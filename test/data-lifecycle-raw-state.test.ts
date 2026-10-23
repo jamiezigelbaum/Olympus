@@ -9,7 +9,7 @@
 // performed. Export has the mirrored duty: it cannot copy raw ingest or secret
 // material, so it has to say so rather than let the manifest imply it did.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -220,5 +220,125 @@ describe('lifecycle names Telegram capture state: the raw copy goes with a delet
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('recursive raw-state deletes stay inside Olympus\'s own, unshared directories', () => {
+  const symlinkSync = (target: string, path: string) => require('node:fs').symlinkSync(target, path);
+  function lab() {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-containment-'));
+    const homeDir = join(dir, 'home');
+    const dataHome = join(homeDir, '.local', 'share');
+    const external = join(dir, 'external');
+    mkdirSync(external, { recursive: true });
+    writeFileSync(join(external, 'precious.txt'), 'keep');
+    const olympusRoot = join(dataHome, 'olympus');
+    mkdirSync(olympusRoot, { recursive: true });
+    // Another source's data, which a wide override must never reach.
+    const whatsappSpool = join(olympusRoot, 'whatsapp-live', 'spool');
+    mkdirSync(whatsappSpool, { recursive: true });
+    writeFileSync(join(whatsappSpool, 'm.jsonl'), 'other source');
+    const del = (env: Record<string, string> = {}, sourceId = 'telegram.messages', dryRun = false) =>
+      deleteOlympusData({ sourceId, homeDir, env, dryRun } as never);
+    return { dir, homeDir, dataHome, external, olympusRoot, whatsappSpool, del };
+  }
+
+  test('a normal spool still deletes', () => {
+    const l = lab();
+    try {
+      const spool = join(l.olympusRoot, 'telegram-capture', 'spool');
+      mkdirSync(spool, { recursive: true });
+      writeFileSync(join(spool, 'x.jsonl'), 'raw');
+      const result = l.del();
+      expect(result.removed).toContain(spool);
+      expect(existsSync(spool)).toBe(false);
+      expect(existsSync(join(l.whatsappSpool, 'm.jsonl'))).toBe(true);
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test('a raw directory that is a symbolic link is refused and its target is untouched', () => {
+    const l = lab();
+    try {
+      mkdirSync(join(l.olympusRoot, 'telegram-capture'), { recursive: true });
+      symlinkSync(l.external, join(l.olympusRoot, 'telegram-capture', 'spool'));
+      expect(() => l.del()).toThrow('symbolic link');
+      expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
+      // A link higher up is refused the same way.
+      rmSync(join(l.olympusRoot, 'telegram-capture'), { recursive: true, force: true });
+      symlinkSync(l.external, join(l.olympusRoot, 'telegram-capture'));
+      expect(() => l.del()).toThrow('symbolic link');
+      expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test('a symlinked gateway-state directory or cursor file is refused, never silently unlinked', () => {
+    const l = lab();
+    try {
+      const gateway = join(l.homeDir, '.local', 'state', 'olympus', 'telegram-capture-gateway');
+      mkdirSync(dirname(gateway), { recursive: true });
+      symlinkSync(l.external, gateway);
+      expect(() => l.del()).toThrow('symbolic link');
+      expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
+      expect(lstatSync(gateway).isSymbolicLink()).toBe(true);
+      rmSync(gateway, { force: true });
+      const cursor = join(l.homeDir, '.local', 'state', 'olympus', 'telegram-spool-drain', 'cursor.json');
+      mkdirSync(dirname(cursor), { recursive: true });
+      symlinkSync(join(l.external, 'precious.txt'), cursor);
+      expect(() => l.del()).toThrow('symbolic link');
+      expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test('a link NESTED inside the spool is unlinked, never followed', () => {
+    const l = lab();
+    try {
+      const spool = join(l.olympusRoot, 'telegram-capture', 'spool');
+      mkdirSync(spool, { recursive: true });
+      writeFileSync(join(spool, 'x.jsonl'), 'raw');
+      symlinkSync(l.external, join(spool, 'escape'));
+      l.del();
+      expect(existsSync(spool)).toBe(false);
+      expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test.each([
+    ['equal to an Olympus root', (l: ReturnType<typeof lab>) => l.olympusRoot],
+    ['above an Olympus root', (l: ReturnType<typeof lab>) => l.dataHome],
+  ])('an override %s is refused and nothing is deleted', (_name, pick) => {
+    const l = lab();
+    try {
+      const spool = join(l.olympusRoot, 'telegram-capture', 'spool');
+      mkdirSync(spool, { recursive: true });
+      writeFileSync(join(spool, 'x.jsonl'), 'raw');
+      expect(() => l.del({ OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: pick(l) })).toThrow('Refusing to delete source state');
+      expect(existsSync(join(spool, 'x.jsonl'))).toBe(true);
+      expect(existsSync(join(l.whatsappSpool, 'm.jsonl'))).toBe(true);
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test('an override that overlaps another source\'s data is refused, nothing deleted', () => {
+    const l = lab();
+    try {
+      const spool = join(l.olympusRoot, 'telegram-capture', 'spool');
+      mkdirSync(spool, { recursive: true });
+      writeFileSync(join(spool, 'x.jsonl'), 'raw');
+      // Equal to another source's spool, and containing it.
+      expect(() => l.del({ OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: l.whatsappSpool })).toThrow('overlaps another source');
+      expect(() => l.del({ OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: join(l.olympusRoot, 'whatsapp-live') })).toThrow('overlaps another source');
+      expect(existsSync(join(spool, 'x.jsonl'))).toBe(true);
+      expect(existsSync(join(l.whatsappSpool, 'm.jsonl'))).toBe(true);
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
+  });
+
+  test('WhatsApp\'s own spool and media are held to the same rules', () => {
+    const l = lab();
+    try {
+      mkdirSync(join(l.olympusRoot, 'whatsapp-live'), { recursive: true });
+      rmSync(l.whatsappSpool, { recursive: true, force: true });
+      symlinkSync(l.external, l.whatsappSpool);
+      expect(() => l.del({}, 'whatsapp.personal.messages')).toThrow('symbolic link');
+      expect(existsSync(join(l.external, 'precious.txt'))).toBe(true);
+    } finally { rmSync(l.dir, { recursive: true, force: true }); }
   });
 });

@@ -106,6 +106,20 @@ describe('Olympus data lifecycle', () => {
     expect(dataDeleteCustody({ sourceId: 'dropbox.files', homeDir: '/nonexistent-olympus-home', connectedRegistry: empty })).toMatchObject({ ready: true });
   });
 
+  test('the refusal says Disconnect for an ordinary source even when the registry is unreadable, and Unpair for a session source', () => {
+    const unreadable = { version: 1 as const, handles: [], dropped: [{ index: 0, reason: 'bad' }] };
+    expect(() => deleteOlympusDataWithCustody({ sourceId: 'dropbox.files', homeDir: '/nonexistent-olympus-home', connectedRegistry: unreadable }))
+      .toThrow('Disconnect dropbox.files');
+    expect(() => deleteOlympusDataWithCustody({ sourceId: 'telegram.messages', homeDir: '/nonexistent-olympus-home', connectedRegistry: unreadable }))
+      .toThrow('Unpair telegram.messages');
+    try {
+      deleteOlympusDataWithCustody({ sourceId: 'dropbox.files', homeDir: '/nonexistent-olympus-home', connectedRegistry: unreadable });
+    } catch (error) {
+      // The repair-registry next action is kept.
+      expect(String((error as { suggestion?: string }).suggestion ?? '')).toContain('Repair');
+    }
+  });
+
   test('CLI custody requires an inactive supervised worker before delete-all', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-all-custody-'));
     const homeDir = join(dir, 'home');

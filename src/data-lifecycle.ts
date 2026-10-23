@@ -17,6 +17,7 @@ import {
   readSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -687,6 +688,10 @@ export function deleteOlympusData(options: {
   const removed: string[] = [];
   const missing: string[] = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
+  // Before anything is removed or even checked one by one: a recursive raw-state
+  // target must be provably Olympus's own and nobody else's (see
+  // assertRawStateTargetsContained). A refusal here deletes nothing.
+  assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
   for (const target of uniqueDeleteTargets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
@@ -772,9 +777,12 @@ export function deleteOlympusDataWithCustody(options: {
     throw new OperationError(
       'invalid_params',
       custody.requirement === 'source_disconnected'
-        ? custody.observed === 'disconnected' || custody.observed === 'connected'
-          ? `Disconnect ${options.sourceId} before deleting its local data.`
-          : `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, ' ')}).`
+        // Unpair or Disconnect by what the SOURCE is (a paired session), never
+        // by what custody happened to observe: an unreadable registry on a
+        // Dropbox delete is still a Disconnect source.
+        ? requireSource(options.sourceId).pairingSessionPaths
+          ? `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, ' ')}).`
+          : `Disconnect ${options.sourceId} before deleting its local data.`
         : custody.observed === 'relay_running'
           ? 'Turn remote access off before deleting local data: the relay process is still running.'
           : custody.observed === 'engine_loaded'
@@ -1655,6 +1663,111 @@ function assertVerifiedExternalSqliteStore(path: string, storeId: string | undef
     }
   } finally {
     closeSqliteStore(db);
+  }
+}
+
+/** Nearest existing ancestor's real path plus the not-yet-existing remainder. */
+function canonicalPath(path: string): string {
+  const absolute = resolve(path);
+  let existing = absolute;
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(existing), ...rest.reverse());
+    } catch {
+      const parent = dirname(existing);
+      if (parent === existing) return absolute;
+      rest.push(basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+function isStrictlyInside(path: string, root: string): boolean {
+  return path !== root && path.startsWith(`${root}${sep}`);
+}
+
+/**
+ * The safety rules for a RECURSIVE raw-state delete target (spool, media,
+ * gateway state: whatever an env override or a default names).
+ *
+ * 1. Strictly inside an Olympus root, never equal to one and never above one: an
+ *    override such as OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR=~/.local/share/olympus
+ *    would otherwise turn one source's delete into every source's.
+ * 2. No symlink anywhere between the root and the target, the target itself
+ *    included: the real path must equal the lexical path under the root's real
+ *    path. A symlinked raw directory would otherwise send a recursive delete
+ *    into whatever it points at. We REFUSE rather than delete only the link,
+ *    because a link there means the owner pointed Olympus at storage it may
+ *    not own, and silently removing the link would still report a delete that
+ *    left the data in place.
+ * 3. (One source's delete) it must not equal, contain or sit inside any other
+ *    source's delete target, any login or pairing path, or the shared config,
+ *    registry, connections and media-cache paths.
+ * Symlinks NESTED inside a valid target are not followed: rmSync unlinks them
+ * (pinned by a test), so what they point at survives.
+ * Refusing happens before anything is removed.
+ */
+function assertRawStateTargetsContained(
+  targets: readonly DeleteTarget[],
+  context: LifecyclePathContext,
+  selectedSource: LifecycleSourceSpec | undefined,
+): void {
+  const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
+  if (stateTargets.length === 0) return;
+  const roots = knownOlympusDataRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
+  const refuse = (path: string, why: string): never => {
+    throw new OperationError(
+      'invalid_params',
+      `Refusing to delete source state ${why}: ${path}`,
+      'Check the configured state-directory values, then remove that directory by hand. Nothing was deleted.',
+    );
+  };
+  for (const target of stateTargets) {
+    const lexical = resolve(target.path);
+    const root = roots.find((candidate) => isStrictlyInside(lexical, candidate.lexical));
+    if (!root) {
+      // Equal to a root, above one, or outside all of them. Outside is the
+      // external fence's job (it names the override); equal or above is ours.
+      if (roots.some((candidate) => lexical === candidate.lexical || isStrictlyInside(candidate.lexical, lexical))) {
+        refuse(target.path, 'that is, or contains, an Olympus data root');
+      }
+      continue;
+    }
+    const expectedReal = join(root.real, relative(root.lexical, lexical));
+    if (canonicalPath(lexical) !== expectedReal) refuse(target.path, 'because it, or a directory above it, is a symbolic link');
+  }
+  if (!selectedSource) return;
+  const home = resolveHome(context.homeDir);
+  const own = new Set([selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
+  const protectedPaths = new Set<string>();
+  for (const other of lifecycleSourceSpecs()) {
+    if (own.has(other.sourceId)) continue;
+    for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
+    for (const path of other.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
+    for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
+  }
+  for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
+  for (const path of [
+    join(home, '.olympus', 'config.json'),
+    defaultSovereigntyConfigPathForHome(context.homeDir),
+    join(home, '.config', 'olympus', 'handles.json'),
+    join(home, '.config', 'olympus', 'handles.json.unpaired'),
+    ...remoteConnectionsDeleteTargets(context).map((target) => target.path),
+    ...mediaCacheDeleteTargets(context).map((target) => target.path),
+  ]) protectedPaths.add(path);
+  const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve(path), canonicalPath(path)]);
+  for (const target of stateTargets) {
+    const candidates = [resolve(target.path), canonicalPath(target.path)];
+    for (const protectedPath of protectedCanonical) {
+      for (const candidate of candidates) {
+        if (candidate === protectedPath || isStrictlyInside(protectedPath, candidate) || isStrictlyInside(candidate, protectedPath)) {
+          // A target legitimately inside its OWN source's other path is not
+          // reachable here: own paths are not in the protected set.
+          refuse(target.path, `because it overlaps another source's or shared Olympus data (${protectedPath})`);
+        }
+      }
+    }
   }
 }
 

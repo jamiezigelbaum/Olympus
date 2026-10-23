@@ -61504,6 +61504,7 @@ import {
   readSync as readSync3,
   readdirSync as readdirSync6,
   readFileSync as readFileSync35,
+  realpathSync as realpathSync10,
   renameSync as renameSync10,
   rmSync as rmSync13,
   statSync as statSync19
@@ -61786,6 +61787,7 @@ function deleteOlympusData(options) {
   const removed = [];
   const missing = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
+  assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
   for (const target of uniqueDeleteTargets) {
     if (existsSync37(target.path))
       assertDeleteTargetSafe(target);
@@ -61831,7 +61833,7 @@ function deleteOlympusData(options) {
 function deleteOlympusDataWithCustody(options) {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
-    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? custody.observed === "disconnected" || custody.observed === "connected" ? `Disconnect ${options.sourceId} before deleting its local data.` : `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, " ")}).` : custody.observed === "relay_running" ? "Turn remote access off before deleting local data: the relay process is still running." : custody.observed === "engine_loaded" ? "Stop the Olympus engine before deleting local data: launchd would start it again." : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
+    throw new OperationError("invalid_params", custody.requirement === "source_disconnected" ? requireSource(options.sourceId).pairingSessionPaths ? `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, " ")}).` : `Disconnect ${options.sourceId} before deleting its local data.` : custody.observed === "relay_running" ? "Turn remote access off before deleting local data: the relay process is still running." : custody.observed === "engine_loaded" ? "Stop the Olympus engine before deleting local data: launchd would start it again." : "Stop or uninstall the Olympus worker before deleting local data.", custody.next_action);
   }
   return {
     ...deleteOlympusData(options),
@@ -62379,6 +62381,84 @@ function assertVerifiedExternalSqliteStore(path, storeId) {
     }
   } finally {
     closeSqliteStore(db);
+  }
+}
+function canonicalPath(path) {
+  const absolute2 = resolve11(path);
+  let existing = absolute2;
+  const rest = [];
+  for (;; ) {
+    try {
+      return join58(realpathSync10(existing), ...rest.reverse());
+    } catch {
+      const parent = dirname39(existing);
+      if (parent === existing)
+        return absolute2;
+      rest.push(basename6(existing));
+      existing = parent;
+    }
+  }
+}
+function isStrictlyInside(path, root) {
+  return path !== root && path.startsWith(`${root}${sep8}`);
+}
+function assertRawStateTargetsContained(targets, context2, selectedSource) {
+  const stateTargets = targets.filter((target) => target.kind === "source_state_path" && target.allowRecursive);
+  if (stateTargets.length === 0)
+    return;
+  const roots = knownOlympusDataRoots(context2).map((root) => ({ lexical: resolve11(root), real: canonicalPath(root) }));
+  const refuse2 = (path, why) => {
+    throw new OperationError("invalid_params", `Refusing to delete source state ${why}: ${path}`, "Check the configured state-directory values, then remove that directory by hand. Nothing was deleted.");
+  };
+  for (const target of stateTargets) {
+    const lexical = resolve11(target.path);
+    const root = roots.find((candidate) => isStrictlyInside(lexical, candidate.lexical));
+    if (!root) {
+      if (roots.some((candidate) => lexical === candidate.lexical || isStrictlyInside(candidate.lexical, lexical))) {
+        refuse2(target.path, "that is, or contains, an Olympus data root");
+      }
+      continue;
+    }
+    const expectedReal = join58(root.real, relative7(root.lexical, lexical));
+    if (canonicalPath(lexical) !== expectedReal)
+      refuse2(target.path, "because it, or a directory above it, is a symbolic link");
+  }
+  if (!selectedSource)
+    return;
+  const home2 = resolveHome(context2.homeDir);
+  const own3 = new Set([selectedSource.sourceId, ...selectedSource.sourceAliases ?? []]);
+  const protectedPaths = new Set;
+  for (const other of lifecycleSourceSpecs()) {
+    if (own3.has(other.sourceId))
+      continue;
+    for (const path of sourceDeleteTargets(other, context2).map((target) => target.path))
+      protectedPaths.add(path);
+    for (const path of other.preservationOnlyPaths?.(context2) ?? [])
+      protectedPaths.add(path);
+    for (const path of other.pairingSessionPaths?.(context2) ?? [])
+      protectedPaths.add(path);
+  }
+  for (const path of selectedSource.preservationOnlyPaths?.(context2) ?? [])
+    protectedPaths.add(path);
+  for (const path of [
+    join58(home2, ".olympus", "config.json"),
+    defaultSovereigntyConfigPathForHome(context2.homeDir),
+    join58(home2, ".config", "olympus", "handles.json"),
+    join58(home2, ".config", "olympus", "handles.json.unpaired"),
+    ...remoteConnectionsDeleteTargets(context2).map((target) => target.path),
+    ...mediaCacheDeleteTargets(context2).map((target) => target.path)
+  ])
+    protectedPaths.add(path);
+  const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve11(path), canonicalPath(path)]);
+  for (const target of stateTargets) {
+    const candidates = [resolve11(target.path), canonicalPath(target.path)];
+    for (const protectedPath of protectedCanonical) {
+      for (const candidate of candidates) {
+        if (candidate === protectedPath || isStrictlyInside(protectedPath, candidate) || isStrictlyInside(candidate, protectedPath)) {
+          refuse2(target.path, `because it overlaps another source's or shared Olympus data (${protectedPath})`);
+        }
+      }
+    }
   }
 }
 function isInsideKnownOlympusRoot(path, context2) {
@@ -65383,7 +65463,7 @@ import {
   mkdirSync as mkdirSync28,
   readFileSync as readFileSync37,
   readdirSync as readdirSync7,
-  realpathSync as realpathSync10,
+  realpathSync as realpathSync11,
   renameSync as renameSync11,
   rmSync as rmSync14,
   statSync as statSync20,
@@ -65500,13 +65580,13 @@ function managedToolExecutable(tool, host = {}) {
   if (!manifest || manifest.tool !== tool || manifest.version !== pin.version || manifest.platform !== platformKey || manifest.sha256 !== asset.sha256)
     return;
   try {
-    const realDir = realpathSync10(versionDir);
+    const realDir = realpathSync11(versionDir);
     for (const required3 of new Set([...asset.required, asset.executable])) {
       if (!trustedInside(realDir, join61(versionDir, required3), uid, versionDir))
         return;
     }
     verifyPinnedFiles(versionDir, asset, uid, pin.label, tool);
-    const real = realpathSync10(join61(versionDir, asset.executable));
+    const real = realpathSync11(join61(versionDir, asset.executable));
     accessSync7(real, constants4.X_OK);
     return real;
   } catch {
@@ -65531,7 +65611,7 @@ function trustedInside(realDir, path, uid, versionDir) {
   }
   let real;
   try {
-    real = realpathSync10(path);
+    real = realpathSync11(path);
   } catch {
     return false;
   }
@@ -65601,13 +65681,13 @@ function earlierManagedFolders(tool, host) {
 async function adhocSignUnsigned(staging, asset, platformKey, run, label, tool) {
   if (platformKey !== "darwin-arm64" || !asset.adhocSign?.length)
     return [];
-  const realStaging = realpathSync10(staging);
+  const realStaging = realpathSync11(staging);
   const signed = [];
   for (const relative8 of asset.adhocSign) {
     const file = join61(staging, relative8);
     let real;
     try {
-      real = realpathSync10(file);
+      real = realpathSync11(file);
     } catch {
       throw new ManagedToolsError("archive_incomplete", `The ${label} download is missing ${relative8}, so nothing was installed.`, tool);
     }
@@ -66082,13 +66162,13 @@ async function extractVerifiedArchive(archivePath, staging, asset, tool) {
     mkdirs(posix.dirname(entry.target));
     symlinkSync(entry.linkTarget, join61(staging, entry.target));
   }
-  const realStaging = realpathSync10(staging);
+  const realStaging = realpathSync11(staging);
   for (const entry of planned) {
     if (entry.type !== "symlink")
       continue;
     let real;
     try {
-      real = realpathSync10(join61(staging, entry.target));
+      real = realpathSync11(join61(staging, entry.target));
     } catch {
       throw new ManagedToolsError("unsafe_archive", `The archive has a link that leads nowhere (${entry.path}).`, tool);
     }
@@ -67615,7 +67695,7 @@ import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile6, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash48 } from "node:crypto";
-import { lstatSync as lstatSync24, readFileSync as readFileSync39, readlinkSync as readlinkSync2, readdirSync as readdirSync9, realpathSync as realpathSync11 } from "node:fs";
+import { lstatSync as lstatSync24, readFileSync as readFileSync39, readlinkSync as readlinkSync2, readdirSync as readdirSync9, realpathSync as realpathSync12 } from "node:fs";
 import { dirname as dirname43, join as join63 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -67780,7 +67860,7 @@ async function launcherPath(env) {
     if (!path)
       continue;
     try {
-      if (realpathSync11(path) !== path)
+      if (realpathSync12(path) !== path)
         continue;
       let current2 = path;
       while (true) {
@@ -68009,7 +68089,7 @@ __export(exports_consult_transport_zkapi, {
 });
 import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
 import { createHash as createHash49, randomUUID as randomUUID18 } from "node:crypto";
-import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants5, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync40, readlinkSync as readlinkSync3, realpathSync as realpathSync12, rmSync as rmSync16, statSync as statSync21, writeFileSync as writeFileSync13 } from "node:fs";
+import { accessSync as accessSync8, chmodSync as chmodSync19, closeSync as closeSync14, constants as constants5, existsSync as existsSync40, mkdirSync as mkdirSync29, mkdtempSync as mkdtempSync2, readdirSync as readdirSync10, readFileSync as readFileSync40, readlinkSync as readlinkSync3, realpathSync as realpathSync13, rmSync as rmSync16, statSync as statSync21, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
 import { homedir as homedir41, tmpdir as tmpdir4 } from "node:os";
 import { delimiter as delimiter5, dirname as dirname44, isAbsolute as isAbsolute19, join as join64, resolve as resolvePath } from "node:path";
@@ -68291,7 +68371,7 @@ function zkapiWalletDirectory(env) {
   const configured = env.ZKAPI_CLIENTD_CONFIG_DIR?.trim() || env.OA_CHAT_CONFIG_DIR?.trim() || (process.platform === "darwin" ? join64(home2, "Library", "Application Support", "zkapi-clientd") : join64(env.XDG_CONFIG_HOME?.trim() || join64(home2, ".config"), "zkapi-clientd"));
   const absolute2 = resolvePath(configured);
   try {
-    return realpathSync12(absolute2);
+    return realpathSync13(absolute2);
   } catch {
     return absolute2;
   }
@@ -68702,7 +68782,7 @@ function childEnvironment(env) {
 function daemonEnvironment(base, daemonExecutable) {
   let real = daemonExecutable;
   try {
-    real = realpathSync12(daemonExecutable);
+    real = realpathSync13(daemonExecutable);
   } catch {}
   const installBin = dirname44(real);
   const rest = (base.PATH ?? "").split(delimiter5).filter((entry) => entry && entry !== installBin);
@@ -70225,7 +70305,7 @@ process.stdin.on('end', () => { if (!child) process.exit(71); });
 setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 `;
   DEFAULT_EXECUTABLE_TRUST = {
-    realpath: (path) => realpathSync12(path),
+    realpath: (path) => realpathSync13(path),
     stat: (path) => statSync21(path),
     executable: (path) => {
       try {
@@ -71414,7 +71494,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync26, linkSync, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync42, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync13, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
+import { chmodSync as chmodSync20, closeSync as closeSync15, constants as constants6, copyFileSync, existsSync as existsSync42, fstatSync as fstatSync3, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync26, linkSync, mkdirSync as mkdirSync30, openSync as openSync14, readFileSync as readFileSync42, readlinkSync as readlinkSync4, readdirSync as readdirSync12, realpathSync as realpathSync14, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync2, statSync as statSync23, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire4 } from "node:module";
 import { basename as basename8, dirname as dirname46, join as join66, relative as relative8, resolve as resolve12, sep as sep10 } from "node:path";
 import { userInfo } from "node:os";
@@ -71487,7 +71567,7 @@ function inspectSystemdEngine(l, exec = linuxEngineExec) {
     return unknown;
   if (f.FragmentPath !== l.unitPath) {
     try {
-      if (!f.FragmentPath || realpathSync13(f.FragmentPath) !== l.unitPath)
+      if (!f.FragmentPath || realpathSync14(f.FragmentPath) !== l.unitPath)
         return { ...unknown, detail: `Conflicting unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}. Stop its custodian before retrying.` };
     } catch {
       return { ...unknown, detail: `Cannot verify unit fragment ${f.FragmentPath || "(unknown)"}; expected ${l.unitPath}.` };
@@ -71624,7 +71704,7 @@ function inheritedUtilLinuxFlock(lockPath) {
   let pid = process.ppid;
   for (let depth2 = 0;pid > 1 && depth2 < 16; depth2 += 1) {
     try {
-      const executable = realpathSync13(`/proc/${pid}/exe`);
+      const executable = realpathSync14(`/proc/${pid}/exe`);
       const executableStat = statSync23(executable);
       const args = readFileSync42(`/proc/${pid}/cmdline`).toString("utf8").split("\x00").filter(Boolean);
       if (basename8(executable) === "flock" && executableStat.uid === 0 && (executableStat.mode & 18) === 0 && args.slice(1).some((arg) => arg.startsWith("/") && resolve12(arg) === lockPath))
@@ -138798,7 +138878,7 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash72, randomUUID as randomUUID28 } from "node:crypto";
-import { realpathSync as realpathSync15, rmSync as rmSync24, readdirSync as readdirSync15 } from "node:fs";
+import { realpathSync as realpathSync16, rmSync as rmSync24, readdirSync as readdirSync15 } from "node:fs";
 import { join as join106, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -138860,7 +138940,7 @@ function createLocalFilesSourceConnector(options) {
       throw new LocalFilesRootMissingError(root);
     let real;
     try {
-      real = realpathSync15.native(configured);
+      real = realpathSync16.native(configured);
     } catch {
       throw new LocalFilesRootMissingError(root);
     }
@@ -139251,7 +139331,7 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       let scopeRoot;
       try {
-        scopeRoot = ScopeRoot.open(realpathSync15.native(rootReal));
+        scopeRoot = ScopeRoot.open(realpathSync16.native(rootReal));
       } catch {
         throw new FileExtractionSourceError("source_unavailable");
       }
@@ -141612,7 +141692,7 @@ var init_mac_permissions = __esm(() => {
 });
 
 // src/workers/local-files/scheduler-source.ts
-import { realpathSync as realpathSync16 } from "node:fs";
+import { realpathSync as realpathSync17 } from "node:fs";
 import { homedir as homedir62 } from "node:os";
 function retryTomorrow(context2, reason, afterMs = DAY_MS3) {
   const attempted = Date.parse(context2?.attemptedAt ?? new Date().toISOString());
@@ -141626,7 +141706,7 @@ function createLocalFilesSchedulerSource(input) {
   }
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync16(homedir62()) });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync17(homedir62()) });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -141772,7 +141852,7 @@ var init_scheduler_source = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync17, statSync as statSync30 } from "node:fs";
+import { realpathSync as realpathSync18, statSync as statSync30 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -141780,7 +141860,7 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
     if (!resolved)
       continue;
     try {
-      const real = realpathSync17.native(resolved);
+      const real = realpathSync18.native(resolved);
       if (statSync30(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
@@ -141802,7 +141882,7 @@ function createLocalFilesOpenTargets(options) {
     if (!resolved)
       return;
     try {
-      const real = realpathSync17.native(resolved);
+      const real = realpathSync18.native(resolved);
       return statSync30(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
@@ -141817,7 +141897,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash75 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync67, readFileSync as readFileSync69, readdirSync as readdirSync16, realpathSync as realpathSync18 } from "node:fs";
+import { existsSync as existsSync67, readFileSync as readFileSync69, readdirSync as readdirSync16, realpathSync as realpathSync19 } from "node:fs";
 import { homedir as homedir63 } from "node:os";
 
 class VolumeResolver {
@@ -141959,7 +142039,7 @@ function defaultUuidsByDevice() {
       return result;
     for (const name of readdirSync16(dir)) {
       try {
-        result.set(realpathSync18(`${dir}/${name}`), name);
+        result.set(realpathSync19(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -142409,12 +142489,12 @@ var init_mac_settings = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync38, readdirSync as readdirSync17, realpathSync as realpathSync19 } from "node:fs";
+import { lstatSync as lstatSync38, readdirSync as readdirSync17, realpathSync as realpathSync20 } from "node:fs";
 import { homedir as homedir65 } from "node:os";
 import { join as join109 } from "node:path";
 function safeRealpath(path) {
   try {
-    return realpathSync19.native(path);
+    return realpathSync20.native(path);
   } catch {
     return path;
   }
@@ -142566,7 +142646,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
-        const canonical2 = realpathSync19.native(real);
+        const canonical2 = realpathSync20.native(real);
         if (canonical2 !== real) {
           if (canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
             throw new Error("A selected folder is reached through a link. Choose the folder itself.");
