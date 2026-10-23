@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 
 const ROOT = join(import.meta.dir, '..');
+// When a change moves these pins, re-pin with `bun scripts/dashboard-design-repin.ts --write`, never by hand.
 
 test('dashboard implementation is guarded and visual approval cannot survive changed pixels', () => {
   const receipt = JSON.parse(readFileSync(join(ROOT, 'config/dashboard-design-review.json'), 'utf8')) as {
