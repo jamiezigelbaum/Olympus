@@ -1326,6 +1326,9 @@ function exploreSeeds(config: AgentConfig): Seed[] {
           if (response.status !== 200) return { ok: false, detail: `delete-source-data answered ${response.status}` };
           card = await until(async () => { const now = await readwiseCard(); return now && (now?.coverage?.indexed_items ?? 0) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
         }
+        // A delete (here or in the press just before) restarts the engine's worker a moment later; the page is not opened until it has had time to come back.
+        await sleep(10_000);
+        card = await readwiseCard();
         return card && !connected(card) && (card?.coverage?.indexed_items ?? 0) === 0 ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not read as empty (not connected, nothing indexed): ${cardSummary(await readwiseCard())}` };
       },
     },
