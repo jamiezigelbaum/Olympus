@@ -701,7 +701,14 @@ function archivesPreview(state: string): SourceDashboardViewModel {
   const meta = previewArchivesMeta(state)!;
   const status = emptyStatus();
   const items = meta.archives.reduce((sum, entry) => sum + entry.items, 0);
-  if (items > 0) status.corpora = [corpus('secure_local.archive.email', 'email', 'secure_local', 'mbox', items, items * 3, { withText: items, embedded: Math.round(items * 0.6) })];
+  if (items > 0) {
+    // Each bounded pass of an import is a completed sync run of its store.
+    const embedded = state === 'archives-imported' || state === 'archives-checking' || state === 'archives-already' ? items : Math.round(items * 0.6);
+    status.corpora = [{
+      ...corpus('secure_local.archive.email', 'email', 'secure_local', 'mbox', items, items * 3, { withText: items, embedded }),
+      last_refresh: { sync_run_id: 'preview-archive-pass', status: 'completed', started_at: at(2 * 3600 + 60), completed_at: at(2 * 3600), items_seen: 2_000, items_indexed: 2_000 },
+    }];
+  }
   return buildSourceDashboardViewModel({
     sourceIndexStatus: status,
     schedulerStatus: scheduler(items > 0 ? [schedulerSource('archive.imports', 'secure_local.archive.email', 0.1)] : []),

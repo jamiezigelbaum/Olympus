@@ -2,22 +2,32 @@
 // picker's archive mode (files beside folders, never a link; folder mode is
 // unchanged), an approval that answers at once and reads a possible copy in
 // the background ("checking", then "already imported" or the import started),
-// Decline, Remove, and the Archives row's list. Then one archive from the
-// picker to a search hit cited as imported mail, and back out, and an import
-// whose content stays held while the private model is stopped.
+// Decline, Remove, and the Archives row's list; the dashboard routes, which
+// only a control session reaches. Then one archive from the picker to the
+// Archives row and a search hit cited as imported mail, and back out, and an
+// import whose content stays held while the private model is stopped.
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isV04PublicDashboardRoute } from '../src/core/public-surface.ts';
+import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
+import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
+import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
+import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
+import { buildSourceDashboardViewModel } from '../src/workers/source-dashboard.ts';
+import { createSourceIndexStatusHandler } from '../src/workers/source-index/status.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
+import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { createArchiveImportDashboard, type ArchivePrivateModelState } from '../src/workers/archive-import/dashboard.ts';
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
+import { withArchiveImportCorpora } from '../src/workers/archive-import/store.ts';
 import { pullArchiveImport } from '../src/workers/archive-import/sync.ts';
 import { MacPermissions } from '../src/workers/local-files/mac-permissions.ts';
 import { createLocalFilesArchiveBrowser, createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
@@ -302,6 +312,65 @@ describe('the Archives row\'s list', () => {
   });
 });
 
+describe('the dashboard routes', () => {
+  test('only a control session reaches them, never the read-only token; Remove must be confirmed', async () => {
+    const f = fixture();
+    f.write('Takeout.mbox', mbox([mail(0)]));
+    const worker = createEmailSourceWorker({
+      sourceDashboard: {
+        sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+        archiveImports: f.dashboard,
+      },
+    });
+    const origin = 'http://127.0.0.1:17777';
+    const guarded = withWorkerBearerAuth((request: Request) => worker.fetch(request), { authToken: 'worker-secret' });
+    const post = (path: string, body: unknown, headers: Record<string, string> = {}) => guarded(new Request(`${origin}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin, ...headers },
+      body: JSON.stringify(body),
+    }));
+    for (const route of ['browse', 'approve', 'decline', 'remove']) {
+      expect(isV04PublicDashboardRoute('POST', `/dashboard/archive-import/${route}`)).toBe(true);
+      expect(isV04PublicDashboardRoute('GET', `/dashboard/archive-import/${route}`)).toBe(false);
+    }
+    const key = join(f.exports, 'Takeout.mbox');
+    // No session, or only the read-only view token: refused, and nothing recorded.
+    expect((await post('/dashboard/archive-import/approve', { key })).status).toBe(401);
+    expect((await post('/dashboard/archive-import/browse', {})).status).toBe(401);
+    const viewToken = dashboardQueryTokenFromWorkerAuthToken('worker-secret')!;
+    expect((await post(`/dashboard/archive-import/approve?token=${viewToken}`, { key })).status).toBe(401);
+    expect(f.dashboard.view().archives).toEqual([]);
+
+    const mint = await guarded(new Request(`${origin}/dashboard/control/session`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer worker-secret', Origin: origin },
+    }));
+    const control = {
+      Cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!,
+      'X-Olympus-CSRF': (await mint.json() as { csrf_token: string }).csrf_token,
+    };
+    const listed = await post('/dashboard/archive-import/browse', { parent_key: f.exports }, control);
+    expect(listed.status).toBe(200);
+    expect((await listed.json() as { nodes: Array<{ name: string }> }).nodes.map((node) => node.name)).toContain('Takeout.mbox');
+    const approved = await post('/dashboard/archive-import/approve', { key }, control);
+    expect(approved.status).toBe(200);
+    const started = await approved.json() as { status: string; archive_id: string };
+    expect(started.status).toBe('started');
+    expect(f.refreshes()).toBe(1);
+    // Either a choice or a request, never both or neither.
+    expect((await post('/dashboard/archive-import/approve', {}, control)).status).toBe(400);
+
+    const unconfirmed = await post('/dashboard/archive-import/remove', { archive_id: started.archive_id }, control);
+    expect(unconfirmed.status).toBe(400);
+    expect(await unconfirmed.json()).toMatchObject({ error: { code: 'remove_confirmation_required' } });
+    expect(f.dashboard.view().archives[0]!.status).toBe('importing');
+    const removed = await post('/dashboard/archive-import/remove', { archive_id: started.archive_id, acknowledge: true }, control);
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ ok: true });
+    expect(f.dashboard.view().archives[0]!.status).toBe('removing');
+  });
+});
+
 describe('one archive from the picker to a cited answer and back out', () => {
   test('approve, import, find it in search cited as imported mail, remove', async () => {
     const f = fixture();
@@ -330,6 +399,27 @@ describe('one archive from the picker to a cited answer and back out', () => {
       const body = await response.json() as { hits?: Array<Record<string, any>> };
       hits.push(...(body.hits ?? []).map((hit) => ({ ...hit, corpus: store.corpusId, trust: store.trustDomain })));
     }
+    // The Archives row, from the engine's own status over these stores: one
+    // archive imported, and its listing done (no "Finding items" left).
+    const corpusRegistry = createSourceCorpusRegistry(withArchiveImportCorpora());
+    const opened = new Set(lane.set.openStores().map((store) => store.corpusId));
+    const status = await createSourceIndexStatusHandler({
+      corpusDefinitions: corpusRegistry.definitions('status').filter((definition) => opened.has(definition.corpusId)),
+      connectorStores: lane.set.openStores(),
+    }).status({});
+    const card = buildSourceDashboardViewModel({
+      sourceIndexStatus: status,
+      sourceCorpusRegistry: corpusRegistry,
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+      connectedHandleRegistry: { version: 1, handles: [] },
+      apiKeyAvailability: {},
+      importedArchives: f.dashboard.present(),
+    });
+    expect(card.sources.find((entry) => entry.source_id === 'archive.imports')!.connection.label).toBe('1 archive imported');
+    const row = buildChatGptDashboardViewModel(card, {}).sources.find((source) => source.id === 'archive.imports')!;
+    expect(row.status).not.toBe('Off');
+    expect(row.progress?.stage).not.toBe('listing');
+
     const hit = hits.find((candidate) => candidate.sourceItem?.accountScope === started.archive_id);
     expect(hit).toBeDefined();
     expect(hit!.sourceItem.provider).toBe('mbox');
