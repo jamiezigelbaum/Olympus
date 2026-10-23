@@ -172,7 +172,7 @@ const ENUMERATE = String.raw`(() => {
       const text = clean(node.textContent);
       return text.length > 0 && text.length <= 240 ? text : '';
     };
-    const beside = disabled ? (near(el.previousElementSibling) + ' ' + near(el.nextElementSibling) + ' ' + (solo && parent ? near(parent.previousElementSibling) + ' ' + near(parent.nextElementSibling) : '')) : '';
+    const beside = disabled ? (() => { let words = ''; let node = el; for (let depth = 0; node && depth < 3 && node !== document.body; depth++, node = node.parentElement) words += ' ' + near(node.previousElementSibling) + ' ' + near(node.nextElementSibling); return words; })() : '';
     const reason = disabled ? clean(beside + ' ' + (solo ? (parent.textContent || '').replace(el.textContent || '', '') : '') + ' ' + described + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-description') || '')) : '';
     const field = tag === 'input' || tag === 'textarea' || tag === 'select';
     const submit = (tag === 'button' && (el.getAttribute('type') || 'submit') === 'submit') || (tag === 'input' && type === 'submit');
@@ -574,7 +574,7 @@ export function judge(input: JudgeInput): Judged {
     // A required field is empty: the browser says so and nothing is sent.
     outcomes.push({ ok: requests.length === 0 && !left, expected: 'a form with a required field left empty asks for it and sends nothing', actual: requests.length === 0 && !left ? 'nothing was sent' : 'the form was sent with a required field empty' });
   } else if (/data-agent-kind=(pair|key)$/.test(control.formKind)) {
-    outcomes.push({ ok: after.secret > 0, expected: `${control.name} shows what it made`, actual: after.secret > 0 ? 'a code is showing' : 'no code or key is showing' });
+    outcomes.push({ ok: after.secret > 0, expected: `${control.name} shows what it made`, actual: after.secret > 0 ? 'a code is showing' : `no code or key is showing${squash(after.statuses ?? '') ? ` (the page says: ${squash(after.statuses).slice(0, 160)})` : ''}` });
   } else if (control.confirms) {
     const asked = after.confirms.length > before.confirms.length && after.confirms[after.confirms.length - 1]!.trim().length > 0;
     if (input.answer === false) {
