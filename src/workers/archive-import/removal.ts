@@ -17,6 +17,7 @@
  *    proposal row is deleted, so no move, re-judge or migration acts on them.
  *    Its questions to the private model go too.
  * 3. Answers waiting in the private inbox that read its items are deleted.
+ *    Questions still waiting, and answers that read anything else, stay.
  * 4. Each store's rows, in bounded steps.
  * 5. The superseded copies (the mark that hid the rows), the resume point,
  *    the secret-locations entries, and the inbox once more.

@@ -2,7 +2,8 @@
 // bounded passes that resume after a crash without counting anything twice,
 // a changed or missing file that stops the import visibly, two archives that
 // never share a resume point, and a removal that takes everything derived
-// from one archive and nothing of another. Synthetic mail only.
+// from one archive and nothing of another (questions still waiting stay), and
+// deleting another source keeps what read the archives. Synthetic mail only.
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
@@ -12,7 +13,13 @@ import { join } from 'node:path';
 import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import type { ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
 import { defaultConfig } from '../src/core/config.ts';
-import { openWaitingPrivateQuestionStore, type StoredPrivateAnswer } from '../src/core/waiting-private-questions.ts';
+import { REMOTE_CONNECTIONS_DB_PATH_ENV } from '../src/core/remote-connections.ts';
+import {
+  openWaitingPrivateQuestionStore,
+  waitingPrivateQuestionsDbPath,
+  type StoredPrivateAnswer,
+} from '../src/core/waiting-private-questions.ts';
+import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../src/workers/classification/sniffer-store.ts';
 import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger.ts';
@@ -303,6 +310,8 @@ describe('removing an archive', () => {
     const removedAnswer = ask('From the removed archive?', answerReading(removed));
     const keptAnswer = ask('From the kept archive?', answerReading(kept));
     const otherAnswer = ask('From another source?', answerReading('someone', 'secure_local.synthetic.other'));
+    // Still waiting: it has read nothing yet, so nothing ties it to the archive.
+    const pending = inbox.record(inbox.ticket('synthetic-agent'), { question: 'Not answered yet?', state: 'waiting', surface: 'remote' })!.id;
 
     requestArchiveRemoval(f.runtime.state, removed);
     // The archive's own pass stops importing it from here on.
@@ -364,11 +373,47 @@ describe('removing an archive', () => {
     expect(inbox.get(removedAnswer)).toBeUndefined();
     expect(inbox.get(keptAnswer)).toBeDefined();
     expect(inbox.get(otherAnswer)).toBeDefined();
+    expect(inbox.get(pending)).toMatchObject({ question: 'Not answered yet?', state: 'waiting' });
     inbox.close();
 
     // The chosen file is never touched, and a removal that finished has nothing left to do.
     expect(existsSync(join(f.exports, 'Removed.mbox'))).toBe(true);
     expect((await runArchiveRemoval({ state: f.runtime.state, lane, archiveId: removed })).kind).toBe('not_removing');
+  });
+});
+
+describe('deleting another source', () => {
+  test('keeps the inbox answers that read imported archives', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'archive-other-delete-')));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const homeDir = join(dir, 'home');
+    mkdirSync(homeDir);
+    const env = { [REMOTE_CONNECTIONS_DB_PATH_ENV]: join(dir, 'remote-connections.sqlite') };
+    const inboxPath = waitingPrivateQuestionsDbPath(env[REMOTE_CONNECTIONS_DB_PATH_ENV]);
+    const inbox = openWaitingPrivateQuestionStore(inboxPath);
+    const ask = (question: string, provider: string, accountScope: string, corpusId: string) => {
+      const ref = inbox.record(inbox.ticket('synthetic-agent'), { question, state: 'waiting', surface: 'remote' })!;
+      expect(inbox.saveAnswer(ref, {
+        status: 'answered', answer: 'SYNTHETIC', citations: [], unanswered: [], leftOut: [],
+        read: [{ corpusId, trustDomain: 'secure_local', provenance: { sourceItem: { family: 'email', provider, accountScope, providerItemId: 'x' } } }],
+      })).toBe(true);
+      return ref.id;
+    };
+    const firstArchive = ask('From the first archive?', 'mbox', 'archive-one', archiveCorpusId('secure_local', 'email'));
+    const secondArchive = ask('From the second archive?', 'mbox', 'archive-two', archiveCorpusId('internal', 'email'));
+    const gmail = ask('From Gmail?', 'gmail', 'someone@example.invalid', 'secure_local.email.private');
+    inbox.close();
+
+    deleteOlympusData({ sourceId: 'gmail.email', homeDir, env });
+
+    const after = openWaitingPrivateQuestionStore(inboxPath);
+    try {
+      expect(after.get(gmail)).toBeUndefined();
+      expect(after.get(firstArchive)).toBeDefined();
+      expect(after.get(secondArchive)).toBeDefined();
+    } finally {
+      after.close();
+    }
   });
 });
 

@@ -526,6 +526,11 @@ function defaultSourceCorpusRegistryConfig() {
     corpora: structuredClone(DEFAULT_SOURCE_CORPORA)
   };
 }
+function withSourceCorpora(rawConfig, extra) {
+  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
+  const present = new Set(config.corpora.map((corpus) => corpus.corpusId));
+  return { ...config, corpora: [...config.corpora, ...extra.filter((corpus) => !present.has(corpus.corpusId))] };
+}
 function createSourceCorpusRegistry(rawConfig) {
   const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
   return sourceCorpusRegistryFromConfig(config);
@@ -16861,21 +16866,17 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     deleteForAccountScope(input) {
       const ids = new Set(input.corpusIds);
       const readsScope = (item) => {
-        if (typeof item.corpusId !== "string")
-          return true;
-        if (!ids.has(item.corpusId))
+        if (typeof item.corpusId !== "string" || !ids.has(item.corpusId))
           return false;
         const source = item.provenance?.sourceItem;
-        if (!source || typeof source.provider !== "string" || typeof source.accountScope !== "string")
-          return true;
-        return source.provider === input.provider && source.accountScope === input.accountScope;
+        return source?.provider === input.provider && source?.accountScope === input.accountScope;
       };
       return db.transaction(() => {
-        const rows = db.query("SELECT * FROM waiting_questions").all();
+        const rows = db.query("SELECT * FROM waiting_questions WHERE result IS NOT NULL").all();
         let removed = 0;
         for (const row of rows) {
           const result = toQuestion(row).result;
-          if (!result || result.read.some(readsScope)) {
+          if (result?.read.some(readsScope)) {
             removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
           }
         }
@@ -48888,12 +48889,7 @@ function archiveImportCorpora() {
   });
 }
 function withArchiveImportCorpora(rawConfig) {
-  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
-  const present = new Set(config.corpora.map((corpus) => corpus.corpusId));
-  return {
-    ...config,
-    corpora: [...config.corpora, ...archiveImportCorpora().filter((corpus) => !present.has(corpus.corpusId))]
-  };
+  return withSourceCorpora(rawConfig, archiveImportCorpora());
 }
 var ARCHIVE_TIER_DOMAINS, ARCHIVE_STORE_PLACEMENT, FILE_LABEL, CORPUS_ROLE;
 var init_store2 = __esm(() => {
@@ -61987,6 +61983,7 @@ function lifecycleSourceSpecs() {
       label: "Imported archives connector stores",
       sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
       connectorStorePaths: (context2) => archiveConnectorStoreDbPaths(archiveImportFamilies(), envForContext(context2)),
+      registryCorpora: archiveImportCorpora,
       rawStatePaths: (context2) => [defaultArchiveImportStatePath(envForContext(context2))]
     },
     {
@@ -62246,7 +62243,7 @@ function deleteOlympusData(options) {
     if (existsSync38(inboxPath)) {
       const inbox = openWaitingPrivateQuestionStore(inboxPath);
       try {
-        const registry = createSourceCorpusRegistry(withArchiveImportCorpora()).list();
+        const registry = createSourceCorpusRegistry(withSourceCorpora(undefined, lifecycleSourceSpecs().flatMap((spec) => spec.registryCorpora?.() ?? []))).list();
         const corpora = registry.filter((c) => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId)).map((c) => c.corpusId);
         const count = inbox.deleteForCorpora(corpora, registry.map((c) => c.corpusId));
         if (count > 0)

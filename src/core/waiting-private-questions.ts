@@ -202,8 +202,12 @@ export interface WaitingQuestionStore {
   deleteForCorpora(corpusIds: readonly string[], knownCorpusIds?: readonly string[]): number;
   /**
    * One account scope's items going (an imported archive being removed):
-   * every answer that read one of them from these corpora, or read an item
-   * it cannot place, and every question still waiting, as for a source.
+   * only the answers that positively read one of them, from one of these
+   * corpora with a source item of this provider and scope, are deleted.
+   * Questions still waiting read nothing yet and stay, as does an answer
+   * whose evidence cannot be placed: each answer's sources are checked
+   * again before it is saved or shown, so one that read a removed item is
+   * withdrawn then.
    */
   deleteForAccountScope(input: { provider: string; accountScope: string; corpusIds: readonly string[] }): number;
   close(): void;
@@ -654,18 +658,16 @@ export function openWaitingPrivateQuestionStore(
     deleteForAccountScope(input) {
       const ids = new Set(input.corpusIds);
       const readsScope = (item: Readonly<Record<string, unknown>>): boolean => {
-        if (typeof item.corpusId !== 'string') return true;
-        if (!ids.has(item.corpusId)) return false;
+        if (typeof item.corpusId !== 'string' || !ids.has(item.corpusId)) return false;
         const source = (item.provenance as { sourceItem?: Record<string, unknown> } | undefined)?.sourceItem;
-        if (!source || typeof source.provider !== 'string' || typeof source.accountScope !== 'string') return true;
-        return source.provider === input.provider && source.accountScope === input.accountScope;
+        return source?.provider === input.provider && source?.accountScope === input.accountScope;
       };
       return db.transaction(() => {
-        const rows = db.query('SELECT * FROM waiting_questions').all() as QuestionRow[];
+        const rows = db.query('SELECT * FROM waiting_questions WHERE result IS NOT NULL').all() as QuestionRow[];
         let removed = 0;
         for (const row of rows) {
           const result = toQuestion(row).result;
-          if (!result || result.read.some(readsScope)) {
+          if (result?.read.some(readsScope)) {
             removed += db.query('DELETE FROM waiting_questions WHERE id = ?').run(row.id).changes;
           }
         }

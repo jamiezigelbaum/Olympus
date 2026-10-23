@@ -18,8 +18,7 @@ import { join } from 'node:path';
 import { ARCHIVE_FORMATS, archiveImportFamilies } from '../../core/archive-formats.ts';
 import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import {
-  defaultSourceCorpusRegistryConfig,
-  parseSourceCorpusRegistryConfig,
+  withSourceCorpora,
   type SourceCorpusConfig,
   type SourceCorpusRegistryConfig,
 } from '../../core/source-corpus-registry.ts';
@@ -122,8 +121,9 @@ const CORPUS_ROLE: Readonly<Record<string, { capabilities: SourceCorpusConfig['c
  *
  * They are not shipped defaults: the shipped roster is the public plugin
  * config's, and imported archives join it when the import is on the public
- * surface. Until then only a runtime that holds archive stores (the source
- * runtime, the data lifecycle) adds them, with `withArchiveImportCorpora`.
+ * surface. Until then only what holds archive stores adds them: the source
+ * runtime, with `withArchiveImportCorpora`, and the data lifecycle, through
+ * the archive spec's registry entries.
  */
 export function archiveImportCorpora(): SourceCorpusConfig[] {
   return archiveImportFamilies().flatMap((family) => {
@@ -146,10 +146,5 @@ export function archiveImportCorpora(): SourceCorpusConfig[] {
  * The registry config with the archive stores' entries added (absent ones only).
  */
 export function withArchiveImportCorpora(rawConfig?: unknown): SourceCorpusRegistryConfig {
-  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
-  const present = new Set(config.corpora.map((corpus) => corpus.corpusId));
-  return {
-    ...config,
-    corpora: [...config.corpora, ...archiveImportCorpora().filter((corpus) => !present.has(corpus.corpusId))],
-  };
+  return withSourceCorpora(rawConfig, archiveImportCorpora());
 }
