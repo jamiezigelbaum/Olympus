@@ -384,18 +384,24 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         for (const failure of again.failedSources ?? []) if (!sourceFailures.some((known) => known.seed === seed.id && known.source === failure.source)) sourceFailures.push({ seed: seed.id, ...failure });
         dirty = false;
       }
-      await freshPage();
-      await watch();
-      let controlsNow = await panelControls(driver);
-      // The path's earlier keys are pressed first (a menu opens, a question is asked); the last is the press being judged.
+      // A row can change between two loads (a source that was syncing has finished, and its menu has different entries): a control that is not found is looked for once more on another fresh load before it is failed.
+      let controlsNow: Awaited<ReturnType<typeof panelControls>> = [];
       let reachable = true;
-      for (const key of item.path.slice(0, -1)) {
-        if (!(await press(key))) { reachable = false; break; }
-        await settle();
-      }
-      controlsNow = await panelControls(driver);
+      let control: Awaited<ReturnType<typeof panelControls>>[number] | undefined;
       const finalKey = item.path[item.path.length - 1]!;
-      const control = controlsNow.find((candidate) => candidate.key === finalKey);
+      for (let attempt = 0; attempt < 2 && !control; attempt += 1) {
+        await freshPage();
+        await watch();
+        reachable = true;
+        // The path's earlier keys are pressed first (a menu opens, a question is asked); the last is the press being judged.
+        for (const key of item.path.slice(0, -1)) {
+          if (!(await press(key))) { reachable = false; break; }
+          await settle();
+        }
+        controlsNow = await panelControls(driver);
+        control = controlsNow.find((candidate) => candidate.key === finalKey);
+        if (!reachable) break;
+      }
       if (!reachable || !control) {
         steps.push(failureStep(steps.length + 1, item.path, !reachable ? 'a control on its way could not be pressed' : 'it was on the page as seeded but is not there on a fresh page'));
         failedHere += 1;
