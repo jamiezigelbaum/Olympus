@@ -32793,18 +32793,7 @@ var init_vocabulary = __esm(() => {
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
-    example: "{what}: {file}, at byte {offset}",
-    exampleKinds: {
-      message_too_large: "A message too large to read",
-      message_unreadable: "A message that could not be read",
-      charset_not_decoded: "A message in a character set Olympus could not read",
-      attachments_not_read: "An attachment not read",
-      text_cut: "A message cut short",
-      spam_or_trash: "A message in Spam or Trash",
-      other: "An item not read fully"
-    },
-    examplesHeading: "Where",
-    examplesNote: "Each place is a byte count from the start of that file.",
+    gapInFile: "{file}: {gap}",
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
@@ -32828,7 +32817,32 @@ var init_vocabulary = __esm(() => {
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
     removing: "Removing {name}.",
-    declined: "Declined."
+    declined: "Declined.",
+    needsYou: {
+      stopped: "An import stopped: {name}",
+      request: "An agent asked to import {name}",
+      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      unreadable: "Olympus can't read its list of imported archives",
+      seeWhy: "See why",
+      review: "Review",
+      setUp: "Set up the private model",
+      check: "Check the private model"
+    },
+    unreadable: {
+      why: {
+        damaged: "{file} is damaged, so Olympus cannot tell which archives it imported.",
+        unknown_form: "{file} was written by a newer version of Olympus, or it is damaged.",
+        permission: "Your user account is not allowed to open {file}.",
+        other: "Olympus could not open {file}."
+      },
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      fix: {
+        damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
+        unknown_form: "Update Olympus, then open this page again.",
+        permission: "Check that your user account can open that file, then open this page again.",
+        other: "Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support."
+      }
+    }
   };
   DASHBOARD_COMPUTER_PANEL_COPY = {
     section: "On this computer",
@@ -34077,7 +34091,8 @@ function allOpenTargets() {
     { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
   ];
 }
 function openTargetToken(target) {
@@ -34089,6 +34104,8 @@ function openTargetToken(target) {
     return `fix.${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return;
 }
 function openTargetTokenPattern() {
@@ -34106,7 +34123,7 @@ function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
 }
 function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
+  return target.kind === "unreadable" || target.kind === "archives";
 }
 function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
@@ -35276,6 +35293,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       action = () => openPrivacy(key2);
     } else if (fix.archiveImport === true && picker) {
       action = () => startArchivePick(key2);
+    } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
+      action = () => focusArchive(String(fix.archiveFocus));
+    } else if (fix.archiveModels === true) {
+      action = () => {
+        state.open.models = true;
+        render("summary:models");
+      };
     } else if (picker && picker.handles(fix)) {
       action = () => {
         supersede();
@@ -35444,7 +35468,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     add(list, waiting);
     items.forEach((item, index) => {
       const key2 = "need:" + String(item.id || index);
-      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key2, "warn", true, itemSource(item)));
+      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(archiveNeedFix(item), key2, "warn", true, itemSource(item)));
       add(list, add(el("li", "row need"), body));
     });
     return add(section, list);
@@ -35524,10 +35548,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) : null);
     if (why)
       add(main, why);
-    else if (state.landed && state.landed.id === id)
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)))
       row.className += " landed";
     if (archives)
       add(main, archiveList(archives));
@@ -35574,6 +35598,65 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function archiveFix(archives, fix) {
     return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction ? { label: fix.label, archiveImport: true } : fix;
   }
+  function archiveNeedFix(item) {
+    const fix = item && item.fix;
+    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
+    const id = item && typeof item.id === "string" ? item.id : "";
+    if (!fix || typeof fix.label !== "string" || !meta || typeof meta !== "object")
+      return fix;
+    if (id === "archives:held")
+      return { label: fix.label, archiveModels: true };
+    if (id === "archives:unreadable" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0)
+      return { label: fix.label, archiveFocus: id };
+    return fix;
+  }
+  function focusArchive(target) {
+    const meta = state.computerMeta && state.computerMeta.archives;
+    const sourceId = meta && typeof meta.sourceId === "string" ? meta.sourceId : "";
+    if (target === "archives:unreadable") {
+      if (!sourceId)
+        return;
+      state.open["why:" + sourceId] = true;
+      state.landed = { id: sourceId, until: Date.now() + H.landedMs };
+    } else
+      state.landed = { id: target, until: Date.now() + H.landedMs };
+    render(target === "archives:unreadable" ? "summary:why:" + sourceId : "");
+    const node = root.querySelector(".landed");
+    if (node && typeof node.scrollIntoView === "function")
+      node.scrollIntoView({ block: "center" });
+    const control = node ? node.querySelector("button, summary") : null;
+    if (control && typeof control.focus === "function")
+      control.focus();
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector(".landed");
+      if (shown)
+        shown.classList.remove("landed");
+    }, H.landedMs);
+  }
+  function archiveNeeds(meta) {
+    return Array.isArray(meta.archives) && meta.archives.some((entry) => !!entry && entry.status === "stopped") || Array.isArray(meta.requests) && meta.requests.some((entry) => !!entry && entry.status === "pending" && entry.origin === "agent");
+  }
+  function archiveLanded(own3, needsPerson) {
+    const landed = state.landed;
+    if (!landed)
+      return false;
+    const meta = state.computerMeta && state.computerMeta.archives;
+    return landed.id === own3 || needsPerson && !!meta && landed.id === meta.sourceId;
+  }
+  function archiveUnreadable(meta, id) {
+    const A = H.copy.archives;
+    const unreadable = meta.unreadable;
+    if (!unreadable || typeof unreadable !== "object")
+      return null;
+    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable.reason) ? String(unreadable.reason) : "other";
+    const file = typeof unreadable.file === "string" && unreadable.file ? unreadable.file : "";
+    const box = details("why:" + id, doc.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", fill2(A.unreadable.why[reason], { file: file || A.thisFile })), el("li", "", A.unreadable.kept), el("li", "", A.unreadable.fix[reason])));
+    return box;
+  }
   function archivesMoving() {
     const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     if (!meta || typeof meta !== "object")
@@ -35614,7 +35697,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   const ARCHIVE_STATUSES = ["importing", "imported", "stopped", "removing"];
   const ARCHIVE_REQUEST_STATUSES = ["pending", "checking", "already_imported", "failed"];
   function validArchive(entry) {
-    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_STATUSES.indexOf(entry.status) >= 0 && Array.isArray(entry.gaps) && Array.isArray(entry.skipped) && Array.isArray(entry.examples);
+    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_STATUSES.indexOf(entry.status) >= 0 && Array.isArray(entry.gaps) && Array.isArray(entry.skipped);
   }
   function validArchiveRequest(entry) {
     return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_REQUEST_STATUSES.indexOf(entry.status) >= 0;
@@ -35643,6 +35726,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function archiveRequestItem(request2) {
     const A = H.copy.archives;
     const item = el("li", "archive request");
+    item.setAttribute("data-request", String(request2.status));
+    if (archiveLanded("archive-request:" + request2.id, request2.status === "pending" && request2.origin === "agent"))
+      item.className += " landed";
     const key2 = "archive-request:" + request2.id;
     const where = typeof request2.where === "string" ? request2.where : "";
     if (request2.status === "pending") {
@@ -35664,6 +35750,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const A = H.copy.archives;
     const item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
     item.setAttribute("data-archive", archive.status);
+    if (archiveLanded("archive:" + archive.id, archive.status === "stopped"))
+      item.className += " landed";
     add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", A.status[archive.status])));
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
@@ -35736,17 +35824,13 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const lines = archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => {
       const words2 = kinds[entry.kind] || kinds.other;
       const n = wholeCount(entry.count);
-      return el("li", "", fill2(n === 1 ? words2.one : words2.many, { n: count(n) }));
+      const gap = fill2(n === 1 ? words2.one : words2.many, { n: count(n) });
+      return el("li", "", typeof entry.file === "string" && entry.file ? fill2(A.gapInFile, { file: entry.file, gap }) : gap);
     });
     if (!lines.length)
       return null;
     const box = details("archive-why:" + archive.id, doc.createTextNode(A.seeWhy), "why");
-    add(box, add(el("ul", "plain"), ...lines));
-    const what = A.exampleKinds;
-    const examples = archive.examples.filter((entry) => entry && typeof entry.kind === "string" && typeof entry.file === "string" && entry.file && typeof entry.offset === "number" && isFinite(entry.offset) && entry.offset >= 0).map((entry) => el("li", "", fill2(A.example, { what: what[entry.kind] || what.other, file: entry.file, offset: count(entry.offset) })));
-    if (examples.length)
-      add(box, el("p", "why-head", A.examplesHeading), add(el("ul", "plain files"), ...examples), el("p", "why-note", A.examplesNote));
-    return box;
+    return add(box, add(el("ul", "plain"), ...lines));
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];

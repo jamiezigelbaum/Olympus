@@ -13723,18 +13723,7 @@ var init_vocabulary = __esm(() => {
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
-    example: "{what}: {file}, at byte {offset}",
-    exampleKinds: {
-      message_too_large: "A message too large to read",
-      message_unreadable: "A message that could not be read",
-      charset_not_decoded: "A message in a character set Olympus could not read",
-      attachments_not_read: "An attachment not read",
-      text_cut: "A message cut short",
-      spam_or_trash: "A message in Spam or Trash",
-      other: "An item not read fully"
-    },
-    examplesHeading: "Where",
-    examplesNote: "Each place is a byte count from the start of that file.",
+    gapInFile: "{file}: {gap}",
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
@@ -13758,7 +13747,32 @@ var init_vocabulary = __esm(() => {
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
     removing: "Removing {name}.",
-    declined: "Declined."
+    declined: "Declined.",
+    needsYou: {
+      stopped: "An import stopped: {name}",
+      request: "An agent asked to import {name}",
+      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      unreadable: "Olympus can't read its list of imported archives",
+      seeWhy: "See why",
+      review: "Review",
+      setUp: "Set up the private model",
+      check: "Check the private model"
+    },
+    unreadable: {
+      why: {
+        damaged: "{file} is damaged, so Olympus cannot tell which archives it imported.",
+        unknown_form: "{file} was written by a newer version of Olympus, or it is damaged.",
+        permission: "Your user account is not allowed to open {file}.",
+        other: "Olympus could not open {file}."
+      },
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      fix: {
+        damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
+        unknown_form: "Update Olympus, then open this page again.",
+        permission: "Check that your user account can open that file, then open this page again.",
+        other: "Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support."
+      }
+    }
   };
   DASHBOARD_CHATGPT_SETUP_LABELS = {
     connect: "Connect",
@@ -19418,7 +19432,8 @@ function allOpenTargets() {
     { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
   ];
 }
 function openTargetPath(target) {
@@ -19430,6 +19445,8 @@ function openTargetPath(target) {
     return `fix/${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable/${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return "dashboard";
 }
 function openTargetFromPath(path) {
@@ -19449,6 +19466,8 @@ function openTargetToken(target) {
     return `fix.${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return;
 }
 function openTargetTokenPattern() {
@@ -19466,7 +19485,7 @@ function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
 }
 function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
+  return target.kind === "unreadable" || target.kind === "archives";
 }
 function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);

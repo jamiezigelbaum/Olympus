@@ -777,6 +777,9 @@ describe('the host page renderer', () => {
     const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN });
     expect(html).toContain('"unreadable.dropbox":"dropbox.files"');
     expect(html).toContain('"unreadable.whatsapp":"whatsapp.personal.messages"');
+    // The Archives row the same way.
+    expect(targets.archives).toBe(`${ORIGIN}/dashboard#olympus-open=archives`);
+    expect(html).toContain('"archives":"archive.imports"');
   });
 
   test('its policy frames nothing else and is framed by nothing', () => {

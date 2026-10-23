@@ -15492,7 +15492,8 @@ function allOpenTargets() {
     { kind: "private_answers" },
     ...Object.keys(OPEN_CONNECT_SOURCES).map((source) => ({ kind: "connect", source })),
     ...OPEN_FIX_SECTIONS.map((section) => ({ kind: "fix", section })),
-    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source }))
+    ...Object.keys(OPEN_UNREADABLE_SOURCES).map((source) => ({ kind: "unreadable", source })),
+    { kind: "archives" }
   ];
 }
 function openTargetPath(target) {
@@ -15504,6 +15505,8 @@ function openTargetPath(target) {
     return `fix/${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable/${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return "dashboard";
 }
 function openTargetFromPath(path) {
@@ -15549,6 +15552,8 @@ function openTargetToken(target) {
     return `fix.${target.section}`;
   if (target.kind === "unreadable")
     return `unreadable.${target.source}`;
+  if (target.kind === "archives")
+    return "archives";
   return;
 }
 function openTargetTokenPattern() {
@@ -15566,7 +15571,7 @@ function privateAnswersOpenTargetTokenPattern() {
   return "^page\\.private(?:\\.[A-Za-z0-9_-]{22})?$";
 }
 function isPanelOpenTarget(target) {
-  return target.kind === "unreadable";
+  return target.kind === "unreadable" || target.kind === "archives";
 }
 function panelOpenTargetTokenPattern() {
   const tokens = allOpenTargets().filter(isPanelOpenTarget).map(openTargetToken).filter((token) => token !== undefined);
@@ -15575,16 +15580,17 @@ function panelOpenTargetTokenPattern() {
 function panelOpenTargetSources() {
   const out = {};
   for (const target of allOpenTargets()) {
-    if (target.kind !== "unreadable")
-      continue;
-    out[openTargetToken(target)] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
+    if (target.kind === "unreadable")
+      out[openTargetToken(target)] = OPEN_UNREADABLE_SOURCES[target.source].sourceId;
+    if (target.kind === "archives")
+      out[openTargetToken(target)] = OPEN_ARCHIVES_SOURCE_ID;
   }
   return out;
 }
 function openUnreadableSourceFor(sourceId) {
   return Object.keys(OPEN_UNREADABLE_SOURCES).find((source) => OPEN_UNREADABLE_SOURCES[source].sourceId === sourceId);
 }
-var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
+var OLYMPUS_URL_SCHEME = "olympus", OPEN_CONNECT_SOURCES, OPEN_FIX_SECTIONS, OPEN_UNREADABLE_SOURCES, OPEN_ARCHIVES_SOURCE_ID = "archive.imports", OPEN_URL_MAX_LENGTH = 128, OPEN_PAGE_BASE_URL = "https://olympusplugin.ai/open/", DASHBOARD_OPEN_FRAGMENT_KEY = "olympus-open", DASHBOARD_LAUNCH_OPEN_KEY = "olympus_open";
 var init_open_targets = __esm(() => {
   OPEN_CONNECT_SOURCES = {
     x: { sourceId: "x.bookmarks", label: "X bookmarks" },
@@ -49053,12 +49059,12 @@ function readState3(path) {
     return { version: 1, archives: [] };
   const parsed = JSON.parse(readFileSync28(path, "utf8"));
   if (!isRecord2(parsed) || parsed.version !== 1 || !Array.isArray(parsed.archives)) {
-    throw new Error("The archive import record is not in a form this build reads.");
+    throw new ArchiveRecordFormError("The archive import record is not in a form this build reads.");
   }
   const archives = [];
   for (const entry of parsed.archives) {
     if (!validRecord(entry))
-      throw new Error("The archive import record holds an entry this build does not read.");
+      throw new ArchiveRecordFormError("The archive import record holds an entry this build does not read.");
     archives.push(entry);
   }
   return { version: 1, archives };
@@ -49128,6 +49134,11 @@ class ArchiveImportStateStore {
           continue;
         const bucket = finding.class === "gap" ? tally.gaps : tally.skipped;
         bucket[finding.kind] = (bucket[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+        if (finding.class === "gap") {
+          const byFile = tally.gaps_by_file ??= {};
+          const inFile = byFile[String(finding.fileIndex)] ??= {};
+          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+        }
         if (finding.class === "gap" && tally.samples.length < ARCHIVE_FINDING_SAMPLES_MAX) {
           tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: finding.offset });
         }
@@ -49160,11 +49171,17 @@ class ArchiveImportStateStore {
     });
   }
 }
-var ARCHIVE_IMPORTS_STATE_PATH_ENV = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", ARCHIVE_FINDING_SAMPLES_MAX = 50;
+var ARCHIVE_IMPORTS_STATE_PATH_ENV = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", ARCHIVE_FINDING_SAMPLES_MAX = 50, ArchiveRecordFormError;
 var init_state = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_linux_engine_layout();
+  ArchiveRecordFormError = class ArchiveRecordFormError extends Error {
+    constructor(detail) {
+      super(detail);
+      this.name = "ArchiveRecordFormError";
+    }
+  };
 });
 
 // src/workers/archive-import/requests.ts
@@ -49187,7 +49204,7 @@ function readRequests(path) {
     return { version: 1, requests: [] };
   const parsed = JSON.parse(readFileSync29(path, "utf8"));
   if (!isRecord3(parsed) || parsed.version !== 1 || !Array.isArray(parsed.requests) || !parsed.requests.every(validRequest)) {
-    throw new Error("The archive import requests are not in a form this build reads.");
+    throw new ArchiveRecordFormError("The archive import requests are not in a form this build reads.");
   }
   return { version: 1, requests: parsed.requests };
 }
@@ -74327,6 +74344,8 @@ function dashboardStatusResolution(input) {
   }
   if (unknownValue !== undefined)
     return unknownStatus(unknownValue);
+  if ((source.connection.imports_attention?.length ?? 0) > 0)
+    return { status: "Needs you", mappedUnknown: false };
   const connectionStatus = DASHBOARD_CONNECTION_STATE_STATUS[source.connection.state];
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
   const queueStatus = DASHBOARD_QUEUE_HEALTH_STATUS[source.queue_health.label];
@@ -74409,6 +74428,8 @@ function dashboardAttentionLine(source, options) {
     default:
       break;
   }
+  if (source.connection.imports_attention?.length)
+    return source.connection.label;
   if (source.schedule?.degraded_reason === "scope_root_permission_needed")
     return DASHBOARD_FOLDER_NEEDS_PERMISSION;
   if (source.schedule?.degraded_reason === "scope_root_helper_needed")
@@ -74748,6 +74769,19 @@ function degradedInput(degraded) {
 }
 function unknownStatus(value2) {
   return { status: DASHBOARD_UNKNOWN_STATUS, mappedUnknown: true, unknownValue: value2 };
+}
+function dashboardImportAttentionSentence(entry) {
+  const words2 = DASHBOARD_ARCHIVE_COPY.needsYou;
+  switch (entry.kind) {
+    case "stopped":
+      return words2.stopped.replace("{name}", entry.name);
+    case "request":
+      return words2.request.replace("{name}", entry.name);
+    case "held":
+      return entry.count === 1 ? words2.held.one : words2.held.many.replace("{n}", dashboardCount(entry.count));
+    case "unreadable":
+      return words2.unreadable;
+  }
 }
 var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
@@ -75143,18 +75177,7 @@ var init_vocabulary = __esm(() => {
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
-    example: "{what}: {file}, at byte {offset}",
-    exampleKinds: {
-      message_too_large: "A message too large to read",
-      message_unreadable: "A message that could not be read",
-      charset_not_decoded: "A message in a character set Olympus could not read",
-      attachments_not_read: "An attachment not read",
-      text_cut: "A message cut short",
-      spam_or_trash: "A message in Spam or Trash",
-      other: "An item not read fully"
-    },
-    examplesHeading: "Where",
-    examplesNote: "Each place is a byte count from the start of that file.",
+    gapInFile: "{file}: {gap}",
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
@@ -75178,7 +75201,32 @@ var init_vocabulary = __esm(() => {
     already: "{name} is already imported as {archive}.",
     alreadyUnnamed: "{name} is already imported.",
     removing: "Removing {name}.",
-    declined: "Declined."
+    declined: "Declined.",
+    needsYou: {
+      stopped: "An import stopped: {name}",
+      request: "An agent asked to import {name}",
+      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      unreadable: "Olympus can't read its list of imported archives",
+      seeWhy: "See why",
+      review: "Review",
+      setUp: "Set up the private model",
+      check: "Check the private model"
+    },
+    unreadable: {
+      why: {
+        damaged: "{file} is damaged, so Olympus cannot tell which archives it imported.",
+        unknown_form: "{file} was written by a newer version of Olympus, or it is damaged.",
+        permission: "Your user account is not allowed to open {file}.",
+        other: "Olympus could not open {file}."
+      },
+      kept: "Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.",
+      fix: {
+        damaged: "Restore that file from a backup, or ask for help at olympusplugin.ai/support.",
+        unknown_form: "Update Olympus, then open this page again.",
+        permission: "Check that your user account can open that file, then open this page again.",
+        other: "Open this page again in a minute. If it still says this, ask for help at olympusplugin.ai/support."
+      }
+    }
   };
   DASHBOARD_COMPUTER_PANEL_COPY = {
     section: "On this computer",
@@ -76831,6 +76879,7 @@ __export(exports_source_dashboard, {
   DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS: () => DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS,
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL: () => DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
   DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL: () => DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL,
+  DASHBOARD_ARCHIVES_UNREADABLE_LABEL: () => DASHBOARD_ARCHIVES_UNREADABLE_LABEL,
   DASHBOARD_ARCHIVES_IMPORTING_LABEL: () => DASHBOARD_ARCHIVES_IMPORTING_LABEL
 });
 import { mkdirSync as mkdirSync34 } from "node:fs";
@@ -77975,11 +78024,16 @@ function dashboardArchivesImportedLabel(count) {
 }
 function importedArchivesConnection(imported) {
   const count = imported?.archives ?? 0;
+  const attention = imported?.attention ?? [];
+  const extra = attention.length > 0 ? { imports_attention: attention.map((entry) => ({ ...entry })) } : {};
+  if (attention.some((entry) => entry.kind === "unreadable")) {
+    return { state: "connected", label: DASHBOARD_ARCHIVES_UNREADABLE_LABEL, ...extra };
+  }
   if (count === 0)
-    return { state: "not_connected", label: DASHBOARD_NO_ARCHIVES_LABEL };
+    return { state: "not_connected", label: DASHBOARD_NO_ARCHIVES_LABEL, ...extra };
   if (imported.importing)
-    return { state: "syncing", label: DASHBOARD_ARCHIVES_IMPORTING_LABEL };
-  return { state: "connected", label: dashboardArchivesImportedLabel(count) };
+    return { state: "syncing", label: DASHBOARD_ARCHIVES_IMPORTING_LABEL, ...extra };
+  return { state: "connected", label: dashboardArchivesImportedLabel(count), ...extra };
 }
 function sessionConnectionEvidence(coverage, freshness) {
   const hours = freshness.hours;
@@ -78916,7 +78970,7 @@ function titleCase(value2) {
 function round12(value2) {
   return Math.round(value2 * 10) / 10;
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
@@ -126997,6 +127051,13 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       action = () => openPrivacy(key2);
     } else if (fix.archiveImport === true && picker) {
       action = () => startArchivePick(key2);
+    } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
+      action = () => focusArchive(String(fix.archiveFocus));
+    } else if (fix.archiveModels === true) {
+      action = () => {
+        state.open.models = true;
+        render("summary:models");
+      };
     } else if (picker && picker.handles(fix)) {
       action = () => {
         supersede();
@@ -127165,7 +127226,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     add(list, waiting);
     items.forEach((item, index) => {
       const key2 = "need:" + String(item.id || index);
-      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(item.fix, key2, "warn", true, itemSource(item)));
+      const body = add(el("div", "need-body"), el("p", "row-text", String(item.sentence || "")), fixControl(archiveNeedFix(item), key2, "warn", true, itemSource(item)));
       add(list, add(el("li", "row need"), body));
     });
     return add(section, list);
@@ -127245,10 +127306,10 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     if (progress && !((checking || manual) && progress.stalled)) {
       add(main, sourceProgressBlock(progress, source, stalledWords || (progress.stalled ? pauseFallback(item, source) : "")));
     }
-    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual);
+    const why = seeWhy(source, id, !!progress && !!progress.stalled && !checking && !manual) || (archives ? archiveUnreadable(archives, id) : null);
     if (why)
       add(main, why);
-    else if (state.landed && state.landed.id === id)
+    else if (state.landed && state.landed.id === id && !(archives && archiveNeeds(archives)))
       row.className += " landed";
     if (archives)
       add(main, archiveList(archives));
@@ -127295,6 +127356,65 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function archiveFix(archives, fix) {
     return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction ? { label: fix.label, archiveImport: true } : fix;
   }
+  function archiveNeedFix(item) {
+    const fix = item && item.fix;
+    const meta2 = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
+    const id = item && typeof item.id === "string" ? item.id : "";
+    if (!fix || typeof fix.label !== "string" || !meta2 || typeof meta2 !== "object")
+      return fix;
+    if (id === "archives:held")
+      return { label: fix.label, archiveModels: true };
+    if (id === "archives:unreadable" || id.indexOf("archive:") === 0 || id.indexOf("archive-request:") === 0)
+      return { label: fix.label, archiveFocus: id };
+    return fix;
+  }
+  function focusArchive(target) {
+    const meta2 = state.computerMeta && state.computerMeta.archives;
+    const sourceId = meta2 && typeof meta2.sourceId === "string" ? meta2.sourceId : "";
+    if (target === "archives:unreadable") {
+      if (!sourceId)
+        return;
+      state.open["why:" + sourceId] = true;
+      state.landed = { id: sourceId, until: Date.now() + H.landedMs };
+    } else
+      state.landed = { id: target, until: Date.now() + H.landedMs };
+    render(target === "archives:unreadable" ? "summary:why:" + sourceId : "");
+    const node = root.querySelector(".landed");
+    if (node && typeof node.scrollIntoView === "function")
+      node.scrollIntoView({ block: "center" });
+    const control = node ? node.querySelector("button, summary") : null;
+    if (control && typeof control.focus === "function")
+      control.focus();
+    setTimeout(() => {
+      state.landed = null;
+      const shown = root.querySelector(".landed");
+      if (shown)
+        shown.classList.remove("landed");
+    }, H.landedMs);
+  }
+  function archiveNeeds(meta2) {
+    return Array.isArray(meta2.archives) && meta2.archives.some((entry) => !!entry && entry.status === "stopped") || Array.isArray(meta2.requests) && meta2.requests.some((entry) => !!entry && entry.status === "pending" && entry.origin === "agent");
+  }
+  function archiveLanded(own3, needsPerson) {
+    const landed = state.landed;
+    if (!landed)
+      return false;
+    const meta2 = state.computerMeta && state.computerMeta.archives;
+    return landed.id === own3 || needsPerson && !!meta2 && landed.id === meta2.sourceId;
+  }
+  function archiveUnreadable(meta2, id) {
+    const A = H.copy.archives;
+    const unreadable = meta2.unreadable;
+    if (!unreadable || typeof unreadable !== "object")
+      return null;
+    const reason = Object.prototype.hasOwnProperty.call(A.unreadable.why, unreadable.reason) ? String(unreadable.reason) : "other";
+    const file = typeof unreadable.file === "string" && unreadable.file ? unreadable.file : "";
+    const box = details("why:" + id, doc2.createTextNode(P.seeWhy), "why");
+    if (state.landed && state.landed.id === id)
+      box.className += " landed";
+    add(box, add(el("ul", "plain"), el("li", "", fill2(A.unreadable.why[reason], { file: file || A.thisFile })), el("li", "", A.unreadable.kept), el("li", "", A.unreadable.fix[reason])));
+    return box;
+  }
   function archivesMoving() {
     const meta2 = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     if (!meta2 || typeof meta2 !== "object")
@@ -127335,7 +127455,7 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   const ARCHIVE_STATUSES = ["importing", "imported", "stopped", "removing"];
   const ARCHIVE_REQUEST_STATUSES = ["pending", "checking", "already_imported", "failed"];
   function validArchive(entry) {
-    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_STATUSES.indexOf(entry.status) >= 0 && Array.isArray(entry.gaps) && Array.isArray(entry.skipped) && Array.isArray(entry.examples);
+    return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_STATUSES.indexOf(entry.status) >= 0 && Array.isArray(entry.gaps) && Array.isArray(entry.skipped);
   }
   function validArchiveRequest(entry) {
     return !!entry && typeof entry.id === "string" && !!entry.id && typeof entry.name === "string" && ARCHIVE_REQUEST_STATUSES.indexOf(entry.status) >= 0;
@@ -127364,6 +127484,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function archiveRequestItem(request2) {
     const A = H.copy.archives;
     const item = el("li", "archive request");
+    item.setAttribute("data-request", String(request2.status));
+    if (archiveLanded("archive-request:" + request2.id, request2.status === "pending" && request2.origin === "agent"))
+      item.className += " landed";
     const key2 = "archive-request:" + request2.id;
     const where2 = typeof request2.where === "string" ? request2.where : "";
     if (request2.status === "pending") {
@@ -127385,6 +127508,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const A = H.copy.archives;
     const item = el("li", "archive" + (archive.status === "stopped" ? " stopped" : ""));
     item.setAttribute("data-archive", archive.status);
+    if (archiveLanded("archive:" + archive.id, archive.status === "stopped"))
+      item.className += " landed";
     add(item, add(el("p", "archive-head"), el("span", "archive-name", archive.name), el("span", "ftag", A.status[archive.status])));
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
@@ -127457,17 +127582,13 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const lines = archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => {
       const words2 = kinds[entry.kind] || kinds.other;
       const n = wholeCount(entry.count);
-      return el("li", "", fill2(n === 1 ? words2.one : words2.many, { n: count(n) }));
+      const gap = fill2(n === 1 ? words2.one : words2.many, { n: count(n) });
+      return el("li", "", typeof entry.file === "string" && entry.file ? fill2(A.gapInFile, { file: entry.file, gap }) : gap);
     });
     if (!lines.length)
       return null;
     const box = details("archive-why:" + archive.id, doc2.createTextNode(A.seeWhy), "why");
-    add(box, add(el("ul", "plain"), ...lines));
-    const what = A.exampleKinds;
-    const examples = archive.examples.filter((entry) => entry && typeof entry.kind === "string" && typeof entry.file === "string" && entry.file && typeof entry.offset === "number" && isFinite(entry.offset) && entry.offset >= 0).map((entry) => el("li", "", fill2(A.example, { what: what[entry.kind] || what.other, file: entry.file, offset: count(entry.offset) })));
-    if (examples.length)
-      add(box, el("p", "why-head", A.examplesHeading), add(el("ul", "plain files"), ...examples), el("p", "why-note", A.examplesNote));
-    return box;
+    return add(box, add(el("ul", "plain"), ...lines));
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
@@ -138080,7 +138201,7 @@ function dashboardImportedArchives(archiveImports) {
   try {
     return { importedArchives: archiveImports.present() };
   } catch {
-    return {};
+    return { importedArchives: { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: "other" }] } };
   }
 }
 function asOptionalString(value2) {
@@ -149380,6 +149501,16 @@ function dateOnly2(iso2) {
 function tallies(values) {
   return Object.entries(values).filter(([, count]) => Number.isFinite(count) && count > 0).map(([kind, count]) => ({ kind, count: Math.floor(count) })).sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
 }
+function recordUnreadableReason(error2) {
+  const code = error2 && typeof error2 === "object" ? error2.code : undefined;
+  if (code === "EACCES" || code === "EPERM")
+    return "permission";
+  if (error2 instanceof SyntaxError)
+    return "damaged";
+  if (error2 instanceof ArchiveRecordFormError)
+    return "unknown_form";
+  return "other";
+}
 function unreadableCode(code) {
   if (code === "not_found")
     return "not_found";
@@ -149400,12 +149531,12 @@ function createArchiveImportDashboard(options) {
   let closed = false;
   let checks4 = Promise.resolve();
   const running = new Set;
-  const where2 = (path) => {
-    const folder = posix5.dirname(path);
-    if (folder === home2)
+  const shown = (path) => {
+    if (path === home2)
       return "~";
-    return folder.startsWith(`${home2}/`) ? `~${folder.slice(home2.length)}` : folder;
+    return path.startsWith(`${home2}/`) ? `~${path.slice(home2.length)}` : path;
   };
+  const where2 = (path) => shown(posix5.dirname(path));
   const refresh = () => {
     try {
       options.refreshScheduler();
@@ -149533,11 +149664,17 @@ function createArchiveImportDashboard(options) {
     const done = Math.min(total, before + (read.file_index < record5.files.length ? read.offset : 0));
     return Math.max(0, Math.min(99, Math.floor(done / total * 100)));
   };
+  const gapsOf = (record5) => {
+    const byFile = record5.findings.gaps_by_file;
+    if (record5.files.length < 2 || !byFile || Object.keys(byFile).length === 0)
+      return tallies(record5.findings.gaps);
+    const fileName = (index) => posix5.basename(record5.files[index]?.rel_path || record5.label) || record5.label;
+    return Object.entries(byFile).map(([index, kinds]) => ({ index: Number(index), kinds })).filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record5.files.length).sort((a, b) => a.index - b.index).flatMap((entry) => tallies(entry.kinds).map((gap) => ({ ...gap, file: fileName(entry.index) })));
+  };
   const entryOf = (record5) => {
     const { items, held } = counts(record5);
     const earliest = dateOnly2(record5.date_range?.earliest);
     const latest = dateOnly2(record5.date_range?.latest);
-    const fileName = (index) => posix5.basename(record5.files[index]?.rel_path || record5.label) || record5.label;
     const stopFile = record5.stop?.rel_path ? posix5.basename(record5.stop.rel_path) : undefined;
     return {
       id: record5.archive_id,
@@ -149554,13 +149691,8 @@ function createArchiveImportDashboard(options) {
       startedAt: record5.created_at,
       ...record5.completed_at ? { importedAt: record5.completed_at } : {},
       ...record5.status === "stopped" && record5.stop ? { stop: { code: record5.stop.code, ...stopFile ? { file: stopFile } : {} } } : {},
-      gaps: tallies(record5.findings.gaps),
-      skipped: tallies(record5.findings.skipped),
-      examples: record5.findings.samples.slice(0, 20).map((sample) => ({
-        kind: sample.kind,
-        file: fileName(sample.file_index),
-        offset: sample.offset
-      }))
+      gaps: gapsOf(record5),
+      skipped: tallies(record5.findings.skipped)
     };
   };
   const requestOf = (request, records) => {
@@ -149635,19 +149767,63 @@ function createArchiveImportDashboard(options) {
     },
     view() {
       const model = options.privateModel();
-      const records = state.list();
+      const base = { sourceId: ARCHIVE_IMPORTS_SOURCE_ID, privateModel: model };
+      let records;
+      try {
+        records = state.list();
+      } catch (error2) {
+        return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error2), file: shown(state.path) } };
+      }
+      let asked;
+      try {
+        asked = requests.list();
+      } catch (error2) {
+        return {
+          ...base,
+          archives: records.map(entryOf),
+          requests: [],
+          unreadable: { reason: recordUnreadableReason(error2), file: shown(requests.path) }
+        };
+      }
       return {
-        sourceId: ARCHIVE_IMPORTS_SOURCE_ID,
+        ...base,
         archives: records.map(entryOf),
-        requests: requests.list().map((request) => requestOf(request, records)),
-        privateModel: model
+        requests: asked.map((request) => requestOf(request, records))
       };
     },
     present() {
-      const records = state.list();
+      let records;
+      try {
+        records = state.list();
+      } catch (error2) {
+        return { archives: 0, importing: false, attention: [{ kind: "unreadable", reason: recordUnreadableReason(error2) }] };
+      }
+      const attention = [];
+      let asked = [];
+      try {
+        asked = requests.list();
+      } catch (error2) {
+        attention.push({ kind: "unreadable", reason: recordUnreadableReason(error2) });
+      }
+      for (const record5 of records) {
+        if (record5.status === "stopped")
+          attention.push({ kind: "stopped", id: record5.archive_id, name: record5.label });
+      }
+      for (const request of asked) {
+        if (request.origin === "agent" && request.status === "pending") {
+          attention.push({ kind: "request", id: request.request_id, name: request.label });
+        }
+      }
+      const model = options.privateModel();
+      if (model !== "ready") {
+        const held = records.filter((record5) => record5.status !== "removing").reduce((sum2, record5) => sum2 + counts(record5).held, 0);
+        if (held > 0)
+          attention.push({ kind: "held", count: held, model });
+      }
       return {
         archives: records.length,
-        importing: records.some((record5) => record5.status === "importing" || record5.status === "removing")
+        importing: records.some((record5) => record5.status === "importing" || record5.status === "removing"),
+        ...attention.length > 0 ? { attention } : {}
       };
     },
     resume() {
@@ -153811,10 +153987,13 @@ function buildChatGptDashboardViewModel(view2, options = {}) {
     const connecting = connectingFor(definition, card, now);
     const vocabularyStatus = dashboardStatus({ source: scrubbed, ...degraded ? { degradedCredentials: degraded } : {} });
     const credentials = dashboardCredentialProblem(scrubbed, degraded);
-    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
+    const imports = scrubbed.connection.imports_attention ?? [];
+    const measured = connecting || vocabularyStatus === "Off" || dashboardRefusedFirstConnect(scrubbed) || imports.length > 0 ? undefined : measuredSourceProgress(card, scrubbed, embedding, card.connection.state !== "awaiting_consent" && wantsReconnect(scrubbed, vocabularyStatus, card.connection.action.kind, degraded, undefined), now);
     const progress2 = measured?.progress;
     let status = connecting || credentials || missingScope(scrubbed) ? "Needs you" : dashboardHonestStatus(vocabularyStatus, progress2);
-    if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress2).fix)) {
+    if (imports.length > 0)
+      status = "Needs you";
+    else if (!connecting && !credentials && (status === "Needs you" || status === "Failing") && progress2 && progress2.stage !== "done" && !progress2.stalled && checksAgainOnly(attentionItem(definition, scrubbed, card.connection.action.kind, degraded, undefined, progress2).fix)) {
       status = "Working";
     }
     const sync = connecting || status === "Off" || card.sync_now_available !== true ? undefined : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress2);
@@ -153824,7 +154003,7 @@ function buildChatGptDashboardViewModel(view2, options = {}) {
     entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress2, now, sync, options.remote !== undefined),
     index
   })).sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index).map(({ entry }) => entry);
-  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").map(({ definition, card, actionKind, connecting, progress: progress2, sync }) => attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync));
+  const needsYou = rows.filter(({ status }) => status === "Needs you" || status === "Failing").flatMap(({ definition, card, actionKind, connecting, progress: progress2, sync }) => card.connection.imports_attention?.length ? card.connection.imports_attention.map(importAttentionItem) : [attentionItem(definition, card, actionKind, degraded, connecting, progress2, sync)]);
   if (embedding.state === "failed") {
     needsYou.push({
       id: "model:embedding",
@@ -153928,7 +154107,7 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const menu = [];
   if (sync)
     menu.push(sync);
-  if (status !== "Off" && definition.connect_action.kind === "archive_import")
+  if (status !== "Off" && definition.connect_action.kind === "archive_import" && !card.connection.imports_attention?.some((entry) => entry.kind === "unreadable"))
     menu.push(connectFix(definition));
   if (status !== "Off" && card.scope_selection && !scopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
@@ -154004,6 +154183,25 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
   const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
+}
+function importAttentionItem(entry) {
+  const words2 = DASHBOARD_ARCHIVE_COPY.needsYou;
+  const sentence = dashboardImportAttentionSentence(entry);
+  const archives = openPageUrl({ kind: "archives" });
+  switch (entry.kind) {
+    case "stopped":
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words2.seeWhy, archives) };
+    case "request":
+      return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words2.review, archives) };
+    case "held":
+      return {
+        id: "archives:held",
+        sentence,
+        fix: helpLinkFix(entry.model === "off" ? words2.setUp : words2.check, openOnComputer(undefined, "answers"))
+      };
+    case "unreadable":
+      return { id: "archives:unreadable", sentence, fix: helpLinkFix(words2.seeWhy, archives) };
+  }
 }
 function syncFix(definition, card, status, actionKind, degraded, progress) {
   if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card))
@@ -154358,6 +154556,24 @@ function overallProgress(rows) {
     details
   };
 }
+function importsAttention(input) {
+  if (!Array.isArray(input))
+    return {};
+  const name = (value2) => typeof value2 === "string" ? value2.slice(0, 255) : "";
+  const out = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== "object")
+      continue;
+    if ((entry.kind === "stopped" || entry.kind === "request") && typeof entry.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
+      out.push({ kind: entry.kind, id: entry.id, name: name(entry.name) });
+    } else if (entry.kind === "held" && finite(entry.count) && entry.count > 0 && (entry.model === "off" || entry.model === "waiting")) {
+      out.push({ kind: "held", count: count(entry.count), model: entry.model });
+    } else if (entry.kind === "unreadable") {
+      out.push({ kind: "unreadable", reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : "other" });
+    }
+  }
+  return out.length > 0 ? { imports_attention: out } : {};
+}
 function scrubCard(definition, card) {
   const connectionLabel = KNOWN_CONNECTION_LABELS.has(card.connection.label) || SYNCED_RELATIVE.test(card.connection.label) || ARCHIVES_IMPORTED.test(card.connection.label) ? card.connection.label : "";
   const freshnessLabel2 = card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL || card.freshness.label.startsWith("Answer lane:") ? card.freshness.label : "";
@@ -154425,7 +154641,8 @@ function scrubCard(definition, card) {
       handles: [],
       ...pending && finite(pending.expires_in_minutes) ? { pending: { started_at: "", expires_at: "", expires_in_minutes: count(pending.expires_in_minutes) } } : {},
       ...refusal3 ? { provider_refusal: { code: KNOWN_REFUSAL_CODES.has(refusal3.code) ? refusal3.code : "", reason: "" } } : {},
-      ...card.connection.google_signin_moved === true ? { google_signin_moved: true } : {}
+      ...card.connection.google_signin_moved === true ? { google_signin_moved: true } : {},
+      ...importsAttention(card.connection.imports_attention)
     },
     ...card.progress && finite(card.progress.indexed_items_per_hour) ? {
       progress: {
@@ -154495,7 +154712,7 @@ function isoOrUndefined(value2) {
 function isoOrNow(value2, now) {
   return isoOrUndefined(value2) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_open_targets();
   init_shared_status();
@@ -154535,7 +154752,8 @@ var init_dashboard_view_model = __esm(() => {
     "Unpair incomplete — manual cleanup required",
     "synced",
     DASHBOARD_NO_ARCHIVES_LABEL,
-    DASHBOARD_ARCHIVES_IMPORTING_LABEL
+    DASHBOARD_ARCHIVES_IMPORTING_LABEL,
+    DASHBOARD_ARCHIVES_UNREADABLE_LABEL
   ]);
   SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour|day|week|month|year)s? ago)$/;
   ARCHIVES_IMPORTED = /^(1 archive|\d+ archives) imported$/;
@@ -154558,6 +154776,7 @@ var init_dashboard_view_model = __esm(() => {
   };
   TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
+  IMPORT_UNREADABLE_REASONS = new Set(["damaged", "unknown_form", "permission", "other"]);
   MANUAL_SYNC_OUTCOMES = new Set(["checking", "checked", "failed", "busy"]);
 });
 
