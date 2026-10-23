@@ -1,5 +1,6 @@
 // bun run eval:classification            deterministic fake sniffer (CI)
 // bun run eval:classification -- --real  the configured private lane (local model or Venice Private)
+// bun run eval:classification -- --archive  the same corpus held until judged (an archive import)
 //
 // Prints the report as JSON and exits 1 when a hard gate fails. The real run
 // sends only the synthetic corpus, and only to a lane the sniffer lane
@@ -13,6 +14,7 @@ import { loadConfig } from '../../src/core/config.ts';
 import { DelphiClient } from '../../src/core/delphi.ts';
 import { loadSovereigntyEngine } from '../../src/core/sovereignty.ts';
 import { resolveSnifferLane, type SnifferLane } from '../../src/workers/classification/sniffer-lane.ts';
+import { archiveHeldCorpus } from './corpus.ts';
 import { createFakeSnifferModel } from './fake-sniffer.ts';
 import { runClassificationEval } from './run.ts';
 import { createInboxReplayModel, runInboxEval, type InboxSplit } from './inbox.ts';
@@ -47,7 +49,8 @@ async function main(): Promise<void> {
   }
   const { lane, model, label } = real ? realSniffer() : { lane: FAKE_LANE, model: createFakeSnifferModel(), label: 'fake (deterministic)' };
   const started = Date.now();
-  const report = await runClassificationEval({ lane, model, label });
+  const archive = process.argv.includes('--archive');
+  const report = await runClassificationEval({ lane, model, label: archive ? `${label}, archive held` : label, ...(archive ? { cases: archiveHeldCorpus() } : {}) });
   console.log(JSON.stringify({ ...report, elapsed_ms: Date.now() - started }, null, 2));
   if (!report.gates.passed) process.exit(1);
 }

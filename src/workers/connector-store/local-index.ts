@@ -77,7 +77,7 @@ import {
   type TierCopy,
   type TierSearchLayer,
 } from '../classification/tier-ledger.ts';
-import { classifyContentTier, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
+import { classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
 import {
   decideItemTiers,
@@ -2695,6 +2695,8 @@ export class LocalConnectorStore {
           ...(title ? { title } : {}),
           ...(path ? { path } : {}),
           mimeType: item.mimeType,
+          // The lane's hold, or the one its listing-time decision recorded.
+          ...(inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {}),
           subject: item.identity,
         },
         {

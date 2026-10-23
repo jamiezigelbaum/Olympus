@@ -23,6 +23,7 @@ import {
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import {
   classifyItemTiers,
+  heldUntilJudged,
   type OwnerTierRule,
   type TierDecision,
   type TierSniffer,
@@ -73,6 +74,14 @@ export interface ConnectorStoreTierClassification {
   retirePublic?: boolean;
   /** The inputs cannot be trusted (an invalid rules file): record no decisions. */
   unavailableReason?: string;
+  /**
+   * The lane imports an archive: every item's content stays Private until
+   * the privacy-safe model judges it (`TierClassificationInput.holdUntilJudged`;
+   * docs/design/archive-import.md, "Privacy while an import is judged"). The
+   * lane's own input, never an installed one; only an archive import lane
+   * module may set it (test/tier-hold-until-judged-guard.test.ts).
+   */
+  holdContentUntilJudged?: true;
 }
 
 /**
@@ -100,6 +109,8 @@ export function resolveStoreTierClassification(
     ...(sniffer ? { sniffer } : {}),
     ...(retirePublic ? { retirePublic: true } : {}),
     ...(unavailableReason ? { unavailableReason } : {}),
+    // The lane's own hold, carried as the lane set it (installed inputs have none).
+    ...(explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true as const } : {}),
   };
 }
 
@@ -183,6 +194,10 @@ export function decideItemTiers(
   const sniffer = options?.sniffer && ledger && read
     ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh })
     : options?.sniffer;
+  // The lane's hold, or the one its stored decision carries (a store whose
+  // recording did not bring the lane's option still holds the same way).
+  const holdUntilJudged = options?.holdContentUntilJudged === true
+    || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
@@ -191,6 +206,7 @@ export function decideItemTiers(
       provider: item.identity.provider,
       ...(text !== undefined ? { text } : {}),
       ...(extra.namesOnly ? { namesOnly: true } : {}),
+      ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
       mimeType: item.mimeType,
       subject: item.identity,
     },

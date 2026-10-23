@@ -42,6 +42,8 @@ import {
   classifyContentTier,
   classifyItemTiers,
   HELD_RECORD_PRIORITY,
+  HELD_UNTIL_JUDGED_PRIORITY,
+  heldUntilJudged,
   SNIFFER_NAMES_MAX_CHARS,
   tierSnifferInputHash,
   maxTier,
@@ -201,7 +203,10 @@ export function rejudgeStoredContent(
     },
   };
   const sniffer = counting && secretFencedSniffer(counting, ledger, identity, read);
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity);
+  // The lane's hold, or the one the stored decision carries: a held item is
+  // judged again exactly as it was held at landing.
+  const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged);
   const content = classifyContentTier(
     {
       text,
@@ -213,6 +218,7 @@ export function rejudgeStoredContent(
       ...(path ? { path } : {}),
       ...(sender ? { sender } : {}),
       ...(mimeType ? { mimeType } : {}),
+      ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
       ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
       subject: identity,
     },
@@ -300,6 +306,7 @@ function rejudgeMetadata(
   sniffer: TierSniffer | undefined,
   names: { title: string | undefined; path: string | undefined; sender: string | undefined; folderKeys: string[] },
   subject: TierLedgerIdentity,
+  holdUntilJudged = false,
 ): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
   const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
   if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
@@ -321,7 +328,7 @@ function rejudgeMetadata(
   const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({ pass: 'metadata', material, flags: ['names:rejudge'], subject,
     materialHash: tierSnifferInputHash('metadata', signals),
-    mapRevision: fresh.mapRevision, priority: HELD_RECORD_PRIORITY });
+    mapRevision: fresh.mapRevision, priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY });
   const pending = verdict.verdict === 'undecided';
   return {
     metadataTier: pending ? baseline : maxTier(baseline, verdict.tier),

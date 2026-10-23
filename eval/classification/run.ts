@@ -12,13 +12,21 @@
 // - 0 items the model answered badly below Private.
 // Reported: Personal and Public precision, the pending rate, the `no_signal`
 // escape count, and the calls, batch sizes and estimated tokens the sniffer used.
+// With archive-held cases (`holdUntilJudged`), one more gate:
+// - 0 held items usable below Private before their own judgment.
 
 import type { AnalystModel } from '../../src/core/analyst.ts';
 import { CachedTierSniffer } from '../../src/workers/classification/sniffer.ts';
 import type { SnifferLane } from '../../src/workers/classification/sniffer-lane.ts';
 import { runSnifferPass } from '../../src/workers/classification/sniffer-resolver.ts';
 import { TierSnifferStore } from '../../src/workers/classification/sniffer-store.ts';
-import { classifyItemTiers, tierRank, type TierKey } from '../../src/workers/classification/tier-classifier.ts';
+import {
+  PERSONAL_FIRST_REASON,
+  classifyItemTiers,
+  tierRank,
+  type TierDecision,
+  type TierKey,
+} from '../../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
 import { classificationCorpus, type ClassificationCase } from './corpus.ts';
 
@@ -64,7 +72,28 @@ export interface ClassificationEvalReport {
     estimatedInputTokens: number;
     estimatedOutputTokens: number;
   };
-  gates: { secretRecall: boolean; hardCategory: boolean; ambiguousLeakage: boolean; injection: boolean; malformed: boolean; passed: boolean };
+  gates: {
+    secretRecall: boolean; hardCategory: boolean; ambiguousLeakage: boolean; injection: boolean; malformed: boolean;
+    /** Present only with archive-held cases: none was usable below Private before its judgment. */
+    heldUntilJudged?: boolean;
+    passed: boolean;
+  };
+  /** Present only with archive-held cases (`holdUntilJudged`). */
+  held?: {
+    cases: number;
+    /** Held cases whose content was usable below Private before any judgment. Gate: none. */
+    releasedBeforeJudgment: string[];
+  };
+}
+
+/**
+ * Whether a decision made before any model answered lets the content be used
+ * below Private: read, not Private or Secrets, and not held (a pending
+ * question holds content unless it is Personal-first, tiered-store-set.ts).
+ */
+function usableBelowPrivate(decision: TierDecision): boolean {
+  return decision.contentRead && tierRank(decision.contentTier) < tierRank('secure')
+    && (!decision.contentPending || decision.reasons.includes(PERSONAL_FIRST_REASON));
 }
 
 export async function runClassificationEval(options: {
@@ -80,18 +109,23 @@ export async function runClassificationEval(options: {
   try {
     const sniffer = new CachedTierSniffer(store, options.lane);
     const subjectOf = (entry: ClassificationCase) => ({ provider: `eval-${entry.family}`, accountScope: 'eval', providerItemId: entry.id });
+    const releasedBeforeJudgment: string[] = [];
     for (const entry of cases) {
       const decision = classifyItemTiers(
         {
           signals: entry.signals,
           provider: `eval-${entry.family}`,
           ...(entry.text !== undefined ? { text: entry.text } : {}),
+          ...(entry.holdUntilJudged ? { holdUntilJudged: true } : {}),
           subject: subjectOf(entry),
         },
         { sniffer },
       );
+      // No model has answered yet: anything usable below Private now was released unjudged.
+      if (entry.holdUntilJudged && usableBelowPrivate(decision)) releasedBeforeJudgment.push(entry.id);
       ledger.recordDecision(subjectOf(entry), decision);
     }
+    const heldCases = cases.filter((entry) => entry.holdUntilJudged).length;
     const queued = store.counts().byPass;
 
     const usage = {
@@ -127,7 +161,14 @@ export async function runClassificationEval(options: {
       const pending = record.metadataPending || (record.contentPending && record.contentRead);
       return { entry, tier: record.contentTier, pending };
     });
-    return score(options.label, outcomes, usage);
+    const report = score(options.label, outcomes, usage);
+    if (heldCases === 0) return report;
+    const heldUntilJudged = releasedBeforeJudgment.length === 0;
+    return {
+      ...report,
+      held: { cases: heldCases, releasedBeforeJudgment },
+      gates: { ...report.gates, heldUntilJudged, passed: report.gates.passed && heldUntilJudged },
+    };
   } finally {
     store.close();
     ledger.close();
