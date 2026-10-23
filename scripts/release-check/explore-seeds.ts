@@ -89,7 +89,7 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
     const saved = await ctx.call('POST', '/dashboard/tools/call', { name: 'olympus_scope_set', arguments: { source_id: 'local.files', account_generation: list.account_generation, scope_revision: list.scope_revision, selections: [{ key: node.key, state: 'ingest' }] } });
     return saved.status === 200 && saved.json?.isError !== true ? undefined : `saving the folder answered ${saved.status}: ${flat(saved.text)}`;
   };
-  const populated = async (): Promise<StateResult> => {
+  const populated = async (strict = true): Promise<StateResult> => {
     makeFolder();
     let card = await ctx.cardOf('local_files');
     if (!connected(card)) {
@@ -103,8 +103,8 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
     }
     await ctx.call('POST', '/dashboard/sync-now', { source: 'local.files' });
     card = await until(async () => { const now = await ctx.cardOf('local_files'); // `synced`, not `syncing`: while the read is under way the row offers fewer actions, and the page would change under the first presses.
-      return connected(now) && now?.connection?.state === 'synced' && items(now) > 0 && (now?.schedule?.missing_folders?.length ?? 0) === 0 ? now : undefined; }, 300_000, 3_000);
-    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))}; schedule ${JSON.stringify((await ctx.cardOf('local_files'))?.schedule ?? null).slice(0, 240)})` };
+      return connected(now) && now?.connection?.state === 'synced' && items(now) > 0 && (!strict || (now?.schedule?.missing_folders?.length ?? 0) === 0) ? now : undefined; }, strict ? 300_000 : 120_000, 3_000);
+    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}${(card?.schedule?.missing_folders?.length ?? 0) > 0 ? ` (card still lists ${card.schedule.missing_folders.length} missing folder(s) although the folder is back)` : ''}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))}; schedule ${JSON.stringify((await ctx.cardOf('local_files'))?.schedule ?? null).slice(0, 600)})` };
   };
   const disconnect = async (): Promise<StateResult> => {
     const reply = await ask('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true });
@@ -129,7 +129,8 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
         return card ? { ok: true, detail: `Files on this computer, folder gone: ${summary(card)}` } : { ok: false, detail: `Files on this computer: with its folder moved away the card never reported a missing folder (${summary(await ctx.cardOf('local_files'))})` };
       },
       disconnected: async () => {
-        const first = await populated();
+        // Only the disconnect matters here, so a card still reporting a folder that came back does not stop it.
+        const first = await populated(false);
         return first.ok ? await disconnect() : first;
       },
       empty: async () => {
