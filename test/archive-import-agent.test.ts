@@ -13,6 +13,7 @@ import * as fsp from 'node:fs/promises';
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parseArgs } from '../src/cli.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { DirectHttpEmailTransport, EmailClient } from '../src/core/email.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
@@ -720,6 +721,13 @@ describe('where it is offered', () => {
       expect([file, readFileSync(join(import.meta.dir, '..', 'connect-relay', 'server', 'generated', file), 'utf8').includes('archive_import')]).toEqual([file, false]);
     }
     expect(readFileSync(join(import.meta.dir, '..', 'connect-relay', 'server', 'directory', 'approved.ts'), 'utf8')).not.toContain('archive_import');
+  });
+
+  test('the CLI reads start, status and remove with their flags', () => {
+    expect(archiveImport.cliHints).toEqual({ name: 'archive', positional: ['action'] });
+    expect(parseArgs(archiveImport, ['start', '--path', '/Users/someone/Takeout.mbox'])).toEqual({ action: 'start', path: '/Users/someone/Takeout.mbox' });
+    expect(parseArgs(archiveImport, ['status'])).toEqual({ action: 'status' });
+    expect(parseArgs(archiveImport, ['remove', '--archive-id', '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60'])).toEqual({ action: 'remove', archive_id: '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60' });
   });
 
   test('the description tells an agent when to offer it, that it only asks, and to leave the file alone', () => {
