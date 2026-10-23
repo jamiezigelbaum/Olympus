@@ -270,12 +270,29 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
     }
     fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
   }
+  if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
+    return "busy";
   const path = `${guardBase}.${highest + 1}`;
   const descriptor = publishRecordExclusive(path, token);
   if (descriptor === undefined)
     return "retry";
   closeSync(descriptor);
   return { path, token };
+}
+function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
+  let text;
+  try {
+    text = readFileSync(guardBase, "utf8");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return false;
+    throw error;
+  }
+  const record = parseLeaseRecord(text);
+  if (record)
+    return recordedProcessInstanceIsAlive(record);
+  const age = leaseAgeMsSync(guardBase);
+  return age !== undefined && age < staleAfterMs;
 }
 function releaseCommitGuard(held) {
   if (readLeaseRecordSync(held.path)?.token !== held.token)
@@ -1067,6 +1084,7 @@ var init_linux_engine_layout = __esm(() => {
   init_config();
   init_linux_desktop_entry();
   init_atomic_file();
+  init_file_lease();
   LEGACY_LINUX_POLICY_FILES = [
     "privacy.json",
     "tier-rules.json",

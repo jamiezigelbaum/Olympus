@@ -126,6 +126,19 @@ export async function withFileLease<T>(
   }
 }
 
+/**
+ * True when `name` is one of the files a lease on `target` keeps beside it: the
+ * lock, the commit guard (the unnumbered name older engines used, or a member
+ * of the numbered series), or a crashed publisher's private temp file for
+ * either. Inventories that must refuse unknown files use this, so a guard
+ * series or a leftover temp file is never mistaken for foreign data.
+ */
+export function isFileLeaseSidecarName(target: string, name: string): boolean {
+  if (!name.startsWith(`${target}.lock`)) return false;
+  return /^[.]lock(?:[.]commit(?:[.][1-9][0-9]*)?)?(?:[.]tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$/
+    .test(name.slice(target.length));
+}
+
 /** Synchronous counterpart for the encrypted store and handle registry. */
 export function withFileLeaseSync<T>(
   targetPath: string,
@@ -462,11 +475,47 @@ function tryAcquireCommitGuardOnce(
     }
     fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
   }
+  // An engine from before the numbered series guards with the bare name; a
+  // live one still excludes this claim. An abandoned one is never removed
+  // here (see removeAbandonedLegacyCommitGuardSync).
+  if (legacyCommitGuardIsLive(guardBase, staleAfterMs)) return 'busy';
   const path = `${guardBase}.${highest + 1}`;
   const descriptor = publishRecordExclusive(path, token);
   if (descriptor === undefined) return 'retry';
   closeSync(descriptor);
   return { path, token };
+}
+
+function legacyCommitGuardIsLive(guardBase: string, staleAfterMs: number): boolean {
+  let text: string;
+  try {
+    text = readFileSync(guardBase, 'utf8');
+  } catch (error) {
+    if (isNodeErrorWithCode(error, 'ENOENT')) return false;
+    throw error;
+  }
+  const record = parseLeaseRecord(text);
+  if (record) return recordedProcessInstanceIsAlive(record);
+  // Older engines created the file before writing it: keep their age rule.
+  const age = leaseAgeMsSync(guardBase);
+  return age !== undefined && age < staleAfterMs;
+}
+
+/**
+ * Remove the bare `<lock>.commit` an engine from before the numbered series
+ * left behind when its owner is gone. Call only inside `lease.commit()` on a
+ * lease for `targetPath`, once the older engine can no longer run (an upgrade
+ * after it released custody): current code never claims the bare name, so the
+ * held guard excludes every other remover and nothing can recreate it.
+ */
+export function removeAbandonedLegacyCommitGuardSync(targetPath: string, staleAfterMs = DEFAULT_OPTIONS.staleAfterMs): void {
+  const guardBase = commitGuardPathFor(lockPathFor(targetPath));
+  if (legacyCommitGuardIsLive(guardBase, staleAfterMs)) return;
+  try {
+    unlinkSync(guardBase);
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
+  }
 }
 
 function releaseCommitGuard(held: HeldCommitGuard): void {

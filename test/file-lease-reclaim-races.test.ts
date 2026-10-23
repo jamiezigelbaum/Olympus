@@ -11,6 +11,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
   FileLeaseBusyError,
   fileLeaseTestHooks,
+  isFileLeaseSidecarName,
+  removeAbandonedLegacyCommitGuardSync,
   withFileLease,
   withFileLeaseSync,
 } from '../src/core/file-lease.ts';
@@ -155,5 +157,38 @@ describe('empty-record lease reclamation', () => {
       expect(readFileSync(`${path}.lock`, 'utf8').length).toBeGreaterThan(0);
       expect(readdirSync(join(path, '..')).filter((n) => n.includes('.tmp-'))).toEqual([]);
     }, options);
+  });
+});
+
+describe('an engine from before the numbered guard series', () => {
+  test('a live bare guard still excludes a commit', () => {
+    const path = target();
+    writeFileSync(`${path}.lock.commit`, record('older-engine', process.pid), { mode: 0o600 });
+    expect(() => withFileLeaseSync(path, (lease) => lease.commit(() => 'entered'), options)).toThrow(FileLeaseBusyError);
+    expect(tokenIn(`${path}.lock.commit`)).toBe('older-engine');
+  });
+
+  test('an abandoned bare guard is ignored, then removed only on request under the held guard', () => {
+    const path = target();
+    writeFileSync(`${path}.lock.commit`, record('older-engine', DEAD_PID), { mode: 0o600 });
+    expect(withFileLeaseSync(path, (lease) => lease.commit(() => 'entered'), options)).toBe('entered');
+    expect(existsSync(`${path}.lock.commit`)).toBe(true);
+    withFileLeaseSync(path, (lease) => lease.commit(() => removeAbandonedLegacyCommitGuardSync(path)), options);
+    expect(existsSync(`${path}.lock.commit`)).toBe(false);
+  });
+
+  test('a live bare guard is never removed', () => {
+    const path = target();
+    writeFileSync(`${path}.lock.commit`, record('older-engine', process.pid), { mode: 0o600 });
+    removeAbandonedLegacyCommitGuardSync(path);
+    expect(tokenIn(`${path}.lock.commit`)).toBe('older-engine');
+  });
+
+  test('inventories recognize every lease file and nothing else', () => {
+    const uuid = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    for (const name of ['state.json.lock', 'state.json.lock.commit', 'state.json.lock.commit.1', 'state.json.lock.commit.42',
+      `state.json.lock.tmp-${uuid}`, `state.json.lock.commit.3.tmp-${uuid}`]) expect(isFileLeaseSidecarName('state.json', name)).toBe(true);
+    for (const name of ['state.json', 'state.json.lock.commit.0', 'state.json.lock.commit.x', 'state.json.lock.old',
+      'other.json.lock', 'state.json.lock.commit.1.tmp-nope', 'state.jsonx.lock']) expect(isFileLeaseSidecarName('state.json', name)).toBe(false);
   });
 });

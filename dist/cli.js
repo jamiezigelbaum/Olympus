@@ -4063,6 +4063,11 @@ async function withFileLease(targetPath, callback, options = {}) {
     await owner.release();
   }
 }
+function isFileLeaseSidecarName(target, name) {
+  if (!name.startsWith(`${target}.lock`))
+    return false;
+  return /^[.]lock(?:[.]commit(?:[.][1-9][0-9]*)?)?(?:[.]tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$/.test(name.slice(target.length));
+}
 function withFileLeaseSync(targetPath, callback, options = {}) {
   const owner = acquireFileLeaseSync(targetPath, normalizeOptions(options));
   try {
@@ -4299,12 +4304,40 @@ function tryAcquireCommitGuardOnce(guardBase, token, staleAfterMs) {
     }
     fileLeaseTestHooks.afterGuardJudgedAbandoned?.();
   }
+  if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
+    return "busy";
   const path = `${guardBase}.${highest + 1}`;
   const descriptor = publishRecordExclusive(path, token);
   if (descriptor === undefined)
     return "retry";
   closeSync4(descriptor);
   return { path, token };
+}
+function legacyCommitGuardIsLive(guardBase, staleAfterMs) {
+  let text2;
+  try {
+    text2 = readFileSync7(guardBase, "utf8");
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT"))
+      return false;
+    throw error;
+  }
+  const record = parseLeaseRecord(text2);
+  if (record)
+    return recordedProcessInstanceIsAlive(record);
+  const age = leaseAgeMsSync(guardBase);
+  return age !== undefined && age < staleAfterMs;
+}
+function removeAbandonedLegacyCommitGuardSync(targetPath, staleAfterMs = DEFAULT_OPTIONS.staleAfterMs) {
+  const guardBase = commitGuardPathFor(lockPathFor(targetPath));
+  if (legacyCommitGuardIsLive(guardBase, staleAfterMs))
+    return;
+  try {
+    unlinkSync(guardBase);
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT"))
+      throw error;
+  }
 }
 function releaseCommitGuard(held) {
   if (readLeaseRecordSync(held.path)?.token !== held.token)
@@ -6807,12 +6840,12 @@ function isLegacyLinuxSetting(name) {
   const temporary = name.match(/^(.*)[.][0-9a-f-]{36}[.]tmp$/);
   if (temporary)
     return isLegacyLinuxSetting(temporary[1]);
+  if (isFileLeaseSidecarName("consult.json", name))
+    return true;
   return [
     "privacy.json",
     "tier-rules.json",
     "consult.json",
-    "consult.json.lock",
-    "consult.json.lock.commit",
     "sovereignty.json",
     "sources/dropbox.personal.ingestion.json",
     "sources/ingestion-exclusions.json",
@@ -6964,6 +6997,7 @@ var init_linux_engine_layout = __esm(() => {
   init_config();
   init_linux_desktop_entry();
   init_atomic_file();
+  init_file_lease();
   LEGACY_LINUX_POLICY_FILES = [
     "privacy.json",
     "tier-rules.json",
@@ -72261,14 +72295,19 @@ function priorEngineUsesLegacySettings(layout, receiptState = readLinuxEngineRec
   return receiptState === "installed";
 }
 function isLegacyConsultSidecar(name) {
-  return name === "consult.json.lock" || name === "consult.json.lock.commit";
+  return isFileLeaseSidecarName("consult.json", name);
 }
 function withLegacyConsultLease(layout, run) {
   const files = legacyLinuxSettings(layout);
   if (!files.some((name) => name === "consult.json" || isLegacyConsultSidecar(name)))
     return run();
   try {
-    return withFileLeaseSync(join66(layout.home, ".olympus/consult.json"), (lease) => lease.commit(run), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
+    const target = join66(layout.home, ".olympus/consult.json");
+    return withFileLeaseSync(target, (lease) => lease.commit(() => {
+      const result = run();
+      removeAbandonedLegacyCommitGuardSync(target);
+      return result;
+    }), { acquireTimeoutMs: 100, pollIntervalMs: 10 });
   } catch (error) {
     if (error instanceof FileLeaseBusyError)
       throw new Error("Finish saving Olympus settings, then retry the upgrade. A settings writer is still running; nothing was migrated.");
