@@ -346,6 +346,68 @@ describe('visual baselines', () => {
     }
   });
 
+  test('a newer approval is recorded after a complete clean comparison even if nothing changed, and an incomplete or broken run leaves it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rc-visual-'));
+    try {
+      const actualDir = join(dir, 'actual');
+      const baselinesDir = join(dir, 'baselines');
+      const outDir = join(dir, 'out');
+      for (const folder of [actualDir, baselinesDir, outDir]) mkdirSync(folder, { recursive: true });
+      const names = [SCREENS[0]!, SCREENS[1]!].map((screen) => ({ name: screenName(screen.id, 1280, 'light'), screen, width: 1280, theme: 'light' }));
+      const recorded = (): string => JSON.parse(readFileSync(join(baselinesDir, APPROVAL_FILE), 'utf8')).approvalDigest;
+      const setUp = (): void => {
+        for (const item of names) { writeFileSync(join(actualDir, `${item.name}.png`), base); writeFileSync(join(baselinesDir, `${item.name}.png`), base); }
+        writeFileSync(join(baselinesDir, APPROVAL_FILE), JSON.stringify({ approvalDigest: 'old' }));
+      };
+      const look = (): ReturnType<typeof compareScreens> => compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names });
+
+      setUp();
+      look(); // every screen still matches
+      expect(recorded()).toBe('new');
+
+      setUp();
+      rmSync(join(actualDir, `${names[1]!.name}.png`)); // a screen did not come back
+      look();
+      expect(recorded()).toBe('old');
+
+      setUp();
+      writeFileSync(join(actualDir, `${names[1]!.name}.png`), base.subarray(0, 40)); // unreadable
+      look();
+      expect(recorded()).toBe('old');
+
+      setUp();
+      rmSync(join(baselinesDir, `${names[1]!.name}.png`)); // no reference
+      look();
+      expect(recorded()).toBe('old');
+
+      // The machine returned no screens at all: nothing was compared, so the approval is not used up.
+      setUp();
+      const expected = names.map((item) => item.name);
+      compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names: [], expected });
+      expect(recorded()).toBe('old');
+
+      // An earlier screen differs under the newer approval but a later one is missing: no reference is refreshed, the difference fails,
+      // and the approval stays for a full retry.
+      setUp();
+      const changed = png(100, 100, (x) => (x < 20 ? [0, 0, 0] : [250, 250, 250]));
+      writeFileSync(join(actualDir, `${names[0]!.name}.png`), changed);
+      rmSync(join(actualDir, `${names[1]!.name}.png`));
+      const partial = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names, expected });
+      expect(readFileSync(join(baselinesDir, `${names[0]!.name}.png`)).equals(base)).toBe(true);
+      expect(visualChecks(partial)[0]!.status).toBe('fail');
+      expect(recorded()).toBe('old');
+
+      // The same change with every screen back is refreshed and the approval is used up.
+      writeFileSync(join(actualDir, `${names[1]!.name}.png`), base);
+      const full = compareScreens({ actualDir, baselinesDir, outDir, update: false, approvalDigest: 'new', names, expected });
+      expect(visualChecks(full)[0]!.status).toBe('warn');
+      expect(readFileSync(join(baselinesDir, `${names[0]!.name}.png`)).equals(changed)).toBe(true);
+      expect(recorded()).toBe('new');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('the Inbox mask hides what varies with the run and keeps the intro paragraph', () => {
     const window = new Window({ url: 'http://127.0.0.1/' });
     window.document.body.innerHTML = '<section class="pasection" aria-labelledby="waiting"><h3 id="waiting">Inbox</h3><p class="pnote" data-pa-none>none</p><p class="pnote" id="intro">Intro</p><ul data-pa-list><li>row</li></ul><div class="pbuttons"><button>Delete all</button></div><p data-pa-older-removed>older</p></section>';

@@ -143,7 +143,7 @@ function isReadablePng(bytes: Buffer): boolean {
   try { PNG.sync.read(bytes); return true; } catch { return false; }
 }
 
-export function compareScreens(input: { actualDir: string; baselinesDir: string; outDir: string; update: boolean; approvalDigest?: string | undefined; names: readonly { name: string; screen: Screen; width: number; theme: string }[]; tolerance?: { maxDiffRatio: number; pixelThreshold: number } }): VisualRun {
+export function compareScreens(input: { actualDir: string; baselinesDir: string; outDir: string; update: boolean; approvalDigest?: string | undefined; names: readonly { name: string; screen: Screen; width: number; theme: string }[]; expected?: readonly string[]; tolerance?: { maxDiffRatio: number; pixelThreshold: number } }): VisualRun {
   const visualDir = join(input.outDir, 'visual');
   mkdirSync(visualDir, { recursive: true });
   if (input.update) mkdirSync(input.baselinesDir, { recursive: true });
@@ -151,7 +151,7 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
   // The references were taken under an earlier design approval than this build's: a changed look is then an approved change.
   const recorded = readApprovalDigest(input.baselinesDir);
   const approvedSince = input.approvalDigest !== undefined && recorded !== undefined && recorded !== input.approvalDigest;
-  let refreshed = false;
+  const refreshes: { path: string; bytes: Buffer; result: VisualResult }[] = [];
   for (const item of input.names) {
     const actualPath = join(input.actualDir, `${item.name}.png`);
     if (!existsSync(actualPath)) continue;
@@ -180,13 +180,25 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
       writeFileSync(baselinePath, actual);
       result.updated = true;
     } else if (approvedSince && (comparison.status === 'different' || comparison.status === 'size') && isReadablePng(actual)) {
-      writeFileSync(baselinePath, actual);
+      // Staged: written only if the whole comparison completes, below.
+      refreshes.push({ path: baselinePath, bytes: actual, result });
       result.approvedRefresh = true;
-      refreshed = true;
     }
     results.push(result);
   }
-  if (input.approvalDigest !== undefined && (input.update || refreshed)) writeFileSync(join(input.baselinesDir, APPROVAL_FILE), `${JSON.stringify({ approvalDigest: input.approvalDigest }, null, 2)}\n`);
+  // The newer approval is used up by one complete, clean comparison (every expected screen read and compared; none unreadable, missing or
+  // failing), even when no pixel changed; otherwise it would stay live and refresh a later, unapproved regression. The set is checked
+  // against the expected screens, not only the ones the machine returned, so a capture that returned nothing is not complete.
+  const compared = new Set(results.map((result) => screenName(result.screen, result.width, result.theme)));
+  const complete = results.length === input.names.length && (input.expected ?? []).every((name) => compared.has(name))
+    && results.every((result) => result.updated === true || result.approvedRefresh === true || result.comparison.status === 'match');
+  if (approvedSince && complete) {
+    for (const refresh of refreshes) writeFileSync(refresh.path, refresh.bytes);
+  } else {
+    // An incomplete run refreshes nothing: the differing screens fail as ordinary differences, and the approval stays for a full retry.
+    for (const refresh of refreshes) refresh.result.approvedRefresh = false;
+  }
+  if (input.approvalDigest !== undefined && (input.update || (approvedSince && complete))) writeFileSync(join(input.baselinesDir, APPROVAL_FILE), `${JSON.stringify({ approvalDigest: input.approvalDigest }, null, 2)}\n`);
   return { results, baselinesDir: input.baselinesDir, update: input.update };
 }
 
