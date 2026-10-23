@@ -90,15 +90,18 @@ export interface VisualRun {
 /** Where the references record which design approval they were taken under (beside the pictures). */
 export const APPROVAL_FILE = 'approval.json';
 
+/** Marks the formula behind a fingerprint. A record in any other form (the first formula also hashed every rendered digest) matches nothing. */
+export const APPROVAL_FORMAT = 'v2:';
+
 /**
- * A short fingerprint of the owner's design approvals: the approved design review and each reviewed state's approved rendering, from
- * `config/dashboard-design-review.json`. It changes only when the owner approves a design (the guard digests are re-pinned for that),
- * never for a change nobody approved, so a changed look under a new fingerprint is an approved change and under the same one is a defect.
+ * A short fingerprint of the owner's sign-off: the `design_review` record in `config/dashboard-design-review.json` (id, approved_by,
+ * approved_on, approval, covers) and nothing else. The rendered digests beside it (`reviewed_states`) are re-pinned by routine dashboard
+ * changes with no sign-off, so they are deliberately left out: only the owner's record moving counts as a new approval. A changed look
+ * under a new fingerprint is an approved change; under the same one, a defect.
  */
 export function approvalDigestOf(review: unknown): string {
-  const r = (review ?? {}) as { design_review?: unknown; reviewed_states?: Array<{ id?: string; rendered_html_sha256?: string }> };
-  const states = (r.reviewed_states ?? []).map((state) => [state.id ?? '', state.rendered_html_sha256 ?? '']);
-  return createHash('sha256').update(JSON.stringify({ design_review: r.design_review ?? null, states })).digest('hex');
+  const r = (review ?? {}) as { design_review?: unknown };
+  return `${APPROVAL_FORMAT}${createHash('sha256').update(JSON.stringify({ design_review: r.design_review ?? null })).digest('hex')}`;
 }
 
 /** The fingerprint for the harness's own source (the review file beside it); undefined where there is no such file. */
@@ -150,7 +153,8 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
   const results: VisualResult[] = [];
   // The references were taken under an earlier design approval than this build's: a changed look is then an approved change.
   const recorded = readApprovalDigest(input.baselinesDir);
-  const approvedSince = input.approvalDigest !== undefined && recorded !== undefined && recorded !== input.approvalDigest;
+  // A record in another formula (an older fingerprint) is not a recorded approval: nothing is refreshed, and the differences fail as ordinary ones until the record is rewritten.
+  const approvedSince = input.approvalDigest !== undefined && recorded !== undefined && recorded.startsWith(APPROVAL_FORMAT) && recorded !== input.approvalDigest;
   const refreshes: { path: string; bytes: Buffer; result: VisualResult }[] = [];
   for (const item of input.names) {
     const actualPath = join(input.actualDir, `${item.name}.png`);

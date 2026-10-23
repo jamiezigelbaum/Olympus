@@ -1233,6 +1233,16 @@ async function until<T>(read: () => Promise<T | undefined>, timeoutMs: number, e
 
 const cardSummary = (card: any): string => `connection ${String(card?.connection?.state ?? '?')}, ${String(card?.coverage?.indexed_items ?? '?')} indexed, answers ${String(card?.answer_readiness?.state ?? '?')}${card?.connection?.provider_refusal ? ', refused by the provider' : ''}`;
 
+/** Disconnects Readwise; a 409 means the source is busy (a sync in flight), so it is asked again for a minute, and the answer says what it refused with. */
+async function disconnectReadwise(session: { call(method: string, path: string, body?: unknown): Promise<{ status: number; json: any; text: string }> }): Promise<{ status: number; json: any; text: string }> {
+  let response = await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
+  for (let attempt = 0; attempt < 12 && response.status === 409; attempt += 1) {
+    await sleep(5_000);
+    response = await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
+  }
+  return response;
+}
+
 /** The seeded states of the install the exploration starts from, produced through the dashboard's own routes and the stand-in. */
 function exploreSeeds(config: AgentConfig): Seed[] {
   // The card's connection reads `synced` once the source has been read; not connected, needs setup, awaiting consent and reauth are the others.
@@ -1285,8 +1295,8 @@ function exploreSeeds(config: AgentConfig): Seed[] {
         const first = await populated();
         if (!first.ok) return first;
         const session = await ownerSession();
-        const response = await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
-        if (response.status !== 200) return { ok: false, detail: `disconnect answered ${response.status}` };
+        const response = await disconnectReadwise(session);
+        if (response.status !== 200) return { ok: false, detail: `disconnect answered ${response.status}: ${String(response.text ?? '').replace(/\s+/g, ' ').slice(0, 160)}` };
         const card = await until(async () => { const now = await readwiseCard(); return now && !connected(now) && (now?.coverage?.indexed_items ?? 0) > 0 ? now : undefined; }, 60_000);
         return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not read as disconnected with its data kept: ${cardSummary(await readwiseCard())}` };
       },
@@ -1300,8 +1310,8 @@ function exploreSeeds(config: AgentConfig): Seed[] {
         const session = await ownerSession();
         let card = await readwiseCard();
         if (connected(card)) {
-          const response = await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
-          if (response.status !== 200) return { ok: false, detail: `disconnect answered ${response.status}` };
+          const response = await disconnectReadwise(session);
+          if (response.status !== 200) return { ok: false, detail: `disconnect answered ${response.status}: ${String(response.text ?? '').replace(/\s+/g, ' ').slice(0, 160)}` };
           card = await until(async () => { const now = await readwiseCard(); return now && !connected(now) ? now : undefined; }, 60_000);
         }
         if (card && (card?.coverage?.indexed_items ?? 0) > 0) {

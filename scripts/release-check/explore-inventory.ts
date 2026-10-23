@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../../src/workers/source-dashboard.ts';
-import { DASHBOARD_CHATGPT_SETUP_LABELS as LABELS, DASHBOARD_CHATGPT_VOCABULARY as VOCABULARY } from '../../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_CHATGPT_PICKER_COPY as PICKER, DASHBOARD_CHATGPT_SETUP_LABELS as LABELS, DASHBOARD_CHATGPT_VOCABULARY as VOCABULARY } from '../../src/workers/dashboard/vocabulary.ts';
 
 export type { ControlKind, SeedId } from './explore-kinds.ts';
 import type { ControlKind, SeedId } from './explore-kinds.ts';
@@ -70,6 +70,8 @@ export function buildInventory(root = join(import.meta.dir, '..', '..')): Invent
     // A source this worker cannot sync offers Check again on its Needs-you row (checkAgainFix() in the view model).
     else add('check-again', escape(VOCABULARY.checkAgain), false, ['failed']);
     if (scopeIds.has(id)) add('scope', `${escape(LABELS.chooseFolders)}|${escape(LABELS.chooseMail)}`, false, ['populated'], 'its folders and mail are chosen in a picker that needs the provider');
+    // A Mac that will not open a chosen folder stalls the source, and the row then links to the privacy settings page (client.ts, scope_root_permission_needed).
+    if (definition.connect_action.kind === 'this_computer') add('privacy-settings', escape(PICKER.openPrivacySettings), false, ['failed'], 'it shows only when a Mac refuses a chosen folder');
     // A paired chat app (Telegram, WhatsApp) offers Unpair, with the engine's own confirmation, on the computer (unpairEntry() in the dashboard client).
     if (definition.connect_kind === 'pairing') add('unpair', escape(`Unpair ${definition.label}`), true, ['populated']);
     if (disconnectIds.has(id) || definition.connect_action.kind === 'this_computer') {
