@@ -3,7 +3,9 @@
  * agent left for the person to approve or decline, and the dashboard's own
  * approvals while their files are read whole to tell a copy of an earlier
  * import apart ("checking"), or after that check found one ("already
- * imported") or failed.
+ * imported") or failed. Also the removals an agent asked for, which wait for
+ * the person the same way (`kind: 'remove'`, the archive's id and name, no
+ * path).
  *
  * Kept apart from the archive record (state.ts), which holds only approved
  * imports, and from the folder-scope approvals (file-source-scopes.json),
@@ -37,23 +39,33 @@ export const ARCHIVE_IMPORT_REQUEST_PATH_MAX = 4096;
 
 export type ArchiveImportRequestStatus = 'pending' | 'checking' | 'already_imported' | 'failed';
 
+/**
+ * What the request asks: to import a file or folder, or to remove an
+ * imported archive. A request written before removals existed has no kind,
+ * and is an import.
+ */
+export type ArchiveImportRequestKind = 'import' | 'remove';
+
 export interface ArchiveImportRequest {
   request_id: string;
+  kind: ArchiveImportRequestKind;
   /**
    * Who asked: an agent (waits for the person), or the person in the dashboard.
    */
   origin: 'agent' | 'dashboard';
   /**
    * The path as asked (an agent's) or as chosen in the picker (the dashboard's).
+   * A removal names no path: it is empty.
    */
   path: string;
   /**
-   * The last part of the path, for display.
+   * The last part of the path, for display; for a removal, the archive's name when it was asked.
    */
   label: string;
   status: ArchiveImportRequestStatus;
   /**
-   * already_imported: the import that already holds these files.
+   * already_imported: the import that already holds these files. A removal:
+   * the archive it asks to remove.
    */
   archive_id?: string;
   /**
@@ -79,11 +91,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const STATUSES: ReadonlySet<string> = new Set(['pending', 'checking', 'already_imported', 'failed']);
 
-function validRequest(value: unknown): value is ArchiveImportRequest {
+function validRequest(value: unknown): boolean {
   if (!isRecord(value)) return false;
+  const kind = value.kind === undefined ? 'import' : value.kind;
+  if (kind !== 'import' && kind !== 'remove') return false;
+  const path = value.path;
+  // An import names a path; a removal names the archive and waits (it is never checked).
+  const named = kind === 'import'
+    ? typeof path === 'string' && path.length > 0 && path.length <= ARCHIVE_IMPORT_REQUEST_PATH_MAX
+    : path === '' && value.origin === 'agent' && value.status === 'pending'
+      && typeof value.archive_id === 'string';
   return typeof value.request_id === 'string' && isArchiveId(value.request_id)
     && (value.origin === 'agent' || value.origin === 'dashboard')
-    && typeof value.path === 'string' && value.path.length > 0 && value.path.length <= ARCHIVE_IMPORT_REQUEST_PATH_MAX
+    && named
     && typeof value.label === 'string'
     && typeof value.status === 'string' && STATUSES.has(value.status)
     && (value.archive_id === undefined || (typeof value.archive_id === 'string' && isArchiveId(value.archive_id)))
@@ -100,7 +120,10 @@ function readRequests(path: string): PersistedRequests {
   if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.requests) || !parsed.requests.every(validRequest)) {
     throw new ArchiveRecordFormError('The archive import requests are not in a form this build reads.');
   }
-  return { version: 1, requests: parsed.requests as ArchiveImportRequest[] };
+  return {
+    version: 1,
+    requests: (parsed.requests as Array<Record<string, unknown>>).map((entry) => ({ ...entry, kind: entry.kind ?? 'import' }) as unknown as ArchiveImportRequest),
+  };
 }
 
 /**
@@ -139,13 +162,38 @@ export class ArchiveImportRequestStore {
     let added: ArchiveImportRequest | undefined;
     this.mutate((state) => {
       const waiting = state.requests.filter((request) => request.status === 'pending');
-      const same = waiting.find((request) => request.path === path);
+      const same = waiting.find((request) => request.kind === 'import' && request.path === path);
+      if (same) {
+        added = same;
+        return false;
+      }
+      // Imports and removals share one bound: what waits for the person is theirs to answer.
+      if (waiting.length >= ARCHIVE_IMPORT_PENDING_REQUESTS_MAX) return false;
+      added = this.entry('import', 'agent', path, 'pending');
+      state.requests.push(added);
+      return true;
+    });
+    return added;
+  }
+
+  /**
+   * An agent's request to remove an imported archive, waiting for the
+   * person. One request per archive; refused (undefined) while too many
+   * already wait. Nothing is removed here: only the dashboard's approval
+   * removes (dashboard.ts).
+   */
+  addRemoval(archiveId: string, name: string): ArchiveImportRequest | undefined {
+    if (!isArchiveId(archiveId)) throw new Error('The archive to remove is not an archive id.');
+    let added: ArchiveImportRequest | undefined;
+    this.mutate((state) => {
+      const waiting = state.requests.filter((request) => request.status === 'pending');
+      const same = waiting.find((request) => request.kind === 'remove' && request.archive_id === archiveId);
       if (same) {
         added = same;
         return false;
       }
       if (waiting.length >= ARCHIVE_IMPORT_PENDING_REQUESTS_MAX) return false;
-      added = this.entry('agent', path, 'pending');
+      added = this.entry('remove', 'agent', '', 'pending', { archiveId, label: name });
       state.requests.push(added);
       return true;
     });
@@ -160,7 +208,7 @@ export class ArchiveImportRequestStore {
     this.mutate((state) => {
       entry = state.requests.find((request) => request.status === 'checking' && request.path === path);
       if (entry) return false;
-      entry = this.entry('dashboard', path, 'checking');
+      entry = this.entry('import', 'dashboard', path, 'checking');
       state.requests.push(entry);
       return true;
     });
@@ -172,7 +220,7 @@ export class ArchiveImportRequestStore {
    */
   startChecking(requestId: string): ArchiveImportRequest | undefined {
     return this.change(requestId, (request) => {
-      if (request.status !== 'pending') return false;
+      if (request.kind !== 'import' || request.status !== 'pending') return false;
       request.status = 'checking';
     });
   }
@@ -205,7 +253,7 @@ export class ArchiveImportRequestStore {
   }
 
   /**
-   * Declined, dismissed, or done (its import started).
+   * Declined, dismissed, or done (its import started, its archive removed).
    */
   remove(requestId: string): boolean {
     let removed = false;
@@ -218,9 +266,25 @@ export class ArchiveImportRequestStore {
     return removed;
   }
 
-  private entry(origin: ArchiveImportRequest['origin'], path: string, status: ArchiveImportRequestStatus): ArchiveImportRequest {
+  private entry(
+    kind: ArchiveImportRequestKind,
+    origin: ArchiveImportRequest['origin'],
+    path: string,
+    status: ArchiveImportRequestStatus,
+    removal?: { archiveId: string; label: string },
+  ): ArchiveImportRequest {
     const at = this.now().toISOString();
-    return { request_id: randomUUID(), origin, path, label: archivePathLabel(path), status, created_at: at, updated_at: at };
+    return {
+      request_id: randomUUID(),
+      kind,
+      origin,
+      path,
+      label: removal ? removal.label.normalize('NFC').slice(0, 255) : archivePathLabel(path),
+      status,
+      ...(removal ? { archive_id: removal.archiveId } : {}),
+      created_at: at,
+      updated_at: at,
+    };
   }
 
   private change(requestId: string, edit: (request: ArchiveImportRequest) => void | false): ArchiveImportRequest | undefined {

@@ -691,6 +691,7 @@ function localFilesPreview(state: string) {
  *   archives-already     that check found the archive already imported
  *   archives-failed      a choice that was not imported, and why
  *   archives-request     an agent asked to import a file: Import or Decline
+ *   archives-remove-request  an agent asked to remove an imported archive: Remove or Decline
  *   archives-importing   one archive 42% read, its messages held for the private model
  *   archives-imported    one archive imported, with what was not read, per kind
  *   archives-waiting     imported, but no private model is set up: the route to set one up
@@ -702,6 +703,7 @@ function localFilesPreview(state: string) {
  */
 const ARCHIVE_STATES = [
   'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
+  'archives-remove-request',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable',
 ] as const;
@@ -740,7 +742,9 @@ function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedA
   if (meta.unreadable) attention.push({ kind: 'unreadable', reason: meta.unreadable.reason });
   for (const entry of meta.archives) if (entry.status === 'stopped') attention.push({ kind: 'stopped', id: entry.id, name: entry.name });
   for (const request of meta.requests) {
-    if (request.origin === 'agent' && request.status === 'pending') attention.push({ kind: 'request', id: request.id, name: request.name });
+    if (request.origin === 'agent' && request.status === 'pending') {
+      attention.push({ kind: request.kind === 'remove' ? 'removal' : 'request', id: request.id, name: request.name });
+    }
   }
   const held = meta.archives.filter((entry) => entry.status !== 'removing').reduce((sum, entry) => sum + entry.held, 0);
   if (meta.privateModel !== 'ready' && held > 0) attention.push({ kind: 'held', count: held, model: meta.privateModel });
@@ -800,10 +804,13 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
     requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Inbox.mbox', where: '~/Desktop', origin: 'dashboard', status: 'failed', code: 'changed' });
   } else if (state === 'archives-request') {
     requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Takeout-2.mbox', where: '~/Downloads', origin: 'agent', status: 'pending' });
+  } else if (state === 'archives-remove-request') {
+    archives.push(takeout);
+    requests.push({ id: '7d1e2f30-4c5b-4a6d-9e7f-8b9c0d1e2f3a', kind: 'remove', name: takeout.name, where: takeout.where, origin: 'agent', status: 'pending', archiveId: takeout.id, archiveName: takeout.name });
   } else if (state === 'archives-unreadable') {
     return {
       sourceId: 'archive.imports', archives, requests, privateModel,
-      unreadable: { reason: 'damaged', file: '~/.local/share/openclaw/olympus/archive-imports.json' },
+      unreadable: { reason: 'damaged', file: '~/.local/share/openclaw/olympus/archive-imports.json', list: 'archives' },
     };
   }
   return { sourceId: 'archive.imports', archives, requests, privateModel };

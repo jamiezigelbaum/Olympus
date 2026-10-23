@@ -1259,7 +1259,12 @@ export function chatgptDashboardClient(
     const A = H.copy.archives;
     const meta = state.computerMeta && state.computerMeta.archives;
     if (name === H.archiveRemoveTool) {
-      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry: Any) => entry && entry.id === (args && args.archive_id))[0] : null;
+      // Remove on an archive names it; Remove on an agent's request names the archive the request does.
+      const asked = args && args.request_id && meta && Array.isArray(meta.requests)
+        ? meta.requests.filter((entry: Any) => entry && entry.id === args.request_id)[0]
+        : null;
+      const target = asked ? asked.archiveId : args && args.archive_id;
+      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry: Any) => entry && entry.id === target)[0] : null;
       return removed && typeof removed.name === 'string' ? fill(A.removing, { name: removed.name }) : '';
     }
     if (name === H.archiveDeclineTool) {
@@ -1318,6 +1323,22 @@ export function chatgptDashboardClient(
     if (archiveLanded('archive-request:' + request.id, request.status === 'pending' && request.origin === 'agent')) item.className += ' landed';
     const key = 'archive-request:' + request.id;
     const where = typeof request.where === 'string' ? request.where : '';
+    if (request.kind === 'remove') {
+      // An agent asked to remove an archive: the person's Remove runs the same removal as the archive's own, after the same confirmation.
+      item.setAttribute('data-request', 'remove');
+      add(item, el('p', '', where ? fill(A.removeRequestLine, { name: request.name, where }) : fill(A.removeRequestLineNoWhere, { name: request.name })));
+      add(item, el('p', 'muted', A.removeRequestNote));
+      add(item, add(el('div', 'archive-actions'),
+        fixControl({
+          label: A.remove,
+          tool: H.archiveRemoveTool,
+          args: { request_id: request.id },
+          destructive: true,
+          confirmText: fill(A.removeConfirm, { name: request.name }),
+        }, key + ':remove', 'plain', true),
+        fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':decline', 'plain', false)));
+      return item;
+    }
     if (request.status === 'pending') {
       add(item, el('p', '', fill(A.requestLine, { name: request.name, where })));
       add(item, add(el('div', 'archive-actions'),

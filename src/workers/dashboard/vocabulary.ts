@@ -1847,6 +1847,10 @@ export const DASHBOARD_ARCHIVE_COPY = {
   removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
   /** An agent's request, waiting for the person. */
   requestLine: 'An agent asked to import {name} from {where}.',
+  /** An agent's request to remove an archive; the archive's own name and folder. */
+  removeRequestLine: 'An agent asked to remove {name}, imported from {where}.',
+  removeRequestLineNoWhere: 'An agent asked to remove {name}.',
+  removeRequestNote: 'Removing deletes everything Olympus made from it. The file itself stays where it is.',
   approve: 'Import',
   decline: 'Decline',
   checkingLine: 'Checking whether {name} is already imported. Olympus reads it once to compare.',
@@ -1876,6 +1880,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
   needsYou: {
     stopped: 'An import stopped: {name}',
     request: 'An agent asked to import {name}',
+    removal: 'An agent asked to remove {name}',
     held: { one: '1 imported message waits for the private model', many: '{n} imported messages wait for the private model' },
     unreadable: "Olympus can't read its list of imported archives",
     seeWhy: 'See why',
@@ -1912,6 +1917,8 @@ export function dashboardImportAttentionSentence(entry: DashboardImportAttention
       return words.stopped.replace('{name}', entry.name);
     case 'request':
       return words.request.replace('{name}', entry.name);
+    case 'removal':
+      return words.removal.replace('{name}', entry.name);
     case 'held':
       return entry.count === 1 ? words.held.one : words.held.many.replace('{n}', dashboardCount(entry.count));
     case 'unreadable':

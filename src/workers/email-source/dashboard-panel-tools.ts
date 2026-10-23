@@ -299,11 +299,17 @@ async function archiveDecline(options: DashboardPanelToolsOptions, args: Record<
   return { content: [{ type: 'text', text: 'Declined.' }], structuredContent: { status: 'declined' } };
 }
 
-/** Remove one imported archive: the panel's confirm is the acknowledgement the route asks for. */
+/**
+ * Remove one imported archive (`archive_id`), or approve an agent's request to
+ * remove one (`request_id`): the panel's confirm is the acknowledgement the
+ * route asks for. Both run the same removal.
+ */
 async function archiveRemove(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
   const keys = Object.keys(args);
-  if (keys.length !== 1 || keys[0] !== 'archive_id' || !archiveArg(args.archive_id)) return refused('archive_id is required.', 'invalid_params');
-  const answer = await archiveRoute(options, 'remove', { archive_id: args.archive_id, acknowledge: true });
+  const byArchive = keys.length === 1 && keys[0] === 'archive_id' && archiveArg(args.archive_id);
+  const byRequest = keys.length === 1 && keys[0] === 'request_id' && archiveArg(args.request_id);
+  if (!byArchive && !byRequest) return refused('Give an archive id or a request id.', 'invalid_params');
+  const answer = await archiveRoute(options, 'remove', { ...(byArchive ? { archive_id: args.archive_id } : { request_id: args.request_id }), acknowledge: true });
   if (!answer.ok) return answer.result;
   return { content: [{ type: 'text', text: 'Removing.' }], structuredContent: { status: 'removing' } };
 }

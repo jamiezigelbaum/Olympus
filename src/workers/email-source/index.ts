@@ -45,6 +45,7 @@ import { selectedItemContentFieldPath } from '../../core/source-index/selected-i
 import { dropboxPolicyExcludedPathPrefixes, type SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import { normalizeVeniceAnalystModelId } from '../../core/venice-models.ts';
 import { isV04PublicDashboardRoute } from '../../core/public-surface.ts';
+import type { ArchiveImportAgent } from '../archive-import/agent.ts';
 import type { ArchiveImportDashboard } from '../archive-import/dashboard.ts';
 import { NativeMessagingCaptureOwnerError } from '../../core/messaging-capture.ts';
 import {
@@ -428,6 +429,12 @@ export interface EmailSourceWorkerOptions {
    * Absent: `/consult/ask` answers 501.
    */
   consultAsk?: (input: ConsultAskWireRequest, signal: AbortSignal) => Promise<unknown>;
+  /**
+   * What an agent may do about archive imports (archive-import/agent.ts):
+   * ask for an import or a removal, and read the list. Absent:
+   * `/archive-import/*` answers 501.
+   */
+  archiveImportAgent?: ArchiveImportAgent;
   // Optional content-free latency ledger. When present, one JSON line per
   // answered source_answer request is appended (phase timings, corpus ids, skip
   // reasons, analyst backend/fallback, release decision — never query/content).
@@ -817,6 +824,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     for (const [ticket, entry] of releaseTickets) if (entry.expires <= Date.now()) releaseTickets.delete(ticket);
   };
   const consultAsk = options.consultAsk;
+  const archiveImportAgent = options.archiveImportAgent;
   const sourceAnswerLatencyLog = options.sourceAnswerLatencyLog;
   const sourceIndexStatus = options.sourceIndexStatus;
   const currentReadwiseSync = options.currentReadwiseSync
@@ -1007,6 +1015,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           // The request's signal (a remote caller gone, a job's deadline)
           // cancels the writer and the session before dispatch.
           return json(await consultAsk(await parseConsultAskRequest(request), request.signal));
+        }
+
+        // An agent's side of importing an archive (archive-import/agent.ts): ask
+        // for an import or a removal, and read the list. It records a request
+        // and reads; it approves, imports and removes nothing. Those are the
+        // dashboard's control routes below, which a local control session
+        // alone reaches. The path is kept as text and never opened here.
+        if (request.method === 'POST' && url.pathname.startsWith(`${basePath}/archive-import/`)) {
+          if (!archiveImportAgent) {
+            throw new EmailSourceWorkerError(501, 'archive_import_not_supported', 'Importing archives is not set up in this engine.');
+          }
+          const record = await parseObjectBody(request);
+          const action = url.pathname.slice(`${basePath}/archive-import/`.length);
+          if (action === 'start') return json(archiveImportAgent.start(record.path));
+          if (action === 'status') return json(archiveImportAgent.status(record.archive_id));
+          if (action === 'remove') return json(archiveImportAgent.remove(record.archive_id));
+          throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/answer/release`) {
@@ -2868,8 +2893,12 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           }
           if (url.pathname === '/dashboard/archive-import/remove') {
             return await withDashboardGrantMutation(async () => {
+              // An archive, or an agent's request to remove one: either way the person's confirmation, and the same removal.
               const archiveId = asOptionalString(record.archive_id);
-              if (!archiveId) throw new EmailSourceWorkerError(400, 'invalid_request', 'archive_id is required.');
+              const requestId = asOptionalString(record.request_id);
+              if ((archiveId === undefined) === (requestId === undefined)) {
+                throw new EmailSourceWorkerError(400, 'invalid_request', 'Give either archive_id or request_id.');
+              }
               if (record.acknowledge !== true) {
                 throw new EmailSourceWorkerError(
                   400,
@@ -2877,7 +2906,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                   'Confirm that Remove deletes everything Olympus made from this archive, and leaves the file itself where it is.',
                 );
               }
-              return json(archiveImports.remove(archiveId));
+              return json(archiveId !== undefined ? archiveImports.remove(archiveId) : archiveImports.approveRemoval(requestId!));
             });
           }
           throw new EmailSourceWorkerError(404, 'not_found', 'No such archive route.');

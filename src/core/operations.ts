@@ -203,6 +203,17 @@ const ASK_ANONYMOUSLY_PARAMS = {
   timeoutMs: { type: 'number', description: 'How long to wait for the answer, in milliseconds (default 1200000; a zkAPI route can take minutes; inside OpenClaw the wait is capped at 600000).' },
 } satisfies Record<string, ParamDef>;
 
+const ARCHIVE_IMPORT_PARAMS = {
+  action: {
+    type: 'string',
+    required: true,
+    enum: ['start', 'status', 'remove'],
+    description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).',
+  },
+  path: { type: 'string', description: 'start only: the full path of the export (an .mbox file, or an Apple Mail .mbox folder), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves.' },
+  archive_id: { type: 'string', description: 'remove: the archive_id status returned. status: show only this archive.' },
+} satisfies Record<string, ParamDef>;
+
 export const operations: Operation[] = [
   {
     name: 'argus_ping',
@@ -657,6 +668,49 @@ export const operations: Operation[] = [
       });
       const jobs = ctx.sourceAnswerJobs;
       return jobs ? runUnderCaller(jobs, ctx.signal, ask) : ask(ctx.signal);
+    },
+  },
+  {
+    name: 'archive_import',
+    description: [
+      'Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.',
+      'Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.',
+      'Never open, read or copy the file yourself, and never retry to get around the approval.',
+      'start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message\'s words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If it is already imported it says so and does not import it again.',
+      'status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.',
+      'remove {archive_id}: also needs the user\'s approval on the dashboard (same needs_approval result); removing deletes what Olympus made from the archive and never touches the file.',
+      'Any other {ok: false, message} is a refusal to tell the user in those words.',
+    ].join(' '),
+    params: ARCHIVE_IMPORT_PARAMS,
+    // Not read-only: it leaves requests waiting for the user. A client that
+    // auto-approves read-only tools must not auto-approve this one, although
+    // the user's own approval on the dashboard is what imports or removes.
+    mutating: true,
+    nativeExposure: 'sourceIndexEnabledOnly',
+    cliHints: { name: 'archive', positional: ['action'] },
+    handler: async (ctx, params) => {
+      assertNoUndeclaredParams(ARCHIVE_IMPORT_PARAMS, params, 'Archive import');
+      const action = asString(params.action, 'action');
+      if (action !== 'start' && action !== 'status' && action !== 'remove') {
+        throw new OperationError('invalid_params', 'action must be "start", "status" or "remove".');
+      }
+      const path = optionalString(params.path);
+      const archiveId = optionalString(params.archive_id);
+      if (action === 'start' && (path === undefined || archiveId !== undefined)) {
+        throw new OperationError('invalid_params', 'start needs path, and takes no archive_id.');
+      }
+      if (action === 'remove' && (archiveId === undefined || path !== undefined)) {
+        throw new OperationError('invalid_params', 'remove needs archive_id, and takes no path.');
+      }
+      if (action === 'status' && path !== undefined) {
+        throw new OperationError('invalid_params', 'status takes no path; give archive_id to show one archive.');
+      }
+      return ctx.email.archiveImport({
+        action,
+        ...(path !== undefined ? { path } : {}),
+        ...(archiveId !== undefined ? { archiveId } : {}),
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
     },
   },
   {

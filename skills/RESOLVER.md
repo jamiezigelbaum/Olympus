@@ -43,6 +43,17 @@ approves a private analyst for them; `include_secure_local: false` opts out.
 Do not route legal, financial, medical, tax, or similar private topics to
 Dropbox by assumption.
 
+## Archive Import Usage
+
+| Trigger | Skill |
+| --- | --- |
+| User mentions an old mail export, a Google Takeout download, an `.mbox` file, or an Apple Mail export they want searchable | `skills/import-archive/SKILL.md` |
+| User asks to remove an archive they imported, or how an archive import is going | `skills/import-archive/SKILL.md` |
+
+`archive_import` only asks. The user approves every import and removal on the
+Olympus dashboard on their computer; never open, read, or copy the export
+yourself, and never retry to get around the approval.
+
 ## PKM Authoring And Onboarding
 
 | Trigger | Skill |
