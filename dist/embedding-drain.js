@@ -164,7 +164,8 @@ async function acquireFileLease(targetPath, options) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
     }
-    await removeStaleLease(targetPath, lockPath, options);
+    if (await removeStaleLease(targetPath, lockPath, options))
+      continue;
     if (Date.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
     await sleep(options.pollIntervalMs);
@@ -190,40 +191,43 @@ function acquireFileLeaseSync(targetPath, options) {
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
     }
-    removeStaleLeaseSync(targetPath, lockPath, options);
+    if (removeStaleLeaseSync(targetPath, lockPath, options))
+      continue;
     if (Date.now() >= deadline)
       throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
   }
 }
 async function removeStaleLease(targetPath, lockPath, options) {
-  await withAsyncCommitGuard(targetPath, lockPath, options, async () => {
+  return withAsyncCommitGuard(targetPath, lockPath, options, async () => {
     const observed = await readLeaseRecord(lockPath);
     if (!await leaseIsStale(lockPath, observed, options.staleAfterMs))
-      return;
+      return false;
     const confirmed = await readLeaseRecord(lockPath);
     if (observed && confirmed?.token !== observed.token)
-      return;
+      return false;
     await unlink(lockPath).catch((error) => {
       if (!isNodeErrorWithCode(error, "ENOENT"))
         throw error;
     });
+    return true;
   });
 }
 function removeStaleLeaseSync(targetPath, lockPath, options) {
-  withSyncCommitGuard(targetPath, lockPath, options, () => {
+  return withSyncCommitGuard(targetPath, lockPath, options, () => {
     const observed = readLeaseRecordSync(lockPath);
     if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs))
-      return;
+      return false;
     const confirmed = readLeaseRecordSync(lockPath);
     if (observed && confirmed?.token !== observed.token)
-      return;
+      return false;
     try {
       unlinkSync(lockPath);
     } catch (error) {
       if (!isNodeErrorWithCode(error, "ENOENT"))
         throw error;
     }
+    return true;
   });
 }
 async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
@@ -249,7 +253,8 @@ async function withAsyncCommitGuard(targetPath, lockPath, options, callback) {
           });
         throw error;
       }
-      await removeAbandonedCommitGuard(guardPath, options.staleAfterMs);
+      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs))
+        continue;
       if (Date.now() >= deadline)
         throw new FileLeaseBusyError(targetPath);
       await sleep(options.pollIntervalMs);
@@ -290,7 +295,8 @@ function withSyncCommitGuard(targetPath, lockPath, options, callback) {
       }
       if (!isNodeErrorWithCode(error, "EEXIST"))
         throw error;
-      removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs);
+      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs))
+        continue;
       if (Date.now() >= deadline)
         throw new FileLeaseBusyError(targetPath);
       sleepSync(options.pollIntervalMs);
@@ -317,32 +323,33 @@ async function removeAbandonedCommitGuard(path, staleAfterMs) {
   const observed = await readLeaseRecord(path);
   if (observed) {
     if (recordedProcessInstanceIsAlive(observed))
-      return;
+      return false;
     const confirmed = await readLeaseRecord(path);
     if (confirmed?.token !== observed.token)
-      return;
+      return false;
   } else {
     const age = await leaseAgeMs(path);
     if (age === undefined || age < staleAfterMs)
-      return;
+      return false;
   }
   await unlink(path).catch((error) => {
     if (!isNodeErrorWithCode(error, "ENOENT"))
       throw error;
   });
+  return true;
 }
 function removeAbandonedCommitGuardSync(path, staleAfterMs) {
   const observed = readLeaseRecordSync(path);
   if (observed) {
     if (recordedProcessInstanceIsAlive(observed))
-      return;
+      return false;
     const confirmed = readLeaseRecordSync(path);
     if (confirmed?.token !== observed.token)
-      return;
+      return false;
   } else {
     const age = leaseAgeMsSync(path);
     if (age === undefined || age < staleAfterMs)
-      return;
+      return false;
   }
   try {
     unlinkSync(path);
@@ -350,6 +357,7 @@ function removeAbandonedCommitGuardSync(path, staleAfterMs) {
     if (!isNodeErrorWithCode(error, "ENOENT"))
       throw error;
   }
+  return true;
 }
 async function leaseIsStale(lockPath, observed, staleAfterMs) {
   if (!observed) {

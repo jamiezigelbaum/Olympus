@@ -287,7 +287,11 @@ async function acquireFileLease(
       await descriptor?.close().catch(() => undefined);
       if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
     }
-    await removeStaleLease(targetPath, lockPath, options);
+    // A takeover that freed the lease retries the claim at once, even past the
+    // deadline: the takeover itself may have spent the whole timeout (slow
+    // runner, busy commit guard), and reporting "busy" for a lease nobody holds
+    // is wrong. O_EXCL still admits exactly one claimant.
+    if (await removeStaleLease(targetPath, lockPath, options)) continue;
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     await sleep(options.pollIntervalMs);
   }
@@ -315,7 +319,7 @@ function acquireFileLeaseSync(
     } catch (error) {
       if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
     }
-    removeStaleLeaseSync(targetPath, lockPath, options);
+    if (removeStaleLeaseSync(targetPath, lockPath, options)) continue;
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
   }
@@ -325,15 +329,16 @@ async function removeStaleLease(
   targetPath: string,
   lockPath: string,
   options: NormalizedFileLeaseOptions,
-): Promise<void> {
-  await withAsyncCommitGuard(targetPath, lockPath, options, async () => {
+): Promise<boolean> {
+  return withAsyncCommitGuard(targetPath, lockPath, options, async () => {
     const observed = await readLeaseRecord(lockPath);
-    if (!await leaseIsStale(lockPath, observed, options.staleAfterMs)) return;
+    if (!await leaseIsStale(lockPath, observed, options.staleAfterMs)) return false;
     const confirmed = await readLeaseRecord(lockPath);
-    if (observed && confirmed?.token !== observed.token) return;
+    if (observed && confirmed?.token !== observed.token) return false;
     await unlink(lockPath).catch((error) => {
       if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
     });
+    return true;
   });
 }
 
@@ -341,17 +346,18 @@ function removeStaleLeaseSync(
   targetPath: string,
   lockPath: string,
   options: NormalizedFileLeaseOptions,
-): void {
-  withSyncCommitGuard(targetPath, lockPath, options, () => {
+): boolean {
+  return withSyncCommitGuard(targetPath, lockPath, options, () => {
     const observed = readLeaseRecordSync(lockPath);
-    if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs)) return;
+    if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs)) return false;
     const confirmed = readLeaseRecordSync(lockPath);
-    if (observed && confirmed?.token !== observed.token) return;
+    if (observed && confirmed?.token !== observed.token) return false;
     try {
       unlinkSync(lockPath);
     } catch (error) {
       if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
     }
+    return true;
   });
 }
 
@@ -384,7 +390,7 @@ async function withAsyncCommitGuard<T>(
         if (created) await unlink(guardPath).catch(() => undefined);
         throw error;
       }
-      await removeAbandonedCommitGuard(guardPath, options.staleAfterMs);
+      if (await removeAbandonedCommitGuard(guardPath, options.staleAfterMs)) continue;
       if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
       await sleep(options.pollIntervalMs);
     }
@@ -430,7 +436,7 @@ function withSyncCommitGuard<T>(
         }
       }
       if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
-      removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs);
+      if (removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs)) continue;
       if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
       sleepSync(options.pollIntervalMs);
     }
@@ -452,36 +458,38 @@ function withSyncCommitGuard<T>(
   }
 }
 
-async function removeAbandonedCommitGuard(path: string, staleAfterMs: number): Promise<void> {
+async function removeAbandonedCommitGuard(path: string, staleAfterMs: number): Promise<boolean> {
   const observed = await readLeaseRecord(path);
   if (observed) {
-    if (recordedProcessInstanceIsAlive(observed)) return;
+    if (recordedProcessInstanceIsAlive(observed)) return false;
     const confirmed = await readLeaseRecord(path);
-    if (confirmed?.token !== observed.token) return;
+    if (confirmed?.token !== observed.token) return false;
   } else {
     const age = await leaseAgeMs(path);
-    if (age === undefined || age < staleAfterMs) return;
+    if (age === undefined || age < staleAfterMs) return false;
   }
   await unlink(path).catch((error) => {
     if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
   });
+  return true;
 }
 
-function removeAbandonedCommitGuardSync(path: string, staleAfterMs: number): void {
+function removeAbandonedCommitGuardSync(path: string, staleAfterMs: number): boolean {
   const observed = readLeaseRecordSync(path);
   if (observed) {
-    if (recordedProcessInstanceIsAlive(observed)) return;
+    if (recordedProcessInstanceIsAlive(observed)) return false;
     const confirmed = readLeaseRecordSync(path);
-    if (confirmed?.token !== observed.token) return;
+    if (confirmed?.token !== observed.token) return false;
   } else {
     const age = leaseAgeMsSync(path);
-    if (age === undefined || age < staleAfterMs) return;
+    if (age === undefined || age < staleAfterMs) return false;
   }
   try {
     unlinkSync(path);
   } catch (error) {
     if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
   }
+  return true;
 }
 
 async function leaseIsStale(
