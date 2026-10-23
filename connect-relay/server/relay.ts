@@ -123,6 +123,7 @@ import { publicKeyOf, type MemoryInstallRegistry, type RegistryCounts } from './
 import { createResponsePolicies, type RouteKind } from './response-policy.ts';
 import { InstallSession } from './session.ts';
 import { SurfaceMap } from './surface-map.ts';
+import { UsageLedger, type UsageDay } from './usage.ts';
 
 /**
  * Whether a `surfaces` frame may change its install's mapping: it came over
@@ -183,6 +184,8 @@ export interface RelayConfig {
   readonly log?: RelayLog;
   /** How often unused registrations are swept (default hourly). */
   readonly sweepIntervalMs?: number;
+  /** Where the daily usage totals are kept (usage.ts); unset keeps them in memory only. */
+  readonly usagePath?: string;
   /** The engines' offline tool-list mappings (default: a new, empty one). */
   readonly surfaceMap?: SurfaceMap;
   readonly now?: () => number;
@@ -222,6 +225,10 @@ export interface RelayHandle {
   revoke(installId: string): Promise<RevokeResult>;
   restore(installId: string): Promise<boolean>;
   status(): RelayStatus;
+  /** Daily usage totals, oldest first, today's as of now. */
+  usage(): UsageDay[];
+  /** Marks a registered install as one of the team's own (or not); false when nothing changed. */
+  setInternal(installId: string, internal: boolean): Promise<boolean>;
   sweep(now?: number): string[];
   close(): Promise<void>;
 }
@@ -291,6 +298,12 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('demoInstallsByClient values must be install ids');
   }
   const perAppDemoInstalls = new Set(demoInstallsByClient.values());
+  const usage = new UsageLedger(
+    registry,
+    (installId) => registry.isInternal(installId) || installId === config.demoInstallId || perAppDemoInstalls.has(installId),
+    config.usagePath,
+    now,
+  );
   /** The demo install a sign-in for this client_id goes to, or undefined (no demo). */
   const demoInstallFor = (clientId: string | null): string | undefined =>
     (clientId !== null ? demoInstallsByClient.get(clientId) : undefined) ?? config.demoInstallId;
@@ -562,6 +575,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     server.timeout(input.request, 0);
     try {
       handedOff();
+      usage.request(installId);
       return await session.forward({
         method: input.request.method,
         path: input.path,
@@ -971,6 +985,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         if (!admitted) return fail(ws, 'rate_limited', 'too many registrations; try again later', 'register_rate');
         if (!registry.register(installId, publicKey)) return fail(ws, 'capacity', 'relay registry is full', 'registry_full');
         log('register', { install: installTag(installId), returning });
+        usage.registered(installId, returning);
       }
     } else if (message.type === 'hello') {
       const record = registry.get(installId);
@@ -993,6 +1008,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     ws.data.session = session;
     sessions.set(installId, session);
     registry.seen(installId);
+    usage.active(installId);
     session.send({ type: 'ready', installId, features: [RELAY_FEATURE_SURFACES] });
     // `legacy_auth` sessions are what the legacy window still serves: the
     // operator closes it once none appear (docs/design/chatgpt-plugin.md).
@@ -1135,7 +1151,10 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           authenticate(ws, message);
           return;
         }
-        if (message.type === 'ping') registry.seen(session.installId);
+        if (message.type === 'ping') {
+          registry.seen(session.installId);
+          usage.active(session.installId);
+        }
         if (message.type === 'surfaces') {
           // Stored under the install this session authenticated as, and no
           // other, and only while it is that install's current, open session
@@ -1177,12 +1196,23 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     for (const installId of expired) {
       surfaceMap.remove(installId);
       log('registration_expired', { install: installTag(installId) });
+      usage.removed(installId);
     }
     surfaceMap.sweep();
     return expired;
   };
   const sweepTimer = setInterval(() => sweep(), config.sweepIntervalMs ?? 60 * 60_000);
   sweepTimer.unref?.();
+  // The day's counters reach disk every ten minutes, and on close.
+  const persistUsage = () => {
+    try {
+      usage.persist();
+    } catch (error) {
+      console.error(JSON.stringify({ at: new Date().toISOString(), event: 'usage_write_failed', message: error instanceof Error ? error.message : String(error) }));
+    }
+  };
+  const usageTimer = setInterval(persistUsage, 10 * 60_000);
+  usageTimer.unref?.();
 
   return {
     port: server.port!,
@@ -1223,9 +1253,16 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
         startedAt,
       };
     },
+    usage: () => usage.snapshot(),
+    async setInternal(installId, internal) {
+      if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('not an install id');
+      return registry.setInternal(installId, internal);
+    },
     sweep,
     async close() {
       clearInterval(sweepTimer);
+      clearInterval(usageTimer);
+      persistUsage();
       for (const session of sessions.values()) session.close(1001, 'relay shutting down');
       sessions.clear();
       server.stop(true);

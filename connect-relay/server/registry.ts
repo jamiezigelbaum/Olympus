@@ -32,12 +32,16 @@ export interface InstallRecord {
    * online at a sweep. An unconfirmed registration expires after a day.
    */
   confirmed: boolean;
+  /** The operator marked it as one of the team's own machines: left out of usage counts. */
+  internal?: boolean;
 }
 
 /** Aggregate numbers only: safe to print, names no install. */
 export interface RegistryCounts {
   readonly registered: number;
   readonly revoked: number;
+  /** Registered installs marked internal. */
+  readonly internal: number;
 }
 
 /** Where an id's last operator change stands. */
@@ -52,7 +56,7 @@ type OperatorOp = 'revoke' | 'restore';
  */
 export type LogEntry =
   | { op: 'register'; installId: string; publicKey: string; at: number; unconfirmed?: true }
-  | { op: 'seen' | 'confirm' | 'remove' | 'revoke' | 'restore'; installId: string; at: number };
+  | { op: 'seen' | 'confirm' | 'remove' | 'revoke' | 'restore' | 'internal' | 'external'; installId: string; at: number };
 
 /** Expired ids remembered, so their return is told apart from a new registration. */
 const MAX_REMEMBERED_REMOVALS = 20_000;
@@ -77,6 +81,29 @@ export class MemoryInstallRegistry {
 
   get(installId: string): InstallRecord | undefined {
     return this.records.get(installId);
+  }
+
+  /** Every registered install (read-only use). */
+  allRecords(): IterableIterator<InstallRecord> {
+    return this.records.values();
+  }
+
+  isInternal(installId: string): boolean {
+    return this.records.get(installId)?.internal === true;
+  }
+
+  /**
+   * Marks a registered install as internal (or not). Resolves true once the
+   * change is durable, false when the install is not registered or already
+   * marked so. The mark lasts while the registration does.
+   */
+  async setInternal(installId: string, internal: boolean): Promise<boolean> {
+    const record = this.records.get(installId);
+    if (!record || (record.internal === true) === internal) return false;
+    const entry: LogEntry = { op: internal ? 'internal' : 'external', installId, at: this.now() };
+    this.apply(entry);
+    await this.append(entry);
+    return true;
   }
 
   /** Idempotent for the same key. False when the id is revoked or the registry is full. */
@@ -209,7 +236,9 @@ export class MemoryInstallRegistry {
   }
 
   counts(): RegistryCounts {
-    return { registered: this.records.size, revoked: this.revoked.size };
+    let internal = 0;
+    for (const record of this.records.values()) if (record.internal) internal += 1;
+    return { registered: this.records.size, revoked: this.revoked.size, internal };
   }
 
   /** Resolves when every accepted change is durable; rejects if one failed. */
@@ -233,6 +262,15 @@ export class MemoryInstallRegistry {
       case 'confirm': {
         const record = this.records.get(entry.installId);
         if (record) record.confirmed = true;
+        return;
+      }
+      case 'internal':
+      case 'external': {
+        const record = this.records.get(entry.installId);
+        if (record) {
+          if (entry.op === 'internal') record.internal = true;
+          else delete record.internal;
+        }
         return;
       }
       case 'seen': {
@@ -305,6 +343,7 @@ export class FileInstallRegistry extends MemoryInstallRegistry {
         ...(record.confirmed ? {} : { unconfirmed: true }),
       }));
       if (record.lastSeenAt !== record.registeredAt) lines.push(JSON.stringify({ op: 'seen', installId: record.installId, at: record.lastSeenAt }));
+      if (record.internal) lines.push(JSON.stringify({ op: 'internal', installId: record.installId, at: 0 }));
     }
     for (const installId of this.revoked) lines.push(JSON.stringify({ op: 'revoke', installId, at: 0 }));
     const temporary = `${this.path}.tmp.${process.pid}`;

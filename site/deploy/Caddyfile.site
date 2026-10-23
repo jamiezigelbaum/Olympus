@@ -8,9 +8,13 @@
 # Written for Caddy 2.6.2 (Ubuntu's package). Caddy issues and renews the
 # certificates for both names over HTTP-01 on its own.
 #
-# No access log: Caddy writes access logs only for sites with a `log`
-# directive, and neither block below has one. Keep it that way; the privacy
-# policy says the site keeps no access log.
+# No access log for pages. The one `log` below records downloads of the
+# installers, uninstallers and release tarballs only, and keeps the path, the
+# method, the status and the time of each: every other field (the address,
+# headers, TLS details, sizes) is deleted before the line is written.
+# `olympus-relay count-installers` turns the lines into daily counts and
+# empties the file every hour (connect-relay/server/installer-counts.ts).
+# Keep it that way; the privacy policy describes exactly this.
 
 olympusplugin.ai {
 	root * /srv/olympus-site
@@ -28,6 +32,41 @@ olympusplugin.ai {
 		# the film scenes the home page frames from /film/scene.html.
 		Content-Security-Policy "default-src 'none'; script-src 'self' 'sha256-0j1jTOMYtxTTncQw2y8aSWI6ZpTi4+amPByMbBtTDgU=' 'sha256-4IdeJd2mnSg7lmwDls6PXDceTYBglYhvlNm3uxNsC6k=' 'sha256-5aV2cBYptttloCpYNV+RBNOuWIJqOCqFL+uVqEm6/9U=' 'sha256-Vn5CgAshi/F+VPMJSiZ4xfFGuzmSjyOYjRhe6wj4u4M=' 'sha256-Znv3XKjdAJFbAsKspfqhGPF1jY3XEPHYjDsiCw6Kgm8=' 'sha256-htYQ+i46RXgGFkxMcEeN57jAHDC90FuEpv7fvF8/5Zs=' 'sha256-qOHdj41Qa4QdcRFc0qk0T3l4gPAZDZAvVg1GJ5Lh8GY=' 'sha256-t9p+4gelVgQi00HbZPB1J01pjVZq0ctI2EmrjcFDrYc=' 'sha256-uKLlUm8pDSbTCPMHcCnJURmmQUELZuSk2W9NJx2knKQ=' 'sha256-uLE5NylBbq/98tHyBIoTcnHfjbmB222UD6wq1qsNIwU=' 'sha256-vV49Z6acNXBJdNL+4awJhqsDukVXGyv2q5DcWSYfLYM=' 'sha256-vY5unn6r4Yvnb+76hI/FwC7u66R8RodFtQWMyx+ml9M=' 'sha256-yIED3zG56HqOwI2Iffyw7KjX6dSTnvF8Ve2/SvxiELc='; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; media-src 'self'; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
 		-Server
+	}
+
+	# Downloads only (see the header): every other request is left out of the log.
+	@not_download not path /install.sh /install-linux.sh /uninstall.sh /uninstall-linux.sh /releases/*
+	skip_log @not_download
+	# Olympus's daily update check fetches the install script too
+	# (src/core/update-check.ts sends this exact User-Agent); it is not a download.
+	@update_check header User-Agent Olympus
+	skip_log @update_check
+	log {
+		output file /var/log/caddy/olympus-installers.log {
+			roll_size 10MiB
+			roll_keep 1
+		}
+		format filter {
+			wrap json
+			fields {
+				request>remote_ip delete
+				common_log delete
+				request>remote_port delete
+				request>client_ip delete
+				request>proto delete
+				request>host delete
+				request>headers delete
+				request>tls delete
+				resp_headers delete
+				user_id delete
+				duration delete
+				size delete
+				bytes_read delete
+				logger delete
+				msg delete
+				level delete
+			}
+		}
 	}
 
 	# Deploy files never ship (deploy.sh excludes them), but refuse them anyway.

@@ -34,7 +34,7 @@
     <div class="wrap">
 
       <h1>Privacy policy</h1>
-      <p class="meta">Effective 16 October 2026.</p>
+      <p class="meta">Effective 23 October 2026.</p>
 
       <p>Olympus is a knowledge engine that runs on your computer (a Mac, or a Linux computer running Omarchy) and answers questions about your own mail, files and notes, including questions you ask in ChatGPT, Claude, Grok or another AI app you connect. It is published by Open Coordination Unlimited, Inc. ("OCU", "we", "us"), a United States company, which is responsible for the personal data described here. This policy explains what data Olympus processes, where, why, who receives it, how long it is kept, and how you control it. When it changes, the date above changes.</p>
 
@@ -48,6 +48,8 @@
       <ul>
         <li><strong>Relay registry:</strong> for each install, an install identifier derived from the install's public key, the public key, and timestamps.</li>
         <li><strong>Relay event logs:</strong> event types (for example "session ready"), times, fixed diagnostic fields and a shortened one-way hash of the install identifier.</li>
+        <li><strong>Usage totals:</strong> daily counts of how many installs connected to the relay, how many were new and how many requests it forwarded. They name no install.</li>
+        <li><strong>Download counts:</strong> daily counts of how often the installers and uninstallers on our website were downloaded. See <a href="#website">Our website</a>.</li>
         <li><strong>In memory only:</strong> IP addresses and request counters used to limit abuse, and which installs are online.</li>
         <li><strong>In transit:</strong> your questions, answers, evidence excerpts and the other data described in <a href="#chatgpt">What ChatGPT receives</a>, while the relay forwards them between ChatGPT, Claude, Grok, Grok Bot or Cursor and your computer.</li>
         <li id="google-sign-in"><strong>Google sign-in:</strong> when you connect Gmail or Google Drive through Olympus's shared Google app (the default), your computer signs in with Google and refreshes its tokens with Google directly; no Olympus service takes part. Olympus versions before 1.0.0 that used the shared Google app signed in and refreshed through a sign-in service we ran on Cloudflare at <code>auth.olympusplugin.ai</code>; we retired it before releasing 1.0.0 and deleted the keyed account hashes and first-sign-in times it kept. The page that returns you to Olympus after you sign in to Dropbox is served by Cloudflare at <code>auth.olympusplugin.ai</code>, whose request logs can record the one-time sign-in code and state in that page's address; the code works only once, expires within minutes, and cannot be used without a one-time key that never leaves your computer.</li>
@@ -206,8 +208,8 @@
         <li><strong>Private answers and private questions:</strong> the relay forwards the panel's requests and your computer's replies encrypted, without the key to read them, and does not log them or their identifiers.</li>
       </ul>
 
-      <h3>Our website</h3>
-      <p>Our website, olympusplugin.ai, uses no cookies, analytics or trackers, loads nothing from other sites, and is configured with access logging off.</p>
+      <h3 id="website">Our website</h3>
+      <p>Our website, olympusplugin.ai, uses no cookies, analytics or trackers, loads nothing from other sites, and keeps no access log for its pages. To count downloads, the web server records each download of an installer, uninstaller or release file with only the file, the time and whether it succeeded: no IP address, browser or other detail. Once an hour these records become daily counts and are deleted.</p>
       <p>On a Mac or Omarchy computer, Olympus also checks olympusplugin.ai about once a day for a new version, by downloading the public install script. That check sends no identifiers, cookies or query string; our server sees your computer's IP address, as with any request to the website. The check is skipped when your computer uses a proxy; set <code>OLYMPUS_UPDATE_CHECK=off</code> to turn it off.</p>
 
       <h2 id="purposes">Why we process data</h2>
@@ -241,6 +243,7 @@
         <li><strong>Private panels:</strong> private answer jobs expire 10 minutes after they are created and private question jobs after 30 minutes. They are held in memory on your computer and removed by periodic cleanup. An answer already shown can stay visible while its panel is open. For the panel's browser storage, see <a href="#private-panel">The private answer panel</a>.</li>
         <li><strong>Relay registry:</strong> active registrations expire after about 90 days without a connection. Earlier registry entries stay on disk until the relay restarts and compacts its records. The relay keeps up to 20,000 expired install identifiers, with no fixed time limit, to recognise returning installs, and keeps the identifiers of revoked installs until they are restored, so that a blocked install cannot reconnect.</li>
         <li><strong>Relay event logs:</strong> kept for 14 days, then deleted.</li>
+        <li><strong>Usage totals and download counts:</strong> kept for about two years. Download records become counts within an hour and are then deleted.</li>
         <li><strong>Sign-in return page:</strong> Cloudflare's request logs for the page that returns you after Dropbox sign-in, including the one-time code they may record, are kept under Cloudflare's own retention for our account; we use them only to troubleshoot. The Google sign-in service used by Olympus versions before 1.0.0 was retired before 1.0.0 was released, and the keyed account hashes and first-sign-in times it kept were deleted.</li>
         <li><strong>Support email:</strong> kept as long as needed to resolve your request, then deleted unless the law requires us to keep it longer.</li>
         <li><strong>Anonymous questions:</strong> Olympus keeps a usage record on your computer (counts, costs and session checks) until you delete Olympus's data. The question as sent and the reply stay in the private inbox, as below.</li>

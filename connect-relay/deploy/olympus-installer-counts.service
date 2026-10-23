@@ -1,0 +1,30 @@
+# Adds the site's installer downloads to their daily counts and empties the
+# download log (server/installer-counts.ts). Installed by deploy/deploy.sh;
+# started hourly by olympus-installer-counts.timer.
+# Counts:  /var/lib/olympus-installer-counts/counts.json (no address, no headers)
+
+[Unit]
+Description=Olympus installer download counts
+
+[Service]
+Type=oneshot
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/olympus-relay count-installers --log /var/log/caddy/olympus-installers.log --out /var/lib/olympus-installer-counts/counts.json
+StateDirectory=olympus-installer-counts
+StateDirectoryMode=0755
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/log/caddy
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0022

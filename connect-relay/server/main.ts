@@ -16,17 +16,27 @@
  *                         CIMD support (oauth-metadata.ts); checked per request
  *   RELAY_REGISTRY_PATH   default /var/lib/olympus-relay/registry.jsonl
  *   RELAY_ADMIN_SOCKET    default <registry dir>/admin.sock
+ *   RELAY_USAGE_PATH      daily usage totals, default <registry dir>/usage.json (server/usage.ts)
  *   RELAY_LEGACY_AUTH     `off` closes the legacy signature window (default on;
  *                         docs/design/chatgpt-plugin.md, "Relay protocol compatibility")
  *
- * `main.ts admin <status|revoke|restore> ...` runs the operator command
+ * `main.ts admin <status|usage|revoke|restore|internal|external> ...` runs the operator command
  * instead of the relay (server/admin.ts), so the compiled binary carries both.
+ * `main.ts count-installers` adds the site's installer downloads to their
+ * daily counts (server/installer-counts.ts), run hourly by a systemd timer.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { adminSocketPath, DEFAULT_REGISTRY_PATH, runAdmin, startAdminSocket } from './admin.ts';
+import { adminSocketPath, DEFAULT_REGISTRY_PATH, runAdmin, startAdminSocket, usagePath } from './admin.ts';
 import { jsonLineLog } from './log.ts';
 import { FileInstallRegistry } from './registry.ts';
 import { startRelay } from './relay.ts';
+
+if (process.argv[2] === 'count-installers') {
+  const { runCountInstallers } = await import('./installer-counts.ts');
+  const { code, out } = runCountInstallers(process.argv.slice(3));
+  (code === 0 ? process.stdout : process.stderr).write(out);
+  process.exit(code);
+}
 
 if (process.argv[2] === 'admin') {
   const { code, out } = await runAdmin(process.argv.slice(3));
@@ -87,6 +97,7 @@ const admin = await startAdminSocket(adminSocketPath(), () => relay);
 relay = await startRelay({
   publicHost: process.env.RELAY_PUBLIC_HOST ?? 'mcp.olympusplugin.ai',
   registry: new FileInstallRegistry(process.env.RELAY_REGISTRY_PATH ?? DEFAULT_REGISTRY_PATH),
+  usagePath: usagePath(),
   listen: { host: process.env.RELAY_LISTEN_HOST ?? '127.0.0.1', port: port('RELAY_LISTEN_PORT', 8787) },
   enginePort: port('RELAY_ENGINE_PORT', 8010),
   ...(process.env.RELAY_INSTALL_URL ? { installUrl: process.env.RELAY_INSTALL_URL } : {}),
