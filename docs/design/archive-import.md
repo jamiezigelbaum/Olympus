@@ -212,9 +212,9 @@ exports), plus the held-out eval where the step changes the source pipeline.
 A fresh install on Mac and on Linux can import a synthetic mbox, Reflect,
 Roam, WhatsApp and Telegram export through the dashboard and through the agent tool, see each as a
 snapshot with counts and gaps, find cited answers from it, and remove it.
-No imported item is in a Personal store, or embedded by a cloud model,
-before its local judgment; a test imports with the private model stopped and
-checks this.
+No imported item's content is in a Personal store, or embedded by a cloud
+model, before its local judgment; cleared names may be, as above. A test
+imports with the private model stopped and checks this.
 
 For WhatsApp and Telegram, also on the same candidate as a supported live
 connection (`V0_4_RELEASE.md`, "Qualification action"): the dashboard shows
