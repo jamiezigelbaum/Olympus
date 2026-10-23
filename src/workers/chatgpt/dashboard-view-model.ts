@@ -434,6 +434,8 @@ function sourceEntry(
   // sync; on a late or unresponsive source it is the row's button instead
   // (owner, 2026-10-09), and the panel keeps the menu free of the row's fix.
   if (sync) menu.push(sync);
+  // Another archive is imported the way the first was: from the dashboard on the computer it is on.
+  if (status !== 'Off' && definition.connect_action.kind === 'archive_import') menu.push(connectFix(definition));
   if (status !== 'Off' && card.scope_selection && !scopePending(card) && !missingScope(card)) {
     const fix = scopeFix(definition, card);
     if (fix) menu.push(fix);

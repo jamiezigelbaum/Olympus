@@ -1792,6 +1792,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
     makePrivate: 'Import',
     makePrivateFor: 'Import {name}',
     alreadyPrivate: 'Imported',
+    busy: 'Starting…',
+    chooseAnother: 'Choose another',
   },
   listLabel: 'Imported archives',
   status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing' },
@@ -1829,9 +1831,20 @@ export const DASHBOARD_ARCHIVE_COPY = {
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },
   },
-  /** Exactly where: a file of the archive and a byte offset in it. */
+  /** Under the gaps: exactly where some are, a file of the archive and a byte offset in it. */
+  seeWhy: 'See what was not read',
   example: '{what}: {file}, at byte {offset}',
+  exampleKinds: {
+    message_too_large: 'A message too large to read',
+    message_unreadable: 'A message that could not be read',
+    charset_not_decoded: 'A message in a character set Olympus could not read',
+    attachments_not_read: 'An attachment not read',
+    text_cut: 'A message cut short',
+    spam_or_trash: 'A message in Spam or Trash',
+    other: 'An item not read fully',
+  },
   examplesHeading: 'Where',
+  examplesNote: 'Each place is a byte count from the start of that file.',
   remove: 'Remove',
   removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
   /** An agent's request, waiting for the person. */
@@ -1901,7 +1914,7 @@ export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   disconnect: 'Disconnect',
   deleteData: 'Delete indexed data',
   changeModels: 'Change',
-  importArchive: 'Import an archive',
+  importArchive: DASHBOARD_ARCHIVE_COPY.importAction,
 } as const;
 
 /**

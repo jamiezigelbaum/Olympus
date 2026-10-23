@@ -21,6 +21,8 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //                picks the Agents fixture.
 //   &picker=open[,everything|folder:<Name>...]  with a local-files-* state: opens
 //                the folder picker (and clicks on) as soon as the panel loads.
+//   &picker=import[,folder:<Name>...]  with an archives-* state: opens the
+//                archive picker (Import an archive) the same way.
 //
 // Only the dashboard read answers; every other panel tool says it needs a
 // worker.
@@ -36,8 +38,20 @@ import {
   dashboardOutsideHelpRedirect,
   renderDashboardLocalPage,
 } from '../src/workers/dashboard/index.ts';
-import { COMPUTER_META_KEY, DASHBOARD_TOOL_NAME, DELETE_SOURCE_DATA_TOOL_NAME, SCOPE_LIST_TOOL_NAME, SCOPE_UI_META_KEY } from '../src/workers/chatgpt/dashboard-contract.ts';
+import {
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_BROWSE_TOOL_NAME,
+  COMPUTER_META_KEY,
+  DASHBOARD_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
+  SCOPE_LIST_TOOL_NAME,
+  SCOPE_UI_META_KEY,
+  type ComputerArchiveEntry,
+  type ComputerArchivesMeta,
+} from '../src/workers/chatgpt/dashboard-contract.ts';
 import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
+import { ARCHIVE_FORMATS } from '../src/core/archive-formats.ts';
+import { ARCHIVE_APPROVE_COPY } from '../src/workers/archive-import/dashboard.ts';
 import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
 import { buildChatGptDashboardViewModel, type ChatGptDashboardOptions } from '../src/workers/chatgpt/dashboard-view-model.ts';
@@ -449,6 +463,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
   }
   if (state.startsWith('local-files')) return localFilesPreview(state.startsWith('local-files-picker') ? 'local-files-connected' : state);
   if (state === 'delete-data' || state === 'delete-data-done') return deleteDataPreview(state === 'delete-data-done');
+  if (state.startsWith('archives-')) return archivesPreview(state);
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
   if (state === 'connect-google') return connectPreview('google');
@@ -659,6 +674,160 @@ function localFilesPreview(state: string) {
 }
 
 /**
+ * Archives (archive import, 2026-10-23): fixture-only states for the owner's
+ * review. The card reads how many archives are imported; the list under it is
+ * the computer's own (previewArchivesMeta), so these states show it on the
+ * computer only.
+ *   archives-none        nothing imported yet: Import an archive
+ *   archives-picker      the same row; opening Import an archive lists files
+ *                        and folders (previewArchiveBrowse), Downloads needing
+ *                        the Mac's permission, and Import starts an import
+ *   archives-checking    an approval reading its files once to tell a copy apart
+ *   archives-already     that check found the archive already imported
+ *   archives-failed      a choice that was not imported, and why
+ *   archives-request     an agent asked to import a file: Import or Decline
+ *   archives-importing   one archive 42% read, its messages held for the private model
+ *   archives-imported    one archive imported, with what was not read and exactly where
+ *   archives-waiting     imported, but no private model is set up: the route to set one up
+ *   archives-stopped     the file changed during the import: what happened and what to do
+ *   archives-removing    Remove pressed: everything Olympus made from it is being deleted
+ */
+const ARCHIVE_STATES = [
+  'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
+  'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
+] as const;
+
+function archivesPreview(state: string): SourceDashboardViewModel {
+  const meta = previewArchivesMeta(state)!;
+  const status = emptyStatus();
+  const items = meta.archives.reduce((sum, entry) => sum + entry.items, 0);
+  if (items > 0) status.corpora = [corpus('secure_local.archive.email', 'email', 'secure_local', 'mbox', items, items * 3, { withText: items, embedded: Math.round(items * 0.6) })];
+  return buildSourceDashboardViewModel({
+    sourceIndexStatus: status,
+    schedulerStatus: scheduler(items > 0 ? [schedulerSource('archive.imports', 'secure_local.archive.email', 0.1)] : []),
+    sovereigntyEngine: engine,
+    connectedHandleRegistry: registry([]),
+    apiKeyAvailability: {},
+    importedArchives: {
+      archives: meta.archives.length,
+      importing: meta.archives.some((entry) => entry.status === 'importing' || entry.status === 'removing'),
+    },
+    now: NOW,
+  });
+}
+
+/** The Archives row's list for an archives-* state: invented names, never anyone's files. */
+export function previewArchivesMeta(state: string): ComputerArchivesMeta | undefined {
+  if (!(ARCHIVE_STATES as readonly string[]).includes(state)) return undefined;
+  const takeout: ComputerArchiveEntry = {
+    id: '0b9e4c52-7a1d-4d3e-9f0a-3c1b2a4d5e6f',
+    name: 'All mail Including Spam and Trash.mbox',
+    format: 'Mail (mbox)',
+    where: '~/Downloads/Takeout/Mail',
+    status: 'imported',
+    items: 48_210,
+    judged: 48_210,
+    held: 0,
+    earliest: '2009-03-14',
+    latest: '2026-10-19',
+    startedAt: at(6 * 3600),
+    importedAt: at(2 * 3600),
+    gaps: [],
+    skipped: [],
+    examples: [],
+  };
+  const archives: ComputerArchiveEntry[] = [];
+  const requests: ComputerArchivesMeta['requests'] = [];
+  let privateModel: ComputerArchivesMeta['privateModel'] = 'ready';
+  if (state === 'archives-importing') {
+    const { importedAt: _importedAt, ...started } = takeout;
+    archives.push({ ...started, status: 'importing', items: 20_340, judged: 12_900, held: 7_440, percent: 42, latest: '2016-08-02' });
+  } else if (state === 'archives-imported' || state === 'archives-waiting') {
+    if (state === 'archives-waiting') privateModel = 'off';
+    archives.push({
+      ...takeout,
+      judged: state === 'archives-waiting' ? 0 : 48_190,
+      held: state === 'archives-waiting' ? 48_210 : 20,
+      gaps: [{ kind: 'message_too_large', count: 3 }, { kind: 'attachments_not_read', count: 112 }, { kind: 'charset_not_decoded', count: 1 }],
+      skipped: [{ kind: 'spam_or_trash', count: 1_204 }],
+      examples: [
+        { kind: 'message_too_large', file: 'All mail Including Spam and Trash.mbox', offset: 1_873_204_118 },
+        { kind: 'message_too_large', file: 'All mail Including Spam and Trash.mbox', offset: 4_102_993_051 },
+        { kind: 'charset_not_decoded', file: 'All mail Including Spam and Trash.mbox', offset: 311_457_902 },
+      ],
+    });
+  } else if (state === 'archives-stopped') {
+    const { importedAt: _importedAt, ...started } = takeout;
+    archives.push({ ...started, status: 'stopped', items: 9_812, judged: 9_812, held: 0, latest: '2012-11-30', stop: { code: 'file_changed', file: 'All mail Including Spam and Trash.mbox' } });
+  } else if (state === 'archives-removing') {
+    archives.push({ ...takeout, status: 'removing' });
+  } else if (state === 'archives-checking') {
+    requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Inbox.mbox', where: '~/Library/Mail/V10/Exported', origin: 'dashboard', status: 'checking' });
+    archives.push(takeout);
+  } else if (state === 'archives-already') {
+    requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'All mail copy.mbox', where: '~/Desktop', origin: 'dashboard', status: 'already_imported', archiveId: takeout.id, archiveName: takeout.name });
+    archives.push(takeout);
+  } else if (state === 'archives-failed') {
+    requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Inbox.mbox', where: '~/Desktop', origin: 'dashboard', status: 'failed', code: 'changed' });
+  } else if (state === 'archives-request') {
+    requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Takeout-2.mbox', where: '~/Downloads', origin: 'agent', status: 'pending' });
+  }
+  return { sourceId: 'archive.imports', archives, requests, privateModel };
+}
+
+/**
+ * The archive picker's answers (local-files/scope-browser.ts archive mode),
+ * with a fake home: files beside folders, Downloads needing the Mac's
+ * permission, and an Apple Mail export folder chosen as one archive.
+ */
+export function previewArchiveBrowse(args: { parent_key?: unknown }) {
+  const parent = typeof args.parent_key === 'string' ? args.parent_key : '';
+  const folder = (name: string, extra: Record<string, unknown> = {}, under = LOCAL_FILES_HOME) => ({
+    key: `${under}/${name}`, ...(under !== LOCAL_FILES_HOME || parent ? { parent_key: under } : {}), name, kind: 'folder', has_children: true, selectable: true, ...extra,
+  });
+  const file = (name: string, size: number, under: string) => ({ key: `${under}/${name}`, parent_key: under, name, kind: 'file', has_children: false, selectable: true, size_bytes: size });
+  let nodes: unknown[];
+  if (!parent) {
+    nodes = [
+      folder('Desktop', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
+      folder('Documents', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
+      folder('Downloads', { access: { state: 'needs_permission', message: MAC_ACCESS_COPY.needsPermission } }),
+      folder('Mail exports'),
+      { key: '/@disk-1', name: 'Backup Drive', kind: 'folder', has_children: true, selectable: true, is_disk: true },
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Mail exports`) {
+    nodes = [
+      folder('Inbox.mbox', {}, parent),
+      file('Takeout-2026-10.mbox', 6_420_000_000, parent),
+      file('notes.txt', 2_400, parent),
+    ];
+  } else if (parent === `${LOCAL_FILES_HOME}/Mail exports/Inbox.mbox`) {
+    nodes = [file('mbox', 812_000_000, parent), file('Info.plist', 1_200, parent)];
+  } else {
+    nodes = [];
+  }
+  return {
+    content: [{ type: 'text', text: 'Listed.' }],
+    structuredContent: { status: 'listed', count: nodes.length },
+    _meta: { [SCOPE_UI_META_KEY]: { nodes } },
+  };
+}
+
+/** The approval's answer in the preview: an .mbox starts; anything else is refused in the engine's words. */
+export function previewArchiveApprove(args: { key?: unknown }) {
+  const key = typeof args.key === 'string' ? args.key : '';
+  const name = key.split('/').pop() ?? '';
+  if (!name.endsWith('.mbox')) {
+    return {
+      content: [{ type: 'text', text: ARCHIVE_APPROVE_COPY.unsupported.split('{formats}').join(ARCHIVE_FORMATS.map((format) => format.label).join(', ')) }],
+      structuredContent: { error: 'unsupported' },
+      isError: true,
+    };
+  }
+  return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name } };
+}
+
+/**
  * Delete indexed data (owner, 2026-10-23). Readwise connected and fresh;
  * Dropbox disconnected with its index still on the computer
  * ('delete-data': the ⋯ menu offers Delete indexed data), or after the delete
@@ -844,6 +1013,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
   'delete-data', 'delete-data-done',
+  ...ARCHIVE_STATES,
 ] as const;
 
 /** 'delete-data': set once the preview's delete tool has run, so the next read is the done state. */
@@ -927,7 +1097,7 @@ export function previewScopeList(state: string, args: { parent_key?: unknown }) 
 function pickerAutoScript(spec: string): string {
   const steps = spec.split(',').map((step) => step.trim()).filter((step) => /^[A-Za-z0-9:_ .-]+$/.test(step)).slice(0, 6);
   return `<script>(function(){var steps=${JSON.stringify(steps)};var i=0;var tries=0;`
-    + `function find(step){if(step==='open'){return Array.prototype.filter.call(document.querySelectorAll('button'),function(b){return b.textContent==='Choose folders'})[0];}`
+    + `function find(step){if(step==='open'||step==='import'){var label=step==='open'?'Choose folders':'Import an archive';return Array.prototype.filter.call(document.querySelectorAll('button'),function(b){return b.textContent===label})[0];}`
     + `if(step==='everything')return document.querySelector('[data-key="picker:seg:@account:ingest"]');`
     + `if(step.indexOf('folder:')===0)return document.querySelector('[data-key="picker:open:${LOCAL_FILES_HOME}/'+step.slice(7)+'"]');return null;}`
     + `function tick(){if(i>=steps.length||tries++>200)return;var n=find(steps[i]);if(n&&!n.disabled){n.click();i++;setTimeout(tick,400);return;}setTimeout(tick,150);}`
@@ -942,7 +1112,12 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
     ...result,
     _meta: {
       ...(result._meta ?? {}),
-      [COMPUTER_META_KEY]: { indexFaster: { on: indexFasterOn }, ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}), ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}) },
+      [COMPUTER_META_KEY]: {
+        indexFaster: { on: indexFasterOn },
+        ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
+        ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
+        ...(previewArchivesMeta(state) ? { archives: previewArchivesMeta(state) } : {}),
+      },
     },
   };
 }
@@ -1061,6 +1236,8 @@ if (import.meta.main) {
       if (body.name === SCOPE_LIST_TOOL_NAME && body.arguments?.source_id === 'local.files' && state.startsWith('local-files')) {
         return Response.json(previewScopeList(state, body.arguments));
       }
+      if (body.name === ARCHIVE_BROWSE_TOOL_NAME && state.startsWith('archives-')) return Response.json(previewArchiveBrowse(body.arguments ?? {}));
+      if (body.name === ARCHIVE_APPROVE_TOOL_NAME && state.startsWith('archives-')) return Response.json(previewArchiveApprove((body.arguments ?? {}) as { key?: unknown }));
       if (body.name === DELETE_SOURCE_DATA_TOOL_NAME && state === 'delete-data') {
         previewDataDeleted = true;
         return Response.json({

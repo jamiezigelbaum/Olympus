@@ -14,9 +14,14 @@
  * label id and name, which the mail contract requires). Closing the picker
  * drops the session. Pick mode (the privacy flow's Add a folder) saves
  * nothing: it hands the one picked folder's key and name back to its caller.
+ * Archive mode (the computer's Import an archive) is pick mode over files and
+ * folders on this computer: the one call it makes is the import's approval,
+ * with the chosen opaque key, and it hands back only what came of it.
  */
 import type { DASHBOARD_CHATGPT_PICKER_COPY } from '../vocabulary.ts';
 import {
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_BROWSE_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
@@ -31,6 +36,10 @@ export const CHATGPT_PICKER_TOOLS = {
   scopeList: SCOPE_LIST_TOOL_NAME,
   /** {..., selections | mail} → {status: 'saved'} or {status: 'conflict'} with the fresh list in `_meta`. */
   scopeSet: SCOPE_SET_TOOL_NAME,
+  /** Computer only: {parent_key?, cursor?} → files and folders in `_meta[scopeMetaKey]` (ArchiveBrowseList). */
+  archiveBrowse: ARCHIVE_BROWSE_TOOL_NAME,
+  /** Computer only: {key} → {status: 'started' | 'checking' | 'already_imported', name, archive_name?}. */
+  archiveApprove: ARCHIVE_APPROVE_TOOL_NAME,
 } as const;
 
 /** Argument names that carry the mail draft (list: the estimate; set: the save). */
@@ -102,6 +111,23 @@ export interface ChatGptFolderPickWords {
   alreadyPrivate: string;
 }
 
+/** Words for importing an archive (the computer's Archives row); the caller owns them. */
+export interface ChatGptArchivePickWords extends ChatGptFolderPickWords {
+  /** The top of the listing ("This computer"). */
+  source: string;
+  /** The chosen row's control while its import is being approved. */
+  busy: string;
+  /** Beside an approval the engine refused, to go on choosing. */
+  chooseAnother: string;
+}
+
+/** What came of an archive choice (the approval's answer), for the caller's one line. */
+export interface ChatGptArchivePicked {
+  name: string;
+  status: 'started' | 'checking' | 'already_imported';
+  archiveName?: string;
+}
+
 /** The folder picked in pick mode: its opaque key and its name, for the caller's own view only. */
 export interface ChatGptPickedFolder {
   key: string;
@@ -117,6 +143,12 @@ export interface ChatGptPicker {
    * `taken` keys show as already picked.
    */
   pickFolder(sourceId: string, sourceLabel: string, words: ChatGptFolderPickWords, taken: string[], done: (folder: ChatGptPickedFolder | null) => void): void;
+  /**
+   * Computer only: browse this computer's files and folders and import one.
+   * The picker asks the engine to approve the choice and stays open on a
+   * refusal, saying why; `done` gets what came of an approval, or null on Back.
+   */
+  pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void): void;
   active(): boolean;
   view(): HTMLElement;
   afterRender(): void;
@@ -352,6 +384,66 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     openScope(sourceId, sourceLabel, words.title, '', '', undefined, { words, taken: taken.slice(), done });
   }
 
+  function pickArchive(words: ChatGptArchivePickWords, done: (picked: ChatGptArchivePicked | null) => void): void {
+    stopTimer();
+    session++;
+    if (kit.compact()) kit.fullscreen();
+    // Back hands null to `done`; an approval hands what came of it (approveArchive).
+    openScope('', words.source, words.title, '', '', undefined, { words, taken: [], done: () => done(null), archive: { done } });
+  }
+
+  /** Archive mode: the files and folders of this computer, one choice, approved by the engine. */
+  function archiveMode(): boolean {
+    return !!p && !!p.pick && !!p.pick.archive;
+  }
+
+  /** The text of a tool error (the engine's own sentence), or ''. */
+  function errorSentence(result: Any): string {
+    const parts = result && Array.isArray(result.content) ? result.content : [];
+    const text = parts.filter((part: Any) => part && part.type === 'text' && typeof part.text === 'string')[0];
+    return text ? String(text.text) : '';
+  }
+
+  /**
+   * Ask the engine to import the chosen file or folder. It answers at once
+   * (a copy check runs in the background); a refusal keeps the person here
+   * with the engine's reason, and the Mac's own note when it is the Mac's
+   * privacy rules.
+   */
+  function approveArchive(key: string, name: string): void {
+    if (!archiveMode() || p.loading || p.saving) return;
+    p.saving = true;
+    p.savingKey = key;
+    p.saveError = '';
+    p.saveAccess = null;
+    kit.render('picker:pick:' + key);
+    const mine = session;
+    const refused = (text: string, access: Any) => {
+      if (mine !== session || !p) return;
+      p.saving = false;
+      p.savingKey = '';
+      p.saveError = text || Q.loadFailed;
+      p.saveAccess = access && typeof access.message === 'string' && access.message ? access : null;
+      kit.render('picker:archive-error');
+    };
+    kit.call(T.archiveApprove, { key }).then((result) => {
+      if (mine !== session || !p) return;
+      const content = result && result.structuredContent && typeof result.structuredContent === 'object' ? result.structuredContent : null;
+      const status = content ? content.status : '';
+      if (!result || result.isError || (status !== 'started' && status !== 'checking' && status !== 'already_imported')) {
+        refused(errorSentence(result), content ? content.access : null);
+        return;
+      }
+      const done = p.pick.archive.done;
+      const picked: ChatGptArchivePicked = { name: typeof content.name === 'string' && content.name ? content.name : name, status };
+      if (typeof content.archive_name === 'string' && content.archive_name) picked.archiveName = content.archive_name;
+      stopTimer();
+      p = null;
+      session++;
+      done(picked);
+    }, () => refused('', null));
+  }
+
   // ---- scope sessions ----------------------------------------------------
   function openScope(id: string, label: string, title: string, returnKey: string, notice: string, initial?: Any, pick?: Any): void {
     stopTimer();
@@ -362,6 +454,8 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       title: title || (mail ? Q.mailTitle : Q.foldersTitle),
       loading: 'root', loaded: false, error: '', retry: null, generation: '', revision: '',
       edited: false, saving: false, saveError: '', discarding: false,
+      // archive mode: the row being approved, and the Mac's note on a refusal
+      savingKey: '', saveAccess: null,
       // folders
       roots: [], rootCursor: '', branches: new Map(), cursors: new Map(), catalog: new Map(),
       // Per level ('' is the root): how many more folders follow ("N more"), and levels Olympus could not list in full.
@@ -408,6 +502,11 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       && Array.isArray(page.nodes) && page.nodes.every(validNode);
   }
 
+  /** An archive listing has no account or saved scope to check, only its nodes. */
+  function validArchiveBrowse(page: Any): boolean {
+    return !!page && typeof page === 'object' && Array.isArray(page.nodes) && page.nodes.every(validNode);
+  }
+
   function failLoad(retry: () => void, focus: string): void {
     p.loading = '';
     p.error = Q.loadFailed;
@@ -423,10 +522,12 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   // rules are stored; inherited choices and Mixed are derived on every render.
   function list(parentKey: string, append: boolean, after?: () => void): void {
     const cursor = append ? (parentKey ? p.cursors.get(parentKey) : p.rootCursor) : '';
-    const args: Any = { source_id: p.id };
+    const archive = archiveMode();
+    // Archive mode lists this computer itself: no source, no saved scope.
+    const args: Any = archive ? {} : { source_id: p.id };
     if (parentKey) args.parent_key = parentKey;
     // The trail above it, so the engine can refuse a level inside a Secrets folder.
-    if (parentKey && (p.ancestors.get(parentKey) || []).length) args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
+    if (!archive && parentKey && (p.ancestors.get(parentKey) || []).length) args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
     if (cursor) args.cursor = cursor;
     p.loading = parentKey || 'root';
     p.error = '';
@@ -434,10 +535,10 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     const focus = append ? 'picker:more:' + parentKey : p.loaded ? '' : 'picker:back';
     kit.render(focus);
     const mine = session;
-    kit.call(T.scopeList, args).then((result) => {
+    kit.call(archive ? T.archiveBrowse : T.scopeList, args).then((result) => {
       if (mine !== session || !p) return;
       const page = scopeData(result);
-      if (!validBrowse(page)) {
+      if (!(archive ? validArchiveBrowse(page) : validBrowse(page))) {
         failLoad(() => list(parentKey, append, after), 'picker:retry');
         return;
       }
@@ -972,6 +1073,14 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   /** Pick mode: Make private, or Already private when the caller holds it. */
   function pickButton(key: string, name: string, focusKey: string): HTMLButtonElement {
     const words = p.pick.words;
+    if (archiveMode()) {
+      // Import: the engine approves it (or says why not) before the picker closes.
+      const busy = p.saving && p.savingKey === key;
+      const control = kit.button(busy ? words.busy : words.makePrivate, focusKey, p.loading || p.saving ? null : () => approveArchive(key, name), 'plain');
+      if (busy) control.setAttribute('aria-busy', 'true');
+      control.setAttribute('aria-label', fill(words.makePrivateFor, { name }));
+      return control;
+    }
     if (p.pick.taken.indexOf(key) >= 0) return kit.button(words.alreadyPrivate, focusKey, null, 'plain');
     const control = kit.button(words.makePrivate, focusKey, p.loading ? null : () => leave('', false, { key, name }), 'plain');
     control.setAttribute('aria-label', fill(words.makePrivateFor, { name }));
@@ -982,18 +1091,24 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
   function pickRow(node: Any): HTMLElement {
     const key = node.key;
     const li = el('li', 'frow pick');
+    // Archive mode: the Mac's Needs permission and Disk tags, and a file's size, beside the name.
+    const label = (target: HTMLElement): HTMLElement => {
+      if (archiveMode()) nameParts(target, node.name, '', node);
+      else add(target, el('span', 'fname-text', node.name));
+      return target;
+    };
     if (node.has_children) {
       const open = el('button', 'fname') as HTMLButtonElement;
       open.type = 'button';
       open.setAttribute('data-key', 'picker:open:' + key);
-      add(open, el('span', 'fname-text', node.name));
+      label(open);
       const chevron = el('span', 'chev', '›');
       chevron.setAttribute('aria-hidden', 'true');
       add(open, chevron);
       if (p.loading || p.saving) open.disabled = true;
       else open.addEventListener('click', () => drill(key));
       add(li, open);
-    } else add(li, add(el('p', 'fname leaf'), el('span', 'fname-text', node.name)));
+    } else add(li, label(el('p', 'fname leaf')));
     if (node.selectable !== false) add(li, pickButton(key, node.name, 'picker:pick:' + key));
     return li;
   }
@@ -1181,6 +1296,19 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       add(error, add(el('div', 'banner-body'), el('p', '', p.error),
         add(el('div', 'actions'), kit.button(Q.tryAgain, 'picker:retry', () => p.retry && p.retry(), 'plain'))));
       add(body, error);
+    }
+    if (archiveMode() && p.saveError) {
+      // Why the engine would not import that choice, and the Mac's own note when it is its privacy rules.
+      const error = el('div', 'banner');
+      error.setAttribute('role', 'alert');
+      add(error, add(el('div', 'banner-body'), el('p', '', p.saveError),
+        add(el('div', 'actions'), kit.button(p.pick.words.chooseAnother, 'picker:archive-error', () => {
+          p.saveError = '';
+          p.saveAccess = null;
+          kit.render(p.path.length ? 'picker:up' : 'picker:back');
+        }, 'plain'))));
+      add(body, error);
+      if (p.saveAccess) add(body, accessNote(p.saveAccess, null));
     }
   }
 
@@ -1555,6 +1683,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
     handles,
     start,
     pickFolder,
+    pickArchive,
     active: () => !!p,
     view,
     afterRender: () => undefined,

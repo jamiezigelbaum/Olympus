@@ -19,6 +19,9 @@ import {
   type DashboardStatusColorToken,
 } from '../vocabulary.ts';
 import {
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_DECLINE_TOOL_NAME,
+  ARCHIVE_REMOVE_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
   INDEX_FASTER_TOOL_NAME,
@@ -211,6 +214,17 @@ summary{cursor:pointer;border-radius:0.375rem}
 .why-note{font-size:0.8125rem;color:var(--muted)}
 .why .files li{overflow-wrap:anywhere}
 .why .files .btn.link.file{min-height:0;padding:0.125rem 0;color:var(--accent);text-align:left}
+.why-head{margin-top:0.5rem;font-size:0.875rem;font-weight:600}
+.archives{list-style:none;margin:0.5rem 0 0;padding:0}
+.archive{padding:0.625rem 0;border-top:1px solid var(--line)}
+.archive>p+p,.archive>p+div,.archive>div+p,.archive>div+div,.archive>div+details,.archive>p+details{margin-top:0.25rem}
+.archive-head{display:flex;flex-wrap:wrap;align-items:center;gap:0.25rem 0.5rem}
+.archive-name{font-weight:600;min-width:0;overflow-wrap:anywhere}
+.archive.stopped .ftag{color:var(--text);border-color:var(--warn)}
+.archive-progress{display:flex;flex-direction:column;gap:0.25rem}
+.archive-progress .bar{height:0.375rem}
+.archive-held>p+p{margin-top:0.125rem}
+.archive-actions{display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.5rem}
 .landed{outline:3px solid var(--focus);outline-offset:4px;border-radius:10px;animation:landed-fade 2.5s ease-out 1.5s forwards}
 @keyframes landed-fade{to{outline-color:transparent}}
 .notice{margin:0 0 0.75rem;padding:0.5rem 0.75rem;border:1px solid var(--line);background:var(--surface);border-radius:0.5rem}
@@ -370,6 +384,9 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
       unpairTool: UNPAIR_SOURCE_TOOL_NAME,
       unreadableOpenTool: OPEN_UNREADABLE_FILE_TOOL_NAME,
       unreadablePageTool: UNREADABLE_FILES_PAGE_TOOL_NAME,
+      archiveApproveTool: ARCHIVE_APPROVE_TOOL_NAME,
+      archiveDeclineTool: ARCHIVE_DECLINE_TOOL_NAME,
+      archiveRemoveTool: ARCHIVE_REMOVE_TOOL_NAME,
       landedMs: CHATGPT_DASHBOARD_LANDED_MS,
       copy: DASHBOARD_COMPUTER_PANEL_COPY,
     },
