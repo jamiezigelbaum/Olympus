@@ -1776,8 +1776,6 @@ export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   chooseMail: 'Choose mail',
   disconnect: 'Disconnect',
   changeModels: 'Change',
-  /** Gmail and Drive's row while Olympus's own Google sign-in is full: the steps are on the computer. */
-  useOwnGoogleApp: 'Use your own Google app',
 } as const;
 
 /**

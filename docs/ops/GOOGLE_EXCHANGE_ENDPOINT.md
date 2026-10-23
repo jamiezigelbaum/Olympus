@@ -109,7 +109,7 @@ about closing a gap that PKCE leaves open:
 | Strict JSON schema | Exact allowed field set (an unknown field refuses the whole request), bounded lengths, and a character-class check on every field (RFC 7636 shape for `code_verifier`, printable ASCII for `code`/`state`/`refresh_token`) | `exchange/src/schema.ts` |
 | `redirect_uri` allowlist | Exact match against the configured relay URL(s), or a loopback form (defense in depth — see below) | `exchange/src/redirect-allowlist.ts` |
 | No logging of codes/tokens | The only thing ever logged is `{path, status, duration_ms}` — never a request or response body, never a header value | `exchange/src/index.ts` (`logRequest`) |
-| No CORS on the token routes | No `Access-Control-Allow-*` header is ever returned by the token routes or the stats route, and any request carrying an `Origin` header is refused outright — these are server-to-server (or address-bar) routes, never called from a page. The one exception is the public, count-free `GET /exchange/capacity` | `exchange/src/index.ts` (`hasBrowserOrigin`), `exchange/src/capacity.ts` |
+| No CORS on the token routes | No `Access-Control-Allow-*` header is ever returned by the token routes or the stats route, and any request carrying an `Origin` header is refused outright — these are server-to-server (or address-bar) routes, never called from a page | `exchange/src/index.ts` (`hasBrowserOrigin`) |
 | Timeouts | 10s deadline on every call to Google, covering the response BODY as well as the headers (`AbortController` plus a raced deadline, so a peer that answers and then dribbles cannot outlive it) | `exchange/src/google.ts` |
 | Upstream body cap | 64 KiB on Google's response, enforced on the bytes actually read; an oversized answer is refused rather than truncated, and none of it is echoed | `exchange/src/google.ts` (`readBoundedText`) |
 | Structured error passthrough | Google's error responses are forwarded with their exact status and body (Google's OAuth error bodies are a small fixed vocabulary and never echo the secret); this endpoint's own errors are a fixed `{error, error_description}` shape that never includes exception text, a stack trace, or anything read from `env` | `exchange/src/index.ts` (`respondFromGoogle`, `errorResponse`) |
@@ -307,15 +307,6 @@ gap between `GOOGLE_FULL_AT` (default `90`) and `GOOGLE_USER_CAP` (default
 | `STATS_TOKEN` | For the stats route | At least 16 characters. Without it `/exchange/stats` answers `404` |
 | `USER_COUNT_HMAC_KEY` | No | Keys the hash of each account id. Without it the hash is plain SHA-256 under a fixed label. Set it **before** the first real sign-in and never rotate it: a new key makes every returning account look new and double-counts it |
 
-### `GET /exchange/capacity`
-
-Public, no token, readable from any origin, cacheable for about a minute
-(`Cache-Control: public, max-age=60`). Answers exactly
-`{ "google": "open" }` or `{ "google": "full" }` and never a count. `full` when
-`GOOGLE_SIGNIN_FULL` is `1`, or when counted + offset >= `GOOGLE_FULL_AT`.
-An unreadable counter answers `open` (the route fails open; the manual
-override still works with no KV at all).
-
 ### `GET /exchange/stats`
 
 The owner's tracker. Bookmark this, with the token the owner chose for
@@ -345,23 +336,12 @@ script.
 
 ### The engine's side
 
-Before the dashboard opens Google consent through Olympus's own app (a
-first-time Gmail or Drive connect with no Google app of the owner's own on
-file), `src/core/google-publisher-capacity.ts` asks `/exchange/capacity` with a
-1.5 second timeout, caching the answer for a minute. On `full` the dashboard's
-start route answers `409 google_signin_full` and the Gmail and Drive cards show
-the owner's sentence ("Google sign-in is full for the moment. We're working on
-it. For now, you can still connect Google by using your own Google app.") with
-a **Set up** button into the bring-your-own steps. Everything else fails
-**open**: a network error, a timeout, a non-200, a redirect, or any body that is
-not exactly `{"google":"open"|"full"}` reads as open. Own-app flows, Dropbox, X,
-token refresh, and a source that already holds its own connection (Reauthenticate
-re-signs an account already counted) never see the full state. A Google source
-with no connection of its own is held back even when the other Google source is
-connected: Google's consent lets the person pick any account, so adding Drive
-beside Gmail can be a new user. Olympus stores only opaque account labels, never
-the address, so it cannot preselect the account with `login_hint`; a
-Reauthenticate with a different account can still consume a slot.
+Removed. The Worker also served a public `GET /exchange/capacity`
+(`{ "google": "open" | "full" }`), and the engine asked it before opening
+Google consent through Olympus's own app, showing a "Google sign-in is full"
+notice when it said `full`. With the Worker retired the route answered `404`,
+which the check read as open, so the check, its notice and the route's source
+were deleted.
 
 ### Owner and anchor deploy steps
 
@@ -370,12 +350,9 @@ Reauthenticate with a different account can still consume a slot.
    `bunx wrangler secret put USER_COUNT_HMAC_KEY` (another random string, then
    never change it).
 3. `bunx wrangler deploy` (the new vars ship in `wrangler.toml`).
-4. Check: `curl -s https://auth.olympusplugin.ai/exchange/capacity` answers
-   `{"google":"open"}`; `curl -s https://auth.olympusplugin.ai/exchange/stats`
+4. Check: `curl -s https://auth.olympusplugin.ai/exchange/stats`
    answers `401`; the stats URL with the token shows the page; and the relay
    headers check in the runbook (step 7) still passes.
-5. To switch the full state on by hand: set `GOOGLE_SIGNIN_FULL = "1"` and
-   redeploy. To lower the threshold, change `GOOGLE_FULL_AT`.
 
 ## Hostname and routing
 
@@ -546,15 +523,12 @@ would be a check that expires on the next rotation. Two defences instead:
 
 ## Testing
 
-`exchange/test/user-count.test.ts` covers the user counter and its two routes:
+`exchange/test/user-count.test.ts` covers the user counter and its stats route:
 distinct counting (the same account twice, Gmail plus Drive for one account,
 different accounts, the offset, no raw id or address in storage, refresh and
 refused exchanges never counting), counting never breaking or changing an
 exchange (throwing KV, a hanging counter under `waitUntil`, malformed tokens),
-`/exchange/capacity` at and around the threshold and under the manual override
-(and failing open), and `/exchange/stats` refusing every request without the
-token. The engine's side is in `test/google-publisher-capacity.test.ts` and the
-"Google sign-in capacity" block of `test/dashboard-oauth-publisher-relay.test.ts`.
+and `/exchange/stats` refusing every request without the token.
 
 `exchange/test/google-exchange.test.ts` covers schema refusals (missing
 fields, wrong shapes, unknown fields), the `redirect_uri` allowlist (exact

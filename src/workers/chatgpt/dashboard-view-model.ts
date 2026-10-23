@@ -17,7 +17,6 @@
  * leaves the engine.
  */
 import type { ModelSetupView } from '../../core/model-setup.ts';
-import { GOOGLE_SIGNIN_FULL_SENTENCE } from '../../core/google-signin-full-copy.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import {
   OPEN_CONNECT_SOURCES,
@@ -233,18 +232,14 @@ export function buildChatGptDashboardViewModel(
     const sync = connecting || status === 'Off' || card.sync_now_available !== true
       ? undefined
       : syncFix(definition, scrubbed, status, card.connection.action.kind, degraded, progress);
-    // Olympus's own Google app is full: the row says so and points at the
-    // computer, where the owner's own Google app is set up. Read off the raw
-    // card; the scrubbed one carries no action.
-    const googleFull = card.connection.action.kind === 'needs_setup' && card.connection.action.publisher_full === true;
-    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts, sync, googleFull };
+    return { definition, card: scrubbed, status, actionKind: card.connection.action.kind, connecting, progress, counts: measured?.counts, sync };
   });
 
   // One list (owner, 2026-10-09): sources that need the owner first, then
   // connected sources, then the ones not connected yet; roster order within.
   const sources: DashboardSource[] = rows
-    .map(({ definition, card, status, actionKind, connecting, progress, sync, googleFull }, index) => ({
-      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, googleFull, options.remote !== undefined),
+    .map(({ definition, card, status, actionKind, connecting, progress, sync }, index) => ({
+      entry: sourceEntry(definition, card, status, actionKind, degraded, connecting, progress, now, sync, options.remote !== undefined),
       index,
     }))
     .sort((a, b) => sourceRank(a.entry) - sourceRank(b.entry) || a.index - b.index)
@@ -372,7 +367,6 @@ function sourceEntry(
   progress: SourceProgress | undefined,
   now: Date,
   sync?: DashboardFix,
-  googleFull = false,
   onServer = false,
 ): DashboardSource {
   const inFlight = progress && progress.stage !== 'done' && status !== 'Needs you' && status !== 'Failing';
@@ -393,11 +387,9 @@ function sourceEntry(
   // sign-in on the computer (owner, 2026-10-13): only on a quiet row, where
   // nothing more pressing holds the button or the line.
   const signinMoved = card.connection.google_signin_moved === true && status === 'Fresh' && !connecting && !inFlight;
-  const detail = googleFull
-    ? GOOGLE_SIGNIN_FULL_SENTENCE
-    : manualLine && !(ownDetail ?? '').startsWith(manualLine)
-      ? manualLine
-      : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
+  const detail = manualLine && !(ownDetail ?? '').startsWith(manualLine)
+    ? manualLine
+    : signinMoved ? DASHBOARD_CHATGPT_VOCABULARY.googleSigninMoved : ownDetail;
   const unreadable = card.coverage.unreadable_items ?? 0;
   const manual = card.last_manual_sync;
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
@@ -406,11 +398,7 @@ function sourceEntry(
   const primary = connecting
     ? connecting.fix
     : status === 'Off'
-      ? (actionKind === 'none'
-        ? undefined
-        : googleFull
-          ? helpLinkFix(CHATGPT_SETUP_LABELS.useOwnGoogleApp, openOnComputer(undefined, 'connect'))
-          : connectFix(definition))
+      ? (actionKind === 'none' ? undefined : connectFix(definition))
       : scopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
         : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);

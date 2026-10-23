@@ -40,9 +40,8 @@ RATE_LIMIT_WINDOW_SECONDS = "60"
 # Google lets an unverified app with restricted scopes serve at most GOOGLE_USER_CAP
 # distinct users over its whole lifetime, and sends the 101st to Google's own
 # error page, never back to Olympus. src/user-count.ts counts distinct accounts
-# from each successful sign-in; GET /exchange/capacity turns "full" once the
-# reported number reaches GOOGLE_FULL_AT, so the engine can stop sending people
-# to Google before the wall. Docs: docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md,
+# from each successful sign-in; GET /exchange/stats reports "full" once the
+# reported number reaches GOOGLE_FULL_AT. Docs: docs/ops/GOOGLE_EXCHANGE_ENDPOINT.md,
 # "User cap counter".
 #
 # Added to the counted number: accounts Google counts that this Worker did not

@@ -1,15 +1,9 @@
 /**
- * The two read routes that sit beside the token exchange:
+ * The read route that sits beside the token exchange:
  *
- *   GET /exchange/capacity  public; `{ "google": "open" | "full" }` and nothing else
  *   GET /exchange/stats     the owner's tracker; behind a bearer token
  *
- * The first lets the Olympus engine stop sending people to a Google consent
- * page that will refuse them (src/core/google-publisher-capacity.ts). It
- * carries no count on purpose: the number of users is the owner's business
- * metric, and a public, cacheable answer needs only the state.
- *
- * The second is how the owner watches the count out of 100. It is gated by
+ * It is how the owner watches the count out of 100. It is gated by
  * the `STATS_TOKEN` Worker secret, sent either as `Authorization: Bearer` or,
  * so a non-technical owner can bookmark it, as `?token=`. A browser (an
  * `Accept` header naming text/html) gets a small readable page; anything else
@@ -37,31 +31,6 @@ export interface CapacityRouteEnv extends CapacityEnv {
 
 /** Long enough that a guess is not a plausible attack; a shorter configured value disables the route. */
 const MIN_STATS_TOKEN_LENGTH = 16;
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-  'Access-Control-Max-Age': '600',
-};
-
-export async function handleCapacity(request: Request, env: CapacityRouteEnv): Promise<Response> {
-  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return jsonResponse({ error: 'method_not_allowed' }, 405, { Allow: 'GET, HEAD, OPTIONS' });
-  }
-  const config = capacityConfig(env);
-  // An unreadable counter fails OPEN: a broken tally must not shut the door.
-  // The owner's manual override still wins, since it needs no KV at all.
-  const counted = await readStoredCount(env.RATE_LIMIT_KV);
-  const state = capacityState(config, counted);
-  // Cacheable for a minute; a degraded answer is cached only briefly so a
-  // recovered counter is noticed quickly.
-  const maxAge = counted === undefined && !config.forcedFull ? 10 : 60;
-  return jsonResponse({ google: state }, 200, {
-    ...CORS_HEADERS,
-    'Cache-Control': `public, max-age=${maxAge}`,
-  });
-}
 
 export async function handleStats(
   request: Request,

@@ -13244,12 +13244,6 @@ var init_connected_handles = __esm(() => {
 // src/core/google-handle-compatibility.ts
 var init_google_handle_compatibility = () => {};
 
-// src/core/google-signin-full-copy.ts
-var GOOGLE_SIGNIN_FULL_SENTENCE = "Google sign-in is full for the moment. We're working on it. For now, you can still connect Google by using your own Google app.", GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE;
-var init_google_signin_full_copy = __esm(() => {
-  GOOGLE_SIGNIN_FULL_ON_COMPUTER_SENTENCE = `${GOOGLE_SIGNIN_FULL_SENTENCE} Open Olympus on your computer to set it up.`;
-});
-
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -13659,8 +13653,7 @@ var init_vocabulary = __esm(() => {
     chooseFolders: "Choose folders",
     chooseMail: "Choose mail",
     disconnect: "Disconnect",
-    changeModels: "Change",
-    useOwnGoogleApp: "Use your own Google app"
+    changeModels: "Change"
   };
   DASHBOARD_CHATGPT_PICKER_COPY = {
     back: "Back to Olympus",
@@ -18381,7 +18374,6 @@ var DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_P
 var init_source_dashboard = __esm(() => {
   init_linux_engine_layout();
   init_google_handle_compatibility();
-  init_google_signin_full_copy();
   init_publisher_oauth_client();
   init_privacy_language();
   init_sqlite_migrations();

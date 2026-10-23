@@ -186,10 +186,10 @@ nudge.
 
 **The user cap.** The Desktop and Web clients share Google's lifetime cap for
 an unverified app with restricted scopes. The Worker counted users from its own
-exchanges, so Desktop sign-ins are not counted there; the engine's
-`/exchange/capacity` check still reads the Worker (and fails open). Until the
-count has a new home, the owner watches the user count in the Google Cloud
-console and uses the Worker's manual full switch (`GOOGLE_SIGNIN_FULL`).
+exchanges, so Desktop sign-ins are not counted there. The Worker is retired,
+and the engine's capacity check that read it was removed with it, so Olympus
+has no "Google sign-in is full" state. The owner watches the user count in the
+Google Cloud console.
 
 **Verification.** `gmail.readonly` and `drive.readonly` are restricted scopes.
 Moving sign-in to the computer does not change that: publishing the app still
