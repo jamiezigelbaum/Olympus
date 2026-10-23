@@ -95,7 +95,7 @@ export function findChange(oldPng: PNG, newPng: PNG): Change | undefined {
     const largest = [...regions].sort((a, b) => b.w * b.h - a.w * a.h)[0]!;
     return {
       oldBoxes: regions, newBoxes: regions,
-      caption: `${regions.length} changed region${regions.length === 1 ? '' : 's'}${regions.length === 1 ? '' : `, the largest ${largest.w}x${largest.h} px`} at y=${regions[0]!.y}; the rest is identical`,
+      caption: `${regions.length} changed region${regions.length === 1 ? '' : 's'}${regions.length === 1 ? '' : `, the largest ${largest.w}x${largest.h} px`} at y=${largest.y}; the rest is identical`,
     };
   }
   let top = 0;
@@ -140,11 +140,17 @@ export function outline(source: PNG, boxes: readonly Box[]): PNG {
 /** The part of the picture inside the boxes' union (with padding), scaled up so a small change can be seen. At most `maxHeight` tall. */
 export function zoomCrop(source: PNG, boxes: readonly Box[], maxHeight = 480): PNG {
   const x0 = Math.max(0, Math.min(...boxes.map((box) => box.x)) - PAD);
-  const y0 = Math.max(0, Math.min(...boxes.map((box) => box.y)) - PAD);
   const x1 = Math.min(source.width, Math.max(...boxes.map((box) => box.x + Math.max(box.w, 2))) + PAD);
+  let y0 = Math.max(0, Math.min(...boxes.map((box) => box.y)) - PAD);
   const y1 = Math.min(source.height, Math.max(...boxes.map((box) => box.y + Math.max(box.h, 2))) + PAD);
+  // Too tall to show every region: centre the crop on the largest one, so the biggest change is never cut off.
+  if (y1 - y0 > maxHeight) {
+    const largest = [...boxes].sort((a, b) => b.w * b.h - a.w * a.h)[0]!;
+    const centre = largest.y + Math.max(largest.h, 2) / 2;
+    y0 = Math.max(0, Math.min(source.height - maxHeight, Math.round(centre - maxHeight / 2)));
+  }
   const w = Math.max(1, x1 - x0);
-  const h = Math.max(1, Math.min(y1 - y0, maxHeight));
+  const h = Math.max(1, Math.min(y1 - y0, maxHeight, source.height - y0));
   const scale = w <= 300 ? 2 : 1;
   const out = new PNG({ width: w * scale, height: h * scale });
   for (let y = 0; y < h * scale; y++) {
