@@ -323,13 +323,13 @@ export function visualSection(results: readonly VisualResult[] | undefined): str
     : `<figure><p class="muted">${escapeHtml(label)}: none</p></figure>`);
   const rows = results.map((result) => {
     const c = result.comparison;
-    const state = result.updated ? 'candidate written' : c.status === 'match' ? 'matches' : c.status === 'missing' ? 'no approved picture' : c.status === 'size' ? 'size changed' : c.status === 'unreadable' ? 'unreadable' : 'differs';
-    const bad = !result.updated && c.status !== 'match';
+    const state = result.approvedRefresh ? 'approved change, refreshed' : result.updated ? 'candidate written' : c.status === 'match' ? 'matches' : c.status === 'missing' ? 'no approved picture' : c.status === 'size' ? 'size changed' : c.status === 'unreadable' ? 'unreadable' : 'differs';
+    const bad = !result.updated && !result.approvedRefresh && c.status !== 'match';
     const open = bad ? ' open' : '';
-    const body = bad || result.updated
+    const body = bad || result.updated || result.approvedRefresh
       ? `<div class="trio">${cell(result.baseline, 'Approved')}${cell(result.actual, 'This run')}${cell(result.diff, 'Difference')}</div>`
       : `<div class="trio">${cell(result.actual, 'This run')}</div>`;
-    return `<details${open}><summary><span class="badge ${bad ? 'fail' : result.updated ? 'warn' : 'pass'}">${escapeHtml(state.toUpperCase())}</span> ${escapeHtml(result.title)} · ${result.width} px · ${escapeHtml(result.theme)} <span class="muted">${(c.diffRatio * 100).toFixed(3)}% of pixels differ</span></summary>${body}</details>`;
+    return `<details${open}><summary><span class="badge ${bad ? 'fail' : result.updated || result.approvedRefresh ? 'warn' : 'pass'}">${escapeHtml(state.toUpperCase())}</span> ${escapeHtml(result.title)} · ${result.width} px · ${escapeHtml(result.theme)} <span class="muted">${(c.diffRatio * 100).toFixed(3)}% of pixels differ</span></summary>${body}</details>`;
   });
   return `<h3>Visual baselines</h3>${rows.join('')}`;
 }

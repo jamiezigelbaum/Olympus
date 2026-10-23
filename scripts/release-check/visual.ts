@@ -14,6 +14,7 @@
  * This file runs on the computer that runs the harness (it holds the image library); the in-machine agent only takes the pictures,
  * and `maskScript` is the one thing of it the machine runs.
  */
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import pixelmatch from 'pixelmatch';
@@ -70,6 +71,8 @@ export interface VisualResult {
   diff?: string;
   /** The run wrote this picture as the new candidate reference. */
   updated?: boolean;
+  /** The picture differed, but the owner has approved a design change since the references were taken: the reference was refreshed. */
+  approvedRefresh?: boolean;
 }
 
 export interface VisualRun {
@@ -77,6 +80,37 @@ export interface VisualRun {
   baselinesDir: string;
   update: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// The owner's approval of a design change
+
+/** Where the references record which design approval they were taken under (beside the pictures). */
+export const APPROVAL_FILE = 'approval.json';
+
+/**
+ * A short fingerprint of the owner's design approvals: the approved design review and each reviewed state's approved rendering, from
+ * `config/dashboard-design-review.json`. It changes only when the owner approves a design (the guard digests are re-pinned for that),
+ * never for a change nobody approved, so a changed look under a new fingerprint is an approved change and under the same one is a defect.
+ */
+export function approvalDigestOf(review: unknown): string {
+  const r = (review ?? {}) as { design_review?: unknown; reviewed_states?: Array<{ id?: string; rendered_html_sha256?: string }> };
+  const states = (r.reviewed_states ?? []).map((state) => [state.id ?? '', state.rendered_html_sha256 ?? '']);
+  return createHash('sha256').update(JSON.stringify({ design_review: r.design_review ?? null, states })).digest('hex');
+}
+
+/** The fingerprint for the harness's own source (the review file beside it); undefined where there is no such file. */
+export function currentApprovalDigest(configPath = join(import.meta.dir, '..', '..', 'config', 'dashboard-design-review.json')): string | undefined {
+  try { return approvalDigestOf(JSON.parse(readFileSync(configPath, 'utf8'))); } catch { return undefined; }
+}
+
+function readApprovalDigest(baselinesDir: string): string | undefined {
+  try {
+    const value = (JSON.parse(readFileSync(join(baselinesDir, APPROVAL_FILE), 'utf8')) as { approvalDigest?: unknown }).approvalDigest;
+    return typeof value === 'string' && value !== '' ? value : undefined;
+  } catch { return undefined; }
+}
+
+if (import.meta.main) console.log(currentApprovalDigest() ?? '');
 
 /**
  * Compares the pictures the machine took (in `actualDir`, `<screen>-<width>-<theme>.png`) with the references in `baselinesDir`, and
@@ -87,11 +121,15 @@ function isReadablePng(bytes: Buffer): boolean {
   try { PNG.sync.read(bytes); return true; } catch { return false; }
 }
 
-export function compareScreens(input: { actualDir: string; baselinesDir: string; outDir: string; update: boolean; names: readonly { name: string; screen: Screen; width: number; theme: string }[]; tolerance?: { maxDiffRatio: number; pixelThreshold: number } }): VisualRun {
+export function compareScreens(input: { actualDir: string; baselinesDir: string; outDir: string; update: boolean; approvalDigest?: string | undefined; names: readonly { name: string; screen: Screen; width: number; theme: string }[]; tolerance?: { maxDiffRatio: number; pixelThreshold: number } }): VisualRun {
   const visualDir = join(input.outDir, 'visual');
   mkdirSync(visualDir, { recursive: true });
   if (input.update) mkdirSync(input.baselinesDir, { recursive: true });
   const results: VisualResult[] = [];
+  // The references were taken under an earlier design approval than this build's: a changed look is then an approved change.
+  const recorded = readApprovalDigest(input.baselinesDir);
+  const approvedSince = input.approvalDigest !== undefined && recorded !== undefined && recorded !== input.approvalDigest;
+  let refreshed = false;
   for (const item of input.names) {
     const actualPath = join(input.actualDir, `${item.name}.png`);
     if (!existsSync(actualPath)) continue;
@@ -117,9 +155,14 @@ export function compareScreens(input: { actualDir: string; baselinesDir: string;
     if (input.update && isReadablePng(actual)) {
       writeFileSync(baselinePath, actual);
       result.updated = true;
+    } else if (approvedSince && (comparison.status === 'different' || comparison.status === 'size') && isReadablePng(actual)) {
+      writeFileSync(baselinePath, actual);
+      result.approvedRefresh = true;
+      refreshed = true;
     }
     results.push(result);
   }
+  if (input.approvalDigest !== undefined && (input.update || refreshed)) writeFileSync(join(input.baselinesDir, APPROVAL_FILE), `${JSON.stringify({ approvalDigest: input.approvalDigest }, null, 2)}\n`);
   return { results, baselinesDir: input.baselinesDir, update: input.update };
 }
 
@@ -129,6 +172,9 @@ export function visualChecks(run: VisualRun): CheckResult[] {
     const name = screenName(result.screen, result.width, result.theme);
     const title = `${result.title} at ${result.width} px, ${result.theme}, matches the approved picture`;
     const c = result.comparison;
+    if (result.approvedRefresh) {
+      return { id: `visual.${name}`, title, status: 'warn', detail: `approved change, references refreshed: the owner approved a design change since the references were taken, and this screen differs by ${(c.diffRatio * 100).toFixed(2)}% of pixels (old and new are side by side in the report); the new picture is in the candidate set for commit` } satisfies CheckResult;
+    }
     if (result.updated) {
       return { id: `visual.${name}`, title, status: 'warn', detail: `written as the candidate approved picture (${c.status === 'missing' ? 'there was none' : c.status === 'match' ? 'unchanged' : `it differed from the one before: ${(c.diffRatio * 100).toFixed(2)}% of pixels`}); the owner approves it by merging it` } satisfies CheckResult;
     }

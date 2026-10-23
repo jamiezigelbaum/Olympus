@@ -442,7 +442,8 @@ describe('the journeys and the visual baselines against a scripted machine', () 
     const updated = await runReleaseCheck(options({ skipJourneys: false, baselinesDir, updateBaselines: true }));
     expect(visualIds(updated, 'warn')).toHaveLength(names.length);
     expect(failedIds(updated)).toEqual([]);
-    expect(readdirSync(baselinesDir).sort()).toEqual(names.map((item) => `${item.name}.png`).sort());
+    expect(readdirSync(baselinesDir).filter((file) => file !== 'approval.json').sort()).toEqual(names.map((item) => `${item.name}.png`).sort());
+    expect(existsSync(join(baselinesDir, 'approval.json'))).toBe(true);
 
     const approvedBefore = readFileSync(join(baselinesDir, `${names[0]!.name}.png`));
     const again = await runReleaseCheck(options({ skipJourneys: false, baselinesDir }));
