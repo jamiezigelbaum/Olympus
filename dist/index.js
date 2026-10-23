@@ -30425,9 +30425,9 @@ function archiveImportContentText(payload2) {
     const lines = ["Waiting for the user to approve on their computer: " + result.message];
     if (typeof result.request_id === "string")
       lines.push("request_id: " + result.request_id);
-    const open3 = asRecord17(result.open);
-    if (open3 && typeof open3.url === "string")
-      lines.push("Opens the Archives page: " + open3.url);
+    const open2 = asRecord17(result.open);
+    if (open2 && typeof open2.url === "string")
+      lines.push("Opens the Archives page: " + open2.url);
     return lines.join(`
 `);
   }
