@@ -217,17 +217,25 @@ export class ArchiveImportStateStore {
     if (findings.length === 0) return;
     this.update(archiveId, (record) => {
       const tally = record.findings;
+      // Positions counted by an earlier call. One call carries every finding
+      // of the messages it covers, so several findings at one position count.
+      const through = tally.through;
+      const before = (fileIndex: number, offset: number): boolean => through !== undefined
+        && (fileIndex < through.file_index || (fileIndex === through.file_index && offset <= through.offset));
+      let last = through;
       for (const finding of findings) {
-        const through = tally.through;
-        if (through && (finding.fileIndex < through.file_index
-          || (finding.fileIndex === through.file_index && finding.offset <= through.offset))) continue;
+        if (before(finding.fileIndex, finding.offset)) continue;
         const bucket = finding.class === 'gap' ? tally.gaps : tally.skipped;
         bucket[finding.kind] = (bucket[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
         if (finding.class === 'gap' && tally.samples.length < ARCHIVE_FINDING_SAMPLES_MAX) {
           tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: finding.offset });
         }
-        tally.through = { file_index: finding.fileIndex, offset: finding.offset };
+        if (!last || finding.fileIndex > last.file_index
+          || (finding.fileIndex === last.file_index && finding.offset > last.offset)) {
+          last = { file_index: finding.fileIndex, offset: finding.offset };
+        }
       }
+      if (last) tally.through = last;
     });
   }
 
