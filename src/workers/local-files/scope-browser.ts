@@ -76,7 +76,7 @@ export function createLocalFilesFolderScopeBrowser(
   const context = options.context ?? {
     ...defaultExclusionContext(),
     home,
-    volumeIgnoresCase: (volumeId: string | undefined) => volumes.ignoresCase(volumeId),
+    volumeIgnoresCase: (volumeId: string | undefined, path?: string) => volumes.ignoresCase(volumeId, path),
   };
   const readDirectory = options.readDirectory
     ?? ((realPath: string) => readdirSync(realPath, { withFileTypes: true }));
@@ -113,8 +113,9 @@ export function createLocalFilesFolderScopeBrowser(
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'EACCES' || code === 'EPERM') {
         const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
-        // A guarded folder the Mac said no to: say how to turn it back on.
-        if (guard) throw new AccessRefused(permissions.noteDenied(guard));
+        // A guarded folder the Mac said no to (EPERM): say how to turn it back on.
+        // An explicit EACCES is the folder's own permissions, guarded place or not.
+        if (guard && code !== 'EACCES') throw new AccessRefused(permissions.noteDenied(guard));
         // Not a guarded place. A privacy refusal the guarded list does not
         // cover (macOS answers it with EPERM) is Full Disk Access; an ordinary
         // refusal (EACCES, or any refusal off a Mac) is the account's own file

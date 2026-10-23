@@ -57,7 +57,7 @@ const PLACE_WORDS: Record<GuardedFolderKind, string> = {
   network: 'a network drive',
 };
 
-export type AccessAnswer = 'granted' | 'denied' | 'waiting';
+export type AccessAnswer = 'granted' | 'denied' | 'waiting' | 'unreadable';
 
 export interface MacPermissionsOptions {
   platform?: NodeJS.Platform;
@@ -207,6 +207,9 @@ export class MacPermissions {
    */
   isPrivacyRefusal(realPath: string, errno: string | undefined, volume?: Pick<MountedVolume, 'kind' | 'mountPoint' | 'primary'>): boolean {
     if (!this.active) return false;
+    // An explicit EACCES is the account's own file permissions, even inside a
+    // guarded place; EPERM, or a guarded place with no errno, is the Mac's rule.
+    if (errno === 'EACCES') return false;
     return errno === 'EPERM' || this.guardOf(realPath, volume) !== undefined;
   }
 
@@ -269,6 +272,8 @@ export class MacPermissions {
     const answer = await this.ask(guard);
     if (answer === 'granted') return undefined;
     if (answer === 'waiting') return { state: 'waiting', message: MAC_ACCESS_COPY.waiting };
+    // The folder's own permissions refused (not the Mac's privacy rule): nothing in System Settings changes that.
+    if (answer === 'unreadable') return { state: 'denied', message: this.unreadableCopy() };
     return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
 
@@ -311,7 +316,8 @@ export class MacPermissions {
       pending = this.list(guard.root).then(
         () => { this.remember(guard, 'granted'); return 'granted' as const; },
         (error: NodeJS.ErrnoException) => {
-          if (error.code === 'EPERM' || error.code === 'EACCES') { this.remember(guard, 'denied'); return 'denied' as const; }
+          if (error.code === 'EACCES') return 'unreadable' as const;
+          if (error.code === 'EPERM') { this.remember(guard, 'denied'); return 'denied' as const; }
           // Anything else (a disk that went away) is not an answer to the question.
           throw error;
         },

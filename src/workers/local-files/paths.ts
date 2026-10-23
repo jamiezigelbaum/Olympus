@@ -86,12 +86,15 @@ export function scopePathsIgnoreCase(
 ): boolean {
   if (context.volumeIgnoresCase) {
     let volumeId: string | undefined;
+    let inside: string | undefined;
     let known = true;
     if (scopePath !== undefined) {
-      try { volumeId = splitScopePath(scopePath).volumeId; } catch { known = false; }
+      try { ({ volumeId, path: inside } = splitScopePath(scopePath)); } catch { known = false; }
     }
     if (known) {
-      const decided = context.volumeIgnoresCase(volumeId);
+      // The path lets the resolver pick the mount that actually holds it: the
+      // computer's own volumes (root, home, Data) share one prefix-free form.
+      const decided = context.volumeIgnoresCase(volumeId, inside);
       if (decided !== undefined) return decided;
     }
   }
@@ -170,7 +173,7 @@ export interface DefaultExclusionContext {
    * case, when that is known. Undefined for "unknown": the platform's usual
    * format is used.
    */
-  volumeIgnoresCase?: (volumeId: string | undefined) => boolean | undefined;
+  volumeIgnoresCase?: (volumeId: string | undefined, path?: string) => boolean | undefined;
 }
 
 export function defaultExclusionContext(

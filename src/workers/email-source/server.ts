@@ -2696,7 +2696,7 @@ export async function main(): Promise<void> {
   // case-insensitive stick on Linux); the platform's usual format fills gaps.
   const localFilesExclusionContext = {
     ...defaultExclusionContext(),
-    volumeIgnoresCase: (volumeId: string | undefined) => localFilesVolumes.ignoresCase(volumeId),
+    volumeIgnoresCase: (volumeId: string | undefined, path?: string) => localFilesVolumes.ignoresCase(volumeId, path),
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
   let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;

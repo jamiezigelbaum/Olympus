@@ -93,6 +93,49 @@ describe('one decision for case, made per volume', () => {
     expect(probeIgnoresCaseIn(join(base, 'digits'))).toBeUndefined();
   });
 
+  test('the computer\'s own mounts are told apart by the one that holds the path, not by the home folder', () => {
+    // A case-insensitive /home over a case-sensitive root (Linux), and the reverse.
+    const make = (insensitive: Record<string, boolean>) => {
+      const probed: string[] = [];
+      const volumes = new VolumeResolver({
+        platform: 'linux', home: '/home/jo',
+        readMounts: () => '1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:2 / /home rw - vfat /dev/sda2 rw',
+        uuidsByDevice: () => new Map(),
+        probeIgnoresCase: (dir) => { probed.push(dir); return insensitive[dir]; },
+      });
+      return { volumes, probed };
+    };
+    const a = make({ '/home/jo': true, '/': false });
+    expect(a.volumes.ignoresCase(undefined, '/home/jo/Docs')).toBe(true);
+    expect(a.volumes.ignoresCase(undefined, '/etc/Hosts')).toBe(false);
+    expect(a.volumes.ignoresCase(undefined, '/home/jo/Other')).toBe(true);
+    expect(a.probed).toEqual(['/home/jo', '/']);
+    const b = make({ '/home/jo': false, '/': true });
+    expect(b.volumes.ignoresCase(undefined, '/usr/Lib')).toBe(true);
+    expect(b.volumes.ignoresCase(undefined, '/home/jo/x')).toBe(false);
+    // The path travels from the scope decision to the resolver.
+    const context: DefaultExclusionContext = { home: '/home/jo', platform: 'linux', volumeIgnoresCase: (id, path) => a.volumes.ignoresCase(id, path) };
+    expect(scopePathsIgnoreCase(context, '/home/jo/Docs')).toBe(true);
+    expect(scopePathsIgnoreCase(context, '/etc/Hosts')).toBe(false);
+  });
+
+  test('an exclusion keeps matching after a case-only rename when the root ignores case but /Users does not', () => {
+    const volumes = new VolumeResolver({
+      platform: 'darwin', home: '/Users/jo',
+      readMounts: () => '/dev/disk3s1s1 on / (apfs, local)\n/dev/disk3s5 on /Users (apfs, local)',
+      probeIgnoresCase: (dir) => (dir === '/' ? true : dir === '/Users/jo' || dir === '/Users' ? false : undefined),
+    });
+    const context: DefaultExclusionContext = {
+      home: '/Users/jo', platform: 'darwin', volumeIgnoresCase: (id, path) => volumes.ignoresCase(id, path),
+    };
+    const approval = { selections: [{ key: '/Shared', state: 'ingest' as const }, { key: '/Shared/Private', state: 'exclude' as const }], wholeAccount: false };
+    expect(decideLocalFilesPath(approval, '/Shared/private/secret.txt', context)).toBe('denied');
+    expect(decideLocalFilesPath(approval, '/Shared/open.txt', context)).toBe('content');
+    // Under /Users, which is case-sensitive, `private` is another folder.
+    const users = { selections: [{ key: '/Users/jo/proj', state: 'ingest' as const }, { key: '/Users/jo/proj/Private', state: 'exclude' as const }], wholeAccount: false };
+    expect(decideLocalFilesPath(users, '/Users/jo/proj/private/a.txt', context)).toBe('content');
+  });
+
   test('VolumeResolver answers per volume, remembers it, and says nothing for a disk that is not mounted', () => {
     const probed: string[] = [];
     const volumes = new VolumeResolver({

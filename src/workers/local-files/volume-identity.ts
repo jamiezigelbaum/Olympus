@@ -99,16 +99,20 @@ export class VolumeResolver {
    * then callers use the platform's usual format. Answers are kept per volume
    * id, and a volume that is not mounted right now is not remembered as known.
    */
-  ignoresCase(volumeId: string | undefined): boolean | undefined {
+  ignoresCase(volumeId: string | undefined, path?: string): boolean | undefined {
     const home = this.deps.home;
-    const volume = volumeId === undefined ? this.volumeOf(home) : this.mountedVolume(volumeId);
+    // A prefix-free path (the computer's own volumes: root, the home mount,
+    // macOS's Data mount) is judged by the mount that actually holds it, the
+    // deepest mount point containing the path; with no path, the home's.
+    const volume = volumeId === undefined ? this.volumeOf(path ?? home) : this.mountedVolume(volumeId);
     if (!volume) return undefined;
-    // The primary id covers several mounts of the computer's own disks; the
-    // one that holds the home folder is the one the person's files are on.
-    const cacheKey = volume.primary ? `primary:${volume.mountPoint}` : volume.id;
+    const cacheKey = volume.primary ? `mount:${volume.mountPoint}` : volume.id;
     if (this.caseByVolume.has(cacheKey)) return this.caseByVolume.get(cacheKey);
     const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
-    const places = volume.primary && volumeId === undefined ? [home, volume.mountPoint] : [volume.mountPoint];
+    // The home folder has real names in it; it is only a place to look when it is on this mount.
+    const homeHere = volume.primary && isWithinScopePath(home, volume.mountPoint)
+      && this.volumeOf(home).mountPoint === volume.mountPoint;
+    const places = homeHere ? [home, volume.mountPoint] : [volume.mountPoint];
     let answer: boolean | undefined;
     for (const place of places) {
       answer = probe(place);

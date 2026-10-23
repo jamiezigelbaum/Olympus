@@ -135,7 +135,7 @@ describe('the picker\'s states for a guarded folder', () => {
       context: { home: f.home, syncedRoots: [], platform: 'darwin' },
       home: f.home,
       permissions: f.permissions,
-      readDirectory: () => { throw refusal('EACCES'); },
+      readDirectory: () => { throw refusal('EPERM'); },
     });
     const page = await browser.browse({ parentKey: join(f.home, 'Documents') });
     expect(page.access?.state).toBe('denied');
@@ -344,11 +344,48 @@ describe('each cause gets its own action', () => {
     // macOS answers a privacy refusal with EPERM, a mode refusal with EACCES.
     expect(await kindFor(join(f.home, 'Code'), 'EPERM')).toBe('scope_root_permission_needed');
     expect(await kindFor(join(f.home, 'Code'), 'EACCES')).toBe('scope_root_unreadable');
-    // A guarded folder is the Mac's rule whichever errno came back.
-    expect(await kindFor(join(f.home, 'Documents'), 'EACCES')).toBe('scope_root_permission_needed');
+    // A guarded folder refused with EPERM is the Mac's rule; an explicit EACCES is the folder's own permissions.
+    expect(await kindFor(join(f.home, 'Documents'), 'EPERM')).toBe('scope_root_permission_needed');
+    expect(await kindFor(join(f.home, 'Documents', 'locked'), 'EACCES')).toBe('scope_root_unreadable');
     const linux = fixture({ platform: 'linux', helper: true });
     const linuxSource = schedulerFor(linux, [join(linux.home, 'Code')], refuse('EPERM'));
     expect((await failureOf(() => linuxSource.tasks.find((task) => task.kind === 'sync')!.run())).errorKind).toBe('scope_root_unreadable');
+  });
+
+  test('a privacy refusal with no helper behind the read is "helper needed", not a Files & Folders switch', async () => {
+    const refuse = async () => { throw new LocalFilesRootPermissionError('x', 'EPERM'); };
+    const run = async (f: ReturnType<typeof fixture>, permissions: MacPermissions) => failureOf(() => schedulerFor(f, [join(f.home, 'Library', 'Mail')], refuse, permissions).tasks.find((task) => task.kind === 'sync')!.run());
+    const f = fixture({ helper: false });
+    const noHelper = await run(f, f.permissions);
+    expect(noHelper.errorKind).toBe('scope_root_helper_needed');
+    expect(noHelper.reason).toBe('scope_root_helper_needed');
+    expect(noHelper.message).toBe(MAC_ACCESS_COPY.needsHelper);
+    const worker = new MacPermissions({ platform: 'darwin', home: f.home, hostKind: () => 'managed_worker', helperPresent: () => false });
+    const managed = await run(f, worker);
+    expect(managed.errorKind).toBe('scope_root_helper_needed');
+    expect(managed.message).toBe(MAC_ACCESS_COPY.needsHelperManagedWorker);
+    // With a helper, the same refusal is the Mac's to answer.
+    const withHelper = fixture({ helper: true });
+    expect((await run(withHelper, withHelper.permissions)).errorKind).toBe('scope_root_permission_needed');
+    // An ordinary file-permission refusal is not about the helper.
+    const plain = async () => { throw new LocalFilesRootPermissionError('x', 'EACCES'); };
+    expect((await failureOf(() => schedulerFor(f, [join(f.home, 'Code')], plain).tasks.find((task) => task.kind === 'sync')!.run())).errorKind).toBe('scope_root_unreadable');
+  });
+
+  test('inside a guarded folder, EACCES is the folder\'s own permissions in the picker too; EPERM stays the Mac\'s rule', async () => {
+    const f = fixture({ helper: true });
+    const inDocs = (code: string) => createLocalFilesFolderScopeBrowser({
+      volumes: new VolumeResolver({ platform: 'darwin', home: f.home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)' }),
+      context: { home: f.home, platform: 'darwin' }, home: f.home, permissions: f.permissions,
+      readDirectory: () => { throw refusal(code); },
+    }).browse({ parentKey: join(f.home, 'Documents', 'Taxes') });
+    await expect(inDocs('EACCES')).rejects.toThrow(MAC_ACCESS_COPY.unreadable);
+    expect((await inDocs('EPERM')).access).toMatchObject({ state: 'denied', settings_url: FILES_AND_FOLDERS_URL });
+    // The ask itself: a mode refusal on the guarded folder is not remembered as the Mac saying no.
+    const asked = fixture({ helper: true, list: async () => { throw refusal('EACCES'); }, persist: true });
+    const page = await asked.browser.browse({ parentKey: join(asked.home, 'Documents') });
+    expect(page.access).toEqual({ state: 'denied', message: MAC_ACCESS_COPY.unreadable });
+    expect(asked.permissions.nodeAccess({ kind: 'documents', root: join(asked.home, 'Documents') })?.state).toBe('needs_permission');
   });
 
   test('an ordinary refusal in the picker is not Full Disk Access; a privacy refusal outside the guarded folders is', async () => {

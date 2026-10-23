@@ -124,9 +124,14 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
             const real = root.path === '/' ? '/' : volumeResolver ? realPathOfScopePath(volumeResolver, root.path) : root.path;
             const privacy = real !== undefined
               && macPermissions.isPrivacyRefusal(real, error.errno, volumeResolver?.volumeOf(real));
-            const errorKind = privacy ? 'scope_root_permission_needed' : 'scope_root_unreadable';
+            // A privacy refusal with no helper behind the read (a saved
+            // ~/Library/Mail scope after the helper was deleted) cannot be
+            // answered in System Settings: no app is there to switch on.
+            const noHelper = privacy && !macPermissions.hasHelper();
+            const errorKind = noHelper ? 'scope_root_helper_needed' : privacy ? 'scope_root_permission_needed' : 'scope_root_unreadable';
             throw new SourceSchedulerTaskFailure(
-              privacy ? 'Your Mac did not allow Olympus to read a chosen folder.' : 'Your user account is not allowed to read a chosen folder.',
+              noHelper ? macPermissions.helperNeededCopy()
+                : privacy ? 'Your Mac did not allow Olympus to read a chosen folder.' : 'Your user account is not allowed to read a chosen folder.',
               { errorKind, retryAt: retryTomorrow(context, errorKind, PERMISSION_RETRY_MS) },
             );
           }

@@ -31923,16 +31923,17 @@ function isWithinScopePath(path, root) {
 function scopePathsIgnoreCase(context2, scopePath) {
   if (context2.volumeIgnoresCase) {
     let volumeId;
+    let inside;
     let known = true;
     if (scopePath !== undefined) {
       try {
-        volumeId = splitScopePath(scopePath).volumeId;
+        ({ volumeId, path: inside } = splitScopePath(scopePath));
       } catch {
         known = false;
       }
     }
     if (known) {
-      const decided = context2.volumeIgnoresCase(volumeId);
+      const decided = context2.volumeIgnoresCase(volumeId, inside);
       if (decided !== undefined)
         return decided;
     }
@@ -39322,6 +39323,8 @@ class MacPermissions {
   isPrivacyRefusal(realPath, errno, volume) {
     if (!this.active)
       return false;
+    if (errno === "EACCES")
+      return false;
     return errno === "EPERM" || this.guardOf(realPath, volume) !== undefined;
   }
   unreadableCopy() {
@@ -39371,6 +39374,8 @@ class MacPermissions {
       return;
     if (answer === "waiting")
       return { state: "waiting", message: MAC_ACCESS_COPY.waiting };
+    if (answer === "unreadable")
+      return { state: "denied", message: this.unreadableCopy() };
     return { state: "denied", message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
   noteDenied(guard) {
@@ -39404,7 +39409,9 @@ class MacPermissions {
         this.remember(guard, "granted");
         return "granted";
       }, (error) => {
-        if (error.code === "EPERM" || error.code === "EACCES") {
+        if (error.code === "EACCES")
+          return "unreadable";
+        if (error.code === "EPERM") {
           this.remember(guard, "denied");
           return "denied";
         }
@@ -43758,16 +43765,17 @@ class VolumeResolver {
   refresh() {
     this.cache = undefined;
   }
-  ignoresCase(volumeId) {
+  ignoresCase(volumeId, path) {
     const home = this.deps.home;
-    const volume = volumeId === undefined ? this.volumeOf(home) : this.mountedVolume(volumeId);
+    const volume = volumeId === undefined ? this.volumeOf(path ?? home) : this.mountedVolume(volumeId);
     if (!volume)
       return;
-    const cacheKey = volume.primary ? `primary:${volume.mountPoint}` : volume.id;
+    const cacheKey = volume.primary ? `mount:${volume.mountPoint}` : volume.id;
     if (this.caseByVolume.has(cacheKey))
       return this.caseByVolume.get(cacheKey);
     const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
-    const places = volume.primary && volumeId === undefined ? [home, volume.mountPoint] : [volume.mountPoint];
+    const homeHere = volume.primary && isWithinScopePath(home, volume.mountPoint) && this.volumeOf(home).mountPoint === volume.mountPoint;
+    const places = homeHere ? [home, volume.mountPoint] : [volume.mountPoint];
     let answer;
     for (const place of places) {
       answer = probe(place);
@@ -44254,7 +44262,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
   const context2 = options.context ?? {
     ...defaultExclusionContext(),
     home,
-    volumeIgnoresCase: (volumeId) => volumes.ignoresCase(volumeId)
+    volumeIgnoresCase: (volumeId, path) => volumes.ignoresCase(volumeId, path)
   };
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
@@ -44282,7 +44290,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
       const code = error.code;
       if (code === "EACCES" || code === "EPERM") {
         const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
-        if (guard)
+        if (guard && code !== "EACCES")
           throw new AccessRefused(permissions.noteDenied(guard));
         if (permissions.isPrivacyRefusal(realPath, code, volumes.volumeOf(realPath))) {
           const fda = !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
