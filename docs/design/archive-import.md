@@ -32,6 +32,9 @@ same way, with the same privacy and the same status.
   agent-started imports.
 - **WhatsApp and Telegram exports are in scope** (owner, 2026-10-23), after
   mail.
+- **Imported archives stay Private until the local model judges them**
+  (owner, 2026-10-23). Personal-first does not apply to them: it assumed a
+  wait of minutes, and an import puts years of items in the queue at once.
 
 ## Where things stand
 
@@ -61,7 +64,7 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
 | Picker | The local-files picker (`workers/local-files/scope-browser.ts`), extended to offer files as well as folders in a "choose one file or folder" mode (today it lists folders only, `scope-browser.ts:121`). |
 | Reading | Only the chosen path, through the scope-safe reader (`core/scope-safe-fs.ts`), so no symlink escape. `ScopeRoot.readFile` loads a whole file, so archive reading adds a bounded streaming read on `openRelative`, with a per-message size cap. |
-| Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Tiers follow the shared classifier as it is (Personal-first, `CONTRACTS.md` change log 2026-10-13); importers set no source-level floor. |
+| Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Importers set no source-level floor; each item gets its own tier. Until the local model judges an item, its content is held Private (below). |
 | Removal | Per archive, not per source. Lifecycle delete today removes a whole source's store (`data-lifecycle.ts:657`) and Reflect has one store for the whole family (`data-lifecycle.ts:404`), so removing one import that way would erase the others. Remove cancels and fences that archive's running work, deletes its items, chunks, vectors and derived data (including private answers built from it, `data-lifecycle.ts:691`), and never touches the user's file. |
 | Operation | One operation, `archive_import` (start, status, remove), on the public tool lists, CLI, and MCP. The dashboard calls the same operation. An agent cannot import a path just by naming it: start needs a path the user approved, through the dashboard picker or a confirmation the user answers, the same approval the scope picker gives other sources. A prompt-injected or accidental tool call can at most ask. |
 | Dashboard | An "Archives" source showing each import: format, file name, item count, date range, progress, gaps (unreadable messages, skipped attachments), and Remove. Every problem has a route to exactly what failed. |
@@ -105,7 +108,38 @@ Their privacy defaults disagree today: the family postures say `internal`/S3
 `secure_local` would leave ordinary notes Private for good, because the
 classifier does not judge content already at that tier
 (`tier-classifier.ts:858`). The connectors' default becomes `internal`, so
-notes are tiered per item by the shared classifier like every other source.
+notes are judged per item like every other source instead of resting at
+Private.
+
+## Privacy while an import is judged
+
+Every item from an imported archive is held Private until the private model
+(the local model, or Venice Private where the preset has no local one) judges
+it, then moves to its judged tier. Nothing from an import is Personal, and so
+nothing reaches a cloud model or cloud embedding, before its own judgment.
+Ordinary cloud models never judge.
+
+- **Shared, not per format.** The import spine marks every item it ingests
+  with its ingest mode (`archive_import`, already declared in
+  `source-family.ts`). The shared classifier reads that mark: for these
+  items, content without a verdict is held as for own-record items today,
+  and `content:personal_first` is never set (`tier-classifier.ts:873`,
+  `tiered-store-set.ts:409`). No connector or format branches on it.
+- **Names** follow the existing rule: cleared names stay Personal while the
+  content is held (Gmail and Drive already work this way).
+- **Secrets, structured identifiers, owner rules and source floors** keep
+  their precedence. An owner override of an item still wins.
+- **Queue order.** Held import items join the judging queue behind live
+  own-record items, so a large import does not delay judgments for new mail.
+  The dashboard shows each archive's judged and still-held counts, so a
+  partly judged import is visible rather than silently incomplete.
+- **No model ready.** Items stay held until one is; the dashboard says the
+  import is waiting for the private model, with a route to set it up.
+- **Gate.** This changes classification semantics, so it follows the
+  versioned change gate in `docs/ENGINEERING_PROCESS.md`: a new classifier
+  version, a `CONTRACTS.md` change-log entry, the held-out eval and an
+  independent review. It lands in step 1, before any archive format is
+  public.
 
 Both connectors also load a whole export at once (`reflect/connector.ts:139`,
 `roam/connector.ts:69`), so a large export could run the engine out of
@@ -153,7 +187,8 @@ Both are in scope. They come after mail because they reuse the same spine
 1. Format registry, detection, archive identity and checkpoints, per-archive
    removal, `archive_import` operation, Archives source in the dashboard,
    with Reflect as the first format (its connector exists, so this proves the
-   spine), with streaming reads and the `internal` default.
+   spine), with streaming reads and the `internal` default. The
+   hold-until-judged rule lands here too, through its classifier gate.
 2. Mail (mbox), with the streaming reader and file-selecting picker.
 3. Roam onto the registry; all Reflect and Roam allowlist entries removed.
 4. WhatsApp chat export, with the selected-file, scope-safe reads.
@@ -177,6 +212,9 @@ exports), plus the held-out eval where the step changes the source pipeline.
 A fresh install on Mac and on Linux can import a synthetic mbox, Reflect,
 Roam, WhatsApp and Telegram export through the dashboard and through the agent tool, see each as a
 snapshot with counts and gaps, find cited answers from it, and remove it.
+No imported item is in a Personal store, or embedded by a cloud model,
+before its local judgment; a test imports with the private model stopped and
+checks this.
 
 For WhatsApp and Telegram, also on the same candidate as a supported live
 connection (`V0_4_RELEASE.md`, "Qualification action"): the dashboard shows
