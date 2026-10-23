@@ -12,6 +12,12 @@
  * One row per UTC day, rewritten in place (atomic rename, 0600) while the day
  * runs, so a restart keeps the day's counters. A day the relay was down for
  * has no row.
+ *
+ * Known limits of keeping counts only: an install marked internal after it
+ * was counted stays in that day's row (mark team installs as soon as they
+ * register), and after a restart the day's active figure can undercount
+ * installs seen both before and after it, because the ids seen before are not
+ * kept.
  */
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -70,6 +76,14 @@ export class UsageLedger {
       if (record.lastSeenAt >= start && !this.excluded(record.installId)) this.activeToday.add(record.installId);
     }
     this.current()!.active = Math.max(this.current()!.active, this.activeToday.size);
+  }
+
+  /**
+   * Closes the previous day if the date changed. Call it before changing the
+   * registry, so yesterday's totals are taken before today's first change.
+   */
+  tick(): void {
+    this.roll();
   }
 
   /** A session started or a heartbeat arrived. */

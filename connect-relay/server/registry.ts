@@ -101,8 +101,9 @@ export class MemoryInstallRegistry {
     const record = this.records.get(installId);
     if (!record || (record.internal === true) === internal) return false;
     const entry: LogEntry = { op: internal ? 'internal' : 'external', installId, at: this.now() };
-    this.apply(entry);
+    // Applied once durable: a failed write changes nothing, so a retry writes again.
     await this.append(entry);
+    this.apply(entry);
     return true;
   }
 

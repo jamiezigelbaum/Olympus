@@ -983,6 +983,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           ? reregistrationsPerIp.take(allocation) && takeGlobal(reregistrationsGlobal, 'reregistrations')
           : registrationsPerIp.take(allocation) && takeGlobal(registrationsGlobal, 'registrations');
         if (!admitted) return fail(ws, 'rate_limited', 'too many registrations; try again later', 'register_rate');
+        usage.tick();
         if (!registry.register(installId, publicKey)) return fail(ws, 'capacity', 'relay registry is full', 'registry_full');
         log('register', { install: installTag(installId), returning });
         usage.registered(installId, returning);
@@ -1007,6 +1008,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     const session = new InstallSession(installId, ws, limits, queueBudget);
     ws.data.session = session;
     sessions.set(installId, session);
+    usage.tick();
     registry.seen(installId);
     usage.active(installId);
     session.send({ type: 'ready', installId, features: [RELAY_FEATURE_SURFACES] });
@@ -1152,6 +1154,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
           return;
         }
         if (message.type === 'ping') {
+          usage.tick();
           registry.seen(session.installId);
           usage.active(session.installId);
         }
@@ -1192,6 +1195,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   const startedAt = new Date(now()).toISOString();
   const sweep = (at = now()): string[] => {
+    usage.tick();
     // Read before the expiry deletes the records that carry the mark.
     const internal = new Set([...registry.allRecords()].filter((record) => record.internal).map((record) => record.installId));
     const expired = registry.expire(at, limits.inactiveRegistrationTtlMs, (installId) => sessions.has(installId), limits.unconfirmedRegistrationTtlMs);

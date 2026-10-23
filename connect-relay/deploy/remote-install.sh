@@ -25,6 +25,11 @@ install -d -m 0755 /opt/olympus-relay
 install -m 0755 "$BINARY" "/opt/olympus-relay/olympus-relay-${SHORT}"
 install -m 0644 "$SRC/BUILD_SHA" "/opt/olympus-relay/olympus-relay-${SHORT}.sha"
 ln -sfn "/opt/olympus-relay/olympus-relay-${SHORT}" /usr/local/bin/olympus-relay
+# The download counter runs this build too, through its own link, which a
+# rollback (deploy.sh repoints only olympus-relay) leaves alone: an older
+# relay build may not know `count-installers`, and the log must still empty
+# every hour.
+ln -sfn "/opt/olympus-relay/olympus-relay-${SHORT}" /usr/local/bin/olympus-installer-counts
 
 install -m 0644 "$SRC/olympus-relay.service" /etc/systemd/system/olympus-relay.service
 # Hourly installer download counts (server/installer-counts.ts); Caddy writes
