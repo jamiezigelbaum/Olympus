@@ -4681,6 +4681,62 @@ export class LocalConnectorStore {
     return matches;
   }
 
+  /**
+   * Every active item whose path-shaped locator is a file or folder directly
+   * under `/` (`/notes.txt`, never `/a/b.txt`). A folder's own listing cannot
+   * ask for this: {@link activeItemsUnderLocatorIfIndexed} refuses `/` on
+   * purpose, and a walk of the whole computer asks per top-level folder. The
+   * files that sit directly under `/` belong to no folder, so this is the one
+   * way the walk can tell that one of them is gone. Same answer as the folder
+   * read when the index is not ready: nothing.
+   */
+  activeItemsDirectlyUnderRootIfIndexed(input: {
+    provider: string;
+    accountScope: string;
+    limit: number;
+  }): Array<{ identity: SourceItemIdentity; locatorUri: string }> {
+    if (!this.locatorIdentityIndexState().completed) return [];
+    if (!Number.isSafeInteger(input.limit) || input.limit <= 0) return [];
+    // `/` sorts immediately before `0`: [`/`, `0`) is every path-shaped locator;
+    // a name with no further `/` after the first character is a direct child.
+    const rows = this.db.query(`
+      SELECT
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND locator.normalized_locator >= '/'
+        AND locator.normalized_locator < '0'
+        AND instr(substr(locator.normalized_locator, 2), '/') = 0
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, input.limit) as Array<{
+      provider_item_id: string;
+      provider_file_id: string | null;
+      local_item_id: string;
+      source_version: string | null;
+      locator_uri: string | null;
+    }>;
+    return rows.flatMap((row) => row.locator_uri
+      ? [{
+          identity: {
+            family: this.family,
+            provider: input.provider,
+            accountScope: input.accountScope,
+            providerItemId: row.provider_item_id,
+            ...(row.provider_file_id ? { providerFileId: row.provider_file_id } : {}),
+            localItemId: row.local_item_id,
+            ...(row.source_version ? { sourceVersion: row.source_version } : {}),
+          },
+          locatorUri: row.locator_uri,
+        }]
+      : []);
+  }
+
   activeItemForLocator(input: {
     provider: string;
     accountScope: string;

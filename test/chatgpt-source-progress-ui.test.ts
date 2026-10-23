@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import type { DashboardSource, DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { COMPUTER_META_KEY, OLYMPUS_HOST_CONTEXT_KEY, type DashboardSource, type DashboardViewModelV1 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY as P, DASHBOARD_CHATGPT_PICKER_COPY as Q } from '../src/workers/dashboard/vocabulary.ts';
 
@@ -348,4 +348,35 @@ describe('setup errors inline', () => {
       expect(host.text()).not.toContain('can\'t reach your Mac');
     });
   }
+});
+
+describe('a chosen folder the computer will not open: the action fits the cause', () => {
+  const files = (reason: string): DashboardSource => ({
+    id: 'local.files', label: 'Files on this computer', group: 'local', status: 'Needs you',
+    progress: { stage: 'listing', unit: 'files', done: 0, total: 0, percent: 0, stalled: true, stalledReason: reason as never },
+  });
+  const link = (reason: string) => {
+    const host = mount({});
+    host.win.dispatchEvent(new host.win.MessageEvent('message', {
+      data: { jsonrpc: '2.0', method: 'ui/notifications/host-context-changed', params: { [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'computer', readOnly: false, links: {} } } },
+      source: (host.win as any).parent,
+    }));
+    host.push({
+      structuredContent: model({ sources: [files(reason)] }),
+      _meta: { [COMPUTER_META_KEY]: { permissionSettings: [{ sourceId: 'local.files', url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders' }] } },
+    });
+    return { host, link: row(host, 'Files on this computer').querySelector('a[data-key="source:local.files:privacy-settings"]') };
+  };
+
+  test('only the Mac\'s privacy refusal offers Open privacy settings; a missing helper and an ordinary refusal say their own fix', () => {
+    const privacy = link('scope_root_permission_needed');
+    expect(privacy.link?.textContent).toBe(Q.openPrivacySettings);
+    expect(row(privacy.host, 'Files on this computer').querySelector('.stall-line')!.textContent).toContain('Files & Folders');
+    for (const [reason, words] of [['scope_root_helper_needed', 'olympus engine install-helper'], ['scope_root_unreadable', 'user account']] as const) {
+      const other = link(reason);
+      expect(other.link).toBeNull();
+      expect(row(other.host, 'Files on this computer').querySelector('.stall-line')!.textContent).toContain(words);
+      expect(row(other.host, 'Files on this computer').textContent).not.toContain('privacy settings');
+    }
+  });
 });

@@ -2618,6 +2618,8 @@ const HONEST_SCHEDULER_ERROR_KINDS: ReadonlySet<string> = new Set([
   'config_missing_folder_argument',
   'scope_root_missing',
   'scope_root_permission_needed',
+  'scope_root_helper_needed',
+  'scope_root_unreadable',
   'credential_missing',
   'credential_reauth_required',
   'credential_refresh_busy',

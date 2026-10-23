@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
-  appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, renameSync, linkSync,
+  appendFileSync, chmodSync, fstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync, renameSync, linkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  SCOPE_FILE_MAX_RANGE_BYTES, ScopeRoot, ScopeSafeError, resetScopeSafeNativeForTests, scopeSafeFsAvailable,
+  SCOPE_FILE_MAX_RANGE_BYTES, ScopeRoot, ScopeSafeError, resetScopeSafeNativeForTests, scopeSafeFsAvailable, scopeSafeNativeForTests,
 } from '../src/core/scope-safe-fs.ts';
 
 const cleanups: Array<() => void> = [];
@@ -228,6 +228,113 @@ describe('bounded range reads', () => {
     try {
       expect(codeOf(() => scope.openFile('dev/null'))).toBe('escape');
     } finally {
+      scope.close();
+    }
+  });
+});
+
+describe('statEntry is relative to a verified directory, never by path', () => {
+  // The branch every Linux stat takes (and macOS takes for a file whose open
+  // is refused): the descriptor-relative lstat. `placeholders: false` sends
+  // this platform down it directly.
+  function withoutPlaceholders(extra: Record<string, unknown> = {}): void {
+    resetScopeSafeNativeForTests({ ...scopeSafeNativeForTests()!, placeholders: false, ...extra } as never);
+  }
+
+  test('reports files, folders and links without following the link', () => {
+    const { root, outside } = tree();
+    symlinkSync(join(outside, 'secret.txt'), join(root, 'link.txt'));
+    withoutPlaceholders();
+    const scope = ScopeRoot.open(root);
+    try {
+      expect(scope.statEntry('a.txt')).toMatchObject({ kind: 'file', size: 5, dataless: false });
+      expect(scope.statEntry('sub/b.txt')).toMatchObject({ kind: 'file', size: 5 });
+      expect(scope.statEntry('sub').kind).toBe('directory');
+      expect(scope.statEntry('link.txt').kind).toBe('symlink');
+      expect(scope.statEntry('a.txt').mtimeMs).toBeGreaterThan(1_500_000_000_000);
+      expect(codeOf(() => scope.statEntry('missing.txt'))).toBe('not_found');
+    } finally {
+      scope.close();
+    }
+  });
+
+  test('a file whose open is refused still has metadata (macOS fallback)', () => {
+    if (process.getuid?.() === 0) return;
+    const { root } = tree();
+    chmodSync(join(root, 'a.txt'), 0o000);
+    const scope = ScopeRoot.open(root);
+    try {
+      expect(scope.statEntry('a.txt')).toMatchObject({ kind: 'file', size: 5 });
+    } finally {
+      chmodSync(join(root, 'a.txt'), 0o644);
+      scope.close();
+    }
+  });
+
+  test('an ancestor swapped for a link after the listing does not leak outside metadata', () => {
+    const { root, outside } = tree();
+    writeFileSync(join(outside, 'b.txt'), 'OUTSIDE-LONGER-CONTENT');
+    for (const placeholders of [false, true]) {
+      resetScopeSafeNativeForTests({ ...scopeSafeNativeForTests()!, placeholders } as never);
+      const scope = ScopeRoot.open(root);
+      try {
+        expect(scope.statEntry('sub/b.txt').size).toBe(5);
+        renameSync(join(root, 'sub'), join(root, 'sub-moved'));
+        symlinkSync(outside, join(root, 'sub'));
+        expect(codeOf(() => scope.statEntry('sub/b.txt'))).toBe('escape');
+      } finally {
+        scope.close();
+        rmSync(join(root, 'sub'));
+        renameSync(join(root, 'sub-moved'), join(root, 'sub'));
+      }
+    }
+  });
+
+  test('the entry is stat\'ed against a descriptor on its verified parent directory', () => {
+    const { root } = tree();
+    const real = scopeSafeNativeForTests()!;
+    const seen: Array<{ name: string; parentIno: string }> = [];
+    withoutPlaceholders({
+      lstatChild: (dirfd: number, name: string) => {
+        seen.push({ name, parentIno: String(fstatSync(dirfd, { bigint: true }).ino) });
+        return real.lstatChild!(dirfd, name);
+      },
+    });
+    const scope = ScopeRoot.open(root);
+    try {
+      scope.statEntry('sub/b.txt');
+      expect(seen).toEqual([{ name: 'b.txt', parentIno: scope.statRelative('sub').ino }]);
+    } finally {
+      scope.close();
+    }
+  });
+
+  test('fails closed when the platform has no descriptor-relative stat', () => {
+    const { root } = tree();
+    withoutPlaceholders({ lstatChild: undefined });
+    const scope = ScopeRoot.open(root);
+    try {
+      expect(codeOf(() => scope.statEntry('a.txt'))).toBe('unsupported');
+    } finally {
+      scope.close();
+    }
+  });
+});
+
+describe('a refused folder says which refusal it was', () => {
+  test('a mode refusal is EACCES', () => {
+    if (process.getuid?.() === 0) return;
+    const { root } = tree();
+    const scope = ScopeRoot.open(root);
+    chmodSync(join(root, 'sub'), 0o000);
+    try {
+      let caught: unknown;
+      try { scope.list('sub'); } catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(ScopeSafeError);
+      expect((caught as ScopeSafeError).code).toBe('permission');
+      expect((caught as ScopeSafeError).errno).toBe('EACCES');
+    } finally {
+      chmodSync(join(root, 'sub'), 0o755);
       scope.close();
     }
   });

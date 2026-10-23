@@ -19,10 +19,10 @@ import type { FileSourceScopeApprovalSnapshot } from '../../core/source-scope-ap
 import type { FileSourceScopeAuthority, FileSourceScopePolicyRef } from '../source-scope-runtime.ts';
 import {
   deepestDefaultExclusion,
-  foldScopePath,
-  isWithinScopePath,
   normalizeScopePath,
   scopePathDepth,
+  scopePathIsWithin,
+  scopePathsIgnoreCase,
   type DefaultExclusionContext,
 } from './paths.ts';
 
@@ -39,6 +39,12 @@ export interface LocalFilesContentScope {
   revision: string;
   /** Throws when the approval this scope was built for is no longer the current one. */
   assertCurrent(): void;
+  /**
+   * Whether the volume holding this scope path ignores case: the one decision
+   * `decide`, watcher replay and the search for what is gone all share.
+   * Absent on a scope that cannot say: case then matters.
+   */
+  ignoresCase?(scopePath: string): boolean;
   decide(scopePath: string): LocalFilesDecision;
   /**
    * Checks the approval is current once and returns a decider over exactly
@@ -61,7 +67,7 @@ export function decideLocalFilesPath(
     .filter((selection): selection is { key: string; state: typeof approval.selections[number]['state'] } =>
       // Saved keys carry the spelling the folder had when it was chosen; a
       // later rename in Finder (`Private` -> `private`) must not undo them.
-      selection.key !== undefined && isWithinScopePath(foldScopePath(path, context), foldScopePath(selection.key, context)));
+      selection.key !== undefined && scopePathIsWithin(path, selection.key, context));
 
   const defaultOff = deepestDefaultExclusion(path, context);
   if (defaultOff) {
@@ -104,6 +110,7 @@ export function createScopeBoundLocalFilesContentScope(input: {
     generation: input.ref.accountGeneration,
     revision: input.ref.revision,
     assertCurrent() { current(); },
+    ignoresCase: (scopePath) => scopePathsIgnoreCase(input.context, scopePath),
     decide: (scopePath) => decideLocalFilesPath(current(), scopePath, input.context),
     snapshotDecider() {
       const approval = current();
