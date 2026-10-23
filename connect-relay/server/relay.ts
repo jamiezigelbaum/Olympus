@@ -1227,6 +1227,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     async revoke(installId) {
       if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('not an install id');
       const wasRegistered = registry.get(installId) !== undefined;
+      usage.tick();
       // The registry refuses the id before this returns; the write may still fail.
       const durable = registry.revoke(installId);
       surfaceMap.remove(installId);
@@ -1262,6 +1263,7 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
     usage: () => usage.snapshot(),
     async setInternal(installId, internal) {
       if (!INSTALL_ID_PATTERN.test(installId)) throw new Error('not an install id');
+      usage.tick();
       return registry.setInternal(installId, internal);
     },
     sweep,
