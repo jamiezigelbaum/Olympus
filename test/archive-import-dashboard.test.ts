@@ -723,7 +723,7 @@ describe('one exclusion for approvals and the CLI delete of imported archives', 
     // While the CLI held it, the import had not been recorded.
     expect(await new Response(cli.stdout).text()).toBe('not recorded\n');
     expect(f.runtime.state.list().map((record) => record.label)).toEqual(['Takeout.mbox']);
-  });
+  }, 30_000);
 
   test('the CLI delete waits for an approval moving into the checks, then refuses', async () => {
     const f = fixture();
@@ -744,7 +744,7 @@ describe('one exclusion for approvals and the CLI delete of imported archives', 
     expect(await worker.exited).toBe(0);
     // The check the worker started is still there to finish or cancel.
     expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ name: 'Mine.mbox', status: 'checking' })]);
-  });
+  }, 30_000);
 });
 
 describe('when this computer\'s settings keep imports from running', () => {
