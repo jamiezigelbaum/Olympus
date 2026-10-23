@@ -84,15 +84,18 @@ function writesOf(code: string, name: string): number[] {
       return parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken;
     }
     if (ts.isDeleteExpression(parent)) return true;
+    if ((ts.isForOfStatement(parent) || ts.isForInStatement(parent)) && parent.initializer === target) return true;
     // A destructuring assignment target (`[x.name] = …`, `({ k: x.name } = …)`):
     // climb the pattern literal and see whether it is the left of an `=`.
     let pattern: ts.Node = target;
     while (pattern.parent && (ts.isArrayLiteralExpression(pattern.parent) || ts.isObjectLiteralExpression(pattern.parent)
-      || ts.isPropertyAssignment(pattern.parent) || ts.isSpreadElement(pattern.parent) || isWrapper(pattern.parent))) {
+      || ts.isPropertyAssignment(pattern.parent) || ts.isSpreadElement(pattern.parent)
+      || ts.isSpreadAssignment(pattern.parent) || isWrapper(pattern.parent))) {
       pattern = pattern.parent;
     }
     if (pattern === target) return false;
     const outer = pattern.parent;
+    if (outer !== undefined && (ts.isForOfStatement(outer) || ts.isForInStatement(outer))) return outer.initializer === pattern;
     return outer !== undefined && ts.isBinaryExpression(outer) && outer.left === pattern
       && outer.operatorToken.kind === ts.SyntaxKind.EqualsToken;
   };
@@ -134,6 +137,10 @@ describe('holding content until judged is an archive import lane\'s choice alone
       `[c.${LANE_OPTION}] = [true];`,
       `({ k: c.${LANE_OPTION} } = { k: true });`,
       `c['${LANE_OPTION}'] = true;`,
+      `for (c.${LANE_OPTION} of [true] as const) {}`,
+      `for (c.${LANE_OPTION} in { a: 1 }) {}`,
+      `for ([c.${LANE_OPTION}] of [[true]]) {}`,
+      `({ ...c.${LANE_OPTION} } = { a: 1 });`,
     ]) expect(`${written} -> ${writesOf(written, LANE_OPTION).length}`).toBe(`${written} -> 1`);
     for (const readOnly of [
       `if (c.${LANE_OPTION} === true) hold();`,
@@ -141,6 +148,7 @@ describe('holding content until judged is an archive import lane\'s choice alone
       `return set.${LANE_OPTION}\n  ?? false;`,
       `const merged = { hold: set.${LANE_OPTION}, rest: [set.${LANE_OPTION}] };`,
       `const h = c.${LANE_OPTION}!;`,
+      `for (const v of [c.${LANE_OPTION}]) use(v);`,
     ]) expect(`${readOnly} -> ${writesOf(readOnly, LANE_OPTION).length}`).toBe(`${readOnly} -> 0`);
   });
 
