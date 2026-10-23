@@ -165,7 +165,15 @@ const ENUMERATE = String.raw`(() => {
     const solo = parent && parent.querySelectorAll('button, a, input, select, textarea, summary').length === 1;
     const describedBy = el.getAttribute('aria-describedby');
     const described = describedBy ? describedBy.split(/\s+/).map((id) => { const t = document.getElementById(id); return t ? t.textContent : ''; }).join(' ') : '';
-    const reason = disabled ? clean((solo ? (parent.textContent || '').replace(el.textContent || '', '') : '') + ' ' + described + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-description') || '')) : '';
+    // Words beside the control (the paragraph just before or after it, or its wrapper) that carry no control of their own also say why.
+    const near = (node) => {
+      if (!node || node.tagName === 'SCRIPT' || node.tagName === 'STYLE') return '';
+      if (node.querySelector && node.querySelector('button, a, input, select, textarea, summary')) return '';
+      const text = clean(node.textContent);
+      return text.length > 0 && text.length <= 240 ? text : '';
+    };
+    const beside = disabled ? (near(el.previousElementSibling) + ' ' + near(el.nextElementSibling) + ' ' + (solo && parent ? near(parent.previousElementSibling) + ' ' + near(parent.nextElementSibling) : '')) : '';
+    const reason = disabled ? clean(beside + ' ' + (solo ? (parent.textContent || '').replace(el.textContent || '', '') : '') + ' ' + described + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-description') || '')) : '';
     const field = tag === 'input' || tag === 'textarea' || tag === 'select';
     const submit = (tag === 'button' && (el.getAttribute('type') || 'submit') === 'submit') || (tag === 'input' && type === 'submit');
     out.push({
@@ -250,7 +258,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
 
   const read = async <T>(call: string): Promise<T | undefined> => {
     for (let attempt = 0; attempt < 4; attempt++) {
-      try { return await driver.probe('host', call) as T; } catch { await sleep(400); }
+      try { return await Promise.race([driver.probe('host', call) as Promise<T>, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the page did not answer')), 15_000))]); } catch { await sleep(400); }
     }
     return undefined;
   };
@@ -455,7 +463,9 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
             findings: [...new Set(judged.findings)].slice(0, 10),
           };
           const shot = `pages-${page.id}/${String(trace.n).padStart(2, '0')}.jpg`;
-          if (await driver.screenshot(shot).catch(() => false)) trace.screenshot = shot;
+          // A capture of a page that is not in front never answers; it is given a few seconds and the step goes without a picture.
+          phase = 'taking a picture';
+          if (await Promise.race([driver.screenshot(shot).catch(() => false), new Promise<boolean>((done) => setTimeout(() => done(false), 8_000))])) trace.screenshot = shot;
           steps.push(trace);
           // What the press revealed gets its own turn.
           if (after && item.path.length < 2) {
