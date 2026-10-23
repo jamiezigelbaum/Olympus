@@ -139192,11 +139192,13 @@ function createLocalFilesSourceConnector(options) {
       accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
       locatorUri: scopePath
     });
-    if (own3 && !seen.has(own3.providerItemId)) {
+    const ownMatches = own3 && (options.scope.ignoresCase?.(scopePath) || own3.providerItemId === localFilesItemId(scopePath));
+    if (own3 && ownMatches && !seen.has(own3.providerItemId)) {
       seen.add(own3.providerItemId);
       items.push(deletedItem(own3, scopePath));
     }
     if (store.activeItemsUnderLocatorIfIndexed) {
+      const elsewhere = new Set;
       for (let batch = 0;batch < DELETED_DESCENDANT_MAX_BATCHES; batch += 1) {
         const found = store.activeItemsUnderLocatorIfIndexed({
           provider: LOCAL_FILES_PROVIDER,
@@ -139206,8 +139208,13 @@ function createLocalFilesSourceConnector(options) {
         });
         let fresh2 = 0;
         for (const descendant of found) {
-          if (seen.has(descendant.identity.providerItemId))
+          if (seen.has(descendant.identity.providerItemId) || elsewhere.has(descendant.identity.providerItemId))
             continue;
+          if (!pathIsAtOrBelow(descendant.locatorUri, scopePath)) {
+            elsewhere.add(descendant.identity.providerItemId);
+            fresh2 += 1;
+            continue;
+          }
           seen.add(descendant.identity.providerItemId);
           items.push(deletedItem(descendant.identity, descendant.locatorUri));
           fresh2 += 1;
@@ -139226,7 +139233,9 @@ function createLocalFilesSourceConnector(options) {
       return [];
     const bases = root === "/" ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== "/")])] : [root];
     const absent = [];
-    const judge = (stored) => {
+    const judge = (stored, base) => {
+      if (base !== undefined && !pathIsAtOrBelow(stored.locatorUri, base))
+        return;
       if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId))
         return;
       if (unreadable.some((path) => pathIsAtOrBelow(stored.locatorUri, path)))
@@ -139249,7 +139258,7 @@ function createLocalFilesSourceConnector(options) {
         locatorUri: base,
         limit: ABSENCE_SCAN_LIMIT
       })) {
-        judge(stored);
+        judge(stored, base);
       }
     }
     return absent;

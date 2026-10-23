@@ -320,11 +320,15 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
       locatorUri: scopePath,
     });
-    if (own && !seen.has(own.providerItemId)) {
+    // The store compares locators ignoring ASCII case; on a volume that keeps
+    // case, `/a` must not stand for `/A`. The id is the exact path's hash.
+    const ownMatches = own && (options.scope.ignoresCase?.(scopePath) || own.providerItemId === localFilesItemId(scopePath));
+    if (own && ownMatches && !seen.has(own.providerItemId)) {
       seen.add(own.providerItemId);
       items.push(deletedItem(own, scopePath));
     }
     if (store.activeItemsUnderLocatorIfIndexed) {
+      const elsewhere = new Set<string>();
       for (let batch = 0; batch < DELETED_DESCENDANT_MAX_BATCHES; batch += 1) {
         const found = store.activeItemsUnderLocatorIfIndexed({
           provider: LOCAL_FILES_PROVIDER,
@@ -337,7 +341,14 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
         });
         let fresh = 0;
         for (const descendant of found) {
-          if (seen.has(descendant.identity.providerItemId)) continue;
+          if (seen.has(descendant.identity.providerItemId) || elsewhere.has(descendant.identity.providerItemId)) continue;
+          // A sibling spelled differently only by case, on a volume that keeps
+          // case, is another folder: counted as progress, never deleted.
+          if (!pathIsAtOrBelow(descendant.locatorUri, scopePath)) {
+            elsewhere.add(descendant.identity.providerItemId);
+            fresh += 1;
+            continue;
+          }
           seen.add(descendant.identity.providerItemId);
           items.push(deletedItem(descendant.identity, descendant.locatorUri));
           fresh += 1;
@@ -371,7 +382,10 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== '/')])]
       : [root];
     const absent: RawItem[] = [];
-    const judge = (stored: { identity: SourceItemIdentity; locatorUri: string }): void => {
+    const judge = (stored: { identity: SourceItemIdentity; locatorUri: string }, base?: string): void => {
+      // The store's range ignores ASCII case; on a volume that keeps case a
+      // sibling spelled differently (`/a` beside `/A`) is not under `base`.
+      if (base !== undefined && !pathIsAtOrBelow(stored.locatorUri, base)) return;
       if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId)) return;
       if (unreadable.some((path) => pathIsAtOrBelow(stored.locatorUri, path))) return;
       deletedSeen.add(stored.identity.providerItemId);
@@ -393,7 +407,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
         locatorUri: base,
         limit: ABSENCE_SCAN_LIMIT,
       })) {
-        judge(stored);
+        judge(stored, base);
       }
     }
     return absent;
