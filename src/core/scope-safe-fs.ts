@@ -58,6 +58,27 @@ export function scopeIdentityKey(identity: ScopeIdentity): string {
   return `${identity.dev}:${identity.ino}`;
 }
 
+/**
+ * One version of a file: its identity plus the size and modification time it
+ * had when it was opened. A reader holding a version refuses to read once the
+ * file under its descriptor no longer matches it.
+ */
+export interface ScopeFileVersion extends ScopeIdentity {
+  size: number;
+  mtimeMs: number;
+}
+
+export function scopeFileVersionKey(version: ScopeFileVersion): string {
+  return `${version.dev}:${version.ino}:${version.size}:${version.mtimeMs}`;
+}
+
+export function sameScopeFileVersion(a: ScopeFileVersion, b: ScopeFileVersion): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+}
+
+/** The most one `readAt` call returns, so no caller can load a whole large file at once. */
+export const SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+
 export type ScopeEntryKind = 'file' | 'directory' | 'symlink' | 'other';
 
 export interface ScopeStat extends ScopeIdentity {
@@ -469,6 +490,37 @@ export class ScopeRoot {
   }
 
   /**
+   * Opens a regular file for bounded range reads (`ScopeFileReader.readAt`)
+   * instead of loading it whole. `expected` is the identity, or the whole
+   * version, seen before: another file at that name, or the same file at
+   * another size or time when a version is given, is `changed`. A link, a
+   * mount point on the way, or a placeholder that would need downloading is
+   * refused. The caller closes the reader.
+   */
+  openFile(relPath: string, options: { expected?: ScopeIdentity | ScopeFileVersion } = {}): ScopeFileReader {
+    const { fd, stat } = this.openRelative(relPath);
+    try {
+      if (stat.kind !== 'file') throw new ScopeSafeError('not_regular');
+      if (stat.dataless) throw new ScopeSafeError('not_regular', 'placeholder');
+      const version: ScopeFileVersion = { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+      const expected = options.expected;
+      if (expected) {
+        if (stat.dev !== expected.dev || stat.ino !== expected.ino) {
+          throw new ScopeSafeError('changed', 'identity differs from the one seen before');
+        }
+        if ('size' in expected && !sameScopeFileVersion(version, expected)) {
+          throw new ScopeSafeError('changed', 'the file changed since it was seen');
+        }
+      }
+      return new ScopeFileReader(relPath, fd, version);
+    } catch (error) {
+      fs.closeSync(fd);
+      if (error instanceof ScopeSafeError) throw error;
+      throw mapNodeError(error);
+    }
+  }
+
+  /**
    * Reads a regular file. `expected` is the identity the listing saw; another
    * file (or a link, or a different mount) at that name is `changed`/`escape`.
    * A placeholder that would need downloading is never read.
@@ -498,6 +550,81 @@ export class ScopeRoot {
       throw mapNodeError(error);
     } finally {
       fs.closeSync(fd);
+    }
+  }
+}
+
+/**
+ * A descriptor on one regular file below an approved root, read in bounded
+ * ranges. It was opened through the same link- and mount-refusing walk as
+ * every other read, and each range first checks that the file under the
+ * descriptor is still the version that was opened (same identity, size and
+ * modification time); a file that grew, shrank or was rewritten is `changed`.
+ */
+export class ScopeFileReader {
+  readonly relPath: string;
+  readonly version: ScopeFileVersion;
+  private fd: number;
+
+  constructor(relPath: string, fd: number, version: ScopeFileVersion) {
+    this.relPath = relPath;
+    this.fd = fd;
+    this.version = version;
+  }
+
+  get size(): number {
+    return this.version.size;
+  }
+
+  /** Throws `changed` when the open file is no longer the version it was opened at. */
+  assertUnchanged(): void {
+    if (this.fd < 0) throw new ScopeSafeError('io', 'file closed');
+    let st: fs.BigIntStats;
+    try {
+      st = fs.fstatSync(this.fd, { bigint: true });
+    } catch (error) {
+      throw mapNodeError(error);
+    }
+    const now: ScopeFileVersion = {
+      dev: st.dev.toString(),
+      ino: st.ino.toString(),
+      size: Number(st.size),
+      mtimeMs: Number(st.mtimeMs),
+    };
+    if (!sameScopeFileVersion(now, this.version)) throw new ScopeSafeError('changed', 'the file changed while it was read');
+  }
+
+  /**
+   * Up to `length` bytes starting at `offset`, never past the end of the
+   * version that was opened. `length` is capped at SCOPE_FILE_MAX_RANGE_BYTES.
+   */
+  readAt(offset: number, length: number): Uint8Array {
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0) {
+      throw new ScopeSafeError('io', 'bad range');
+    }
+    if (length > SCOPE_FILE_MAX_RANGE_BYTES) throw new ScopeSafeError('too_large', 'range too large');
+    this.assertUnchanged();
+    const end = Math.min(this.version.size, offset + length);
+    if (offset >= end) return new Uint8Array(0);
+    const out = Buffer.allocUnsafe(end - offset);
+    let filled = 0;
+    try {
+      while (filled < out.length) {
+        const read = fs.readSync(this.fd, out, filled, out.length - filled, offset + filled);
+        if (read === 0) break;
+        filled += read;
+      }
+    } catch (error) {
+      throw mapNodeError(error);
+    }
+    if (filled < out.length) throw new ScopeSafeError('changed', 'the file is shorter than it was');
+    return new Uint8Array(out.buffer, out.byteOffset, filled);
+  }
+
+  close(): void {
+    if (this.fd >= 0) {
+      try { fs.closeSync(this.fd); } catch { /* already closed */ }
+      this.fd = -1;
     }
   }
 }
