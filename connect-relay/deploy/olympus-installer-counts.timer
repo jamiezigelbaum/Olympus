@@ -1,0 +1,11 @@
+# Hourly: a download's log line lives an hour at most.
+[Unit]
+Description=Hourly installer download counts
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

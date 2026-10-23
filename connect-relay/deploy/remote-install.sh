@@ -27,6 +27,14 @@ install -m 0644 "$SRC/BUILD_SHA" "/opt/olympus-relay/olympus-relay-${SHORT}.sha"
 ln -sfn "/opt/olympus-relay/olympus-relay-${SHORT}" /usr/local/bin/olympus-relay
 
 install -m 0644 "$SRC/olympus-relay.service" /etc/systemd/system/olympus-relay.service
+# Hourly installer download counts (server/installer-counts.ts); Caddy writes
+# the download log they read into /var/log/caddy, which the package creates.
+install -m 0644 "$SRC/olympus-installer-counts.service" /etc/systemd/system/olympus-installer-counts.service
+install -m 0644 "$SRC/olympus-installer-counts.timer" /etc/systemd/system/olympus-installer-counts.timer
+install -d -m 0755 -o caddy -g caddy /var/log/caddy
+# Created as caddy before `caddy validate` (run as root) opens it, so the
+# running Caddy, which writes it as caddy, can still open it after a reload.
+[ -e /var/log/caddy/olympus-installers.log ] || install -m 0600 -o caddy -g caddy /dev/null /var/log/caddy/olympus-installers.log
 # Caddy's admin socket directory (/run/caddy, see the Caddyfile's `admin`).
 install -d -m 0755 /etc/systemd/system/caddy.service.d
 install -m 0644 "$SRC/caddy-admin.conf" /etc/systemd/system/caddy.service.d/olympus-admin.conf
@@ -45,6 +53,7 @@ systemctl restart systemd-journald
 
 systemctl daemon-reload
 systemctl enable olympus-relay.service >/dev/null
+systemctl enable --now olympus-installer-counts.timer >/dev/null
 systemctl restart olympus-relay.service
 # A reload reaches the running Caddy over the admin address in the NEW
 # config; the first deploy that moves admin from TCP to the Unix socket finds

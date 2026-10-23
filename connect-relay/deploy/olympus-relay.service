@@ -1,8 +1,9 @@
 # Olympus relay v2. Installed by deploy/deploy.sh.
 # Binary:  /usr/local/bin/olympus-relay -> /opt/olympus-relay/olympus-relay-<sha> (bun build --compile)
-# State:   /var/lib/olympus-relay (registry.jsonl, admin.sock)
+# State:   /var/lib/olympus-relay (registry.jsonl, usage.json, admin.sock)
 # Front:   Caddy terminates TLS for mcp.olympusplugin.ai and proxies to 127.0.0.1:8787.
-# Operator: sudo -u relay olympus-relay admin status | revoke <install-id> | restore <install-id>
+# Operator: sudo -u relay olympus-relay admin status | usage [--json] | revoke <install-id> | restore <install-id>
+#           | internal <install-id> | external <install-id>
 
 [Unit]
 Description=Olympus relay (mcp.olympusplugin.ai)

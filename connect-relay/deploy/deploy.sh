@@ -54,7 +54,7 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 
 echo "Building olympus-relay ${SHORT} for linux-x64"
 bun build --compile --target=bun-linux-x64 "$ROOT/connect-relay/server/main.ts" --outfile "$BUILD_DIR/olympus-relay-${SHORT}"
-cp "$DEPLOY_DIR/olympus-relay.service" "$DEPLOY_DIR/Caddyfile" "$DEPLOY_DIR/caddy-admin.conf" "$DEPLOY_DIR/remote-install.sh" "$BUILD_DIR/"
+cp "$DEPLOY_DIR/olympus-relay.service" "$DEPLOY_DIR/olympus-installer-counts.service" "$DEPLOY_DIR/olympus-installer-counts.timer" "$DEPLOY_DIR/Caddyfile" "$DEPLOY_DIR/caddy-admin.conf" "$DEPLOY_DIR/remote-install.sh" "$BUILD_DIR/"
 cp "$ROOT/site/deploy/Caddyfile.site" "$BUILD_DIR/olympus-site.caddy"
 printf '%s\n' "$SHA" > "$BUILD_DIR/BUILD_SHA"
 

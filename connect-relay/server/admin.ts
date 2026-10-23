@@ -2,23 +2,29 @@
  * Operator commands for a running relay, over a local Unix socket.
  *
  *   olympus-relay admin status
+ *   olympus-relay admin usage [--json]
  *   olympus-relay admin revoke <install-id>
  *   olympus-relay admin restore <install-id>
+ *   olympus-relay admin internal <install-id>
+ *   olympus-relay admin external <install-id>
  *
  * (`bun server/admin.ts ...` from a source checkout.) Run it on the relay host
  * as the service user, for example `sudo -u relay olympus-relay admin status`.
  * The socket lives in the relay's 0700 state directory and is itself 0600, so
  * only that user and root can reach it; nothing here listens on the network.
  *
- * `status` prints counts only and names no install. `revoke` records the
+ * `status` prints counts only and names no install. `usage` prints the daily
+ * usage totals (server/usage.ts), counts only too; `internal` marks one of the
+ * team's own installs so those totals leave it out, `external` undoes that. `revoke` records the
  * revocation durably (fsync) before it answers, ends the install's session,
  * and refuses the id from then on (an install otherwise re-registers by
  * itself). No restart. If the relay is not running, `revoke` records the
  * revocation in the registry log instead and the relay applies it on its next
  * start; `status` then reads the log.
  *
- * Paths: RELAY_ADMIN_SOCKET (default `<registry dir>/admin.sock`) and
- * RELAY_REGISTRY_PATH (default `/var/lib/olympus-relay/registry.jsonl`).
+ * Paths: RELAY_ADMIN_SOCKET (default `<registry dir>/admin.sock`),
+ * RELAY_REGISTRY_PATH (default `/var/lib/olympus-relay/registry.jsonl`) and
+ * RELAY_USAGE_PATH (default `<registry dir>/usage.json`).
  */
 import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, unlinkSync } from 'node:fs';
 import net from 'node:net';
@@ -26,6 +32,7 @@ import { dirname, join } from 'node:path';
 import { INSTALL_ID_PATTERN } from '../shared/protocol.ts';
 import { appendOfflineRevocation, readRegistrySnapshot } from './registry.ts';
 import type { RelayHandle, RelayStatus, RevokeResult } from './relay.ts';
+import { readUsageFile, type UsageDay } from './usage.ts';
 
 const MAX_ADMIN_LINE_BYTES = 4096;
 
@@ -62,20 +69,28 @@ export const DEFAULT_REGISTRY_PATH = '/var/lib/olympus-relay/registry.jsonl';
 
 export type AdminRequest =
   | { op: 'status' }
+  | { op: 'usage' }
   | { op: 'revoke'; installId: string }
-  | { op: 'restore'; installId: string };
+  | { op: 'restore'; installId: string }
+  | { op: 'internal' | 'external'; installId: string };
 
 export type AdminResponse =
   | { ok: true; op: 'status'; status: RelayStatus }
   | { ok: true; op: 'revoke'; result: RevokeResult }
   | { ok: true; op: 'restore'; restored: boolean }
+  | { ok: true; op: 'usage'; days: UsageDay[] }
+  | { ok: true; op: 'internal' | 'external'; changed: boolean }
   | { ok: false; error: string };
 
 export function adminSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   return env.RELAY_ADMIN_SOCKET ?? join(dirname(env.RELAY_REGISTRY_PATH ?? DEFAULT_REGISTRY_PATH), 'admin.sock');
 }
 
-type AdminTarget = Pick<RelayHandle, 'status' | 'revoke' | 'restore'>;
+export function usagePath(env: NodeJS.ProcessEnv = process.env): string {
+  return env.RELAY_USAGE_PATH ?? join(dirname(env.RELAY_REGISTRY_PATH ?? DEFAULT_REGISTRY_PATH), 'usage.json');
+}
+
+type AdminTarget = Pick<RelayHandle, 'status' | 'revoke' | 'restore' | 'usage' | 'setInternal'>;
 
 /**
  * Serves operator requests on a Unix socket at `path` (mode 0600). `relay` may
@@ -111,11 +126,15 @@ export async function startAdminSocket(path: string, relay: AdminTarget | (() =>
     if (!relay) return { ok: false, error: 'the relay is starting; try again in a few seconds' };
     try {
       if (message.op === 'status') return { ok: true, op: 'status', status: relay.status() };
+      if (message.op === 'usage') return { ok: true, op: 'usage', days: relay.usage() };
       const installId = typeof message.installId === 'string' ? message.installId : '';
       if (!INSTALL_ID_PATTERN.test(installId)) return { ok: false, error: 'installId must be a 32-character install id' };
       if (message.op === 'revoke') return { ok: true, op: 'revoke', result: await relay.revoke(installId) };
       if (message.op === 'restore') return { ok: true, op: 'restore', restored: await relay.restore(installId) };
-      return { ok: false, error: 'op must be status, revoke or restore' };
+      if (message.op === 'internal' || message.op === 'external') {
+        return { ok: true, op: message.op, changed: await relay.setInternal(installId, message.op === 'internal') };
+      }
+      return { ok: false, error: 'op must be status, usage, revoke, restore, internal or external' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -177,6 +196,7 @@ export function formatStatus(status: RelayStatus, running = true): string {
     );
   }
   lines.push(`Revoked installs:           ${status.revoked}`);
+  lines.push(`Internal installs:          ${status.internal}`);
   return `${lines.join('\n')}\n`;
 }
 
@@ -190,7 +210,26 @@ export function formatRevoke(result: RevokeResult): string {
   return `${parts.join(' ')}\n`;
 }
 
-const USAGE = 'Usage: olympus-relay admin status | revoke <install-id> | restore <install-id>\n';
+/** Days as a table, newest last. */
+export function formatUsage(days: readonly UsageDay[]): string {
+  if (days.length === 0) return 'No usage recorded yet.\n';
+  const header = 'Day         Active  New  Back  Gone  Requests  Registered  7-day  30-day';
+  const rows = days.map((day) => [
+    day.day.padEnd(10),
+    String(day.active).padStart(7),
+    String(day.newInstalls).padStart(4),
+    String(day.returning).padStart(5),
+    String(day.removed).padStart(5),
+    String(day.requests).padStart(9),
+    String(day.registered).padStart(11),
+    String(day.active7).padStart(6),
+    String(day.active30).padStart(7),
+  ].join(' '));
+  return `${[header, ...rows].join('\n')}\n`;
+}
+
+const USAGE = 'Usage: olympus-relay admin status | usage [--json] | revoke <install-id> | restore <install-id> | internal <install-id> | external <install-id>\n';
+const ID_OPS = new Set(['revoke', 'restore', 'internal', 'external']);
 
 export async function runAdmin(
   argv: readonly string[],
@@ -198,16 +237,23 @@ export async function runAdmin(
   /** The caller's uid (tests); defaults to this process's. */
   uid: number | undefined = process.getuid?.(),
 ): Promise<{ code: number; out: string }> {
-  const [op, installId, ...extra] = argv;
-  if (extra.length > 0 || !(op === 'status' ? installId === undefined : (op === 'revoke' || op === 'restore') && installId !== undefined)) {
-    return { code: 2, out: USAGE };
-  }
+  const [op, argument, ...extra] = argv;
+  const json = op === 'usage' && argument === '--json';
+  const installId = op !== undefined && ID_OPS.has(op) ? argument : undefined;
+  const valid = op === 'status'
+    ? argument === undefined
+    : op === 'usage'
+      ? argument === undefined || json
+      : op !== undefined && ID_OPS.has(op) && argument !== undefined;
+  if (extra.length > 0 || !valid) return { code: 2, out: USAGE };
   if (installId !== undefined && !INSTALL_ID_PATTERN.test(installId)) {
     return { code: 2, out: 'An install id is 32 characters of a-z and 2-7.\n' };
   }
   const socketPath = adminSocketPath(env);
   const registryPath = env.RELAY_REGISTRY_PATH ?? DEFAULT_REGISTRY_PATH;
-  const request: AdminRequest = op === 'status' ? { op } : { op: op as 'revoke' | 'restore', installId: installId! };
+  const request: AdminRequest = op === 'status' || op === 'usage'
+    ? { op }
+    : { op: op as 'revoke' | 'restore' | 'internal' | 'external', installId: installId! };
   let response: AdminResponse;
   try {
     response = await adminRequest(socketPath, request);
@@ -221,6 +267,11 @@ export async function runAdmin(
       const counts = readRegistrySnapshot(registryPath).counts();
       return { code: 0, out: formatStatus({ ...counts, online: 0, inFlight: 0, uploading: 0, heldRequestBytes: 0, queuedBytes: 0, startedAt: '' }, false) };
     }
+    if (request.op === 'usage') {
+      const days = readUsageFile(usagePath(env));
+      return { code: 0, out: json ? `${JSON.stringify({ running: false, days })}\n` : `Relay not running (last saved totals)\n${formatUsage(days)}` };
+    }
+    if (request.op === 'internal' || request.op === 'external') return { code: 1, out: 'The relay is not running; start it, then try again.\n' };
     if (request.op === 'revoke') {
       // Only the service user writes the log: an append by root (or anyone
       // else) could create a registry the relay then cannot open or rewrite.
@@ -246,7 +297,11 @@ export async function runAdmin(
   }
   if (!response.ok) return { code: 1, out: `The relay refused: ${response.error}\n` };
   if (response.op === 'status') return { code: 0, out: formatStatus(response.status) };
+  if (response.op === 'usage') return { code: 0, out: json ? `${JSON.stringify({ running: true, days: response.days })}\n` : formatUsage(response.days) };
+  if (response.op === 'internal') return { code: 0, out: response.changed ? `Marked ${installId} internal; usage totals leave it out.\n` : `${installId} is not registered or already internal.\n` };
+  if (response.op === 'external') return { code: 0, out: response.changed ? `${installId} counts in usage totals again.\n` : `${installId} is not registered or not internal.\n` };
   if (response.op === 'revoke') return { code: 0, out: formatRevoke(response.result) };
+  if (response.op !== 'restore') return { code: 1, out: 'The relay gave an unexpected answer.\n' };
   return { code: 0, out: response.restored ? `Restored ${installId}; it may register again.\n` : `${installId} was not revoked.\n` };
 }
 
