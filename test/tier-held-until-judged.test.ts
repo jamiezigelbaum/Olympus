@@ -112,8 +112,8 @@ test('held questions queue behind every live question, own records included', ()
   expect(contentQuestions().map((request) => request.priority)).toEqual([HELD_UNTIL_JUDGED_PRIORITY, HELD_UNTIL_JUDGED_PRIORITY]);
   expect(contentQuestions()[0]!.flags).toContain(HELD_UNTIL_JUDGED_REASON);
   requests.length = 0;
-  // A names question of a held item waits behind live ones too.
-  classifyItemTiers({ signals: { title: 'Biopsy results' }, text: ORDINARY, holdUntilJudged: true }, { sniffer: waiting });
+  // A names question of a held item (a structured value in its name) waits behind live ones too.
+  classifyItemTiers({ signals: { title: 'Scan SSN 123-45-6789' }, text: ORDINARY, holdUntilJudged: true }, { sniffer: waiting });
   expect(requests.find((request) => request.pass === 'metadata')?.priority).toBe(HELD_UNTIL_JUDGED_PRIORITY);
   requests.length = 0;
   classifyItemTiers({ signals: { title: 'Lab report' }, text: 'Patient: Morgan Example\nGlucose 93 mg/dL.' }, { sniffer: waiting });
