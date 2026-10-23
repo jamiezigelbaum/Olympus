@@ -422,6 +422,32 @@ describe('imports asked for', () => {
     // Dismiss only clears a finished check: no "Declined." line.
     expect(page.text()).not.toContain(A.declined);
   });
+
+  test('a check can be cancelled, and one that ended without importing can be tried again', async () => {
+    const FAILED = 'ae5d4c3b-8a7f-4e9d-8c1b-5f6a7b8c9da4';
+    let answer = dashboard('archives-checking', meta([ARCHIVE], [
+      { ...REQUEST, origin: 'dashboard', status: 'checking' },
+      { ...REQUEST, id: FAILED, name: 'Moved.mbox', origin: 'dashboard', status: 'failed', code: 'replaced' },
+    ]));
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => answer,
+      [ARCHIVE_DECLINE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Cancelled.' }], structuredContent: { ok: true } }),
+      [ARCHIVE_APPROVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: 'Moved.mbox' } }),
+    });
+    expect(page.text()).toContain(fill(A.failedLine, { name: 'Moved.mbox', reason: A.failed.replaced }));
+    answer = dashboard('archives-checking', meta([ARCHIVE], [{ ...REQUEST, id: FAILED, name: 'Moved.mbox', origin: 'dashboard', status: 'failed', code: 'replaced' }]));
+    page.button(A.cancel).click();
+    await settle(30);
+    expect(page.calls(ARCHIVE_DECLINE_TOOL_NAME)).toEqual([{ name: ARCHIVE_DECLINE_TOOL_NAME, arguments: { request_id: REQUEST.id } }]);
+    expect(page.text()).toContain(fill(A.cancelled, { name: REQUEST.name }));
+    expect(page.hasButton(A.cancel)).toBe(false);
+
+    answer = dashboard('archives-checking', meta([ARCHIVE], []));
+    page.button(A.tryAgain).click();
+    await settle(30);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([{ name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { request_id: FAILED } }]);
+    expect(page.text()).toContain(fill(A.started, { name: 'Moved.mbox' }));
+  });
 });
 
 describe('Needs you for imports', () => {
@@ -482,6 +508,45 @@ describe('Needs you for imports', () => {
     expect(why.textContent).toContain(fill(A.unreadable.why.damaged, { file }));
     expect(why.textContent).toContain(A.unreadable.kept);
     expect(why.textContent).toContain(A.unreadable.fix.damaged);
+  });
+
+  test('a check that ended without importing: a Needs you line whose See why goes to that request, with Try again', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-failed') });
+    const line = needsYou(page).get(fill(A.needsYou.failed, { name: 'Inbox.mbox' }));
+    expect(line).toBeDefined();
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.seeWhy) as HTMLButtonElement).click();
+    await settle();
+    const request = page.doc.querySelector('li.archive.request[data-request="failed"]')!;
+    expect(request.className).toContain('landed');
+    expect(Array.from(request.querySelectorAll('button')).map((node) => node.textContent)).toEqual([A.tryAgain, A.dismiss]);
+    expect(archivesRow(page).querySelector('.dot')!.className).toContain('tone-warn');
+  });
+
+  test('an archive Olympus cannot count now: never "0 messages", a Needs you line that goes to it', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-uncounted') });
+    const archive = archiveItem(page, 'imported');
+    expect(archive.textContent).toContain(A.countsUnavailable.why);
+    expect(archive.textContent).toContain(A.countsUnavailable.fix);
+    expect(archive.textContent).not.toContain(fill(A.items.many, { n: '0' }));
+    expect(archive.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
+    const line = needsYou(page).get(fill(A.needsYou.counts, { name: TAKEOUT }));
+    expect(line).toBeDefined();
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.seeWhy) as HTMLButtonElement).click();
+    await settle();
+    expect(archiveItem(page, 'imported').className).toContain('landed');
+  });
+
+  test('imports this computer\'s settings keep from running: a Needs you line whose See why names the setting and what to do', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-not-running') });
+    const line = needsYou(page).get(A.needsYou.scheduler.disabled);
+    expect(line).toBeDefined();
+    (Array.from(line!.querySelectorAll('button')).find((node) => node.textContent === A.needsYou.seeWhy) as HTMLButtonElement).click();
+    await settle();
+    const why = archivesRow(page).querySelector('details.why') as HTMLDetailsElement;
+    expect(why.open).toBe(true);
+    expect(why.textContent).toContain(A.notRunning.why.disabled);
+    expect(why.textContent).toContain(A.notRunning.fix.disabled);
+    expect(A.notRunning.why.disabled).toContain('worker.scheduler.enabled');
   });
 
   test('an imported archive with everything judged adds nothing to Needs you', async () => {

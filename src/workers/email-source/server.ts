@@ -230,7 +230,12 @@ import {
 import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
 import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
-import { createArchiveImportDashboard, type ArchivePrivateModelState } from '../archive-import/dashboard.ts';
+import {
+  archiveImportScheduling,
+  archivePrivateModelFromSniffer,
+  createArchiveImportDashboard,
+  type ArchivePrivateModelState,
+} from '../archive-import/dashboard.ts';
 import { archiveLaneLegs } from '../archive-import/lane.ts';
 import { withArchiveImportCorpora } from '../archive-import/store.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
@@ -4482,6 +4487,10 @@ export async function main(): Promise<void> {
       ).sources);
     },
     privateModel: () => archivePrivateModelState(),
+    // Without the scheduler, or with a source list that leaves archives out,
+    // nothing runs an import or a removal: approving one is refused, and one
+    // already waiting says which setting under Needs you.
+    scheduling: () => (sourceScheduler ? archiveImportScheduling(olympusConfig.worker.scheduler) : 'disabled'),
   });
   archiveImportDashboard.resume();
   // Built-in transcription installs only when the chosen sources contain
@@ -5973,12 +5982,7 @@ export async function main(): Promise<void> {
   }
   classificationBusy = () => tierSniffer?.hasPriority ?? false;
   tierSnifferBacklog = tierSniffer ? () => tierSniffer.backlog() : undefined;
-  archivePrivateModelState = () => {
-    if (!tierSniffer) return 'off';
-    const reason = tierSniffer.status().waiting?.reason;
-    // A pass running or yielding to an answer is the model at work.
-    return reason === undefined || reason === 'yielding_to_answers' || reason === 'pass_running' ? 'ready' : 'waiting';
-  };
+  archivePrivateModelState = () => archivePrivateModelFromSniffer(tierSniffer);
   tierSniffer?.start();
 
   // The worker owns a background tick that outlives any request, so the process

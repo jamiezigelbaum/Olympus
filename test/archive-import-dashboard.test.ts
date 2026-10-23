@@ -33,8 +33,17 @@ import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts'
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { withWorkerBearerAuth } from '../src/workers/http.ts';
-import { createArchiveImportDashboard, type ArchivePrivateModelState } from '../src/workers/archive-import/dashboard.ts';
+import { DASHBOARD_LOCAL_CONTROL_SESSION_PATH, withWorkerBearerAuth } from '../src/workers/http.ts';
+import { recordRequestPeer } from '../src/core/request-peer.ts';
+import {
+  archiveImportScheduling,
+  createArchiveImportDashboard,
+  type ArchivePrivateModelState,
+  type ArchiveSchedulingState,
+} from '../src/workers/archive-import/dashboard.ts';
+import { configWithEnvironmentOverrides, defaultConfig } from '../src/core/config.ts';
+import { dataDeleteCustody } from '../src/data-lifecycle.ts';
+import { ARCHIVE_IMPORTS_STATE_PATH_ENV } from '../src/workers/archive-import/state.ts';
 import { runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
@@ -125,15 +134,30 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
   // A check reads a slice, then waits here: held, it stays "checking" until released.
   let hold: Promise<void> | undefined;
   let release = () => undefined as void;
-  const dashboard = createArchiveImportDashboard({
-    runtime,
-    browser,
-    refreshScheduler: () => { refreshes += 1; },
-    privateModel: () => model,
-    pause: () => hold ?? Promise.resolve(),
-    home,
-  });
-  cleanups.push(() => dashboard.close());
+  let scheduling: ArchiveSchedulingState = 'on';
+  // The dashboard counts through the runtime's lanes; broken, every count fails.
+  let countsBroken = false;
+  const counting: ArchiveImportRuntime = {
+    ...runtime,
+    lane: (family) => {
+      if (countsBroken) throw new Error('The index could not be opened.');
+      return runtime.lane(family);
+    },
+  };
+  const open = () => {
+    const opened = createArchiveImportDashboard({
+      runtime: counting,
+      browser,
+      refreshScheduler: () => { refreshes += 1; },
+      privateModel: () => model,
+      scheduling: () => scheduling,
+      pause: () => hold ?? Promise.resolve(),
+      home,
+    });
+    cleanups.push(() => opened.close());
+    return opened;
+  };
+  const dashboard = open();
   const write = (name: string, text: string, folder = exports): string => {
     const path = join(folder, name);
     writeFileSync(path, text);
@@ -145,7 +169,19 @@ function fixture(options: { model?: ArchivePrivateModelState } = {}) {
     setModel: (next: ArchivePrivateModelState) => { model = next; },
     holdChecks: () => { hold = new Promise<void>((resolve) => { release = resolve; }); },
     releaseChecks: () => { hold = undefined; release(); },
+    setScheduling: (next: ArchiveSchedulingState) => { scheduling = next; },
+    breakCounts: (broken: boolean) => { countsBroken = broken; },
+    /** The dashboard as a restarted Olympus builds it, over the same files. */
+    reopen: open,
   };
+}
+
+async function until(done: () => boolean): Promise<void> {
+  for (let tries = 0; tries < 500; tries += 1) {
+    if (done()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out');
 }
 
 async function importAll(runtime: ArchiveImportRuntime, archiveId: string): Promise<void> {
@@ -227,7 +263,6 @@ describe('approving an import', () => {
     // A second press while it checks is the same check.
     expect(await approveKey(f, join(f.home, 'Desktop', 'Big copy.mbox'))).toMatchObject({ status: 'checking' });
     expect(f.dashboard.view().requests).toHaveLength(1);
-    expect(f.dashboard.decline(checking.ok && checking.status === 'checking' ? checking.request_id : '')).toMatchObject({ ok: false, code: 'checking' });
 
     f.releaseChecks();
     await f.dashboard.idle();
@@ -348,6 +383,15 @@ describe('the Archives row\'s list', () => {
       { kind: 'attachments_not_read', count: 1, file: 'Inbox' },
       { kind: 'message_too_large', count: 2, file: 'Sent' },
     ]);
+    // Gaps counted before the record kept them per file stay, as what no file accounts for.
+    record.findings.gaps = { attachments_not_read: 4, message_too_large: 2, text_cut: 3 };
+    writeFileSync(statePath, JSON.stringify(saved));
+    expect(f.dashboard.view().archives[0]!.gaps).toEqual([
+      { kind: 'attachments_not_read', count: 1, file: 'Inbox' },
+      { kind: 'message_too_large', count: 2, file: 'Sent' },
+      { kind: 'attachments_not_read', count: 3 },
+      { kind: 'text_cut', count: 3 },
+    ]);
   });
 });
 
@@ -364,7 +408,7 @@ describe('what the imports need from the person', () => {
     expect(f.dashboard.present().attention).toEqual([{ kind: 'request', id: asked.request_id, name: 'Other.mbox' }]);
     // The person's own approval while it is checked is not waiting on them.
     expect(f.dashboard.decline(asked.request_id)).toEqual({ ok: true });
-    requests.addChecking(f.write('Mine.mbox', mbox([mail(2)])));
+    requests.addChecking(f.write('Mine.mbox', mbox([mail(2)])), { root_identity: { dev: '1', ino: '2' }, manifest_sha256: 'a'.repeat(64) });
     expect(f.dashboard.present()).toEqual({ archives: 1, importing: false });
   });
 
@@ -417,6 +461,166 @@ describe('what the imports need from the person', () => {
   }
 });
 
+describe('a check of a possible copy', () => {
+  async function importedBig(f: ReturnType<typeof fixture>) {
+    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const first = await approveKey(f, f.write('Big.mbox', text));
+    if (!first.ok || first.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, first.archive_id);
+    return { first, text };
+  }
+
+  test('Cancel stops it and nothing is imported, though the file differs inside', async () => {
+    const f = fixture();
+    const { text } = await importedBig(f);
+    const middle = Math.floor(text.length / 2);
+    const twin = f.write('Twin.mbox', `${text.slice(0, middle)}y${text.slice(middle + 1)}`);
+    f.holdChecks();
+    const checking = await approveKey(f, twin);
+    if (!checking.ok || checking.status !== 'checking') throw new Error('expected a check');
+    expect(f.dashboard.decline(checking.request_id)).toEqual({ ok: true });
+    f.releaseChecks();
+    await f.dashboard.idle();
+    expect(f.dashboard.view().requests).toEqual([]);
+    expect(f.runtime.state.list().map((record) => record.label)).toEqual(['Big.mbox']);
+  });
+
+  test('an import removed while the check reads it holds nothing any more: the approved import is recorded', async () => {
+    const f = fixture();
+    const { first } = await importedBig(f);
+    mkdirSync(join(f.home, 'Desktop'));
+    const copy = join(f.home, 'Desktop', 'Big copy.mbox');
+    copyFileSync(join(f.exports, 'Big.mbox'), copy);
+    f.holdChecks();
+    expect(await approveKey(f, copy)).toMatchObject({ ok: true, status: 'checking' });
+    expect(f.dashboard.remove(first.archive_id)).toEqual({ ok: true });
+    f.releaseChecks();
+    await f.dashboard.idle();
+    expect(f.dashboard.view().requests).toEqual([]);
+    expect(f.runtime.state.list().map((record) => [record.label, record.status])).toEqual([
+      ['Big.mbox', 'removing'],
+      ['Big copy.mbox', 'importing'],
+    ]);
+  });
+
+  test('cut short by a restart, it resumes only against what the person approved; a file replaced meanwhile goes under Needs you with Try again', async () => {
+    const f = fixture();
+    await importedBig(f);
+    mkdirSync(join(f.home, 'Desktop'));
+    const copy = join(f.home, 'Desktop', 'Big copy.mbox');
+    copyFileSync(join(f.exports, 'Big.mbox'), copy);
+    f.holdChecks();
+    const checking = await approveKey(f, copy);
+    if (!checking.ok || checking.status !== 'checking') throw new Error('expected a check');
+    // Olympus stops mid-check, and the file is replaced before it starts again.
+    f.dashboard.close();
+    f.releaseChecks();
+    await f.dashboard.idle();
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ id: checking.request_id, status: 'checking' })]);
+    writeFileSync(copy, mbox([mail(5, { tag: 'other' })]));
+
+    const restarted = f.reopen();
+    restarted.resume();
+    await until(() => restarted.view().requests[0]?.status !== 'checking');
+    expect(restarted.view().requests).toEqual([expect.objectContaining({ id: checking.request_id, status: 'failed', code: 'replaced' })]);
+    expect(f.runtime.state.list()).toHaveLength(1);
+    // The person's own approval that ended without importing is theirs to see.
+    expect(restarted.present().attention).toEqual([{ kind: 'failed', id: checking.request_id, name: 'Big copy.mbox' }]);
+
+    // Try again: the file as it is now.
+    expect(await restarted.approve({ requestId: checking.request_id })).toMatchObject({ ok: true, status: 'started', name: 'Big copy.mbox' });
+    expect(restarted.view().requests).toEqual([]);
+    expect(f.runtime.state.list().map((record) => record.label)).toEqual(['Big.mbox', 'Big copy.mbox']);
+    expect(restarted.present().attention).toBeUndefined();
+  });
+
+  test('the CLI delete of imported archives waits for every check, and for a list of checks it cannot read', () => {
+    const f = fixture();
+    const custody = () => dataDeleteCustody({
+      sourceId: 'archive.imports',
+      homeDir: f.home,
+      env: { ...f.env, [ARCHIVE_IMPORTS_STATE_PATH_ENV]: f.runtime.state.path },
+      connectedRegistry: { version: 1, handles: [] },
+    });
+    expect(custody()).toMatchObject({ ready: true });
+    const requests = new ArchiveImportRequestStore({ path: archiveImportRequestsPath(f.runtime.state.path) });
+    const checking = requests.addChecking(f.write('Mine.mbox', mbox([mail(0)])), { root_identity: { dev: '1', ino: '2' }, manifest_sha256: 'a'.repeat(64) });
+    // Approved and still being checked: its import could land after the delete.
+    expect(custody()).toMatchObject({ ready: false, observed: 'connected', next_action: expect.stringContaining('cancel any import still being checked') });
+    writeFileSync(requests.path, '{ not json');
+    expect(custody()).toMatchObject({ ready: false, observed: 'connected' });
+    writeFileSync(requests.path, JSON.stringify({ version: 1, requests: [] }));
+    expect(custody()).toMatchObject({ ready: true });
+    expect(checking.status).toBe('checking');
+  });
+
+  test('cut short by a restart with nothing changed, it resumes and finds the copy', async () => {
+    const f = fixture();
+    const { first } = await importedBig(f);
+    mkdirSync(join(f.home, 'Desktop'));
+    const copy = join(f.home, 'Desktop', 'Big copy.mbox');
+    copyFileSync(join(f.exports, 'Big.mbox'), copy);
+    f.holdChecks();
+    expect(await approveKey(f, copy)).toMatchObject({ ok: true, status: 'checking' });
+    f.dashboard.close();
+    f.releaseChecks();
+    await f.dashboard.idle();
+
+    const restarted = f.reopen();
+    restarted.resume();
+    await until(() => restarted.view().requests[0]?.status !== 'checking');
+    expect(restarted.view().requests).toEqual([expect.objectContaining({ status: 'already_imported', archiveId: first.archive_id })]);
+    expect(f.runtime.state.list()).toHaveLength(1);
+  });
+});
+
+describe('when this computer\'s settings keep imports from running', () => {
+  for (const setting of ['disabled', 'not_selected'] as const) {
+    test(`background reading ${setting === 'disabled' ? 'off' : 'leaving out archives'}: Import and Remove are refused, naming the setting, and an import already waiting is under Needs you`, async () => {
+      const f = fixture();
+      const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0)])));
+      if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+      f.setScheduling(setting);
+      const named = setting === 'disabled' ? 'worker.scheduler.enabled' : 'worker.scheduler.sourceIds';
+      expect(await approveKey(f, f.write('Other.mbox', mbox([mail(1, { tag: 'b' })])))).toMatchObject({
+        ok: false, code: 'imports_not_running', message: expect.stringContaining(named),
+      });
+      expect(f.dashboard.remove(started.archive_id)).toMatchObject({ ok: false, code: 'imports_not_running', message: expect.stringContaining(named) });
+      expect(f.runtime.state.list().map((record) => record.status)).toEqual(['importing']);
+      expect(f.dashboard.view().notRunning).toBe(setting);
+      expect(f.dashboard.present().attention).toEqual([{ kind: 'scheduler', setting }]);
+      // Nothing left for the scheduler to run: nothing to say.
+      await importAll(f.runtime, started.archive_id);
+      expect(f.dashboard.view().notRunning).toBeUndefined();
+      expect(f.dashboard.present()).toEqual({ archives: 1, importing: false });
+    });
+  }
+
+  test('the worker\'s scheduler settings say which', () => {
+    const scheduler = (env: Record<string, string>) => configWithEnvironmentOverrides(defaultConfig(), env).worker.scheduler;
+    expect(archiveImportScheduling(scheduler({ OLYMPUS_WORKER_SCHEDULER_ENABLED: 'false' }))).toBe('disabled');
+    expect(archiveImportScheduling(scheduler({ OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true' }))).toBe('on');
+    expect(archiveImportScheduling(scheduler({ OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true', OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS: 'gmail.email' }))).toBe('not_selected');
+    expect(archiveImportScheduling(scheduler({ OLYMPUS_WORKER_SCHEDULER_ENABLED: 'true', OLYMPUS_WORKER_SCHEDULER_SOURCE_IDS: 'gmail.email,archive.imports' }))).toBe('on');
+  });
+});
+
+describe('counts that cannot be read', () => {
+  test('an archive whose index cannot be opened says so under Needs you, never as no messages', async () => {
+    const f = fixture();
+    const started = await approveKey(f, f.write('Takeout.mbox', mbox([mail(0), mail(1)])));
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    await importAll(f.runtime, started.archive_id);
+    expect(f.dashboard.view().archives[0]).toMatchObject({ items: 2 });
+    f.breakCounts(true);
+    expect(f.dashboard.view().archives[0]).toMatchObject({ countsUnavailable: true });
+    expect(f.dashboard.present().attention).toEqual([{ kind: 'counts', id: started.archive_id, name: 'Takeout.mbox' }]);
+    f.breakCounts(false);
+    expect(f.dashboard.view().archives[0]!.countsUnavailable).toBeUndefined();
+    expect(f.dashboard.present().attention).toBeUndefined();
+  });
+});
+
 describe('the dashboard routes', () => {
   test('only a control session reaches them, never the read-only token; Remove must be confirmed', async () => {
     const f = fixture();
@@ -446,10 +650,11 @@ describe('the dashboard routes', () => {
     expect((await post(`/dashboard/archive-import/approve?token=${viewToken}`, { key })).status).toBe(401);
     expect(f.dashboard.view().archives).toEqual([]);
 
-    const mint = await guarded(new Request(`${origin}/dashboard/control/session`, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer worker-secret', Origin: origin },
-    }));
+    // This computer's own session (the local unlock; archive-import-local-session.test.ts
+    // has the refusals of every other kind).
+    const unlock = new Request(`${origin}${DASHBOARD_LOCAL_CONTROL_SESSION_PATH}`, { method: 'POST', headers: { Origin: origin } });
+    recordRequestPeer(unlock, '127.0.0.1');
+    const mint = await guarded(unlock);
     const control = {
       Cookie: mint.headers.get('Set-Cookie')!.split(';')[0]!,
       'X-Olympus-CSRF': (await mint.json() as { csrf_token: string }).csrf_token,

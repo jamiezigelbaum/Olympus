@@ -1414,7 +1414,13 @@ export interface DashboardImportedArchives {
 export type DashboardImportAttention =
   | { kind: 'stopped'; id: string; name: string }
   | { kind: 'request'; id: string; name: string }
+  /** A check of an approved import that ended without importing it. */
+  | { kind: 'failed'; id: string; name: string }
+  /** An archive whose counts cannot be read now. */
+  | { kind: 'counts'; id: string; name: string }
   | { kind: 'held'; count: number; model: 'off' | 'waiting' }
+  /** An archive is importing or being removed, and the setting named stops it running. */
+  | { kind: 'scheduler'; setting: 'disabled' | 'not_selected' }
   | { kind: 'unreadable'; reason: DashboardImportsUnreadableReason };
 
 /**

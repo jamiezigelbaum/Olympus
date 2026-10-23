@@ -590,6 +590,12 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
       return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
     case 'request':
       return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words.review, archives) };
+    case 'failed':
+      return { id: `archive-request:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'counts':
+      return { id: `archive:${entry.id}`, sentence, fix: helpLinkFix(words.seeWhy, archives) };
+    case 'scheduler':
+      return { id: 'archives:scheduler', sentence, fix: helpLinkFix(words.seeWhy, archives) };
     case 'held':
       return {
         id: 'archives:held',
@@ -1188,10 +1194,12 @@ function importsAttention(input: readonly DashboardImportAttention[] | undefined
   const out: DashboardImportAttention[] = [];
   for (const entry of input) {
     if (!entry || typeof entry !== 'object') continue;
-    if ((entry.kind === 'stopped' || entry.kind === 'request') && typeof entry.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
+    if ((entry.kind === 'stopped' || entry.kind === 'request' || entry.kind === 'failed' || entry.kind === 'counts') && typeof entry.id === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(entry.id) && name(entry.name)) {
       out.push({ kind: entry.kind, id: entry.id, name: name(entry.name) });
     } else if (entry.kind === 'held' && finite(entry.count) && entry.count > 0 && (entry.model === 'off' || entry.model === 'waiting')) {
       out.push({ kind: 'held', count: count(entry.count), model: entry.model });
+    } else if (entry.kind === 'scheduler' && (entry.setting === 'disabled' || entry.setting === 'not_selected')) {
+      out.push({ kind: 'scheduler', setting: entry.setting });
     } else if (entry.kind === 'unreadable') {
       out.push({ kind: 'unreadable', reason: IMPORT_UNREADABLE_REASONS.has(entry.reason) ? entry.reason : 'other' });
     }

@@ -245,8 +245,9 @@ export function withWorkerBearerAuth(
       return fetchHandler(request);
     }
     if (hasValidWorkerBearerToken(presentedAuthorization, authToken)) {
-      // Outside help and Private answers: control session only, never the
-      // bearer (see DASHBOARD_CONSULT_CONTROL_PATHS, DASHBOARD_PRIVATE_ANSWERS_PATH).
+      // Outside help, Private answers and archive approvals: control session
+      // only, never the bearer (see DASHBOARD_CONSULT_CONTROL_PATHS,
+      // DASHBOARD_PRIVATE_ANSWERS_PATH, DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS).
       if (isDashboardLocalGradeRoute(request)) return dashboardLocalGradeRefusal(request);
       // The Gateway bridge holds the bearer for every operator it serves, so
       // its mints share one budget.
@@ -589,18 +590,36 @@ function isDashboardPrivateAnswersRoute(request: Request): boolean {
   return request.method === 'POST' && new URL(request.url).pathname === DASHBOARD_PRIVATE_ANSWERS_PATH;
 }
 
-/** Routes only a local-grade control session reaches: Outside help, and Private answers. */
+/**
+ * Importing an archive, declining an agent's request for one, and removing
+ * one (archive-import/dashboard.ts): only the person at this computer's
+ * dashboard approves what Olympus reads, so these take the consult routes'
+ * grade too. Holding the worker bearer (an agent, the Gateway) is not enough.
+ */
+export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
+  '/dashboard/archive-import/approve',
+  '/dashboard/archive-import/decline',
+  '/dashboard/archive-import/remove',
+];
+
+function isDashboardArchiveImportLocalRoute(request: Request): boolean {
+  return request.method === 'POST' && DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS.includes(new URL(request.url).pathname);
+}
+
+/** Routes only a local-grade control session reaches: Outside help, Private answers, and archive approvals. */
 function isDashboardLocalGradeRoute(request: Request): boolean {
-  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request);
+  return isDashboardConsultControlRoute(request) || isDashboardPrivateAnswersRoute(request) || isDashboardArchiveImportLocalRoute(request);
 }
 
 function dashboardLocalGradeRefusal(request: Request): Response {
-  if (!isDashboardPrivateAnswersRoute(request)) return dashboardConsultMacOnlyResponse();
+  if (!isDashboardPrivateAnswersRoute(request) && !isDashboardArchiveImportLocalRoute(request)) return dashboardConsultMacOnlyResponse();
   return new Response(JSON.stringify({
     ok: false,
     error: {
       code: 'mac_dashboard_only',
-      message: 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
+      message: isDashboardArchiveImportLocalRoute(request)
+        ? 'Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
+        : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {
     status: 403,

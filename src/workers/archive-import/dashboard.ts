@@ -27,6 +27,7 @@ import type {
   ComputerArchivesMeta,
 } from '../chatgpt/dashboard-contract.ts';
 import type { LocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
+import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
 import { archiveFileDigestSteps } from './manifest.ts';
 import { requestArchiveRemoval } from './removal.ts';
 import type { ArchiveImportRuntime } from './runtime.ts';
@@ -45,6 +46,7 @@ import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, type ArchiveImportRe
 import {
   ArchiveImportRequestStore,
   archiveImportRequestsPath,
+  type ArchiveImportApproval,
   type ArchiveImportRequest,
 } from './requests.ts';
 
@@ -52,6 +54,37 @@ import {
  * How the private model stands for judging held items.
  */
 export type ArchivePrivateModelState = ComputerArchivesMeta['privateModel'];
+
+/**
+ * How the private model stands, off the tier sniffer's own status: none
+ * built is `off`; asking, or a pass at work, is `ready`; any reason it asks
+ * nothing (not answering, no model, the owner's approval, resting after
+ * failures, the day's budget) is `waiting`.
+ */
+export function archivePrivateModelFromSniffer(
+  sniffer: { status(): { waiting?: { reason: string } } } | undefined,
+): ArchivePrivateModelState {
+  if (!sniffer) return 'off';
+  const reason = sniffer.status().waiting?.reason;
+  return reason === undefined || reason === 'yielding_to_answers' || reason === 'pass_running' ? 'ready' : 'waiting';
+}
+
+/**
+ * Whether the scheduler runs archive imports: `on`, or the setting that
+ * stops it (background reading off, or its source list leaving archives out).
+ */
+export type ArchiveSchedulingState = 'on' | NonNullable<ComputerArchivesMeta['notRunning']>;
+
+/**
+ * Whether the worker's scheduler settings run archive imports: off when the
+ * scheduler is (`worker.scheduler.enabled`), not selected when its source
+ * list (`worker.scheduler.sourceIds`) is not empty and leaves archives out.
+ */
+export function archiveImportScheduling(scheduler: { enabled: boolean; sourceIds: readonly string[] }): ArchiveSchedulingState {
+  if (!scheduler.enabled) return 'disabled';
+  const selected = scheduler.sourceIds.map((sourceId) => sourceId.trim());
+  return selected.length > 0 && !selected.includes(SCHEDULER_SOURCE_IDS.archiveImports) ? 'not_selected' : 'on';
+}
 
 export type ArchiveApproveResult =
   | { ok: true; status: 'started'; archive_id: string; name: string }
@@ -96,6 +129,12 @@ export interface ArchiveImportDashboardOptions {
    */
   privateModel: () => ArchivePrivateModelState;
   /**
+   * Whether the scheduler would run an import or a removal now (default on).
+   * When it would not, approving and removing are refused rather than left
+   * at 0% forever.
+   */
+  scheduling?: () => ArchiveSchedulingState;
+  /**
    * Test seam: the requests' file (default beside the archive record).
    */
   requestsPath?: string;
@@ -124,6 +163,15 @@ export const ARCHIVE_APPROVE_COPY = {
   checking: 'Olympus is still checking this one.',
   unknown_archive: 'This archive is no longer in the list.',
   already_removing: 'This archive is already being removed.',
+} as const;
+
+/**
+ * Why an import or a removal is refused while it would never run: the
+ * setting that stops it, and what to change.
+ */
+export const ARCHIVE_NOT_RUNNING_COPY = {
+  disabled: 'Olympus’s background reading is turned off (the worker.scheduler.enabled setting), so imports and removals never run. Turn it on, restart Olympus, then try again.',
+  not_selected: 'Olympus’s background reading leaves out archives (the worker.scheduler.sourceIds setting does not list archive.imports), so imports and removals never run. Add archive.imports to it, or empty it, restart Olympus, then try again.',
 } as const;
 
 function fill(template: string, values: Record<string, string>): string {
@@ -179,6 +227,19 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   let checks: Promise<void> = Promise.resolve();
   // Requests whose check runs in this process (a `checking` entry not here was left by a restart).
   const running = new Set<string>();
+  // Checks the person cancelled: each stops at its next slice and records nothing.
+  const cancelled = new Set<string>();
+  const scheduling = (): ArchiveSchedulingState => {
+    try {
+      return options.scheduling?.() ?? 'on';
+    } catch {
+      return 'on';
+    }
+  };
+  const notRunning = (): ArchiveApproveResult | undefined => {
+    const setting = scheduling();
+    return setting === 'on' ? undefined : refusal('imports_not_running', ARCHIVE_NOT_RUNNING_COPY[setting]);
+  };
 
   // A path with the home folder shown as ~.
   const shown = (path: string): string => {
@@ -224,14 +285,23 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
               digests.push(step.value);
               break;
             }
-            if (closed) {
+            if (closed || cancelled.has(requestId)) {
               steps.return('');
               return;
             }
             await pause();
           }
         }
-        if (closed) return;
+        if (closed || cancelled.has(requestId)) return;
+        // Recorded only while its request still stands: cancelled, removed
+        // (or a list that cannot be read) records nothing.
+        let current: ArchiveImportRequest | undefined;
+        try {
+          current = requests.get(requestId);
+        } catch {
+          return;
+        }
+        if (!current || current.status !== 'checking') return;
         outcome(requestId, commitArchiveImport(state, prepared, digests));
       } catch (error) {
         if (closed) return;
@@ -243,10 +313,21 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         }
       } finally {
         running.delete(requestId);
+        cancelled.delete(requestId);
         prepared.root.close();
       }
     });
   };
+
+  const approvalOf = (prepared: PreparedArchiveImport): ArchiveImportApproval => ({
+    root_identity: { dev: prepared.record.root_identity.dev, ino: prepared.record.root_identity.ino },
+    manifest_sha256: prepared.record.manifest_sha256,
+  });
+  const sameApproval = (approved: ArchiveImportApproval | undefined, prepared: PreparedArchiveImport): boolean =>
+    approved !== undefined
+    && approved.root_identity.dev === prepared.record.root_identity.dev
+    && approved.root_identity.ino === prepared.record.root_identity.ino
+    && approved.manifest_sha256 === prepared.record.manifest_sha256;
 
   /**
    * The approval of one resolved path: answered at once, the slow part (a
@@ -289,7 +370,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
     let entry: ArchiveImportRequest | undefined;
     try {
-      entry = requestId ? requests.startChecking(requestId) : requests.addChecking(path);
+      entry = requestId ? requests.startChecking(requestId, approvalOf(prepared)) : requests.addChecking(path, approvalOf(prepared));
     } catch (error) {
       prepared.root.close();
       throw error;
@@ -304,15 +385,24 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     return { ok: true, status: 'checking', request_id: entry.request_id, name };
   };
 
-  const counts = (record: ArchiveImportRecord): { items: number; held: number } => {
+  /**
+   * How many items the archive holds and how many still wait for the private
+   * model; undefined when its index cannot be opened or read, which is said
+   * as such and never as an empty archive.
+   */
+  const counts = (record: ArchiveImportRecord): { items: number; held: number } | undefined => {
     try {
       const lane = options.runtime.lane(record.family);
       const tally = lane.ledger.accountScopeCounts(record.provider, record.archive_id);
       return { items: tally.items, held: tally.awaitingJudgment };
     } catch {
-      return { items: 0, held: 0 };
+      return undefined;
     }
   };
+
+  // An import or a removal waiting for the scheduler to run it.
+  const stuck = (records: readonly ArchiveImportRecord[]): boolean =>
+    records.some((record) => record.status === 'importing' || record.status === 'removing');
 
   const percent = (record: ArchiveImportRecord): number => {
     const total = record.files.reduce((sum, file) => sum + file.size, 0);
@@ -331,15 +421,31 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     const byFile = record.findings.gaps_by_file;
     if (record.files.length < 2 || !byFile || Object.keys(byFile).length === 0) return tallies(record.findings.gaps);
     const fileName = (index: number): string => posix.basename(record.files[index]?.rel_path || record.label) || record.label;
-    return Object.entries(byFile)
+    const perFile = Object.entries(byFile)
       .map(([index, kinds]) => ({ index: Number(index), kinds }))
       .filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record.files.length)
-      .sort((a, b) => a.index - b.index)
-      .flatMap((entry) => tallies(entry.kinds).map((gap) => ({ ...gap, file: fileName(entry.index) })));
+      .sort((a, b) => a.index - b.index);
+    // Gaps counted before the record kept them per file (an import that went
+    // on after an upgrade) stay, as the part of each kind no file accounts for.
+    const placed: Record<string, number> = {};
+    for (const entry of perFile) {
+      for (const [kind, count] of Object.entries(entry.kinds)) {
+        if (Number.isFinite(count) && count > 0) placed[kind] = (placed[kind] ?? 0) + Math.floor(count);
+      }
+    }
+    const remainder: Record<string, number> = {};
+    for (const [kind, count] of Object.entries(record.findings.gaps)) {
+      if (Number.isFinite(count)) remainder[kind] = Math.floor(count) - (placed[kind] ?? 0);
+    }
+    return [
+      ...perFile.flatMap((entry) => tallies(entry.kinds).map((gap) => ({ ...gap, file: fileName(entry.index) }))),
+      ...tallies(remainder),
+    ];
   };
 
   const entryOf = (record: ArchiveImportRecord): ComputerArchiveEntry => {
-    const { items, held } = counts(record);
+    const counted = counts(record);
+    const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly(record.date_range?.earliest);
     const latest = dateOnly(record.date_range?.latest);
     const stopFile = record.stop?.rel_path ? posix.basename(record.stop.rel_path) : undefined;
@@ -352,6 +458,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       items,
       judged: Math.max(0, items - held),
       held,
+      ...(counted ? {} : { countsUnavailable: true as const }),
       ...(record.status === 'importing' ? { percent: percent(record) } : {}),
       ...(earliest ? { earliest } : {}),
       ...(latest ? { latest } : {}),
@@ -399,8 +506,20 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     },
 
     async approve(request) {
+      // Nothing is approved that would never run.
+      const blocked = notRunning();
+      if (blocked) return blocked;
       if ('requestId' in request) {
         const waiting = requests.get(request.requestId);
+        if (waiting?.status === 'failed') {
+          // Try again on a check that ended without importing: a fresh
+          // approval of the same path, the old outcome kept until it starts.
+          const resolved = await options.browser.resolvePath(waiting.path);
+          if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
+          const again = approvePath(resolved.path);
+          if (again.ok) requests.remove(waiting.request_id);
+          return again;
+        }
         if (!waiting || waiting.status !== 'pending') return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
         const resolved = await options.browser.resolvePath(waiting.path);
         if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
@@ -414,12 +533,15 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     decline(requestId) {
       const request = requests.get(requestId);
       if (!request) return { ok: false, code: 'not_waiting', message: ARCHIVE_APPROVE_COPY.not_waiting };
-      if (request.status === 'checking') return { ok: false, code: 'checking', message: ARCHIVE_APPROVE_COPY.checking };
+      // Cancel a check: it stops at its next slice and records nothing.
+      if (request.status === 'checking' && running.has(requestId)) cancelled.add(requestId);
       requests.remove(requestId);
       return { ok: true };
     },
 
     remove(archiveId) {
+      const blocked = notRunning();
+      if (blocked && !blocked.ok) return { ok: false, code: blocked.code, message: blocked.message };
       const record = state.get(archiveId);
       if (!record) return { ok: false, code: 'unknown_archive', message: ARCHIVE_APPROVE_COPY.unknown_archive };
       if (record.status === 'removing') return { ok: false, code: 'already_removing', message: ARCHIVE_APPROVE_COPY.already_removing };
@@ -452,10 +574,12 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path) },
         };
       }
+      const setting = scheduling();
       return {
         ...base,
         archives: records.map(entryOf),
         requests: asked.map((request) => requestOf(request, records)),
+        ...(setting !== 'on' && stuck(records) ? { notRunning: setting } : {}),
       };
     },
 
@@ -476,17 +600,29 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       for (const record of records) {
         if (record.status === 'stopped') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
       }
+      // An import or a removal the scheduler will never run, and the setting why.
+      const setting = scheduling();
+      if (setting !== 'on' && stuck(records)) attention.push({ kind: 'scheduler', setting });
+      const counted = new Map<string, { items: number; held: number }>();
+      for (const record of records) {
+        if (record.status === 'removing') continue;
+        const tally = counts(record);
+        if (tally) counted.set(record.archive_id, tally);
+        else attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
+      }
       for (const request of asked) {
         if (request.origin === 'agent' && request.status === 'pending') {
           attention.push({ kind: 'request', id: request.request_id, name: request.label });
         }
       }
+      // A check that ended without importing what the person approved.
+      for (const request of asked) {
+        if (request.status === 'failed') attention.push({ kind: 'failed', id: request.request_id, name: request.label });
+      }
       // Held content no private model can judge now: the person's to set up.
       const model = options.privateModel();
       if (model !== 'ready') {
-        const held = records
-          .filter((record) => record.status !== 'removing')
-          .reduce((sum, record) => sum + counts(record).held, 0);
+        const held = [...counted.values()].reduce((sum, tally) => sum + tally.held, 0);
         if (held > 0) attention.push({ kind: 'held', count: held, model });
       }
       return {
@@ -513,6 +649,13 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           const prepared = prepareArchiveImport({ state, path: resolved.path });
           if (prepared.kind !== 'ready') {
             outcome(request.request_id, prepared);
+            return;
+          }
+          // Only what the person approved resumes: a folder or a file
+          // replaced while Olympus was stopped is asked about again.
+          if (!sameApproval(request.approved, prepared)) {
+            prepared.root.close();
+            requests.settle(request.request_id, { status: 'failed', code: 'replaced' });
             return;
           }
           if (prepared.copies.length === 0) {

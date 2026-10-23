@@ -1332,6 +1332,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               ...(options.localModelReadiness ? { modelReadiness: options.localModelReadiness() } : {}),
               origin: dashboardOAuthRedirectOrigin(url, request.headers),
               ...(controlSessionCsrfToken ? { csrfToken: controlSessionCsrfToken } : {}),
+              ...(controlSessionCsrfToken && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) === 'local' ? { localSession: true } : {}),
               ...(dashboardReadToken(url) ? { readToken: dashboardReadToken(url)! } : {}),
             }), {
               status: 200,
@@ -2832,12 +2833,23 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // listing, the person's approval, Decline of an agent's request, and
         // Remove. Control routes only (workers/http.ts), never the dash_ read
         // token: the listing is made of file names, and only the person at
-        // the dashboard approves or removes. Every change runs under the
-        // grant guard, and hands the scheduler its tasks at once.
+        // the dashboard approves or removes. Approve, Decline and Remove take
+        // a local-grade session alone, whose grade the boundary injects and
+        // nothing else can set: never the worker bearer, nor a session a
+        // bearer minted. Every change runs under the grant guard, and hands
+        // the scheduler its tasks at once.
         if (request.method === 'POST' && url.pathname.startsWith('/dashboard/archive-import/')) {
           const archiveImports = sourceDashboard?.archiveImports;
           if (!archiveImports) {
             throw new EmailSourceWorkerError(501, 'archive_import_not_supported', 'Importing archives is not set up in this engine.');
+          }
+          if (url.pathname !== '/dashboard/archive-import/browse'
+            && request.headers.get(DASHBOARD_CONTROL_GRADE_CONTEXT_HEADER) !== 'local') {
+            throw new EmailSourceWorkerError(
+              403,
+              'mac_dashboard_only',
+              'Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.',
+            );
           }
           const record = await parseObjectBody(request);
           if (url.pathname === '/dashboard/archive-import/browse') {

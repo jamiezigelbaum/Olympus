@@ -132,6 +132,11 @@ export function prepareArchiveImport(input: {
  * SHA-256, when the preparation named possible copies) said it is not one.
  * The files must still be the versions the preparation pinned, and another
  * approval of the same files in the meantime wins. Does not close the root.
+ *
+ * The imports it may be a copy of are read again here, not taken from the
+ * preparation: reading the files whole can take minutes, and an import
+ * removed (or being removed) meanwhile no longer holds them, so this one
+ * is recorded instead.
  */
 export function commitArchiveImport(
   state: ArchiveImportStateStore,
@@ -140,8 +145,8 @@ export function commitArchiveImport(
 ): ArchiveImportStart {
   if (prepared.copies.length > 0) {
     if (!digests) throw new Error('A possible copy is recorded only once its files were read whole.');
-    const copy = prepared.copies.find((record) => isCopyOf(record, digests));
-    if (copy) return { kind: 'already_imported', archive: state.get(copy.archive_id) ?? copy };
+    const copy = findProbableCopies(state.list(), prepared.record.files).find((record) => isCopyOf(record, digests));
+    if (copy) return { kind: 'already_imported', archive: copy };
   }
   try {
     const check = verifyArchiveManifest(prepared.root, prepared.record.files);
