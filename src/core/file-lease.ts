@@ -1,39 +1,21 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import {
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { mkdir, open, readFile, stat, unlink, utimes } from 'node:fs/promises';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 
 export interface FileLeaseOptions {
   acquireTimeoutMs?: number;
   pollIntervalMs?: number;
+  /** Accepted for compatibility and ignored: the kernel releases a dead holder's lock, so nothing is ever judged stale. */
   staleAfterMs?: number;
+  /** Accepted for compatibility and ignored: a kernel lock needs no heartbeat. */
   heartbeatIntervalMs?: number;
 }
 
 interface NormalizedFileLeaseOptions {
   acquireTimeoutMs: number;
   pollIntervalMs: number;
-  staleAfterMs: number;
-  heartbeatIntervalMs: number;
-}
-
-interface FileLeaseRecord {
-  version: 1;
-  token: string;
-  pid: number;
-  acquiredAt: string;
-  processInstance?: ProcessInstanceIdentity;
 }
 
 export interface ProcessInstanceIdentity {
@@ -56,8 +38,6 @@ type ProcessInstanceIdentityComparison = 'same' | 'different' | 'unknown';
 const DEFAULT_OPTIONS: NormalizedFileLeaseOptions = {
   acquireTimeoutMs: 10_000,
   pollIntervalMs: 25,
-  staleAfterMs: 30_000,
-  heartbeatIntervalMs: 5_000,
 };
 const runtimeRequire = createRequire(import.meta.url);
 
@@ -98,29 +78,33 @@ export interface SyncFileLease {
 }
 
 /**
- * Serialize a cross-process mutation with an O_EXCL owner-token lockfile.
+ * Serialize a cross-process mutation with a lock the operating system holds.
  *
- * Every irreversible write must run through lease.commit(). That method and a
- * stale takeover acquire the same short-lived commit guard, so ownership
- * verification and the write callback are one compare-and-commit operation.
- * A former owner that resumes after takeover is typed-refused before its write.
+ * The lease is an exclusive SQLite lock (`BEGIN EXCLUSIVE`) on `<target>.lock.db`,
+ * taken on an open connection and kept until release. SQLite takes it with the
+ * kernel's advisory file locks, which the kernel drops the instant the holder
+ * dies (SIGKILL included). So there is no owner record, no process-liveness
+ * judgement, no staleness bound and no reclaim: a lease is held exactly while
+ * its holder is alive and has not released it, and a contender is either given
+ * it or told it is busy. Because ownership cannot be taken away, lease.commit()
+ * only has to confirm the lease has not been released before it writes.
+ *
+ * The lock file is empty and persists between uses; never delete it while a
+ * lease may be held (a new file would be a different lock). SQLite is used
+ * because it is the one kernel-lock primitive both runtimes that load this
+ * module ship: bun:sqlite under Bun, node:sqlite under Node (OpenClaw's plugin
+ * host, Node 24).
  */
 export async function withFileLease<T>(
   targetPath: string,
   callback: (lease: FileLease) => Promise<T>,
   options: FileLeaseOptions = {},
 ): Promise<T> {
-  const normalized = normalizeOptions(options);
-  const owner = await acquireFileLease(targetPath, normalized);
-  const heartbeat = setInterval(() => {
-    void owner.heartbeat();
-  }, normalized.heartbeatIntervalMs);
-  heartbeat.unref?.();
+  const owner = await acquireFileLease(targetPath, normalizeOptions(options));
   try {
     return await callback(owner);
   } finally {
-    clearInterval(heartbeat);
-    await owner.release();
+    owner.release();
   }
 }
 
@@ -138,130 +122,73 @@ export function withFileLeaseSync<T>(
   }
 }
 
-class AsyncFileLeaseOwner implements FileLease {
-  readonly targetPath: string;
-  readonly lockPath: string;
-  private readonly token: string;
-  private readonly descriptor: Awaited<ReturnType<typeof open>>;
-  private readonly options: NormalizedFileLeaseOptions;
-
-  constructor(
-    targetPath: string,
-    lockPath: string,
-    token: string,
-    descriptor: Awaited<ReturnType<typeof open>>,
-    options: NormalizedFileLeaseOptions,
-  ) {
-    this.targetPath = targetPath;
-    this.lockPath = lockPath;
-    this.token = token;
-    this.descriptor = descriptor;
-    this.options = options;
-  }
-
-  async assertOwned(): Promise<void> {
-    if ((await readLeaseRecord(this.lockPath))?.token !== this.token) {
-      throw new FileLeaseLostError(this.targetPath);
-    }
-  }
-
-  async commit<T>(write: () => Promise<T>): Promise<T> {
-    return withAsyncCommitGuard(this.targetPath, this.lockPath, this.options, async () => {
-      await this.assertOwned();
-      return write();
-    });
-  }
-
-  async heartbeat(): Promise<void> {
-    try {
-      await this.commit(async () => {
-        const now = new Date();
-        await utimes(this.lockPath, now, now);
-      });
-    } catch {
-      // The next explicit ownership assertion reports the lost fence. A
-      // heartbeat must never become an unhandled rejection.
-    }
-  }
-
-  async release(): Promise<void> {
-    try {
-      await withAsyncCommitGuard(this.targetPath, this.lockPath, this.options, async () => {
-        if ((await readLeaseRecord(this.lockPath))?.token === this.token) {
-          await unlink(this.lockPath).catch((error) => {
-            if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-          });
-        }
-      });
-    } catch (error) {
-      if (!(error instanceof FileLeaseBusyError)) throw error;
-      // A newer owner may be committing while a taken-over callback unwinds.
-      // It owns cleanup now; do not mask the typed refusal from the callback.
-      if ((await readLeaseRecord(this.lockPath))?.token === this.token) {
-        throw error;
-      }
-    } finally {
-      await this.descriptor.close();
-    }
-  }
+/**
+ * True when `name` is one of the files a lease on `target` keeps beside it: the
+ * lock database and SQLite's journal for it, or the `.lock` / `.lock.commit`
+ * files engines from before the kernel lock left behind. Inventories that must
+ * refuse unknown files use this, so a lease file is never mistaken for foreign
+ * data.
+ */
+export function isFileLeaseSidecarName(target: string, name: string): boolean {
+  if (!name.startsWith(`${target}.lock`)) return false;
+  return /^[.]lock(?:[.]db(?:-journal|-wal|-shm)?|[.]commit(?:[.][1-9][0-9]*)?(?:[.]tmp-[0-9a-f-]{36})?|[.]tmp-[0-9a-f-]{36})?$/
+    .test(name.slice(target.length));
 }
 
 class SyncFileLeaseOwner implements SyncFileLease {
   readonly targetPath: string;
   readonly lockPath: string;
-  private readonly token: string;
-  private readonly descriptor: number;
-  private readonly options: NormalizedFileLeaseOptions;
+  private lock: KernelLock | undefined;
 
-  constructor(
-    targetPath: string,
-    lockPath: string,
-    token: string,
-    descriptor: number,
-    options: NormalizedFileLeaseOptions,
-  ) {
+  constructor(targetPath: string, lockPath: string, lock: KernelLock) {
     this.targetPath = targetPath;
     this.lockPath = lockPath;
-    this.token = token;
-    this.descriptor = descriptor;
-    this.options = options;
+    this.lock = lock;
   }
 
   assertOwned(): void {
-    if (readLeaseRecordSync(this.lockPath)?.token !== this.token) {
-      throw new FileLeaseLostError(this.targetPath);
-    }
+    if (!this.lock) throw new FileLeaseLostError(this.targetPath);
   }
 
   commit<T>(write: () => T): T {
-    return withSyncCommitGuard(this.targetPath, this.lockPath, this.options, () => {
-      this.assertOwned();
-      return write();
-    });
+    this.assertOwned();
+    return write();
   }
 
   release(): void {
-    try {
-      try {
-        withSyncCommitGuard(this.targetPath, this.lockPath, this.options, () => {
-          if (readLeaseRecordSync(this.lockPath)?.token === this.token) {
-            try {
-              unlinkSync(this.lockPath);
-            } catch (error) {
-              if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-            }
-          }
-        });
-      } catch (error) {
-        if (!(error instanceof FileLeaseBusyError)) throw error;
-        if (readLeaseRecordSync(this.lockPath)?.token === this.token) {
-          throw error;
-        }
-      }
-    } finally {
-      closeSync(this.descriptor);
-    }
+    const lock = this.lock;
+    this.lock = undefined;
+    lock?.release();
   }
+}
+
+class AsyncFileLeaseOwner implements FileLease {
+  readonly targetPath: string;
+  readonly lockPath: string;
+  private readonly inner: SyncFileLeaseOwner;
+
+  constructor(targetPath: string, lockPath: string, lock: KernelLock) {
+    this.targetPath = targetPath;
+    this.lockPath = lockPath;
+    this.inner = new SyncFileLeaseOwner(targetPath, lockPath, lock);
+  }
+
+  async assertOwned(): Promise<void> {
+    this.inner.assertOwned();
+  }
+
+  async commit<T>(write: () => Promise<T>): Promise<T> {
+    this.inner.assertOwned();
+    return write();
+  }
+
+  release(): void {
+    this.inner.release();
+  }
+}
+
+interface KernelLock {
+  release(): void;
 }
 
 async function acquireFileLease(
@@ -270,34 +197,10 @@ async function acquireFileLease(
 ): Promise<AsyncFileLeaseOwner> {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  // One claim attempt after a takeover past the deadline, never more: a
-  // stream of owners that keep dying must not retry forever (PR #466 review).
-  let lateTakeoverRetry = false;
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
-    const token = randomUUID();
-    let descriptor: Awaited<ReturnType<typeof open>> | undefined;
-    try {
-      descriptor = await open(lockPath, 'wx', 0o600);
-      const record = leaseRecord(token);
-      // Do not yield between exclusive creation and a parseable owner record:
-      // an aggressive stale observer must never mistake an active creator for
-      // an abandoned empty lockfile.
-      writeFileSync(descriptor.fd, JSON.stringify(record), 'utf8');
-      fsyncSync(descriptor.fd);
-      return new AsyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      await descriptor?.close().catch(() => undefined);
-      if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
-    }
-    // A takeover that freed the lease retries the claim at once, even past the
-    // deadline: the takeover itself may have spent the whole timeout (slow
-    // runner, busy commit guard), and reporting "busy" for a lease nobody holds
-    // is wrong. O_EXCL still admits exactly one claimant.
-    if ((await removeStaleLease(targetPath, lockPath, options)) && (Date.now() < deadline || !lateTakeoverRetry)) {
-      lateTakeoverRetry ||= Date.now() >= deadline;
-      continue;
-    }
+    const lock = tryKernelLock(lockPath);
+    if (lock) return new AsyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     await sleep(options.pollIntervalMs);
   }
@@ -309,313 +212,79 @@ function acquireFileLeaseSync(
 ): SyncFileLeaseOwner {
   const lockPath = lockPathFor(targetPath);
   const deadline = Date.now() + options.acquireTimeoutMs;
-  // One claim attempt after a takeover past the deadline, never more: a
-  // stream of owners that keep dying must not retry forever (PR #466 review).
-  let lateTakeoverRetry = false;
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
   while (true) {
-    const token = randomUUID();
-    try {
-      const descriptor = openSync(lockPath, 'wx', 0o600);
-      try {
-        writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), 'utf8');
-        fsyncSync(descriptor);
-      } catch (error) {
-        closeSync(descriptor);
-        throw error;
-      }
-      return new SyncFileLeaseOwner(targetPath, lockPath, token, descriptor, options);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
-    }
-    if ((removeStaleLeaseSync(targetPath, lockPath, options)) && (Date.now() < deadline || !lateTakeoverRetry)) {
-      lateTakeoverRetry ||= Date.now() >= deadline;
-      continue;
-    }
+    const lock = tryKernelLock(lockPath);
+    if (lock) return new SyncFileLeaseOwner(targetPath, lockPath, lock);
     if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
     sleepSync(options.pollIntervalMs);
   }
 }
 
-async function removeStaleLease(
-  targetPath: string,
-  lockPath: string,
-  options: NormalizedFileLeaseOptions,
-): Promise<boolean> {
-  return withAsyncCommitGuard(targetPath, lockPath, options, async () => {
-    const observed = await readLeaseRecord(lockPath);
-    if (!await leaseIsStale(lockPath, observed, options.staleAfterMs)) return false;
-    const confirmed = await readLeaseRecord(lockPath);
-    if (observed && confirmed?.token !== observed.token) return false;
-    await unlink(lockPath).catch((error) => {
-      if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-    });
-    return true;
-  });
+interface SqliteConnection {
+  exec(sql: string): unknown;
+  close(): void;
 }
 
-function removeStaleLeaseSync(
-  targetPath: string,
-  lockPath: string,
-  options: NormalizedFileLeaseOptions,
-): boolean {
-  return withSyncCommitGuard(targetPath, lockPath, options, () => {
-    const observed = readLeaseRecordSync(lockPath);
-    if (!leaseIsStaleSync(lockPath, observed, options.staleAfterMs)) return false;
-    const confirmed = readLeaseRecordSync(lockPath);
-    if (observed && confirmed?.token !== observed.token) return false;
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-    }
-    return true;
-  });
-}
-
-async function withAsyncCommitGuard<T>(
-  targetPath: string,
-  lockPath: string,
-  options: NormalizedFileLeaseOptions,
-  callback: () => Promise<T>,
-): Promise<T> {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  // One claim attempt after a takeover past the deadline, never more: a
-  // stream of owners that keep dying must not retry forever (PR #466 review).
-  let lateTakeoverRetry = false;
-  const token = randomUUID();
-  let descriptor: Awaited<ReturnType<typeof open>> | undefined;
-  while (!descriptor) {
-    try {
-      descriptor = await open(guardPath, 'wx', 0o600);
-      // The guard becomes parseable in the same event-loop slice as O_EXCL.
-      // A crash may leave an empty orphan, but a live owner is never exposed as
-      // an old malformed guard merely because its first write was awaiting I/O.
-      writeFileSync(descriptor.fd, JSON.stringify(leaseRecord(token)), 'utf8');
-      fsyncSync(descriptor.fd);
-    } catch (error) {
-      // Only a guard this process created may be removed. An open that failed
-      // before the O_EXCL existence check (descriptor exhaustion) leaves a live
-      // holder's guard on disk, and deleting it would admit a second committer.
-      const created = descriptor !== undefined;
-      await descriptor?.close().catch(() => undefined);
-      descriptor = undefined;
-      if (!isNodeErrorWithCode(error, 'EEXIST')) {
-        if (created) await unlink(guardPath).catch(() => undefined);
-        throw error;
-      }
-      if ((await removeAbandonedCommitGuard(guardPath, options.staleAfterMs)) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
-      await sleep(options.pollIntervalMs);
-    }
+function openSqlite(path: string): SqliteConnection {
+  if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') {
+    const { Database } = runtimeRequire('bun:sqlite') as typeof import('bun:sqlite');
+    return new Database(path);
   }
-  try {
-    return await callback();
-  } finally {
-    try {
-      if ((await readLeaseRecord(guardPath))?.token === token) {
-        await unlink(guardPath).catch((error) => {
-          if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-        });
-      }
-    } finally {
-      await descriptor.close();
-    }
-  }
-}
-
-function withSyncCommitGuard<T>(
-  targetPath: string,
-  lockPath: string,
-  options: NormalizedFileLeaseOptions,
-  callback: () => T,
-): T {
-  const guardPath = commitGuardPathFor(lockPath);
-  const deadline = Date.now() + options.acquireTimeoutMs;
-  // One claim attempt after a takeover past the deadline, never more: a
-  // stream of owners that keep dying must not retry forever (PR #466 review).
-  let lateTakeoverRetry = false;
-  const token = randomUUID();
-  let descriptor: number | undefined;
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync(guardPath, 'wx', 0o600);
-      writeFileSync(descriptor, JSON.stringify(leaseRecord(token)), 'utf8');
-      fsyncSync(descriptor);
-    } catch (error) {
-      if (descriptor !== undefined) {
-        closeSync(descriptor);
-        descriptor = undefined;
-        try {
-          unlinkSync(guardPath);
-        } catch {
-          // The create/write error is authoritative.
-        }
-      }
-      if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
-      if ((removeAbandonedCommitGuardSync(guardPath, options.staleAfterMs)) && (Date.now() < deadline || !lateTakeoverRetry)) {
-        lateTakeoverRetry ||= Date.now() >= deadline;
-        continue;
-      }
-      if (Date.now() >= deadline) throw new FileLeaseBusyError(targetPath);
-      sleepSync(options.pollIntervalMs);
-    }
-  }
-  try {
-    return callback();
-  } finally {
-    try {
-      if (readLeaseRecordSync(guardPath)?.token === token) {
-        try {
-          unlinkSync(guardPath);
-        } catch (error) {
-          if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-        }
-      }
-    } finally {
-      closeSync(descriptor);
-    }
-  }
-}
-
-async function removeAbandonedCommitGuard(path: string, staleAfterMs: number): Promise<boolean> {
-  const observed = await readLeaseRecord(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed)) return false;
-    const confirmed = await readLeaseRecord(path);
-    if (confirmed?.token !== observed.token) return false;
-  } else {
-    const age = await leaseAgeMs(path);
-    if (age === undefined || age < staleAfterMs) return false;
-  }
-  await unlink(path).catch((error) => {
-    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-  });
-  return true;
-}
-
-function removeAbandonedCommitGuardSync(path: string, staleAfterMs: number): boolean {
-  const observed = readLeaseRecordSync(path);
-  if (observed) {
-    if (recordedProcessInstanceIsAlive(observed)) return false;
-    const confirmed = readLeaseRecordSync(path);
-    if (confirmed?.token !== observed.token) return false;
-  } else {
-    const age = leaseAgeMsSync(path);
-    if (age === undefined || age < staleAfterMs) return false;
-  }
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, 'ENOENT')) throw error;
-  }
-  return true;
-}
-
-async function leaseIsStale(
-  lockPath: string,
-  observed: FileLeaseRecord | undefined,
-  staleAfterMs: number,
-): Promise<boolean> {
-  if (!observed) {
-    const age = await leaseAgeMs(lockPath);
-    return age !== undefined && age >= staleAfterMs;
-  }
-  return !recordedProcessInstanceIsAlive(observed) || (await leaseAgeMs(lockPath) ?? 0) >= staleAfterMs;
-}
-
-function leaseIsStaleSync(
-  lockPath: string,
-  observed: FileLeaseRecord | undefined,
-  staleAfterMs: number,
-): boolean {
-  if (!observed) {
-    const age = leaseAgeMsSync(lockPath);
-    return age !== undefined && age >= staleAfterMs;
-  }
-  return !recordedProcessInstanceIsAlive(observed) || (leaseAgeMsSync(lockPath) ?? 0) >= staleAfterMs;
-}
-
-async function readLeaseRecord(path: string): Promise<FileLeaseRecord | undefined> {
-  try {
-    return parseLeaseRecord(await readFile(path, 'utf8'));
-  } catch (error) {
-    if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
-    throw error;
-  }
-}
-
-function readLeaseRecordSync(path: string): FileLeaseRecord | undefined {
-  try {
-    return parseLeaseRecord(readFileSync(path, 'utf8'));
-  } catch (error) {
-    if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
-    throw error;
-  }
-}
-
-function parseLeaseRecord(text: string): FileLeaseRecord | undefined {
-  try {
-    const value = JSON.parse(text) as Record<string, unknown>;
-    if (
-      value.version !== 1
-      || typeof value.token !== 'string'
-      || typeof value.pid !== 'number'
-      || typeof value.acquiredAt !== 'string'
-    ) return undefined;
-    const processInstance = parseProcessInstanceIdentity(value.processInstance);
-    return {
-      version: 1,
-      token: value.token,
-      pid: value.pid,
-      acquiredAt: value.acquiredAt,
-      ...(processInstance ? { processInstance } : {}),
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-async function leaseAgeMs(path: string): Promise<number | undefined> {
-  try {
-    return Math.max(0, Date.now() - (await stat(path)).mtimeMs);
-  } catch (error) {
-    if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
-    throw error;
-  }
-}
-
-function leaseAgeMsSync(path: string): number | undefined {
-  try {
-    return Math.max(0, Date.now() - statSync(path).mtimeMs);
-  } catch (error) {
-    if (isNodeErrorWithCode(error, 'ENOENT')) return undefined;
-    throw error;
-  }
-}
-
-function leaseRecord(token: string): FileLeaseRecord {
-  return {
-    version: 1,
-    token,
-    pid: process.pid,
-    acquiredAt: new Date().toISOString(),
-    ...(CURRENT_PROCESS_INSTANCE ? { processInstance: CURRENT_PROCESS_INSTANCE } : {}),
-  };
+  const { DatabaseSync } = runtimeRequire('node:sqlite') as typeof import('node:sqlite');
+  return new DatabaseSync(path);
 }
 
 /**
- * A live PID is not sufficient owner identity: kernels reuse it after a crash
- * or reboot. Compare the recorded boot plus process start identity when both
- * sides can obtain one. Missing capability or denied inspection deliberately
- * returns "alive" for an existing PID, preserving the conservative fence.
+ * One attempt at the exclusive lock: the lock, or undefined when another
+ * holder has it. Never waits (the caller polls) and never touches the file
+ * with any other descriptor once it exists: closing any descriptor a process
+ * has open on a file drops that process's POSIX locks on it, so a lock file
+ * is created only if absent and is otherwise opened solely by SQLite.
  */
-function recordedProcessInstanceIsAlive(record: FileLeaseRecord): boolean {
-  return recordedProcessOwnerIsAlive(record.pid, record.processInstance);
+function tryKernelLock(lockPath: string): KernelLock | undefined {
+  if (!existsSync(lockPath)) {
+    try {
+      closeSync(openSync(lockPath, 'wx', 0o600));
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, 'EEXIST')) throw error;
+    }
+  }
+  const connection = openSqlite(lockPath);
+  try {
+    connection.exec('PRAGMA busy_timeout = 0');
+    connection.exec('BEGIN EXCLUSIVE');
+  } catch (error) {
+    closeQuietly(connection);
+    if (isSqliteBusy(error)) return undefined;
+    throw error;
+  }
+  return {
+    release() {
+      try {
+        connection.exec('ROLLBACK');
+      } catch {
+        // Closing the connection releases the lock regardless.
+      }
+      closeQuietly(connection);
+    },
+  };
+}
+
+function closeQuietly(connection: SqliteConnection): void {
+  try {
+    connection.close();
+  } catch {
+    // The lock is released with the connection either way.
+  }
+}
+
+/** SQLITE_BUSY (5) and SQLITE_LOCKED (6): bun:sqlite sets `code`, node:sqlite sets `errcode`. */
+function isSqliteBusy(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, errcode, errno } = error as { code?: unknown; errcode?: unknown; errno?: unknown };
+  return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED'
+    || errcode === 5 || errcode === 6 || errno === 5 || errno === 6;
 }
 
 /**
@@ -644,7 +313,6 @@ function isProcessAlive(pid: number): boolean {
 }
 
 const CURRENT_BOOT_ID = process.platform === 'darwin' ? darwinBootId() : undefined;
-const CURRENT_PROCESS_INSTANCE = processInstanceIdentity(process.pid);
 
 export function processInstanceIdentity(pid: number): ProcessInstanceIdentity | undefined {
   if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
@@ -932,22 +600,14 @@ export const __fileLeaseIdentityTestHooks = {
 };
 
 function lockPathFor(targetPath: string): string {
-  return `${targetPath}.lock`;
-}
-
-function commitGuardPathFor(lockPath: string): string {
-  return `${lockPath}.commit`;
+  return `${targetPath}.lock.db`;
 }
 
 function normalizeOptions(options: FileLeaseOptions): NormalizedFileLeaseOptions {
-  const acquireTimeoutMs = positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs);
-  const pollIntervalMs = positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs);
-  const staleAfterMs = positiveInteger(options.staleAfterMs, DEFAULT_OPTIONS.staleAfterMs);
-  const heartbeatIntervalMs = positiveInteger(
-    options.heartbeatIntervalMs,
-    Math.min(DEFAULT_OPTIONS.heartbeatIntervalMs, Math.max(1, Math.floor(staleAfterMs / 3))),
-  );
-  return { acquireTimeoutMs, pollIntervalMs, staleAfterMs, heartbeatIntervalMs };
+  return {
+    acquireTimeoutMs: positiveInteger(options.acquireTimeoutMs, DEFAULT_OPTIONS.acquireTimeoutMs),
+    pollIntervalMs: positiveInteger(options.pollIntervalMs, DEFAULT_OPTIONS.pollIntervalMs),
+  };
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
