@@ -26,7 +26,10 @@ same way, with the same privacy and the same status.
   file-version-bound cursors, collision-safe mail identity, and the
   Reflect/Roam privacy-default conflict. A second round added WhatsApp
   message identity, bounded parsing of chat exports and zips, and the
-  snapshot-beside-live acceptance cases.
+  snapshot-beside-live acceptance cases. A third round, with Codex's PR review, made
+  tiers follow the shared Personal-first classifier, capped Reflect and Roam
+  export size, bound resume to every file read, and required user approval
+  for agent-started imports.
 - **WhatsApp and Telegram exports are in scope** (owner, 2026-10-23), after
   mail.
 
@@ -55,12 +58,12 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect and Roam by their JSON shape (the connectors already parse liberally). No match: say so and list what is supported. Two matches: ask. |
 | Connectors | Thin `SourceConnector`s (contracts.ts), one per format. Pages honour the `done` / `truncated` rule in contracts.ts. |
 | Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. Today Reflect uses one constant connector id (`reflect/connector.ts:87`) and the store keys resume on it (`connector-store/local-index.ts:11083`); that changes when Reflect moves onto the registry. |
-| Cursor | Position in the archive, bound to the input file's identity (device, inode, size, mtime). A large import resumes after a restart; if an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
+| Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
 | Picker | The local-files picker (`workers/local-files/scope-browser.ts`), extended to offer files as well as folders in a "choose one file or folder" mode (today it lists folders only, `scope-browser.ts:121`). |
 | Reading | Only the chosen path, through the scope-safe reader (`core/scope-safe-fs.ts`), so no symlink escape. `ScopeRoot.readFile` loads a whole file, so archive reading adds a bounded streaming read on `openRelative`, with a per-message size cap. |
-| Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Until an item is judged, it is held as Private (the fail-closed prior). |
+| Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Tiers follow the shared classifier as it is (Personal-first, `CONTRACTS.md` change log 2026-10-13); importers set no source-level floor. |
 | Removal | Per archive, not per source. Lifecycle delete today removes a whole source's store (`data-lifecycle.ts:657`) and Reflect has one store for the whole family (`data-lifecycle.ts:404`), so removing one import that way would erase the others. Remove cancels and fences that archive's running work, deletes its items, chunks, vectors and derived data (including private answers built from it, `data-lifecycle.ts:691`), and never touches the user's file. |
-| Operation | One operation, `archive_import` (start, status, remove), on the public tool lists, CLI, and MCP. The dashboard calls the same operation. |
+| Operation | One operation, `archive_import` (start, status, remove), on the public tool lists, CLI, and MCP. The dashboard calls the same operation. An agent cannot import a path just by naming it: start needs a path the user approved, through the dashboard picker or a confirmation the user answers, the same approval the scope picker gives other sources. A prompt-injected or accidental tool call can at most ask. |
 | Dashboard | An "Archives" source showing each import: format, file name, item count, date range, progress, gaps (unreadable messages, skipped attachments), and Remove. Every problem has a route to exactly what failed. |
 
 ### Mail (mbox), first
@@ -98,9 +101,16 @@ tier classifier and may need their classification signals updated.
 
 Their privacy defaults disagree today: the family postures say `internal`/S3
 (`source-family.ts:241`, Personal), the connectors default to `secure_local`
-(`reflect/connector.ts:53`, `roam/connector.ts:62`, Private). Items are tiered
-per item from privacy settings plus the judge either way; the prior before
-judging stays Private, and the postures are corrected to match.
+(`reflect/connector.ts:53`, `roam/connector.ts:62`, Private). Keeping
+`secure_local` would leave ordinary notes Private for good, because the
+classifier does not judge content already at that tier
+(`tier-classifier.ts:858`). The connectors' default becomes `internal`, so
+notes are tiered per item by the shared classifier like every other source.
+
+Both connectors also load a whole export at once (`reflect/connector.ts:139`,
+`roam/connector.ts:69`). Before either is public, they refuse an export over
+a checked size limit with a visible error; incremental parsing can replace
+the limit later.
 
 ### WhatsApp and Telegram exports
 
@@ -140,7 +150,7 @@ Both are in scope. They come after mail because they reuse the same spine
 1. Format registry, detection, archive identity and checkpoints, per-archive
    removal, `archive_import` operation, Archives source in the dashboard,
    with Reflect as the first format (its connector exists, so this proves the
-   spine without new parsing).
+   spine without new parsing), with its size limit and `internal` default.
 2. Mail (mbox), with the streaming reader and file-selecting picker.
 3. Roam onto the registry; all Reflect and Roam allowlist entries removed.
 4. WhatsApp chat export, with the selected-file, scope-safe reads.
