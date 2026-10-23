@@ -25,7 +25,7 @@
 // what this pass read (`TierOwnerOverrideGuard`). Only tier overrides act here: `not-secret` needs the item's
 // signals and text, which its next listing supplies.
 
-import { classifyItemTiers, contentDigestReason, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
+import { classifyItemTiers, contentDigestReason, heldUntilJudged, type TierDecision, type TierKey } from '../classification/tier-classifier.ts';
 import {
   copyServingLayer,
   trustDomainRank,
@@ -100,9 +100,11 @@ function applyOne(
 ): void {
   const ledger = set.ledger;
   const identity = identityOf(record);
-  // Exactly the decision a listing makes for an overridden item.
+  // Exactly the decision a listing makes for an overridden item. The owner's
+  // tier wins; a lane hold is kept in the reasons for the passes after it.
+  const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
   const decision: TierDecision = classifyItemTiers(
-    { signals: {}, provider: record.provider, subject: identity },
+    { signals: {}, provider: record.provider, subject: identity, ...(holdUntilJudged ? { holdUntilJudged: true } : {}) },
     { override: { kind: 'tier', tier }, ...(retirePublic ? { retirePublic: true } : {}) },
   );
   const secrets = decision.contentTier === 'secrets';

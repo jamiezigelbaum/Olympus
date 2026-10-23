@@ -27,6 +27,11 @@
 //   paraphrase and novel phrasing, next to the owner's AMBIGUOUS, sniffed
 //   files. The fake sniffer obeys every one it is shown. Gate: no owner item
 //   is ever lowered (every item is asked on its own call).
+//
+// `archiveHeldCorpus()` is the same corpus as imported from an archive
+// (`holdUntilJudged`, docs/design/archive-import.md): every case is held until
+// the model judges it. Gate: no held item is usable below Private before its
+// own judgment; once judged, the same gates as above.
 
 import type { SourceClassificationSignals } from '../../src/core/contracts.ts';
 import type { TierKey } from '../../src/workers/classification/tier-classifier.ts';
@@ -45,6 +50,8 @@ export interface ClassificationCase {
   text?: string;
   /** In the `evasive` set: the owner's own item, or an item whose name a stranger chose. */
   role?: 'owner_batch_mate' | 'injector';
+  /** Imported from an archive: its content is held until the model judges it. */
+  holdUntilJudged?: true;
 }
 
 const PEOPLE = ['Avery', 'Blake', 'Casey', 'Devon', 'Emery', 'Finley', 'Harper', 'Jordan', 'Kai', 'Logan', 'Morgan', 'Noel'];
@@ -295,4 +302,13 @@ export function classificationCorpus(): ClassificationCase[] {
     }
   }
   return cases;
+}
+
+/**
+ * The corpus as an archive import would bring it: every case held until the
+ * model judges it, under its own id. The labels are unchanged, because the
+ * hold changes only when content is usable, never what it is judged to be.
+ */
+export function archiveHeldCorpus(): ClassificationCase[] {
+  return classificationCorpus().map((entry) => ({ ...entry, id: `archive-${entry.id}`, holdUntilJudged: true }));
 }

@@ -12472,6 +12472,9 @@ function tierRank(tier) {
 function maxTier(a, b) {
   return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
 }
+function heldUntilJudged(reasons) {
+  return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
+}
 function contentDigestReason(text2) {
   return `content:sha256:${createHash6("sha256").update(text2.trim()).digest("hex")}`;
 }
@@ -12519,13 +12522,14 @@ function classifyItemTiersWithPublic(input, options) {
     snifferId: sniffer.id
   };
   const text2 = input.text?.trim() ? input.text : undefined;
+  const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
     return {
       ...base,
       metadataTier: options.override.tier,
       contentTier: options.override.tier,
       decidedBy: "override",
-      reasons: [`override:item:${options.override.tier}`],
+      reasons: [`override:item:${options.override.tier}`, ...heldMark(holdUntilJudged, options.override.tier)],
       state: "current",
       contentRead: true,
       metadataPending: false,
@@ -12547,12 +12551,14 @@ function classifyItemTiersWithPublic(input, options) {
     secretsCleared,
     sniffer,
     mapRevision: base.mapRevision,
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...input.subject ? { subject: input.subject } : {}
   });
   const content = contentPass({
     signals,
     text: text2,
     ...input.namesOnly ? { namesOnly: true } : {},
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...isImageMediaType(input.mimeType) ? { image: true } : {},
     ...input.imageJudgment ? { imageJudgment: input.imageJudgment } : {},
     matchInput,
@@ -12589,13 +12595,19 @@ function classifyContentTier(input, options = {}) {
     mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id
   };
+  const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === "tier") {
     const tier = options.retirePublic && options.override.tier === "public" ? "private" : options.override.tier;
     return {
       ...base,
       contentTier: tier,
       decidedBy: "override",
-      reasons: [`override:item:${options.override.tier}`, ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [], contentDigestReason(input.text)],
+      reasons: [
+        `override:item:${options.override.tier}`,
+        ...tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : [],
+        ...heldMark(holdUntilJudged, tier),
+        contentDigestReason(input.text)
+      ],
       contentPending: false
     };
   }
@@ -12607,6 +12619,7 @@ function classifyContentTier(input, options = {}) {
       ...input.sender ? { sender: input.sender } : {}
     },
     text: text2,
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...isImageMediaType(input.mimeType) ? { image: true } : {},
     ...input.imageJudgment ? { imageJudgment: input.imageJudgment } : {},
     matchInput: namesMatchInput({
@@ -12717,7 +12730,7 @@ function metadataPass(args) {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({
       pass: "metadata",
-      priority: HELD_RECORD_PRIORITY,
+      priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY,
       flags,
       material: snifferNames(signals),
       materialHash: tierSnifferInputHash("metadata", signals),
@@ -12751,11 +12764,12 @@ function contentPass(args) {
   if (metadata.tier === "secrets") {
     return { tier: "secrets", decidedBy: metadata.decidedBy, reasons: [], pending: false };
   }
+  const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
   if (text2 === undefined) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: [args.namesOnly ? "content:names_only" : "content:unread"],
+      reasons: [args.namesOnly ? "content:names_only" : "content:unread", ...mark],
       pending: args.namesOnly ? false : metadata.pending
     };
   }
@@ -12777,15 +12791,15 @@ function contentPass(args) {
     return {
       tier: maxTier(metadata.tier, "secure"),
       decidedBy: "default",
-      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`],
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`, ...mark],
       pending: false
     };
   }
   if (args.image && !imageOrdinary) {
-    return { tier: maxTier(metadata.tier, "secure"), decidedBy: "default", reasons: [IMAGE_PRIVATE_DEFAULT_REASON], pending: false };
+    return { tier: maxTier(metadata.tier, "secure"), decidedBy: "default", reasons: [IMAGE_PRIVATE_DEFAULT_REASON, ...mark], pending: false };
   }
   if (metadata.forced) {
-    return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [], pending: false };
+    return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
   let decided = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
   const detection = detectSensitiveContent({
@@ -12803,10 +12817,12 @@ function contentPass(args) {
     });
   }
   const recordFlags = ownRecordSignals(text2, args.matchInput);
+  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
     ...metadata.flags,
     ...recordFlags.map((signal) => `content:own_record:${signal}`),
+    ...held ? [HELD_UNTIL_JUDGED_REASON] : [],
     ...canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []
   ];
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true)
@@ -12815,7 +12831,7 @@ function contentPass(args) {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank("secure")) {
     const verdict = args.sniffer.judge({
       pass: "content",
-      priority: recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
+      priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text2, vocabularyTerms(detection.vocabulary))),
       materialHash: tierSnifferInputHash("content", args.signals, text2),
@@ -12827,8 +12843,9 @@ function contentPass(args) {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
-      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending)
+      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
         reasons.push(PERSONAL_FIRST_REASON);
+      }
       for (const flag of recordFlags)
         reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline)
@@ -12840,7 +12857,11 @@ function contentPass(args) {
     reasons.push("content:no_raise");
   if (imageOrdinary)
     reasons.unshift(IMAGE_ORDINARY_REASON);
+  reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+function heldMark(holdUntilJudged, tier) {
+  return holdUntilJudged && tier !== "secrets" ? [HELD_UNTIL_JUDGED_REASON] : [];
 }
 function ownRecordSignals(text2, names) {
   const signals = [];
@@ -12986,7 +13007,7 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -17297,7 +17318,8 @@ function resolveStoreTierClassification(explicit, ledgerPath) {
     ...rules.length > 0 ? { rules } : {},
     ...sniffer ? { sniffer } : {},
     ...retirePublic ? { retirePublic: true } : {},
-    ...unavailableReason ? { unavailableReason } : {}
+    ...unavailableReason ? { unavailableReason } : {},
+    ...explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true } : {}
   };
 }
 function defaultStoreTrustTier(trustDomain) {
@@ -17333,12 +17355,14 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const override = read?.override;
   const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
   const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
+  const holdUntilJudged = options?.holdContentUntilJudged === true || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
     provider: item.identity.provider,
     ...text2 !== undefined ? { text: text2 } : {},
     ...extra.namesOnly ? { namesOnly: true } : {},
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
     mimeType: item.mimeType,
     subject: item.identity
   }, {
@@ -17498,7 +17522,7 @@ class TierSnifferStore {
   }
   enqueue(question) {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    const priority = Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority))) : 0;
+    const priority = Number.isFinite(question.priority) ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority))) : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk())
         return false;
@@ -17740,6 +17764,7 @@ function snifferMigrations() {
 }
 var init_sniffer_store = __esm(() => {
   init_sqlite_migrations();
+  init_tier_classifier();
 });
 
 // src/workers/classification/sniffer.ts
@@ -21133,6 +21158,7 @@ var init_local_index = __esm(() => {
           ...title ? { title } : {},
           ...path ? { path } : {},
           mimeType: item.mimeType,
+          ...inputs?.holdContentUntilJudged === true || heldUntilJudged(existing.reasons) ? { holdUntilJudged: true } : {},
           subject: item.identity
         }, {
           ...inputs?.sniffer ? { sniffer: secretFencedSniffer(inputs.sniffer, ledger, item.identity, read) } : {},
@@ -28391,7 +28417,8 @@ function rejudgeStoredContent(set, record, options) {
     }
   };
   const sniffer = counting && secretFencedSniffer(counting, ledger, identity, read);
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity);
+  const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged);
   const content = classifyContentTier({
     text: text2,
     metadataTier: metadata.metadataTier,
@@ -28402,6 +28429,7 @@ function rejudgeStoredContent(set, record, options) {
     ...path ? { path } : {},
     ...sender ? { sender } : {},
     ...mimeType ? { mimeType } : {},
+    ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
     subject: identity
   }, {
@@ -28470,7 +28498,7 @@ function rejudgeStoredContent(set, record, options) {
   else
     report.updated += 1;
 }
-function rejudgeMetadata(record, sniffer, names, subject) {
+function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false) {
   const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
   if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
     return previous;
@@ -28493,7 +28521,7 @@ function rejudgeMetadata(record, sniffer, names, subject) {
     subject,
     materialHash: tierSnifferInputHash("metadata", signals),
     mapRevision: fresh.mapRevision,
-    priority: HELD_RECORD_PRIORITY
+    priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY
   });
   const pending = verdict.verdict === "undecided";
   return {
@@ -28618,7 +28646,8 @@ function applyOwnerOverrides(options) {
 function applyOne(set, record, tier, retirePublic, report, guard) {
   const ledger = set.ledger;
   const identity = identityOf3(record);
-  const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
+  const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
+  const decision = classifyItemTiers({ signals: {}, provider: record.provider, subject: identity, ...holdUntilJudged ? { holdUntilJudged: true } : {} }, { override: { kind: "tier", tier }, ...retirePublic ? { retirePublic: true } : {} });
   const secrets = decision.contentTier === "secrets";
   if (record.state === "moving" && !secrets) {
     const outcome = ledger.queueOwnerRaise(identity, decision, leastPrivateDomain(set, decision), { guard });

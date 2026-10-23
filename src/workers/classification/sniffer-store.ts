@@ -17,7 +17,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
-import type { TierSnifferSubject } from './tier-classifier.ts';
+import { HELD_UNTIL_JUDGED_PRIORITY, type TierSnifferSubject } from './tier-classifier.ts';
 import { TIER_SNIFFER_SQLITE_STORE_ID } from './tier-ledger-path.ts';
 
 export const TIER_SNIFFER_SCHEMA_VERSION = 3;
@@ -167,7 +167,11 @@ export class TierSnifferStore {
     stillAsk?: () => boolean;
   }): boolean {
     const materialHash = question.materialHash ?? snifferMaterialHash(question.pass, question.material);
-    const priority = Number.isFinite(question.priority) ? Math.max(0, Math.min(100, Math.floor(question.priority!))) : 0;
+    // From the held-until-judged floor (an imported archive, behind all live
+    // work) to 100; anything else is the ordinary 0.
+    const priority = Number.isFinite(question.priority)
+      ? Math.max(HELD_UNTIL_JUDGED_PRIORITY, Math.min(100, Math.floor(question.priority!)))
+      : 0;
     return this.db.transaction(() => {
       if (question.stillAsk && !question.stillAsk()) return false;
       const before = this.db.query(`

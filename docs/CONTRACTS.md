@@ -318,6 +318,50 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-23 (no contract type version change; tier classifier stays
+  `2026-10-13.p6`): **imported content is held until judged** (owner
+  direction 2026-10-23; `docs/design/archive-import.md`, "Privacy while an
+  import is judged"). A lane option on the connector store's tier
+  classification, `holdContentUntilJudged` (`tier-placement.ts`), reaches the
+  classifier as `holdUntilJudged`. Read content without a verdict is then
+  held pending in Private exactly as an own-record item is, also when no
+  model is configured; `content:personal_first` is never set; and every
+  non-Secrets decision records `content:held_until_judged`, which re-judging,
+  migration planning, the rules sweep, override settling, the store's late
+  content path and the tiered extraction sink read back from the stored
+  decision. Names follow the existing names rule. Secrets, structured
+  identifiers, owner rules, force rules, source floors and overrides keep
+  their precedence; an owner prior rule that settled the names also settles
+  the content, as it does today. Held questions queue at priority -1, behind
+  live own-record (10) and ordinary (0) questions, and the sniffer store's
+  clamp floor moves from 0 to -1 for them; the oldest-question slot every
+  queue read reserves keeps an import from starving.
+  `test/tier-hold-until-judged-guard.test.ts` lets only modules under
+  `src/workers/archive-import/` set the option; none exists yet, so no
+  install's behaviour changes until an archive import lane ships.
+  Version: kept, by the 2026-10-03 precedent (a change no fresh decision can
+  see keeps the version). The hold changes only decisions in a lane that sets
+  it and no lane sets it, while a bump would re-judge every routed item on
+  every install for no change. Evidence: for all 1,596 synthetic corpus cases
+  the recorded decision (before and after the fake sniffer's passes), the
+  no-model decision, the late-content decision and every queued question
+  with its priority and flags are byte-identical before and after this
+  change, and the default `bun run eval:classification` report is unchanged.
+  SourceConnector, EvidencePack and Analyst shapes, their versions and the
+  canonical fingerprint are unchanged (`bun run contracts:check`).
+  Migration: none. The reason is an additive reason code; the sniffer store
+  schema is unchanged and only the enqueue clamp widens; existing queued
+  questions keep their priorities.
+  Eval evidence: `archiveHeldCorpus()` runs the same corpus as an archive
+  import would bring it (`bun run eval:classification -- --archive`) with one
+  more gate, no held item usable below Private before its own judgment; all
+  existing gates pass, and once judged the confusion matrix equals the unheld
+  run (`test/classification-eval.test.ts`). `test/tier-held-until-judged.test.ts`
+  covers the store paths. Like p6, this is wiring and regression proof with a
+  deterministic fake model, not a real-model quality receipt.
+  Critical-review gate: a critical classification change; it needs fresh
+  independent review of its head before merge, alongside required CI under
+  `docs/ENGINEERING_PROCESS.md`.
 - 2026-10-13 (no contract type version change): tier classifier
   `2026-10-13.p6`, owner-approved Personal-first (2026-10-04;
   `docs/design/categorization-precision.md` step 2). Content without

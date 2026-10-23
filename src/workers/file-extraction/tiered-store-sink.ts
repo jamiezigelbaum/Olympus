@@ -29,7 +29,7 @@ import {
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
-import { classifyContentTier, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
+import { classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
 import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
@@ -176,6 +176,9 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // The photo judge's verdict on this exact picture, wherever in the set
       // it was judged. None: the picture is unjudged and its content Private.
       const imageJudgment = plan.media ? setMediaJudgment(set, plan.media.sha256) : undefined;
+      // The lane's hold, or the one the listing-time decision recorded.
+      const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
+        || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
       const content = classifyContentTier(
         {
           text: request.text,
@@ -187,6 +190,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           ...(itemPath ? { path: itemPath } : {}),
           mimeType: plan.item.mimeType,
           ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
+          ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
           subject: identity,
         },
         {

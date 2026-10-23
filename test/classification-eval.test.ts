@@ -3,7 +3,7 @@
 // `bun run eval:classification -- --real`.
 
 import { describe, expect, test } from 'bun:test';
-import { classificationCorpus } from '../eval/classification/corpus.ts';
+import { archiveHeldCorpus, classificationCorpus } from '../eval/classification/corpus.ts';
 import { createFakeSnifferModel } from '../eval/classification/fake-sniffer.ts';
 import { runClassificationEval } from '../eval/classification/run.ts';
 import type { SnifferLane } from '../src/workers/classification/sniffer-lane.ts';
@@ -55,5 +55,25 @@ describe('classification eval (fake sniffer)', () => {
     expect(model.stats.complied).toBeGreaterThan(0);
     expect(model.stats.compliedMaxBatch).toBe(1);
     expect(model.stats.items).toBe(report.sniffer_usage.itemsAsked);
+    // No archive-held case: the report is the one it always was.
+    expect(report.held).toBeUndefined();
+    expect(report.gates.heldUntilJudged).toBeUndefined();
   }, 30_000);
+
+  test('archive-held: nothing is usable below Private before its own judgment, and judged items land where they always did', async () => {
+    const baseline = await runClassificationEval({ lane: FAKE_LANE, model: createFakeSnifferModel(), label: 'fake' });
+    const model = createFakeSnifferModel();
+    const report = await runClassificationEval({ lane: FAKE_LANE, model, label: 'fake, archive held', cases: archiveHeldCorpus() });
+    expect(report.held).toEqual({ cases: classificationCorpus().length, releasedBeforeJudgment: [] });
+    expect(report.gates.heldUntilJudged).toBe(true);
+    expect(report.gates.passed).toBe(true);
+    expect(report.secretRecall).toBe(1);
+    expect(report.hardCategoryMisses).toEqual([]);
+    expect(report.injectionLeaks).toEqual([]);
+    expect(report.malformedLeaks).toEqual([]);
+    // Once the model has answered, the hold changes nothing about where items land.
+    expect(report.pending).toBe(0);
+    expect(report.confusion).toEqual(baseline.confusion);
+    expect(model.stats.compliedMaxBatch).toBeLessThanOrEqual(1);
+  }, 60_000);
 });

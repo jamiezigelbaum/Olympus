@@ -120,27 +120,35 @@ it, then moves to its judged tier. Nothing from an import is Personal, and so
 nothing reaches a cloud model or cloud embedding, before its own judgment.
 Ordinary cloud models never judge.
 
-- **Shared, not per format.** The import spine marks every item it ingests
-  with its ingest mode (`archive_import`, already declared in
-  `source-family.ts`). The shared classifier reads that mark: for these
-  items, content without a verdict is held as for own-record items today,
-  and `content:personal_first` is never set (`tier-classifier.ts:873`,
-  `tiered-store-set.ts:409`). No connector or format branches on it.
+- **Shared, not per format.** An archive import lane sets one lane option,
+  `holdContentUntilJudged`, on its store's tier classification
+  (`tier-placement.ts`); only a module under `src/workers/archive-import/`
+  may set it (`test/tier-hold-until-judged-guard.test.ts`). The shared
+  classifier then holds content without a verdict as for own-record items,
+  never sets `content:personal_first`, and records
+  `content:held_until_judged`, which every later pass (re-judge, migration,
+  rules sweep, override settling, text that lands later) reads back from the
+  stored decision. No connector or format branches on it. Built in step 1.
 - **Names** follow the existing rule: cleared names stay Personal while the
   content is held (Gmail and Drive already work this way).
 - **Secrets, structured identifiers, owner rules and source floors** keep
   their precedence. An owner override of an item still wins.
-- **Queue order.** Held import items join the judging queue behind live
-  own-record items, so a large import does not delay judgments for new mail.
+- **Queue order.** Held import questions join the judging queue behind
+  every live question (priority -1, below own-record 10 and ordinary 0), so a
+  large import does not delay judgments for new mail; the oldest-question
+  slot each queue read reserves keeps the import moving.
   The dashboard shows each archive's judged and still-held counts, so a
   partly judged import is visible rather than silently incomplete.
 - **No model ready.** Items stay held until one is; the dashboard says the
   import is waiting for the private model, with a route to set it up.
 - **Gate.** This changes classification semantics, so it follows the
-  versioned change gate in `docs/ENGINEERING_PROCESS.md`: a new classifier
-  version, a `CONTRACTS.md` change-log entry, the held-out eval and an
-  independent review. It lands in step 1, before any archive format is
-  public.
+  versioned change gate in `docs/ENGINEERING_PROCESS.md`: a `CONTRACTS.md`
+  change-log entry (2026-10-23), the held-out eval (an archive-held run of
+  the classification corpus) and an independent review. The classifier
+  version stays `2026-10-13.p6`: no lane set the option before it, so no
+  decision differs (per-case evidence in the change log), and a bump would
+  re-judge every routed item for nothing. It lands in step 1, before any
+  archive format is public.
 
 Both connectors also load a whole export at once (`reflect/connector.ts:139`,
 `roam/connector.ts:69`), so a large export could run the engine out of

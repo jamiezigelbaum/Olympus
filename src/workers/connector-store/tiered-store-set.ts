@@ -712,6 +712,16 @@ export class TieredStoreSet {
     return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
   }
 
+  /**
+   * Whether this lane holds every item's content until the privacy-safe
+   * model judges it (`ConnectorStoreTierClassification.holdContentUntilJudged`).
+   * The lane's own option, read without the installed inputs, for passes over
+   * stored items (re-judge, migration, extraction landings, override settling).
+   */
+  holdsContentUntilJudged(): boolean {
+    return this.tierClassification?.holdContentUntilJudged === true;
+  }
+
   /** @internal */
   secrets(): SecretLocationsIndex | undefined {
     return this.secretLocations;

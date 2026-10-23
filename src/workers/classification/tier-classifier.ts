@@ -50,6 +50,9 @@ export const TIER_CLASSIFIER_KIND = 'olympus_shared_four_tier_classifier';
 // and "confidence" alone no longer count). Items decided under p3 are judged
 // again, so a document either rule misfired on gets a real verdict.
 // p5: Personal-first content; own-record signals hold only the content.
+// The archive hold (`holdUntilJudged`, 2026-10-23) keeps p6: it changes only
+// decisions in a lane that sets it, and no such lane existed before it, so no
+// recorded decision differs under it (docs/CONTRACTS.md change log).
 export const TIER_CLASSIFIER_VERSION = '2026-10-13.p6';
 
 /**
@@ -132,6 +135,14 @@ export interface TierSnifferSubject {
 
 /** Queue priority for an item held as someone's own record: ahead of ordinary background judgments. */
 export const HELD_RECORD_PRIORITY = 10;
+/**
+ * Queue priority for every question about an item whose lane holds content
+ * until judged (`TierClassificationInput.holdUntilJudged`, an imported
+ * archive): behind every live question, own records and Personal-first
+ * content alike, so a large import never delays them. Aging still reserves
+ * progress for the oldest questions (sniffer-resolver.ts).
+ */
+export const HELD_UNTIL_JUDGED_PRIORITY = -1;
 
 export interface TierSnifferRequest {
   pass: 'metadata' | 'content';
@@ -193,6 +204,20 @@ export const SNIFFER_EXCERPT_MAX_CHARS = 1_200;
 export const CONTENT_READ_SNIFFER_FLAG = 'content:read';
 /** An open model question that does not hold the content (owner-approved). */
 export const PERSONAL_FIRST_REASON = 'content:personal_first';
+/**
+ * Recorded with the content reasons of every non-Secrets decision about an
+ * item whose lane holds content until judged (`holdUntilJudged`). It names
+ * the lane's rule, not the item's state, so a judged item keeps it: a later
+ * pass that sees only the stored decision (a re-judge, the migration, an
+ * extraction landing, the store's own recording) reads it back
+ * (`heldUntilJudged`) and holds the same way.
+ */
+export const HELD_UNTIL_JUDGED_REASON = 'content:held_until_judged';
+
+/** Whether recorded reasons say the item's lane holds its content until judged. */
+export function heldUntilJudged(reasons: readonly string[] | undefined): boolean {
+  return reasons?.includes(HELD_UNTIL_JUDGED_REASON) === true;
+}
 
 /** Persisted with the decision's content reasons, including while its question
  * waits. The store chunks trimmed text into contiguous slices; concatenating
@@ -250,6 +275,19 @@ export interface TierClassificationInput {
   mimeType?: string;
   /** The photo judge's verdict on a still image's picture (media-judge.ts). Absent: unjudged. */
   imageJudgment?: ImageJudgmentSignal;
+  /**
+   * The item's lane holds its content until the privacy-safe model judges it
+   * (an imported archive; the lane option is
+   * `ConnectorStoreTierClassification.holdContentUntilJudged`). Read text
+   * without a verdict waits exactly as an own record's does: pending, never
+   * `content:personal_first`, also with no model configured. Secrets,
+   * structured identifiers, owner rules, force rules, source floors, image
+   * rules and the per-item override keep their precedence, and the names are
+   * judged as usual. Every non-Secrets decision records
+   * HELD_UNTIL_JUDGED_REASON, and its questions queue at
+   * HELD_UNTIL_JUDGED_PRIORITY.
+   */
+  holdUntilJudged?: boolean;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -395,6 +433,7 @@ function classifyItemTiersWithPublic(
     snifferId: sniffer.id,
   };
   const text = input.text?.trim() ? input.text : undefined;
+  const holdUntilJudged = input.holdUntilJudged === true;
 
   // [1] Per-item owner override (sticky). A tier override is final for both
   // layers — including over Secrets, which is the one thing that may.
@@ -404,7 +443,7 @@ function classifyItemTiersWithPublic(
       metadataTier: options.override.tier,
       contentTier: options.override.tier,
       decidedBy: 'override',
-      reasons: [`override:item:${options.override.tier}`],
+      reasons: [`override:item:${options.override.tier}`, ...heldMark(holdUntilJudged, options.override.tier)],
       state: 'current',
       // The owner decided the content; nothing about the text can change it.
       contentRead: true,
@@ -430,6 +469,7 @@ function classifyItemTiersWithPublic(
     secretsCleared,
     sniffer,
     mapRevision: base.mapRevision,
+    ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
     ...(input.subject ? { subject: input.subject } : {}),
   });
 
@@ -438,6 +478,7 @@ function classifyItemTiersWithPublic(
     signals,
     text,
     ...(input.namesOnly ? { namesOnly: true } : {}),
+    ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
     ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
     matchInput,
@@ -500,6 +541,11 @@ export interface ContentTierInput {
   mimeType?: string;
   /** The photo judge's verdict on a still image's picture. Absent: unjudged. */
   imageJudgment?: ImageJudgmentSignal;
+  /**
+   * The item's lane holds content until judged (TierClassificationInput.holdUntilJudged).
+   * A caller with only the stored decision reads it back with `heldUntilJudged`.
+   */
+  holdUntilJudged?: boolean;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -524,13 +570,15 @@ export function classifyContentTier(
     mapRevision: TIER_MAP_REVISION,
     snifferId: sniffer.id,
   };
+  const holdUntilJudged = input.holdUntilJudged === true;
   if (options.override?.kind === 'tier') {
     const tier = options.retirePublic && options.override.tier === 'public' ? 'private' : options.override.tier;
     return {
       ...base,
       contentTier: tier,
       decidedBy: 'override',
-      reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []), contentDigestReason(input.text)],
+      reasons: [`override:item:${options.override.tier}`, ...(tier !== options.override.tier ? [PUBLIC_RETIRED_REASON] : []),
+        ...heldMark(holdUntilJudged, tier), contentDigestReason(input.text)],
       contentPending: false,
     };
   }
@@ -542,6 +590,7 @@ export function classifyContentTier(
       ...(input.sender ? { sender: input.sender } : {}),
     },
     text,
+    ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
     ...(isImageMediaType(input.mimeType) ? { image: true } : {}),
     ...(input.imageJudgment ? { imageJudgment: input.imageJudgment } : {}),
     matchInput: namesMatchInput({
@@ -614,6 +663,8 @@ function metadataPass(args: {
   secretsCleared: boolean;
   sniffer: TierSniffer;
   mapRevision: string;
+  /** The lane holds content until judged: its names question queues behind live ones. */
+  holdUntilJudged?: boolean;
   subject?: TierSnifferSubject;
 }): PassResult {
   const { signals, names, options } = args;
@@ -717,7 +768,7 @@ function metadataPass(args: {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'metadata',
-      priority: HELD_RECORD_PRIORITY,
+      priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY,
       flags,
       material: snifferNames(signals),
       materialHash: tierSnifferInputHash('metadata', signals),
@@ -766,6 +817,8 @@ function contentPass(args: {
   secretsCleared: boolean;
   sniffer: TierSniffer;
   mapRevision: string;
+  /** The lane holds content until judged (TierClassificationInput.holdUntilJudged). */
+  holdUntilJudged?: boolean;
   subject?: TierSnifferSubject;
 }): { tier: TierKey; decidedBy: TierDecidedBy; reasons: string[]; pending: boolean } {
   const { metadata, text } = args;
@@ -774,11 +827,14 @@ function contentPass(args: {
     // so no text of a secret-bearing item is scanned further or excerpted.
     return { tier: 'secrets', decidedBy: metadata.decidedBy, reasons: [], pending: false };
   }
+  // The lane's hold travels with every decision but a Secrets one, so a later
+  // pass over the stored decision holds the same way (HELD_UNTIL_JUDGED_REASON).
+  const mark = heldMark(args.holdUntilJudged === true, metadata.tier);
   if (text === undefined) {
     return {
       tier: metadata.tier,
       decidedBy: metadata.decidedBy,
-      reasons: [args.namesOnly ? 'content:names_only' : 'content:unread'],
+      reasons: [args.namesOnly ? 'content:names_only' : 'content:unread', ...mark],
       // Names only: the content IS the names' tier, and a names verdict
       // settles both; nothing is left open on the text.
       pending: args.namesOnly ? false : metadata.pending,
@@ -810,17 +866,17 @@ function contentPass(args: {
     return {
       tier: maxTier(metadata.tier, 'secure'),
       decidedBy: 'default',
-      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`],
+      reasons: [`${IMAGE_SENSITIVE_REASON_PREFIX}${imageCategoryCode(args.imageJudgment.category)}`, ...mark],
       pending: false,
     };
   }
   if (args.image && !imageOrdinary) {
-    return { tier: maxTier(metadata.tier, 'secure'), decidedBy: 'default', reasons: [IMAGE_PRIVATE_DEFAULT_REASON], pending: false };
+    return { tier: maxTier(metadata.tier, 'secure'), decidedBy: 'default', reasons: [IMAGE_PRIVATE_DEFAULT_REASON, ...mark], pending: false };
   }
 
   // A force rule fixes the tier; only Secrets (above) may still raise it.
   if (metadata.forced) {
-    return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [], pending: false };
+    return { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [...mark], pending: false };
   }
 
   let decided: ResolvedVerdict = { tier: metadata.tier, decidedBy: metadata.decidedBy, reasons: [] };
@@ -845,12 +901,17 @@ function contentPass(args: {
   // [11] Retired with the legacy sensitivity map (2026-10-03).
 
   // [12] Every eligible read item still gets its own background judgment.
-  // Only own-record signals hold its content while that answer is missing.
+  // Only own-record signals hold its content while that answer is missing,
+  // and, in a lane that holds content until judged, every read item does
+  // (asked even with no model, so it stays pending until one answers),
+  // unless an owner rule settled its names: the owner said where it belongs.
   const recordFlags = ownRecordSignals(text, args.matchInput);
+  const held = args.holdUntilJudged === true && metadata.ownerDecided !== true;
   let pending = false;
   const flags = [
     ...metadata.flags,
     ...recordFlags.map(signal => `content:own_record:${signal}`),
+    ...(held ? [HELD_UNTIL_JUDGED_REASON] : []),
     ...(canAskSniffer ? detection.borderline.map((family) => `content:borderline:${family}`) : []),
   ];
   if (canAskSniffer && flags.length === 0 && metadata.ownerDecided !== true) flags.push(CONTENT_READ_SNIFFER_FLAG);
@@ -858,7 +919,8 @@ function contentPass(args: {
   if (flags.length > 0 && tierRank(decided.tier) < tierRank('secure')) {
     const verdict = args.sniffer.judge({
       pass: 'content',
-      priority: recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
+      priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY
+        : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
       material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
       materialHash: tierSnifferInputHash('content', args.signals, text),
@@ -870,7 +932,11 @@ function contentPass(args: {
       reasons.splice(0, reasons.length, ...decided.reasons);
     } else {
       pending = true;
-      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending) reasons.push(PERSONAL_FIRST_REASON);
+      // A held lane never releases content before its judgment, even where
+      // an owner rule settled the names and the body still raised a question.
+      if (verdict.queued === true && recordFlags.length === 0 && !metadata.pending && args.holdUntilJudged !== true) {
+        reasons.push(PERSONAL_FIRST_REASON);
+      }
       for (const flag of recordFlags) reasons.push(`content:own_record:${flag}`);
       for (const flag of detection.borderline) reasons.push(`content:borderline:${flag}`);
       reasons.push(`content:sniffer:${args.sniffer.id}:undecided`);
@@ -878,7 +944,13 @@ function contentPass(args: {
   }
   if (reasons.length === 0) reasons.push('content:no_raise');
   if (imageOrdinary) reasons.unshift(IMAGE_ORDINARY_REASON);
+  reasons.push(...mark);
   return { tier: decided.tier, decidedBy: decided.decidedBy, reasons: [...new Set(reasons)], pending };
+}
+
+/** The lane-hold reason for a decision at `tier`: none for Secrets, which outrank it. */
+function heldMark(holdUntilJudged: boolean, tier: TierKey): string[] {
+  return holdUntilJudged && tier !== 'secrets' ? [HELD_UNTIL_JUDGED_REASON] : [];
 }
 
 /** Source-neutral evidence of a populated record, never a topic classifier. */
