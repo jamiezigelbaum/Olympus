@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { explorePages, matches, pagesChecks, type PageDef, type PageControl } from '../scripts/release-check/explore-pages.ts';
+import { explorePages, matches, pagesChecks, type PageDef, type PageControl, type PagesOptions } from '../scripts/release-check/explore-pages.ts';
 import { buildPageInventory, scanControls } from '../scripts/release-check/explore-pages-inventory.ts';
 import type { ElementInfo, JourneyDriver, PageEvents } from '../scripts/release-check/journey.ts';
 import { PROBE_SOURCE, type WireTarget } from '../scripts/release-check/probe.ts';
@@ -40,6 +40,8 @@ interface State {
   unnamedField?: boolean;
   /** Reload keeps the confirmation record (a full page load clears window state). */
   reloadsOnRevoke?: boolean;
+  /** The Build a connector page has no Lock, as in the product. */
+  noLockOnConnector?: boolean;
 }
 
 class PagesDriver implements JourneyDriver {
@@ -73,7 +75,7 @@ class PagesDriver implements JourneyDriver {
       ${s.silentDisabled ? '<button type="button" class="btn" disabled>Wait</button>' : ''}
       ${s.secret ? secret : ''}
       <ul>${rows}</ul>
-      ${s.locked ? '<form data-control-session-kind="unlock"><button type="submit">Unlock</button></form>' : '<form data-control-session-kind="lock"><button type="submit">Lock</button></form>'}
+      ${s.noLockOnConnector && this.path.endsWith('connector') ? '' : s.locked ? '<form data-control-session-kind="unlock"><button type="submit">Unlock</button></form>' : '<form data-control-session-kind="lock"><button type="submit">Lock</button></form>'}
     </main>`;
     evalIn(this.host, PROBE_SOURCE);
     const on = (selector: string, handler: (el: Element) => void): void => {
@@ -139,8 +141,8 @@ const quick = () => ({ sleep: async () => {}, now: ((): (() => number) => { let 
 const PAGES: PageDef[] = [{ id: 'agents', title: 'Agents', path: '/dashboard?agents' }, { id: 'connector', title: 'Build a connector', path: '/dashboard?connector' }];
 const inventory = () => buildPageInventory();
 
-async function run(driver: PagesDriver, pages: PageDef[] = PAGES) {
-  const result = await explorePages({ driver, pages, inventory: inventory(), ...quick() });
+async function run(driver: PagesDriver, pages: PageDef[] = PAGES, extra: Partial<PagesOptions> = {}) {
+  const result = await explorePages({ driver, pages, inventory: inventory(), ...quick(), ...extra });
   const steps = result.traces.flatMap((trace) => trace.steps);
   return { result, steps, failed: steps.filter((step) => !step.ok) };
 }
@@ -189,7 +191,7 @@ describe('exploring the other pages', () => {
     expect(driver.pressed).not.toContain('remote-on');
     expect(driver.pressed.filter((press) => press === 'lock')).toHaveLength(1);
     expect(driver.pressed.indexOf('lock')).toBeGreaterThan(driver.pressed.lastIndexOf('revoke') - 1);
-    expect(steps.some((step) => step.name === 'Lock (not pressed)' && /pressed once, on the last page/.test(step.actual))).toBe(true);
+    expect(steps.some((step) => step.name === 'Lock (not pressed)' && /pressed once, after every other page/.test(step.actual))).toBe(true);
     // A control made by an earlier press (Revoke after Create key) is found on a later load and pressed.
     expect(result.pages[0]!.pressed).toBeGreaterThan(5);
     expect(result.pages[0]!.validated).toBe(1);
@@ -237,6 +239,34 @@ describe('exploring the other pages', () => {
     expect(disabled.failed.some((step) => /disabled and says nothing about why/.test(step.findings.join(' ')))).toBe(true);
     const field = await run(new PagesDriver({ unnamedField: true }), [PAGES[0]!]);
     expect(field.failed.some((step) => /has no name/.test(step.findings.join(' ')))).toBe(true);
+  });
+
+  test('when the last page has no Lock, Lock is pressed once at the end, back on a page that has it', async () => {
+    const driver = new PagesDriver({ noLockOnConnector: true });
+    const { result, steps, failed } = await run(driver);
+    expect(failed.map((step) => step.name)).toEqual([]);
+    expect(driver.pressed.filter((press) => press === 'lock')).toHaveLength(1);
+    expect(driver.pressed[driver.pressed.length - 1]).toBe('lock');
+    expect(steps.some((step) => step.name === 'Lock' && step.ok)).toBe(true);
+    expect(result.pages.map((page) => page.id)).toEqual(['agents', 'connector']);
+    expect(result.coverage.entries.find((entry) => entry.id === 'components.ts:Lock')?.status).toBe('pressed');
+  });
+
+  test('a page whose controls cannot be read fails instead of passing empty', async () => {
+    const driver = new PagesDriver();
+    driver.probe = async () => { throw new Error('no answer'); };
+    const { result } = await run(driver, [PAGES[0]!]);
+    expect(pagesChecks(result)[0]).toMatchObject({ id: 'pages.agents', status: 'fail' });
+    expect(result.pages[0]!.error).toContain('could not be read');
+  });
+
+  test('a first load that never answers is bounded and the next page still runs', async () => {
+    const driver = new PagesDriver();
+    const go = driver.go.bind(driver);
+    driver.go = async (path: string) => { if (path.endsWith('agents')) return await new Promise<void>(() => {}); return await go(path); };
+    const { result } = await run(driver, PAGES, { itemBoundMs: 300 });
+    expect(result.pages[0]!.error).toContain('took longer');
+    expect(result.pages[1]!.pressed).toBeGreaterThan(0);
   });
 
   test('a page that cannot be explored is reported as such, with the reason', async () => {

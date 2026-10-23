@@ -84,6 +84,8 @@ export interface PagesOptions {
   /** The most presses one page may take. */
   maxPresses?: number;
   settleMs?: number;
+  /** How long one press, or one load of a page, may take before it is recorded as a failure (default 60 s). */
+  itemBoundMs?: number;
 }
 
 export interface PageSummary { id: string; title: string; path: string; found: number; pressed: number; validated: number; skipped: number; failed: number; presses: number; error?: string }
@@ -251,6 +253,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
   const sleep = options.sleep ?? sleepFor;
   const settleMs = options.settleMs ?? 10_000;
   const maxPresses = options.maxPresses ?? 60;
+  const itemBoundMs = options.itemBoundMs ?? ITEM_BOUND_MS;
   const summaries: PageSummary[] = [];
   const traces: JourneyTrace[] = [];
   const entryState = new Map<string, { pressed: boolean; pages: Set<string> }>();
@@ -264,7 +267,9 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
   };
   const enumerate = async (): Promise<PageControl[]> => {
     const got = await read<PageControl[]>(ENUMERATE);
-    return Array.isArray(got) ? got : [];
+    // A page whose controls cannot be read is not an empty page: it fails rather than passing with nothing checked.
+    if (!Array.isArray(got)) throw new Error("the page's controls could not be read (the browser did not answer)");
+    return got;
   };
   const observe = async (): Promise<PageObservation | undefined> => await read<PageObservation>(OBSERVE);
 
@@ -295,6 +300,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
   const pageFindings = async (controls: PageControl[]): Promise<string[]> => {
     const findings: string[] = [];
     const audit = await read<{ bad: string[]; emptyButtons: string[]; overflowX: number }>('__rc.audit()');
+    if (!audit) findings.push('the page could not be checked against the rules (the browser did not answer)');
     for (const text of audit?.bad ?? []) findings.push(`the page shows a placeholder value: "${text}"`);
     for (const control of audit?.emptyButtons ?? []) findings.push(`a button or link has no name: ${control}`);
     if ((audit?.overflowX ?? 0) > 0) findings.push(`the page scrolls sideways (${audit!.overflowX} px too wide)`);
@@ -307,13 +313,21 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
 
   const pageList = options.pages ?? PAGES;
   const lastPageId = pageList[pageList.length - 1]?.id;
-  for (const [pageIndex, page] of pageList.entries()) {
+  // Lock ends the browser's session, so it is pressed once, after every other press: on the last page if that page offers it, or else
+  // in a final pass back on the first page that did (the last page, Build a connector, has no Lock).
+  const passes: Array<{ page: PageDef; lockOnly: boolean }> = pageList.map((page) => ({ page, lockOnly: false }));
+  let lockPage: PageDef | undefined;
+  let lockPressed = false;
+  for (let passIndex = 0; passIndex < passes.length; passIndex++) {
+    const { page, lockOnly } = passes[passIndex]!;
     // Each page gets an equal share of the time left, so one large page cannot use up the others' turns.
-    const pageDeadline = options.deadlineAt === undefined ? undefined : now() + Math.max(0, options.deadlineAt - now()) / (pageList.length - pageIndex);
+    const pageDeadline = options.deadlineAt === undefined ? undefined : now() + Math.max(0, options.deadlineAt - now()) / (passes.length - passIndex);
     const reported = new Set<string>();
-    const summary: PageSummary = { id: page.id, title: page.title, path: page.path, found: 0, pressed: 0, validated: 0, skipped: 0, failed: 0, presses: 0 };
-    summaries.push(summary);
-    const steps: StepTrace[] = [];
+    const existing = lockOnly ? summaries.find((candidate) => candidate.id === page.id) : undefined;
+    const summary: PageSummary = existing ?? { id: page.id, title: page.title, path: page.path, found: 0, pressed: 0, validated: 0, skipped: 0, failed: 0, presses: 0 };
+    if (!existing) summaries.push(summary);
+    const earlier = lockOnly ? traces.find((trace) => trace.id === `pages-${page.id}`) : undefined;
+    const steps: StepTrace[] = earlier?.steps ?? [];
     const record = (control: PageControl, pressed: boolean): void => {
       for (const entry of options.inventory.entries) {
         if (!matches(entry, control)) continue;
@@ -324,18 +338,18 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
       }
     };
     try {
-      await loadPage(page);
+      // The first load is bounded like a press, so a browser that stops answering costs this page, not the whole run.
+      const base = await withBound(async () => { await loadPage(page); return await enumerate(); }, itemBoundMs, `loading the ${page.title} page`);
       const load = driver.drainEvents();
       const loadRequests = load.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)));
       const loadConsole = load.console.filter((message) => !ALWAYS_ALLOWED_CONSOLE.some((rule) => rule.test(message)) && !(/Failed to load resource/.test(message) && load.requests.length > 0));
-      const base = await enumerate();
-      const baseFindings = [
+      const baseFindings = lockOnly ? [] : [
         ...await pageFindings(base),
         ...(options.audit ? await options.audit(driver, page).catch((error: unknown) => [`the page audit failed to run: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`]) : []),
         ...loadConsole.map((message) => `console error while loading: ${message.slice(0, 200)}`),
         ...loadRequests.map((request) => `failed request while loading: ${request.text} -> ${request.status || 'failed'}`),
       ];
-      steps.push({
+      if (!lockOnly) steps.push({
         n: 1, name: `The ${page.title} page as loaded`, action: `open ${page.path}`,
         expected: 'the page follows the generic rules (names, reasons for disabled controls, no placeholder words, no sideways scroll)',
         actual: baseFindings.length === 0 ? `${base.filter((c) => c.visible).length} control(s) showing` : baseFindings.join('; '),
@@ -359,6 +373,8 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
         for (const control of controls) {
           if (seenSigs.has(`${via.join('>')}|${control.sig}`)) continue;
           seenSigs.add(`${via.join('>')}|${control.sig}`);
+          // The final Lock pass presses Lock and nothing else; the rest of the page was crawled in its own pass.
+          if (lockOnly) { if (control.visible && /^Lock$/i.test(control.name)) enqueue({ path: [...via, control.sig], rank: 2 }); continue; }
           if (!foundSigs.has(control.sig)) { foundSigs.add(control.sig); summary.found += 1; }
           if (!control.visible && via.length === 0 && control.tag !== 'summary') {
             // Inside something closed: reached through what opens it (a sheet's toggle), found but not pressed on its own.
@@ -371,8 +387,8 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           if (skip) { record(control, false); summary.skipped += 1; steps.push(skippedStep(steps.length + 1, control, skip.reason, page)); continue; }
           if (control.tag === 'a' && isExternal(control.href)) { validateLink(control, page, steps, summary, record); continue; }
           const destructive = control.confirms || /^(Lock|Delete( all)?)$/i.test(control.name) || /data-pa-delete/.test(control.attrs.join(' '));
-          // Lock ends the browser's session, so it is pressed once, on the last page.
-          if (/^Lock$/i.test(control.name) && page.id !== lastPageId) { record(control, false); summary.skipped += 1; steps.push(skippedStep(steps.length + 1, control, 'Lock ends the session for the pages after it; it is pressed once, on the last page', page)); continue; }
+          // Lock ends the browser's session, so it is pressed once, after everything else (see `passes`).
+          if (/^Lock$/i.test(control.name) && page.id !== lastPageId) { lockPage ??= page; record(control, false); summary.skipped += 1; steps.push(skippedStep(steps.length + 1, control, 'Lock ends the session for the pages after it; it is pressed once, after every other page', page)); continue; }
           if (control.confirms) {
             enqueue({ path: [...via, control.sig], answer: false, rank: 0 });
             enqueue({ path: [...via, control.sig], answer: true, rank: 1 });
@@ -381,14 +397,21 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
       };
       consider(base, []);
 
-      let wave = 0;
+      let wave = lockOnly ? 2 : 0;
       while (summary.presses < maxPresses && !(pageDeadline !== undefined && now() >= pageDeadline)) {
         if ((queue.length === 0 || queue.every((entry) => entry.rank === 2)) && wave < 2) {
           // What the earlier presses made (a pairing code leaves a connection to revoke) shows on a fresh page; looked for before Lock ends the session.
           wave += 1;
-          await loadPage(page);
+          let reloaded: PageControl[];
+          try {
+            reloaded = await withBound(async () => { await loadPage(page); return await enumerate(); }, itemBoundMs, `reloading the ${page.title} page`);
+          } catch (error) {
+            steps.push(failureStep(steps.length + 1, page.path, `the page could not be loaded again: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`));
+            summary.failed += 1;
+            break;
+          }
           driver.drainEvents();
-          const again = (await enumerate()).filter((control) => !seenSigs.has(`|${control.sig}`));
+          const again = reloaded.filter((control) => !seenSigs.has(`|${control.sig}`));
           if (again.length > 0) consider(again, []);
           continue;
         }
@@ -441,6 +464,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           summary.pressed += 1;
           totalPresses += 1;
           record(control, true);
+          if (/^Lock$/i.test(control.name)) lockPressed = true;
           let pagesMax = pagesBefore;
           const settling = (async () => { for (let i = 0; i < 6; i++) { await sleep(250); pagesMax = Math.max(pagesMax, await driver.pages().catch(() => pagesMax)); } })();
           await settle();
@@ -480,7 +504,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
             const revealed = afterControls.filter((candidate) => candidate.visible && !controls.some((was) => was.sig === candidate.sig && was.visible));
             if (revealed.length > 0 && (control.tag === 'summary' || control.expanded !== null || control.attrs.includes('data-sheet-toggle'))) consider(revealed, item.path);
           }
-          }, ITEM_BOUND_MS, `pressing ${item.path[item.path.length - 1] ?? 'a control'}`);
+          }, itemBoundMs, `pressing ${item.path[item.path.length - 1] ?? 'a control'}`);
         } catch (error) {
           steps.push(failureStep(steps.length + 1, item.path[item.path.length - 1] ?? '', `the press could not be judged: ${error instanceof Error ? error.message.slice(0, 200) : String(error)} (while ${phase})`));
           summary.failed += 1;
@@ -492,7 +516,11 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
       steps.push(failureStep(steps.length + 1, page.path, `the page could not be explored: ${summary.error}`));
       summary.failed += 1;
     }
-    traces.push({ id: `pages-${page.id}`, title: `Pressing every control on the ${page.title} page`, source: 'bounded exploration of the other dashboard pages (layer 3 of the release-testing design)', ok: steps.every((step) => step.ok), steps, ms: steps.reduce((sum, step) => sum + step.ms, 0) });
+    if (earlier) {
+      earlier.ok = steps.every((step) => step.ok);
+      earlier.ms = steps.reduce((sum, step) => sum + step.ms, 0);
+    } else traces.push({ id: `pages-${page.id}`, title: `Pressing every control on the ${page.title} page`, source: 'bounded exploration of the other dashboard pages (layer 3 of the release-testing design)', ok: steps.every((step) => step.ok), steps, ms: steps.reduce((sum, step) => sum + step.ms, 0) });
+    if (passIndex === pageList.length - 1 && lockPage && !lockPressed) passes.push({ page: lockPage, lockOnly: true });
   }
 
   const entries: PageCoverageEntry[] = options.inventory.entries.map((entry) => {
