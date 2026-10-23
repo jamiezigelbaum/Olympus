@@ -108,6 +108,8 @@ const LEAVES = new Set<ControlKind>(['connect', 'reconnect', 'scope', 'check-aga
 const CONFIRM_WAIT_MS = 60_000;
 /** How long a page with a busy control (a sync running) is waited on before it is judged. */
 const BUSY_WAIT_MS = 90_000;
+/** A file in a source's sample list: pressing it asks the desktop to open the file. */
+const OPENS_A_FILE = /^Open .+\.[A-Za-z0-9]{1,5}$/;
 const OWN_HOSTS = /^https:\/\/(www\.)?olympusplugin\.ai\//;
 
 const keyed = (key: string): { css: string } => ({ css: `[data-key="${key.replace(/"/g, '\\"')}"]` });
@@ -119,7 +121,7 @@ export interface PressContext {
   seed: SeedId;
   control: PanelControl;
   kind: ControlKind;
-  before: { keys: string[]; seeded: string[]; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
+  before: { keys: string[]; seeded: string[]; rows: Record<string, string>; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
   after: { controls: PanelControl[]; text: string; open: Array<{ key: string; open: boolean; text?: string }>; url: string };
   opened: string[];
 }
@@ -150,8 +152,10 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
     const base = c.control.key.replace(/:no$/, '');
     const gone = !c.after.controls.some((control) => control.key === `${base}:yes`);
     // Left as it was: the page offers the same controls as when it was seeded, apart from the question itself (a Cancel that did the action would swap Disconnect for Connect, or remove Delete).
-    const rest = (keys: string[]): string => keys.filter((key) => !key.startsWith(`${base}:`)).sort().join('|');
-    const same = rest(c.before.seeded) === rest(c.after.controls.map((control) => control.key));
+    // Only the source's own row is compared: another source's row can change under the page while it syncs.
+    const row = c.control.rowName;
+    const rest = (keys: string[]): string => keys.filter((key) => !key.startsWith(`${base}:`) && (c.before.rows[key] ?? row) === row).sort().join('|');
+    const same = rest(c.before.seeded) === rest(c.after.controls.filter((control) => control.rowName === row).map((control) => control.key));
     return { ok: gone && same, expected: 'Cancel closes the question and leaves things as they were', actual: !gone ? 'the question is still showing' : same ? 'the question closed' : 'the question closed, but the controls on the page changed: Cancel changed the source' };
   },
 };
@@ -399,6 +403,11 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       const kind = kindOf(control.key, control.name);
       const listed = idOf(control);
+      if (OPENS_A_FILE.test(control.name)) {
+        // A file in a source's sample list asks the desktop to open it; the throwaway machine has no desktop, so there is nothing to see.
+        steps.push({ n: steps.length + 1, name: `${control.name} (not pressed)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a control that needs a desktop is named, with why it is not pressed', actual: 'it asks the desktop to open a file, and the machine has none', ok: true, ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: [] });
+        continue;
+      }
       if (control.disabled) {
         // Pressed: a disabled control must do nothing, and has to say why (the page rule above); it counts as found, not as pressed.
         steps.push({ n: steps.length + 1, name: `${control.name || control.key} (disabled)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a disabled control says why', actual: control.reason || 'it says nothing', ok: control.reason !== '', ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: control.reason ? [] : [`"${control.name}" is disabled and says nothing about why`] });
@@ -437,7 +446,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
 
       const context: PressContext = {
         seed: seed.id, control, kind,
-        before: { keys: controlsNow.map((candidate) => candidate.key), seeded: base.map((candidate) => candidate.key), text: beforeText, open: beforeOpen },
+        before: { keys: controlsNow.map((candidate) => candidate.key), seeded: base.map((candidate) => candidate.key), rows: Object.fromEntries(base.map((candidate) => [candidate.key, candidate.rowName])), text: beforeText, open: beforeOpen },
         after: { controls: afterControls, text: afterText, open: afterOpen, url: at },
         opened: openedWindows,
       };

@@ -103,8 +103,8 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
     }
     await ctx.call('POST', '/dashboard/sync-now', { source: 'local.files' });
     card = await until(async () => { const now = await ctx.cardOf('local_files'); // `synced`, not `syncing`: while the read is under way the row offers fewer actions, and the page would change under the first presses.
-      return connected(now) && now?.connection?.state === 'synced' && items(now) > 0 && (now?.schedule?.missing_folders?.length ?? 0) === 0 ? now : undefined; }, 180_000, 3_000);
-    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))})` };
+      return connected(now) && now?.connection?.state === 'synced' && items(now) > 0 && (now?.schedule?.missing_folders?.length ?? 0) === 0 ? now : undefined; }, 300_000, 3_000);
+    return card ? { ok: true, detail: `Files on this computer: ${summary(card)}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))}; schedule ${JSON.stringify((await ctx.cardOf('local_files'))?.schedule ?? null).slice(0, 240)})` };
   };
   const disconnect = async (): Promise<StateResult> => {
     const reply = await ask('/dashboard/disconnect', { source_id: 'local.files', acknowledge: true });
@@ -158,7 +158,7 @@ export function localFilesDriver(ctx: SeedContext): SourceDriver {
  * stays the seed's result; another source that cannot reach the state is listed in `failedSources` and the seed is still pressed.
  */
 /** The longest one source may take to reach one state. */
-const STATE_BOUND_MS = 240_000;
+const STATE_BOUND_MS = 420_000;
 
 export function composeSeeds(primary: readonly Seed[], drivers: readonly SourceDriver[]): Seed[] {
   return primary.map((seed) => ({

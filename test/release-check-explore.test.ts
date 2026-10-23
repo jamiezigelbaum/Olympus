@@ -430,3 +430,27 @@ describe('exploring the Sources section', () => {
     expect(Object.keys(EXPECTATIONS).sort()).toEqual(['cancel', 'delete-data', 'disconnect', 'menu', 'see-why']);
   });
 });
+
+describe('what the page-side script reads', () => {
+  test('a disabled control that carries its reason in a title or a description is not one that says nothing', () => {
+    const window = new Window({ url: 'http://127.0.0.1:8010/dashboard' });
+    (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = () => ({ left: 1, top: 1, width: 10, height: 10, right: 11, bottom: 11 });
+    window.document.body.innerHTML = '<li class="row source"><span class="source-name">Files</span><button data-key="a" disabled title="Not possible here">One</button><button data-key="b" disabled aria-description="Saving">Two</button><button data-key="c" disabled>Three</button></li>';
+    evalIn(window, PROBE_SOURCE);
+    const controls = evalIn(window, '__rc.controls()') as Array<{ key: string; reason: string }>;
+    expect(controls.map((control) => [control.key, control.reason])).toEqual([['a', 'Not possible here'], ['b', 'Saving'], ['c', '']]);
+  });
+});
+
+describe('a file in a sample list', () => {
+  test('is named and not pressed, because the machine has no desktop to open it on', async () => {
+    const driver = new PanelDriver();
+    const seed: Seed = { id: 'populated', title: 'populated', apply: async () => ({ ok: true, detail: 'x' }) };
+    // A control named like a file, in the Readwise row.
+    const render = (driver as unknown as { render(): void }).render.bind(driver);
+    (driver as unknown as { render(): void }).render = () => { render(); driver.panel.document.querySelector('.menu-panel')?.insertAdjacentHTML('beforeend', '<span class="fix"><button data-key="menu:readwise.library:9">Open trip-notes.txt</button></span>'); };
+    const result = await explore({ driver, seeds: [seed], inventory: inventory(), ...quick() });
+    const step = result.traces[0]!.steps.find((entry) => entry.name === 'Open trip-notes.txt (not pressed)');
+    expect(step).toMatchObject({ ok: true });
+  });
+});
