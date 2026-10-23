@@ -76,6 +76,7 @@ import {
 import { X_BOOKMARKS_STORE_PLACEMENT, defaultXBookmarksConnectorStoreDbPath } from '../x-bookmarks/connector.ts';
 import { X_BOOKMARKS_CORPUS_ID } from '../x-bookmarks/corpus-adapter.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, X_BOOKMARKS_TIER_SET_ID, defaultXBookmarksSecureConnectorStoreDbPath } from '../x-bookmarks/tier-set.ts';
+import { archiveTierMigrationLaneSpecs } from '../archive-import/lane.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from './secret-locations.ts';
 import { TierLedger } from './tier-ledger.ts';
 import type { TierMigrationLane } from './tier-migration.ts';
@@ -98,6 +99,8 @@ export interface TierMigrationLaneSpec {
   sourceId: string;
   setId: string;
   legs: Partial<Record<SourceTrustDomain, TierMigrationLegSpec>> & { secure_local: TierMigrationLegSpec };
+  /** The lane's own classification input, as its runtime sets it; the run's shared inputs are added to it. */
+  tierClassification?: TieredLaneSetOptions['tierClassification'];
   splitLayers?: boolean;
   laneFloor?: TieredLaneFloor;
   contentArrivesLater?: boolean;
@@ -229,6 +232,7 @@ export function installedTierMigrationLaneSpecs(
         secure_local: { corpusId: WHATSAPP_LIVE_CORPUS_ID, dbPath: defaultWhatsAppConnectorStoreDbPath(env), family: 'chat', legacy: true },
       },
     },
+    ...archiveTierMigrationLaneSpecs(env),
   ];
 }
 
@@ -286,6 +290,9 @@ export function openTierMigrationLanes(
           ...(leg.restingTier ? { restingTier: leg.restingTier } : {}),
         };
       }
+      const tierClassification = spec.tierClassification || options.tierClassification
+        ? { ...options.tierClassification, ...spec.tierClassification }
+        : undefined;
       const set = createTieredLaneSet({
         setId: spec.setId,
         ledger,
@@ -293,7 +300,7 @@ export function openTierMigrationLanes(
         ...(spec.splitLayers === false ? { splitLayers: false } : {}),
         ...(spec.laneFloor ? { laneFloor: spec.laneFloor } : {}),
         ...(spec.contentArrivesLater ? { contentArrivesLater: true } : {}),
-        ...(options.tierClassification ? { tierClassification: options.tierClassification } : {}),
+        ...(tierClassification ? { tierClassification } : {}),
         ...(secretLocations ? { secretLocations } : {}),
       });
       lanes.push({

@@ -227,6 +227,12 @@ export class SecretLocationsIndex {
     `).run(identity.provider, identity.accountScope, identity.providerConversationId ?? '', identity.providerItemId).changes > 0;
   }
 
+  /** Every location of one account scope's items (an imported archive being removed). */
+  removeAccountScope(provider: string, accountScope: string): number {
+    return this.db.query('DELETE FROM secret_locations WHERE provider = ? AND account_scope = ?')
+      .run(provider, accountScope).changes;
+  }
+
   get(identity: SecretLocationIdentity): SecretLocation | undefined {
     const row = this.db.query(`
       SELECT * FROM secret_locations

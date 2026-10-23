@@ -230,6 +230,20 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/unreadable-files.ts',
   'src/workers/source-index/analyst-answer.ts',
   'src/workers/source-index/answer-types.ts',
+  // The archive import spine (docs/design/archive-import.md): the record,
+  // manifest, stores, tier lane, pass, scheduler source, removal and runtime
+  // every archive format shares. A format's own reader lives beside it
+  // (src/workers/archive-import/<format>/), where this guard does not reach;
+  // nothing here may learn one format's or one source's shapes.
+  'src/workers/archive-import/lane.ts',
+  'src/workers/archive-import/manifest.ts',
+  'src/workers/archive-import/removal.ts',
+  'src/workers/archive-import/runtime.ts',
+  'src/workers/archive-import/scheduler-source.ts',
+  'src/workers/archive-import/start.ts',
+  'src/workers/archive-import/state.ts',
+  'src/workers/archive-import/store.ts',
+  'src/workers/archive-import/sync.ts',
 ];
 
 const FILE_EXTRACTION_FACTORY_GLOB = 'src/workers/file-extraction/**/*.ts';

@@ -365,6 +365,17 @@ export function defaultSourceCorpusRegistryConfig(): SourceCorpusRegistryConfig 
   };
 }
 
+/**
+ * The registry config with these entries added (absent ones only). A runtime
+ * that holds stores the shipped roster does not list, created on first need,
+ * adds their entries this way so it can place what those stores hold.
+ */
+export function withSourceCorpora(rawConfig: unknown, extra: readonly SourceCorpusConfig[]): SourceCorpusRegistryConfig {
+  const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
+  const present = new Set(config.corpora.map((corpus) => corpus.corpusId));
+  return { ...config, corpora: [...config.corpora, ...extra.filter((corpus) => !present.has(corpus.corpusId))] };
+}
+
 export function createSourceCorpusRegistry(rawConfig?: unknown): SourceCorpusRegistry {
   const config = parseSourceCorpusRegistryConfig(rawConfig ?? defaultSourceCorpusRegistryConfig());
   return sourceCorpusRegistryFromConfig(config);

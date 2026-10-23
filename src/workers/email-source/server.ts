@@ -230,6 +230,10 @@ import {
 } from '../local-files/store.ts';
 import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
+import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
+import { archiveLaneLegs } from '../archive-import/lane.ts';
+import { withArchiveImportCorpora } from '../archive-import/store.ts';
+import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
 import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
 import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../local-files/locator-result-projector.ts';
@@ -1981,7 +1985,9 @@ export async function main(): Promise<void> {
       console.warn(`[remote] ${openClawRemote.path} could not be read or parsed; remote access and demo sign-in are off for this worker.`);
     }
   }
-  const sourceCorpusRegistry = createSourceCorpusRegistry(olympusConfig.sourceIndex.corpusRegistry);
+  // Imported archives' stores are served here although they are not yet on
+  // the public plugin-config roster (archive-import/store.ts).
+  const sourceCorpusRegistry = createSourceCorpusRegistry(withArchiveImportCorpora(olympusConfig.sourceIndex.corpusRegistry));
   const dropboxIngestionPolicy = loadDropboxIngestionPolicy({
     inlinePolicy: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policy,
     policyPath: olympusConfig.sourceIndex.ingestionPolicies.dropboxPersonal?.policyPath,
@@ -3313,6 +3319,34 @@ export async function main(): Promise<void> {
       });
     }
   };
+  // Imported archives: one tier lane per family, adopted like every other
+  // lane's, and built only once an archive of that family exists (an install
+  // that never imported anything creates no file). Every store is created on
+  // first need and served under its own trust domain's embedding identity.
+  const archiveImports = createArchiveImportRuntime({
+    env: process.env,
+    openSecretLocations: (secureDbPath) => openTierSecretLocations(secureDbPath, 'imported archives'),
+    onLane: (lane) => {
+      if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
+      adoptTierLane({
+        ledger: lane.ledger,
+        secureCorpusId: lane.secure.corpusId,
+        corpusIds: archiveLaneLegs(lane).map((leg) => leg.corpusId),
+        onDemand: archiveLaneLegs(lane),
+        ...(lane.secretLocations ? { secrets: lane.secretLocations } : {}),
+      });
+    },
+    onStoreOpened: (store) => registerTierLegStore(
+      store,
+      store.corpusId,
+      store.trustDomain === 'secure_local' ? tierSecureEmbeddingProvider ?? null : sourceIndexEmbeddingProvider ?? null,
+    ),
+  });
+  try {
+    archiveImports.existingLanes();
+  } catch (error) {
+    console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.name : 'error'}`);
+  }
   // Every constructed canonical store gets its embedding and retrieval lane.
   if (xBookmarksConnectorStore && xBookmarksEmbeddingProvider) {
     registerConnectorStoreEmbeddingLane({
@@ -4343,6 +4377,29 @@ export async function main(): Promise<void> {
           ...(fileExtractionRuntime ? { fileExtraction: fileExtractionRuntime.runner } : {}),
           ...(whatsappLiveMaxItems !== undefined ? { maxItems: whatsappLiveMaxItems } : {}),
         }),
+      ),
+      recordLane(
+        SCHEDULER_SOURCE_IDS.archiveImports,
+        undefined,
+        () => {
+          let lanes: ReturnType<typeof archiveImports.existingLanes>;
+          try {
+            lanes = archiveImports.existingLanes();
+          } catch {
+            lanes = [];
+          }
+          return createArchiveImportsSchedulerSource({
+            runtime: archiveImports,
+            config: olympusConfig,
+            tierEmbeddings: lanes.flatMap((lane) => [
+              { leg: lane.secure, provider: tierSecureEmbeddingProvider },
+              { leg: lane.internal, provider: sourceIndexEmbeddingProvider },
+              { leg: lane.public, provider: sourceIndexEmbeddingProvider },
+            ].flatMap(({ leg, provider }) => provider
+              ? [{ corpusId: leg.corpusId, store: () => leg.current(), provider }]
+              : [])),
+          });
+        },
       ),
     ].filter((source): source is SourceSchedulerSource => source !== undefined);
     // One embedding sweep per source that embeds, built once here from the

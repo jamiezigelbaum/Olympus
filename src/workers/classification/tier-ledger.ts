@@ -3112,6 +3112,65 @@ export class TierLedger {
     return row ? { cursor: row.cursor, committedAt: row.committed_at } : undefined;
   }
 
+  /** Forgets a tiered set's resume point for one connector (a removed import). */
+  deleteSetCursor(setId: string, connectorId: string): boolean {
+    return this.db.query('DELETE FROM tier_set_cursors WHERE set_id = ? AND connector_id = ?')
+      .run(setId, connectorId).changes > 0;
+  }
+
+  /** How many items one account scope has here, and how many of them still wait for a judgment. */
+  accountScopeCounts(provider: string, accountScope: string): { items: number; awaitingJudgment: number } {
+    const row = this.db.query(`
+      SELECT COUNT(*) AS items,
+        COALESCE(SUM(CASE WHEN state = 'pending' OR metadata_pending = 1 OR content_pending = 1 THEN 1 ELSE 0 END), 0) AS awaiting
+      FROM tier_items WHERE provider = ? AND account_scope = ?
+    `).get(provider, accountScope) as { items: number; awaiting: number };
+    return { items: row.items, awaitingJudgment: row.awaiting };
+  }
+
+  /**
+   * The first step of removing one account scope's items (an imported
+   * archive: its id is the account scope). In one transaction, every copy
+   * is superseded, so no store serves any of the items from here on, and
+   * every decision, override, history row, migration proposal and Secret
+   * side-store note is deleted, so no later pass (a move, a re-judge, a
+   * migration, a settle) acts on them. The superseded copies stay as the
+   * mark that hides the stores' rows until those are purged; then
+   * `deleteAccountScopeCopies` removes them. Deleting a decision fires no
+   * trigger (they watch inserts and updates only).
+   */
+  withdrawAccountScope(provider: string, accountScope: string): { items: number; copies: number } {
+    return this.db.transaction(() => {
+      const now = this.now().toISOString();
+      const copies = this.db.query(`
+        UPDATE tier_copies
+        SET copy_state = 'superseded',
+          superseded_by_generation = COALESCE(superseded_by_generation, generation + 1),
+          updated_at = ?
+        WHERE provider = ? AND account_scope = ? AND copy_state <> 'superseded'
+      `).run(now, provider, accountScope).changes;
+      const items = this.db.query('DELETE FROM tier_items WHERE provider = ? AND account_scope = ?')
+        .run(provider, accountScope).changes;
+      for (const table of [
+        'tier_history',
+        'tier_overrides',
+        'tier_migration_proposals',
+        'secret_side_store_debt',
+        'secret_side_store_scrubs',
+        'secret_redaction_retirement',
+      ]) {
+        this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
+      }
+      return { items, copies };
+    })();
+  }
+
+  /** The last step of removing one account scope: its copy rows, once its stores hold none of its rows. */
+  deleteAccountScopeCopies(provider: string, accountScope: string): number {
+    return this.db.query('DELETE FROM tier_copies WHERE provider = ? AND account_scope = ?')
+      .run(provider, accountScope).changes;
+  }
+
   private insertCopies(
     identity: TierLedgerIdentity,
     plan: Pick<TierPlacementPlan, 'copies' | 'embedHold'>,

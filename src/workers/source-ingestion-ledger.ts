@@ -78,6 +78,8 @@ import {
   defaultLocalFilesPublicConnectorStoreDbPath,
 } from './local-files/store.ts';
 import { closeSqliteStore } from '../core/sqlite-store.ts';
+import { archiveImportFamilies } from '../core/archive-formats.ts';
+import { ARCHIVE_TIER_DOMAINS, archiveConnectorStoreDbPath, archiveCorpusId } from './archive-import/store.ts';
 
 export interface SourceIngestionLedgerSnapshot {
   kind: 'source_ingestion_ledger';
@@ -1646,6 +1648,14 @@ function localConnectorStores(env: Record<string, string | undefined>): Array<Co
       family: 'chat',
       trustDomain: 'secure_local',
     },
+    // Imported archives: one store set per family, read without writing.
+    ...archiveImportFamilies().flatMap((family) => ARCHIVE_TIER_DOMAINS.map((trustDomain) => ({
+      corpusId: archiveCorpusId(trustDomain, family),
+      dbPath: archiveConnectorStoreDbPath(trustDomain, family, env),
+      family,
+      trustDomain,
+      readOnly: true,
+    }))),
   ]);
 }
 

@@ -126,6 +126,7 @@ export const SCHEDULER_SOURCE_IDS = {
   xBookmarks: 'x.bookmarks',
   telegram: TELEGRAM_MESSAGES_SOURCE_ID,
   whatsapp: WHATSAPP_PERSONAL_SOURCE_ID,
+  archiveImports: 'archive.imports',
 } as const;
 
 export interface SourceSchedulerConstructionDecision {
