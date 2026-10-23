@@ -32,6 +32,9 @@ install -m 0644 "$SRC/olympus-relay.service" /etc/systemd/system/olympus-relay.s
 install -m 0644 "$SRC/olympus-installer-counts.service" /etc/systemd/system/olympus-installer-counts.service
 install -m 0644 "$SRC/olympus-installer-counts.timer" /etc/systemd/system/olympus-installer-counts.timer
 install -d -m 0755 -o caddy -g caddy /var/log/caddy
+# Created as caddy before `caddy validate` (run as root) opens it, so the
+# running Caddy, which writes it as caddy, can still open it after a reload.
+[ -e /var/log/caddy/olympus-installers.log ] || install -m 0600 -o caddy -g caddy /dev/null /var/log/caddy/olympus-installers.log
 # Caddy's admin socket directory (/run/caddy, see the Caddyfile's `admin`).
 install -d -m 0755 /etc/systemd/system/caddy.service.d
 install -m 0644 "$SRC/caddy-admin.conf" /etc/systemd/system/caddy.service.d/olympus-admin.conf

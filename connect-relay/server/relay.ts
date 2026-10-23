@@ -1192,11 +1192,13 @@ export async function startRelay(config: RelayConfig): Promise<RelayHandle> {
 
   const startedAt = new Date(now()).toISOString();
   const sweep = (at = now()): string[] => {
+    // Read before the expiry deletes the records that carry the mark.
+    const internal = new Set([...registry.allRecords()].filter((record) => record.internal).map((record) => record.installId));
     const expired = registry.expire(at, limits.inactiveRegistrationTtlMs, (installId) => sessions.has(installId), limits.unconfirmedRegistrationTtlMs);
     for (const installId of expired) {
       surfaceMap.remove(installId);
       log('registration_expired', { install: installTag(installId) });
-      usage.removed(installId);
+      if (!internal.has(installId)) usage.removed(installId);
     }
     surfaceMap.sweep();
     return expired;

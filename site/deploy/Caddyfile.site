@@ -9,8 +9,8 @@
 # certificates for both names over HTTP-01 on its own.
 #
 # No access log for pages. The one `log` below records downloads of the
-# installers, uninstallers and release tarballs only, and keeps the path, the
-# method, the status and the time of each: every other field (the address,
+# installers, uninstallers and release tarballs only, and keeps the address
+# requested, the method, the status and the time of each: every other field (the address,
 # headers, TLS details, sizes) is deleted before the line is written.
 # `olympus-relay count-installers` turns the lines into daily counts and
 # empties the file every hour (connect-relay/server/installer-counts.ts).
@@ -43,8 +43,8 @@ olympusplugin.ai {
 	skip_log @update_check
 	log {
 		output file /var/log/caddy/olympus-installers.log {
-			roll_size 10MiB
-			roll_keep 1
+			# Never rolled: a rolled copy would outlive the hourly count.
+			roll_disabled
 		}
 		format filter {
 			wrap json
