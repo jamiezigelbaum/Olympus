@@ -350,7 +350,7 @@ function copyUnreadable(value: unknown): DashboardUnreadable | undefined {
 const MANUAL_SYNC_OUTCOMES = new Set<NonNullable<DashboardSource['lastManualSync']>['outcome']>(['checking', 'checked', 'failed', 'busy']);
 
 const SOURCE_STAGES = new Set<SourceProgress['stage']>(['listing', 'reading', 'indexing', 'done']);
-const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'scope_root_missing', 'scope_root_permission_needed', 'provider_unavailable', 'model_downloading']);
+const STALLED_REASONS = new Set<SourceStalledReason>(['waiting_for_credentials', 'scope_pending', 'scope_root_missing', 'scope_root_permission_needed', 'scope_root_helper_needed', 'scope_root_unreadable', 'provider_unavailable', 'model_downloading']);
 const STALL_CAUSES = new Set<SourceStallDetail['cause']>(['failing', 'paused', 'switched_off', 'no_movement']);
 const STALL_STAGES = new Set<NonNullable<SourceStallDetail['stage']>>(['listing', 'reading', 'indexing']);
 

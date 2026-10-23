@@ -88,6 +88,23 @@ export function ignoreGlobsForRoot(globs: readonly string[], rootReal: string): 
   });
 }
 
+/**
+ * Whether a watch on `rootReal` (with `globs` adjusted for that root) would
+ * drop what happens at `path`: some folder between the root and the path is
+ * one the watch leaves out. A chosen folder inside such a place (iCloud Drive
+ * inside Library, say) gets no wake from the outer watch and needs its own.
+ */
+export function watchWouldIgnore(globs: readonly string[], rootReal: string, path: string): boolean {
+  const effective = ignoreGlobsForRoot(globs, rootReal);
+  const lowerPath = path.toLowerCase();
+  const below = lowerPath.startsWith(`${rootReal.toLowerCase()}/`) ? lowerPath.slice(rootReal.length + 1).split('/') : lowerPath.split('/').filter(Boolean);
+  return effective.some((glob) => {
+    if (glob.startsWith('**/')) return below.includes(glob.slice(3).toLowerCase());
+    const lowerGlob = glob.toLowerCase();
+    return lowerPath === lowerGlob || lowerPath.startsWith(`${lowerGlob}/`);
+  });
+}
+
 export class WatchHub {
   private readonly options: WatchHubOptions;
   private module: Promise<ParcelWatcherModule> | undefined;

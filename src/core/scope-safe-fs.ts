@@ -42,10 +42,17 @@ export type ScopeSafeErrorCode =
 
 export class ScopeSafeError extends Error {
   readonly code: ScopeSafeErrorCode;
-  constructor(code: ScopeSafeErrorCode, detail?: string) {
+  /**
+   * For `permission`: which refusal it was. On macOS a privacy refusal (the
+   * "Olympus may not open Desktop" kind) answers EPERM while an ordinary
+   * mode/ownership refusal answers EACCES, so callers can tell them apart.
+   */
+  readonly errno?: 'EACCES' | 'EPERM';
+  constructor(code: ScopeSafeErrorCode, detail?: string, errno?: 'EACCES' | 'EPERM') {
     super(detail ? `${code}: ${detail}` : code);
     this.name = 'ScopeSafeError';
     this.code = code;
+    if (errno) this.errno = errno;
   }
 }
 
@@ -74,6 +81,15 @@ export interface ScopeDirEntry {
   kind: ScopeEntryKind | undefined;
 }
 
+/** What lstat of one directory entry reports. */
+interface ChildStat {
+  mode: number;
+  dev: bigint;
+  ino: bigint;
+  size: number;
+  mtimeMs: number;
+}
+
 interface Native {
   openat(dirfd: number, name: string, flags: number): number;
   openat2Beneath(dirfd: number, relPath: string, flags: number): number;
@@ -81,6 +97,13 @@ interface Native {
   readdirNames(dir: number | bigint): Array<{ name: string; type: number }>;
   closedir(dir: number | bigint): void;
   fstatFlags(fd: number): number | undefined;
+  /**
+   * lstat of the entry `name` directly inside the directory held open as
+   * `dirfd`, never following a link in `name` (the fstatat(..., AT_SYMLINK_NOFOLLOW)
+   * question). Absent where the platform has no such call here; then the
+   * caller fails closed.
+   */
+  lstatChild?(dirfd: number, name: string): ChildStat;
   lastErrno(): number;
   /** True where a listing can name a placeholder (a file kept only in the cloud); needs a descriptor to tell. */
   placeholders: boolean;
@@ -137,7 +160,10 @@ function loadNative(): Native | null {
       [`fdopendir${darwin && intel ? '$INODE64' : ''}`]: { args: [FFIType.i32], returns: FFIType.ptr },
       [`readdir${suffix}`]: { args: [FFIType.ptr], returns: FFIType.ptr },
       closedir: { args: [FFIType.ptr], returns: FFIType.i32 },
-      ...(darwin ? { [`fstat${suffix}`]: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 } } : {}),
+      ...(darwin ? {
+        [`fstat${suffix}`]: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
+        [`fstatat${suffix}`]: { args: [FFIType.i32, FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+      } : {}),
       [darwin ? '__error' : '__errno_location']: { args: [], returns: FFIType.ptr },
     } as const) as unknown as { symbols: Record<string, (...args: unknown[]) => unknown> };
     const s = libc.symbols;
@@ -151,6 +177,39 @@ function loadNative(): Native | null {
     const native: Native = {
       lastErrno: errno,
       placeholders: darwin,
+      // Linux: /proc/self/fd/N is the kernel's own link to the directory the
+      // descriptor holds, so the only name resolved by path is the final one,
+      // and lstat does not follow it. Without /proc this fails closed.
+      ...(!darwin && fs.existsSync('/proc/self/fd')
+        ? {
+          lstatChild: (dirfd: number, name: string): ChildStat => {
+            const st = fs.lstatSync(`/proc/self/fd/${dirfd}/${name}`, { bigint: true });
+            return { mode: Number(st.mode), dev: st.dev, ino: st.ino, size: Number(st.size), mtimeMs: Number(st.mtimeMs) };
+          },
+        }
+        : {}),
+      // macOS: fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW) against struct stat
+      // (64-bit inode layout: dev i32 @0, mode u16 @4, ino u64 @8, mtime @48,
+      // size i64 @96).
+      ...(darwin
+        ? {
+          lstatChild: (dirfd: number, name: string): ChildStat => {
+            const nameBuffer = cstr(name);
+            const buffer = Buffer.alloc(144);
+            const result = s[`fstatat${suffix}`]!(dirfd, ptr(nameBuffer), ptr(buffer), 0x20) as number; // AT_SYMLINK_NOFOLLOW
+            const failure = result < 0 ? errno() : 0;
+            keepAlive(nameBuffer, buffer);
+            if (result < 0) throw toError(failure);
+            return {
+              mode: buffer.readUInt16LE(4),
+              dev: BigInt(buffer.readInt32LE(0)),
+              ino: buffer.readBigUInt64LE(8),
+              size: Number(buffer.readBigInt64LE(96)),
+              mtimeMs: Number(buffer.readBigInt64LE(48)) * 1000 + buffer.readInt32LE(56) / 1e6,
+            };
+          },
+        }
+        : {}),
       openat(dirfd, name, flags) {
         const nameBuffer = cstr(name);
         const result = s.openat!(dirfd, ptr(nameBuffer), flags | cloexec) as number;
@@ -229,13 +288,15 @@ function toError(code: number): ScopeSafeError {
   const e = platformErrno();
   switch (code) {
     case e.ENOENT: return new ScopeSafeError('not_found');
-    case e.EACCES: return new ScopeSafeError('permission');
+    case e.EACCES: return new ScopeSafeError('permission', undefined, 'EACCES');
     case e.ELOOP: case e.EXDEV: case e.ENOTDIR: return new ScopeSafeError('escape', `errno ${code}`);
     case e.ENOSYS: return new ScopeSafeError('unsupported', 'openat2 unavailable');
     case e.EPERM:
       // On Linux a seccomp filter answers EPERM for a call it blocks. The
       // safe open cannot be told apart from a plain denial, so fail closed.
-      return new ScopeSafeError(process.platform === 'linux' ? 'unsupported' : 'permission', `errno ${code}`);
+      return process.platform === 'linux'
+        ? new ScopeSafeError('unsupported', `errno ${code}`)
+        : new ScopeSafeError('permission', `errno ${code}`, 'EPERM');
     default: return new ScopeSafeError('io', `errno ${code}`);
   }
 }
@@ -426,20 +487,31 @@ export class ScopeRoot {
         if (!(error instanceof ScopeSafeError)) throw error;
       }
     }
-    let st: fs.BigIntStats;
+    // Never by path: an ancestor swapped for a link after the listing would
+    // answer for a file outside the folder. The directory is opened the same
+    // safe way reads are (no link, no mount point, beneath the root) and the
+    // entry is stat'ed relative to that descriptor.
+    const parts = splitRelative(relPath);
+    const name = parts[parts.length - 1];
+    if (name === undefined) throw new ScopeSafeError('not_regular', 'the root itself');
+    if (!this.native.lstatChild) throw new ScopeSafeError('unsupported', 'no descriptor-relative stat here');
+    const { fd: parentFd } = this.openRelative(parts.slice(0, -1).join('/'), { directory: true });
+    let st: ChildStat;
     try {
-      st = fs.lstatSync(posix.join(this.path, relPath), { bigint: true });
+      st = this.native.lstatChild(parentFd, name);
     } catch (error) {
-      throw mapNodeError(error);
+      throw error instanceof ScopeSafeError ? error : mapNodeError(error);
+    } finally {
+      fs.closeSync(parentFd);
     }
-    const kind = kindFromMode(Number(st.mode));
+    const kind = kindFromMode(st.mode);
     if (kind !== 'symlink' && st.dev.toString() !== this.dev) throw new ScopeSafeError('escape', 'mount point');
     return {
       dev: st.dev.toString(),
       ino: st.ino.toString(),
       kind,
-      size: Number(st.size),
-      mtimeMs: Number(st.mtimeMs),
+      size: st.size,
+      mtimeMs: st.mtimeMs,
       dataless: false,
     };
   }
@@ -505,7 +577,7 @@ export class ScopeRoot {
 function mapNodeError(error: unknown): ScopeSafeError {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   if (code === 'ENOENT') return new ScopeSafeError('not_found');
-  if (code === 'EACCES' || code === 'EPERM') return new ScopeSafeError('permission');
+  if (code === 'EACCES' || code === 'EPERM') return new ScopeSafeError('permission', undefined, code);
   if (code === 'ELOOP' || code === 'ENOTDIR') return new ScopeSafeError('escape', String(code));
   return new ScopeSafeError('io', String(code ?? 'unknown'));
 }

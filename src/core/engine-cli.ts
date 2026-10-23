@@ -258,7 +258,12 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
   if (configError) missing.push(configError);
   // macOS: the signed helper app is what the Mac names when it asks about Desktop, Documents and the like.
   const helperPath = paths.linux ? undefined : installedEngineHelper(paths);
-  const helperInUse = Boolean(installedProgram(paths.plistPath)?.helperPath);
+  const plistHelper = installedProgram(paths.plistPath)?.helperPath;
+  const helperInUse = Boolean(plistHelper);
+  // The agent's plist names a helper that is no longer there (deleted, or not
+  // an executable file): launchd cannot start the engine, whatever it last said.
+  const helperGone = !paths.linux && Boolean(plistHelper) && !helperPath;
+  if (helperGone) missing.push('The engine agent is set to start through the Olympus helper app, but the helper app is gone: run olympus engine install-helper.');
   const helperUnused = Boolean(helperPath) && agent.installed && !helperInUse;
   if (helperUnused) missing.push('The Olympus helper app is installed but the engine agent does not use it yet: run olympus engine install.');
   if (agent.state === 'running' && !worker.reachable) missing.push('The worker is not answering yet: see olympus engine logs.');
@@ -268,12 +273,12 @@ export async function engineStatusReport(deps: EngineCliDeps = {}): Promise<Reco
     missing.push('Remote access is on but the relay process is not running: see olympus engine logs, or run olympus engine restart.');
   }
   return {
-    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && (remoteMode.mode !== 'relay' || relayRunning),
+    ok: (!linuxHealth || linuxHealth.ok) && agent.state === 'running' && worker.reachable && !configError && !helperUnused && !helperGone && (remoteMode.mode !== 'relay' || relayRunning),
     host: openclaw
       ? { mode: 'standalone', openclaw: 'installed (optional; not used by the engine)', openclaw_path: openclaw }
       : { mode: 'standalone', openclaw: 'not installed (not needed)' },
     agent,
-    ...(paths.linux ? {} : { helper: { installed: Boolean(helperPath), in_use: helperInUse, ...(paths.helperAppPath ? { path: paths.helperAppPath } : {}) } }),
+    ...(paths.linux ? {} : { helper: { installed: Boolean(helperPath), in_use: helperInUse, ...(helperGone ? { missing_but_referenced: true } : {}), ...(paths.helperAppPath ? { path: paths.helperAppPath } : {}) } }),
     engine: host ?? null,
     config: {
       path: paths.configPath,

@@ -69,7 +69,8 @@ export class LocalFilesRootMissingError extends Error {
 
 /** The system will not let Olympus read the approved folder (a macOS permission prompt, or a mode). */
 export class LocalFilesRootPermissionError extends Error {
-  constructor(readonly scopePath: string) {
+  /** Which refusal the system gave: EPERM is the Mac's privacy rule, EACCES ordinary file permissions. */
+  constructor(readonly scopePath: string, readonly errno?: 'EACCES' | 'EPERM') {
     super('Olympus is not allowed to read a chosen folder.');
     this.name = 'LocalFilesRootPermissionError';
   }
@@ -94,6 +95,12 @@ export interface LocalFilesStoreView {
     provider: string;
     accountScope: string;
     locatorUri: string;
+    limit: number;
+  }): ReadonlyArray<{ identity: SourceItemIdentity; locatorUri: string }>;
+  /** Files and folders directly under `/`, for a walk of the whole computer to tell one is gone. */
+  activeItemsDirectlyUnderRootIfIndexed?(input: {
+    provider: string;
+    accountScope: string;
     limit: number;
   }): ReadonlyArray<{ identity: SourceItemIdentity; locatorUri: string }>;
   lookupsReady?(): boolean;
@@ -221,10 +228,19 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       return { real, walkRoot: ScopeRoot.open(real) };
     } catch (error) {
       if (error instanceof ScopeSafeError && error.code === 'not_found') throw new LocalFilesRootMissingError(root);
-      if (error instanceof ScopeSafeError && error.code === 'permission') throw new LocalFilesRootPermissionError(root);
+      if (error instanceof ScopeSafeError && error.code === 'permission') throw new LocalFilesRootPermissionError(root, error.errno);
       throw error;
     }
   };
+
+  // Whether names differ by case on this volume is the scope's one decision
+  // (a scope that cannot say compares exactly). Stored locators and event
+  // paths keep the spelling the disk gave them at the time, so a case-only
+  // rename on a volume that ignores case must not read as a different place.
+  const foldPath = (path: string, forScopePath: string = root): string =>
+    options.scope.ignoresCase?.(forScopePath) ? path.toLowerCase() : path;
+  const pathIsAtOrBelow = (path: string, ancestor: string): boolean =>
+    isWithinScopePath(foldPath(path, path), foldPath(ancestor, ancestor));
 
   const scopePathOf = (relPath: string): string => (relPath === '' ? root : posix.join(root, relPath).normalize('NFC'));
 
@@ -304,11 +320,15 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
       locatorUri: scopePath,
     });
-    if (own && !seen.has(own.providerItemId)) {
+    // The store compares locators ignoring ASCII case; on a volume that keeps
+    // case, `/a` must not stand for `/A`. The id is the exact path's hash.
+    const ownMatches = own && (options.scope.ignoresCase?.(scopePath) || own.providerItemId === localFilesItemId(scopePath));
+    if (own && ownMatches && !seen.has(own.providerItemId)) {
       seen.add(own.providerItemId);
       items.push(deletedItem(own, scopePath));
     }
     if (store.activeItemsUnderLocatorIfIndexed) {
+      const elsewhere = new Set<string>();
       for (let batch = 0; batch < DELETED_DESCENDANT_MAX_BATCHES; batch += 1) {
         const found = store.activeItemsUnderLocatorIfIndexed({
           provider: LOCAL_FILES_PROVIDER,
@@ -321,7 +341,14 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
         });
         let fresh = 0;
         for (const descendant of found) {
-          if (seen.has(descendant.identity.providerItemId)) continue;
+          if (seen.has(descendant.identity.providerItemId) || elsewhere.has(descendant.identity.providerItemId)) continue;
+          // A sibling spelled differently only by case, on a volume that keeps
+          // case, is another folder: counted as progress, never deleted.
+          if (!pathIsAtOrBelow(descendant.locatorUri, scopePath)) {
+            elsewhere.add(descendant.identity.providerItemId);
+            fresh += 1;
+            continue;
+          }
           seen.add(descendant.identity.providerItemId);
           items.push(deletedItem(descendant.identity, descendant.locatorUri));
           fresh += 1;
@@ -355,6 +382,24 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== '/')])]
       : [root];
     const absent: RawItem[] = [];
+    const judge = (stored: { identity: SourceItemIdentity; locatorUri: string }, base?: string): void => {
+      // The store's range ignores ASCII case; on a volume that keeps case a
+      // sibling spelled differently (`/a` beside `/A`) is not under `base`.
+      if (base !== undefined && !pathIsAtOrBelow(stored.locatorUri, base)) return;
+      if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId)) return;
+      if (unreadable.some((path) => pathIsAtOrBelow(stored.locatorUri, path))) return;
+      deletedSeen.add(stored.identity.providerItemId);
+      absent.push(deletedItem(stored.identity, stored.locatorUri));
+    };
+    // Files directly under `/` belong to no top-level folder, so the per-folder
+    // reads below never reach them: ask for them on their own.
+    if (root === '/' && store.activeItemsDirectlyUnderRootIfIndexed) {
+      for (const stored of store.activeItemsDirectlyUnderRootIfIndexed({
+        provider: LOCAL_FILES_PROVIDER,
+        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+        limit: ABSENCE_SCAN_LIMIT,
+      })) judge(stored);
+    }
     for (const base of bases) {
       for (const stored of store.activeItemsUnderLocatorIfIndexed({
         provider: LOCAL_FILES_PROVIDER,
@@ -362,10 +407,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
         locatorUri: base,
         limit: ABSENCE_SCAN_LIMIT,
       })) {
-        if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId)) continue;
-        if (unreadable.some((path) => isWithinScopePath(stored.locatorUri, path))) continue;
-        deletedSeen.add(stored.identity.providerItemId);
-        absent.push(deletedItem(stored.identity, stored.locatorUri));
+        judge(stored, base);
       }
     }
     return absent;
@@ -373,7 +415,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
 
   /** True when a folder the person chose lies at or below `scopePath`. */
   const leadsToSelection = (scopePath: string): boolean =>
-    options.scope.roots().some((entry) => entry.scopePath !== root && isWithinScopePath(entry.scopePath, scopePath));
+    options.scope.roots().some((entry) => entry.scopePath !== root && pathIsAtOrBelow(entry.scopePath, scopePath));
 
   /** Everything under `startRel` (a directory), as items, honoring the person's scope. */
   async function* walk(
@@ -483,7 +525,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
     for (const event of events) {
       // The whole computer is `/`; every other root is a path without a trailing slash.
       const prefix = real === '/' ? '/' : `${real}/`;
-      if (!event.path.startsWith(prefix)) continue;
+      if (!foldPath(event.path).startsWith(foldPath(prefix))) continue;
       latest.set(event.path.slice(prefix.length), event.type);
       if (latest.size > MAX_EVENT_PATHS) throw new LocalFilesHistoryResetError('too many changes to replay');
     }
@@ -654,7 +696,7 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
       if (decide(scopePath) !== 'content') return refused({ scopeContentDenied: true });
       // The deepest approved folder that holds the file is the one it is read through.
       const holder = options.scope.roots()
-        .filter((entry) => isWithinScopePath(scopePath, entry.scopePath))
+        .filter((entry) => pathIsAtOrBelow(scopePath, entry.scopePath))
         .sort((a, b) => b.scopePath.length - a.scopePath.length)[0];
       if (!holder) return refused({ scopeContentDenied: true });
       const rootReal = realPathOfScopePath(options.volumes, holder.scopePath);

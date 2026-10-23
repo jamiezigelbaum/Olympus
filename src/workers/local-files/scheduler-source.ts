@@ -22,14 +22,14 @@ import {
 } from '../source-scheduler.ts';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { MAC_ACCESS_COPY, MacPermissions } from './mac-permissions.ts';
+import { MacPermissions } from './mac-permissions.ts';
 import { LocalFilesRootMissingError, LocalFilesRootPermissionError } from './connector.ts';
 import { realPathOfScopePath } from './locations.ts';
 import { isWithinScopePath } from './paths.ts';
 import type { LocalFilesProviderStoreSyncHandler } from './provider-store-sync.ts';
 import { LOCAL_FILES_ACCOUNT_SCOPE, LOCAL_FILES_PROVIDER } from './scope.ts';
 import type { VolumeResolver } from './volume-identity.ts';
-import { ignoreGlobsForRoot, type WatchHub } from './watch-hub.ts';
+import { ignoreGlobsForRoot, watchWouldIgnore, type WatchHub } from './watch-hub.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** A folder the computer would not open is checked again soon: the person may have just allowed it. */
@@ -93,9 +93,12 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
       writer: true,
       run: async (context?: SourceSchedulerTaskRunContext) => {
         if (blockedRoots.has(root.path)) {
-          throw new SourceSchedulerTaskFailure(MAC_ACCESS_COPY.needsHelper, {
-            errorKind: 'scope_root_permission_needed',
-            retryAt: retryTomorrow(context, 'scope_root_permission_needed', PERMISSION_RETRY_MS),
+          // The fix is the helper app (or, under OpenClaw's own worker, a
+          // different host), not System Settings: its own reason, so the
+          // dashboard offers no privacy-settings button for it.
+          throw new SourceSchedulerTaskFailure(macPermissions.helperNeededCopy(), {
+            errorKind: 'scope_root_helper_needed',
+            retryAt: retryTomorrow(context, 'scope_root_helper_needed', PERMISSION_RETRY_MS),
           });
         }
         let outcome;
@@ -115,10 +118,22 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
             });
           }
           if (error instanceof LocalFilesRootPermissionError) {
-            throw new SourceSchedulerTaskFailure('Olympus is not allowed to read a chosen folder.', {
-              errorKind: 'scope_root_permission_needed',
-              retryAt: retryTomorrow(context, 'scope_root_permission_needed', PERMISSION_RETRY_MS),
-            });
+            // The Mac's privacy rule (a Files & Folders switch fixes it) is a
+            // different problem from the account's own file permissions
+            // (System Settings cannot fix those).
+            const real = root.path === '/' ? '/' : volumeResolver ? realPathOfScopePath(volumeResolver, root.path) : root.path;
+            const privacy = real !== undefined
+              && macPermissions.isPrivacyRefusal(real, error.errno, volumeResolver?.volumeOf(real));
+            // A privacy refusal with no helper behind the read (a saved
+            // ~/Library/Mail scope after the helper was deleted) cannot be
+            // answered in System Settings: no app is there to switch on.
+            const noHelper = privacy && !macPermissions.hasHelper();
+            const errorKind = noHelper ? 'scope_root_helper_needed' : privacy ? 'scope_root_permission_needed' : 'scope_root_unreadable';
+            throw new SourceSchedulerTaskFailure(
+              noHelper ? macPermissions.helperNeededCopy()
+                : privacy ? 'Your Mac did not allow Olympus to read a chosen folder.' : 'Your user account is not allowed to read a chosen folder.',
+              { errorKind, retryAt: retryTomorrow(context, errorKind, PERMISSION_RETRY_MS) },
+            );
           }
           throw error;
         }
@@ -203,20 +218,26 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
 }
 
 /**
- * Points the hub at the approved folders that exist right now. A folder inside
- * another approved folder is covered by it, and a folder that is gone (a disk
- * that is not mounted) is watched again when it returns, on the next build.
+ * Points the hub at the approved folders that exist right now. A folder
+ * inside another approved folder is covered by it, and a folder that is gone
+ * (a disk that is not mounted) is watched again when it returns, on the next
+ * build. A nested folder the outer watch cannot see keeps its own watch: one
+ * on another disk (inotify and FSEvents do not follow a mount into another
+ * device) or inside a place the outer watch leaves out (iCloud Drive inside
+ * Library, a chosen `.git`).
  */
-function watchApprovedFolders(
+export function watchApprovedFolders(
   watch: { hub: WatchHub; volumes: VolumeResolver; ignore: readonly string[] },
   scopePaths: readonly string[],
 ): void {
-  const unique = [...new Set(scopePaths)];
-  const outermost = unique.filter((path) =>
-    !unique.some((other) => other !== path && isWithinScopePath(path, other)));
-  const real = outermost.flatMap((path) => {
-    const resolved = realPathOfScopePath(watch.volumes, path);
-    return resolved ? [resolved] : [];
+  const resolved = [...new Set(scopePaths)].flatMap((path) => {
+    const real = realPathOfScopePath(watch.volumes, path);
+    return real ? [{ path, real }] : [];
   });
-  watch.hub.setRoots(real.map((root) => ({ root, ignore: ignoreGlobsForRoot(watch.ignore, root) })));
+  const mountOf = (real: string): string => watch.volumes.volumeOf(real).mountPoint;
+  const covers = (outer: { real: string }, inner: { real: string }): boolean =>
+    mountOf(outer.real) === mountOf(inner.real) && !watchWouldIgnore(watch.ignore, outer.real, inner.real);
+  const watched = resolved.filter((entry) =>
+    !resolved.some((other) => other !== entry && isWithinScopePath(entry.path, other.path) && covers(other, entry)));
+  watch.hub.setRoots(watched.map(({ real }) => ({ root: real, ignore: ignoreGlobsForRoot(watch.ignore, real) })));
 }
