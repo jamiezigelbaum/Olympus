@@ -1369,7 +1369,9 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     await driver.start();
     // The first opening link signs the browser in and Unlock opens the controls (the Private answers page offers it); the dashboard then opens in that session.
     await driver.open('private');
-    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true });
+    // The accessibility checker's script, put on the machine by the orchestrator beside the inventory; without it the audit is skipped and says so.
+    const axePath = join(WORKDIR, 'axe.min.js');
+    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, ...(existsSync(axePath) ? { axeSource: readFileSync(axePath, 'utf8') } : {}) });
     // The computer's other pages, in the same signed-in browser, after the Sources section (Lock ends the session, so it comes last).
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;

@@ -887,6 +887,9 @@ async function runExploreLeg(run: Run, outDir: string): Promise<void> {
   const pagesInventoryPath = join(scratch, 'pages-inventory.json');
   writeFileSync(pagesInventoryPath, JSON.stringify(buildPageInventory()));
   await run.machine!.put(pagesInventoryPath, '~/rc/explore-pages-inventory.json');
+  // The accessibility checker (axe-core, a dev dependency): its script goes to the machine beside the inventory. Missing (no bun install), the audit is skipped and says so.
+  const axePath = join(import.meta.dir, '..', '..', 'node_modules', 'axe-core', 'axe.min.js');
+  if (existsSync(axePath)) await run.machine!.put(axePath, '~/rc/axe.min.js');
   const done = await run.phase('explore', () => run.agent('explore', '--out ~/rc/explore --inventory ~/rc/explore-inventory.json --pages-inventory ~/rc/explore-pages-inventory.json', 3_000_000));
   const result = done.result;
   if (!result || result.result === undefined) {
