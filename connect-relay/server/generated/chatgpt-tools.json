@@ -659,7 +659,9 @@
               "dropbox.files",
               "x.bookmarks",
               "readwise.library",
-              "local.files"
+              "local.files",
+              "telegram.messages",
+              "whatsapp.personal.messages"
             ]
           }
         },

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import {
+  dataDeleteCustody,
   deleteOlympusData,
   deleteOlympusDataWithCustody,
   exportOlympusData,
@@ -81,6 +82,28 @@ describe('Olympus data lifecycle', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('custody treats a paired-session source as disconnected only after a CLEAN Unpair', () => {
+    const empty = { version: 1 as const, handles: [] };
+    const record = (state: 'unpaired' | 'unpair_incomplete') => ({ status: 'ok' as const, records: [{ source_id: 'telegram.messages', state }] });
+    const base = { sourceId: 'telegram.messages', homeDir: '/nonexistent-olympus-home', connectedRegistry: empty };
+    const gone = () => 'gone' as const;
+    // No unpaired record: still paired as far as anyone can prove.
+    expect(dataDeleteCustody({ ...base, unpairedSources: { status: 'missing' } })).toMatchObject({ ready: false, observed: 'paired' });
+    expect(dataDeleteCustody({ ...base })).toMatchObject({ ready: false, observed: 'unpair_state_unreadable' });
+    expect(dataDeleteCustody({ ...base, unpairedSources: { status: 'unreadable', path: 'x', reason: 'bad' } })).toMatchObject({ ready: false, observed: 'unpair_state_unreadable' });
+    expect(dataDeleteCustody({ ...base, unpairedSources: record('unpair_incomplete'), artifactPresence: gone })).toMatchObject({ ready: false, observed: 'unpair_incomplete' });
+    // A clean record with a session artifact still on disk is a pairing again.
+    expect(dataDeleteCustody({ ...base, unpairedSources: record('unpaired'), artifactPresence: () => 'present' })).toMatchObject({ ready: false, observed: 'paired' });
+    expect(dataDeleteCustody({ ...base, unpairedSources: record('unpaired'), artifactPresence: () => 'unknown' })).toMatchObject({ ready: false, observed: 'paired' });
+    expect(dataDeleteCustody({ ...base, unpairedSources: record('unpaired'), artifactPresence: gone })).toEqual({
+      requirement: 'source_disconnected', ready: true, observed: 'disconnected',
+    });
+    // The CLI delete carries the same protection.
+    expect(() => deleteOlympusDataWithCustody({ ...base, unpairedSources: { status: 'missing' } })).toThrow('Unpair telegram.messages');
+    // A source with no pairing session is unaffected by the record.
+    expect(dataDeleteCustody({ sourceId: 'dropbox.files', homeDir: '/nonexistent-olympus-home', connectedRegistry: empty })).toMatchObject({ ready: true });
   });
 
   test('CLI custody requires an inactive supervised worker before delete-all', () => {

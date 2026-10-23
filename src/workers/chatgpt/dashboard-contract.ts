@@ -596,6 +596,13 @@ export type ChatGptDisconnectSourceId =
   | 'x.bookmarks'
   | 'readwise.library'
   | 'local.files';
+/**
+ * Sources whose indexed data the panel may delete: the Disconnect set, plus the
+ * paired-session chat sources once a CLEAN Unpair has ended their pairing
+ * (they have no Disconnect; Unpair is their disconnect). Widening this never
+ * widens Disconnect.
+ */
+export type ChatGptDeleteSourceId = ChatGptDisconnectSourceId | 'telegram.messages' | 'whatsapp.personal.messages';
 
 /**
  * `olympus_connect_source {source}` → structuredContent. The provider's sign-in
@@ -768,7 +775,7 @@ export interface DisconnectSourceResult {
  */
 export interface DeleteSourceDataResult {
   status: 'deleted';
-  source_id: ChatGptDisconnectSourceId;
+  source_id: ChatGptDeleteSourceId;
   restarting: boolean;
 }
 

@@ -2430,12 +2430,36 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               sourceId,
               connectedRegistry: readConnectedHandleRegistry(registryPath),
               thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
+              // A paired-session source (Telegram, WhatsApp) is disconnected
+              // only after a clean Unpair, which the durable record carries.
+              unpairedSources: readReconciledUnpairedSources(registryPath),
             };
-            const custody = dataDeleteCustody(custodyInput);
+            const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
             if (!custody.ready) {
-              throw custody.observed === 'connected'
-                ? new EmailSourceWorkerError(409, 'delete_source_connected', 'Disconnect this source before deleting its indexed data.')
-                : new EmailSourceWorkerError(409, 'delete_unavailable', 'Olympus cannot confirm this source is disconnected, so it did not delete anything.');
+              throw custody.observed === 'connected' || custody.observed === 'paired'
+                ? new EmailSourceWorkerError(
+                  409,
+                  'delete_source_connected',
+                  custody.observed === 'paired'
+                    ? 'Unpair this source before deleting its indexed data.'
+                    : 'Disconnect this source before deleting its indexed data.',
+                )
+                : custody.observed === 'unpair_incomplete' || custody.observed === 'unpair_state_unreadable'
+                  ? new EmailSourceWorkerError(409, 'delete_unavailable', 'Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.')
+                  : new EmailSourceWorkerError(409, 'delete_unavailable', 'Olympus cannot confirm this source is disconnected, so it did not delete anything.');
+            }
+            // A paired-session source's capture runs as a child of this worker.
+            // Unpair stopped it; confirm that again now rather than assume it,
+            // because a spool still being written while its store is deleted
+            // would bring the deleted messages straight back.
+            const captureKind = sourceId === 'telegram.messages' ? 'telegram' as const
+              : sourceId === 'whatsapp.personal.messages' ? 'whatsapp' as const
+              : undefined;
+            if (captureKind && sourceDashboard.stopMessagingCapture) {
+              try { await sourceDashboard.stopMessagingCapture(captureKind); }
+              catch {
+                throw new EmailSourceWorkerError(409, 'delete_unavailable', 'Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.');
+              }
             }
             let removedCount = 0;
             let failed = false;

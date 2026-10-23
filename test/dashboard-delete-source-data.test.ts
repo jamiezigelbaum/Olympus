@@ -161,3 +161,145 @@ describe('dashboard Delete indexed data route', () => {
     }
   });
 });
+
+/**
+ * Paired-session sources (Telegram, WhatsApp): no broker handle, so "disconnected"
+ * means a CLEAN Unpair, and the capture child stays confirmed stopped.
+ */
+describe('dashboard Delete indexed data route: paired-session sources', () => {
+  type Unpaired = 'clean' | 'incomplete' | 'none' | 'unreadable';
+  function fixture(options: { unpaired?: Unpaired; sessionOnDisk?: boolean; stopThrows?: boolean; handle?: boolean } = {}) {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-delete-session-'));
+    const homeDir = join(root, 'home');
+    const registryPath = join(root, 'handles.json');
+    writeConnectedHandleRegistry({
+      version: 1,
+      handles: options.handle === true
+        ? [{
+            handle: 'telegram.personal', provider: 'telegram', accountRole: 'personal', trustDomain: 'secure_local',
+            allowedCapabilities: ['telegram.messages.sync'], scopes: [], connectedAt: '2026-08-30T00:00:00.000Z',
+          }]
+        : [],
+    }, registryPath);
+    const context = { homeDir, env: {} };
+    const specs = lifecycleSourceSpecs();
+    const tg = specs.find((entry) => entry.sourceId === 'telegram.messages')!;
+    const wa = specs.find((entry) => entry.sourceId === 'whatsapp.personal.messages')!;
+    const files = {
+      tgStore: tg.connectorStorePaths!(context)[0]!,
+      tgSpool: tg.preservationOnlyPaths!(context)[0]!,
+      tgSession: tg.pairingSessionPaths!(context)[0]!,
+      waStore: wa.connectorStorePaths!(context)[0]!,
+      waSpool: wa.rawStatePaths!(context)[0]!,
+      waMedia: wa.rawStatePaths!(context).find((path) => path.endsWith('media'))!,
+      waSession: wa.pairingSessionPaths!(context)[0]!,
+    };
+    for (const path of [files.tgStore, files.waStore]) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'indexed'); }
+    for (const dir of [files.tgSpool, files.waSpool, files.waMedia]) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'x.jsonl'), 'raw'); }
+    if (options.sessionOnDisk === true) {
+      for (const path of [files.tgSession, files.waSession]) { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'session'); }
+    }
+    const state = options.unpaired ?? 'clean';
+    if (state === 'unreadable') writeFileSync(`${registryPath}.unpaired`, '{not json');
+    else if (state !== 'none') {
+      const record = (source_id: string) => state === 'clean'
+        ? { source_id, state: 'unpaired' }
+        : { source_id, state: 'unpair_incomplete', failed_steps: ['stored_reference'] };
+      writeFileSync(`${registryPath}.unpaired`, JSON.stringify({
+        version: 1,
+        sources: [record('telegram.messages'), record('whatsapp.personal.messages')],
+      }), { mode: 0o600 });
+    }
+    const restarts = { requested: 0 };
+    const stops: string[] = [];
+    const worker = createEmailSourceWorker({
+      sourceDashboard: {
+        sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+        registryPath,
+        registryAdoptionIntervalMs: 0,
+        dataLifecyclePathContext: context,
+        workerRestart: { canRestart: () => true, request: () => { restarts.requested += 1; return true; } },
+        stopMessagingCapture: async (source: 'telegram' | 'whatsapp') => {
+          stops.push(source);
+          if (options.stopThrows === true) throw new Error('did not exit');
+        },
+      },
+    });
+    return { root, files, restarts, stops, worker };
+  }
+  const post = (worker: { fetch(request: Request): Promise<Response> }, body: Record<string, unknown>) =>
+    worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+
+  test('after a clean Unpair, Telegram\'s stores go; its capture spool and cursor stay', async () => {
+    const f = fixture();
+    try {
+      const response = await post(f.worker, { source_id: 'telegram.messages', acknowledge: true });
+      expect(response.status).toBe(200);
+      expect(existsSync(f.files.tgStore)).toBe(false);
+      // Raw capture is not indexed data and is deliberately left (preservation-only).
+      expect(existsSync(f.files.tgSpool)).toBe(true);
+      // WhatsApp is a different source: untouched.
+      expect(existsSync(f.files.waStore)).toBe(true);
+      expect(f.stops).toEqual(['telegram']);
+      expect(f.restarts.requested).toBe(1);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('after a clean Unpair, WhatsApp\'s store, spool and media go, and nothing else', async () => {
+    const f = fixture();
+    try {
+      const response = await post(f.worker, { source_id: 'whatsapp.personal.messages', acknowledge: true });
+      expect(response.status).toBe(200);
+      expect(existsSync(f.files.waStore)).toBe(false);
+      expect(existsSync(f.files.waSpool)).toBe(false);
+      expect(existsSync(f.files.waMedia)).toBe(false);
+      expect(existsSync(f.files.tgStore)).toBe(true);
+      expect(existsSync(f.files.tgSpool)).toBe(true);
+      expect(f.stops).toEqual(['whatsapp']);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ['never unpaired (still paired, no record)', { unpaired: 'none' as const }, 'delete_source_connected'],
+    ['the unpair is incomplete', { unpaired: 'incomplete' as const }, 'delete_unavailable'],
+    ['the unpair record is unreadable', { unpaired: 'unreadable' as const }, 'delete_unavailable'],
+    ['the session file is still on disk', { sessionOnDisk: true }, 'delete_source_connected'],
+    ['capture has not confirmed it stopped', { stopThrows: true }, 'delete_unavailable'],
+  ] as const)('refuses and deletes nothing when %s', async (_name, options, code) => {
+    const f = fixture(options as never);
+    try {
+      for (const source_id of ['telegram.messages', 'whatsapp.personal.messages']) {
+        const response = await post(f.worker, { source_id, acknowledge: true });
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({ error: { code } });
+      }
+      for (const path of [f.files.tgStore, f.files.tgSpool, f.files.waStore, f.files.waSpool, f.files.waMedia]) {
+        expect(existsSync(path)).toBe(true);
+      }
+      expect(f.restarts.requested).toBe(0);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses Telegram while its pairing handle is still registered, even with a clean-looking record', async () => {
+    const f = fixture({ handle: true });
+    try {
+      const response = await post(f.worker, { source_id: 'telegram.messages', acknowledge: true });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_source_connected' } });
+      expect(existsSync(f.files.tgStore)).toBe(true);
+      expect(f.restarts.requested).toBe(0);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+});

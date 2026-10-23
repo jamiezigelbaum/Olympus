@@ -29,6 +29,7 @@ import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import type {
   TranscriptionModelView,
+  ChatGptDeleteSourceId,
   ChatGptDisconnectSourceId,
   ChatGptSyncSourceId,
   ChatGptOAuthSource,
@@ -128,13 +129,14 @@ const UNSAFE_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009fâ€‹-â€
 const OAUTH_SOURCES = new Set<ChatGptOAuthSource>(['gmail', 'google-drive', 'dropbox']);
 const SCOPE_SOURCE_IDS = new Set<ChatGptScopeSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']);
 const DISCONNECT_SOURCE_IDS = new Set<ChatGptDisconnectSourceId>(['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files']);
+const DELETE_DATA_SOURCE_IDS = new Set<ChatGptDeleteSourceId>([...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages']);
 const SYNC_SOURCE_IDS = new Set<ChatGptSyncSourceId>(DISCONNECT_SOURCE_IDS);
 const FIX_TOOL_ARGS: Record<string, Record<string, ReadonlySet<string>>> = {
   [DASHBOARD_TOOL_NAME]: {},
   [CONNECT_SOURCE_TOOL_NAME]: { source: OAUTH_SOURCES },
   [SCOPE_LIST_TOOL_NAME]: { source_id: SCOPE_SOURCE_IDS },
   [DISCONNECT_SOURCE_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
-  [DELETE_SOURCE_DATA_TOOL_NAME]: { source_id: DISCONNECT_SOURCE_IDS },
+  [DELETE_SOURCE_DATA_TOOL_NAME]: { source_id: DELETE_DATA_SOURCE_IDS },
   [MODEL_SET_TOOL_NAME]: { embedding: new Set(['built_in']), answers: new Set(['local', 'venice']) },
   [MODEL_RETRY_TOOL_NAME]: { model: new Set(['embedding', 'answers', 'transcription']) },
   [SYNC_SOURCE_TOOL_NAME]: { source_id: SYNC_SOURCE_IDS },
@@ -961,6 +963,8 @@ const SOURCE_LABELS: Record<string, string> = {
   'local.files': 'Files on this computer',
   'x.bookmarks': 'X bookmarks',
   'readwise.library': 'Readwise',
+  'telegram.messages': 'Telegram',
+  'whatsapp.personal.messages': 'WhatsApp',
 };
 
 export function connectSourceToolResult(result: ConnectSourceResult, options: { direct?: boolean; onComputer?: boolean } = {}): ChatGptToolResult {
@@ -1029,7 +1033,7 @@ export function disconnectToolResult(result: DisconnectSourceResult): ChatGptToo
 }
 
 export function deleteSourceDataToolResult(result: DeleteSourceDataResult): ChatGptToolResult {
-  const sourceId = DISCONNECT_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
+  const sourceId = DELETE_DATA_SOURCE_IDS.has(result.source_id) ? result.source_id : undefined;
   if (!sourceId) return errorToolResult(new ChatGptSurfaceError('internal'));
   return {
     content: [{ type: 'text', text: `Indexed data deleted for ${SOURCE_LABELS[sourceId]}. Your files and accounts were not touched.` }],

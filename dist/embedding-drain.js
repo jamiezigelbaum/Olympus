@@ -42025,6 +42025,7 @@ init_store_sync2();
 
 // src/data-lifecycle.ts
 init_sovereignty();
+init_unpaired_sources();
 init_source_corpus_registry();
 init_public_source_capabilities();
 init_worker_service();

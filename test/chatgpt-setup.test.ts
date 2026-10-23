@@ -941,6 +941,16 @@ describe('olympus_delete_source_data', () => {
       expect((await call(client, 'olympus_delete_source_data', { source_id: 'made.up' })).isError).toBe(true);
       expect((await call(client, 'olympus_delete_source_data', { source_id: 'dropbox.files', path: '/' })).isError).toBe(true);
       expect(backendState.deleted).toEqual(['dropbox.files']);
+      // The paired-session chat sources are accepted for Delete (after a clean Unpair,
+      // which the engine enforces), but never for Disconnect.
+      const enumOf = (name: string) => (tools.find((entry) => entry.name === name)!.inputSchema as unknown as { properties: { source_id: { enum: string[] } } }).properties.source_id.enum;
+      expect(enumOf('olympus_delete_source_data')).toEqual(expect.arrayContaining(['telegram.messages', 'whatsapp.personal.messages']));
+      expect(enumOf('olympus_disconnect_source')).not.toContain('telegram.messages');
+      const telegram = await call(client, 'olympus_delete_source_data', { source_id: 'telegram.messages' });
+      expect(telegram.structuredContent).toEqual({ status: 'deleted', source_id: 'telegram.messages', restarting: true });
+      expect(telegram.content[0]!.text).toContain('Indexed data deleted for Telegram');
+      expect((await call(client, 'olympus_disconnect_source', { source_id: 'telegram.messages' })).isError).toBe(true);
+      expect(backendState.deleted).toEqual(['dropbox.files', 'telegram.messages']);
     } finally {
       await client.close();
     }

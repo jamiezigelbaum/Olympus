@@ -110,6 +110,70 @@ describe('Delete indexed data in the ⋯ menu', () => {
   });
 });
 
+describe('Delete indexed data for a paired-session source (Telegram, WhatsApp): only after a CLEAN Unpair', () => {
+  const GUIDED = { kind: 'guided_session' } as unknown as DashboardSourceCard['connection']['action'];
+  const connection = (label: string, state: 'not_connected' | 'connected' = 'not_connected') =>
+    ({ state, label, action: GUIDED, handles: [] }) as unknown as DashboardSourceCard['connection'];
+  const WITH_DATA = { indexed_items: 5000, content_ready_items: 5000, embedded_items: 5000, needs_review_items: 0 };
+  const rowFor = (sourceId: string, label: string, coverage = WITH_DATA, state: 'not_connected' | 'connected' = 'not_connected') => {
+    const view = buildDashboardPreviewView('delete-data');
+    const changed = view.sources.map((c) => (c.source_id === sourceId ? { ...c, connection: connection(label, state), coverage: { ...c.coverage, ...coverage } } : c));
+    const model = buildChatGptDashboardViewModel({ ...view, sources: changed }, { now: DASHBOARD_PREVIEW_NOW });
+    return { row: model.sources.find((source) => source.id === sourceId)!, model };
+  };
+
+  test.each(['telegram.messages', 'whatsapp.personal.messages'])('%s: a clean Unpair with data kept reads calm Disconnected and offers Delete', (sourceId) => {
+    const { row, model } = rowFor(sourceId, 'unpaired');
+    expect(row.status).toBe('Off');
+    expect(row.detail).toBe('Disconnected · indexed data kept');
+    expect(row.menu).toEqual([{ label: 'Delete indexed data', tool: 'olympus_delete_source_data', args: { source_id: sourceId }, destructive: true }]);
+    expect(JSON.stringify(model.needsYou)).not.toContain(sourceId);
+  });
+
+  test.each([
+    ['Unpair incomplete — manual cleanup required'],
+    ['unpair state unreadable'],
+    ['not connected'],
+  ])('%s: no Delete (an unsettled or never-paired session offers none, and keeps its warning)', (label) => {
+    for (const sourceId of ['telegram.messages', 'whatsapp.personal.messages']) {
+      const { row } = rowFor(sourceId, label);
+      expect(JSON.stringify(row.menu ?? [])).not.toContain('olympus_delete_source_data');
+    }
+    if (label !== 'not connected') {
+      const { row } = rowFor('telegram.messages', label);
+      expect(row.detail ?? '').not.toContain('indexed data kept');
+    }
+  });
+
+  test('a paired (connected) session, and a clean Unpair with nothing indexed, offer none', () => {
+    expect(JSON.stringify(rowFor('telegram.messages', 'connected', WITH_DATA, 'connected').row.menu ?? [])).not.toContain('olympus_delete_source_data');
+    const empty = { indexed_items: 0, content_ready_items: 0, embedded_items: 0, needs_review_items: 0 };
+    expect(rowFor('telegram.messages', 'unpaired', empty).row.menu).toBeUndefined();
+  });
+
+  test('Delete never widens Disconnect: the Disconnect tool still rejects the chat sources, Delete accepts them', async () => {
+    const tools = (await import('../src/workers/chatgpt/setup-tools.ts'));
+    const del = tools.DELETE_SOURCE_DATA_TOOL.inputSchema as unknown as { properties: { source_id: { enum: string[] } } };
+    const dis = tools.DISCONNECT_SOURCE_TOOL.inputSchema as unknown as { properties: { source_id: { enum: string[] } } };
+    expect(del.properties.source_id.enum).toEqual(expect.arrayContaining(['telegram.messages', 'whatsapp.personal.messages']));
+    expect(dis.properties.source_id.enum).not.toContain('telegram.messages');
+    expect(dis.properties.source_id.enum).not.toContain('whatsapp.personal.messages');
+  });
+
+  test('the response builder passes the two chat ids for Delete only', () => {
+    const base = buildChatGptDashboardViewModel(viewWith({}), { now: NOW });
+    const row = base.sources.find((source) => source.id === 'dropbox.files')!;
+    const withMenu = (tool: string, id: string) => copyDashboardViewModel({
+      ...base,
+      sources: [{ ...row, menu: [{ label: 'x', tool, args: { source_id: id }, destructive: true }] }],
+    }).sources[0]!.menu![0]!.args;
+    expect(withMenu('olympus_delete_source_data', 'telegram.messages')).toEqual({ source_id: 'telegram.messages' });
+    expect(withMenu('olympus_delete_source_data', 'whatsapp.personal.messages')).toEqual({ source_id: 'whatsapp.personal.messages' });
+    expect(withMenu('olympus_disconnect_source', 'telegram.messages')).toEqual({});
+    expect(withMenu('olympus_delete_source_data', 'made.up')).toEqual({});
+  });
+});
+
 describe('the ⋯ menu and the row button', () => {
   test('a connected source that can sync has Sync now first in its ⋯ menu', () => {
     const dropbox = chatgptDropbox(viewWith({ sync_now_available: true }));

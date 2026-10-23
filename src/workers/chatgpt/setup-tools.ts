@@ -41,6 +41,7 @@ import {
   SCOPE_LIST_TOOL_NAME,
   SCOPE_SET_TOOL_NAME,
   SYNC_SOURCE_TOOL_NAME,
+  type ChatGptDeleteSourceId,
   type ChatGptDisconnectSourceId,
   type ChatGptFolderSourceId,
   type ChatGptOAuthSource,
@@ -126,7 +127,7 @@ export interface ChatGptSetupBackend {
    * (the engine refuses a connected or busy one). `restarting` is whether the
    * engine's worker is restarting so it stops serving the deleted data.
    */
-  deleteSourceData(sourceId: ChatGptDisconnectSourceId): Promise<{ restarting: boolean }>;
+  deleteSourceData(sourceId: ChatGptDeleteSourceId): Promise<{ restarting: boolean }>;
   /**
    * Sync now: starts one source's sync through the dashboard's own route and
    * answers without waiting for it (`busy` when one is running, `too_soon`
@@ -171,6 +172,8 @@ const FOLDER_SOURCE_IDS = ['google_drive.docs', 'dropbox.files', 'local.files'] 
 const SCOPE_SOURCE_IDS = ['gmail.email', ...FOLDER_SOURCE_IDS] as const;
 const DISCONNECT_SOURCE_IDS = ['gmail.email', 'google_drive.docs', 'dropbox.files', 'x.bookmarks', 'readwise.library', 'local.files'] as const;
 const SYNC_SOURCE_IDS = DISCONNECT_SOURCE_IDS;
+/** Delete indexed data also covers the paired-session chat sources (after a clean Unpair); Disconnect does not. */
+const DELETE_DATA_SOURCE_IDS = [...DISCONNECT_SOURCE_IDS, 'telegram.messages', 'whatsapp.personal.messages'] as const;
 
 /** The widget may call these; the model may too. */
 const WIDGET_AND_MODEL = { ui: { visibility: ['model', 'app'] }, 'openai/widgetAccessible': true } as const;
@@ -290,7 +293,7 @@ export const DELETE_SOURCE_DATA_TOOL: ToolDefinition = {
   description: 'For the Olympus panel: delete everything Olympus indexed from a source that is already disconnected (search results, summaries and its privacy records). The files and accounts themselves are not touched. Cannot be undone.',
   inputSchema: {
     type: 'object',
-    properties: { source_id: { type: 'string', enum: [...DISCONNECT_SOURCE_IDS] } },
+    properties: { source_id: { type: 'string', enum: [...DELETE_DATA_SOURCE_IDS] } },
     required: ['source_id'],
     additionalProperties: false,
   },
@@ -465,7 +468,7 @@ export async function callSetupTool(
         return disconnectToolResult({ status: 'disconnected', source_id: sourceId });
       }
       case DELETE_SOURCE_DATA_TOOL_NAME: {
-        const sourceId = oneOf(args.source_id, DISCONNECT_SOURCE_IDS);
+        const sourceId = oneOf(args.source_id, DELETE_DATA_SOURCE_IDS);
         const { restarting } = await backend.deleteSourceData(sourceId);
         return deleteSourceDataToolResult({ status: 'deleted', source_id: sourceId, restarting });
       }

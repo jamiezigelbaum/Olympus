@@ -123,6 +123,8 @@ export type DashboardConnectionState =
  * "not connected" / "unpaired" reads Disconnected, indexed data kept.
  */
 export const DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = 'connection state unreadable';
+/** The card's connection label after a clean Unpair: the paired session is gone and nothing is owed. */
+export const DASHBOARD_UNPAIRED_LABEL = 'unpaired';
 export const DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = 'unpair state unreadable';
 export const DASHBOARD_UNPAIR_INCOMPLETE_LABEL = 'Unpair incomplete — manual cleanup required';
 export const DASHBOARD_UNSETTLED_CUSTODY_LABELS: ReadonlySet<string> = new Set([
@@ -3543,7 +3545,7 @@ function connectionStateFromDefinition(
       ? DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL
       : unpaired.state === 'unpair_incomplete'
         ? DASHBOARD_UNPAIR_INCOMPLETE_LABEL
-        : 'unpaired';
+        : DASHBOARD_UNPAIRED_LABEL;
     return {
       state: 'not_connected',
       label,

@@ -37,6 +37,7 @@ import type { BuiltInTranscriptionDashboardState } from '../source-index/built-i
 import {
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
   DASHBOARD_SUPPORTED_SOURCES,
+  DASHBOARD_UNPAIRED_LABEL,
   type DashboardSourceAction,
   type DashboardSourceCard,
   type DashboardSupportedSourceDefinition,
@@ -69,6 +70,7 @@ import {
   DELETE_SOURCE_DATA_TOOL_NAME,
   SCOPE_LIST_TOOL_NAME,
   SYNC_SOURCE_TOOL_NAME,
+  type ChatGptDeleteSourceId,
   type ChatGptDisconnectSourceId,
   type ChatGptOAuthSource,
   type ChatGptScopeSourceId,
@@ -429,11 +431,17 @@ function sourceEntry(
   // Delete indexed data (owner, 2026-10-23): only once the source is
   // disconnected (the engine enforces it too) and there is indexed data left
   // to delete. A source whose index is empty has nothing to offer.
-  if (notConnected && disconnectable && card.coverage.indexed_items > 0) {
+  // A paired-session source (guided_session: Telegram, WhatsApp) has no
+  // Disconnect; its disconnect is Unpair. It qualifies only after a CLEAN
+  // Unpair (the card's `unpaired` label, never an incomplete or unreadable
+  // one), and the engine re-checks the durable record and the disk.
+  const cleanlyUnpaired = definition.connect_action.kind === 'guided_session'
+    && card.connection.label === DASHBOARD_UNPAIRED_LABEL;
+  if (notConnected && (disconnectable || cleanlyUnpaired) && card.coverage.indexed_items > 0) {
     menu.push({
       label: CHATGPT_SETUP_LABELS.deleteData,
       tool: DELETE_SOURCE_DATA_TOOL_NAME,
-      args: { source_id: definition.source_id as ChatGptDisconnectSourceId },
+      args: { source_id: definition.source_id as ChatGptDeleteSourceId },
       destructive: true,
     });
   }

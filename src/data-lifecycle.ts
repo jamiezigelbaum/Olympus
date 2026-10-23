@@ -80,6 +80,7 @@ import {
   whatsappPairingSessionPaths,
   whatsappStateDir as resolveWhatsAppStateDir,
 } from './core/pairing-session-paths.ts';
+import { artifactPresence, type UnpairedSourcesRead } from './workers/credential-broker/unpaired-sources.ts';
 import { createSourceCorpusRegistry } from './core/source-corpus-registry.ts';
 import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabilities.ts';
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
@@ -165,6 +166,15 @@ export interface LifecycleSourceSpec {
    * a destructive surface.
    */
   preservationOnlyPaths?(context?: LifecyclePathContext): string[];
+  /**
+   * The artifacts that make this computer a paired session of the provider
+   * (Telegram's mtproto login, WhatsApp's linked-device session). A family that
+   * names them has no broker credential to disconnect, so "disconnected" means
+   * a CLEAN Unpair: the durable unpaired record says so and none of these is
+   * left on disk. Naming them here is also what lets the per-source delete
+   * refuse a pairing that is still live.
+   */
+  pairingSessionPaths?(context?: LifecyclePathContext): string[];
   policyPaths?(context?: LifecyclePathContext): string[];
 }
 
@@ -218,7 +228,7 @@ export interface DataDeleteResult {
 export interface DataDeleteCustody {
   requirement: 'source_disconnected' | 'worker_inactive';
   ready: boolean;
-  observed: 'disconnected' | 'connected' | WorkerServiceState | 'unknown_registry' | 'relay_running' | 'engine_loaded';
+  observed: 'disconnected' | 'connected' | 'paired' | 'unpair_incomplete' | 'unpair_state_unreadable' | WorkerServiceState | 'unknown_registry' | 'relay_running' | 'engine_loaded';
   next_action?: string;
 }
 
@@ -317,6 +327,7 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         defaultProtectedTelegramConnectorStoreDbPath(envForContext(context)),
       ],
       preservationOnlyPaths: (context) => telegramPreservationOnlyPaths(envForContext(context)),
+      pairingSessionPaths: (context) => telegramPairingSessionPaths({ env: envForContext(context) }),
     },
     {
       sourceId: 'readwise.library',
@@ -387,6 +398,7 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         defaultWhatsAppInternalConnectorStoreDbPath(envForContext(context)),
       ],
       rawStatePaths: (context) => whatsappRawStatePaths(envForContext(context)),
+      pairingSessionPaths: (context) => whatsappPairingSessionPaths({ env: envForContext(context) }),
     },
     // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
     {
@@ -740,6 +752,8 @@ export function deleteOlympusDataWithCustody(options: {
   sourceId?: string;
   dryRun?: boolean;
   connectedRegistry?: ConnectedHandleRegistry;
+  unpairedSources?: UnpairedSourcesRead;
+  artifactPresence?: (path: string) => 'gone' | 'present' | 'unknown';
   /** Source ids connected on this computer without a credential (see core/this-computer.ts). */
   thisComputerSources?: readonly string[];
   workerState?: WorkerServiceState;
@@ -756,7 +770,9 @@ export function deleteOlympusDataWithCustody(options: {
     throw new OperationError(
       'invalid_params',
       custody.requirement === 'source_disconnected'
-        ? `Disconnect ${options.sourceId} before deleting its local data.`
+        ? custody.observed === 'disconnected' || custody.observed === 'connected'
+          ? `Disconnect ${options.sourceId} before deleting its local data.`
+          : `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, ' ')}).`
         : custody.observed === 'relay_running'
           ? 'Turn remote access off before deleting local data: the relay process is still running.'
           : custody.observed === 'engine_loaded'
@@ -776,10 +792,17 @@ export function dataDeleteCustody(options: {
   sourceId?: string;
   connectedRegistry?: ConnectedHandleRegistry;
   thisComputerSources?: readonly string[];
+  /**
+   * The durable unpaired-source record, read the way the dashboard reads it
+   * (reconciled against the disk). Required for a paired-session source.
+   */
+  unpairedSources?: UnpairedSourcesRead;
+  /** Tests inject disk presence; real callers leave it. */
+  artifactPresence?: (path: string) => 'gone' | 'present' | 'unknown';
   workerState?: WorkerServiceState;
   relayRunning?: boolean;
   engineLoaded?: boolean;
-}): DataDeleteCustody {
+} & LifecyclePathContext): DataDeleteCustody {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
   }
@@ -808,18 +831,56 @@ export function dataDeleteCustody(options: {
     const connected = (lane !== undefined
       && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider))
       || (options.thisComputerSources?.includes(source!.sourceId) ?? false);
-    return connected
-      ? {
+    if (connected) {
+      return {
+        requirement: 'source_disconnected',
+        ready: false,
+        observed: 'connected',
+        next_action: 'Use Disconnect in the local dashboard, then rerun the CLI delete.',
+      };
+    }
+    // A paired-session source (Telegram, WhatsApp) has no handle to disconnect
+    // and its card infers a live session from sync evidence, so "no handle" is
+    // not "disconnected". Only a CLEAN Unpair is: the unpaired record says
+    // `unpaired` and no pairing artifact is left on disk. Anything else is a
+    // pairing that is live, half-removed, or whose state cannot be read.
+    const pairingPaths = source!.pairingSessionPaths?.(options);
+    if (pairingPaths) {
+      const read = options.unpairedSources;
+      if (!read || read.status === 'unreadable') {
+        return {
           requirement: 'source_disconnected',
           ready: false,
-          observed: 'connected',
-          next_action: 'Use Disconnect in the local dashboard, then rerun the CLI delete.',
-        }
-      : {
-          requirement: 'source_disconnected',
-          ready: true,
-          observed: 'disconnected',
+          observed: 'unpair_state_unreadable',
+          next_action: 'Repair the Olympus unpaired-source record, then Unpair this source and retry.',
         };
+      }
+      const record = read.status === 'ok'
+        ? read.records.find((candidate) => candidate.source_id === source!.sourceId)
+        : undefined;
+      if (!record) {
+        return {
+          requirement: 'source_disconnected',
+          ready: false,
+          observed: 'paired',
+          next_action: 'Use Unpair in the local dashboard, then retry.',
+        };
+      }
+      const presence = options.artifactPresence ?? artifactPresence;
+      if (record.state !== 'unpaired' || pairingPaths.some((path) => presence(path) !== 'gone')) {
+        return {
+          requirement: 'source_disconnected',
+          ready: false,
+          observed: record.state === 'unpaired' ? 'paired' : 'unpair_incomplete',
+          next_action: 'Finish Unpair in the local dashboard (remove what it lists), then retry.',
+        };
+      }
+    }
+    return {
+      requirement: 'source_disconnected',
+      ready: true,
+      observed: 'disconnected',
+    };
   }
 
   if (options.engineLoaded === true) {
