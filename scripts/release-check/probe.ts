@@ -196,7 +196,7 @@ export const PROBE_SOURCE = String.raw`(() => {
           disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
           visible: isVisible(el), expanded: el.getAttribute('aria-expanded'),
           reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : '',
-          rowName: rowName ? clean(rowName.textContent) : '', rowKind: row ? (row.classList.contains('source') ? 'source' : 'need') : '',
+          rowName: rowName ? clean(rowName.textContent) : '', rowKind: row ? (row.classList.contains('source') ? 'source' : (row.classList.contains('need') ? 'need' : '')) : '',
           menuKey: menu ? menu.getAttribute('data-open-key') : '', href: el.getAttribute('href'),
         });
       }
@@ -212,7 +212,11 @@ export const PROBE_SOURCE = String.raw`(() => {
     },
     openedWindows: () => (window.__rcOpened ? window.__rcOpened.slice() : []),
     /** Every details element's state, for the menus and See why. */
-    openDetails: () => Array.from(document.querySelectorAll('details[data-open-key]')).map((el) => ({ key: el.getAttribute('data-open-key'), open: el.open === true })),
+    openDetails: () => Array.from(document.querySelectorAll('details[data-open-key]')).map((el) => {
+      const summary = el.querySelector('summary');
+      const body = clean(el.textContent).replace(summary ? clean(summary.textContent) : '', '').trim();
+      return { key: el.getAttribute('data-open-key'), open: el.open === true, text: body.slice(0, 200) };
+    }),
     /** The rectangle of the framed panel in this page, if there is one. */
     frameBox: (id) => { const el = document.getElementById(id); if (!el) return null; const box = el.getBoundingClientRect(); return { x: box.left, y: box.top, w: box.width, h: box.height }; },
     scrollHeight: () => Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0),

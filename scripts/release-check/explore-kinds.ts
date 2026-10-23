@@ -5,7 +5,7 @@
 import { DASHBOARD_CHATGPT_SETUP_LABELS as LABELS, DASHBOARD_CHATGPT_VOCABULARY as VOCABULARY } from '../../src/workers/dashboard/vocabulary.ts';
 
 export type SeedId = 'populated' | 'failed' | 'disconnected' | 'empty';
-export type ControlKind = 'connect' | 'reconnect' | 'sync' | 'scope' | 'disconnect' | 'delete-data' | 'menu' | 'see-why' | 'confirm' | 'cancel' | 'other';
+export type ControlKind = 'connect' | 'reconnect' | 'sync' | 'scope' | 'disconnect' | 'delete-data' | 'menu' | 'see-why' | 'confirm' | 'cancel' | 'unpair' | 'check-again' | 'other';
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -21,5 +21,7 @@ export function kindOf(key: string, label: string): ControlKind {
   if (new RegExp(`^(${escape(LABELS.chooseFolders)}|${escape(LABELS.chooseMail)})$`).test(text)) return 'scope';
   if (new RegExp(`^(${escape(VOCABULARY.reconnect)}|${escape(VOCABULARY.reconnectGoogle)})$`).test(text)) return 'reconnect';
   if (new RegExp(`^${escape(LABELS.connect)}$`).test(text)) return 'connect';
+  if (new RegExp(`^${escape(VOCABULARY.checkAgain)}$`).test(text)) return 'check-again';
+  if (/^Unpair\b/.test(text)) return 'unpair';
   return 'other';
 }

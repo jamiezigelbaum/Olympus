@@ -40,6 +40,14 @@ interface PanelState {
   gmailRow?: boolean;
   /** Connect leaves the dashboard for another page (the panel is gone). */
   connectLeaves?: boolean;
+  /** Cancel on the Disconnect question disconnects anyway. */
+  cancelDisconnects?: boolean;
+  /** Rows that are not sources: the computer's Keys row (a link that leaves the page). */
+  computerRow?: boolean;
+  /** A Needs-you style source row with no control. */
+  bareNeedRow?: boolean;
+  /** The page logs a console error while it loads. */
+  loadLogs?: boolean;
 }
 
 /** A panel with one source, Readwise, that behaves the way the dashboard's does: a row, a ⋯ menu, a question before Disconnect. */
@@ -71,7 +79,9 @@ class PanelDriver implements JourneyDriver {
       : `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">Not connected</p></div><div class="source-actions"><span class="fix"><button data-key="primary:readwise.library">Connect</button></span></div></li>`;
     const need = s.bareProblem ? '<ul><li class="row need"><div class="need-body"><p class="row-text">Readwise is stuck</p></div></li></ul>' : '';
     const gmail = s.gmailRow ? '<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Gmail</span></p></div><div class="source-actions"><span class="fix"><button data-key="primary:gmail.email">Connect</button></span></div></li>' : '';
-    this.panel.document.body.innerHTML = `<main><h2>Sources</h2>${need}<ul>${row}${gmail}</ul></main>`;
+    const computer = s.computerRow ? '<li class="row"><span class="row-text">Keys</span><a data-key="computer:keys" href="/dashboard?keys">Open Keys</a></li>' : '';
+    const needRow = s.bareNeedRow ? '<li class="row source need-row"><div class="source-main"><p class="row-text">Gmail needs you</p></div></li>' : '';
+    this.panel.document.body.innerHTML = `<main><h2>Sources</h2>${need}<ul>${row}${gmail}${needRow}</ul><ul>${computer}</ul></main>`;
     evalIn(this.panel, PROBE_SOURCE);
     this.host.document.body.innerHTML = '<iframe id="olympus-panel"></iframe>';
     evalIn(this.host, PROBE_SOURCE);
@@ -88,7 +98,8 @@ class PanelDriver implements JourneyDriver {
     });
     on('menu:readwise.library:1', () => { if (this.state.noQuestion) this.state.connected = false; else this.state.confirming = true; });
     on('menu:readwise.library:1:yes', () => { this.state.connected = false; this.state.confirming = false; });
-    on('menu:readwise.library:1:no', () => { this.state.confirming = false; });
+    on('menu:readwise.library:1:no', () => { this.state.confirming = false; if (this.state.cancelDisconnects) this.state.connected = false; });
+    on('computer:keys', () => { this.at = '/dashboard?keys'; this.gone = true; });
     on('primary:readwise.library', () => {
       if (this.state.connectLeaves) { this.at = '/dashboard?connect'; this.gone = true; return; }
       if (this.state.connectOpens) this.opened.push(this.state.connectOpens);
@@ -118,7 +129,7 @@ class PanelDriver implements JourneyDriver {
   async go(): Promise<void> { this.reset(); }
   async reload(): Promise<void> { this.reset(); }
   /** A fresh page: the server's state (connected or not) stays; the page's own (menu open, question asked, windows opened) starts over. */
-  private reset(): void { this.state.menuOpen = false; this.state.confirming = false; this.opened.length = 0; this.at = '/dashboard'; this.gone = false; this.render(); }
+  private reset(): void { if (this.state.loadLogs) this.events.console.push('ReferenceError: boot is not defined'); this.state.menuOpen = false; this.state.confirming = false; this.opened.length = 0; this.at = '/dashboard'; this.gone = false; this.render(); }
   async setViewport(): Promise<void> {}
   async where(): Promise<string> { return this.at; }
   async pages(): Promise<number> { return this.pagesOpen; }
@@ -152,7 +163,7 @@ describe('the inventory, taken from the product\'s source', () => {
     expect(all.filter((entry) => entry.sourceId === 'gmail.email').every((entry) => typeof entry.unreachable === 'string')).toBe(true);
     expect(new Set(all.map((entry) => entry.sourceId)).size).toBeGreaterThanOrEqual(8);
     // The destructive ones are marked as such.
-    expect(all.filter((entry) => entry.destructive).every((entry) => entry.kind === 'delete-data' || entry.kind === 'disconnect')).toBe(true);
+    expect(all.filter((entry) => entry.destructive).every((entry) => entry.kind === 'delete-data' || entry.kind === 'disconnect' || entry.kind === 'unpair')).toBe(true);
   });
 
   test('the sets are read from the view model\'s source, and a source that changes shape fails loudly', () => {
@@ -255,7 +266,7 @@ describe('exploring the Sources section', () => {
     const driver = new PanelDriver();
     const failedSeed: Seed = { id: 'failed', title: 'failed', apply: async () => ({ ok: false, detail: 'the sync was not refused' }) };
     const result = await explore({ driver, seeds: [failedSeed], inventory: inventory(), ...quick() });
-    expect(exploreChecks(result).find((entry) => entry.id === 'explore.failed')).toMatchObject({ status: 'warn' });
+    expect(exploreChecks(result).find((entry) => entry.id === 'explore.failed')).toMatchObject({ status: 'fail' });
     expect(result.coverage.find((entry) => entry.id === 'readwise.library:reconnect')?.detail).toContain('its seed could not be produced');
   });
 
@@ -287,6 +298,61 @@ describe('exploring the Sources section', () => {
     const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
     expect(result.traces[0]!.steps.some((step) => step.actual.includes('the press could not be judged'))).toBe(true);
     expect(result.summary.presses).toBeGreaterThan(1);
+  });
+
+  test('a Cancel that performs the action fails: the page is compared with how it was seeded', async () => {
+    const driver = new PanelDriver({ cancelDisconnects: true });
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    const check = exploreChecks(result).find((entry) => entry.id === 'explore.populated')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('Cancel changed the source');
+  });
+
+  test('See why has to open and say something', () => {
+    const make = (open: boolean, text: string) => ({ seed: 'populated', kind: 'see-why', before: { keys: [], seeded: [], text: '', open: [] }, after: { controls: [], text: '', open: [{ key: 'why:x', open, text }], url: '/dashboard' }, opened: [], control: { key: 'summary:why:x' } }) as never;
+    expect(EXPECTATIONS['see-why']!(make(true, 'Because the key was refused.')).ok).toBe(true);
+    expect(EXPECTATIONS['see-why']!(make(true, '')).ok).toBe(false);
+    expect(EXPECTATIONS['see-why']!(make(false, 'text')).ok).toBe(false);
+  });
+
+  test('only source rows are pressed: another row\'s link that leaves the page is never touched', async () => {
+    const driver = new PanelDriver({ computerRow: true });
+    await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    expect(driver.pressed).not.toContain('computer:keys');
+  });
+
+  test('a source row that needs the owner but offers nothing fails, as a Needs-you row does', async () => {
+    const driver = new PanelDriver({ bareNeedRow: true });
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(result).find((entry) => entry.id === 'explore.populated')!.detail).toContain('no way to fix it');
+  });
+
+  test('what the page logs while loading fails the seeded page', async () => {
+    const driver = new PanelDriver({ loadLogs: true });
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    const check = exploreChecks(result).find((entry) => entry.id === 'explore.populated')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('console error while loading');
+  });
+
+  test('the press bound is per seed: a later seed still presses', async () => {
+    const driver = new PanelDriver();
+    const result = await explore({ driver, seeds: [populated(driver), disconnected(driver)], inventory: inventory(), maxPresses: 2, ...quick() });
+    expect(result.seeds.map((seed) => seed.pressed > 0)).toEqual([true, true]);
+    expect(result.summary.presses).toBeGreaterThan(2);
+  });
+
+  test('Telegram and WhatsApp Unpair are listed, destructive, and unreachable on a throwaway machine', () => {
+    const unpair = buildInventory().filter((entry) => entry.kind === 'unpair');
+    expect(unpair.map((entry) => entry.sourceId).sort()).toEqual(['telegram.messages', 'whatsapp.personal.messages']);
+    expect(unpair.every((entry) => entry.destructive && typeof entry.unreachable === 'string')).toBe(true);
+    expect(kindOf('x', 'Unpair Telegram')).toBe('unpair');
+    // Sources that cannot be synced here offer Check again when they need the owner.
+    const again = buildInventory().filter((entry) => entry.kind === 'check-again');
+    expect(again.map((entry) => entry.sourceId)).toContain('telegram.messages');
+    expect(again.map((entry) => entry.sourceId)).toContain('whatsapp.personal.messages');
+    expect(again.every((entry) => typeof entry.unreachable === 'string' || entry.sourceId !== 'readwise.library')).toBe(true);
+    expect(kindOf('x', 'Check again')).toBe('check-again');
   });
 
   test('the press bound stops the exploration and says so', async () => {

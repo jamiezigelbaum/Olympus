@@ -67,7 +67,11 @@ export function buildInventory(root = join(import.meta.dir, '..', '..')): Invent
     add('connect', escape(LABELS.connect), false, ['disconnected', 'empty']);
     add('reconnect', `${escape(VOCABULARY.reconnect)}|${escape(VOCABULARY.reconnectGoogle)}`, false, ['failed']);
     if (syncIds.has(id)) add('sync', escape(LABELS.syncNow), false, ['populated', 'failed']);
+    // A source this worker cannot sync offers Check again on its Needs-you row (checkAgainFix() in the view model).
+    else add('check-again', escape(VOCABULARY.checkAgain), false, ['failed']);
     if (scopeIds.has(id)) add('scope', `${escape(LABELS.chooseFolders)}|${escape(LABELS.chooseMail)}`, false, ['populated'], 'its folders and mail are chosen in a picker that needs the provider');
+    // A paired chat app (Telegram, WhatsApp) offers Unpair, with the engine's own confirmation, on the computer (unpairEntry() in the dashboard client).
+    if (definition.connect_kind === 'pairing') add('unpair', escape(`Unpair ${definition.label}`), true, ['populated']);
     if (disconnectIds.has(id) || definition.connect_action.kind === 'this_computer') {
       add('disconnect', escape(LABELS.disconnect), true, ['populated', 'failed']);
       add('delete-data', escape(LABELS.deleteData), true, ['disconnected']);

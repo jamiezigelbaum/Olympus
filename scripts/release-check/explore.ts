@@ -105,8 +105,8 @@ export interface PressContext {
   seed: SeedId;
   control: PanelControl;
   kind: ControlKind;
-  before: { keys: string[]; text: string; open: Array<{ key: string; open: boolean }> };
-  after: { controls: PanelControl[]; text: string; open: Array<{ key: string; open: boolean }>; url: string };
+  before: { keys: string[]; seeded: string[]; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
+  after: { controls: PanelControl[]; text: string; open: Array<{ key: string; open: boolean; text?: string }>; url: string };
   opened: string[];
 }
 
@@ -119,7 +119,8 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
   },
   'see-why': (c) => {
     const open = c.after.open.find((entry) => `summary:${entry.key}` === c.control.key);
-    return { ok: open?.open === true, expected: 'See why opens and says why', actual: open?.open ? 'it opened' : 'it did not open' };
+    const says = (open?.text ?? '').trim().length > 0;
+    return { ok: open?.open === true && says, expected: 'See why opens and says why', actual: !open?.open ? 'it did not open' : says ? 'it opened and says why' : 'it opened with nothing in it' };
   },
   disconnect: (c) => {
     const yes = c.after.controls.some((control) => control.key === `${c.control.key}:yes` && control.visible);
@@ -134,7 +135,10 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
   cancel: (c) => {
     const base = c.control.key.replace(/:no$/, '');
     const gone = !c.after.controls.some((control) => control.key === `${base}:yes`);
-    return { ok: gone, expected: 'Cancel closes the question and leaves things as they were', actual: gone ? 'the question closed' : 'the question is still showing' };
+    // Left as it was: the page offers the same controls as when it was seeded, apart from the question itself (a Cancel that did the action would swap Disconnect for Connect, or remove Delete).
+    const rest = (keys: string[]): string => keys.filter((key) => !key.startsWith(`${base}:`)).sort().join('|');
+    const same = rest(c.before.seeded) === rest(c.after.controls.map((control) => control.key));
+    return { ok: gone && same, expected: 'Cancel closes the question and leaves things as they were', actual: !gone ? 'the question is still showing' : same ? 'the question closed' : 'the question closed, but the controls on the page changed: Cancel changed the source' };
   },
 };
 
@@ -162,8 +166,8 @@ async function panelText(driver: JourneyDriver): Promise<string> {
   return squash(String(await driver.probe('panel', '__rc.visibleText()') ?? ''));
 }
 
-async function openDetails(driver: JourneyDriver): Promise<Array<{ key: string; open: boolean }>> {
-  const got = await driver.probe('panel', '__rc.openDetails()') as Array<{ key: string; open: boolean }> | null;
+async function openDetails(driver: JourneyDriver): Promise<Array<{ key: string; open: boolean; text?: string }>> {
+  const got = await driver.probe('panel', '__rc.openDetails()') as Array<{ key: string; open: boolean; text?: string }> | null;
   return Array.isArray(got) ? got : [];
 }
 
@@ -188,7 +192,7 @@ export async function pageFindings(driver: JourneyDriver, controls?: PanelContro
     if (control.visible && control.disabled && !control.reason) findings.push(`"${control.name || control.key}" is disabled and says nothing about why${control.rowName ? ` (${control.rowName})` : ''}`);
   }
   const unfixed = await driver.probe('panel', `(() => {
-    const rows = Array.from(document.querySelectorAll('li.row.need'));
+    const rows = Array.from(document.querySelectorAll('li.row.need, li.row.source.need-row'));
     return rows.filter((row) => !row.querySelector('button, a[href]')).map((row) => __rc.clean(row.textContent).slice(0, 80));
   })()`) as string[] | null;
   for (const row of unfixed ?? []) findings.push(`a problem is shown with no way to fix it: "${row}"`);
@@ -223,7 +227,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const foundIds = new Map<string, { seeds: Set<SeedId>; pressed: boolean; disabled: boolean }>();
   const unlisted = new Map<string, { key: string; label: string; rowName: string; pressed: boolean }>();
   const seedFailures = new Map<SeedId, string>();
-  let presses = 0;
+  let totalPresses = 0;
   let opened = options.signedIn === true;
 
   const idOf = (control: PanelControl): string | undefined => {
@@ -232,7 +236,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     const kind = kindOf(control.key, control.name);
     return options.inventory.find((entry) => entry.sourceId === source && entry.kind === kind && new RegExp(entry.label, 'i').test(control.name))?.id;
   };
-  const inScope = (control: PanelControl): boolean => control.rowKind !== '' && ['button', 'summary', 'a'].includes(control.tag);
+  const inScope = (control: PanelControl): boolean => control.rowKind === 'source' && ['button', 'summary', 'a'].includes(control.tag);
   /** A control the machine can press without leaving the throwaway install in a state it cannot restore, or starting a sign-in at a real provider. */
   const drivable = (control: PanelControl): boolean => {
     return options.inventory.some((entry) => entry.sourceLabel === control.rowName && entry.unreachable === undefined);
@@ -285,14 +289,23 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     }
     await freshPage();
     await watch();
+    // What the page logged and requested while loading is judged here, once, with the seeded page; each press then starts from a clean log.
+    const load = driver.drainEvents();
+    const loadRefusal = seed.id === 'failed';
+    const loadRequests = load.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)) && !(loadRefusal && REFUSAL_REQUESTS.some((rule) => rule.test(request.url))));
+    const loadConsole = load.console.filter((message) => !ALWAYS_ALLOWED_CONSOLE.some((rule) => rule.test(message)) && !(/Failed to load resource/.test(message) && load.requests.length > 0));
     const base = await panelControls(driver);
     const steps: StepTrace[] = [];
-    const baseFindings = await pageFindings(driver, base);
+    const baseFindings = [
+      ...await pageFindings(driver, base),
+      ...loadConsole.map((message) => `console error while loading: ${message.slice(0, 200)}`),
+      ...loadRequests.map((request) => `failed request while loading: ${request.text} -> ${request.status || 'failed'}`),
+    ];
     steps.push({
       n: 1, name: `The ${seed.title} page as seeded`, action: `apply the seed "${seed.id}" and open the dashboard`,
       expected: 'the page follows the generic rules (labels, reasons for disabled controls, a fix for every problem, no sideways scroll)',
       actual: baseFindings.length === 0 ? `${base.filter(inScope).length} control(s) in the Sources section` : baseFindings.join('; '),
-      ok: baseFindings.length === 0, ms: 0, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: baseFindings,
+      ok: baseFindings.length === 0, ms: 0, at: '/dashboard', consoleErrors: loadConsole.map((message) => message.slice(0, 300)), failedRequests: loadRequests.map((request) => `${request.text} -> ${request.status || 'failed'}`), findings: baseFindings,
     });
     const record = (control: PanelControl, listed: string | undefined): void => {
       const known = listed ? foundIds.get(listed) : undefined;
@@ -326,6 +339,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     const lastKinds = new Set(seed.last ?? []);
     const orderKey = (entry: { path: string[]; parentKind?: ControlKind }): number => (entry.parentKind && lastKinds.has(entry.parentKind) && /:yes$/.test(entry.path[entry.path.length - 1]!) ? 1 : 0);
 
+    let presses = 0;
     let dirty = false;
     let pressedHere = 0;
     let failedHere = 0;
@@ -371,6 +385,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       driver.drainEvents();
       const info = await press(control.key);
       presses += 1;
+      totalPresses += 1;
       pressedHere += 1;
       if (listed) foundIds.get(listed)!.pressed = true;
       else for (const entry of unlisted.values()) if (entry.key === control.key && entry.rowName === control.rowName) entry.pressed = true;
@@ -382,7 +397,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       // A press may leave the dashboard (a control that opens a page of its own): the panel is then gone, which is an outcome, not a crash.
       let afterControls: PanelControl[] = [];
       let afterText = '';
-      let afterOpen: Array<{ key: string; open: boolean }> = [];
+      let afterOpen: Array<{ key: string; open: boolean; text?: string }> = [];
       let left = false;
       try {
         afterControls = await panelControls(driver);
@@ -396,7 +411,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
 
       const context: PressContext = {
         seed: seed.id, control, kind,
-        before: { keys: controlsNow.map((candidate) => candidate.key), text: beforeText, open: beforeOpen },
+        before: { keys: controlsNow.map((candidate) => candidate.key), seeded: base.map((candidate) => candidate.key), text: beforeText, open: beforeOpen },
         after: { controls: afterControls, text: afterText, open: afterOpen, url: at },
         opened: openedWindows,
       };
@@ -474,7 +489,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const found = coverage.filter((entry) => foundIds.has(entry.id)).length;
   return {
     seeds, traces, coverage, unlisted: [...unlisted.values()],
-    summary: { listed, found, pressed, missed: listed - pressed, unlisted: unlisted.size, presses },
+    summary: { listed, found, pressed, missed: listed - pressed, unlisted: unlisted.size, presses: totalPresses },
     accessibility: { status: 'skipped', reason: 'no accessibility checker (axe-core or similar) is installed in the repository or on the machine, and adding one is a dependency decision for the owner; the generic rules above cover names, reasons and overflow only' },
   };
 }
@@ -492,7 +507,7 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
   for (const seed of result.seeds) {
     const trace = result.traces.find((candidate) => candidate.id === `explore-${seed.id}`);
     if (!seed.produced) {
-      checks.push({ id: `explore.${seed.id}`, title: `Every control, from the ${seed.title} state`, status: 'warn', detail: `the state could not be produced, so its controls were not pressed: ${seed.detail}` });
+      checks.push({ id: `explore.${seed.id}`, title: `Every control, from the ${seed.title} state`, status: 'fail', detail: `the state could not be produced, so its controls were not pressed: ${seed.detail}` });
       continue;
     }
     const failed = trace?.steps.filter((step) => !step.ok) ?? [];

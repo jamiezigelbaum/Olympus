@@ -1299,13 +1299,17 @@ function exploreSeeds(config: AgentConfig): Seed[] {
         await startFakeWith(config, config.fakeToken).catch(() => undefined);
         const session = await ownerSession();
         let card = await readwiseCard();
-        if (connected(card)) await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
-        card = await readwiseCard();
-        if ((card?.coverage?.indexed_items ?? 0) > 0) {
-          await session.call('POST', '/dashboard/delete-source-data', { source_id: 'readwise.library', acknowledge: true });
+        if (connected(card)) {
+          const response = await session.call('POST', '/dashboard/disconnect', { source_id: 'readwise.library', acknowledge: true });
+          if (response.status !== 200) return { ok: false, detail: `disconnect answered ${response.status}` };
+          card = await until(async () => { const now = await readwiseCard(); return now && !connected(now) ? now : undefined; }, 60_000);
+        }
+        if (card && (card?.coverage?.indexed_items ?? 0) > 0) {
+          const response = await session.call('POST', '/dashboard/delete-source-data', { source_id: 'readwise.library', acknowledge: true });
+          if (response.status !== 200) return { ok: false, detail: `delete-source-data answered ${response.status}` };
           card = await until(async () => { const now = await readwiseCard(); return now && (now?.coverage?.indexed_items ?? 0) === 0 && !connected(now) ? now : undefined; }, 120_000, 3_000);
         }
-        return card ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not read as empty: ${cardSummary(await readwiseCard())}` };
+        return card && !connected(card) && (card?.coverage?.indexed_items ?? 0) === 0 ? { ok: true, detail: cardSummary(card) } : { ok: false, detail: `the source did not read as empty (not connected, nothing indexed): ${cardSummary(await readwiseCard())}` };
       },
     },
   ];
