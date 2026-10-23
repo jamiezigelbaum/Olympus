@@ -151,6 +151,15 @@ export function createLocalFilesProviderStoreSyncHandler(
           }
           return [...union.values()];
         },
+        activeItemsDirectlyUnderRootIfIndexed(input) {
+          const union = new Map<string, { identity: import('../../core/source-index/types.ts').SourceItemIdentity; locatorUri: string }>();
+          for (const domain of TIER_DOMAIN_ORDER) {
+            for (const child of tierSet.store(domain)?.activeItemsDirectlyUnderRootIfIndexed(input) ?? []) {
+              if (!union.has(child.identity.providerItemId)) union.set(child.identity.providerItemId, child);
+            }
+          }
+          return [...union.values()];
+        },
         lookupsReady() {
           return TIER_DOMAIN_ORDER.every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
         },
@@ -158,6 +167,7 @@ export function createLocalFilesProviderStoreSyncHandler(
     : {
         activeIdentityForLocatorIfIndexed: (input) => options.store.activeIdentityForLocatorIfIndexed(input),
         activeItemsUnderLocatorIfIndexed: (input) => options.store.activeItemsUnderLocatorIfIndexed(input),
+        activeItemsDirectlyUnderRootIfIndexed: (input) => options.store.activeItemsDirectlyUnderRootIfIndexed(input),
         lookupsReady: () => options.store.locatorIdentityIndexReady(),
       };
 

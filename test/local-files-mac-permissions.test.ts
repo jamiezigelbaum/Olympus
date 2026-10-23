@@ -8,9 +8,11 @@ import {
   MAC_ACCESS_COPY,
   ENGINE_HELPER_ENV,
   MacPermissions,
+  permissionHostKind,
   permissionHostPresent,
 } from '../src/workers/local-files/mac-permissions.ts';
 import { revealHelperAndOpenFullDiskAccess } from '../src/workers/local-files/mac-settings.ts';
+import { LocalFilesRootPermissionError } from '../src/workers/local-files/connector.ts';
 import { createLocalFilesSchedulerSource } from '../src/workers/local-files/scheduler-source.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { createLocalFilesFolderScopeBrowser } from '../src/workers/local-files/scope-browser.ts';
@@ -264,7 +266,7 @@ describe('the picker\'s states for a guarded folder', () => {
 describe('Full Disk Access for the whole computer', () => {
   test('the top level says what to switch on when it is off, and nothing when it is on', async () => {
     const off = fixture({ fullDiskAccess: false });
-    expect((await off.browser.browse({})).access).toEqual({ state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL });
+    expect((await off.browser.browse({})).access).toEqual({ state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess(), settings_url: FULL_DISK_ACCESS_URL });
     expect((await fixture({ fullDiskAccess: true }).browser.browse({})).access).toBeUndefined();
     expect((await fixture({ fullDiskAccess: false, helper: false }).browser.browse({})).access?.state).toBe('needs_helper');
   });
@@ -296,4 +298,102 @@ test('only the standalone engine without the helper lacks an app for macOS to na
   expect(permissionHostPresent({ OLYMPUS_MANAGED_WORKER: '1' })).toBe(false);
   expect(permissionHostPresent({ OLYMPUS_ENGINE_HOST: '1', [ENGINE_HELPER_ENV]: '1' })).toBe(true);
   expect(permissionHostPresent({})).toBe(true);
+});
+
+test('who the Mac blames follows the environment', () => {
+  expect(permissionHostKind({ [ENGINE_HELPER_ENV]: '1', OLYMPUS_ENGINE_HOST: '1' })).toBe('engine_helper');
+  expect(permissionHostKind({ OLYMPUS_ENGINE_HOST: '1' })).toBe('engine_without_helper');
+  expect(permissionHostKind({ OLYMPUS_MANAGED_WORKER: '1' })).toBe('managed_worker');
+  expect(permissionHostKind({})).toBe('other');
+});
+
+describe('each cause gets its own action', () => {
+  const root = (path: string) => ({ path, approved_scope_key: `scope:${path}`, default_action: 'metadata_only' });
+  function schedulerFor(f: ReturnType<typeof fixture>, folders: string[], pull: () => Promise<unknown>, permissions = f.permissions) {
+    return createLocalFilesSchedulerSource({
+      policy: { corpusId: 'c', roots: folders.map(root), sync: { cadence: 'daily' }, content: { plan_limit: 1, batch_size: 1 } } as never,
+      config: defaultConfig(),
+      providerSync: { pull, connectorIdForScope: () => 'k' } as never,
+      store: { lastCompletedSyncRun: () => undefined } as never,
+      macPermissions: permissions,
+      volumes: new VolumeResolver({ platform: 'darwin', home: f.home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)' }),
+    })!;
+  }
+  async function failureOf(run: () => Promise<unknown>): Promise<{ errorKind: string; reason: string | undefined; message: string }> {
+    try { await run(); } catch (error) {
+      const failure = error as { errorKind: string; retryAt?: { degradedReason?: string }; message: string };
+      return { errorKind: failure.errorKind, reason: failure.retryAt?.degradedReason, message: failure.message };
+    }
+    throw new Error('expected a failure');
+  }
+
+  test('a missing helper stalls as "helper needed" (no privacy-settings button), and the reason matches the kind', async () => {
+    const f = fixture({ helper: false });
+    const source = schedulerFor(f, [join(f.home, 'Documents')], async () => { throw new Error('not read'); });
+    const failure = await failureOf(() => source.tasks.find((task) => task.kind === 'sync')!.run());
+    expect(failure.errorKind).toBe('scope_root_helper_needed');
+    expect(failure.reason).toBe('scope_root_helper_needed');
+    expect(failure.message).toContain('olympus engine install-helper');
+  });
+
+  test('the Mac\'s privacy refusal keeps the Files & Folders reason; an ordinary refusal is its own reason', async () => {
+    const f = fixture({ helper: true });
+    const refuse = (errno: 'EACCES' | 'EPERM') => async () => { throw new LocalFilesRootPermissionError('x', errno); };
+    const kindFor = async (folder: string, errno: 'EACCES' | 'EPERM') =>
+      (await failureOf(() => schedulerFor(f, [folder], refuse(errno)).tasks.find((task) => task.kind === 'sync')!.run())).errorKind;
+    // macOS answers a privacy refusal with EPERM, a mode refusal with EACCES.
+    expect(await kindFor(join(f.home, 'Code'), 'EPERM')).toBe('scope_root_permission_needed');
+    expect(await kindFor(join(f.home, 'Code'), 'EACCES')).toBe('scope_root_unreadable');
+    // A guarded folder is the Mac's rule whichever errno came back.
+    expect(await kindFor(join(f.home, 'Documents'), 'EACCES')).toBe('scope_root_permission_needed');
+    const linux = fixture({ platform: 'linux', helper: true });
+    const linuxSource = schedulerFor(linux, [join(linux.home, 'Code')], refuse('EPERM'));
+    expect((await failureOf(() => linuxSource.tasks.find((task) => task.kind === 'sync')!.run())).errorKind).toBe('scope_root_unreadable');
+  });
+
+  test('an ordinary refusal in the picker is not Full Disk Access; a privacy refusal outside the guarded folders is', async () => {
+    const f = fixture({ fullDiskAccess: false });
+    const browse = (platform: NodeJS.Platform, code: string, fda = false) => {
+      const permissions = new MacPermissions({ platform, home: f.home, helperPresent: () => true, listProtected: () => { if (!fda) throw refusal('EPERM'); } });
+      return createLocalFilesFolderScopeBrowser({ volumes: new VolumeResolver({ platform: 'darwin', home: f.home, readMounts: () => '/dev/disk3s1s1 on / (apfs, local)' }), context: { home: f.home, platform }, home: f.home, permissions, readDirectory: () => { throw refusal(code); } })
+        .browse({ parentKey: join(f.home, 'Code') });
+    };
+    expect((await browse('darwin', 'EPERM')).access?.state).toBe('needs_full_disk_access');
+    await expect(browse('darwin', 'EACCES')).rejects.toThrow(MAC_ACCESS_COPY.unreadable);
+    await expect(browse('linux', 'EACCES')).rejects.toThrow(MAC_ACCESS_COPY.unreadableLinux);
+    await expect(browse('linux', 'EPERM')).rejects.toThrow(MAC_ACCESS_COPY.unreadableLinux);
+    expect(MAC_ACCESS_COPY.unreadable).not.toContain('Full Disk Access');
+    expect(MAC_ACCESS_COPY.unreadableLinux).not.toContain('System Settings');
+  });
+});
+
+describe('the words fit the app the Mac actually names', () => {
+  const guard = { kind: 'documents' as const, root: '/h/Documents' };
+  const make = (hostKind: 'engine_helper' | 'engine_without_helper' | 'managed_worker' | 'other') => new MacPermissions({
+    platform: 'darwin', home: '/h', hostKind: () => hostKind,
+    helperPresent: () => hostKind === 'engine_helper' || hostKind === 'other',
+    list: async () => { throw refusal('EPERM'); }, listProtected: () => { throw refusal('EPERM'); },
+  });
+
+  test('Olympus Engine only when the helper stands behind it; another host is named as the app your Mac asked about', async () => {
+    const helper = make('engine_helper');
+    expect(helper.noteDenied(guard).message).toContain('under Olympus Engine');
+    expect(helper.fullDiskAccessNote()?.message).toContain('Olympus Engine needs Full Disk Access');
+    const other = make('other');
+    for (const message of [other.noteDenied(guard).message, other.fullDiskAccessNote()!.message]) {
+      expect(message).not.toContain('Olympus Engine');
+      expect(message).toContain('the app that runs Olympus');
+    }
+    expect((await other.open(guard))?.state).toBe('denied');
+  });
+
+  test('OpenClaw\'s own worker is never told to install a helper it would not be launched through', () => {
+    const worker = make('managed_worker');
+    expect(worker.nodeAccess(guard)).toEqual({ state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelperManagedWorker });
+    expect(worker.fullDiskAccessNote()).toEqual({ state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelperManagedWorkerWholeComputer });
+    expect(MAC_ACCESS_COPY.needsHelperManagedWorker).toContain('OpenClaw');
+    expect(MAC_ACCESS_COPY.needsHelperManagedWorker).not.toContain('Then choose Try again');
+    // The standalone engine without the helper still gets the install instruction.
+    expect(make('engine_without_helper').helperNeededCopy()).toBe(MAC_ACCESS_COPY.needsHelper);
+  });
 });

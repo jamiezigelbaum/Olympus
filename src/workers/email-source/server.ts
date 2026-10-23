@@ -233,7 +233,7 @@ import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
 import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../local-files/locator-result-projector.ts';
 import { createLocalFilesOpenTargets, localFilesOpenRoots } from '../local-files/open-target.ts';
-import { defaultExclusionContext, isWithinScopePath } from '../local-files/paths.ts';
+import { defaultExclusionContext, scopePathIsWithin } from '../local-files/paths.ts';
 import { defaultLocalFilesIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import { VolumeResolver } from '../local-files/volume-identity.ts';
 import { WatchHub, watchIgnoreGlobs } from '../local-files/watch-hub.ts';
@@ -2692,7 +2692,12 @@ export async function main(): Promise<void> {
   // content scope and sync handler are rebuilt whenever the approval changes.
   const localFilesWatchHub = new WatchHub();
   const localFilesVolumes = new VolumeResolver();
-  const localFilesExclusionContext = defaultExclusionContext();
+  // Case handling is read from each volume (a case-sensitive disk on a Mac, a
+  // case-insensitive stick on Linux); the platform's usual format fills gaps.
+  const localFilesExclusionContext = {
+    ...defaultExclusionContext(),
+    volumeIgnoresCase: (volumeId: string | undefined) => localFilesVolumes.ignoresCase(volumeId),
+  };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
   let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;
   const localFilesSyncFor = (ref: SourceScopePolicyRef) => {
@@ -3033,7 +3038,7 @@ export async function main(): Promise<void> {
           lanes: (config.resolveScopes?.() ?? config.scopes).map((approvedScopeKey) => ({
             approvedScopeKey,
             matches: (row) => row.locatorUri !== undefined
-              && isWithinScopePath(row.locatorUri, approvedScopeKey.slice(LOCAL_FILES_POLICY_SOURCE.length + 1)),
+              && scopePathIsWithin(row.locatorUri, approvedScopeKey.slice(LOCAL_FILES_POLICY_SOURCE.length + 1), localFilesExclusionContext),
           })),
         });
       }],

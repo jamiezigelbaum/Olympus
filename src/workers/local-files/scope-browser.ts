@@ -18,7 +18,7 @@ import {
   type SourceFolderScopeBrowser,
 } from '../source-scope-browser.ts';
 import { realPathOfScopePath, scopePathOfRealPath } from './locations.ts';
-import { MAC_ACCESS_COPY, MacPermissions } from './mac-permissions.ts';
+import { MacPermissions } from './mac-permissions.ts';
 import {
   DEFAULT_EXCLUSION_LABELS,
   defaultExclusionContext,
@@ -73,7 +73,11 @@ export function createLocalFilesFolderScopeBrowser(
 ): SourceFolderScopeBrowser {
   const volumes = options.volumes ?? new VolumeResolver();
   const home = safeRealpath(options.home ?? options.context?.home ?? homedir());
-  const context = options.context ?? { ...defaultExclusionContext(), home };
+  const context = options.context ?? {
+    ...defaultExclusionContext(),
+    home,
+    volumeIgnoresCase: (volumeId: string | undefined) => volumes.ignoresCase(volumeId),
+  };
   const readDirectory = options.readDirectory
     ?? ((realPath: string) => readdirSync(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
@@ -111,10 +115,15 @@ export function createLocalFilesFolderScopeBrowser(
         const guard = permissions.guardOf(realPath, volumes.volumeOf(realPath));
         // A guarded folder the Mac said no to: say how to turn it back on.
         if (guard) throw new AccessRefused(permissions.noteDenied(guard));
-        // Not a guarded place: on a Mac the likely cause is Full Disk Access.
-        const fda = permissions.active && !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
-        if (fda) throw new AccessRefused(fda);
-        throw new Error('Your computer does not let Olympus open this folder. Check who may open it in Finder (Get Info, then Sharing & Permissions), then try again.');
+        // Not a guarded place. A privacy refusal the guarded list does not
+        // cover (macOS answers it with EPERM) is Full Disk Access; an ordinary
+        // refusal (EACCES, or any refusal off a Mac) is the account's own file
+        // permissions, and System Settings cannot change that.
+        if (permissions.isPrivacyRefusal(realPath, code, volumes.volumeOf(realPath))) {
+          const fda = !permissions.hasFullDiskAccess() ? permissions.fullDiskAccessNote() : undefined;
+          if (fda) throw new AccessRefused(fda);
+        }
+        throw new Error(permissions.unreadableCopy());
       }
       throw new Error('This folder could not be read. It may have moved or its disk may be unmounted.');
     }
@@ -202,7 +211,7 @@ export function createLocalFilesFolderScopeBrowser(
         const real = realPathOfScopePath(volumes, key);
         return real !== undefined && permissions.blocksReadWithoutHelper(real, volumes.volumeOf(real));
       });
-      if (blocked) throw new Error(MAC_ACCESS_COPY.needsHelper);
+      if (blocked) throw new Error(permissions.helperNeededCopy());
     },
     async validateSelections(selections) {
       const normalized = selections.map((selection) => ({ ...selection, key: normalizeScopePath(selection.key) }));

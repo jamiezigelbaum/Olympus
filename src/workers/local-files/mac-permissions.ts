@@ -64,6 +64,8 @@ export interface MacPermissionsOptions {
   home: string;
   /** True when the engine runs through the signed helper. Default: the helper's environment flag. */
   helperPresent?: () => boolean;
+  /** Who the Mac blames for this process's reads. Default: from the environment, or from `helperPresent` when that is given. */
+  hostKind?: () => PermissionHostKind;
   /** Where the Mac's answers are remembered. Absent: remembered for this run only. */
   memoryPath?: string;
   /** How long one ask waits for the person before it answers "waiting". Default 8 seconds. */
@@ -76,34 +78,70 @@ export interface MacPermissionsOptions {
   now?: () => number;
 }
 
+/**
+ * Who the Mac blames when this process reads a guarded folder.
+ *  - `engine_helper`: the standalone engine, started through the signed helper:
+ *    the Mac names "Olympus Engine".
+ *  - `engine_without_helper`: the standalone engine with no helper installed
+ *    (olympus engine install-helper fixes it).
+ *  - `managed_worker`: the worker OpenClaw's Gateway supervises as its own
+ *    LaunchAgent. It is never started through the helper, so installing the
+ *    helper for the standalone engine does not change what the Mac names.
+ *  - `other`: Olympus runs inside another app (the OpenClaw Gateway, a terminal
+ *    during development). That app is what the Mac names.
+ */
+export type PermissionHostKind = 'engine_helper' | 'engine_without_helper' | 'managed_worker' | 'other';
+
+/** What the Mac calls the app that runs Olympus, in the words a person will see in System Settings. */
+const ENGINE_APP = 'Olympus Engine';
+const OTHER_APP = 'the app that runs Olympus (the one your Mac named when it asked)';
+
 /** Copy, in one place so the picker and the tests read the same words. */
 export const MAC_ACCESS_COPY = {
   needsPermission: 'Your Mac will ask before Olympus opens this folder.',
   waiting: 'Your Mac is asking whether Olympus may open this folder. Answer on your Mac, then choose Try again.',
   needsHelper: 'To open this folder, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then choose Try again.',
   needsHelperWholeComputer: 'To read the whole computer, Olympus Engine needs its helper app so your Mac can ask you. The helper app is not installed on this computer yet. Install it with "olympus engine install-helper", then open this list again.',
-  denied: (kind: GuardedFolderKind) =>
-    `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under Olympus Engine. Then choose Try again.`,
-  fullDiskAccess: 'To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save.',
+  /** Olympus runs as OpenClaw's own worker: the helper is not part of that setup, so say what does work. */
+  needsHelperManagedWorker: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about this folder for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose a folder outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
+  needsHelperManagedWorkerWholeComputer: 'Olympus is running as an OpenClaw background worker here, and your Mac cannot ask you about the whole computer for it. To use it, run Olympus Engine instead ("olympus engine install", then "olympus engine install-helper"), or choose folders outside Desktop, Documents, Downloads, iCloud Drive and other disks.',
+  denied: (kind: GuardedFolderKind, app: string = ENGINE_APP) =>
+    `Your Mac said no to ${PLACE_WORDS[kind]}. To turn it back on, open System Settings, choose Privacy & Security, then Files & Folders, and switch on ${SETTINGS_NAMES[kind]} under ${app}. Then choose Try again.`,
+  fullDiskAccess: (app: string = ENGINE_APP) =>
+    app === ENGINE_APP
+      ? 'To search your whole computer, Olympus Engine needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch on Olympus Engine. If Olympus Engine is not in the list, drag it in from the Finder window that opens when you save.'
+      : `To search your whole computer, ${app} needs Full Disk Access. Open System Settings, choose Privacy & Security, then Full Disk Access, and switch it on. If it is not in the list, add it with the plus button.`,
+  /** Ordinary file permissions (not the Mac's privacy rules): the person's own account cannot read it. */
+  unreadable: 'Your user account is not allowed to open this folder. In Finder, choose Get Info on it and check who may open it under Sharing & Permissions, then choose Try again.',
+  unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.',
 } as const;
 
 /**
- * Whether a signed app stands behind this process when macOS asks about a
- * guarded folder. The standalone engine and the managed worker run bun under
- * launchd, so only the
- * helper app gives it one. Any other host (OpenClaw, a terminal during
- * development) is itself the app macOS names.
+ * Who macOS blames for a read made by a process with this environment.
+ * The standalone engine and the managed worker run bun under launchd, so only
+ * the helper app gives them a signed app to be blamed; any other host
+ * (OpenClaw's Gateway, a terminal during development) is itself the app macOS
+ * names.
  */
-export function permissionHostPresent(env: Record<string, string | undefined>): boolean {
-  if (env[ENGINE_HELPER_ENV]) return true;
+export function permissionHostKind(env: Record<string, string | undefined>): PermissionHostKind {
+  if (env[ENGINE_HELPER_ENV]) return 'engine_helper';
+  if (env.OLYMPUS_ENGINE_HOST === '1' || env.OLYMPUS_STANDALONE === '1') return 'engine_without_helper';
   // The managed worker LaunchAgent also runs bun directly.
-  return env.OLYMPUS_ENGINE_HOST !== '1' && env.OLYMPUS_STANDALONE !== '1' && env.OLYMPUS_MANAGED_WORKER !== '1';
+  if (env.OLYMPUS_MANAGED_WORKER === '1') return 'managed_worker';
+  return 'other';
+}
+
+/** Whether a signed app (or the hosting app itself) stands behind the Mac's question. */
+export function permissionHostPresent(env: Record<string, string | undefined>): boolean {
+  const kind = permissionHostKind(env);
+  return kind === 'engine_helper' || kind === 'other';
 }
 
 export class MacPermissions {
   private readonly platform: NodeJS.Platform;
   private readonly home: string;
   private readonly helperPresent: () => boolean;
+  private readonly hostKind: () => PermissionHostKind;
   private readonly memoryPath: string | undefined;
   private readonly askTimeoutMs: number;
   private readonly list: (path: string) => Promise<unknown>;
@@ -116,6 +154,10 @@ export class MacPermissions {
     this.platform = options.platform ?? process.platform;
     this.home = options.home;
     this.helperPresent = options.helperPresent ?? (() => permissionHostPresent(process.env));
+    this.hostKind = options.hostKind
+      ?? (options.helperPresent
+        ? () => (options.helperPresent!() ? 'engine_helper' : 'engine_without_helper')
+        : () => permissionHostKind(process.env));
     this.memoryPath = options.memoryPath;
     this.askTimeoutMs = options.askTimeoutMs ?? 8_000;
     this.list = options.list ?? (async (path) => {
@@ -137,6 +179,40 @@ export class MacPermissions {
 
   hasHelper(): boolean {
     return this.helperPresent();
+  }
+
+  /** The app the Mac names in its questions, for the words shown to the person. */
+  private appName(): string {
+    return this.hostKind() === 'engine_helper' ? ENGINE_APP : OTHER_APP;
+  }
+
+  /**
+   * What to tell the person when this process cannot be asked about a guarded
+   * folder (or the whole computer). Installing the helper is only the fix for
+   * the standalone engine; OpenClaw's own worker gets the words that fit it.
+   */
+  helperNeededCopy(wholeComputer = false): string {
+    if (this.hostKind() === 'managed_worker') {
+      return wholeComputer ? MAC_ACCESS_COPY.needsHelperManagedWorkerWholeComputer : MAC_ACCESS_COPY.needsHelperManagedWorker;
+    }
+    return wholeComputer ? MAC_ACCESS_COPY.needsHelperWholeComputer : MAC_ACCESS_COPY.needsHelper;
+  }
+
+  /**
+   * Whether a refusal to read a folder is the Mac's privacy rule rather than
+   * ordinary file permissions. macOS answers a privacy refusal with EPERM and a
+   * plain mode or ownership refusal with EACCES, and a guarded place is one the
+   * privacy rules cover by definition. On any other platform privacy rules do
+   * not exist.
+   */
+  isPrivacyRefusal(realPath: string, errno: string | undefined, volume?: Pick<MountedVolume, 'kind' | 'mountPoint' | 'primary'>): boolean {
+    if (!this.active) return false;
+    return errno === 'EPERM' || this.guardOf(realPath, volume) !== undefined;
+  }
+
+  /** The words for a folder the person's own account cannot open (no privacy rule involved). */
+  unreadableCopy(): string {
+    return this.active ? MAC_ACCESS_COPY.unreadable : MAC_ACCESS_COPY.unreadableLinux;
   }
 
   /** The guarded place a real path is in (or is), or undefined for an ordinary folder. */
@@ -177,7 +253,7 @@ export class MacPermissions {
     if (this.recall(guard) === 'granted') return undefined;
     return {
       state: this.hasHelper() ? 'needs_permission' : 'needs_helper',
-      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : MAC_ACCESS_COPY.needsHelper,
+      message: this.hasHelper() ? MAC_ACCESS_COPY.needsPermission : this.helperNeededCopy(),
     };
   }
 
@@ -188,25 +264,25 @@ export class MacPermissions {
    */
   async open(guard: GuardedFolder): Promise<OlympusFolderAccess | undefined> {
     if (!this.hasHelper()) {
-      return { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelper };
+      return { state: 'needs_helper', message: this.helperNeededCopy() };
     }
     const answer = await this.ask(guard);
     if (answer === 'granted') return undefined;
     if (answer === 'waiting') return { state: 'waiting', message: MAC_ACCESS_COPY.waiting };
-    return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+    return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
 
   /** What an unreadable folder, found while reading, means: a denial, or a plain failure. */
   noteDenied(guard: GuardedFolder): OlympusFolderAccess {
     this.remember(guard, 'denied');
-    return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind), settings_url: FILES_AND_FOLDERS_URL };
+    return { state: 'denied', message: MAC_ACCESS_COPY.denied(guard.kind, this.appName()), settings_url: FILES_AND_FOLDERS_URL };
   }
 
   /** The top level's note about searching the whole computer, when Full Disk Access is not on. */
   fullDiskAccessNote(): OlympusFolderAccess | undefined {
     if (!this.active || this.hasFullDiskAccess()) return undefined;
-    if (!this.hasHelper()) return { state: 'needs_helper', message: MAC_ACCESS_COPY.needsHelperWholeComputer };
-    return { state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess, settings_url: FULL_DISK_ACCESS_URL };
+    if (!this.hasHelper()) return { state: 'needs_helper', message: this.helperNeededCopy(true) };
+    return { state: 'needs_full_disk_access', message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
 
   /**

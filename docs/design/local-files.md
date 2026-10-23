@@ -202,6 +202,26 @@ enrolment is pending). This is the case the 2026-10-11 signing ruling named for
 revisiting. Until the helper ships, unguarded folders work on Mac, and
 everything works on Linux.
 
+### Which fix each refusal gets
+
+A chosen folder Olympus cannot open stalls with one of three reasons, and only
+the first offers Open privacy settings:
+
+- `scope_root_permission_needed`: the Mac's privacy rule (macOS answers it with
+  EPERM, and a guarded Desktop, Documents, Downloads, iCloud Drive or disk is
+  the Mac's rule whatever the errno). Fix: Files & Folders, or Full Disk Access.
+- `scope_root_helper_needed`: the engine is not running through the helper app.
+  Fix: `olympus engine install-helper`. Under OpenClaw's own supervised worker
+  (a separate LaunchAgent that is never started through the helper) that fix does
+  not apply, so the words say to run Olympus Engine instead or choose a folder
+  outside the guarded places. Hosted inside another app (the OpenClaw Gateway, a
+  terminal), the Mac names that app, not "Olympus Engine".
+- `scope_root_unreadable`: ordinary file permissions (EACCES, or any refusal off
+  a Mac). System Settings cannot change it.
+
+`olympus engine status` reports a LaunchAgent that starts the engine through a
+helper app that has been deleted as not ok, with `olympus engine install-helper`.
+
 ### Spike results (2026-10-22, development-signed helper)
 
 1. The prompt and Files & Folders name "Olympus Engine" (macOS uses the

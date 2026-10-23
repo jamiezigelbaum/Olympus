@@ -13,7 +13,7 @@
  */
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isWithinScopePath } from './paths.ts';
 
@@ -40,6 +40,11 @@ export interface VolumeIdentityDeps {
   diskutilPlist?: (mountPoint: string) => string | undefined;
   /** Filesystem UUIDs by device node: the /dev/disk/by-uuid links (Linux). */
   uuidsByDevice?: () => Map<string, string>;
+  /**
+   * Whether the file system under a folder ignores case, or undefined when the
+   * folder gives no way to tell. Default: look at one real name in it.
+   */
+  probeIgnoresCase?: (dir: string) => boolean | undefined;
   now?: () => number;
 }
 
@@ -62,6 +67,8 @@ const CACHE_TTL_MS = 15_000;
 export class VolumeResolver {
   private readonly deps: Required<Pick<VolumeIdentityDeps, 'platform' | 'home' | 'now'>> & VolumeIdentityDeps;
   private cache: { at: number; volumes: MountedVolume[] } | undefined;
+  /** What was learned about each volume's case handling; the format of a mounted disk does not change. */
+  private readonly caseByVolume = new Map<string, boolean | undefined>();
 
   constructor(deps: VolumeIdentityDeps = {}) {
     this.deps = {
@@ -83,6 +90,32 @@ export class VolumeResolver {
 
   refresh(): void {
     this.cache = undefined;
+  }
+
+  /**
+   * Whether the volume `volumeId` (undefined: the one holding the home folder)
+   * ignores case in file names, read from the volume itself; undefined when it
+   * cannot be told (not mounted, nothing in it with a letter in its name), and
+   * then callers use the platform's usual format. Answers are kept per volume
+   * id, and a volume that is not mounted right now is not remembered as known.
+   */
+  ignoresCase(volumeId: string | undefined): boolean | undefined {
+    const home = this.deps.home;
+    const volume = volumeId === undefined ? this.volumeOf(home) : this.mountedVolume(volumeId);
+    if (!volume) return undefined;
+    // The primary id covers several mounts of the computer's own disks; the
+    // one that holds the home folder is the one the person's files are on.
+    const cacheKey = volume.primary ? `primary:${volume.mountPoint}` : volume.id;
+    if (this.caseByVolume.has(cacheKey)) return this.caseByVolume.get(cacheKey);
+    const probe = this.deps.probeIgnoresCase ?? probeIgnoresCaseIn;
+    const places = volume.primary && volumeId === undefined ? [home, volume.mountPoint] : [volume.mountPoint];
+    let answer: boolean | undefined;
+    for (const place of places) {
+      answer = probe(place);
+      if (answer !== undefined) break;
+    }
+    if (answer !== undefined) this.caseByVolume.set(cacheKey, answer);
+    return answer;
   }
 
   /** The volume holding `realPath`: the deepest mount point that contains it. */
@@ -167,6 +200,34 @@ export class VolumeResolver {
     if (uuid) return `lin-${uuid.toLowerCase()}`;
     return `dev-${shortHash(`${mount.source}\u0000${mount.fsType}`)}`;
   }
+}
+
+/**
+ * Looks up one name in `dir` with its letter case swapped. The same file back
+ * (same device and inode) means the file system ignores case; "no such file"
+ * means it does not. Reads one directory listing and one lstat, nothing else.
+ */
+export function probeIgnoresCaseIn(dir: string): boolean | undefined {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return undefined; }
+  for (const name of names) {
+    // ASCII letters only: other scripts fold by rules a probe should not guess at.
+    const swapped = name.replace(/[a-zA-Z]/g, (letter) => (letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()));
+    if (swapped === name) continue;
+    try {
+      const own = lstatSync(`${dir === '/' ? '' : dir}/${name}`, { bigint: true });
+      try {
+        const other = lstatSync(`${dir === '/' ? '' : dir}/${swapped}`, { bigint: true });
+        return other.ino === own.ino && other.dev === own.dev;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        return undefined;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 function labelFor(mountPoint: string): string {

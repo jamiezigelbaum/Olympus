@@ -80,6 +80,10 @@ export type SourceStalledReason =
   | 'scope_root_missing'
   /** The computer will not let Olympus open a chosen folder (a Mac privacy switch); it checks again soon. */
   | 'scope_root_permission_needed'
+  /** The Mac cannot ask about a chosen folder because Olympus is not running through its helper app (or runs as OpenClaw's own worker); the fix is not a privacy switch. */
+  | 'scope_root_helper_needed'
+  /** The person's own account may not open a chosen folder (ordinary file permissions); System Settings cannot change that. */
+  | 'scope_root_unreadable'
   /** The provider keeps failing or refusing reads; it retries on its own. */
   | 'provider_unavailable'
   /** Indexing waits for the built-in search model to finish downloading. */
