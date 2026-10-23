@@ -25,6 +25,7 @@ import type {
   ComputerArchiveRequest,
   ComputerArchivesMeta,
 } from '../chatgpt/dashboard-contract.ts';
+import { displayText } from '../dashboard/display-text.ts';
 import { DASHBOARD_ARCHIVE_COPY } from '../dashboard/vocabulary.ts';
 import {
   ARCHIVE_IMPORT_REQUEST_PATH_MAX,
@@ -122,9 +123,20 @@ export type ArchiveAgentStatus =
   | { ok: false; code: 'archives_unreadable'; reason: string; message: string }
   | { ok: false; code: 'unknown_archive'; message: string };
 
+/**
+ * An archive Olympus already holds a record of at the path asked for, in the
+ * state it is actually in. A record at the same path is not proof that the
+ * file is the one imported (it may have been replaced), so it never stands
+ * in for the answer: it is reported beside the request that was recorded.
+ */
+export interface AgentExistingRecord {
+  archive_id: string;
+  name: string;
+  state: ComputerArchiveEntry['status'];
+}
+
 export type ArchiveAgentStart =
-  | { ok: false; code: 'needs_approval'; request_id: string; message: string; open: ArchiveOpenTarget }
-  | { ok: true; status: 'already_imported'; archive_id: string; name: string; archive_status: ComputerArchiveEntry['status']; message: string }
+  | { ok: false; code: 'needs_approval'; request_id: string; message: string; open: ArchiveOpenTarget; existing_record?: AgentExistingRecord }
   | { ok: true; status: 'checking'; request_id: string; name: string; message: string }
   | { ok: false; code: 'invalid_path' | 'too_many_requests' | 'archives_unreadable' | 'requests_unreadable'; message: string };
 
@@ -158,7 +170,13 @@ export const ARCHIVE_AGENT_COPY = {
   needsApproval: 'Olympus imports a file only after the person approves it, and has not opened {name}. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Import on the request for {name}. Do not open, copy or read the file yourself, and do not ask again: call archive_import with status to see when it has been approved.',
   needsRemovalApproval: 'Olympus removes an imported archive only after the person approves it. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Remove on the request for {name}. Removing deletes everything Olympus made from it; the file itself stays where it is. Do not ask again: call archive_import with status to see when it is gone.',
   checking: 'The person approved {name} and Olympus is checking whether it is already imported. Call archive_import with status to see the result.',
-  alreadyImported: '{name} is already imported, so Olympus did not import it again. Call archive_import with status for its state.',
+  existingRecord: {
+    imported: 'Olympus has an earlier import from this same path: {name}.',
+    importing: 'Olympus is importing {name} from this same path now.',
+    stopped: 'An earlier import from this same path, {name}, stopped before it finished.',
+    removing: 'Olympus is removing {name}, an earlier import from this same path.',
+  },
+  existingNote: 'A matching path does not show that this file is the one imported: it may have been replaced since, so Olympus recorded a request for the file as it is now. When the person approves, Olympus opens the file, compares it with what it already holds, and says if it is the same export.',
   removing: '{name} is already being removed. Call archive_import with status to see when it is gone.',
   heldNote: {
     ready: DASHBOARD_ARCHIVE_COPY.heldWhy.ready,
@@ -322,7 +340,7 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
         || path.includes('\0') || !path.startsWith('/')) {
         return { ok: false, code: 'invalid_path', message: ARCHIVE_AGENT_COPY.invalidPath };
       }
-      const name = archivePathLabel(path);
+      const name = displayText(archivePathLabel(path));
       const asked = spelled(path);
       let records;
       try {
@@ -333,29 +351,25 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
         }
         throw error;
       }
-      // An approved and imported archive is recognised by its recorded path, as text only. Whether the
-      // same bytes sit under another name is for the approval to find out, which reads the files.
-      const imported = records.find((record) => record.status !== 'removing'
-        && spelled(recordedPath(record.root_path, record.chosen_rel_path)) === asked);
-      if (imported) {
-        return {
-          ok: true,
-          status: 'already_imported',
-          archive_id: imported.archive_id,
-          name: imported.label,
-          archive_status: imported.status,
-          message: fill(ARCHIVE_AGENT_COPY.alreadyImported, { name: imported.label }),
-        };
-      }
+      // A record at this path is reported as what it is: an earlier record, in its own state. It is not
+      // proof the file is the same export (a newer one may have replaced it, or an import may have stopped
+      // before reading anything), so a request is recorded for the file as it is now. Whether the bytes
+      // repeat an earlier import is for the approval to find out, which reads the files; nothing here does.
+      const record = records
+        .filter((candidate) => spelled(recordedPath(candidate.root_path, candidate.chosen_rel_path)) === asked)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      const existing_record: AgentExistingRecord | undefined = record
+        ? { archive_id: record.archive_id, name: displayText(record.label), state: record.status }
+        : undefined;
       let entry;
       try {
-        const existing = deps.requests.list().find((request) => request.kind === 'import'
+        const checking = deps.requests.list().find((request) => request.kind === 'import'
           && request.path === path && request.status === 'checking');
-        if (existing) {
+        if (checking) {
           return {
             ok: true,
             status: 'checking',
-            request_id: existing.request_id,
+            request_id: checking.request_id,
             name,
             message: fill(ARCHIVE_AGENT_COPY.checking, { name }),
           };
@@ -372,8 +386,14 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
         ok: false,
         code: 'needs_approval',
         request_id: entry.request_id,
-        message: fill(ARCHIVE_AGENT_COPY.needsApproval, { name }),
+        message: [
+          ...(existing_record
+            ? [fill(ARCHIVE_AGENT_COPY.existingRecord[existing_record.state], { name: existing_record.name }), ARCHIVE_AGENT_COPY.existingNote]
+            : []),
+          fill(ARCHIVE_AGENT_COPY.needsApproval, { name }),
+        ].join(' '),
         open: archivesOpenTarget(),
+        ...(existing_record ? { existing_record } : {}),
       };
     },
 
@@ -430,13 +450,14 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
         throw error;
       }
       if (!record) return { ok: false, code: 'unknown_archive', message: ARCHIVE_AGENT_COPY.unknownArchive };
+      const label = displayText(record.label);
       if (record.status === 'removing') {
         return {
           ok: true,
           status: 'removing',
           archive_id: record.archive_id,
-          name: record.label,
-          message: fill(ARCHIVE_AGENT_COPY.removing, { name: record.label }),
+          name: label,
+          message: fill(ARCHIVE_AGENT_COPY.removing, { name: label }),
         };
       }
       let entry;
@@ -454,8 +475,8 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
         code: 'needs_approval',
         request_id: entry.request_id,
         archive_id: record.archive_id,
-        name: record.label,
-        message: fill(ARCHIVE_AGENT_COPY.needsRemovalApproval, { name: record.label }),
+        name: label,
+        message: fill(ARCHIVE_AGENT_COPY.needsRemovalApproval, { name: label }),
         open: archivesOpenTarget(),
       };
     },

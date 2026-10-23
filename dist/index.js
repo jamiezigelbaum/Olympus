@@ -13441,6 +13441,9 @@ var init_answer_ready_coverage = __esm(() => {
   ];
 });
 
+// src/workers/dashboard/display-text.ts
+var init_display_text = () => {};
+
 // src/workers/dashboard/vocabulary.ts
 function dashboardManualSyncPendingLine(label) {
   return `Checking ${syncMid(label)}…`;
@@ -13452,6 +13455,7 @@ var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
+  init_display_text();
   init_scheduler_markers();
   DASHBOARD_UNCONNECTED_STATES = new Set([
     "not_connected",
@@ -13745,6 +13749,7 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    fullPath: "Full path: {path}",
     removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
     removeRequestLineNoWhere: "An agent asked to remove {name}.",
     removeRequestNote: "Removing deletes everything Olympus made from it. The file itself stays where it is.",
@@ -29770,7 +29775,7 @@ var operations = [
       "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
       "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
       "Never open, read or copy the file yourself, and never retry to get around the approval.",
-      `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If it is already imported it says so and does not import it again.`,
+      `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
       "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
       "remove {archive_id}: also needs the user's approval on the dashboard (same needs_approval result); removing deletes what Olympus made from the archive and never touches the file.",
       "Any other {ok: false, message} is a refusal to tell the user in those words."

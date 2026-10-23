@@ -18,6 +18,7 @@ import type { DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
+import { displayText } from './display-text.ts';
 import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from './scheduler-markers.ts';
 import type { ModelLoadFailedReason, SourceFailureKind } from '../chatgpt/dashboard-contract.ts';
 
@@ -1867,6 +1868,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
   removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
   /** An agent's request, waiting for the person. */
   requestLine: 'An agent asked to import {name} from {where}.',
+  /** Under an agent's request: the whole path it acts on, with hidden characters written out. */
+  fullPath: 'Full path: {path}',
   /** An agent's request to remove an archive; the archive's own name and folder. */
   removeRequestLine: 'An agent asked to remove {name}, imported from {where}.',
   removeRequestLineNoWhere: 'An agent asked to remove {name}.',
@@ -1940,21 +1943,23 @@ export const DASHBOARD_ARCHIVE_COPY = {
 
 /**
  * The sentence one Needs you item about imports carries (both surfaces read
- * the same words; names are the person's own file names).
+ * the same words). A name is the person's own file name, or an agent's idea
+ * of one: it is shown through `displayText`, so nothing in it can hide or
+ * reorder the words around it.
  */
 export function dashboardImportAttentionSentence(entry: DashboardImportAttention): string {
   const words = DASHBOARD_ARCHIVE_COPY.needsYou;
   switch (entry.kind) {
     case 'stopped':
-      return words.stopped.replace('{name}', entry.name);
+      return words.stopped.replace('{name}', () => displayText(entry.name));
     case 'request':
-      return words.request.replace('{name}', entry.name);
+      return words.request.replace('{name}', () => displayText(entry.name));
     case 'removal':
-      return words.removal.replace('{name}', entry.name);
+      return words.removal.replace('{name}', () => displayText(entry.name));
     case 'failed':
-      return words.failed.replace('{name}', entry.name);
+      return words.failed.replace('{name}', () => displayText(entry.name));
     case 'counts':
-      return words.counts.replace('{name}', entry.name);
+      return words.counts.replace('{name}', () => displayText(entry.name));
     case 'scheduler':
       return words.scheduler[entry.setting];
     case 'held':

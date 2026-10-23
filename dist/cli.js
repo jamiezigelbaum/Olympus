@@ -74393,6 +74393,25 @@ var init_answer_ready_coverage = __esm(() => {
   ];
 });
 
+// src/workers/dashboard/display-text.ts
+function escapeOne(char) {
+  if (char === " ")
+    return char;
+  const code = char.codePointAt(0) ?? 0;
+  return `⟨U+${code.toString(16).toUpperCase().padStart(4, "0")}⟩`;
+}
+function visibleText(text2) {
+  return text2.replace(HIDDEN, escapeOne);
+}
+function displayText(text2) {
+  const shown = visibleText(text2);
+  return /^[\x20-\x7e]*$/.test(shown) ? shown : `${FIRST_STRONG_ISOLATE}${shown}${POP_DIRECTIONAL_ISOLATE}`;
+}
+var FIRST_STRONG_ISOLATE = "⁨", POP_DIRECTIONAL_ISOLATE = "⁩", HIDDEN;
+var init_display_text = __esm(() => {
+  HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}͏ᅟᅠ឴឵⠀ㅤﾠ⟨⟩]/gu;
+});
+
 // src/workers/dashboard/vocabulary.ts
 function dashboardStatusResolution(input) {
   const source = input.source;
@@ -74843,15 +74862,15 @@ function dashboardImportAttentionSentence(entry) {
   const words2 = DASHBOARD_ARCHIVE_COPY.needsYou;
   switch (entry.kind) {
     case "stopped":
-      return words2.stopped.replace("{name}", entry.name);
+      return words2.stopped.replace("{name}", () => displayText(entry.name));
     case "request":
-      return words2.request.replace("{name}", entry.name);
+      return words2.request.replace("{name}", () => displayText(entry.name));
     case "removal":
-      return words2.removal.replace("{name}", entry.name);
+      return words2.removal.replace("{name}", () => displayText(entry.name));
     case "failed":
-      return words2.failed.replace("{name}", entry.name);
+      return words2.failed.replace("{name}", () => displayText(entry.name));
     case "counts":
-      return words2.counts.replace("{name}", entry.name);
+      return words2.counts.replace("{name}", () => displayText(entry.name));
     case "scheduler":
       return words2.scheduler[entry.setting];
     case "held":
@@ -74864,6 +74883,7 @@ var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is mis
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
+  init_display_text();
   init_scheduler_markers();
   DASHBOARD_UPDATE_COPY = {
     notice: (version) => `Olympus ${version} is available. To update, run this in Terminal:`,
@@ -75273,6 +75293,7 @@ var init_vocabulary = __esm(() => {
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
     requestLine: "An agent asked to import {name} from {where}.",
+    fullPath: "Full path: {path}",
     removeRequestLine: "An agent asked to remove {name}, imported from {where}.",
     removeRequestLineNoWhere: "An agent asked to remove {name}.",
     removeRequestNote: "Removing deletes everything Olympus made from it. The file itself stays where it is.",
@@ -87272,7 +87293,7 @@ var init_operations = __esm(() => {
         "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
         "Never open, read or copy the file yourself, and never retry to get around the approval.",
-        `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If it is already imported it says so and does not import it again.`,
+        `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
         "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
         "remove {archive_id}: also needs the user's approval on the dashboard (same needs_approval result); removing deletes what Olympus made from the archive and never touches the file.",
         "Any other {ok: false, message} is a refusal to tell the user in those words."
@@ -127665,6 +127686,21 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       add(list, archiveItem(archive, String(meta2.privateModel || "")));
     return list;
   }
+  function isolatedLine(cls, template, values) {
+    const line = el("p", cls);
+    for (const part of template.split(/(\{[a-z]+\})/)) {
+      const key2 = part.slice(1, -1);
+      if (part.charAt(0) === "{" && Object.prototype.hasOwnProperty.call(values, key2))
+        add(line, el("bdi", "", values[key2]));
+      else if (part)
+        add(line, doc2.createTextNode(part));
+    }
+    return line;
+  }
+  function archiveFullPath(request2) {
+    const path = typeof request2.path === "string" ? request2.path : "";
+    return path ? isolatedLine("muted archive-facts request-path", H.copy.archives.fullPath, { path }) : null;
+  }
   function archiveRequestItem(request2) {
     const A = H.copy.archives;
     const item = el("li", "archive request");
@@ -127675,7 +127711,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const where2 = typeof request2.where === "string" ? request2.where : "";
     if (request2.kind === "remove") {
       item.setAttribute("data-request", "remove");
-      add(item, el("p", "", where2 ? fill2(A.removeRequestLine, { name: request2.name, where: where2 }) : fill2(A.removeRequestLineNoWhere, { name: request2.name })));
+      add(item, where2 ? isolatedLine("", A.removeRequestLine, { name: request2.name, where: where2 }) : isolatedLine("", A.removeRequestLineNoWhere, { name: request2.name }));
+      add(item, archiveFullPath(request2));
       add(item, el("p", "muted", A.removeRequestNote));
       add(item, add(el("div", "archive-actions"), fixControl({
         label: A.remove,
@@ -127687,7 +127724,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       return item;
     }
     if (request2.status === "pending") {
-      add(item, el("p", "", fill2(A.requestLine, { name: request2.name, where: where2 })));
+      add(item, isolatedLine("", A.requestLine, { name: request2.name, where: where2 }));
+      add(item, archiveFullPath(request2));
       add(item, add(el("div", "archive-actions"), fixControl({ label: A.approve, tool: H.archiveApproveTool, args: { request_id: request2.id } }, key2 + ":approve", "plain", false), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
@@ -149772,7 +149810,7 @@ function createArchiveImportAgent(deps) {
       if (typeof path !== "string" || path.length === 0 || path.length > ARCHIVE_IMPORT_REQUEST_PATH_MAX || path.includes("\x00") || !path.startsWith("/")) {
         return { ok: false, code: "invalid_path", message: ARCHIVE_AGENT_COPY.invalidPath };
       }
-      const name = archivePathLabel(path);
+      const name = displayText(archivePathLabel(path));
       const asked = spelled(path);
       let records;
       try {
@@ -149783,25 +149821,16 @@ function createArchiveImportAgent(deps) {
         }
         throw error2;
       }
-      const imported = records.find((record5) => record5.status !== "removing" && spelled(recordedPath(record5.root_path, record5.chosen_rel_path)) === asked);
-      if (imported) {
-        return {
-          ok: true,
-          status: "already_imported",
-          archive_id: imported.archive_id,
-          name: imported.label,
-          archive_status: imported.status,
-          message: fill2(ARCHIVE_AGENT_COPY.alreadyImported, { name: imported.label })
-        };
-      }
+      const record5 = records.filter((candidate) => spelled(recordedPath(candidate.root_path, candidate.chosen_rel_path)) === asked).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      const existing_record = record5 ? { archive_id: record5.archive_id, name: displayText(record5.label), state: record5.status } : undefined;
       let entry;
       try {
-        const existing = deps.requests.list().find((request) => request.kind === "import" && request.path === path && request.status === "checking");
-        if (existing) {
+        const checking = deps.requests.list().find((request) => request.kind === "import" && request.path === path && request.status === "checking");
+        if (checking) {
           return {
             ok: true,
             status: "checking",
-            request_id: existing.request_id,
+            request_id: checking.request_id,
             name,
             message: fill2(ARCHIVE_AGENT_COPY.checking, { name })
           };
@@ -149819,8 +149848,12 @@ function createArchiveImportAgent(deps) {
         ok: false,
         code: "needs_approval",
         request_id: entry.request_id,
-        message: fill2(ARCHIVE_AGENT_COPY.needsApproval, { name }),
-        open: archivesOpenTarget()
+        message: [
+          ...existing_record ? [fill2(ARCHIVE_AGENT_COPY.existingRecord[existing_record.state], { name: existing_record.name }), ARCHIVE_AGENT_COPY.existingNote] : [],
+          fill2(ARCHIVE_AGENT_COPY.needsApproval, { name })
+        ].join(" "),
+        open: archivesOpenTarget(),
+        ...existing_record ? { existing_record } : {}
       };
     },
     status(archiveId) {
@@ -149875,13 +149908,14 @@ function createArchiveImportAgent(deps) {
       }
       if (!record5)
         return { ok: false, code: "unknown_archive", message: ARCHIVE_AGENT_COPY.unknownArchive };
+      const label = displayText(record5.label);
       if (record5.status === "removing") {
         return {
           ok: true,
           status: "removing",
           archive_id: record5.archive_id,
-          name: record5.label,
-          message: fill2(ARCHIVE_AGENT_COPY.removing, { name: record5.label })
+          name: label,
+          message: fill2(ARCHIVE_AGENT_COPY.removing, { name: label })
         };
       }
       let entry;
@@ -149900,8 +149934,8 @@ function createArchiveImportAgent(deps) {
         code: "needs_approval",
         request_id: entry.request_id,
         archive_id: record5.archive_id,
-        name: record5.label,
-        message: fill2(ARCHIVE_AGENT_COPY.needsRemovalApproval, { name: record5.label }),
+        name: label,
+        message: fill2(ARCHIVE_AGENT_COPY.needsRemovalApproval, { name: label }),
         open: archivesOpenTarget()
       };
     }
@@ -149910,6 +149944,7 @@ function createArchiveImportAgent(deps) {
 var ARCHIVE_AGENT_COPY;
 var init_agent = __esm(() => {
   init_open_targets();
+  init_display_text();
   init_vocabulary();
   init_requests();
   init_state();
@@ -149922,7 +149957,13 @@ var init_agent = __esm(() => {
     needsApproval: "Olympus imports a file only after the person approves it, and has not opened {name}. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Import on the request for {name}. Do not open, copy or read the file yourself, and do not ask again: call archive_import with status to see when it has been approved.",
     needsRemovalApproval: "Olympus removes an imported archive only after the person approves it. Tell them to open Olympus on their computer, go to Sources, then Archives, and choose Remove on the request for {name}. Removing deletes everything Olympus made from it; the file itself stays where it is. Do not ask again: call archive_import with status to see when it is gone.",
     checking: "The person approved {name} and Olympus is checking whether it is already imported. Call archive_import with status to see the result.",
-    alreadyImported: "{name} is already imported, so Olympus did not import it again. Call archive_import with status for its state.",
+    existingRecord: {
+      imported: "Olympus has an earlier import from this same path: {name}.",
+      importing: "Olympus is importing {name} from this same path now.",
+      stopped: "An earlier import from this same path, {name}, stopped before it finished.",
+      removing: "Olympus is removing {name}, an earlier import from this same path."
+    },
+    existingNote: "A matching path does not show that this file is the one imported: it may have been replaced since, so Olympus recorded a request for the file as it is now. When the person approves, Olympus opens the file, compares it with what it already holds, and says if it is the same export.",
     removing: "{name} is already being removed. Call archive_import with status to see when it is gone.",
     heldNote: {
       ready: DASHBOARD_ARCHIVE_COPY.heldWhy.ready,
@@ -150105,7 +150146,8 @@ function createArchiveImportDashboard(options) {
       return "~";
     return path.startsWith(`${home2}/`) ? `~${path.slice(home2.length)}` : path;
   };
-  const where2 = (path) => shown(posix6.dirname(path));
+  const named = (text3) => displayText(text3);
+  const where2 = (path) => named(shown(posix6.dirname(path)));
   const refresh = () => {
     try {
       options.refreshScheduler();
@@ -150175,7 +150217,7 @@ function createArchiveImportDashboard(options) {
   });
   const sameApproval = (approved, prepared) => approved !== undefined && approved.root_identity.dev === prepared.record.root_identity.dev && approved.root_identity.ino === prepared.record.root_identity.ino && approved.manifest_sha256 === prepared.record.manifest_sha256;
   const approvePath = (path, requestId) => {
-    const name = posix6.basename(path);
+    const name = named(posix6.basename(path));
     const prepared = prepareArchiveImport({ state, path });
     if (prepared.kind === "unsupported") {
       return refusal3("unsupported", fill3(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(", ") }));
@@ -150189,7 +150231,7 @@ function createArchiveImportDashboard(options) {
     if (prepared.kind === "already_imported") {
       if (requestId)
         requests.remove(requestId);
-      return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: prepared.archive.label };
+      return { ok: true, status: "already_imported", archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
     if (prepared.copies.length === 0) {
       let result;
@@ -150207,7 +150249,7 @@ function createArchiveImportDashboard(options) {
       if (result.kind === "already_imported") {
         if (requestId)
           requests.remove(requestId);
-        return { ok: true, status: "already_imported", archive_id: result.archive.archive_id, name, archive_name: result.archive.label };
+        return { ok: true, status: "already_imported", archive_id: result.archive.archive_id, name, archive_name: named(result.archive.label) };
       }
       const code = result.kind === "unreadable" ? unreadableCode(result.code) : result.kind;
       return refusal3(code, ARCHIVE_APPROVE_COPY[code] ?? ARCHIVE_APPROVE_COPY.unreadable);
@@ -150252,7 +150294,7 @@ function createArchiveImportDashboard(options) {
     const byFile = record5.findings.gaps_by_file;
     if (record5.files.length < 2 || !byFile || Object.keys(byFile).length === 0)
       return tallies(record5.findings.gaps);
-    const fileName = (index) => posix6.basename(record5.files[index]?.rel_path || record5.label) || record5.label;
+    const fileName = (index) => named(posix6.basename(record5.files[index]?.rel_path || record5.label) || record5.label);
     const perFile = Object.entries(byFile).map(([index, kinds]) => ({ index: Number(index), kinds })).filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record5.files.length).sort((a, b) => a.index - b.index);
     const placed = {};
     for (const entry of perFile) {
@@ -150276,10 +150318,10 @@ function createArchiveImportDashboard(options) {
     const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly2(record5.date_range?.earliest);
     const latest = dateOnly2(record5.date_range?.latest);
-    const stopFile = record5.stop?.rel_path ? posix6.basename(record5.stop.rel_path) : undefined;
+    const stopFile = record5.stop?.rel_path ? named(posix6.basename(record5.stop.rel_path)) : undefined;
     return {
       id: record5.archive_id,
-      name: record5.label,
+      name: named(record5.label),
       format: getArchiveFormat(record5.format)?.label ?? record5.format,
       where: where2(posix6.join(record5.root_path, record5.chosen_rel_path || ".")),
       status: record5.status,
@@ -150303,8 +150345,9 @@ function createArchiveImportDashboard(options) {
       return {
         id: request.request_id,
         kind: "remove",
-        name: archive?.label ?? request.label,
+        name: named(archive?.label ?? request.label),
         where: archive ? where2(posix6.join(archive.root_path, archive.chosen_rel_path || ".")) : "",
+        ...archive ? { path: named(shown(posix6.join(archive.root_path, archive.chosen_rel_path || "."))) } : {},
         origin: request.origin,
         status: request.status,
         archiveId: request.archive_id
@@ -150313,12 +150356,13 @@ function createArchiveImportDashboard(options) {
     return {
       id: request.request_id,
       kind: "import",
-      name: request.label,
+      name: named(request.label),
       where: where2(request.path),
+      path: named(shown(request.path)),
       origin: request.origin,
       status: request.status,
       ...request.archive_id ? { archiveId: request.archive_id } : {},
-      ...archive ? { archiveName: archive.label } : {},
+      ...archive ? { archiveName: named(archive.label) } : {},
       ...request.code ? { code: request.code } : {}
     };
   };
@@ -150557,6 +150601,7 @@ var init_dashboard2 = __esm(() => {
   init_manifest3();
   init_removal();
   init_start();
+  init_display_text();
   init_state();
   init_requests();
   ARCHIVE_APPROVE_COPY = {

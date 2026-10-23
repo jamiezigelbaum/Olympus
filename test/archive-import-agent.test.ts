@@ -324,21 +324,187 @@ describe('start asks and touches nothing', () => {
     expect(watch.touching('Takeout.mbox')).toEqual([]);
   });
 
-  test('an archive the person already approved and imported is not imported again, and saying so does not look at the disk', async () => {
+  test('a path that matches an earlier record is reported as that record, in its state, and still asks: the path is not proof of the same export', async () => {
     const f = fixture();
     const { id, path } = await imported(f, 'Takeout.mbox', [mail(0), mail(1)]);
     const watch = watchFilesystem();
-    for (const spelling of [path, `${path}/`]) {
-      expect(await f.start(spelling)).toMatchObject({
-        ok: true, status: 'already_imported', archive_id: id, name: 'Takeout.mbox', archive_status: 'imported',
-      });
-    }
+    const asked = await f.start(path);
+    expect(asked).toMatchObject({
+      ok: false,
+      code: 'needs_approval',
+      existing_record: { archive_id: id, name: 'Takeout.mbox', state: 'imported' },
+    });
+    // Never "already imported": the agent is not told the file is a duplicate, because nothing has compared it.
+    expect(JSON.stringify(asked)).not.toMatch(/already[ _]imported/i);
+    expect(String(asked.message)).toContain('earlier import from this same path: Takeout.mbox');
+    expect(String(asked.message)).toContain('may have been replaced');
+    expect(String(asked.message)).toContain('recorded a request for the file as it is now');
+    expect(String(asked.message)).toContain('compares it with what it already holds');
+    // A request waits for the person, and nothing on the disk was consulted to say so.
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ id: asked.request_id, status: 'pending', origin: 'agent' })]);
     expect(watch.touching(path, f.exports, 'Takeout.mbox')).toEqual([]);
-    // Nothing was asked of the person, and nothing was imported twice.
-    expect(f.dashboard.view().requests).toEqual([]);
     expect(f.runtime.state.list()).toHaveLength(1);
-    // A different file is a new request as usual.
-    expect(await f.start(join(f.exports, 'Other.mbox'))).toMatchObject({ code: 'needs_approval' });
+
+    // The same request again is the same request, not a second line for the person.
+    expect((await f.start(path)).request_id).toBe(asked.request_id);
+    expect(f.dashboard.view().requests).toHaveLength(1);
+    // A different file is a new request, with no earlier record to report.
+    const other = await f.start(join(f.exports, 'Other.mbox'));
+    expect(other).toMatchObject({ code: 'needs_approval' });
+    expect(other.existing_record).toBeUndefined();
+    expect(f.dashboard.view().requests).toHaveLength(2);
+  });
+
+  test('the same file approved again is found to be the same export by the approval, which reads it; one that replaced it is imported', async () => {
+    const f = fixture();
+    const first = await imported(f, 'Takeout.mbox', [mail(0), mail(1)]);
+
+    // Unchanged: the dashboard's own comparison says it is already imported, and nothing is imported twice.
+    const same = await f.start(first.path);
+    expect(same).toMatchObject({ code: 'needs_approval', existing_record: { archive_id: first.id } });
+    expect(await f.dashboard.approve({ requestId: String(same.request_id) }))
+      .toMatchObject({ ok: true, status: 'already_imported', archive_id: first.id });
+    expect(f.runtime.state.list()).toHaveLength(1);
+    expect(f.dashboard.view().requests).toEqual([]);
+
+    // The person replaces Takeout.mbox with a newer export. The old code answered "already imported" here
+    // and recorded nothing, so the newer export could never be approved.
+    writeFileSync(first.path, mbox([mail(0), mail(1), mail(2, { tag: 'newer' }), mail(3, { tag: 'newer' })]));
+    const newer = await f.start(first.path);
+    expect(newer).toMatchObject({ ok: false, code: 'needs_approval', existing_record: { archive_id: first.id, state: 'imported' } });
+    expect(f.dashboard.view().requests).toEqual([expect.objectContaining({ id: newer.request_id, status: 'pending' })]);
+    const approved = await f.dashboard.approve({ requestId: String(newer.request_id) });
+    expect(approved).toMatchObject({ ok: true, status: 'started' });
+    expect(f.runtime.state.list()).toHaveLength(2);
+    expect(f.runtime.state.get(first.id)!.status).toBe('imported');
+  });
+
+  test('an import that has not read anything, or stopped, is reported in its own state, not as already imported', async () => {
+    const f = fixture();
+    const path = f.write('Takeout.mbox', mbox([mail(0)]));
+    const started = await f.dashboard.approve({ key: path });
+    if (!started.ok || started.status !== 'started') throw new Error('expected a start');
+    // Approved a moment ago: importing, nothing read yet.
+    const importing = await f.start(path);
+    expect(importing).toMatchObject({
+      ok: false, code: 'needs_approval', existing_record: { archive_id: started.archive_id, name: 'Takeout.mbox', state: 'importing' },
+    });
+    expect(String(importing.message)).toContain('Olympus is importing Takeout.mbox from this same path now.');
+    expect(JSON.stringify(importing)).not.toMatch(/already[ _]imported/i);
+
+    // It stopped before reading a message: the file went missing under it.
+    f.runtime.state.update(started.archive_id, (record) => {
+      record.status = 'stopped';
+      record.stop = { code: 'file_missing', message: 'gone', at: '2026-10-23T10:00:00.000Z' };
+    });
+    const stopped = await f.start(path);
+    expect(stopped).toMatchObject({ code: 'needs_approval', existing_record: { archive_id: started.archive_id, state: 'stopped' } });
+    expect(String(stopped.message)).toContain('stopped before it finished');
+    expect(stopped.request_id).toBe(importing.request_id);
+    expect(f.dashboard.view().requests).toHaveLength(1);
+  });
+});
+
+describe('a path cannot disguise what the person approves', () => {
+  /** Name, and how a person must be shown it: every character that hides or reorders, written out. */
+  const HOSTILE: Array<[string, string]> = [
+    ['Inbox\u200B.mbox', 'Inbox\u27E8U+200B\u27E9.mbox'],
+    ['Takeout\u202Egpj.mbox', 'Takeout\u27E8U+202E\u27E9gpj.mbox'],
+    ['Inbox\u2066.mbox', 'Inbox\u27E8U+2066\u27E9.mbox'],
+    ['\uFEFFInbox.mbox', '\u27E8U+FEFF\u27E9Inbox.mbox'],
+    ['Inbox\u00A0.mbox', 'Inbox\u27E8U+00A0\u27E9.mbox'],
+    ['Inbox\u27E8U+200B\u27E9.mbox', 'Inbox\u27E8U+27E8\u27E9U+200B\u27E8U+27E9\u27E9.mbox'],
+  ];
+  /** Any control, format, separator or space-like character left in the text, except the isolates the display adds on purpose. */
+  const stray = (text: string): string[] =>
+    (text.replace(/[\u2068\u2069]/g, '').match(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Zs}]/gu) ?? []).filter((char) => char !== ' ');
+
+  /** The Needs you sentences both surfaces show, from the engine's own list. */
+  function sentences(f: Fixture): string[] {
+    const now = new Date('2026-10-23T12:00:00.000Z');
+    const card = buildSourceDashboardViewModel({
+      sourceIndexStatus: { kind: 'source_index_status', generated_at: now.toISOString(), corpora: [], policy: {} } as unknown as SourceIndexStatusResult,
+      sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+      connectedHandleRegistry: { version: 1, handles: [] },
+      apiKeyAvailability: {},
+      importedArchives: f.dashboard.present(),
+      now,
+    });
+    return buildChatGptDashboardViewModel(card, { now }).needsYou.map((item) => item.sentence);
+  }
+
+  test('an invisible or direction-changing character is written out in the message, the list, the line under Needs you and the full path', async () => {
+    for (const [name, shown] of HOSTILE) {
+      const f = fixture();
+      const path = join(f.exports, name);
+      const asked = await f.start(path);
+      expect(asked).toMatchObject({ code: 'needs_approval' });
+      const view = f.dashboard.view();
+      const status = await f.status();
+      const line = sentences(f).find((sentence) => sentence.startsWith('An agent asked to import'))!;
+
+      // The agent's words, the engine's list, the agent's own status and the Needs you line all name it visibly.
+      expect(String(asked.message)).toContain(shown);
+      expect(view.requests[0]!.name).toBe(`\u2068${shown}\u2069`);
+      expect(view.requests[0]!.path).toBe(`\u2068~/Mail exports/${shown}\u2069`);
+      expect(view.requests[0]!.where).toBe('~/Mail exports');
+      expect((status.requests as Array<{ name: string }>)[0]!.name).toBe(`\u2068${shown}\u2069`);
+      expect(line).toBe(`An agent asked to import \u2068${shown}\u2069`);
+      for (const text of [String(asked.message), JSON.stringify(view), JSON.stringify(status), line]) {
+        expect([name, stray(text)]).toEqual([name, []]);
+      }
+      // Only what is shown is written out: the request keeps the path exactly as asked.
+      expect(new ArchiveImportRequestStore({ path: f.requestsPath }).list()[0]!.path).toBe(path);
+    }
+  });
+
+  test('an ordinary name is shown exactly as it is, and right-to-left text is isolated from the words around it', async () => {
+    const f = fixture();
+    const plain = await f.start(join(f.exports, 'Takeout 2.mbox'));
+    expect(String(plain.message)).toContain('request for Takeout 2.mbox.');
+    expect(f.dashboard.view().requests[0]).toMatchObject({ name: 'Takeout 2.mbox', where: '~/Mail exports', path: '~/Mail exports/Takeout 2.mbox' });
+    expect(sentences(f)).toContain('An agent asked to import Takeout 2.mbox');
+
+    await f.start(join(f.exports, '\u05D3\u05D5\u05D0\u05E8.mbox'));
+    const hebrew = f.dashboard.view().requests.find((entry) => entry.name.includes('\u05D3'))!;
+    expect(hebrew.name).toBe('\u2068\u05D3\u05D5\u05D0\u05E8.mbox\u2069');
+    expect(hebrew.path).toBe('\u2068~/Mail exports/\u05D3\u05D5\u05D0\u05E8.mbox\u2069');
+  });
+
+  test('approving a request opens the path as asked, not as shown: the file with the hidden character, not its look-alike', async () => {
+    const f = fixture();
+    const lookAlike = f.write('Inbox.mbox', mbox([mail(0, { tag: 'plain' })]));
+    const hidden = f.write('Inbox\u200B.mbox', mbox([mail(0, { tag: 'hidden' }), mail(1, { tag: 'hidden' })]));
+    const asked = await f.start(hidden);
+    expect(String(asked.message)).toContain('Inbox\u27E8U+200B\u27E9.mbox');
+
+    const started = await f.dashboard.approve({ requestId: String(asked.request_id) });
+    expect(started).toMatchObject({ ok: true, status: 'started', name: '\u2068Inbox\u27E8U+200B\u27E9.mbox\u2069' });
+    const records = f.runtime.state.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.chosen_rel_path).toBe('Inbox\u200B.mbox');
+    expect(records[0]!.files.map((file) => file.rel_path)).toEqual(['Inbox\u200B.mbox']);
+    expect(readFileSync(lookAlike, 'utf8')).toBe(mbox([mail(0, { tag: 'plain' })]));
+    // The archive keeps its real name, and shows it written out.
+    expect(f.dashboard.view().archives[0]!.name).toBe('\u2068Inbox\u27E8U+200B\u27E9.mbox\u2069');
+  });
+
+  test('a request to remove an archive names it visibly too, with the path it was imported from', async () => {
+    const f = fixture();
+    const a = await imported(f, 'Old\u202Email.mbox', [mail(0, { tag: 'a' })]);
+    const asked = await f.remove(a.id);
+    const shown = 'Old\u27E8U+202E\u27E9mail.mbox';
+    expect(asked).toMatchObject({ code: 'needs_approval', name: `\u2068${shown}\u2069` });
+    expect(String(asked.message)).toContain(shown);
+    expect(f.dashboard.view().requests[0]).toMatchObject({ kind: 'remove', name: `\u2068${shown}\u2069`, path: `\u2068~/Mail exports/${shown}\u2069` });
+    const line = sentences(f).find((sentence) => sentence.startsWith('An agent asked to remove'))!;
+    expect(line).toBe(`An agent asked to remove \u2068${shown}\u2069`);
+    for (const text of [String(asked.message), JSON.stringify(f.dashboard.view()), JSON.stringify(await f.status()), line]) {
+      expect(stray(text)).toEqual([]);
+    }
+    // Removing it is still decided by the archive id, not by how its name reads.
+    expect(f.dashboard.approveRemoval(String(asked.request_id))).toEqual({ ok: true });
+    expect(f.runtime.state.get(a.id)!.status).toBe('removing');
   });
 });
 

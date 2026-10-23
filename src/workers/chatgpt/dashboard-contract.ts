@@ -553,7 +553,12 @@ export interface ComputerArchivesMeta {
 
 export interface ComputerArchiveEntry {
   id: string;
-  /** The chosen file's or folder's name. */
+  /**
+   * The chosen file's or folder's name. Every name, folder and path in this
+   * list is written for display: what cannot be seen or reorders its
+   * neighbours is shown as `⟨U+XXXX⟩` and the value is direction-isolated
+   * (workers/dashboard/display-text.ts).
+   */
   name: string;
   /** The format's own label ("Mail (mbox)"). */
   format: string;
@@ -602,6 +607,12 @@ export interface ComputerArchiveRequest {
   name: string;
   /** The folder it is in; for a removal, the folder the archive was imported from. */
   where: string;
+  /**
+   * The whole path asked for, as the person reads what they approve; for a
+   * removal, the path the archive was imported from. Written out in full,
+   * with every character that cannot be seen shown as `⟨U+XXXX⟩`.
+   */
+  path?: string;
   /** An agent asked (waiting for Approve or Decline), or the person chose it here. */
   origin: 'agent' | 'dashboard';
   status: 'pending' | 'checking' | 'already_imported' | 'failed';

@@ -43,6 +43,7 @@ import type {
   DashboardImportedArchives,
   DashboardImportsUnreadableReason,
 } from '../source-dashboard.ts';
+import { displayText } from '../dashboard/display-text.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, type ArchiveImportRecord } from './state.ts';
 import {
   ArchiveImportRequestStore,
@@ -260,7 +261,11 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     if (path === home) return '~';
     return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
   };
-  const where = (path: string): string => shown(posix.dirname(path));
+  // What the dashboard, a Needs you line and an agent are told of a name, a folder or a path:
+  // asked for by whoever chose it, so every character that cannot be seen is written out
+  // (display-text.ts). The stored path is untouched, and is what the disk is asked for.
+  const named = (text: string): string => displayText(text);
+  const where = (path: string): string => named(shown(posix.dirname(path)));
 
   const refresh = (): void => {
     try {
@@ -349,7 +354,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
    * request being approved.
    */
   const approvePath = (path: string, requestId?: string): ArchiveApproveResult => {
-    const name = posix.basename(path);
+    const name = named(posix.basename(path));
     const prepared = prepareArchiveImport({ state, path });
     if (prepared.kind === 'unsupported') {
       return refusal('unsupported', fill(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(', ') }));
@@ -361,7 +366,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
     if (prepared.kind === 'already_imported') {
       if (requestId) requests.remove(requestId);
-      return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: prepared.archive.label };
+      return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
     if (prepared.copies.length === 0) {
       let result: ArchiveImportStart;
@@ -377,7 +382,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       }
       if (result.kind === 'already_imported') {
         if (requestId) requests.remove(requestId);
-        return { ok: true, status: 'already_imported', archive_id: result.archive.archive_id, name, archive_name: result.archive.label };
+        return { ok: true, status: 'already_imported', archive_id: result.archive.archive_id, name, archive_name: named(result.archive.label) };
       }
       const code = result.kind === 'unreadable' ? unreadableCode(result.code) : result.kind;
       return refusal(code, ARCHIVE_APPROVE_COPY[code as keyof typeof ARCHIVE_APPROVE_COPY] ?? ARCHIVE_APPROVE_COPY.unreadable);
@@ -434,7 +439,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const gapsOf = (record: ArchiveImportRecord): ComputerArchiveEntry['gaps'] => {
     const byFile = record.findings.gaps_by_file;
     if (record.files.length < 2 || !byFile || Object.keys(byFile).length === 0) return tallies(record.findings.gaps);
-    const fileName = (index: number): string => posix.basename(record.files[index]?.rel_path || record.label) || record.label;
+    const fileName = (index: number): string => named(posix.basename(record.files[index]?.rel_path || record.label) || record.label);
     const perFile = Object.entries(byFile)
       .map(([index, kinds]) => ({ index: Number(index), kinds }))
       .filter((entry) => Number.isInteger(entry.index) && entry.index >= 0 && entry.index < record.files.length)
@@ -462,10 +467,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     const { items, held } = counted ?? { items: 0, held: 0 };
     const earliest = dateOnly(record.date_range?.earliest);
     const latest = dateOnly(record.date_range?.latest);
-    const stopFile = record.stop?.rel_path ? posix.basename(record.stop.rel_path) : undefined;
+    const stopFile = record.stop?.rel_path ? named(posix.basename(record.stop.rel_path)) : undefined;
     return {
       id: record.archive_id,
-      name: record.label,
+      name: named(record.label),
       format: getArchiveFormat(record.format)?.label ?? record.format,
       where: where(posix.join(record.root_path, record.chosen_rel_path || '.')),
       status: record.status,
@@ -491,8 +496,9 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       return {
         id: request.request_id,
         kind: 'remove',
-        name: archive?.label ?? request.label,
+        name: named(archive?.label ?? request.label),
         where: archive ? where(posix.join(archive.root_path, archive.chosen_rel_path || '.')) : '',
+        ...(archive ? { path: named(shown(posix.join(archive.root_path, archive.chosen_rel_path || '.'))) } : {}),
         origin: request.origin,
         status: request.status,
         archiveId: request.archive_id!,
@@ -501,13 +507,15 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     return {
       id: request.request_id,
       kind: 'import',
-      name: request.label,
+      name: named(request.label),
       where: where(request.path),
+      // The whole path, as asked, so the person can read exactly what they approve.
+      path: named(shown(request.path)),
       origin: request.origin,
       // A check no process is running (a restart came between) is started again by resume().
       status: request.status,
       ...(request.archive_id ? { archiveId: request.archive_id } : {}),
-      ...(archive ? { archiveName: archive.label } : {}),
+      ...(archive ? { archiveName: named(archive.label) } : {}),
       ...(request.code ? { code: request.code } : {}),
     };
   };

@@ -43,11 +43,24 @@ the Olympus dashboard on their computer, and nothing happens before they do.
    page (`olympus://open/archives`, or the `page` link).
 4. Follow it with `action: "status"`. Do not ask the user again while it waits.
 
-If the archive is already imported, `start` says so (`status:
-"already_imported"`) and imports nothing. If `code` is `too_many_requests`,
-tell the user the dashboard already has requests waiting and to answer those
-first. Any other `ok: false` with a `message` is a refusal: tell the user in
-those words.
+If Olympus already holds an earlier import from the same path, the result
+carries it as `existing_record` (`archive_id`, `name`, and its actual `state`:
+imported, importing, stopped or removing) beside the request. A matching path
+does not show that the file is the same export: it may have been replaced by a
+newer one. So `start` still records the request, and does not say the file is
+already imported. Olympus has not opened the file. When the user approves,
+Olympus opens it and compares it with what it already holds; if it is the same
+export it says so and imports nothing. Do not tell the user it is a duplicate
+before then.
+
+If `code` is `too_many_requests`, tell the user the dashboard already has
+requests waiting and to answer those first. Any other `ok: false` with a
+`message` is a refusal: tell the user in those words.
+
+Names in `message`, `existing_record` and `status` are shown with every
+character that cannot be seen written out, as `⟨U+200B⟩`. Repeat them as
+given; do not tidy them. If a name carries one, say so: the file name has a
+hidden character.
 
 ## Status
 

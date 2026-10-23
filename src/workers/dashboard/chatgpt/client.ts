@@ -1345,6 +1345,28 @@ export function chatgptDashboardClient(
     return list;
   }
 
+  /**
+   * A line from a template whose {keys} are names, folders or paths the
+   * person did not choose (an agent asked): each is its own <bdi>, so
+   * right-to-left text inside one cannot reorder the words around it or
+   * the value beside it.
+   */
+  function isolatedLine(cls: string, template: string, values: Record<string, string>): HTMLElement {
+    const line = el('p', cls);
+    for (const part of template.split(/(\{[a-z]+\})/)) {
+      const key = part.slice(1, -1);
+      if (part.charAt(0) === '{' && Object.prototype.hasOwnProperty.call(values, key)) add(line, el('bdi', '', values[key]));
+      else if (part) add(line, doc.createTextNode(part));
+    }
+    return line;
+  }
+
+  /** The whole path an approval is for, written out in full (hidden characters shown as ⟨U+XXXX⟩): what Import or Remove acts on. */
+  function archiveFullPath(request: Any): HTMLElement | null {
+    const path = typeof request.path === 'string' ? request.path : '';
+    return path ? isolatedLine('muted archive-facts request-path', H.copy.archives.fullPath, { path }) : null;
+  }
+
   function archiveRequestItem(request: Any): HTMLElement {
     const A = H.copy.archives;
     const item = el('li', 'archive request');
@@ -1355,7 +1377,10 @@ export function chatgptDashboardClient(
     if (request.kind === 'remove') {
       // An agent asked to remove an archive: the person's Remove runs the same removal as the archive's own, after the same confirmation.
       item.setAttribute('data-request', 'remove');
-      add(item, el('p', '', where ? fill(A.removeRequestLine, { name: request.name, where }) : fill(A.removeRequestLineNoWhere, { name: request.name })));
+      add(item, where
+        ? isolatedLine('', A.removeRequestLine, { name: request.name, where })
+        : isolatedLine('', A.removeRequestLineNoWhere, { name: request.name }));
+      add(item, archiveFullPath(request));
       add(item, el('p', 'muted', A.removeRequestNote));
       add(item, add(el('div', 'archive-actions'),
         fixControl({
@@ -1369,7 +1394,8 @@ export function chatgptDashboardClient(
       return item;
     }
     if (request.status === 'pending') {
-      add(item, el('p', '', fill(A.requestLine, { name: request.name, where })));
+      add(item, isolatedLine('', A.requestLine, { name: request.name, where }));
+      add(item, archiveFullPath(request));
       add(item, add(el('div', 'archive-actions'),
         fixControl({ label: A.approve, tool: H.archiveApproveTool, args: { request_id: request.id } }, key + ':approve', 'plain', false),
         fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':decline', 'plain', false)));
