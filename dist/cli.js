@@ -148665,6 +148665,16 @@ function fileStop(error2, relPath) {
   }
   return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
 }
+function changeSinceApproval(root, record5, at) {
+  try {
+    root.statRelative("");
+  } catch (error2) {
+    const missing = error2 instanceof ScopeSafeError && error2.code === "not_found" || error2?.code === "ENOENT";
+    return missing ? { code: "file_missing", message: "The folder that holds this archive is no longer there.", at } : { code: "root_changed", message: "The folder that holds this archive was replaced.", at };
+  }
+  const check = verifyArchiveManifest(root, record5.files);
+  return check.ok ? undefined : stopFrom(check, at);
+}
 async function digestArchiveFiles(root, files, shouldContinue) {
   const digests = [];
   for (const file of files) {
@@ -148819,6 +148829,7 @@ async function pullArchiveImport(options) {
     flush();
     const complete = observed.completed();
     const dates = observed.dates();
+    const final = {};
     const updated = options.state.update(record5.archive_id, (entry) => {
       if (dates.earliest && dates.latest) {
         entry.date_range = {
@@ -148828,6 +148839,13 @@ async function pullArchiveImport(options) {
       }
       const digests = completion.digests;
       if (complete && digests && entry.status === "importing" && entry.manifest_sha256 === record5.manifest_sha256) {
+        const changed = changeSinceApproval(root, record5, now().toISOString());
+        if (changed) {
+          final.stop = changed;
+          entry.status = "stopped";
+          entry.stop = changed;
+          return;
+        }
         entry.status = "imported";
         entry.completed_at = now().toISOString();
         entry.files.forEach((file, index) => {
@@ -148835,6 +148853,8 @@ async function pullArchiveImport(options) {
         });
       }
     });
+    if (final.stop)
+      return idle(updated, ["archive_import_stopped"], true);
     const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run2.byDomain[domain] ? [run2.byDomain[domain].sync] : []);
     return {
       receipt: receiptOf(updated, {

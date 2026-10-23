@@ -169,6 +169,30 @@ function afterFirstPage(action: () => void): (formatId: string) => ArchiveConnec
   };
 }
 
+/** The real connector, with `action` run once its last page was taken in, while the pass finishes indexing it. */
+function afterLastPage(action: () => void): (formatId: string) => ArchiveConnectorFactory {
+  return () => (input) => {
+    const real = createMboxArchiveConnector(input);
+    const connector: SourceConnector = {
+      ...real,
+      listItems(options) {
+        return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+          let last = false;
+          try {
+            for await (const page of real.listItems(options)) {
+              last = page.done;
+              yield page;
+            }
+          } finally {
+            if (last) action();
+          }
+        })();
+      },
+    };
+    return connector;
+  };
+}
+
 function dyingAfterFirstPage(): (formatId: string) => ArchiveConnectorFactory {
   return () => (input) => {
     const real = createMboxArchiveConnector(input);
@@ -257,6 +281,22 @@ describe('archive import passes', () => {
     });
     expect(outcome.receipt.counts.import_stopped).toBe(1);
     expect(f.runtime.state.get(replaced)).toMatchObject({ status: 'stopped', stop: { code: 'file_changed', rel_path: 'Replaced.mbox' } });
+  });
+
+  test('a file changed or removed while the last page is indexed stops the import instead of completing it', async () => {
+    const f = fixture();
+    const changing = f.start('Late.mbox', mbox([mail(0, { tag: 'late' }), mail(1, { tag: 'late' })]));
+    await pull(f.runtime, changing, {
+      connectorFactory: afterLastPage(() => appendFileSync(join(f.exports, 'Late.mbox'), mbox([mail(2, { tag: 'late' })]))),
+    });
+    expect(f.runtime.state.get(changing)).toMatchObject({ status: 'stopped', stop: { code: 'file_changed', rel_path: 'Late.mbox' } });
+
+    const vanishing = f.start('Gone.mbox', mbox([mail(0, { tag: 'gone' })]));
+    const outcome = await pull(f.runtime, vanishing, {
+      connectorFactory: afterLastPage(() => unlinkSync(join(f.exports, 'Gone.mbox'))),
+    });
+    expect(outcome.receipt.counts.import_stopped).toBe(1);
+    expect(f.runtime.state.get(vanishing)).toMatchObject({ status: 'stopped', stop: { code: 'file_missing', rel_path: 'Gone.mbox' } });
   });
 
   test('a removal asked for while a pass reads is not undone when the pass stops', async () => {

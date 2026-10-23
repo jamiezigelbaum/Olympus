@@ -157,6 +157,24 @@ function fileStop(error: unknown, relPath: string): unknown {
 }
 
 /**
+ * Why the archive is not the one approved any more, from metadata alone: the
+ * folder at its path and every file at its version. Undefined when all are.
+ */
+function changeSinceApproval(root: ScopeRoot, record: ArchiveImportRecord, at: string): ArchiveImportStop | undefined {
+  try {
+    root.statRelative('');
+  } catch (error) {
+    const missing = (error instanceof ScopeSafeError && error.code === 'not_found')
+      || (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+    return missing
+      ? { code: 'file_missing', message: 'The folder that holds this archive is no longer there.', at }
+      : { code: 'root_changed', message: 'The folder that holds this archive was replaced.', at };
+  }
+  const check = verifyArchiveManifest(root, record.files);
+  return check.ok ? undefined : stopFrom(check, at);
+}
+
+/**
  * Every file's SHA-256, each read again whole once the listing reached the
  * end, so an import completes only on files that are still the versions it
  * read, and its record says what it holds. Undefined when the pass is asked
@@ -329,6 +347,7 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
 
     const complete = observed.completed();
     const dates = observed.dates();
+    const final: { stop?: ArchiveImportStop } = {};
     const updated = options.state.update(record.archive_id, (entry) => {
       if (dates.earliest && dates.latest) {
         entry.date_range = {
@@ -338,11 +357,22 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       }
       const digests = completion.digests;
       if (complete && digests && entry.status === 'importing' && entry.manifest_sha256 === record.manifest_sha256) {
+        // Indexing the last page yielded to other work after the files were
+        // read whole: the folder and every file must still be those versions
+        // (metadata only) at the moment the import is called complete.
+        const changed = changeSinceApproval(root, record, now().toISOString());
+        if (changed) {
+          final.stop = changed;
+          entry.status = 'stopped';
+          entry.stop = changed;
+          return;
+        }
         entry.status = 'imported';
         entry.completed_at = now().toISOString();
         entry.files.forEach((file, index) => { file.sha256 = digests[index]!; });
       }
     });
+    if (final.stop) return idle(updated, ['archive_import_stopped'], true);
     const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain]!.sync] : []);
     return {
       receipt: receiptOf(updated, {
