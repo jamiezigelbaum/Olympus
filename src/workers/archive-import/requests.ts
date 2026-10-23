@@ -22,27 +22,43 @@ import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
 import { isArchiveId } from './state.ts';
 
-/** Requests an agent may leave waiting at once; one more is refused until the person answers. */
+/**
+ * Requests an agent may leave waiting at once; one more is refused until the person answers.
+ */
 export const ARCHIVE_IMPORT_PENDING_REQUESTS_MAX = 20;
-/** Finished checks kept for the person to see (the oldest go first past this). */
+/**
+ * Finished checks kept for the person to see (the oldest go first past this).
+ */
 export const ARCHIVE_IMPORT_OUTCOMES_MAX = 20;
-/** The longest path text kept for a request. */
+/**
+ * The longest path text kept for a request.
+ */
 export const ARCHIVE_IMPORT_REQUEST_PATH_MAX = 4096;
 
 export type ArchiveImportRequestStatus = 'pending' | 'checking' | 'already_imported' | 'failed';
 
 export interface ArchiveImportRequest {
   request_id: string;
-  /** Who asked: an agent (waits for the person), or the person in the dashboard. */
+  /**
+   * Who asked: an agent (waits for the person), or the person in the dashboard.
+   */
   origin: 'agent' | 'dashboard';
-  /** The path as asked (an agent's) or as chosen in the picker (the dashboard's). */
+  /**
+   * The path as asked (an agent's) or as chosen in the picker (the dashboard's).
+   */
   path: string;
-  /** The last part of the path, for display. */
+  /**
+   * The last part of the path, for display.
+   */
   label: string;
   status: ArchiveImportRequestStatus;
-  /** already_imported: the import that already holds these files. */
+  /**
+   * already_imported: the import that already holds these files.
+   */
   archive_id?: string;
-  /** failed: why, as a closed code the dashboard words. */
+  /**
+   * failed: why, as a closed code the dashboard words.
+   */
   code?: string;
   created_at: string;
   updated_at: string;
@@ -75,7 +91,9 @@ function validRequest(value: unknown): value is ArchiveImportRequest {
     && typeof value.created_at === 'string' && typeof value.updated_at === 'string';
 }
 
-/** An unreadable file is an error, never an empty list: a request the person was asked about must not vanish. */
+/**
+ * An unreadable file is an error, never an empty list: a request the person was asked about must not vanish.
+ */
 function readRequests(path: string): PersistedRequests {
   if (!existsSync(path)) return { version: 1, requests: [] };
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
@@ -85,7 +103,9 @@ function readRequests(path: string): PersistedRequests {
   return { version: 1, requests: parsed.requests as ArchiveImportRequest[] };
 }
 
-/** The last part of a path, for display only. */
+/**
+ * The last part of a path, for display only.
+ */
 export function archivePathLabel(path: string): string {
   const parts = path.split('/').filter(Boolean);
   return (parts[parts.length - 1] ?? path).normalize('NFC').slice(0, 255);
@@ -132,7 +152,9 @@ export class ArchiveImportRequestStore {
     return added;
   }
 
-  /** The person's approval, while its files are read whole (the one already checking, for a second press). */
+  /**
+   * The person's approval, while its files are read whole (the one already checking, for a second press).
+   */
   addChecking(path: string): ArchiveImportRequest {
     let entry: ArchiveImportRequest | undefined;
     this.mutate((state) => {
@@ -145,7 +167,9 @@ export class ArchiveImportRequestStore {
     return entry!;
   }
 
-  /** A pending request the person approved: it is checked now. */
+  /**
+   * A pending request the person approved: it is checked now.
+   */
   startChecking(requestId: string): ArchiveImportRequest | undefined {
     return this.change(requestId, (request) => {
       if (request.status !== 'pending') return false;
@@ -153,7 +177,9 @@ export class ArchiveImportRequestStore {
     });
   }
 
-  /** How a check ended when it did not start an import. */
+  /**
+   * How a check ended when it did not start an import.
+   */
   settle(requestId: string, outcome: { status: 'already_imported'; archiveId: string } | { status: 'failed'; code: string }): void {
     this.mutate((state) => {
       const request = state.requests.find((entry) => entry.request_id === requestId);
@@ -178,7 +204,9 @@ export class ArchiveImportRequestStore {
     });
   }
 
-  /** Declined, dismissed, or done (its import started). */
+  /**
+   * Declined, dismissed, or done (its import started).
+   */
   remove(requestId: string): boolean {
     let removed = false;
     this.mutate((state) => {

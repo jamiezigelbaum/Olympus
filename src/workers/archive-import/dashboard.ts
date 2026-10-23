@@ -3,8 +3,8 @@
  * the picker's listing, the person's approval, Decline, Remove, and the
  * Archives row's list.
  *
- * Only the dashboard approves. The worker's archive routes (email-source
- * index.ts) call this under the dashboard grant guard, and the chosen key is
+ * Only the dashboard approves. The worker's /dashboard/archive-import/
+ * routes call this under the dashboard grant guard, and the chosen key is
  * checked here before anything of it is read (local-files/scope-browser.ts
  * archive mode: real path, no link, a file or a folder, the Mac's own
  * permission for a guarded folder).
@@ -43,7 +43,9 @@ import {
   type ArchiveImportRequest,
 } from './requests.ts';
 
-/** How the private model stands for judging held items. */
+/**
+ * How the private model stands for judging held items.
+ */
 export type ArchivePrivateModelState = ComputerArchivesMeta['privateModel'];
 
 export type ArchiveApproveResult =
@@ -60,11 +62,17 @@ export interface ArchiveImportDashboard {
   decline(requestId: string): ArchiveSimpleResult;
   remove(archiveId: string): ArchiveSimpleResult;
   view(): ComputerArchivesMeta;
-  /** Imports at least one archive, or holds one the person was asked about. */
+  /**
+   * Imports at least one archive, or holds one the person was asked about.
+   */
   present(): { archives: number; importing: boolean };
-  /** Checks a restart interrupted, started again. */
+  /**
+   * Checks a restart interrupted, started again.
+   */
   resume(): void;
-  /** Settles when every check started so far has finished (tests, shutdown). */
+  /**
+   * Settles when every check started so far has finished (tests, shutdown).
+   */
   idle(): Promise<void>;
   close(): void;
 }
@@ -72,20 +80,32 @@ export interface ArchiveImportDashboard {
 export interface ArchiveImportDashboardOptions {
   runtime: ArchiveImportRuntime;
   browser: LocalFilesArchiveBrowser;
-  /** Hands the scheduler the current archive tasks (its updateSources). */
+  /**
+   * Hands the scheduler the current archive tasks (its updateSources).
+   */
   refreshScheduler: () => void;
-  /** How the private model stands now. */
+  /**
+   * How the private model stands now.
+   */
   privateModel: () => ArchivePrivateModelState;
-  /** Test seam: the requests' file (default beside the archive record). */
+  /**
+   * Test seam: the requests' file (default beside the archive record).
+   */
   requestsPath?: string;
-  /** Test seam: what a check waits between slices of a file. */
+  /**
+   * Test seam: what a check waits between slices of a file.
+   */
   pause?: () => Promise<void>;
-  /** Test seam: the home folder, shown as ~. */
+  /**
+   * Test seam: the home folder, shown as ~.
+   */
   home?: string;
   now?: () => Date;
 }
 
-/** Plain words for every refusal an approval can meet; the codes are the contract. */
+/**
+ * Plain words for every refusal an approval can meet; the codes are the contract.
+ */
 export const ARCHIVE_APPROVE_COPY = {
   unsupported: 'Olympus can’t import this. It imports {formats}.',
   ambiguous: 'Olympus can’t tell which kind of export this is.',
@@ -100,11 +120,18 @@ export const ARCHIVE_APPROVE_COPY = {
 } as const;
 
 function fill(template: string, values: Record<string, string>): string {
-  return template.replace(/\{(\w+)\}/g, (match, key: string) => values[key] ?? match);
+  let out = template;
+  for (const [key, value] of Object.entries(values)) out = out.split(`{${key}}`).join(value);
+  return out;
 }
 
+/**
+ * The day of an ISO timestamp (YYYY-MM-DD), or undefined when it is not one.
+ */
 function dateOnly(iso: string | undefined): string | undefined {
-  return typeof iso === 'string' && /^\d{4}-\d{2}-\d{2}/.test(iso) ? iso.slice(0, 10) : undefined;
+  if (typeof iso !== 'string' || iso.length < 10 || iso[4] !== '-' || iso[7] !== '-') return undefined;
+  const day = iso.slice(0, 10);
+  return Number.isNaN(Date.parse(`${day}T00:00:00Z`)) ? undefined : day;
 }
 
 function tallies(values: Readonly<Record<string, number>>): Array<{ kind: string; count: number }> {
@@ -162,7 +189,9 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
   };
 
-  /** Reads every file whole, a slice at a time, then records the import unless it is a copy. */
+  /**
+   * Reads every file whole, a slice at a time, then records the import unless it is a copy.
+   */
   const check = (requestId: string, prepared: PreparedArchiveImport): void => {
     running.add(requestId);
     checks = checks.then(async () => {

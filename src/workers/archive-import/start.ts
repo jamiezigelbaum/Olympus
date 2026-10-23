@@ -49,7 +49,9 @@ export interface PreparedArchiveImport {
   kind: 'ready';
   record: NewArchiveImportRecord;
   root: ScopeRoot;
-  /** Completed imports these files may be a copy of; empty when they cannot be. */
+  /**
+   * Completed imports these files may be a copy of; empty when they cannot be.
+   */
   copies: ArchiveImportRecord[];
 }
 

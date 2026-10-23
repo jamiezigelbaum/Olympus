@@ -34,8 +34,19 @@
  *   also counts the private questions waiting here (`waitingPrivateQuestions`),
  *   the computer's one Needs you line. Never for the Gateway bearer, a session
  *   the bearer minted or a launch ticket redeemed, and never to ChatGPT.
+ * - the computer imports archives: `olympus_archive_browse` lists files and
+ *   folders for the picker (names in the picker's `_meta` only),
+ *   `olympus_archive_approve`, `olympus_archive_decline` and
+ *   `olympus_archive_remove` reach the worker's archive routes, which run
+ *   under the dashboard grant guard, and `_meta['olympus/computer']
+ *   archives` lists the imported archives and the imports waiting on the
+ *   person for the Archives row.
  */
 import {
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_DECLINE_TOOL_NAME,
+  ARCHIVE_REMOVE_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   COMPUTER_UNREADABLE_FILES_LIMIT,
@@ -43,8 +54,10 @@ import {
   INDEX_FASTER_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
+  SCOPE_UI_META_KEY,
   UNREADABLE_FILES_PAGE_TOOL_NAME,
   unreadableNames,
+  type ComputerArchivesMeta,
   type ComputerDashboardMeta,
   type ComputerUnpairEntry,
   type ComputerUnreadableEntry,
@@ -105,6 +118,12 @@ export interface DashboardPanelToolsOptions {
    * session, or a locked reader, and never in anything ChatGPT receives.
    */
   waitingPrivateQuestions?: () => number;
+  /**
+   * The Archives row's list (archive-import/dashboard.ts): the person's
+   * imported archives and the imports waiting on them. Names and folders of
+   * the person's files, so only ever in the computer meta. Absent: no row list.
+   */
+  archives?: () => ComputerArchivesMeta | undefined;
 }
 
 function refused(text: string, code: string): ChatGptToolResult {
@@ -189,6 +208,113 @@ async function unpairSource(options: DashboardPanelToolsOptions, args: Record<st
   }
   const text = typeof parsed.status_message === 'string' ? parsed.status_message : 'Unpaired.';
   return { content: [{ type: 'text', text }], structuredContent: { status: 'saved', source_id: args.source_id } };
+}
+
+const ARCHIVE_ARG_MAX = 4096;
+
+function archiveArg(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= ARCHIVE_ARG_MAX && !value.includes('\0');
+}
+
+/**
+ * One archive route on the worker (email-source/index.ts, under the grant
+ * guard): its JSON answer, or the refusal it gave in its own words.
+ */
+async function archiveRoute(
+  options: DashboardPanelToolsOptions,
+  route: 'browse' | 'approve' | 'decline' | 'remove',
+  body: Record<string, unknown>,
+): Promise<{ ok: true; parsed: Record<string, unknown> } | { ok: false; result: ChatGptToolResult }> {
+  const response = await options.workerFetch(new Request(`http://olympus-worker.internal/dashboard/archive-import/${route}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }));
+  const parsed = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  if (response.ok && parsed && parsed.ok === true) return { ok: true, parsed };
+  // A refusal the backend answered (not a file Olympus imports, a link, the Mac's permission) or the route's own.
+  const error = (parsed?.ok === false && typeof parsed.code === 'string' ? parsed : parsed?.error) as
+    { code?: unknown; message?: unknown; access?: unknown } | undefined;
+  const code = typeof error?.code === 'string' ? error.code : 'internal';
+  const text = typeof error?.message === 'string' ? error.message : 'Olympus could not do that. Try again.';
+  const access = error?.access && typeof error.access === 'object' ? error.access : undefined;
+  return {
+    ok: false,
+    result: {
+      content: [{ type: 'text', text }],
+      structuredContent: { error: code, ...(access ? { access } : {}) },
+      isError: true,
+    },
+  };
+}
+
+/** One level of the archive picker: files and folders, the names in the picker's `_meta` only. */
+async function archiveBrowse(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (keys.some((key) => key !== 'parent_key' && key !== 'cursor')
+    || (args.parent_key !== undefined && !archiveArg(args.parent_key))
+    || (args.cursor !== undefined && !archiveArg(args.cursor))) {
+    return refused('parent_key and cursor must be from the picker.', 'invalid_params');
+  }
+  const answer = await archiveRoute(options, 'browse', args);
+  if (!answer.ok) return answer.result;
+  const nodes = Array.isArray(answer.parsed.nodes) ? answer.parsed.nodes : [];
+  return {
+    content: [{ type: 'text', text: 'Listed.' }],
+    structuredContent: { status: 'listed', count: nodes.length },
+    _meta: {
+      [SCOPE_UI_META_KEY]: {
+        nodes,
+        ...(typeof answer.parsed.next_cursor === 'string' ? { next_cursor: answer.parsed.next_cursor } : {}),
+        ...(answer.parsed.access && typeof answer.parsed.access === 'object' ? { access: answer.parsed.access } : {}),
+      },
+    },
+  };
+}
+
+/** Import the chosen file or folder, or approve an agent's request: answered at once (started, checking, already imported). */
+async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  const byKey = keys.length === 1 && keys[0] === 'key' && archiveArg(args.key);
+  const byRequest = keys.length === 1 && keys[0] === 'request_id' && archiveArg(args.request_id);
+  if (!byKey && !byRequest) return refused('Give the chosen key or a request id.', 'invalid_params');
+  const answer = await archiveRoute(options, 'approve', args);
+  if (!answer.ok) return answer.result;
+  const status = answer.parsed.status;
+  if (status !== 'started' && status !== 'checking' && status !== 'already_imported') return refused('Olympus could not do that. Try again.', 'internal');
+  const name = typeof answer.parsed.name === 'string' ? answer.parsed.name : '';
+  const archiveName = typeof answer.parsed.archive_name === 'string' ? answer.parsed.archive_name : '';
+  return {
+    content: [{ type: 'text', text: status === 'started' ? 'Importing.' : status === 'checking' ? 'Checking.' : 'Already imported.' }],
+    structuredContent: { status, name, ...(archiveName ? { archive_name: archiveName } : {}) },
+  };
+}
+
+/** Decline an agent's request, or dismiss a finished check. */
+async function archiveDecline(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== 'request_id' || !archiveArg(args.request_id)) return refused('request_id is required.', 'invalid_params');
+  const answer = await archiveRoute(options, 'decline', args);
+  if (!answer.ok) return answer.result;
+  return { content: [{ type: 'text', text: 'Declined.' }], structuredContent: { status: 'declined' } };
+}
+
+/** Remove one imported archive: the panel's confirm is the acknowledgement the route asks for. */
+async function archiveRemove(options: DashboardPanelToolsOptions, args: Record<string, unknown>): Promise<ChatGptToolResult> {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || keys[0] !== 'archive_id' || !archiveArg(args.archive_id)) return refused('archive_id is required.', 'invalid_params');
+  const answer = await archiveRoute(options, 'remove', { archive_id: args.archive_id, acknowledge: true });
+  if (!answer.ok) return answer.result;
+  return { content: [{ type: 'text', text: 'Removing.' }], structuredContent: { status: 'removing' } };
+}
+
+/** The Archives row's list, or undefined when it cannot be read: the row then shows the card alone. */
+function archivesMeta(options: DashboardPanelToolsOptions): ComputerArchivesMeta | undefined {
+  try {
+    return options.archives?.();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Opening one unreadable file by its one-time token; the token is the only argument. */
@@ -321,6 +447,10 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
       if (name === UNPAIR_SOURCE_TOOL_NAME) return await unpairSource(options, args);
       if (name === OPEN_UNREADABLE_FILE_TOOL_NAME) return await openUnreadableFile(options, args, context);
       if (name === UNREADABLE_FILES_PAGE_TOOL_NAME) return await unreadableFilesPage(options, args, context);
+      if (name === ARCHIVE_BROWSE_TOOL_NAME) return await archiveBrowse(options, args);
+      if (name === ARCHIVE_APPROVE_TOOL_NAME) return await archiveApprove(options, args);
+      if (name === ARCHIVE_DECLINE_TOOL_NAME) return await archiveDecline(options, args);
+      if (name === ARCHIVE_REMOVE_TOOL_NAME) return await archiveRemove(options, args);
       const signal = context.signal ?? new AbortController().signal;
       const base = options.surface();
       // Keep the view the dashboard result is built from, for Unpair's entries.
@@ -342,7 +472,8 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
           ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : [])
         : [];
       const waiting = context.localSession === true ? waitingCount(options) : 0;
-      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0) return result;
+      const archives = archivesMeta(options);
+      if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives) return result;
       const meta: ComputerDashboardMeta = {
         ...(missingFolders.length ? { missingFolders } : {}),
         ...(permissionSettings.length ? { permissionSettings } : {}),
@@ -350,6 +481,7 @@ export function createDashboardPanelTools(options: DashboardPanelToolsOptions): 
         ...(unpair.length > 0 ? { unpair } : {}),
         ...(unreadable.length > 0 ? { unreadable } : {}),
         ...(waiting > 0 ? { waitingPrivateQuestions: waiting } : {}),
+        ...(archives ? { archives } : {}),
       };
       const existing = result._meta && typeof result._meta === 'object' ? result._meta as Record<string, unknown> : {};
       return { ...result, _meta: { ...existing, [COMPUTER_META_KEY]: meta } };

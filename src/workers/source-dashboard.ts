@@ -1217,6 +1217,12 @@ export type DashboardSourceAction =
     label: 'Connect';
   }
   | {
+    // Imported archives: no account and nothing to sign in to; the person
+    // chooses an export on this computer (archive-import/dashboard.ts).
+    kind: 'archive_import';
+    label: 'Import an archive';
+  }
+  | {
     kind: 'none';
   };
 
@@ -1374,6 +1380,18 @@ export interface SourceDashboardBuildOptions {
   /** Explicit-scope state for folder-capable sources; keys absent for every other family. */
   fileSourceScopeStatus?: Readonly<Record<string, 'scope_pending' | 'approved'>>;
   fileSourceScopeIngestionEnabled?: Readonly<Record<string, boolean>>;
+  /**
+   * How many archives are imported (or being removed), and whether one is
+   * still importing or being removed: the Archives card's connection
+   * (archive-import/dashboard.ts). Absent: none.
+   */
+  importedArchives?: DashboardImportedArchives;
+}
+
+/** The Archives card's whole connection: there is no account, only imports. */
+export interface DashboardImportedArchives {
+  archives: number;
+  importing: boolean;
 }
 
 export interface DashboardPendingConnect {
@@ -1456,7 +1474,9 @@ export interface DashboardSupportedSourceDefinition {
     | { kind: 'api_key'; source: DashboardApiKeySource }
     | { kind: 'guided_session'; source: 'telegram' | 'whatsapp'; instructions: string[] }
     // A source on this computer: no sign-in, one Connect, then the owner picks folders.
-    | { kind: 'this_computer'; source: 'local.files' };
+    | { kind: 'this_computer'; source: 'local.files' }
+    // Exports imported one at a time: no connection at all, an import per archive.
+    | { kind: 'archive_import' };
 }
 
 /**
@@ -1726,6 +1746,20 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     connect_kind: 'local',
     sync_name: { mid: 'your files', start: 'Your files', plural: true },
     connect_action: { kind: 'this_computer', source: 'local.files' },
+  },
+  {
+    // Exports the person imports from this computer (archive-import/): each
+    // archive is its own import, held in one store set per family.
+    source_id: 'archive.imports',
+    primary_corpus_id: 'secure_local.archive.email',
+    corpus_source_ids: ['archive.imports'],
+    ingestion_ledger_source_id: 'archive_imports',
+    label: 'Archives',
+    provider: 'mbox',
+    family: 'email',
+    trust_domain: 'secure_local',
+    connect_kind: 'local',
+    connect_action: { kind: 'archive_import' },
   },
   {
     source_id: 'x.bookmarks',
@@ -2220,6 +2254,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       unpairedSources.get(definition.source_id),
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
+      options.importedArchives,
     );
     // Four-tier facts, stamped like sync_now below: counts from the card's own
     // corpora, and the migration only when its plan touches one of them.
@@ -2466,6 +2501,7 @@ function sourceCardFromDefinition(
   unpaired: DashboardUnpairedSourceState | undefined,
   fileSourceScopeStatus: 'scope_pending' | 'approved' | undefined,
   fileSourceScopeIngestionEnabled: boolean,
+  importedArchives?: DashboardImportedArchives,
 ): DashboardSourceCard {
   const corpusCards = withoutCustodialDoubleCount(
     corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)),
@@ -2534,6 +2570,10 @@ function sourceCardFromDefinition(
     registryUnreadable,
     unpaired,
   );
+  if (definition.connect_action.kind === 'archive_import') {
+    // No account to hold: the imports are the connection.
+    Object.assign(baseConnection, importedArchivesConnection(importedArchives));
+  }
   if (googleReconnectRequired) {
     baseConnection.state = 'reauth_required';
     baseConnection.label = 'Reconnect Google to continue syncing';
@@ -2737,7 +2777,9 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
         ? (action.kind === 'guided_session' ? action.instructions.join(' ') : `Finish pairing ${card.label}.`)
         : action.kind === 'needs_setup'
           ? `Open Set up for ${card.label}, register the provider app, then start authorization.`
-          : `Connect one ${card.label} account from this page.`,
+          : action.kind === 'archive_import'
+            ? 'Import an archive from this page: choose a mail export on this computer.'
+            : `Connect one ${card.label} account from this page.`,
       dependencies,
     };
   }
@@ -3648,6 +3690,29 @@ function connectionStateFromDefinition(
  */
 type DashboardSessionEvidence = 'in_cadence' | 'unconfirmed' | 'none';
 
+/** The labels an Archives card's connection can carry. */
+export const DASHBOARD_NO_ARCHIVES_LABEL = 'no archives imported yet';
+export const DASHBOARD_ARCHIVES_IMPORTING_LABEL = 'importing';
+
+export function dashboardArchivesImportedLabel(count: number): string {
+  return count === 1 ? '1 archive imported' : `${count} archives imported`;
+}
+
+/**
+ * The Archives card's connection, from its imports: none yet, one still
+ * importing (or being removed), or every one read. There is no account, so
+ * nothing here can need reconnecting; a stopped import is on its own line in
+ * the archive list, with what to do.
+ */
+function importedArchivesConnection(
+  imported: DashboardImportedArchives | undefined,
+): Pick<DashboardSourceCard['connection'], 'state' | 'label'> {
+  const count = imported?.archives ?? 0;
+  if (count === 0) return { state: 'not_connected', label: DASHBOARD_NO_ARCHIVES_LABEL };
+  if (imported!.importing) return { state: 'syncing', label: DASHBOARD_ARCHIVES_IMPORTING_LABEL };
+  return { state: 'connected', label: dashboardArchivesImportedLabel(count) };
+}
+
 function sessionConnectionEvidence(
   coverage: DashboardSourceCard['coverage'],
   freshness: DashboardSourceCard['freshness'],
@@ -3773,6 +3838,8 @@ function sourceAction(
     if (connected) return { kind: 'none' };
     return { kind: 'this_computer', source: definition.connect_action.source, label: 'Connect' };
   }
+  // Another archive can always be imported.
+  if (definition.connect_action.kind === 'archive_import') return { kind: 'archive_import', label: 'Import an archive' };
   if (definition.connect_action.kind === 'api_key') {
     if (connected && !reauthRequired && !providerRefusing) return { kind: 'none' };
     return {
@@ -3986,8 +4053,9 @@ function pendingForDefinition(
   now: Date,
 ): DashboardPendingConnect | undefined {
   if (definition.connect_action.kind !== 'oauth') return undefined;
+  const source = definition.connect_action.source;
   const matches = pendingConnects
-    .filter((pending) => pending.source === definition.connect_action.source)
+    .filter((pending) => pending.source === source)
     .filter((pending) => {
       const expiresAt = Date.parse(pending.expires_at);
       return Number.isFinite(expiresAt) && expiresAt > now.getTime();

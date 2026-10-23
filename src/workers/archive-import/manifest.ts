@@ -269,7 +269,9 @@ export function findProbableCopies<T extends { status: string; files: readonly A
     .filter((record) => record.files.every((file, index) => sameSample(file, files[index]!) && file.sha256 !== undefined));
 }
 
-/** Whether `record` holds files with exactly these whole-file SHA-256 digests, in order. */
+/**
+ * Whether `record` holds files with exactly these whole-file SHA-256 digests, in order.
+ */
 export function isCopyOf(record: { files: readonly ArchiveManifestFile[] }, digests: readonly string[]): boolean {
   return record.files.length === digests.length && record.files.every((file, index) => file.sha256 === digests[index]);
 }

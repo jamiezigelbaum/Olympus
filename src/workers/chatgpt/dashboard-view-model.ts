@@ -36,7 +36,9 @@ import { isSourceFailureKind, sourceFailureKind, sourceFailureRef } from '../das
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
 import {
+  DASHBOARD_ARCHIVES_IMPORTING_LABEL,
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
+  DASHBOARD_NO_ARCHIVES_LABEL,
   DASHBOARD_SUPPORTED_SOURCES,
   DASHBOARD_UNPAIRED_LABEL,
   type DashboardSourceAction,
@@ -143,8 +145,12 @@ const KNOWN_CONNECTION_LABELS = new Set([
   'unpair state unreadable',
   'Unpair incomplete — manual cleanup required',
   'synced',
+  DASHBOARD_NO_ARCHIVES_LABEL,
+  DASHBOARD_ARCHIVES_IMPORTING_LABEL,
 ]);
 const SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour|day|week|month|year)s? ago)$/;
+/** dashboardArchivesImportedLabel's words, with the count. */
+const ARCHIVES_IMPORTED = /^(1 archive|\d+ archives) imported$/;
 
 const KNOWN_READINESS_LABELS = new Set([
   'Connect this source',
@@ -941,6 +947,10 @@ function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAu
  * the computer for now: their Connect opens the help page's steps for that.
  */
 function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+  // An archive is chosen on the computer it is on: the dashboard there.
+  if (definition.connect_action.kind === 'archive_import') {
+    return helpLinkFix(CHATGPT_SETUP_LABELS.importArchive, openPageUrl({ kind: 'dashboard' }));
+  }
   const source = oauthSource(definition);
   return source
     ? { label: CHATGPT_SETUP_LABELS.connect, tool: CONNECT_SOURCE_TOOL_NAME, args: { source } }
@@ -1127,6 +1137,7 @@ function overallProgress(
  */
 export function scrubCard(definition: DashboardSupportedSourceDefinition, card: DashboardSourceCard): DashboardSourceCard {
   const connectionLabel = KNOWN_CONNECTION_LABELS.has(card.connection.label) || SYNCED_RELATIVE.test(card.connection.label)
+    || ARCHIVES_IMPORTED.test(card.connection.label)
     ? card.connection.label
     : '';
   const freshnessLabel = card.freshness.label === DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL
@@ -1205,8 +1216,11 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
     connection: {
       state: card.connection.state,
       label: connectionLabel,
-      // Instructions, redirect URIs and client ids stay on the Mac.
-      action: { kind: 'none' },
+      // Instructions, redirect URIs and client ids stay on the Mac. Import an
+      // archive carries none of them, and its kind words the row's line.
+      action: card.connection.action.kind === 'archive_import'
+        ? { kind: 'archive_import', label: 'Import an archive' }
+        : { kind: 'none' },
       handles: [],
       ...(pending && finite(pending.expires_in_minutes)
         ? { pending: { started_at: '', expires_at: '', expires_in_minutes: count(pending.expires_in_minutes) } }

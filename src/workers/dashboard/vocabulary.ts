@@ -989,6 +989,8 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   // The answer lane has nothing to sync, and its freshness label is the only
   // field that says so.
   if (source.freshness.label.startsWith('Answer lane:')) return 'answers questions directly';
+  // Imports are read once, never synced: the line says how many are held.
+  if (source.connection.action.kind === 'archive_import') return source.connection.label;
   const unreadable = dashboardUnreadablePhrase(source);
   // The owner's own Sync now press, while it is the latest word, says what it
   // found in place of the bare sync time.
@@ -1773,6 +1775,91 @@ export const DASHBOARD_HOST_GATE_COPY = {
   refused: 'That token was not accepted.',
 } as const;
 
+/**
+ * The Archives row on the computer (archive-import/dashboard.ts): Import an
+ * archive, each imported archive and its state, and the imports waiting on
+ * the person. Names and folders are the person's own; they appear only
+ * beside these words, on the computer.
+ */
+export const DASHBOARD_ARCHIVE_COPY = {
+  importAction: 'Import an archive',
+  /** The picker in archive mode: one file or folder, no save step. */
+  pick: {
+    back: 'Back to Olympus',
+    title: 'Import an archive',
+    intro: 'Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.',
+    source: 'This computer',
+    makePrivate: 'Import',
+    makePrivateFor: 'Import {name}',
+    alreadyPrivate: 'Imported',
+  },
+  listLabel: 'Imported archives',
+  status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing' },
+  dates: '{earliest} to {latest}',
+  items: { one: '1 message', many: '{n} messages' },
+  importingLine: '{percent}% read · {items} so far',
+  importedLine: '{items} · imported {when}',
+  importedLineNoTime: '{items}',
+  removingLine: 'Removing everything Olympus made from this archive. The file itself stays where it is.',
+  judgedLine: '{judged} judged · {held} waiting for the private model',
+  heldWhy: {
+    ready: 'Until the private model judges them, they stay Private.',
+    waiting: 'They stay Private until the private model judges them, and it is not answering right now.',
+    off: 'No private model is set up, so they stay Private and are not judged.',
+  },
+  setUpPrivateModel: 'Set up the private model',
+  stopped: {
+    file_changed: { why: '{file} changed after the import started.', fix: 'Remove this archive, then import the file again once it has stopped changing.' },
+    file_missing: { why: '{file} is no longer where it was.', fix: 'Remove this archive, then import it again from where it is now.' },
+    file_unreadable: { why: 'Olympus could not read {file}.', fix: 'Check that your user account can open it, then remove this archive and import it again.' },
+    resume_point_invalid: { why: 'Olympus lost its place in this archive.', fix: 'Remove this archive and import it again.' },
+    format_unavailable: { why: 'This version of Olympus cannot read this kind of archive.', fix: 'Update Olympus, or remove this archive.' },
+    root_changed: { why: 'The folder it was in was moved or replaced.', fix: 'Remove this archive, then import it again from where it is now.' },
+    other: { why: 'The import stopped.', fix: 'Remove this archive and import it again.' },
+  },
+  /** A file of the archive, when the stop names none. */
+  thisFile: 'A file of this archive',
+  /** What could not be read fully, per kind; and what was left out on purpose. */
+  gaps: {
+    message_too_large: { one: '1 message too large to read', many: '{n} messages too large to read' },
+    message_unreadable: { one: '1 message could not be read', many: '{n} messages could not be read' },
+    charset_not_decoded: { one: '1 message in a character set Olympus could not read', many: '{n} messages in a character set Olympus could not read' },
+    attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
+    text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
+    spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    other: { one: '1 item not read fully', many: '{n} items not read fully' },
+  },
+  /** Exactly where: a file of the archive and a byte offset in it. */
+  example: '{what}: {file}, at byte {offset}',
+  examplesHeading: 'Where',
+  remove: 'Remove',
+  removeConfirm: 'Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.',
+  /** An agent's request, waiting for the person. */
+  requestLine: 'An agent asked to import {name} from {where}.',
+  approve: 'Import',
+  decline: 'Decline',
+  checkingLine: 'Checking whether {name} is already imported. Olympus reads it once to compare.',
+  alreadyLine: '{name} is already imported as {archive}.',
+  alreadyLineUnnamed: '{name} is already imported.',
+  failedLine: '{name} was not imported: {reason}',
+  failed: {
+    not_found: 'it is no longer there. Choose it again.',
+    permission_denied: 'your user account is not allowed to open it.',
+    changed: 'it changed while Olympus was reading it. Import it again once it has stopped changing.',
+    unreadable: 'Olympus could not read it.',
+    unsupported: 'Olympus does not import this kind of file.',
+    ambiguous: 'Olympus could not tell which kind of export it is.',
+  },
+  dismiss: 'Dismiss',
+  /** After a choice in the picker. */
+  started: 'Importing {name}. It shows under Archives as it is read.',
+  checking: 'Checking whether {name} is already imported…',
+  already: '{name} is already imported as {archive}.',
+  alreadyUnnamed: '{name} is already imported.',
+  removing: 'Removing {name}.',
+  declined: 'Declined.',
+} as const;
+
 export const DASHBOARD_COMPUTER_PANEL_COPY = {
   section: 'On this computer',
   onlyHere: 'only here',
@@ -1798,6 +1885,7 @@ export const DASHBOARD_COMPUTER_PANEL_COPY = {
   /** The OpenClaw tab for a connection without operator.write. */
   readOnlyOpenClaw: 'Reconnect OpenClaw with operator.write access to change this',
   indexFaster: DASHBOARD_INDEX_FASTER,
+  archives: DASHBOARD_ARCHIVE_COPY,
 } as const;
 
 /**
@@ -1813,6 +1901,7 @@ export const DASHBOARD_CHATGPT_SETUP_LABELS = {
   disconnect: 'Disconnect',
   deleteData: 'Delete indexed data',
   changeModels: 'Change',
+  importArchive: 'Import an archive',
 } as const;
 
 /**

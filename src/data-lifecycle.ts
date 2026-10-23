@@ -48,7 +48,8 @@ import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
 import { archiveImportFamilies } from './core/archive-formats.ts';
 import { archiveConnectorStoreDbPaths, archiveImportCorpora } from './workers/archive-import/store.ts';
-import { defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
+import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
+import { archiveImportRequestsPath } from './workers/archive-import/requests.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -186,6 +187,13 @@ export interface LifecycleSourceSpec {
    * refuse a pairing that is still live.
    */
   pairingSessionPaths?(context?: LifecyclePathContext): string[];
+  /**
+   * For a source with neither a credential nor a pairing (imported archives):
+   * whether it still holds something the person approved in the dashboard,
+   * which counts as connected for the per-source delete, and how the person
+   * ends it there. A record that cannot be read counts as present.
+   */
+  approvals?: { present(context?: LifecyclePathContext): boolean; nextAction: string };
   policyPaths?(context?: LifecyclePathContext): string[];
 }
 
@@ -314,9 +322,23 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
       connectorStorePaths: (context) => archiveConnectorStoreDbPaths(archiveImportFamilies(), envForContext(context)),
       registryCorpora: archiveImportCorpora,
-      // The record of each import (the chosen paths, file versions, progress).
-      // The person's own export files are never touched.
-      rawStatePaths: (context) => [defaultArchiveImportStatePath(envForContext(context))],
+      // The record of each import (the chosen paths, file versions, progress)
+      // and the imports asked for but not yet recorded. The person's own
+      // export files are never touched.
+      rawStatePaths: (context) => {
+        const statePath = defaultArchiveImportStatePath(envForContext(context));
+        return [statePath, archiveImportRequestsPath(statePath)];
+      },
+      approvals: {
+        present: (context) => {
+          try {
+            return new ArchiveImportStateStore({ path: defaultArchiveImportStatePath(envForContext(context)) }).list().length > 0;
+          } catch {
+            return true;
+          }
+        },
+        nextAction: 'Remove each archive under Archives in the local dashboard, then rerun the CLI delete.',
+      },
     },
     {
       sourceId: 'google_drive.docs',
@@ -880,6 +902,14 @@ export function dataDeleteCustody(options: {
             observed: 'connected',
             next_action: 'Use Disconnect in the local dashboard, then rerun the CLI delete.',
           };
+    }
+    if (source!.approvals?.present(options)) {
+      return {
+        requirement: 'source_disconnected',
+        ready: false,
+        observed: 'connected',
+        next_action: source!.approvals.nextAction,
+      };
     }
     // A paired-session source (Telegram, WhatsApp) has no handle to disconnect
     // and its card infers a live session from sync evidence, so "no handle" is
