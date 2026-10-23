@@ -37,6 +37,7 @@ import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
 import {
   DASHBOARD_ARCHIVES_IMPORTING_LABEL,
+  DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL,
   DASHBOARD_ARCHIVES_UNREADABLE_LABEL,
   DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL,
   DASHBOARD_NO_ARCHIVES_LABEL,
@@ -151,6 +152,7 @@ const KNOWN_CONNECTION_LABELS = new Set([
   'synced',
   DASHBOARD_NO_ARCHIVES_LABEL,
   DASHBOARD_ARCHIVES_IMPORTING_LABEL,
+  DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL,
   DASHBOARD_ARCHIVES_UNREADABLE_LABEL,
 ]);
 const SYNCED_RELATIVE = /^synced (just now|less than 1 hour ago|\d+ (minute|hour|day|week|month|year)s? ago)$/;

@@ -26,6 +26,7 @@ import {
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
+import { ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY } from '../src/workers/archive-import/dashboard.ts';
 import { previewArchiveApprove, previewArchiveBrowse, previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 
 type Message = { jsonrpc?: string; id?: number; method?: string; params?: any };
@@ -520,6 +521,11 @@ describe('Needs you for imports', () => {
     expect(request.className).toContain('landed');
     expect(Array.from(request.querySelectorAll('button')).map((node) => node.textContent)).toEqual([A.tryAgain, A.dismiss]);
     expect(archivesRow(page).querySelector('.dot')!.className).toContain('tone-warn');
+    // Said once, in one form: what happened, with Try again and Dismiss beside it.
+    expect(request.querySelector('p')!.textContent).toBe('Inbox.mbox was not imported: it changed while Olympus was reading it.');
+    for (const reason of Object.values(A.failed)) {
+      for (const second of ['Import it again', 'Try again', 'Choose it again']) expect(reason).not.toContain(second);
+    }
   });
 
   test('an archive Olympus cannot count now: never "0 messages", a Needs you line that goes to it', async () => {
@@ -544,9 +550,39 @@ describe('Needs you for imports', () => {
     await settle();
     const why = archivesRow(page).querySelector('details.why') as HTMLDetailsElement;
     expect(why.open).toBe(true);
-    expect(why.textContent).toContain(A.notRunning.why.disabled);
-    expect(why.textContent).toContain(A.notRunning.fix.disabled);
-    expect(A.notRunning.why.disabled).toContain('worker.scheduler.enabled');
+    // One plain sentence first, then the setting and the restart.
+    expect(Array.from(why.querySelectorAll('li')).map((node) => node.textContent)).toEqual([A.notRunning.why.disabled, A.notRunning.fix.disabled]);
+    expect(A.notRunning.why.disabled).toBe("Background syncing is turned off in Olympus's settings, so imports can't run.");
+    for (const setting of ['disabled', 'not_selected'] as const) {
+      expect(A.notRunning.why[setting]).not.toContain('worker.scheduler');
+      expect(A.notRunning.fix[setting]).toContain(setting === 'disabled' ? 'worker.scheduler.enabled' : 'worker.scheduler.sourceIds');
+      expect(A.notRunning.fix[setting]).toContain('restart Olympus after changing it');
+    }
+  });
+
+  test('an import that cannot run says so: not Importing, no progress bar, and Remove shown but not pressable, its reason beside it', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-not-running') });
+    const archive = archiveItem(page, 'importing');
+    expect(archive.getAttribute('data-not-running')).toBe('disabled');
+    expect(archive.querySelector('.ftag')!.textContent).toBe(A.status.notRunning);
+    expect(archive.querySelector('[role="progressbar"]')).toBeNull();
+    expect(archive.textContent).toContain(fill(A.notRunningLine, { percent: '0', items: fill(A.items.many, { n: '0' }) }));
+    expect(archivesRow(page).textContent).not.toContain(A.status.importing);
+    const remove = Array.from(archive.querySelectorAll('button')).find((node) => node.textContent === A.remove) as HTMLButtonElement;
+    expect(remove.disabled).toBe(true);
+    expect(archive.textContent).toContain(A.removeNotRunning.disabled);
+  });
+
+  test('the archive copy uses straight apostrophes throughout', () => {
+    const strings: string[] = [];
+    const walk = (value: unknown): void => {
+      if (typeof value === 'string') strings.push(value);
+      else if (value && typeof value === 'object') Object.values(value).forEach(walk);
+    };
+    walk(A);
+    walk(ARCHIVE_APPROVE_COPY);
+    walk(ARCHIVE_NOT_RUNNING_COPY);
+    expect(strings.filter((text) => text.includes('\u2019'))).toEqual([]);
   });
 
   test('an imported archive with everything judged adds nothing to Needs you', async () => {

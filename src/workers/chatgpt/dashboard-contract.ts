@@ -544,9 +544,10 @@ export interface ComputerArchivesMeta {
    */
   unreadable?: { reason: 'damaged' | 'unknown_form' | 'permission' | 'other'; file: string; list: 'archives' | 'requests' };
   /**
-   * Imports and removals cannot run while an archive is importing or being
-   * removed: Olympus's background reading is turned off (`disabled`), or its
-   * list of sources leaves archives out (`not_selected`).
+   * With any archive here, imports and removals cannot run: Olympus's
+   * background syncing is turned off (`disabled`), or its list of sources
+   * leaves archives out (`not_selected`). An import or a removal then shows
+   * as not running, and Remove is shown but cannot be pressed.
    */
   notRunning?: 'disabled' | 'not_selected';
 }
@@ -693,6 +694,7 @@ export const ARCHIVE_REMOVE_TOOL_NAME = 'olympus_archive_remove';
  * opens that session (the local unlock) before the first of them.
  */
 export const COMPUTER_LOCAL_SESSION_TOOL_NAMES: readonly string[] = [
+  ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_APPROVE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,

@@ -1,4 +1,5 @@
-// Importing, declining and removing an archive are the person's, at this
+// Choosing (the picker's listing of this computer's folders), importing,
+// declining and removing an archive are the person's, at this
 // computer's own dashboard: a local-grade control session alone (workers/
 // http.ts), the grade Outside help and Private answers already take. The
 // worker bearer is not enough (an agent or the Gateway holds it), nor a
@@ -86,6 +87,7 @@ function cookieOf(response: Response): string {
 }
 
 const BODIES: Record<string, unknown> = {
+  '/dashboard/archive-import/browse': { parent_key: '/Users/someone' },
   '/dashboard/archive-import/approve': { key: '/Users/someone/Mail exports/Takeout.mbox' },
   '/dashboard/archive-import/decline': { request_id: REQUEST_ID },
   '/dashboard/archive-import/remove': { archive_id: ARCHIVE_ID, acknowledge: true },
@@ -150,17 +152,17 @@ describe('approving, declining and removing an archive take this computer\'s own
     expect(f.reached).toEqual([]);
   });
 
-  test('a session the bearer minted, or its launch ticket redeemed, is refused; the same session still lists the picker', async () => {
+  test('a session the bearer minted, or its launch ticket redeemed, is refused, the picker\'s listing included', async () => {
     const f = fixture();
+    expect(DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS).toContain('/dashboard/archive-import/browse');
     for (const session of [await bearerSession(f), await launchSession(f)]) {
       for (const path of DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS) {
         const refused = await f.fetch(post(path, session));
         expect(refused.status).toBe(403);
         expect(await errorCode(refused)).toBe('mac_dashboard_only');
       }
-      expect((await f.fetch(post('/dashboard/archive-import/browse', session))).status).toBe(200);
     }
-    expect(f.reached).toEqual(['browse', 'browse']);
+    expect(f.reached).toEqual([]);
   });
 
   test('an agent cannot mint the local session for itself: not with the bearer, not through a proxy, not as another bearer', async () => {
@@ -184,7 +186,7 @@ describe('approving, declining and removing an archive take this computer\'s own
       const allowed = await f.fetch(post(path, session));
       expect(allowed.status).toBe(200);
     }
-    expect(f.reached).toEqual(['approve', 'decline', 'remove']);
+    expect(f.reached).toEqual(['browse', 'approve', 'decline', 'remove']);
   });
 
   test('the worker route itself refuses a call that carries no local grade (an in-process caller)', async () => {
@@ -213,6 +215,7 @@ describe('the panel\'s archive tools', () => {
     return { tools, seen };
   }
   const calls: Array<[string, Record<string, unknown>]> = [
+    [ARCHIVE_BROWSE_TOOL_NAME, { parent_key: '/Users/someone' }],
     [ARCHIVE_APPROVE_TOOL_NAME, { key: '/Users/someone/Mail exports/Takeout.mbox' }],
     [ARCHIVE_DECLINE_TOOL_NAME, { request_id: REQUEST_ID }],
     [ARCHIVE_REMOVE_TOOL_NAME, { archive_id: ARCHIVE_ID }],
@@ -227,8 +230,6 @@ describe('the panel\'s archive tools', () => {
       expect(result.structuredContent).toEqual({ error: 'mac_dashboard_only' });
     }
     expect(seen).toEqual([]);
-    // The picker's listing is not an approval: it still lists.
-    expect((await tools.call(ARCHIVE_BROWSE_TOOL_NAME, {}, { origin: ORIGIN })).isError).toBeUndefined();
   });
 
   test('with this computer\'s own session: each runs, and carries the grade to the route', async () => {
@@ -237,6 +238,7 @@ describe('the panel\'s archive tools', () => {
       expect((await tools.call(name, args, { origin: ORIGIN, localSession: true })).isError).toBeUndefined();
     }
     expect(seen).toEqual([
+      { path: '/dashboard/archive-import/browse', grade: 'local' },
       { path: '/dashboard/archive-import/approve', grade: 'local' },
       { path: '/dashboard/archive-import/decline', grade: 'local' },
       { path: '/dashboard/archive-import/remove', grade: 'local' },
@@ -283,17 +285,20 @@ describe('the computer\'s host page', () => {
     return { fetched, received, send };
   }
 
-  test('a launch-link session opens the local session (no bearer) before the first approval, then uses it', async () => {
+  test('a launch-link session opens the local session (no bearer) before the picker first lists, then uses it', async () => {
     const page = hostPage(false);
     page.send({ id: 1, method: 'tools/call', params: { name: DASHBOARD_TOOL_NAME, arguments: {} } });
     await settle();
-    page.send({ id: 2, method: 'tools/call', params: { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/x/Takeout.mbox' } } });
+    page.send({ id: 2, method: 'tools/call', params: { name: ARCHIVE_BROWSE_TOOL_NAME, arguments: {} } });
     await settle();
-    page.send({ id: 3, method: 'tools/call', params: { name: ARCHIVE_REMOVE_TOOL_NAME, arguments: { archive_id: ARCHIVE_ID } } });
+    page.send({ id: 3, method: 'tools/call', params: { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/x/Takeout.mbox' } } });
+    await settle();
+    page.send({ id: 4, method: 'tools/call', params: { name: ARCHIVE_REMOVE_TOOL_NAME, arguments: { archive_id: ARCHIVE_ID } } });
     await settle();
     expect(page.fetched.map(({ url, csrf, tool, authorization }) => ({ url, csrf, tool, authorization }))).toEqual([
       { url: '/dashboard/tools/call', csrf: 'bearer-csrf', tool: DASHBOARD_TOOL_NAME, authorization: undefined },
       { url: DASHBOARD_LOCAL_CONTROL_SESSION_PATH, csrf: undefined, tool: undefined, authorization: undefined },
+      { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_BROWSE_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_APPROVE_TOOL_NAME, authorization: undefined },
       { url: '/dashboard/tools/call', csrf: 'local-csrf', tool: ARCHIVE_REMOVE_TOOL_NAME, authorization: undefined },
     ]);

@@ -450,10 +450,14 @@ export class TierSnifferService {
     if (tick.state === 'model_unavailable') reason = 'no_model';
     else if (tick.state === 'awaiting_owner_approval') reason = 'awaiting_owner_approval';
     else if (tick.state === 'failed') reason = 'failed';
-    // A pass the model stopped answering ends on its transport failures. Each
-    // failed dispatch still counts as a call, so this is told apart by how the
-    // pass stopped, never by a call count of zero (which it never has).
-    else if (tick.state === 'ran' && tick.report.stoppedBy === 'transport_failures' && tick.report.pendingSeen > 0) reason = 'model_not_answering';
+    // A model that is not answering: the pass stopped on its transport
+    // failures, or every call it made failed (one question left fails once,
+    // below the stop threshold). Each failed dispatch still counts as a
+    // call, so this is never told by a call count of zero.
+    else if (tick.state === 'ran' && tick.report.pendingSeen > 0
+      && (tick.report.stoppedBy === 'transport_failures' || (tick.report.calls > 0 && tick.report.failedCalls === tick.report.calls))) {
+      reason = 'model_not_answering';
+    }
     else if (tick.state === 'ran' && tick.report.calls === 0 && tick.report.pendingSeen > 0) {
       const stop = tick.report.stoppedBy;
       reason = stop === 'yield' || stop === 'preempted' || stop === 'aborted'

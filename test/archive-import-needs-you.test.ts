@@ -139,6 +139,8 @@ describe('Needs you for imported archives', () => {
         fix: { label: A.needsYou.seeWhy, tool: 'olympus_dashboard', args: {}, href: ARCHIVES_PAGE, openHref: true },
       }]);
       expect(row.status).toBe('Needs you');
+      // Not running is never "Importing".
+      expect(row.detail).toBe("imports can't run");
     }
     // A setting this build does not know is not passed on.
     const unknown = dashboard({ archives: 1, importing: true, attention: [{ kind: 'scheduler', setting: 'later' as 'disabled' }] });

@@ -3730,6 +3730,8 @@ type DashboardSessionEvidence = 'in_cadence' | 'unconfirmed' | 'none';
 /** The labels an Archives card's connection can carry. */
 export const DASHBOARD_NO_ARCHIVES_LABEL = 'no archives imported yet';
 export const DASHBOARD_ARCHIVES_IMPORTING_LABEL = 'importing';
+/** An import or a removal this computer's settings keep from running: never "importing". */
+export const DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run";
 /** The record of imports cannot be read: never "no archives imported yet". */
 export const DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives";
 
@@ -3739,7 +3741,8 @@ export function dashboardArchivesImportedLabel(count: number): string {
 
 /**
  * The Archives card's connection, from its imports: none yet, one still
- * importing (or being removed), or every one read. There is no account, so
+ * importing (or being removed), one this computer's settings keep from
+ * running, or every one read. There is no account, so
  * nothing here can need reconnecting. What the imports need from the person
  * rides along (`imports_attention`), and a record that cannot be read never
  * reads as none imported: it says so instead.
@@ -3754,6 +3757,7 @@ function importedArchivesConnection(
     return { state: 'connected', label: DASHBOARD_ARCHIVES_UNREADABLE_LABEL, ...extra };
   }
   if (count === 0) return { state: 'not_connected', label: DASHBOARD_NO_ARCHIVES_LABEL, ...extra };
+  if (attention.some((entry) => entry.kind === 'scheduler')) return { state: 'connected', label: DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL, ...extra };
   if (imported!.importing) return { state: 'syncing', label: DASHBOARD_ARCHIVES_IMPORTING_LABEL, ...extra };
   return { state: 'connected', label: dashboardArchivesImportedLabel(count), ...extra };
 }

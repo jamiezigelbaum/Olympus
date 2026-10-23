@@ -591,12 +591,15 @@ function isDashboardPrivateAnswersRoute(request: Request): boolean {
 }
 
 /**
- * Importing an archive, declining an agent's request for one, and removing
- * one (archive-import/dashboard.ts): only the person at this computer's
- * dashboard approves what Olympus reads, so these take the consult routes'
- * grade too. Holding the worker bearer (an agent, the Gateway) is not enough.
+ * Choosing an archive (the picker lists this computer's folders), importing
+ * it, declining an agent's request for one, and removing one
+ * (archive-import/dashboard.ts): only the person at this computer's dashboard
+ * looks through and approves what Olympus reads, so these take the consult
+ * routes' grade too. Holding the worker bearer (an agent, the Gateway) is not
+ * enough.
  */
 export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
+  '/dashboard/archive-import/browse',
   '/dashboard/archive-import/approve',
   '/dashboard/archive-import/decline',
   '/dashboard/archive-import/remove',
@@ -618,7 +621,7 @@ function dashboardLocalGradeRefusal(request: Request): Response {
     error: {
       code: 'mac_dashboard_only',
       message: isDashboardArchiveImportLocalRoute(request)
-        ? 'Archives are imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
+        ? 'Archives are chosen, imported, declined and removed only in the dashboard on this computer, in an unlocked browser.'
         : 'Private answers open only in the dashboard on this computer, in an unlocked browser.',
     },
   }), {

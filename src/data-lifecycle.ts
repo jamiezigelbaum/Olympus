@@ -49,7 +49,7 @@ import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './worke
 import { archiveImportFamilies } from './core/archive-formats.ts';
 import { archiveConnectorStoreDbPaths, archiveImportCorpora } from './workers/archive-import/store.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
-import { ArchiveImportRequestStore, archiveImportRequestsPath } from './workers/archive-import/requests.ts';
+import { ArchiveImportRequestStore, archiveImportRequestsPath, withArchiveImportApprovals } from './workers/archive-import/requests.ts';
 import {
   defaultGmailConnectorStoreDbPath,
   defaultGmailPublicConnectorStoreDbPath,
@@ -193,7 +193,16 @@ export interface LifecycleSourceSpec {
    * which counts as connected for the per-source delete, and how the person
    * ends it there. A record that cannot be read counts as present.
    */
-  approvals?: { present(context?: LifecyclePathContext): boolean; nextAction: string };
+  approvals?: {
+    present(context?: LifecyclePathContext): boolean;
+    nextAction: string;
+    /**
+     * Runs the custody check and the delete under the one exclusion the
+     * dashboard's approvals hold while they move between stores, so an
+     * approval never lands between the check and the delete.
+     */
+    exclusive?<T>(context: LifecyclePathContext | undefined, run: () => T): T;
+  };
   policyPaths?(context?: LifecyclePathContext): string[];
 }
 
@@ -345,6 +354,7 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
           }
         },
         nextAction: 'Under Archives in the local dashboard, cancel any import still being checked (or let it finish) and remove each archive, then rerun the CLI delete.',
+        exclusive: (context, run) => withArchiveImportApprovals(defaultArchiveImportStatePath(envForContext(context)), run),
       },
     },
     {
@@ -824,6 +834,16 @@ export function deleteOlympusDataWithCustody(options: {
    */
   engineLoaded?: boolean;
 } & LifecyclePathContext): DataDeleteWithCustodyResult {
+  // A source whose approvals move between stores is checked and deleted
+  // under their exclusion; every other source as before.
+  const exclusive = options.dryRun !== true && options.sourceId
+    ? lifecycleSourceSpecs().find((entry) => entry.sourceId === options.sourceId?.trim() || entry.sourceAliases?.includes(options.sourceId!.trim()))?.approvals?.exclusive
+    : undefined;
+  const run = (): DataDeleteWithCustodyResult => deleteUnderCustody(options);
+  return exclusive ? exclusive(options, run) : run();
+}
+
+function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCustody>[0]): DataDeleteWithCustodyResult {
   const custody = dataDeleteCustody(options);
   if (options.dryRun !== true && !custody.ready) {
     throw new OperationError(

@@ -1241,10 +1241,15 @@ export function chatgptDashboardClient(
     return box;
   }
 
+  /** Which of this computer's settings keeps imports and removals from running, or '' when they run. */
+  function archiveSetting(meta: Any): string {
+    return meta && (meta.notRunning === 'disabled' || meta.notRunning === 'not_selected') ? String(meta.notRunning) : '';
+  }
+
   /** See why under the Archives row while this computer's settings keep imports and removals from running. */
   function archiveNotRunning(meta: Any, id: string): HTMLElement | null {
     const A = H.copy.archives;
-    const setting = meta.notRunning === 'disabled' || meta.notRunning === 'not_selected' ? String(meta.notRunning) : '';
+    const setting = archiveSetting(meta);
     if (!setting) return null;
     const box = details('why:' + id, doc.createTextNode(P.seeWhy), 'why');
     if (state.landed && state.landed.id === id) box.className += ' landed';
@@ -1258,7 +1263,8 @@ export function chatgptDashboardClient(
   function archivesMoving(): boolean {
     const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     if (!meta || typeof meta !== 'object') return false;
-    return (Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
+    // Imports this computer's settings keep from running are not moving.
+    return (!archiveSetting(meta) && Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
       || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && entry.status === 'checking'));
   }
 
@@ -1341,7 +1347,7 @@ export function chatgptDashboardClient(
     const list = el('ul', 'archives');
     list.setAttribute('aria-label', A.listLabel);
     for (const request of requests) add(list, archiveRequestItem(request));
-    for (const archive of archives) add(list, archiveItem(archive, String(meta.privateModel || '')));
+    for (const archive of archives) add(list, archiveItem(archive, String(meta.privateModel || ''), archiveSetting(meta)));
     return list;
   }
 
@@ -1419,12 +1425,16 @@ export function chatgptDashboardClient(
       fixControl({ label: A.dismiss, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':dismiss', 'plain', false)));
   }
 
-  function archiveItem(archive: Any, model: string): HTMLElement {
+  /** One archive; `setting` names what keeps imports and removals from running ('' when they run). */
+  function archiveItem(archive: Any, model: string, setting: string): HTMLElement {
     const A = H.copy.archives;
     const item = el('li', 'archive' + (archive.status === 'stopped' ? ' stopped' : ''));
     item.setAttribute('data-archive', archive.status);
     if (archiveLanded('archive:' + archive.id, archiveNeedsPerson(archive))) item.className += ' landed';
-    add(item, add(el('p', 'archive-head'), el('span', 'archive-name', archive.name), el('span', 'ftag', (A.status as Any)[archive.status])));
+    // Importing or removing, but not running: never "Importing", never a moving bar.
+    const halted = !!setting && (archive.status === 'importing' || archive.status === 'removing');
+    if (halted) item.setAttribute('data-not-running', setting);
+    add(item, add(el('p', 'archive-head'), el('span', 'archive-name', archive.name), el('span', 'ftag', halted ? A.status.notRunning : (A.status as Any)[archive.status])));
     const facts: HTMLElement[] = [archive.format, archive.where]
       .filter((part: Any) => typeof part === 'string' && part)
       .map((part: string) => el('span', '', part));
@@ -1443,7 +1453,12 @@ export function chatgptDashboardClient(
     const items = wholeCount(archive.items);
     // An index that cannot be read now is said as such, never as no messages.
     const uncounted = archive.countsUnavailable === true && archive.status !== 'removing';
-    if (archive.status === 'importing') {
+    if (halted && archive.status === 'importing') {
+      const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
+      add(item, el('p', 'muted', uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: messageCount(items) })));
+    } else if (halted) {
+      add(item, el('p', 'muted', A.removingNotRunningLine));
+    } else if (archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
       const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: messageCount(items) });
       add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
@@ -1466,12 +1481,14 @@ export function chatgptDashboardClient(
     const why = archiveWhy(archive);
     if (why) add(item, why);
     if (archive.status !== 'removing') {
+      // While removals cannot run, Remove is shown but not pressable, the reason beside it.
       add(item, add(el('div', 'archive-actions'), fixControl({
         label: A.remove,
         tool: H.archiveRemoveTool,
         args: { archive_id: archive.id },
         destructive: true,
         confirmText: fill(A.removeConfirm, { name: archive.name }),
+        ...(setting ? { disabledReason: (A.removeNotRunning as Any)[setting] } : {}),
       }, 'archive-remove:' + archive.id, 'plain', true)));
     }
     return item;

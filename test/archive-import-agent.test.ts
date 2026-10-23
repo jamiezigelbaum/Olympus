@@ -599,11 +599,11 @@ describe('status carries no content and tells the truth', () => {
     // Not zero: unknown. And no private-model note about messages nobody could count.
     for (const key of ['messages', 'judged', 'waiting_for_private_model']) expect(archive).not.toHaveProperty(key);
     expect(archive!.summary).toContain('40% read');
-    expect(archive!.summary).toContain('can’t count the messages');
+    expect(archive!.summary).toContain("can't count the messages");
     expect(status).not.toHaveProperty('private_model_note');
     expect(status.not_running).toEqual({
       setting: 'disabled',
-      message: expect.stringContaining('Background reading is turned off on this computer'),
+      message: expect.stringContaining("Background syncing is turned off in Olympus's settings"),
     });
   });
 

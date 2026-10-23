@@ -117,7 +117,7 @@ export type ArchiveAgentStatus =
     private_model: ComputerArchivesMeta['privateModel'];
     /** Said when messages wait for the private model. */
     private_model_note?: string;
-    /** Imports and removals are waiting for background reading that this computer's settings keep from running. */
+    /** Imports and removals are waiting for background syncing that this computer's settings keep from running. */
     not_running?: { setting: 'disabled' | 'not_selected'; message: string };
   }
   | { ok: false; code: 'archives_unreadable'; reason: string; message: string }
