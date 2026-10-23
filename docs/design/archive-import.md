@@ -1,7 +1,8 @@
 # Import an archive
 
-Status: plan, owner direction 2026-10-23. Nothing is built yet. Where this page
-and the code differ, the code is current.
+Status: owner direction 2026-10-23. Step 1 (mail with the shared spine) is
+built; steps 2 to 4 are not. Where this page and the code differ, the code is
+current.
 
 ## Outcome
 
@@ -41,7 +42,7 @@ same way, with the same privacy and the same status.
 
 | Format | Today |
 |---|---|
-| Mail (mbox) | Nothing. Gmail items come from the Gmail API's JSON, not raw messages, so there is no MIME parser to reuse. |
+| Mail (mbox) | Built in step 1 (2026-10-23): the shared spine in `workers/archive-import/`, and a thin mbox connector (`workers/archive-import/mbox/`) that splits the file itself and parses each message with `postal-mime`. Gmail items come from the Gmail API's JSON, so Gmail shares none of it. |
 | WhatsApp chat export | Parser and connector exist (`workers/whatsapp/connector.ts`, `parseWhatsAppChatExport`) and are tested, but nothing in the product calls them. Live WhatsApp capture is wired separately. |
 | Telegram Desktop export | Nothing. Telegram in the product is live capture only (`telegram-messages/capture-spool-connector.ts`). |
 | Reflect export | Connector exists (`workers/reflect/connector.ts`), unwired, allowlisted. |
