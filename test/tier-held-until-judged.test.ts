@@ -30,6 +30,7 @@ import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { applyOwnerOverrides } from '../src/workers/connector-store/tier-override-settle.ts';
 import { decideItemTiers, resolveStoreTierClassification, type ConnectorStoreTierClassification } from '../src/workers/connector-store/tier-placement.ts';
 import { rejudgeRoutedItems } from '../src/workers/connector-store/tier-rejudge.ts';
+import { sweepOwnerRuleRaises } from '../src/workers/connector-store/tier-rules-sweep.ts';
 import { createTieredLaneSet, TieredStoreSet, tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import type { ExtractionSinkRequest } from '../src/workers/file-extraction/types.ts';
@@ -293,6 +294,18 @@ test('an owner override settles a held item and keeps the hold reason for the pa
   expect(record).toMatchObject({ decidedBy: 'override', state: 'moving', targetContentTier: 'secure', contentPending: false });
   expect(record.reasons).toContain('override:item:secure');
   expect(record.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
+});
+
+test('an owner rule saved later raises a held item, and the hold stays with its content', async () => {
+  const f = lane({ ...HOLD, sniffer: waiting });
+  await syncOne(f, { id: 'swept', name: 'Orchard picnic list', text: `${ORDINARY} ${BODY_MARKER}` });
+  const rule: OwnerTierRule = { id: 'owner-raise', match: { kind: 'pathPrefix', value: '/Files/' }, tier: 'secure', strength: 'prior' };
+  expect(sweepOwnerRuleRaises({ set: f.setWith({ ...HOLD, sniffer: waiting, rules: [rule] }) })).toMatchObject({ raised: 1 });
+  const record = f.ledger.getCurrent(identityOf('swept'))!;
+  expect(record.decidedBy).toBe('owner_rule');
+  expect(record.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
+  expect(record.reasons).not.toContain(PERSONAL_FIRST_REASON);
+  expect(f.stores.internal.searchItems(BODY_MARKER, 10)).toEqual([]);
 });
 
 test('text that lands after listing is held from the listing\'s stored hold', async () => {
