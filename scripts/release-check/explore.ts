@@ -302,13 +302,13 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     const baseFindings = [
       ...await pageFindings(driver, base),
       ...loadConsole.map((message) => `console error while loading: ${message.slice(0, 200)}`),
-      ...loadRequests.map((request) => `failed request while loading: ${request.text} -> ${request.status || 'failed'}`),
+      ...loadRequests.map((request) => `failed request while loading: ${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`),
     ];
     steps.push({
       n: 1, name: `The ${seed.title} page as seeded`, action: `apply the seed "${seed.id}" and open the dashboard`,
       expected: 'the page follows the generic rules (labels, reasons for disabled controls, a fix for every problem, no sideways scroll)',
       actual: baseFindings.length === 0 ? `${base.filter(inScope).length} control(s) in the Sources section` : baseFindings.join('; '),
-      ok: baseFindings.length === 0, ms: 0, at: '/dashboard', consoleErrors: loadConsole.map((message) => message.slice(0, 300)), failedRequests: loadRequests.map((request) => `${request.text} -> ${request.status || 'failed'}`), findings: baseFindings,
+      ok: baseFindings.length === 0, ms: 0, at: '/dashboard', consoleErrors: loadConsole.map((message) => message.slice(0, 300)), failedRequests: loadRequests.map((request) => `${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`), findings: baseFindings,
     });
     const record = (control: PanelControl, listed: string | undefined): void => {
       const known = listed ? foundIds.get(listed) : undefined;
@@ -442,6 +442,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
           } catch { break; }
           context.after = { controls: afterControls, text: afterText, open: afterOpen, url: at };
         }
+        // What the page logged or requested while the outcome was awaited counts toward this press: it is not left for the next one to clear.
+        const waited = driver.drainEvents();
+        events.console.push(...waited.console);
+        events.requests.push(...waited.requests);
       }
       const expectation = left ? undefined : (kind === 'confirm' && parent ? AFTER_CONFIRM[parent]?.({ ...context, parent }) : EXPECTATIONS[kind]?.(context));
       if (expectation) outcomes.push(expectation);
@@ -456,7 +460,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       const requests = events.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)) && !(refusal && REFUSAL_REQUESTS.some((rule) => rule.test(request.url))));
       const consoleErrors = events.console.filter((message) => !ALWAYS_ALLOWED_CONSOLE.some((rule) => rule.test(message)) && !(/Failed to load resource/.test(message) && events.requests.length > 0));
       for (const message of consoleErrors) findings.push(`console error: ${message.slice(0, 200)}`);
-      for (const request of requests) findings.push(`failed request: ${request.text} -> ${request.status || 'failed'}`);
+      for (const request of requests) findings.push(`failed request: ${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`);
       // Windows.
       for (const url of openedWindows) if (!OWN_HOSTS.test(url)) findings.push(`a window was opened to a page that is not Olympus's own: ${url.slice(0, 80)}`);
       if (openedWindows.length > 1) findings.push(`one press opened ${openedWindows.length} windows`);
@@ -469,7 +473,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         expected: outcomes.length > 0 ? outcomes.map((outcome) => outcome.expected).join('; ') : 'something happens, and the generic rules hold',
         actual: left ? `the press left the dashboard for ${at || 'another page'}` : outcomes.length > 0 ? outcomes.map((outcome) => outcome.actual).join('; ') : (changed ? 'the page changed' : 'nothing changed'),
         ok, ms: now() - started, at: at.replace(/token=[^&#]*/g, 'token=…'),
-        consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests: requests.map((request) => `${request.text} -> ${request.status || 'failed'}`), findings: [...new Set(findings)].slice(0, 10),
+        consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests: requests.map((request) => `${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`), findings: [...new Set(findings)].slice(0, 10),
       };
       const shot = `explore-${seed.id}/${String(trace.n).padStart(2, '0')}.jpg`;
       if (await driver.screenshot(shot).catch(() => false)) trace.screenshot = shot;
