@@ -31,6 +31,7 @@ import {
   dashboardRefusedFirstConnect as refusedFirstConnect,
 } from '../dashboard/shared-status.ts';
 import { dashboardSourceProgress, type DashboardPhase } from '../dashboard/phases.ts';
+import { OPERATOR_PAUSED_SCHEDULER_MARKERS } from '../dashboard/scheduler-markers.ts';
 import { isSourceFailureKind, sourceFailureKind, sourceFailureRef } from '../dashboard/source-failure.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import type { BuiltInTranscriptionDashboardState } from '../source-index/built-in-reasoning/transcription-model.ts';
@@ -345,9 +346,26 @@ function publicCards(cards: readonly DashboardSourceCard[]): PublicCard[] {
   for (const definition of DASHBOARD_SUPPORTED_SOURCES) {
     if (definition.family === 'model') continue;
     const card = cards.find((candidate) => candidate.source_id === definition.source_id);
-    if (card) out.push({ definition, card });
+    if (card) out.push({ definition, card: withProviderRejection(card) });
   }
   return out;
+}
+
+/**
+ * The provider answered the source's last pull with 401: the scheduler records
+ * that as `credential_reauth_required` for every connector alike. The stored
+ * credential is dead whatever the broker still believes, so a source that
+ * reads connected or synced reads reauth required (Needs you, with its
+ * Reconnect), until a later pull succeeds and clears the failure. Olympus's
+ * own parks (budget guards) outrank it, as in the source card itself.
+ */
+const CONNECTED_STATES: ReadonlySet<string> = new Set(['connected', 'syncing', 'synced', 'waiting_for_first_sync']);
+function withProviderRejection(card: DashboardSourceCard): DashboardSourceCard {
+  const schedule = card.schedule;
+  if (!schedule || schedule.consecutive_failures <= 0 || schedule.last_error_kind !== 'credential_reauth_required') return card;
+  if (schedule.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason)) return card;
+  if (!CONNECTED_STATES.has(card.connection.state)) return card;
+  return { ...card, connection: { ...card.connection, state: 'reauth_required', label: 'reauth required' } };
 }
 
 /** Problems first, then connected sources, then sources not connected yet. */

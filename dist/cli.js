@@ -141314,6 +141314,8 @@ function safeSchedulerErrorKind(error2) {
   if (error2 instanceof CredentialBrokerError && (error2.code === "credential_reauth_required" || error2.code === "credential_missing")) {
     return error2.code;
   }
+  if (isProviderCredentialRejection(error2))
+    return "credential_reauth_required";
   if (error2 instanceof OperationError && error2.code === "source_index_error" && error2.message.startsWith("Local source embedding endpoint ")) {
     return "embedding_backend_unavailable";
   }
@@ -141331,6 +141333,13 @@ function safeSchedulerErrorKind(error2) {
   if (/temporar|try again/i.test(message2))
     return "temporary";
   return "task_failed";
+}
+function isProviderCredentialRejection(error2) {
+  if (!(error2 instanceof Error))
+    return false;
+  if (error2.status === 401)
+    return true;
+  return /\bHTTP 401\b/.test(error2.message);
 }
 function mapExplicitSchedulerErrorKind(value2) {
   if (HONEST_SCHEDULER_ERROR_KINDS.has(value2))
@@ -145537,9 +145546,19 @@ function publicCards(cards) {
       continue;
     const card = cards.find((candidate) => candidate.source_id === definition.source_id);
     if (card)
-      out.push({ definition, card });
+      out.push({ definition, card: withProviderRejection(card) });
   }
   return out;
+}
+function withProviderRejection(card) {
+  const schedule = card.schedule;
+  if (!schedule || schedule.consecutive_failures <= 0 || schedule.last_error_kind !== "credential_reauth_required")
+    return card;
+  if (schedule.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason))
+    return card;
+  if (!CONNECTED_STATES.has(card.connection.state))
+    return card;
+  return { ...card, connection: { ...card.connection, state: "reauth_required", label: "reauth required" } };
 }
 function sourceRank(source) {
   if (source.status === "Needs you" || source.status === "Failing")
@@ -146126,11 +146145,12 @@ function isoOrUndefined(value2) {
 function isoOrNow(value2, now) {
   return isoOrUndefined(value2) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_open_targets();
   init_shared_status();
   init_phases();
+  init_scheduler_markers();
   init_source_failure();
   init_source_dashboard();
   init_vocabulary();
@@ -146177,6 +146197,7 @@ var init_dashboard_view_model = __esm(() => {
   ]);
   KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
+  CONNECTED_STATES = new Set(["connected", "syncing", "synced", "waiting_for_first_sync"]);
   STAGE_FOR_PHASE = {
     metadata_sync: "listing",
     extraction: "reading",

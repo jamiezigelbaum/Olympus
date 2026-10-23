@@ -2702,6 +2702,10 @@ function safeSchedulerErrorKind(error: unknown): string {
     && (error.code === 'credential_reauth_required' || error.code === 'credential_missing')) {
     return error.code;
   }
+  // A provider that answers a pull with 401 has rejected the stored
+  // credential, whichever connector made the call: the same token for every
+  // source, so the dashboard shows the same Reconnect for all of them.
+  if (isProviderCredentialRejection(error)) return 'credential_reauth_required';
   // The embedding provider's fixed prose keeps the connect detail in the
   // OperationError suggestion, so the message regexes below never see
   // "connection"/"ECONN" and the outage read as untyped task_failed — which
@@ -2719,6 +2723,18 @@ function safeSchedulerErrorKind(error: unknown): string {
   if (/network|connection|ECONN/i.test(message)) return 'network';
   if (/temporar|try again/i.test(message)) return 'temporary';
   return 'task_failed';
+}
+
+/**
+ * A connector's request failed with HTTP 401: the provider no longer accepts
+ * the credential. Read off the error's numeric `status` (every connector's API
+ * error class carries one) or, for a connector that only words it, the
+ * "HTTP 401" it reports. Never the provider's own text.
+ */
+function isProviderCredentialRejection(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if ((error as { status?: unknown }).status === 401) return true;
+  return /\bHTTP 401\b/.test(error.message);
 }
 
 function mapExplicitSchedulerErrorKind(value: string): string {
