@@ -131,7 +131,25 @@ function contentTextForOperation(operation: Operation, payload: unknown): string
     const summary = askAnonymouslyContentText(payload);
     if (summary) return summary;
   }
+  if (operation.name === 'archive_import') {
+    const summary = archiveImportContentText(payload);
+    if (summary) return summary;
+  }
   return JSON.stringify(payload, null, 2);
+}
+
+/** The approval the agent must hand to the user, in the user's words; any other result stays as data. */
+function archiveImportContentText(payload: unknown): string | undefined {
+  const result = asRecord(payload);
+  if (!result || result.ok !== false || typeof result.message !== 'string') return undefined;
+  if (result.code === 'needs_approval') {
+    const lines = ['Waiting for the user to approve on their computer: ' + result.message];
+    if (typeof result.request_id === 'string') lines.push('request_id: ' + result.request_id);
+    const open = asRecord(result.open);
+    if (open && typeof open.url === 'string') lines.push('Opens the Archives page: ' + open.url);
+    return lines.join('\n');
+  }
+  return 'Not done: ' + result.message;
 }
 
 /** An anonymous answer as the agent reads it: the reply, how it was asked, or the refusal in the user's words. */

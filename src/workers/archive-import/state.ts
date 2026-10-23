@@ -50,6 +50,12 @@ export interface ArchiveImportFindings {
   skipped: Record<string, number>;
   samples: ArchiveFindingSample[];
   /**
+   * The gaps again, per file of the archive (by file index), so an archive
+   * of several files can say which file each is in. Absent in a record
+   * written before this was kept.
+   */
+  gaps_by_file?: Record<string, Record<string, number>>;
+  /**
    * The last position counted: a finding at or before it was counted already.
    */
   through?: { file_index: number; offset: number };
@@ -86,6 +92,11 @@ export interface ArchiveImportRecord {
    * Earliest and latest item dates seen.
    */
   date_range?: { earliest: string; latest: string };
+  /**
+   * How far the import has read (a file of `files` and a byte offset in it),
+   * for progress only: the resume point is the store's committed cursor.
+   */
+  read_position?: { file_index: number; offset: number };
 }
 
 interface PersistedArchiveImportState {
@@ -153,14 +164,26 @@ function readState(path: string): PersistedArchiveImportState {
   if (!existsSync(path)) return { version: 1, archives: [] };
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
   if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.archives)) {
-    throw new Error('The archive import record is not in a form this build reads.');
+    throw new ArchiveRecordFormError('The archive import record is not in a form this build reads.');
   }
   const archives: ArchiveImportRecord[] = [];
   for (const entry of parsed.archives) {
-    if (!validRecord(entry)) throw new Error('The archive import record holds an entry this build does not read.');
+    if (!validRecord(entry)) throw new ArchiveRecordFormError('The archive import record holds an entry this build does not read.');
     archives.push(entry);
   }
   return { version: 1, archives };
+}
+
+/**
+ * A record that parsed but is not in a form this build reads (a newer
+ * version wrote it, or it is damaged), apart from one that is not JSON at
+ * all or cannot be opened.
+ */
+export class ArchiveRecordFormError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = 'ArchiveRecordFormError';
+  }
 }
 
 export interface NewArchiveImportRecord {
@@ -233,11 +256,23 @@ export class ArchiveImportStateStore {
   /**
    * Counts the findings an import met, each once: a finding at or before the
    * position already counted was counted on an earlier pass (the same bytes
-   * listed again after a restart).
+   * listed again after a restart). With `position`, also notes how far the
+   * import has read, in the same write.
    */
-  recordFindings(archiveId: string, findings: readonly ArchiveImportFinding[]): void {
-    if (findings.length === 0) return;
+  recordFindings(
+    archiveId: string,
+    findings: readonly ArchiveImportFinding[],
+    position?: { fileIndex: number; offset: number },
+  ): void {
+    if (findings.length === 0 && !position) return;
     this.update(archiveId, (record) => {
+      // How far the import read, for its progress: only forward, and only while it imports.
+      const read = record.read_position;
+      const movesOn = position !== undefined && record.status === 'importing'
+        && (!read || position.fileIndex > read.file_index
+          || (position.fileIndex === read.file_index && position.offset > read.offset));
+      if (findings.length === 0 && !movesOn) return false;
+      if (movesOn) record.read_position = { file_index: position!.fileIndex, offset: position!.offset };
       const tally = record.findings;
       // Positions counted by an earlier call. One call carries every finding
       // of the messages it covers, so several findings at one position count.
@@ -249,6 +284,11 @@ export class ArchiveImportStateStore {
         if (before(finding.fileIndex, finding.offset)) continue;
         const bucket = finding.class === 'gap' ? tally.gaps : tally.skipped;
         bucket[finding.kind] = (bucket[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+        if (finding.class === 'gap') {
+          const byFile = (tally.gaps_by_file ??= {});
+          const inFile = (byFile[String(finding.fileIndex)] ??= {});
+          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+        }
         if (finding.class === 'gap' && tally.samples.length < ARCHIVE_FINDING_SAMPLES_MAX) {
           tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: finding.offset });
         }

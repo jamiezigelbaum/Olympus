@@ -20,7 +20,8 @@ export function listMcpTools(config: OlympusConfig, surface: Extract<OperationSu
       ? remoteToolSchema(operation.name, operationToolSchema(operation, { config }))
       : operationToolSchema(operation, { config }),
     // Explicit hints (ChatGPT review asks for all three). Olympus tools read
-    // or act on the owner's own index and models; none deletes anything.
+    // or act on the owner's own index and models; none deletes anything
+    // (archive_import only asks: the owner approves on the dashboard).
     // Only ask_anonymously reaches a provider outside (openWorld).
     annotations: {
       readOnlyHint: !operation.mutating,

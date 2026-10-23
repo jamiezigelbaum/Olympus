@@ -3,8 +3,14 @@
 // Locations, and says which folders are off unless turned on. Nothing is
 // selected here; a choice is made by the person and approved through the
 // shared scope flow.
+//
+// Archive mode (createLocalFilesArchiveBrowser) is the same listing for
+// choosing one export to import: it offers files as well as folders (an
+// Apple Mail `.mbox` export is a folder, chosen as one archive), still never
+// a link, and resolves the chosen key back to its real path with the same
+// checks a folder choice gets.
 
-import { lstatSync, readdirSync, realpathSync, type Dirent } from 'node:fs';
+import { lstatSync, readdirSync, realpathSync, type Dirent, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { OlympusFolderAccess, OlympusFolderScopeNode } from '../../control-ui-contract.ts';
@@ -68,9 +74,8 @@ function ancestorScopePaths(scopePath: string): string[] {
   return out;
 }
 
-export function createLocalFilesFolderScopeBrowser(
-  options: LocalFilesFolderScopeBrowserOptions = {},
-): SourceFolderScopeBrowser {
+/** What both pickers list from: folders, and in archive mode files too. */
+function localFilesListing(options: LocalFilesFolderScopeBrowserOptions, mode: 'folders' | 'archive') {
   const volumes = options.volumes ?? new VolumeResolver();
   const home = safeRealpath(options.home ?? options.context?.home ?? homedir());
   const context = options.context ?? {
@@ -91,7 +96,8 @@ export function createLocalFilesFolderScopeBrowser(
     parentKey: string | undefined,
     access?: OlympusFolderAccess,
   ): OlympusFolderScopeNode => {
-    const reason = defaultExclusionForFolder(scopePath, context);
+    // Off-by-default folders are about what is indexed; choosing an export to import is not.
+    const reason = mode === 'folders' ? defaultExclusionForFolder(scopePath, context) : undefined;
     return {
       key: scopePath,
       ...(parentKey !== undefined ? { parent_key: parentKey } : {}),
@@ -104,6 +110,15 @@ export function createLocalFilesFolderScopeBrowser(
       ...(access ? { access } : {}),
     };
   };
+
+  const fileNode = (scopePath: string, name: string, parentKey: string | undefined): OlympusFolderScopeNode => ({
+    key: scopePath,
+    ...(parentKey !== undefined ? { parent_key: parentKey } : {}),
+    name: name.normalize('NFC'),
+    kind: 'file',
+    has_children: false,
+    selectable: true,
+  });
 
   const childFolders = (realPath: string, parentKey: string | undefined): OlympusFolderScopeNode[] => {
     let entries: Dirent[];
@@ -128,11 +143,15 @@ export function createLocalFilesFolderScopeBrowser(
       }
       throw new Error('This folder could not be read. It may have moved or its disk may be unmounted.');
     }
+    // A link is never followed, so it is not offered; a file is not a folder,
+    // except in archive mode, which offers every regular file but hidden ones.
+    const offered = (entry: Dirent): boolean => !entry.isSymbolicLink()
+      && (entry.isDirectory() || (mode === 'archive' && entry.isFile() && !entry.name.startsWith('.')));
     return entries
-      // A link is never followed, so it is not offered; a file is not a folder.
-      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+      .filter(offered)
       .map((entry) => {
         const childReal = join(realPath, entry.name);
+        if (!entry.isDirectory()) return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey);
         const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
         // Only the top of a guarded place is labelled; inside it the answer already holds.
         const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
@@ -146,60 +165,88 @@ export function createLocalFilesFolderScopeBrowser(
       });
   };
 
+  /** One page of a level: the home folder and the disks at the top, else a folder's entries. */
+  const browse = async (request: { parentKey?: string; cursor?: string }): Promise<{
+    nodes: OlympusFolderScopeNode[];
+    nextCursor?: string;
+    access?: OlympusFolderAccess;
+  }> => {
+    const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
+    const cursorScope = mode === 'archive' ? ARCHIVE_CURSOR_SCOPE : LOCAL_FILES_SOURCE_ID;
+    const offsetText = decodeCursor(cursorScope, parent ?? '', request.cursor);
+    const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
+    if (!Number.isInteger(offset) || offset < 0) throw new Error('Folder browse cursor is invalid.');
+
+    let all: OlympusFolderScopeNode[];
+    let access: OlympusFolderAccess | undefined;
+    if (parent === undefined) {
+      // The home folder's folders, then the disks mounted now.
+      volumes.refresh();
+      all = [
+        ...childFolders(home, undefined),
+        ...volumes.locations().map((volume) => {
+          const guard = permissions.guardOf(volume.mountPoint, volume);
+          const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
+          return {
+            key: scopePathFor('/', volume.id),
+            name: volume.label,
+            kind: 'folder' as const,
+            has_children: true,
+            selectable: true,
+            is_disk: true as const,
+            ...(diskAccess ? { access: diskAccess } : {}),
+          };
+        }),
+      ];
+      // Searching the whole computer needs Full Disk Access; say so up front.
+      // (Choosing one export to import never reads the whole computer.)
+      if (mode === 'folders') access = permissions.fullDiskAccessNote();
+    } else {
+      const real = realPathOfScopePath(volumes, parent);
+      if (!real) throw new Error('That disk is not connected right now.');
+      // Opening a guarded folder is the ask: the Mac's question appears (in
+      // the helper's name) and this level answers with what came of it.
+      const guard = permissions.guardOf(real, volumes.volumeOf(real));
+      const refused = guard ? await permissions.open(guard) : undefined;
+      if (refused) return { nodes: [], access: refused };
+      try {
+        all = childFolders(real, parent);
+      } catch (error) {
+        if (error instanceof AccessRefused) return { nodes: [], access: error.access };
+        throw error;
+      }
+    }
+    const page = all.slice(offset, offset + BROWSE_PAGE_SIZE);
+    const next = offset + BROWSE_PAGE_SIZE;
+    return {
+      nodes: mode === 'archive' ? page.map(withFileSize) : page,
+      ...(next < all.length ? { nextCursor: encodeCursor(cursorScope, parent ?? '', String(next)) } : {}),
+      ...(access ? { access } : {}),
+    };
+  };
+
+  /** A listed file's size, read for the page shown only. */
+  const withFileSize = (entry: OlympusFolderScopeNode): OlympusFolderScopeNode => {
+    if (entry.kind !== 'file') return entry;
+    const real = realPathOfScopePath(volumes, entry.key);
+    let stat: Stats | undefined;
+    try { stat = real ? lstatSync(real) : undefined; } catch { stat = undefined; }
+    return stat?.isFile() ? { ...entry, size_bytes: stat.size } : entry;
+  };
+
+  return { volumes, permissions, browse };
+}
+
+/** The cursor scope of the archive picker's pages (never a source's). */
+const ARCHIVE_CURSOR_SCOPE = 'archive.imports';
+
+export function createLocalFilesFolderScopeBrowser(
+  options: LocalFilesFolderScopeBrowserOptions = {},
+): SourceFolderScopeBrowser {
+  const { volumes, permissions, browse } = localFilesListing(options, 'folders');
   return {
     sourceId: LOCAL_FILES_SOURCE_ID,
-    async browse(request) {
-      const parent = request.parentKey === undefined ? undefined : normalizeScopePath(request.parentKey);
-      const offsetText = decodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? '', request.cursor);
-      const offset = offsetText === undefined ? 0 : Number.parseInt(offsetText, 10);
-      if (!Number.isInteger(offset) || offset < 0) throw new Error('Folder browse cursor is invalid.');
-
-      let all: OlympusFolderScopeNode[];
-      let access: OlympusFolderAccess | undefined;
-      if (parent === undefined) {
-        // The home folder's folders, then the disks mounted now.
-        volumes.refresh();
-        all = [
-          ...childFolders(home, undefined),
-          ...volumes.locations().map((volume) => {
-            const guard = permissions.guardOf(volume.mountPoint, volume);
-            const diskAccess = guard ? permissions.nodeAccess(guard) : undefined;
-            return {
-              key: scopePathFor('/', volume.id),
-              name: volume.label,
-              kind: 'folder' as const,
-              has_children: true,
-              selectable: true,
-              is_disk: true as const,
-              ...(diskAccess ? { access: diskAccess } : {}),
-            };
-          }),
-        ];
-        // Searching the whole computer needs Full Disk Access; say so up front.
-        access = permissions.fullDiskAccessNote();
-      } else {
-        const real = realPathOfScopePath(volumes, parent);
-        if (!real) throw new Error('That disk is not connected right now.');
-        // Opening a guarded folder is the ask: the Mac's question appears (in
-        // the helper's name) and this level answers with what came of it.
-        const guard = permissions.guardOf(real, volumes.volumeOf(real));
-        const refused = guard ? await permissions.open(guard) : undefined;
-        if (refused) return { nodes: [], access: refused };
-        try {
-          all = childFolders(real, parent);
-        } catch (error) {
-          if (error instanceof AccessRefused) return { nodes: [], access: error.access };
-          throw error;
-        }
-      }
-      const page = all.slice(offset, offset + BROWSE_PAGE_SIZE);
-      const next = offset + BROWSE_PAGE_SIZE;
-      return {
-        nodes: page,
-        ...(next < all.length ? { nextCursor: encodeCursor(LOCAL_FILES_SOURCE_ID, parent ?? '', String(next)) } : {}),
-        ...(access ? { access } : {}),
-      };
-    },
+    browse,
     checkApproval({ selections, wholeAccount }) {
       // Until the engine runs under the helper app, a guarded folder (or the
       // whole computer) cannot be saved: its first read would be attributed to
@@ -250,3 +297,95 @@ export function createLocalFilesFolderScopeBrowser(
 
 registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context: FileScopeBrowserContext) =>
   createLocalFilesFolderScopeBrowser());
+
+/** Why a chosen key cannot be imported, before anything of it is read. */
+export type ArchivePathRefusal =
+  | 'not_found'
+  | 'link'
+  | 'not_regular'
+  | 'disk_unavailable'
+  | 'needs_helper'
+  | 'needs_permission';
+
+export type ArchivePathResolution =
+  | { ok: true; path: string; kind: 'file' | 'folder' }
+  | { ok: false; code: ArchivePathRefusal; message: string; access?: OlympusFolderAccess };
+
+/** The picker's side of importing an archive: browse files and folders, and resolve the one chosen. */
+export interface LocalFilesArchiveBrowser {
+  browse(request: { parentKey?: string; cursor?: string }): Promise<{
+    nodes: OlympusFolderScopeNode[];
+    nextCursor?: string;
+    access?: OlympusFolderAccess;
+  }>;
+  /**
+   * The real path a chosen key names, checked before anything of it is read:
+   * it exists, is a regular file or a folder, is reached through no link, and
+   * on a Mac a guarded folder (Desktop, Documents, Downloads, iCloud Drive, a
+   * removable or network disk) is one the Mac lets Olympus open, asking first
+   * through the helper app.
+   */
+  resolve(key: string): Promise<ArchivePathResolution>;
+  /** The same checks for a path given as text (an agent's request, once the person approves it). */
+  resolvePath(path: string): Promise<ArchivePathResolution>;
+}
+
+export const ARCHIVE_PATH_COPY = {
+  not_found: 'This file or folder is no longer there. Choose it again.',
+  link: 'This is a link to somewhere else. Choose the file or folder itself.',
+  not_regular: 'This is not a file or a folder Olympus can import.',
+  disk_unavailable: 'The disk this is on is not connected right now.',
+} as const;
+
+export function createLocalFilesArchiveBrowser(options: LocalFilesFolderScopeBrowserOptions = {}): LocalFilesArchiveBrowser {
+  const { volumes, permissions, browse } = localFilesListing(options, 'archive');
+  const refuse = (code: ArchivePathRefusal, message: string, access?: OlympusFolderAccess): ArchivePathResolution =>
+    ({ ok: false, code, message, ...(access ? { access } : {}) });
+  const resolver = {
+    browse,
+    async resolvePath(path: string): Promise<ArchivePathResolution> {
+      if (!path.startsWith('/') || path.includes('\0')) return refuse('not_found', ARCHIVE_PATH_COPY.not_found);
+      return resolver.resolve(scopePathOfRealPath(volumes, path));
+    },
+    async resolve(key: string): Promise<ArchivePathResolution> {
+      let real: string | undefined;
+      try {
+        real = realPathOfScopePath(volumes, normalizeScopePath(key));
+      } catch {
+        return refuse('not_found', ARCHIVE_PATH_COPY.not_found);
+      }
+      if (!real) return refuse('disk_unavailable', ARCHIVE_PATH_COPY.disk_unavailable);
+      const volume = volumes.volumeOf(real);
+      // Before any read: without the helper app the Mac's question would name Bun.
+      if (permissions.active && permissions.blocksReadWithoutHelper(real, volume)) {
+        return refuse('needs_helper', permissions.helperNeededCopy(), { state: 'needs_helper', message: permissions.helperNeededCopy() });
+      }
+      const guard = permissions.guardOf(real, volume);
+      if (guard) {
+        const refused = await permissions.open(guard);
+        if (refused) return refuse(refused.state === 'needs_helper' ? 'needs_helper' : 'needs_permission', refused.message, refused);
+      }
+      let stat: Stats;
+      try {
+        stat = lstatSync(real);
+      } catch {
+        return refuse('not_found', ARCHIVE_PATH_COPY.not_found);
+      }
+      if (stat.isSymbolicLink()) return refuse('link', ARCHIVE_PATH_COPY.link);
+      if (!stat.isFile() && !stat.isDirectory()) return refuse('not_regular', ARCHIVE_PATH_COPY.not_regular);
+      // Named by its real path, spelled as the disk spells it: a link on the
+      // way is refused; a spelling that differs only in case is the same file.
+      let canonical: string;
+      try {
+        canonical = realpathSync.native(real);
+      } catch {
+        return refuse('not_found', ARCHIVE_PATH_COPY.not_found);
+      }
+      if (canonical !== real && canonical.normalize('NFC').toLowerCase() !== real.normalize('NFC').toLowerCase()) {
+        return refuse('link', ARCHIVE_PATH_COPY.link);
+      }
+      return { ok: true, path: canonical, kind: stat.isFile() ? 'file' : 'folder' };
+    },
+  };
+  return resolver;
+}

@@ -25,6 +25,10 @@ var INDEX_FASTER_TOOL_NAME = "olympus_index_faster";
 var UNPAIR_SOURCE_TOOL_NAME = "olympus_unpair_source";
 var OPEN_UNREADABLE_FILE_TOOL_NAME = "olympus_open_unreadable_file";
 var UNREADABLE_FILES_PAGE_TOOL_NAME = "olympus_unreadable_files";
+var ARCHIVE_BROWSE_TOOL_NAME = "olympus_archive_browse";
+var ARCHIVE_APPROVE_TOOL_NAME = "olympus_archive_approve";
+var ARCHIVE_DECLINE_TOOL_NAME = "olympus_archive_decline";
+var ARCHIVE_REMOVE_TOOL_NAME = "olympus_archive_remove";
 var PANEL_TOOL_NAMES = [
   DASHBOARD_TOOL_NAME,
   CONNECT_SOURCE_TOOL_NAME,
@@ -43,7 +47,11 @@ var COMPUTER_HOST_TOOL_NAMES = [
   INDEX_FASTER_TOOL_NAME,
   UNPAIR_SOURCE_TOOL_NAME,
   OPEN_UNREADABLE_FILE_TOOL_NAME,
-  UNREADABLE_FILES_PAGE_TOOL_NAME
+  UNREADABLE_FILES_PAGE_TOOL_NAME,
+  ARCHIVE_BROWSE_TOOL_NAME,
+  ARCHIVE_APPROVE_TOOL_NAME,
+  ARCHIVE_DECLINE_TOOL_NAME,
+  ARCHIVE_REMOVE_TOOL_NAME
 ];
 
 // src/workers/dashboard/host-bridge.ts

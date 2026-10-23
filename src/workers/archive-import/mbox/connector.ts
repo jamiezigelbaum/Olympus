@@ -349,6 +349,7 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
               if (!input.shouldContinue()) {
                 if (pending) {
                   current();
+                  input.reportPosition?.({ fileIndex, offset: splitter.position });
                   yield { items: page, nextCursor: cursorAt(input, fileIndex, splitter.position), done: false };
                 }
                 return;
@@ -384,6 +385,7 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
                   yield { items: page, nextCursor: doneCursor(input), done: true };
                   return;
                 }
+                input.reportPosition?.({ fileIndex, offset: splitter.position });
                 yield { items: page, nextCursor: cursorAt(input, fileIndex, splitter.position), done: false };
                 emitted += page.length;
                 page = [];
@@ -397,6 +399,7 @@ export function createMboxArchiveConnector(input: ArchiveConnectorInput): Source
               return;
             }
             if (pending) {
+              input.reportPosition?.({ fileIndex: fileIndex + 1, offset: 0 });
               yield { items: page, nextCursor: cursorAt(input, fileIndex + 1, 0), done: false };
               emitted += page.length;
               if (emitted >= limit) return;
