@@ -1,3 +1,4 @@
+import { holdStoreCustodyShared } from '../src/core/store-custody.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { writePrivateFileAtomicSync } from '../src/core/atomic-file.ts';
 import { createHash } from 'node:crypto';
@@ -1466,6 +1467,9 @@ if (import.meta.main) {
     console.log(json);
     process.exit();
   }
+  // Shared store custody for this process's whole life (Delete indexed data
+  // takes it exclusive and so cannot run under a live drain).
+  holdStoreCustodyShared([resolveEmbeddingLedgerPath(process.env)]);
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {

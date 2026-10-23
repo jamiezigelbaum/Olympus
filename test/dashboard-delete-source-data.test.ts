@@ -170,7 +170,14 @@ describe('dashboard Delete indexed data route', () => {
       expect(pending.delete_state).toEqual({ state: 'pending' });
       expect(pending.connection.label).toBe('Deleting indexed data…');
       // The re-check refuses (holders still running): the explanation and the retry survive.
-      await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context, holders: () => false });
+      const holder = Bun.spawn([process.execPath, join(import.meta.dir, 'support', 'custody-holder.ts'), 'lib', f.store], { stdout: 'pipe', env: { PATH: process.env.PATH!, HOME: f.context.homeDir } });
+      await holder.stdout.getReader().read();
+      try {
+        await applyPendingSourceDeletes({ registryPath: f.registryPath, context: f.context });
+      } finally {
+        holder.kill('SIGKILL');
+        await holder.exited;
+      }
       const refused = scrubCard(definition, await card() as never);
       expect(refused.delete_state).toEqual({ state: 'refused', reason: 'holders_running' });
       expect(refused.connection.label).toContain("Delete didn't run");

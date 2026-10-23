@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
+import { effectiveWorkerEnvironment } from '../src/core/worker-effective-env.ts';
 import { startEngineHost } from '../src/core/engine-host.ts';
 import { engineChildrenPath } from '../src/core/engine-children.ts';
 import { defaultEngineConfig, enginePaths } from '../src/core/engine-service.ts';
@@ -22,7 +23,7 @@ import {
   recordSourceDeleteIntent,
   sourceDeleteStates,
 } from '../src/pending-source-deletes.ts';
-import { findStoreHolders } from '../src/core/store-holders.ts';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { withConnectedHandleGrantCustody, readConnectedHandleGrantEpoch } from '../src/workers/credential-broker/connected-handles.ts';
 import { writeConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 
@@ -164,7 +165,6 @@ describe('engine host start', () => {
       log: () => undefined,
       exit: () => { throw new Error('must not exit'); },
       installSignalHandlers: false,
-      storeHoldersReleased: () => true,
     });
     // Every service sees the store already gone; none started before the delete.
     expect(order.filter((line) => line.startsWith('start'))).toEqual([
@@ -223,7 +223,7 @@ function hostConfig(l: ReturnType<typeof lab>) {
   writeFileSync(enginePaths(l.home).configPath, JSON.stringify(defaultEngineConfig()));
 }
 
-async function startHostWith(l: ReturnType<typeof lab>, extra: { children?: unknown; released: boolean; env?: Record<string, string>; psFails?: boolean }) {
+async function startHostWith(l: ReturnType<typeof lab>, extra: { children?: unknown; env?: Record<string, string>; psFails?: boolean }) {
   const env = { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share'), OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: l.registryPath, ...(extra.env ?? {}) };
   if (extra.children) {
     const childrenPath = engineChildrenPath({ HOME: l.home });
@@ -242,52 +242,41 @@ async function startHostWith(l: ReturnType<typeof lab>, extra: { children?: unkn
     log: () => undefined,
     exit: () => { throw new Error('must not exit'); },
     installSignalHandlers: false,
-    storeHoldersReleased: () => extra.released,
   });
   return { order, handle };
 }
 
-describe('apply only when every holder is verified released', () => {
-  test('a holder that cannot be verified gone refuses every pending delete and deletes nothing', async () => {
+const HOLDER = join(import.meta.dir, 'support', 'custody-holder.ts');
+async function holdCustody(path: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, [HOLDER, 'lib', path], { stdio: ['ignore', 'pipe', 'inherit'], env: { PATH: process.env.PATH } });
+  await new Promise<void>((resolve, reject) => {
+    child.stdout!.on('data', () => resolve());
+    child.on('exit', (code) => reject(new Error(`holder exited ${code}`)));
+  });
+  return child;
+}
+
+describe('apply only when the stores are not held open', () => {
+  test('a live holder refuses every pending delete and deletes nothing; once it is killed the retry deletes', async () => {
     const l = lab();
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
-    const { order, handle } = await startHostWith(l, { released: false });
-    expect(order).toEqual(['start: store present']);
-    expect(existsSync(l.store)).toBe(true);
-    expect(sourceDeleteStates(l.registryPath)).toEqual({ 'dropbox.files': { state: 'refused', reason: 'holders_running' } });
-    await handle!.stop();
-  });
-
-  test('a previous host child that could not be reaped counts as an unreleased holder', async () => {
-    const l = lab();
+    const holder = await holdCustody(l.store);
+    try {
+      const { order, handle } = await startHostWith(l, {});
+      expect(order).toEqual(['start: store present']);
+      expect(existsSync(l.store)).toBe(true);
+      expect(sourceDeleteStates(l.registryPath)).toEqual({ 'dropbox.files': { state: 'refused', reason: 'holders_running' } });
+      await handle!.stop();
+    } finally {
+      holder.kill('SIGKILL');
+      await new Promise((resolve) => holder.on('exit', resolve));
+    }
+    // Asking again is the retry; with the holder gone the kernel lock is free.
     recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: l.registryPath, context: l.context });
-    // A recorded group the reaper cannot stop or prove gone (the process table cannot be read).
-    const children = { schema: 'olympus.engine.children.v1', host_pid: 1, children: [{ service: 'olympus-source-embedding-drain', pgid: 4242, started: 'Mon Jan  1 00:00:00 2024' }] };
-    const { handle } = await startHostWith(l, { children, released: true, psFails: true });
-    expect(existsSync(l.store)).toBe(true);
-    expect(sourceDeleteStates(l.registryPath)['dropbox.files']).toEqual({ state: 'refused', reason: 'holders_running' });
-    await handle!.stop();
-  });
-
-  test('the process table finds a Gateway, a foreground worker and a separate drain, and an unreadable table proves nothing', () => {
-    const row = (pid: number, command: string) => ({ pid, pgid: pid, started: 'x', command });
-    const found = findStoreHolders({
-      listProcesses: () => [
-        row(10, '/usr/bin/openclaw-gateway'),
-        row(11, 'bun /repo/dist/cli.js worker run'),
-        row(12, 'node /repo/dist/embedding-drain.js'),
-        row(13, 'bun scripts/source-embedding-drain.ts'),
-        row(14, 'node /usr/bin/openclaw gateway status'),
-        row(15, 'vim notes-about-the-worker.md'),
-        row(16, 'bun /repo/dist/cli.js data delete --source dropbox.files'),
-      ],
-    });
-    expect(found).toEqual({ ok: true, holders: [
-      { pid: 10, kind: 'gateway' }, { pid: 11, kind: 'worker' }, { pid: 12, kind: 'drain' }, { pid: 13, kind: 'drain' },
-    ] });
-    expect(findStoreHolders({ listProcesses: () => undefined })).toEqual({ ok: false });
-    expect(findStoreHolders({ listProcesses: () => [row(10, 'x/openclaw-gateway')], ignorePids: [10] })).toEqual({ ok: true, holders: [] });
-  });
+    const result = await applyPendingSourceDeletes({ registryPath: l.registryPath, context: l.context });
+    expect(result.applied).toEqual(['dropbox.files']);
+    expect(existsSync(l.store)).toBe(false);
+  }, 60_000);
 });
 
 describe('the host applies with the worker\'s effective environment', () => {
@@ -309,11 +298,46 @@ describe('the host applies with the worker\'s effective environment', () => {
       services: () => [],
       reap: { listProcesses: () => [], kill: () => undefined, sleep: () => undefined, selfPid: 1 },
       log: () => undefined, exit: () => { throw new Error('must not exit'); }, installSignalHandlers: false,
-      storeHoldersReleased: () => true,
     });
     expect(existsSync(l.store)).toBe(false);
     expect(readSourceDeleteIntents(elsewhere).intents).toEqual([]);
     await handle!.stop();
+  });
+});
+
+describe('the engine configuration\'s service credentials are part of the effective environment', () => {
+  test('a registry override set only in worker.service.credentials is the registry the host reads', async () => {
+    const l = lab();
+    const elsewhere = join(l.root, 'elsewhere2', 'handles.json');
+    mkdirSync(dirname(elsewhere), { recursive: true });
+    writeConnectedHandleRegistry({ version: 1, handles: [] }, elsewhere);
+    const ctx = { homeDir: l.home, env: { ...l.context.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: elsewhere } };
+    recordSourceDeleteIntent({ sourceId: 'dropbox.files', registryPath: elsewhere, context: ctx });
+    mkdirSync(join(l.home, '.olympus'), { recursive: true });
+    const config = defaultEngineConfig() as { worker: { service: Record<string, unknown> } };
+    config.worker.service.credentials = { OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: elsewhere };
+    writeFileSync(enginePaths(l.home).configPath, JSON.stringify(config));
+    const handle = await startEngineHost({
+      moduleUrl: 'file:///x/dist/cli.js',
+      env: { HOME: l.home, XDG_DATA_HOME: join(l.home, '.local', 'share') },
+      homeDir: l.home, platform: 'darwin',
+      services: () => [],
+      reap: { listProcesses: () => [], kill: () => undefined, sleep: () => undefined, selfPid: 1 },
+      log: () => undefined, exit: () => { throw new Error('must not exit'); }, installSignalHandlers: false,
+    });
+    expect(existsSync(l.store)).toBe(false);
+    expect(readSourceDeleteIntents(elsewhere).intents).toEqual([]);
+    await handle!.stop();
+  });
+
+  test('effectiveWorkerEnvironment returns the same override for the CLI', () => {
+    const l = lab();
+    mkdirSync(join(l.home, '.olympus'), { recursive: true });
+    const config = defaultEngineConfig() as { worker: { service: Record<string, unknown> } };
+    config.worker.service.credentials = { OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: '/x/registry.json' };
+    writeFileSync(enginePaths(l.home).configPath, JSON.stringify(config));
+    const env = effectiveWorkerEnvironment({ env: { HOME: l.home }, homeDir: l.home, platform: 'darwin' });
+    expect(env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH).toBe('/x/registry.json');
   });
 });
 

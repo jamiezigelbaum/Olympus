@@ -1,3 +1,4 @@
+import { holdStoreCustodyShared } from '../../core/store-custody.ts';
 import type { ExtractionUnreadableItem } from '../file-extraction/job-store.ts';
 import { keywordAlternatives, withKeywordAlternatives, keywordExpansionDisabled, withKeywordExpansionDisabled } from '../../core/source-index/keyword-context.ts';
 import { storeKeywordLanguages } from '../../core/source-index/keyword-languages.ts';
@@ -2575,6 +2576,9 @@ export class LocalConnectorStore {
     } else if (this.dbPath !== ':memory:') {
       mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     }
+    // Shared store custody for this process's lifetime, so Delete indexed data
+    // (which takes it exclusive) can prove nothing has this store open.
+    if (this.dbPath !== ':memory:') holdStoreCustodyShared([this.dbPath]);
     this.db = new Database(this.dbPath, options.readOnly === true
       ? { readonly: true, create: false, strict: true }
       : { create: true });

@@ -12,6 +12,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import * as osModule from 'node:os';
+import * as childProcessModule from 'node:child_process';
 import { createRequire } from 'node:module';
 import { afterAll, mock } from 'bun:test';
 
@@ -36,6 +37,58 @@ const liveHome = () => process.env.HOME ?? home;
 const osCopy = { ...osModule } as Record<string, unknown>;
 mock.module('node:os', () => ({ ...osCopy, default: { ...osCopy, homedir: liveHome }, homedir: liveHome }));
 try { (createRequire(import.meta.url)('node:os') as { homedir: () => string }).homedir = liveHome; } catch { /* import form above still covers ESM */ }
+
+// A child that names its own environment (env: { PATH }) would otherwise start
+// with no HOME, and a Bun child resolves the real account home from the OS.
+// Every spawn made from a test gets the isolated HOME when its env has none,
+// and a child asked to run against the real home is refused.
+type Env = Record<string, string | undefined>;
+function isolatedChildEnv(env: Env): Env {
+  const requested = env.HOME;
+  if (requested && realHome && requested === realHome) {
+    throw new Error(`a test asked a child process to run with the real HOME ${realHome}`);
+  }
+  return requested ? env : { ...env, HOME: home };
+}
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
+}
+function fixOptions(options: Record<string, unknown>): Record<string, unknown> {
+  const env = options.env;
+  return isPlainObject(env) ? { ...options, env: isolatedChildEnv(env as Env) } : options;
+}
+function wrapSpawnLike<T extends (...args: never[]) => unknown>(original: T): T {
+  return ((...args: unknown[]) => (original as unknown as (...a: unknown[]) => unknown)(
+    ...args.map((arg, index) => (index > 0 && isPlainObject(arg) ? fixOptions(arg) : arg)),
+  )) as unknown as T;
+}
+const cpCopy = { ...childProcessModule } as Record<string, unknown>;
+const cpNames = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'] as const;
+for (const name of cpNames) {
+  const original = cpCopy[name];
+  if (typeof original === 'function') cpCopy[name] = wrapSpawnLike(original as never);
+}
+mock.module('node:child_process', () => ({ ...cpCopy, default: { ...cpCopy } }));
+try {
+  const cjs = createRequire(import.meta.url)('node:child_process') as Record<string, unknown>;
+  for (const name of cpNames) if (typeof cjs[name] === 'function') cjs[name] = cpCopy[name];
+} catch { /* the import form above still covers ESM */ }
+const bunGlobal = (globalThis as { Bun?: { spawn?: unknown; spawnSync?: unknown } }).Bun;
+if (bunGlobal) {
+  for (const name of ['spawn', 'spawnSync'] as const) {
+    const original = bunGlobal[name];
+    if (typeof original !== 'function') continue;
+    const wrapped = (...args: unknown[]) => {
+      const fixed = args.map((arg, index) => {
+        if (!isPlainObject(arg)) return arg;
+        // Bun.spawn(cmd, options) or Bun.spawn({ cmd, ...options })
+        return index === 0 && !('cmd' in arg) ? arg : fixOptions(arg);
+      });
+      return (original as (...a: unknown[]) => unknown).apply(bunGlobal, fixed);
+    };
+    try { bunGlobal[name] = wrapped; } catch { /* a frozen Bun leaves this one unwrapped */ }
+  }
+}
 
 afterAll(() => {
   if (realHome && homedir() === realHome) {

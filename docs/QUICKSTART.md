@@ -563,11 +563,14 @@ page for revocation. To delete local source data, Disconnect, then use
 the restarted engine removes the data before opening anything. The card offers
 this only on the standalone Olympus Engine, which restarts the worker and the
 embedding step together; under the OpenClaw Gateway or a separately managed
-worker the request is refused and nothing is deleted. If the engine finds
-another Olympus process still running when it starts, it deletes nothing and the
-card says the delete did not run. From a terminal, quit every Olympus process
-first (the engine, the OpenClaw Gateway, any worker and the embedding step; the
-command checks and refuses otherwise), preview the custody boundary, then
+worker the request is refused and nothing is deleted. Every
+Olympus process that opens these stores holds a lock on them for as long as it
+lives, and the delete needs that lock to itself: if any process still holds it
+(a worker, the OpenClaw Gateway, the embedding step or another command), the
+engine deletes nothing and the card says the delete did not run. A process
+that starts during the delete waits for it. From a terminal, quit every Olympus
+process first (the engine, the OpenClaw Gateway, any worker and the embedding
+step; the command checks and refuses otherwise), preview the custody boundary, then
 execute it:
 
 ```bash

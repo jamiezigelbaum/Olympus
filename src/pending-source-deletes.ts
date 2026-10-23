@@ -20,9 +20,11 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
+import { tryHoldStoreCustodyExclusive } from './core/store-custody.ts';
 import { readThisComputerHandles, thisComputerStateUnreadable } from './core/this-computer.ts';
 import {
   dataDeleteCustody,
+  deleteCustodyPaths,
   deleteOlympusDataWithCustody,
   planSourceDelete,
   type LifecyclePathContext,
@@ -158,8 +160,8 @@ export async function applyPendingSourceDeletes(input: {
   registryPath: string;
   context: LifecyclePathContext;
   log?: (line: string) => void;
-  /** True only when every holder of the stores is verified released. Absent: the caller guarantees it. */
-  holders?: () => boolean;
+  /** Test seam: how long to wait for exclusive custody of the stores. */
+  custodyTimeoutMs?: number;
 }): Promise<AppliedSourceDeletes> {
   const log = input.log ?? (() => undefined);
   const result: AppliedSourceDeletes = { applied: [], refused: [] };
@@ -182,15 +184,12 @@ export async function applyPendingSourceDeletes(input: {
     }
   };
 
-  if (input.holders && !input.holders()) {
-    refuseAll('holders_running');
-    return result;
-  }
   try {
     await withConnectedHandleGrantCustody(input.registryPath, {}, () => {
       let intents = readSourceDeleteIntents(input.registryPath).intents;
       for (const intent of intents.filter((entry) => entry.state === 'pending')) {
         let refusal: SourceDeleteRefusal | undefined;
+        let hold: ReturnType<typeof tryHoldStoreCustodyExclusive>;
         try {
           if (intent.grant_epoch !== undefined && intent.grant_epoch !== readConnectedHandleGrantEpoch(input.registryPath)) {
             refusal = 'connection_changed';
@@ -204,14 +203,27 @@ export async function applyPendingSourceDeletes(input: {
             if (JSON.stringify(plan.targets) !== JSON.stringify([...intent.targets].sort())) {
               refusal = 'settings_changed';
             } else {
-              const custody = dataDeleteCustody({ ...sourceDeleteCustodyInput(intent.source_id, input.registryPath), ...input.context });
-              if (!custody.ready) refusal = 'not_disconnected';
-              else deleteOlympusDataWithCustody({
-                ...sourceDeleteCustodyInput(intent.source_id, input.registryPath),
-                ...input.context,
-                registryPath: input.registryPath,
-                verifiedPrimaries: intent.verified_primaries ?? [],
-              });
+              // Exclusive store custody, kernel-held: a worker, the embedding
+              // drain, a foreground run or any other opener holds it shared for
+              // its whole life. Not obtainable: delete nothing. Kept through the
+              // delete and the completion write below, so no opener can start
+              // between the check and the unlink.
+              hold = tryHoldStoreCustodyExclusive(
+                [...plan.targets, ...deleteCustodyPaths({ sourceId: intent.source_id, ...input.context })],
+                input.custodyTimeoutMs !== undefined ? { timeoutMs: input.custodyTimeoutMs } : {},
+              );
+              if (!hold) {
+                refusal = 'holders_running';
+              } else {
+                const custody = dataDeleteCustody({ ...sourceDeleteCustodyInput(intent.source_id, input.registryPath), ...input.context });
+                if (!custody.ready) refusal = 'not_disconnected';
+                else deleteOlympusDataWithCustody({
+                  ...sourceDeleteCustodyInput(intent.source_id, input.registryPath),
+                  ...input.context,
+                  registryPath: input.registryPath,
+                  verifiedPrimaries: intent.verified_primaries ?? [],
+                });
+              }
             }
           }
         } catch (error) {
@@ -221,18 +233,22 @@ export async function applyPendingSourceDeletes(input: {
             : 'failed';
           log(`pending source deletes: ${intent.source_id}: ${message}`);
         }
-        if (refusal) {
-          intents = intents.map((entry) => entry.id === intent.id
-            ? { ...entry, state: 'refused' as const, reason: refusal, refused_at: new Date().toISOString() }
-            : entry);
-          result.refused.push({ sourceId: intent.source_id, reason: refusal });
-          log(`pending source deletes: ${intent.source_id} not deleted (${refusal}).`);
-        } else {
-          intents = intents.filter((entry) => entry.id !== intent.id);
-          result.applied.push(intent.source_id);
-          log(`pending source deletes: ${intent.source_id} deleted.`);
+        try {
+          if (refusal) {
+            intents = intents.map((entry) => entry.id === intent.id
+              ? { ...entry, state: 'refused' as const, reason: refusal, refused_at: new Date().toISOString() }
+              : entry);
+            result.refused.push({ sourceId: intent.source_id, reason: refusal });
+            log(`pending source deletes: ${intent.source_id} not deleted (${refusal}).`);
+          } else {
+            intents = intents.filter((entry) => entry.id !== intent.id);
+            result.applied.push(intent.source_id);
+            log(`pending source deletes: ${intent.source_id} deleted.`);
+          }
+          writeIntents(input.registryPath, intents);
+        } finally {
+          hold?.release();
         }
-        writeIntents(input.registryPath, intents);
       }
     });
   } catch (error) {

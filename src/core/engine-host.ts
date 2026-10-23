@@ -1,7 +1,7 @@
 import { startLinuxOwnerBridgeHost } from './linux-owner-bridge-host.ts';
 import { linuxGraphicalSessionReadinessAsync } from './linux-desktop-opener.ts';
-import { environmentWithWorkerSetupEnv, readWorkerSetupEnv, workerAuthTokenFromConfig } from './worker-auth.ts';
-import { storeHoldersVerifiedReleased } from './store-holders.ts';
+import { readWorkerSetupEnv, workerAuthTokenFromConfig } from './worker-auth.ts';
+import { effectiveWorkerEnvironment } from './worker-effective-env.ts';
 import { resolveServerMode } from './remote-open.ts';
 import { processInstanceIdentity } from './file-lease.ts';
 import { rotateEngineLog } from './linux-engine-service.ts';
@@ -88,8 +88,6 @@ export interface EngineHostOptions {
   reap?: EngineChildReapDeps;
   /** Test seam: where pending source deletes are read and applied (default: the handle registry's directory). */
   pendingDeletes?: { registryPath: string };
-  /** Test seam: true only when no other process can hold a store (default: the process table shows none). */
-  storeHoldersReleased?: () => boolean;
   /** Desktop OS seams for isolated lifecycle qualification. */
   desktop?: { ready?: () => Promise<boolean>; openFile?: (path: string) => Promise<void> };
 }
@@ -178,15 +176,11 @@ export async function startEngineHost(options: EngineHostOptions): Promise<Engin
   // every store path resolve the way the worker resolves them, or the worker
   // would record an intent this host never reads.
   try {
-    const workerEnv = environmentWithWorkerSetupEnv({ env: dataEnv, ...(paths.linux ? { workerEnvPath: paths.workerEnvPath } : {}) });
+    const workerEnv = effectiveWorkerEnvironment({ env: dataEnv, homeDir, platform: options.platform ?? process.platform, pluginConfig });
     await applyPendingSourceDeletes({
       registryPath: options.pendingDeletes?.registryPath ?? handleRegistryPathFromEnv(workerEnv, true)!,
       context: { homeDir, env: workerEnv },
       log,
-      // Every child this host's predecessor recorded is verified gone AND no
-      // other supervisor (Gateway, a foreground worker, a separate drain) has
-      // a store-opening process: otherwise nothing is deleted.
-      holders: () => allRecordedReleased && (options.storeHoldersReleased ?? (() => storeHoldersVerifiedReleased()))(),
     });
   } catch (error) {
     log(`engine: pending deletes could not be applied: ${error instanceof Error ? error.message : 'unknown error'}`);

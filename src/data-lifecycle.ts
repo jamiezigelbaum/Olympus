@@ -49,6 +49,8 @@ import {
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { defaultSourceIngestionExclusionsPath } from './core/source-ingestion-exclusions.ts';
 import { workerSetupEnvPath } from './core/worker-auth.ts';
+import { defaultPrivacyProfilePath } from './workers/classification/privacy-profile.ts';
+import { defaultTierRulesPath } from './workers/classification/tier-rules.ts';
 import { resolveEmbeddingLedgerPath } from './workers/embedding-ledger.ts';
 import { resolveClassificationLedgerPath } from './workers/classification-ledger.ts';
 import { defaultSourceSchedulerStateDbPath } from './workers/source-scheduler-state.ts';
@@ -721,7 +723,7 @@ export function planSourceDelete(options: { sourceId: string; verifiedPrimaries?
   verifiedPrimaries: string[];
 } {
   const selectedSource = requireSource(options.sourceId);
-  const uniqueDeleteTargets = uniqueTargets(sourceDeleteTargets(selectedSource, options));
+  const uniqueDeleteTargets = markRelocatedStores(uniqueTargets(sourceDeleteTargets(selectedSource, options)), options);
   assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
   const verifiedPrimaries = assertTargetsSafe(uniqueDeleteTargets, options.verifiedPrimaries);
   const corpora = createSourceCorpusRegistry().list()
@@ -734,6 +736,17 @@ export function planSourceDelete(options: { sourceId: string; verifiedPrimaries?
     targets: uniqueDeleteTargets.map((target) => resolve(target.path)).sort(),
     verifiedPrimaries: [...new Set([...verifiedPrimaries, ...(options.verifiedPrimaries ?? []).map((path) => resolve(path))])].sort(),
   };
+}
+
+/**
+ * Every path a delete of this source (or of everything) would remove, for
+ * store custody: the locks it must hold exclusively are keyed to these.
+ */
+export function deleteCustodyPaths(options: { sourceId?: string; all?: boolean } & LifecyclePathContext): string[] {
+  const targets = options.all === true
+    ? allDeleteTargets(options)
+    : sourceDeleteTargets(requireSource(options.sourceId), options);
+  return uniqueTargets(targets).map((target) => resolve(target.path));
 }
 
 export function deleteOlympusData(options: {
@@ -756,7 +769,7 @@ export function deleteOlympusData(options: {
     : sourceDeleteTargets(selectedSource!, options);
   const removed: string[] = [];
   const missing: string[] = [];
-  const uniqueDeleteTargets = uniqueTargets(targets);
+  const uniqueDeleteTargets = markRelocatedStores(uniqueTargets(targets), options);
   // Before anything is removed or even checked one by one: a recursive raw-state
   // target must be provably Olympus's own and nobody else's (see
   // assertRawStateTargetsContained). A refusal here deletes nothing.
@@ -1714,6 +1727,33 @@ function serviceUnitTarget(path: string): DeleteTarget {
  * (`priorVerifiedPrimaries`) carries the cleanup to the end. Returns the
  * primaries proven now, for the caller to record.
  */
+const RELOCATING_ENV_NAME = /^OLYMPUS_[A-Z0-9_]*(_PATH|_DB|_CONFIG|_FILE|_DIR|_ROOT)$/;
+
+/**
+ * A database target that is not where its source keeps it by default (some
+ * override moved it, even to a spot inside an Olympus root) is only the
+ * source's own if its contents say so: it gets the same ownership/schema
+ * validation as one outside every root.
+ */
+function markRelocatedStores(targets: DeleteTarget[], context: LifecyclePathContext): DeleteTarget[] {
+  const env = envForContext(context);
+  const scrubbed: Record<string, string | undefined> = { ...env };
+  for (const name of Object.keys(scrubbed)) if (RELOCATING_ENV_NAME.test(name)) scrubbed[name] = undefined;
+  const defaults = new Set<string>();
+  for (const spec of lifecycleSourceSpecs()) {
+    try {
+      for (const target of sourceDeleteTargets(spec, { ...context, env: scrubbed })) {
+        if (target.sqliteStoreId) defaults.add(canonicalPath(target.sqlitePrimaryPath ?? target.path));
+      }
+    } catch { /* an unresolvable default marks nothing as default */ }
+  }
+  return targets.map((target) => target.sqliteStoreId
+    && target.externalSourcePath !== true
+    && !defaults.has(canonicalPath(target.sqlitePrimaryPath ?? target.path))
+    ? { ...target, externalSourcePath: true }
+    : target);
+}
+
 function assertTargetsSafe(targets: readonly DeleteTarget[], priorVerifiedPrimaries: readonly string[] = []): string[] {
   const prior = new Set(priorVerifiedPrimaries.map((path) => resolve(path)));
   const verified = new Set<string>();
@@ -1871,6 +1911,17 @@ function assertRawStateTargetsContained(
       'Check the configured state-directory values, then remove that directory by hand. Nothing was deleted.',
     );
   };
+  // Every file-like target too (stores, sidecars, policy files): a symbolic
+  // link in or above it must not lead the unlink somewhere else.
+  const fileTargets = targets.filter((target) => target.kind === 'source_sqlite'
+    || target.kind === 'source_sqlite_sidecar' || target.kind === 'policy_file');
+  for (const target of fileTargets) {
+    const lexical = resolve(target.path);
+    const root = roots.find((candidate) => isStrictlyInside(lexical, candidate.lexical));
+    if (!root) continue;
+    const expectedReal = join(root.real, relative(root.lexical, lexical));
+    if (canonicalPath(lexical) !== expectedReal) refuse(target.path, 'because it, or a directory above it, is a symbolic link');
+  }
   for (const target of stateTargets) {
     const lexical = resolve(target.path);
     const root = roots.find((candidate) => isStrictlyInside(lexical, candidate.lexical));
@@ -1990,25 +2041,35 @@ function authoritativeStatePaths(context: LifecyclePathContext): string[] {
 }
 
 /**
+ * The one registry of shared authoritative files: each entry is a consumer's
+ * own resolver, so the protected set cannot drift from where the consumer
+ * really reads. A new authoritative resolver is added HERE; the test in
+ * test/authoritative-files.test.ts fails when an exported default/resolve path
+ * function exists that is neither listed here nor classified as something else.
+ */
+export const AUTHORITATIVE_FILE_RESOLVERS: ReadonlyArray<{ name: string; resolve: (env: Record<string, string | undefined>) => string }> = [
+  { name: 'workerSetupEnvPath', resolve: (env) => workerSetupEnvPath({ env }) },
+  { name: 'resolveEmbeddingLedgerPath', resolve: (env) => resolveEmbeddingLedgerPath(env) },
+  { name: 'resolveClassificationLedgerPath', resolve: (env) => resolveClassificationLedgerPath(env) },
+  { name: 'defaultSourceSchedulerStateDbPath', resolve: (env) => defaultSourceSchedulerStateDbPath(env) },
+  { name: 'defaultSourceIngestionExclusionsPath', resolve: (env) => defaultSourceIngestionExclusionsPath(env) },
+  { name: 'defaultPrivacyProfilePath', resolve: (env) => defaultPrivacyProfilePath(env) },
+  { name: 'defaultTierRulesPath', resolve: (env) => defaultTierRulesPath(env) },
+  { name: 'defaultXBookmarksApiUsageDbPath', resolve: (env) => defaultXBookmarksApiUsageDbPath(env) },
+];
+
+/**
  * The default location of every shared authoritative file, from the resolver
- * its consumer uses (not a copy of its layout): the worker environment file
- * that carries the install's credentials and path settings, and the shared
- * ledgers and state beside the stores. A source-path override aimed at one of
- * them is refused whatever the override variable's name is.
+ * its consumer uses (not a copy of its layout), together with the file a
+ * relocating variable points at. A source-path override aimed at one of them
+ * is refused whatever the override variable's name is.
  */
 function authoritativeDefaultsFromConsumers(env: Record<string, string | undefined>): string[] {
-  const resolvers: Array<() => string> = [
-    () => workerSetupEnvPath({ env }),
-    () => resolveEmbeddingLedgerPath(env),
-    () => resolveClassificationLedgerPath(env),
-    () => defaultSourceSchedulerStateDbPath(env),
-    () => defaultSourceIngestionExclusionsPath(env),
-  ];
   const out: string[] = [];
-  for (const resolver of resolvers) {
+  for (const entry of AUTHORITATIVE_FILE_RESOLVERS) {
     try {
-      const path = resolve(resolver());
-      out.push(path, `${path}-wal`, `${path}-shm`, `${path}-journal`, `${path}.lock`);
+      const path = resolve(entry.resolve(env));
+      out.push(path, `${path}-wal`, `${path}-shm`, `${path}-journal`, `${path}.lock`, `${path}.lock.db`);
     } catch { /* an unresolvable layout adds nothing */ }
   }
   return out;

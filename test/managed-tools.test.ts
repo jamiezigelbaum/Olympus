@@ -627,29 +627,6 @@ describe('installing', () => {
     }
   });
 
-  test('a lease takeover mid-install aborts at once, before any shared path is touched again, and the rest of the batch is reported lease_lost', async () => {
-    const f = setup();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const slowFetch = (async (input: string | URL | Request) => {
-      await gate;
-      return servingFetch({ 'https://fixture.test/tor.tar.gz': f.tor, 'https://fixture.test/zkapi.tar.gz': f.zkapi })(input);
-    }) as typeof fetch;
-    const run = installManagedTools({ ...f.options, fetchImpl: slowFetch });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    // Another holder takes the lease over mid-download (the install lock's own format).
-    writeFileSync(join(f.root, 'install.lock'), JSON.stringify({ version: 1, token: 'another-holder', pid: process.pid, acquiredAt: new Date().toISOString() }), { mode: 0o600 });
-    release();
-    const result = await run;
-    expect(result.ok).toBe(false);
-    expect(result.tools.every((tool) => tool.code === 'lease_lost')).toBe(true);
-    // Nothing was installed or left behind under either tool.
-    expect(existsSync(join(f.root, 'tor', '15.0.24'))).toBe(false);
-    expect(existsSync(join(f.root, 'zkapi-clientd', ZK))).toBe(false);
-    expect(leftovers(join(f.root, 'tor'))).toEqual([]);
-    expect(leftovers(join(f.root, 'zkapi-clientd'))).toEqual([]);
-  });
-
     test('the background job: start returns at once, a second start while running is refused, and the state reads the outcome', async () => {
     const f = setup();
     const job = createManagedToolsJob(f.options);

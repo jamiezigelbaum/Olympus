@@ -493,8 +493,10 @@ describe('shared files and stores stay out of a recursive delete, whichever vari
     const gw = join(homeDir, '.local', 'share', 'olympus', 'gw');
     mkdirSync(gw, { recursive: true });
     const legacy = join(gw, 'legacy.sqlite');
-    writeFileSync(legacy, 'x');
-    writeFileSync(`${legacy}-journal`, 'x');
+    // A relocated index is the source's own only if its contents say so.
+    const marked = new Database(legacy, { create: true });
+    try { marked.exec("CREATE TABLE schema_version (store_id TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL); INSERT INTO schema_version VALUES ('telegram-messages-index', 1, 'now');"); } finally { marked.close(); }
+    writeFileSync(`${legacy}-journal`, '');
     try {
       const result = deleteOlympusData({
         sourceId: 'telegram.messages', homeDir,

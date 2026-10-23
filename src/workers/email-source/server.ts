@@ -1,3 +1,4 @@
+import { holdStoreCustodyShared } from '../../core/store-custody.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -1972,6 +1973,11 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
+  // Shared store custody for this worker's whole life, in every mode (run,
+  // foreground, managed, Gateway service): Delete indexed data takes it
+  // exclusive, so it cannot run under a live worker, and a worker that starts
+  // during a delete waits for it.
+  holdStoreCustodyShared([resolveEmbeddingLedgerPath(process.env)]);
   // Startup signals can close only this instance's listener/client. A second
   // foreground worker never revokes the engine host's epoch or runtime path.
   let closeDesktopBridge = () => {};
