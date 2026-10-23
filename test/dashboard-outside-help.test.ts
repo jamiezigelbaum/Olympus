@@ -1353,7 +1353,7 @@ describe('the adapter: the route, its acknowledgements and the fence', () => {
     }
     expect(readFileSync(path, 'utf8')).toBe(before);
     expect(reloads).toEqual([]);
-    expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json')).toEqual([]);
+    expect(readdirSync(join(home, process.platform === 'linux' ? '.config/olympus' : '.olympus')).filter((name) => name.includes('sovereignty') && name !== 'sovereignty.json' && !name.endsWith('.lock.db'))).toEqual([]);
     // Once the disk cooperates the same save goes through, atomically.
     expect((await backend.saveRoute({ acknowledged: ALL_IDS, funding_date: '2026-10-05' })).ok).toBe(true);
     expect((JSON.parse(readFileSync(path, 'utf8')) as SovereigntyConfig).modelProfiles['zkapi-consult']?.zkapi?.fundingDate).toBe('2026-10-05');

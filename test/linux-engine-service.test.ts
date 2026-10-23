@@ -1,3 +1,4 @@
+import { withFileLeaseSync } from '../src/core/file-lease.ts';
 import { createHash } from 'node:crypto';
 import { afterEach, expect, test } from 'bun:test';
 import { closeSync, copyFileSync, lstatSync, readlinkSync, symlinkSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -350,7 +351,17 @@ for(const live of [false,true])test(`legacy consult lease ${live?'refuses a live
  let linked=false;const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);if(command==='loginctl')return good('yes');if(args.includes('--version'))return good('systemd 256');if(args.includes('--property=Version'))return good('256');if(args.includes('olympus-worker.service'))return good('LoadState=not-found');if(args.includes('show'))return good(linked?`LoadState=loaded\nActiveState=inactive\nUnitFileState=disabled\nMainPID=0\nFragmentPath=${l.unitPath}`:'LoadState=not-found');if(args.includes('link'))linked=true;return good();};
  const run=()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)});
  if(live){expect(run).toThrow('Finish saving Olympus settings');expect(calls.some(args=>args.includes('stop'))).toBe(false);}
- else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult.json'),'utf8')).toBe('{}');for(const suffix of ['.lock','.lock.commit'])expect(existsSync(join(legacy,'consult.json'+suffix))).toBe(false);}
+ else{expect(run).not.toThrow();expect(readFileSync(join(l.configDir,'consult.json'),'utf8')).toBe('{}');for(const suffix of ['.lock','.lock.commit'])expect(existsSync(join(legacy,'consult.json'+suffix))).toBe(false);expect(existsSync(join(legacy,'consult.json.lock.db'))).toBe(true);}
+},15_000);
+
+test('legacy consult lease refuses a writer that holds the kernel lock',()=>{
+ const l=layout();publishLinuxEngineReceipt(l);const legacy=join(l.home,'.olympus');mkdirSync(legacy,{mode:0o700});
+ writeFileSync(join(legacy,'consult.json'),'{}',{mode:0o600});
+ const calls:string[][]=[];const exec:EngineExec=(command,args)=>{calls.push(args);return good();};
+ const run=()=>installEngine({platform:'linux',homeDir:l.home,env:linuxEngineEnvironment(l),uid:process.getuid!(),exec,fromCheckout:packageAt(l.home,'v1'),bunBin:runtimeAt(l.home)});
+ withFileLeaseSync(join(legacy,'consult.json'),()=>{expect(run).toThrow('Finish saving Olympus settings');});
+ expect(calls.some(args=>args.includes('stop'))).toBe(false);
+ expect(existsSync(join(legacy,'consult.json'))).toBe(true);
 },15_000);
 
 for (const replacement of ['new-content', 'same-content', 'in-place'] as const) test(`legacy migration rolls back a concurrent ${replacement} writer before unlink`, () => {
