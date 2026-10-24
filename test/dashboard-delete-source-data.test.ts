@@ -19,6 +19,7 @@ import {
 } from './helpers/forget-seeds.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
+import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
 
 /** Delete indexed data: the engine route behind olympus_delete_source_data. */
 describe('dashboard Delete indexed data route', () => {
@@ -390,6 +391,8 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
         : [],
     }, registryPath);
     const context = { homeDir, env: {} };
+    // These accounts predate folders: the registry lists them as legacy, so Delete reaches the paths they always had.
+    pinMessagingLegacy({ HOME: homeDir });
     const specs = lifecycleSourceSpecs();
     const tg = specs.find((entry) => entry.sourceId === 'telegram.messages')!;
     const wa = specs.find((entry) => entry.sourceId === 'whatsapp.personal.messages')!;

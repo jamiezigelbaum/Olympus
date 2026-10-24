@@ -1,10 +1,15 @@
-import { waitForNativeWorkerOwnership } from './native-worker-service.ts';
+import { nativeWorkerEnvironment, waitForNativeWorkerOwnership } from './native-worker-service.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { configFromPluginConfig, type OlympusConfig } from './config.ts';
-import { legacyWhatsAppServiceStateDir } from './olympus-layout.ts';
+import {
+  WHATSAPP_SOURCE_ID,
+  accountRawPath,
+  legacyWhatsAppServiceStateDir,
+} from './olympus-layout.ts';
+import { placedAccount } from './source-placement.ts';
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
@@ -30,6 +35,8 @@ export interface NativeWhatsAppServiceOptions {
   readinessPollMs?: number;
   stopGraceMs?: number;
   restartDelaysMs?: readonly number[];
+  /** Test seam; production always uses applyWorkerSetupEnv's default path. */
+  workerEnvPath?: string;
   /** Test seam; production inherits the Gateway working directory. */
   workingDirectory?: string;
 }
@@ -95,7 +102,7 @@ async function prepareWhatsAppStart(
   assertExecutableFile(capture.binaryPath);
 
   const env = baseEnvironment();
-  const stateDir = capture.stateDir ?? legacyWhatsAppServiceStateDir(env);
+  const stateDir = captureStateDir(capture.stateDir, env, nativeWorkerEnvironment(config, options.workerEnvPath));
   assertUsableSession(join(stateDir, SESSION_FILE));
 
   const instanceId = randomUUID();
@@ -138,6 +145,27 @@ function baseEnvironment(): NodeJS.ProcessEnv {
       .map((name) => [name, process.env[name]])
       .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0),
   );
+}
+
+/**
+ * Where the bridge keeps its state. An account the registry keeps in a folder
+ * has it there; read-only, after the worker owns the data, and from the
+ * environment the worker was launched with (`nativeWorkerEnvironment`), so both
+ * look in the same data folder. One this service owns that has no entry is
+ * `legacy` (its placement pins on the owner flag that environment carries), so
+ * it keeps the configured directory, else the default. A configured directory the folder does not hold contradicts the
+ * registry and is refused rather than left to point the bridge at another session.
+ */
+function captureStateDir(configured: string | undefined, env: NodeJS.ProcessEnv, layoutEnv: NodeJS.ProcessEnv): string {
+  const account = placedAccount(WHATSAPP_SOURCE_ID, layoutEnv);
+  if (account.layout !== 'folder') return configured ?? legacyWhatsAppServiceStateDir(env);
+  const folder = accountRawPath(account, 'whatsapp', layoutEnv);
+  if (configured !== undefined && resolve(configured) !== resolve(folder)) {
+    throw new NativeProcessConfigurationError(
+      'Olympus WhatsApp capture service: this account keeps its files in its account folder, so worker.whatsappCapture.stateDir must be removed (or name that folder).',
+    );
+  }
+  return folder;
 }
 
 function assertExecutableFile(path: string): void {

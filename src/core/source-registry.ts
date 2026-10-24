@@ -69,6 +69,16 @@ export function readSourceRegistry(env: LayoutEnv = process.env): SourceRegistry
 }
 
 /**
+ * Read the registry once no writer is partway through a decision: the lease is
+ * taken, so a writer that read before this call has committed, and one that
+ * reads after it sees whatever this caller did before calling.
+ */
+export function readSourceRegistryUnderLease(env: LayoutEnv = process.env): SourceRegistry {
+  const path = sourceRegistryPath(env);
+  return withFileLeaseSync(path, () => readSourceRegistryAt(path));
+}
+
+/**
  * Read-modify-write the registry under its lease. `mutate` may change the
  * registry in place or return a replacement; a throw writes nothing.
  */

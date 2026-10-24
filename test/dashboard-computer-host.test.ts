@@ -770,6 +770,26 @@ describe('the host page renderer', () => {
     expect(unlocked).toContain('csrf-123');
   });
 
+  test('has one main landmark holding everything, and one level-one heading that is visually hidden', () => {
+    for (const input of [{ csrfToken: 'csrf-123' }, {}]) {
+      const html = renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN, platform: 'linux', ...input });
+      const doc = new Window({ url: `${ORIGIN}/dashboard` }).document;
+      doc.body.innerHTML = html.slice(html.indexOf('<body'), html.indexOf('<script>'));
+      const mains = doc.querySelectorAll('main');
+      expect(mains).toHaveLength(1);
+      const headings = doc.querySelectorAll('h1');
+      expect(headings).toHaveLength(1);
+      expect(headings[0]!.textContent).toBe('Olympus dashboard');
+      expect(headings[0]!.className).toBe('sr-only');
+      expect(mains[0]!.contains(headings[0]!)).toBe(true);
+      // The panel, the gate and the update notice all sit inside it: nothing is left outside a landmark.
+      for (const inner of ['#olympus-panel', '[data-dashboard-control-gate]', '[data-update-notice]']) {
+        expect(mains[0]!.querySelector(inner)).not.toBeNull();
+      }
+    }
+    expect(renderComputerHostPage({ panelHtml: '<p></p>', origin: ORIGIN })).toContain('.sr-only{position:absolute;');
+  });
+
   test('a See why open link lands on the dashboard itself, named by its token, and the page knows only the closed list', () => {
     const targets = computerOpenTargets(ORIGIN);
     expect(targets['unreadable/dropbox']).toBe(`${ORIGIN}/dashboard#olympus-open=unreadable.dropbox`);

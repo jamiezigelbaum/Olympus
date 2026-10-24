@@ -8,16 +8,19 @@
 //     bun scripts/whatsapp-live-sync.ts [--db <path>] [--account personal] [--max-items N]
 //
 // The store db defaults to <state dir>/connector-store.db, which the product
-// worker now mounts directly. This command remains a diagnostic/convergence
+// worker now mounts directly (an account kept in its own account folder uses
+// that folder's spool and secure_local store instead). This command remains a diagnostic/convergence
 // utility; normal runtime sync is owned by the shared scheduler.
 // Output is a Castor-safe JSON summary (counts + spool gap diagnostics only,
 // never message text).
 
-import { WHATSAPP_PERSONAL_SOURCE_ID, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
+import {
+  WHATSAPP_PERSONAL_SOURCE_ID,
+  WHATSAPP_STORE_PLACEMENT,
+  whatsAppLiveSyncScriptPaths,
+} from '../src/workers/whatsapp/store-sync.ts';
 import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { repairConnectorStoreSendersFromConnector } from '../src/workers/connector-store/index.ts';
 import {
   WHATSAPP_LIVE_CONNECTOR_ID,
@@ -27,7 +30,6 @@ import {
 } from '../src/workers/whatsapp/index.ts';
 
 const CORPUS_ID = 'secure_local.whatsapp.messages';
-const DEFAULT_STATE_DIR = join(homedir(), '.local', 'share', 'olympus', 'whatsapp-live');
 
 interface Args {
   mode: 'sync' | 'repair-senders';
@@ -39,9 +41,10 @@ interface Args {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const stateDir = process.env['OLYMPUS_WHATSAPP_STATE_DIR']?.trim() || DEFAULT_STATE_DIR;
-  const spoolDir = join(stateDir, 'spool');
-  const dbPath = args.dbPath ?? join(stateDir, 'connector-store.db');
+  // An account in a folder is where the worker has it; any other keeps the paths this script always used.
+  const paths = whatsAppLiveSyncScriptPaths(process.env);
+  const spoolDir = paths.spoolDir;
+  const dbPath = args.dbPath ?? paths.dbPath;
 
   const connector = createWhatsAppLiveSourceConnector({
     spoolDir,

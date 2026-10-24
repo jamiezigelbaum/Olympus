@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -143,6 +143,10 @@ describe('packaged messaging pairing', () => {
     expect(result.registered).toBe(true);
     expect(registration?.sessionReady).toBe(true);
     expect(result.producer.captureStarted).toBe(false);
+    // A fresh install pairs into its account folder; the capture command carries no path (its spawner sets them).
+    expect(result.sessionLayout).toBe('folder');
+    expect(result.sessionPath).toBe(join(root, 'home', '.local/share/openclaw/olympus/sources/telegram.messages/1/session/telegram'));
+    expect(result.producer.env.OLYMPUS_TELEGRAM_SESSION_PATH).toBeUndefined();
     expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES).toBe(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
     expect(result.producer.env.OLYMPUS_SOURCE_INDEX_TELEGRAM_PROTECTED_CHAT_SCOPES).toBe(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES);
     expect(result.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES)
@@ -155,12 +159,35 @@ describe('packaged messaging pairing', () => {
     expect(JSON.stringify(result)).not.toContain('fixture-hash');
   });
 
+  test('Telegram on an install that already has its files keeps the legacy session path in the capture command', async () => {
+    const root = packageFixture();
+    mkdirSync(join(root, 'home', '.local/share/olympus/telegram-capture/spool'), { recursive: true });
+    const result = await pairMessagingSource({
+      source: 'telegram',
+      packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
+      pythonExecutable: '/usr/bin/python3',
+      secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, chatScopes: ['telegram.personal:chat:101'] },
+      runCommand: async (request) => telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH),
+      registerSession: async () => ({ ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }),
+    });
+    if (result.status !== 'connected') throw new Error('expected connected result');
+    const legacyBase = join(root, 'home', '.local/share/olympus/telegram/telegram.personal');
+    expect(result.sessionLayout).toBe('legacy');
+    expect(result.sessionPath).toBe(legacyBase);
+    expect(result.producer.env.OLYMPUS_TELEGRAM_SESSION_PATH).toBe(legacyBase);
+  });
+
   test('Telegram refuses an unlisted chat before publishing the handle', async () => {
     const root = packageFixture();
     let registered = false;
     await expect(pairMessagingSource({
       source: 'telegram',
       packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
       pythonExecutable: '/usr/bin/python3',
       secretStore: memorySecretStore(),
       captureScopeApproval: {
@@ -183,6 +210,8 @@ describe('packaged messaging pairing', () => {
     await expect(pairMessagingSource({
       source: 'telegram',
       packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
       pythonExecutable: '/usr/bin/python3',
       secretStore: memorySecretStore(),
       captureScopeApproval: {
@@ -205,9 +234,65 @@ describe('packaged messaging pairing', () => {
     expect(registered).toBe(false);
   });
 
-  test('WhatsApp reports the private PNG and returns an approved capture command without starting it', async () => {
+  test('WhatsApp on a fresh install pairs into its account folder: the bridge is handed the folder and the capture command carries no path', async () => {
+    const root = packageFixture();
+    const stateDir = join(root, 'home', '.local/share/openclaw/olympus/sources/whatsapp.personal.messages/1/raw/whatsapp');
+    const qrPath = join(stateDir, 'qr.png');
+    const seenQr: string[] = [];
+    let command: PairingCommandRequest | undefined;
+    const result = await pairMessagingSource({
+      source: 'whatsapp',
+      packageRoot: root,
+      whatsappBridgePath: join(root, 'cache', 'olympus', 'bin', 'olympus-whatsapp-bridge'),
+      homeDir: join(root, 'home'),
+      env: {},
+      whatsappQrMode: 'artifact',
+      captureScopeApproval: {
+        source: 'whatsapp',
+        explicitApproval: true,
+        chatJids: ['chat-1@s.whatsapp.net'],
+      },
+      onWhatsAppQr: async (path) => { seenQr.push(path); },
+      runCommand: async (request) => {
+        command = request;
+        for (const line of whatsappReady(qrPath).stdoutLines) await request.onStdoutLine?.(line);
+        return whatsappReady(qrPath);
+      },
+      registerSession: async () => ({
+        ok: true, source: 'whatsapp', handles: ['whatsapp.personal_local'], secretRefs: [],
+      }),
+    });
+
+    expect(command?.args).toEqual(['--pair-only']);
+    expect(command?.env.OLYMPUS_WHATSAPP_STATE_DIR).toBe(stateDir);
+    expect(statSync(stateDir).mode & 0o777).toBe(0o700);
+    expect(command?.env.OLYMPUS_WHATSAPP_QR_STDOUT).toBe('false');
+    expect(command?.env.OLYMPUS_WHATSAPP_PAIR_TTY_QR).toBe('false');
+    expect(seenQr).toEqual([qrPath]);
+    expect(result.status).toBe('connected');
+    if (result.status !== 'connected') throw new Error('expected connected result');
+    expect(result.qrPngPath).toBe(qrPath);
+    expect(result.sessionLayout).toBe('folder');
+    expect(result.sessionPath).toBe(stateDir);
+    expect(result.producer).toEqual({
+      source: 'whatsapp',
+      executable: join(root, 'cache', 'olympus', 'bin', 'olympus-whatsapp-bridge'),
+      args: ['--capture-approved'],
+      env: {
+        OLYMPUS_WHATSAPP_QR_STDOUT: 'false',
+        OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: 'chat-1@s.whatsapp.net',
+      },
+      secretEnvironment: [],
+      captureStarted: false,
+    });
+  });
+
+  test('WhatsApp on an install that already has its files keeps the legacy state folder, and reports the private PNG and returns an approved capture command without starting it', async () => {
     const root = packageFixture();
     const qrPath = join(root, 'home', '.local/share/olympus/whatsapp-live/qr.png');
+    // Files at the legacy location are what keep an account there.
+    mkdirSync(join(root, 'home', '.local/share/olympus/whatsapp-live'), { recursive: true });
+    writeFileSync(join(root, 'home', '.local/share/olympus/whatsapp-live/connector-store.db'), '');
     const seenQr: string[] = [];
     let command: PairingCommandRequest | undefined;
     const result = await pairMessagingSource({
@@ -240,6 +325,7 @@ describe('packaged messaging pairing', () => {
     expect(result.status).toBe('connected');
     if (result.status !== 'connected') throw new Error('expected connected result');
     expect(result.qrPngPath).toBe(qrPath);
+    expect(result.sessionLayout).toBe('legacy');
     expect(result.producer).toEqual({
       source: 'whatsapp',
       executable: join(root, 'cache', 'olympus', 'bin', 'olympus-whatsapp-bridge'),
@@ -260,6 +346,8 @@ describe('packaged messaging pairing', () => {
     await expect(pairMessagingSource({
       source: 'whatsapp',
       packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
       whatsappBridgePath: missing,
       runCommand: async () => whatsappReady('/private/qr.png'),
     })).rejects.toThrow(/configured WhatsApp pairing bridge does not exist/);
@@ -273,6 +361,8 @@ describe('packaged messaging pairing', () => {
       try {
         await pairMessagingSource({
           source: 'whatsapp', packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
           whatsappBridgePath: join(root, 'cache', 'olympus', 'bin', 'olympus-whatsapp-bridge'),
           runCommand: async () => ({ exitCode: 1, stdoutLines: [], stderr: `private fixture payload\n{"error":"${code}"}` }),
           registerSession: async () => { registered = true; throw new Error('must not register'); },
@@ -310,6 +400,8 @@ describe('packaged messaging pairing', () => {
     await expect(pairMessagingSource({
       source: 'telegram',
       packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
       pythonExecutable: '/usr/bin/python3',
       secretStore: memorySecretStore(),
       runCommand: async () => ({

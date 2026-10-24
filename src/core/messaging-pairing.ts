@@ -8,7 +8,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
-import { telegramSessionBasePath, whatsappStateDir } from './pairing-session-paths.ts';
+import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
+import { pairingLayoutEnv, telegramSessionBasePath, whatsappStateDir } from './pairing-session-paths.ts';
+import { settlePairingPlacement } from './pairing-placement.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
 export const TELEGRAM_API_ID_SECRET_KEY = 'telegram.personal.app.api_id';
@@ -59,6 +61,8 @@ export interface MessagingPairingPendingResult {
 export interface MessagingPairingConnectedResult extends ConnectResult {
   status: 'connected';
   sessionPath: string;
+  /** Where the account's files live; `legacy` when absent. A `folder` account's spawner sets its paths from the folder, so neither the producer env nor the grant carries them. */
+  sessionLayout?: LayoutAccountLayout;
   accountProof: string;
   chats: MessagingChatMetadata[];
   qrPngPath?: string;
@@ -109,6 +113,8 @@ export interface PairMessagingSourceOptions {
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
   buildWhatsAppBridge?: (input: { go: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
+  /** Test seam: replaces the transport to the running worker, which decides a new account's layout while it owns the data. */
+  workerFetch?: typeof fetch;
 }
 
 export type MessagingSessionRegistrar = (
@@ -138,17 +144,29 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
   const packageRoot = resolve(options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
+  // The account is placed before a path is picked: pairing creates its first file.
+  const layout = await settlePairingPlacement(
+    { sourceId: options.source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID },
+    pairingLayoutEnv({ env, ...(options.homeDir ? { homeDir: options.homeDir } : {}) }),
+    options.workerFetch ? { fetchImpl: options.workerFetch } : {},
+  );
   const pathContext = {
     env,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
+    layout,
   };
   const sessionPath = options.source === 'telegram'
     ? telegramSessionBasePath(pathContext)
     : whatsappStateDir(pathContext);
+  // Private from the account folder down; the helpers only make the last folder so.
+  if (layout === 'folder') {
+    mkdirSync(options.source === 'telegram' ? dirname(sessionPath) : sessionPath, { recursive: true, mode: 0o700 });
+  }
 
   const helper = await resolveHelper(options, packageRoot);
   const stdoutEvents: Record<string, unknown>[] = [];
   let qrPngPath: string | undefined;
+  // The helper is handed the path whichever the layout: it is the one that writes the session.
   const commandEnv: Record<string, string | undefined> = {
     ...env,
     ...(options.source === 'telegram'
@@ -221,7 +239,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     };
   }
 
-  const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats);
+  const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
   const rollbackCredentials = options.source === 'telegram'
     ? await persistTelegramCredentials(secretStore, result.privatePayload)
     : async () => {};
@@ -250,6 +268,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     ...connected,
     status: 'connected',
     sessionPath,
+    sessionLayout: layout,
     accountProof,
     chats,
     ...(qrPngPath ? { qrPngPath } : {}),
@@ -377,6 +396,7 @@ function producerLaunch(
   packageRoot: string,
   sessionPath: string,
   chats: readonly MessagingChatMetadata[],
+  layout: LayoutAccountLayout,
 ): MessagingProducerLaunch {
   if (approval.source !== source || approval.explicitApproval !== true) {
     throw new Error('Capture scope approval must name the paired source and be explicit.');
@@ -393,7 +413,8 @@ function producerLaunch(
       executable: helperExecutable,
       args: [join(packageRoot, 'scripts', 'telegram-telethon-reader.py'), '--gateway'],
       env: {
-        OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath,
+        // A folder account's spawner sets its paths from its folder (core/olympus-layout.ts, folderCaptureEnv).
+        ...(layout === 'folder' ? {} : { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath }),
         OLYMPUS_SOURCE_INDEX_TELEGRAM_ACCOUNT: 'telegram.personal',
         OLYMPUS_SOURCE_INDEX_TELEGRAM_APPROVED_CHAT_SCOPES: scopes.join(','),
         OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES: scopes.join(','),
@@ -422,7 +443,7 @@ function producerLaunch(
     executable: helperExecutable,
     args: ['--capture-approved'],
     env: {
-      OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
+      ...(layout === 'folder' ? {} : { OLYMPUS_WHATSAPP_STATE_DIR: sessionPath }),
       OLYMPUS_WHATSAPP_QR_STDOUT: 'false',
       OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: wholeAccount ? '*' : chatJids.join(','),
     },

@@ -317,6 +317,7 @@ import {
   openConnectorStore,
   openSecretLocations,
   recordAccountPlacement,
+  replaceEmptyLegacyAccounts,
   sourceAccountUnavailableReason,
   storageAccountForCorpus,
   type StorageAccount,
@@ -2077,11 +2078,29 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
  */
 let dataOwnerLock: HeldDataOwnerLock | undefined;
 
+/**
+ * Under the owner lock and before anything mounts (core/source-storage.ts,
+ * `replaceEmptyLegacyAccounts`). A failure here changes nothing and does not
+ * stop the worker: the accounts stay where the registry has them.
+ */
+export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefined>): string[] {
+  try {
+    const replaced = replaceEmptyLegacyAccounts(env);
+    for (const sourceId of replaced) console.log(`[storage] ${sourceId} holds nothing yet; its files will live in its account folder.`);
+    return replaced;
+  } catch (error) {
+    console.warn(`[storage] Could not check which empty accounts to place in folders (${error instanceof Error ? error.message : 'unknown error'}); they stay as recorded.`);
+    return [];
+  }
+}
+
 export async function main(): Promise<void> {
   // First, before anything mounts or opens a store: this worker owns the data
   // root. A second worker on it waits a short while (restarts overlap), then
   // exits without mounting anything (core/data-owner-lock.ts).
   dataOwnerLock = takeWorkerDataOwnerLock(process.env);
+  // An account recorded as legacy that holds nothing is placed in a folder instead.
+  replaceEmptyAccountsAtBoot(process.env);
   // From here on, a writable store open records its account in the registry
   // (core/source-storage.ts). Before any lane mounts.
   enableSourceRegistryAdoption();

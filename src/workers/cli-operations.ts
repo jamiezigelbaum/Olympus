@@ -13,7 +13,9 @@ import { isAbsolute } from 'node:path';
 import { canonicalDataRoot } from '../core/cli-via-worker.ts';
 import { loadConfig } from '../core/config.ts';
 import { STOP_OLYMPUS_HINT } from '../core/data-owner-lock.ts';
+import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID } from '../core/olympus-layout.ts';
 import { OperationError } from '../core/operation-error.ts';
+import { placeOwnedAccount } from '../core/source-storage.ts';
 import { exportOlympusData, lifecycleDataRoot, type DataExportResult, type LifecyclePathContext } from '../data-lifecycle.ts';
 import {
   runTierCommand,
@@ -49,6 +51,22 @@ export function cliDataRootMismatch(
     message: `The running Olympus owns its data at ${owned}, not ${asked}, which another process holds.`,
     suggestion: `Wait for or stop whatever holds ${asked} (an operator script, or another Olympus), then run the command again.`,
   };
+}
+
+/**
+ * `olympus connect telegram|whatsapp --pair`, asking where a new account's files go:
+ * this worker owns the data, so it records the entry from its own environment and
+ * answers. The CLI follows the answer (core/pairing-placement.ts).
+ */
+export function pairingPlacementForCli(
+  body: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): { layout: 'folder' | 'legacy' } {
+  const sourceId = typeof body.source_id === 'string' ? body.source_id : '';
+  if (sourceId !== TELEGRAM_SOURCE_ID && sourceId !== WHATSAPP_SOURCE_ID) {
+    throw new OperationError('invalid_params', 'Placement can be asked only for a Telegram or WhatsApp account.');
+  }
+  return { layout: placeOwnedAccount({ sourceId }, env) };
 }
 
 /** `olympus ingestion status`: the ledger, collected in this process. */

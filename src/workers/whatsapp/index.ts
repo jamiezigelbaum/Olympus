@@ -24,6 +24,7 @@ export {
   defaultWhatsAppInternalConnectorStoreDbPath,
   WHATSAPP_INTERNAL_CORPUS_ID,
   defaultWhatsAppMediaDir,
+  defaultWhatsAppMediaRoots,
   defaultWhatsAppSpoolDir,
   defaultWhatsAppStateDir,
   sanitizeWhatsAppLiveCursor,

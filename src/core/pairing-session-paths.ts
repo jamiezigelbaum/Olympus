@@ -1,7 +1,21 @@
 import { lstatSync, realpathSync, rmSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
-import { legacyCaptureDataRoot, whatsappStateDirFromValue, type LayoutEnv } from './olympus-layout.ts';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SOURCE_ID,
+  accountRawPath,
+  accountSessionPath,
+  legacyCaptureDataRoot,
+  olympusDataRoot,
+  olympusStateRoot,
+  whatsappStateDirFromValue,
+  type LayoutAccount,
+  type LayoutAccountLayout,
+  type LayoutEnv,
+} from './olympus-layout.ts';
+import { placedAccount } from './source-placement.ts';
+import { DEFAULT_ACCOUNT_SLOT } from './source-registry.ts';
 
 /**
  * Where Telegram's and WhatsApp's pairing sessions live, and which roots
@@ -23,6 +37,11 @@ import { legacyCaptureDataRoot, whatsappStateDirFromValue, type LayoutEnv } from
 export interface OlympusPathContext {
   homeDir?: string;
   env?: Record<string, string | undefined>;
+  /**
+   * The layout the caller has already settled for the account: pairing records
+   * it before it picks a path. Without it the registry says (core/source-placement.ts).
+   */
+  layout?: LayoutAccountLayout;
 }
 
 function resolveHomeDir(context: OlympusPathContext): string {
@@ -30,10 +49,22 @@ function resolveHomeDir(context: OlympusPathContext): string {
 }
 
 /** The context as the layout module reads it: an explicit homeDir wins over HOME. */
+export function pairingLayoutEnv(context: OlympusPathContext): LayoutEnv {
+  return layoutEnv(context);
+}
+
 function layoutEnv(context: OlympusPathContext): LayoutEnv {
   const env = context.env ?? {};
   const home = context.homeDir?.trim();
   return home ? { ...env, HOME: home } : env;
+}
+
+/** The account these paths are for: the layout the caller settled, else the registry's. */
+export function pairingAccount(source: 'telegram' | 'whatsapp', context: OlympusPathContext = {}): LayoutAccount {
+  const sourceId = source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID;
+  return context.layout
+    ? { source_id: sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout: context.layout }
+    : placedAccount(sourceId, layoutEnv(context));
 }
 
 /**
@@ -58,10 +89,32 @@ export function olympusDataRoots(context: OlympusPathContext = {}): string[] {
 }
 
 /**
+ * The roots a pairing session may be removed from: the lexical ones above, and
+ * where the data actually is when that is not under the home (a relocated
+ * XDG data home, a standalone Linux engine's receipt), the capture root beside
+ * it and the gateway state's. Each is a folder Olympus names and owns; a path
+ * outside all of them is still refused, and so is the root itself.
+ */
+export function pairingOwnedRoots(context: OlympusPathContext = {}): string[] {
+  const env = layoutEnv(context);
+  const actual: string[] = [legacyCaptureDataRoot(env), olympusStateRoot(env)];
+  try {
+    actual.push(olympusDataRoot(env));
+  } catch {
+    // The data folder cannot be worked out here: the roots under the home stand alone.
+  }
+  // A relative XDG value would anchor to wherever the process runs.
+  return [...new Set([...olympusDataRoots(context), ...actual.filter((root) => isAbsolute(root))])];
+}
+
+/**
  * The WhatsApp bridge's state directory, resolved the way the canonical
  * capture/store sync runtime resolves it (`scripts/whatsapp-live-sync.ts`).
+ * A `folder` account's is its `raw/whatsapp`.
  */
 export function whatsappStateDir(context: OlympusPathContext = {}): string {
+  const account = pairingAccount('whatsapp', context);
+  if (account.layout === 'folder') return accountRawPath(account, 'whatsapp', layoutEnv(context));
   const env = context.env ?? {};
   const configured = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
   return configured
@@ -99,8 +152,10 @@ function telegramSessionBase(value: string): string {
   return trimmed.endsWith('.session') ? trimmed.slice(0, -'.session'.length) : trimmed;
 }
 
-/** The Telethon session file base path, without its extensions. */
+/** The Telethon session file base path, without its extensions. A `folder` account's is `session/telegram`. */
 export function telegramSessionBasePath(context: OlympusPathContext = {}): string {
+  const account = pairingAccount('telegram', context);
+  if (account.layout === 'folder') return accountSessionPath(account, layoutEnv(context));
   const env = context.env ?? {};
   const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
   return configured
@@ -149,11 +204,12 @@ export function pairingSessionPathsFromStoredValue(
   return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt'), join(stateDir, 'qr.png')];
 }
 
-/** Whether an explicit env override names where this pairing session lives. */
+/** Whether an explicit env override names where this pairing session lives. A `folder` account honors none. */
 export function pairingSessionPathOverridden(
   source: 'telegram' | 'whatsapp',
   context: OlympusPathContext = {},
 ): boolean {
+  if (pairingAccount(source, context).layout === 'folder') return false;
   const env = context.env ?? {};
   const value = source === 'telegram'
     ? env.OLYMPUS_TELEGRAM_SESSION_PATH
@@ -225,7 +281,7 @@ export function planPairingSessionRemoval(
   paths: readonly string[],
   context: OlympusPathContext = {},
 ): { ok: true; plan: PairingRemovalPlan } | { ok: false; refusal: PairingPathRefusal } {
-  const roots = olympusDataRoots(context).map((root) => resolve(root));
+  const roots = pairingOwnedRoots(context).map((root) => resolve(root));
   const canonicalRoots = canonicalOlympusDataRoots(roots);
   const targets: PairingRemovalTarget[] = [];
   const absent: string[] = [];

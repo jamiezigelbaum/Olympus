@@ -70,7 +70,7 @@ async function freePort(): Promise<number> {
 }
 
 describe('a fresh install: the worker boots', () => {
-  test('Gmail, Drive, Dropbox and local files land in their folders; messaging stays on its legacy paths', async () => {
+  test('Gmail, Drive, Dropbox, local files, Telegram and WhatsApp land in their folders', async () => {
     const { home, env } = freshHome();
     const port = await freePort();
     const child = Bun.spawn([process.execPath, SERVER], {
@@ -119,30 +119,31 @@ describe('a fresh install: the worker boots', () => {
       'google_drive.docs': 'active:folder',
       'dropbox.files': 'active:folder',
       'local.files': 'active:folder',
-      'telegram.messages': 'active:legacy',
-      'whatsapp.personal.messages': 'active:legacy',
+      'telegram.messages': 'active:folder',
+      'whatsapp.personal.messages': 'active:folder',
     });
 
     const dataRoot = olympusDataRoot(env);
-    for (const sourceId of ['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']) {
+    for (const sourceId of ['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files', 'telegram.messages', 'whatsapp.personal.messages']) {
       const stores = join(dataRoot, 'sources', sourceId, '1', 'stores');
       expect(significant(readdirSync(stores)).some((name) => /^secure_local\.sqlite$/.test(name)), sourceId).toBe(true);
     }
-    // Nothing of those four, and nothing of the others yet, at the legacy paths of the data folder.
+    // Nothing of those six, and nothing of the others yet, at the legacy paths of the data folder.
     const topLevel = readdirSync(dataRoot);
-    expect(topLevel.filter((name) => /^(gmail|google-drive|dropbox-files|local-files|readwise|x-bookmarks|archive)[a-z-]*connector-store/.test(name))).toEqual([]);
+    expect(topLevel.filter((name) => /^(gmail|google-drive|dropbox-files|local-files|readwise|x-bookmarks|archive|telegram)[a-z-]*connector-store/.test(name))).toEqual([]);
     expect(topLevel).not.toContain('local-files-watch');
-    // Under sources/ only the four accounts, only under slot 1, only stores.
-    expect(readdirSync(join(dataRoot, 'sources')).sort()).toEqual(['dropbox.files', 'gmail.email', 'google_drive.docs', 'local.files']);
+    // Under sources/ only the six accounts, only under slot 1, only stores.
+    expect(readdirSync(join(dataRoot, 'sources')).sort()).toEqual(['dropbox.files', 'gmail.email', 'google_drive.docs', 'local.files', 'telegram.messages', 'whatsapp.personal.messages']);
     for (const path of significant(everyPath(join(dataRoot, 'sources')))) {
       const rel = relative(join(dataRoot, 'sources'), path).split('/');
       if (rel.length > 1) expect(rel[1], path).toBe('1');
       if (rel.length > 2) expect(rel[2], path).toBe('stores');
     }
-    // Messaging is where it always was.
-    expect(statSync(join(dataRoot, 'telegram-internal-connector-store.sqlite')).isFile()).toBe(true);
-    expect(statSync(join(dataRoot, 'telegram-protected-connector-store.sqlite')).isFile()).toBe(true);
-    expect(statSync(join(home, '.local', 'share', 'olympus', 'whatsapp-live', 'connector-store.db')).isFile()).toBe(true);
+    // Messaging has no files at its old places: no WhatsApp state folder, no capture folders.
+    expect(existsSync(join(home, '.local', 'share', 'olympus', 'whatsapp-live'))).toBe(false);
+    expect(existsSync(join(home, '.local', 'share', 'olympus', 'telegram'))).toBe(false);
+    expect(statSync(join(dataRoot, 'sources', 'telegram.messages', '1', 'stores', 'internal.sqlite')).isFile()).toBe(true);
+    expect(statSync(join(dataRoot, 'sources', 'whatsapp.personal.messages', '1', 'stores', 'secure_local.sqlite')).isFile()).toBe(true);
   }, 90_000);
 });
 

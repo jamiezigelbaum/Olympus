@@ -1,9 +1,23 @@
 import { telegramPythonExecutable } from './messaging-runtime.ts';
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import {
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SOURCE_ID,
+  accountRawPath,
+  accountSessionPath,
+  folderCaptureDirs,
+  folderCaptureEnv,
+  folderCaptureEnvRemoved,
+  type LayoutAccount,
+} from './olympus-layout.ts';
+import { captureGrantPathBeside, readCaptureGrantFile } from './messaging-capture-grant-file.ts';
+import { placedAccount } from './source-placement.ts';
+import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './source-registry.ts';
+import { recordAccountPlacement } from './source-storage.ts';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import type { MessagingPairingConnectedResult, MessagingProducerLaunch, MessagingPairingSource } from './messaging-pairing.ts';
 import { withoutUnpairedLaneHandles } from '../workers/credential-broker/unpaired-sources.ts';
@@ -17,7 +31,8 @@ export interface MessagingCaptureGrant {
   version: 1;
   source: MessagingPairingSource;
   handle: string;
-  sessionPath: string;
+  /** Where a `legacy` account's session is. A `folder` account's grant has none: its spawner computes every path. */
+  sessionPath?: string;
   producer: Pick<MessagingProducerLaunch, 'source' | 'env' | 'secretEnvironment'>;
   grantedAt: string;
 }
@@ -41,7 +56,7 @@ export function defaultMessagingCaptureGrantPath(
   source: MessagingPairingSource,
   registryPath = defaultHandleRegistryPath(),
 ): string {
-  return join(dirname(registryPath), `messaging-capture.${source}.json`);
+  return captureGrantPathBeside(source, registryPath);
 }
 
 export function saveMessagingCaptureGrant(input: {
@@ -55,7 +70,7 @@ export function saveMessagingCaptureGrant(input: {
     version: 1,
     source: input.pairing.source as MessagingPairingSource,
     handle,
-    sessionPath: input.pairing.sessionPath,
+    ...(input.pairing.sessionLayout === 'folder' ? {} : { sessionPath: input.pairing.sessionPath }),
     producer: {
       source: input.pairing.producer.source,
       env: input.pairing.producer.env,
@@ -272,13 +287,25 @@ export class MessagingCaptureSupervisor {
       await this.stop();
       return { source: grant.source, state: 'stopped', reason: 'handle_unavailable' };
     }
-    if (!sessionExists(grant)) {
+    // Placed before the child creates its first file: it never touches the registry.
+    const layoutEnv = definedEnv({ ...process.env, ...(this.options.baseEnv ?? {}) });
+    const account = placeAccount(grant, layoutEnv);
+    if (account.layout === 'legacy' && !grant.sessionPath) {
+      await this.stop();
+      return { source: grant.source, state: 'blocked', reason: 'grant_invalid' };
+    }
+    if (!sessionExists(grant, account, layoutEnv)) {
       await this.stop();
       return { source: grant.source, state: 'blocked', reason: 'session_missing' };
     }
-    const childEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries({ ...process.env, ...(this.options.baseEnv ?? {}), ...grant.producer.env })) {
-      if (value !== undefined) childEnv[key] = value;
+    const childEnv: Record<string, string> = definedEnv({ ...layoutEnv, ...grant.producer.env });
+    // A folder account's paths come from its folder, applied after everything else so
+    // nothing in the environment or the grant can move the child out of it. A legacy
+    // account keeps the grant's, which are the paths it was paired at.
+    if (account.layout === 'folder') {
+      for (const name of folderCaptureEnvRemoved(account)) delete childEnv[name];
+      Object.assign(childEnv, folderCaptureEnv(account, layoutEnv));
+      for (const dir of folderCaptureDirs(account, layoutEnv)) mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     const secrets = this.options.secretStore ?? createDefaultSecretStore();
     for (const mapping of grant.producer.secretEnvironment) {
@@ -339,26 +366,7 @@ async function observeChildExit(child: CaptureChild, timeoutMs: number): Promise
   return observed;
 }
 
-function readGrant(path: string): { kind: 'missing' } | { kind: 'invalid' } | { kind: 'valid'; grant: MessagingCaptureGrant } {
-  if (!existsSync(path)) return { kind: 'missing' };
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    const info = fstatSync(descriptor);
-    const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-    if (!info.isFile() || (info.mode & 0o022) !== 0 || (currentUid !== undefined && info.uid !== currentUid)) {
-      return { kind: 'invalid' };
-    }
-    const value = JSON.parse(readFileSync(descriptor, 'utf8')) as MessagingCaptureGrant;
-    if (value.version !== 1 || !['telegram', 'whatsapp'].includes(value.source) || !value.handle || !value.sessionPath) return { kind: 'invalid' };
-    if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment)) return { kind: 'invalid' };
-    return { kind: 'valid', grant: value };
-  } catch {
-    return { kind: 'invalid' };
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-  }
-}
+const readGrant = readCaptureGrantFile;
 
 function resolveCurrentLaunch(
   options: {
@@ -387,10 +395,56 @@ function handleAllowsCapture(handle: ConnectedCredentialHandle | undefined, sour
     : handle.provider === 'whatsapp_personal' && handle.allowedCapabilities.includes('whatsapp.personal.messages.sync');
 }
 
-function sessionExists(grant: MessagingCaptureGrant): boolean {
+function definedEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const defined: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) defined[key] = value;
+  }
+  return defined;
+}
+
+const accountSourceId = (source: MessagingPairingSource): string => (source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID);
+
+/**
+ * The account the child is for, recorded in the registry first (the worker only:
+ * recording is off elsewhere). A grant that names its session path is a
+ * `legacy` account's, and recording it with that path keeps it at the paths it
+ * was paired at; one without is a folder account's. Where nothing could record
+ * it, the grant still says so: the disk would give a new account a folder, but
+ * this one was paired at a path.
+ */
+function placeAccount(grant: MessagingCaptureGrant, env: Record<string, string>): LayoutAccount {
+  const sourceId = accountSourceId(grant.source);
+  const inFolder: LayoutAccount = { source_id: sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout: 'folder' };
+  recordAccountPlacement(
+    { sourceId },
+    grant.sessionPath ?? (grant.source === 'telegram' ? accountSessionPath(inFolder, env) : accountRawPath(inFolder, 'whatsapp', env)),
+    env,
+  );
+  const placed = placedAccount(sourceId, env);
+  return grant.sessionPath !== undefined && placed.layout === 'folder' && !hasRegistryEntry(sourceId, env)
+    ? { ...placed, layout: 'legacy' }
+    : placed;
+}
+
+function hasRegistryEntry(sourceId: string, env: Record<string, string>): boolean {
+  try {
+    return findRegistryAccount(readSourceRegistry(env), sourceId, DEFAULT_ACCOUNT_SLOT) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function sessionExists(grant: MessagingCaptureGrant, account: LayoutAccount, env: Record<string, string>): boolean {
+  if (account.layout === 'folder') {
+    return grant.source === 'telegram'
+      ? existsSync(`${accountSessionPath(account, env)}.session`)
+      : existsSync(join(accountRawPath(account, 'whatsapp', env), 'session.db'));
+  }
+  const sessionPath = grant.sessionPath ?? '';
   return grant.source === 'telegram'
-    ? existsSync(`${grant.sessionPath.replace(/\.session$/, '')}.session`)
-    : existsSync(join(grant.sessionPath, 'session.db'));
+    ? existsSync(`${sessionPath.replace(/\.session$/, '')}.session`)
+    : existsSync(join(sessionPath, 'session.db'));
 }
 
 function spawnCapture(input: { executable: string; args: readonly string[]; env: Record<string, string> }): CaptureChild {

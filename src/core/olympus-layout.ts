@@ -66,6 +66,17 @@ export function legacyWhatsAppServiceStateDir(env: LayoutEnv = process.env): str
 }
 
 /**
+ * Legacy: the state folder scripts/whatsapp-live-sync.ts has always used (a cron
+ * job's, not the worker's): `OLYMPUS_WHATSAPP_STATE_DIR` or `<home>/.local/share/olympus/whatsapp-live`.
+ * It reads no other variable (`XDG_DATA_HOME` and every spool or store override
+ * included), so an install that relocates the data folder does not move it.
+ * Kept exactly, with the home as the OS reports it, not `env.HOME`.
+ */
+export function legacyWhatsAppLiveSyncStateDir(env: LayoutEnv = process.env, homeDir: string = homedir()): string {
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join(homeDir, '.local', 'share', 'olympus', 'whatsapp-live');
+}
+
+/**
  * Legacy: where Telegram's connector stores live today. It ignores
  * `XDG_DATA_HOME` (every other store honors it), so with a non-default
  * `XDG_DATA_HOME` the stores sit outside the data root. Kept exactly, because
@@ -137,10 +148,22 @@ export function accountFoldersRoot(env: LayoutEnv = process.env): string {
 const TIERS = ['secure_local', 'internal', 'public_safe'] as const;
 type LegacyTier = (typeof TIERS)[number];
 
-/** A file that sits beside the others in the data root, and the env override that moves it. */
+/**
+ * A file that sits beside the others in the data root, and the env override
+ * that moves it. A source whose files never sat there (messaging) names the
+ * folder they do sit in, and every override of the file in the order the
+ * connector tried them.
+ */
 interface LegacyFile {
   file: string;
-  override?: string;
+  override?: string | readonly string[];
+  dir?: LegacyDir;
+}
+
+/** The folder a legacy file sits in: where it is today (env override applied), and by default. */
+interface LegacyDir {
+  resolved(env: LayoutEnv): string;
+  default(env: LayoutEnv): string;
 }
 
 const gmailStore = (infix: string, overrideInfix: string): LegacyFile => ({
@@ -211,6 +234,29 @@ const LEGACY_STORES: Readonly<Record<string, Readonly<Record<LegacyTier, LegacyF
   },
   // Imported archives: one store set per family (`<family>.<tier>`), no override.
   'archive.imports': { secure_local: undefined, internal: undefined, public_safe: undefined },
+  // Messaging (step 4b): their stores sit outside the data root, with the capture state.
+  'telegram.messages': {
+    internal: { file: 'telegram-internal-connector-store.sqlite', dir: telegramStoreDirs() },
+    secure_local: { file: 'telegram-protected-connector-store.sqlite', dir: telegramStoreDirs() },
+    public_safe: undefined,
+  },
+  'whatsapp.personal.messages': {
+    internal: {
+      file: 'connector-store-internal.db',
+      override: 'OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH',
+      dir: whatsappStateDirs(),
+    },
+    secure_local: {
+      file: 'connector-store.db',
+      override: [
+        'OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH',
+        'OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH',
+        'OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH',
+      ],
+      dir: whatsappStateDirs(),
+    },
+    public_safe: undefined,
+  },
 };
 
 const ARCHIVE_IMPORTS = 'archive.imports';
@@ -232,10 +278,16 @@ function legacyStoreFile(sourceId: string, name: string): LegacyFile {
   return file;
 }
 
-/** `override.trim()` when set, else a file in the data root: the one rule every legacy resolver followed. */
+const overrideNamesOf = (entry: LegacyFile | undefined): readonly string[] =>
+  entry?.override === undefined ? [] : typeof entry.override === 'string' ? [entry.override] : entry.override;
+
+/** The first override that is set, trimmed, else a file in its folder (the data root): the one rule every legacy resolver followed. */
 function legacyFilePath(env: LayoutEnv, entry: LegacyFile): string {
-  const configured = entry.override ? env[entry.override]?.trim() : undefined;
-  return configured || olympusDataPath(env, entry.file);
+  for (const name of overrideNamesOf(entry)) {
+    const configured = env[name]?.trim();
+    if (configured) return configured;
+  }
+  return entry.dir ? join(entry.dir.resolved(env), entry.file) : olympusDataPath(env, entry.file);
 }
 
 /**
@@ -254,13 +306,13 @@ export function accountStorePath(account: LayoutAccount, name: string, env: Layo
 
 /** The env overrides that relocate a source's files today. A `folder` account never honors one. */
 export function legacyOverrideEnvNames(sourceId: string): string[] {
-  const names = Object.values(LEGACY_STORES[sourceId] ?? {}).flatMap((file) => (file?.override ? [file.override] : []));
-  return [...names, ...(LEGACY_RAW_OVERRIDES[sourceId] ?? [])];
+  const names = Object.values(LEGACY_STORES[sourceId] ?? {}).flatMap((file) => overrideNamesOf(file));
+  return [...names, ...(LEGACY_RAW_OVERRIDES[sourceId] ?? []), ...messagingRawOverrides(sourceId)];
 }
 
 /** The env override of one store's legacy path (the connectors export it as a constant). */
 export function legacyStoreOverrideEnv(sourceId: string, name: string): string {
-  const override = legacyStoreFile(sourceId, name).override;
+  const [override] = overrideNamesOf(legacyStoreFile(sourceId, name));
   if (!override) throw new TypeError(`${sourceId} ${name} has no path override.`);
   return override;
 }
@@ -271,13 +323,15 @@ export type AccountRawName =
   | 'watch'
   | 'x-reconcile.sqlite'
   | 'archive-imports.json'
-  | 'archive-import-requests.json';
+  | 'archive-import-requests.json'
+  | MessagingRawName;
 
 const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
   watch: 'local.files',
   'x-reconcile.sqlite': 'x.bookmarks',
   'archive-imports.json': ARCHIVE_IMPORTS,
   'archive-import-requests.json': ARCHIVE_IMPORTS,
+  ...messagingRawOwners(),
 };
 
 const ARCHIVE_STATE_OVERRIDE = 'OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH';
@@ -315,6 +369,8 @@ export function accountRawPath(
   options: { usageDbPath?: string } = {},
 ): string {
   if (RAW_OWNER[name] !== account.source_id) throw new TypeError(`${account.source_id} has no raw state named ${name}.`);
+  const messaging = messagingRawPath(account, name, env);
+  if (messaging !== undefined) return messaging;
   const usage = options.usageDbPath;
   if (name === 'x-reconcile.sqlite') {
     if (account.layout === 'legacy') {
@@ -352,12 +408,256 @@ export function legacyAccountPaths(
   const names = sourceId === ARCHIVE_IMPORTS
     ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`))
     : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
-  const stores = names.map((name) => olympusDataPath(env, legacyStoreFile(sourceId, name).file));
+  const stores = names.map((name) => {
+    const entry = legacyStoreFile(sourceId, name);
+    return entry.dir ? join(entry.dir.default(env), entry.file) : olympusDataPath(env, entry.file);
+  });
   const raw: string[] = [];
   if (sourceId === 'local.files') raw.push(olympusDataPath(env, 'local-files-watch'));
   if (sourceId === 'x.bookmarks') raw.push(`${olympusDataPath(env, 'x-bookmarks-api-usage.sqlite')}.reconcile`);
   if (sourceId === ARCHIVE_IMPORTS) raw.push(olympusDataPath(env, 'archive-imports.json'), olympusDataPath(env, 'archive-import-requests.json'));
-  return { stores, raw };
+  const messaging = legacyMessagingPaths(sourceId, env);
+  return { stores: [...stores, ...messaging.stores], raw: [...raw, ...messaging.raw] };
+}
+
+// ---------------------------------------------------------------------------
+// Messaging accounts (docs/design/source-storage.md, "Layout"; delivery step 4b)
+//
+// Telegram and WhatsApp keep more than stores: a capture child writes a
+// session, a spool and its own state, and a child never reads the registry.
+// The process that spawns it (or, for the Gateway-run services, reads the
+// registry read-only) resolves these paths here and hands them over as env.
+// In a `folder` account they are all inside the account folder:
+//
+//   session/telegram.session    Telegram's login, with its -journal beside it
+//   raw/telegram-spool          the captured messages
+//   raw/telegram-gateway        the reader's state
+//   raw/whatsapp                the bridge's state dir: session.db, spool/, media/, the QR files
+//
+// A `legacy` account resolves each as its caller always did, overrides included.
+
+export const TELEGRAM_SOURCE_ID = 'telegram.messages';
+export const WHATSAPP_SOURCE_ID = 'whatsapp.personal.messages';
+
+/** Raw state of a messaging account (`accountRawPath`). */
+export type MessagingRawName =
+  | 'telegram-spool'
+  | 'telegram-gateway'
+  | 'whatsapp'
+  | 'whatsapp-spool'
+  | 'whatsapp-media'
+  | 'whatsapp-media-root';
+
+const MESSAGING_RAW_NAMES: readonly string[] = [
+  'telegram-spool',
+  'telegram-gateway',
+  'whatsapp',
+  'whatsapp-spool',
+  'whatsapp-media',
+  'whatsapp-media-root',
+];
+
+function messagingRawOwners(): Readonly<Record<MessagingRawName, string>> {
+  return {
+    'telegram-spool': 'telegram.messages',
+    'telegram-gateway': 'telegram.messages',
+    whatsapp: 'whatsapp.personal.messages',
+    'whatsapp-spool': 'whatsapp.personal.messages',
+    'whatsapp-media': 'whatsapp.personal.messages',
+    'whatsapp-media-root': 'whatsapp.personal.messages',
+  };
+}
+
+/** The env that tells the Gateway the native service, not the worker, runs a source's capture. */
+export const NATIVE_CAPTURE_OWNER_ENV_NAMES = {
+  telegram: 'OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER',
+  whatsapp: 'OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER',
+} as const;
+
+// What relocates a messaging account's files today. A `folder` account honors none of them.
+const TELEGRAM_PATH_OVERRIDES = [
+  'OLYMPUS_TELEGRAM_SESSION_PATH',
+  'OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR',
+  'OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR',
+  'OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR',
+  'OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR',
+  'OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH',
+  'OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH',
+] as const;
+const WHATSAPP_PATH_OVERRIDES = [
+  'OLYMPUS_WHATSAPP_STATE_DIR',
+  'OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR',
+  'OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR',
+  'OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR',
+] as const;
+
+function messagingRawOverrides(sourceId: string): readonly string[] {
+  if (sourceId === TELEGRAM_SOURCE_ID) return TELEGRAM_PATH_OVERRIDES;
+  if (sourceId === WHATSAPP_SOURCE_ID) return WHATSAPP_PATH_OVERRIDES;
+  return [];
+}
+
+/**
+ * The native-ownership pin: the env name that says the Gateway-run service
+ * owns this source's capture, when it is set. That service reads its paths
+ * from plugin config and the files of an account it owns stay where they are
+ * (the design's "Gateway-run capture stays legacy"), and the plugin-config
+ * capture paths (`worker.telegramCapture.*`, `worker.whatsappCapture.*`)
+ * reach only that service, so this one pin covers both. Anything but an
+ * explicit off, a value the worker would refuse included, pins.
+ */
+export function nativeCaptureOwnerPin(sourceId: string, env: LayoutEnv = process.env): string | undefined {
+  const name = sourceId === TELEGRAM_SOURCE_ID
+    ? NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram
+    : sourceId === WHATSAPP_SOURCE_ID ? NATIVE_CAPTURE_OWNER_ENV_NAMES.whatsapp : undefined;
+  const value = name ? env[name]?.trim().toLowerCase() : undefined;
+  return name && value && !['false', '0', 'no'].includes(value) ? `${name} (native capture)` : undefined;
+}
+
+/** `<XDG state home>/olympus`: where the Telegram reader keeps its gateway state by default. */
+export function olympusStateRoot(env: LayoutEnv = process.env): string {
+  return join(env.XDG_STATE_HOME?.trim() || join(layoutHome(env), '.local', 'state'), 'olympus');
+}
+
+function telegramStoreDirs(): LegacyDir {
+  return { resolved: legacyTelegramStoreRoot, default: legacyTelegramStoreRoot };
+}
+
+// The worker's WhatsApp state directory: OLYMPUS_WHATSAPP_STATE_DIR, else under the capture root.
+// (Pairing and Unpair spell an override that names `session.db` as its directory; that is theirs,
+// in core/pairing-session-paths.ts, and stays so for a `legacy` account.)
+function legacyWhatsAppStateDir(env: LayoutEnv): string {
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join(legacyCaptureDataRoot(env), 'whatsapp-live');
+}
+
+function whatsappStateDirs(): LegacyDir {
+  return { resolved: legacyWhatsAppStateDir, default: (env) => join(legacyCaptureDataRoot(env), 'whatsapp-live') };
+}
+
+function isMessagingRawName(name: string): name is MessagingRawName {
+  return MESSAGING_RAW_NAMES.includes(name);
+}
+
+function messagingRawPath(account: LayoutAccount, name: AccountRawName, env: LayoutEnv): string | undefined {
+  if (!isMessagingRawName(name)) return undefined;
+  if (account.layout === 'folder') {
+    const raw = join(accountFolder(account, env), 'raw');
+    if (name === 'telegram-spool' || name === 'telegram-gateway') return join(raw, name);
+    if (name === 'whatsapp') return join(raw, 'whatsapp');
+    if (name === 'whatsapp-spool') return join(raw, 'whatsapp', 'spool');
+    if (name === 'whatsapp-media-root') return join(raw, 'whatsapp', 'media');
+    return join(raw, 'whatsapp', 'media', 'audio');
+  }
+  switch (name) {
+    case 'telegram-spool':
+      return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
+        || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim()
+        || join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool');
+    case 'telegram-gateway':
+      return legacyTelegramGatewayStateDir(env);
+    case 'whatsapp':
+      return legacyWhatsAppStateDir(env);
+    case 'whatsapp-spool':
+      return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join(legacyWhatsAppStateDir(env), 'spool');
+    case 'whatsapp-media':
+    case 'whatsapp-media-root': {
+      // The transcribe drain reads the captured audio through its own knobs.
+      const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
+      return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim()
+        || join(transcribeStateDir || legacyWhatsAppStateDir(env), 'media', 'audio');
+    }
+  }
+}
+
+/**
+ * Telegram's session as a Telethon base path (Telethon adds `.session`, and
+ * the pairing receipt names the base): `session/telegram` in the account's
+ * folder, else `OLYMPUS_TELEGRAM_SESSION_PATH` (either spelling, trimmed),
+ * else the capture root's `telegram/telegram.personal`.
+ */
+export function accountSessionPath(account: LayoutAccount, env: LayoutEnv = process.env): string {
+  if (account.source_id !== TELEGRAM_SOURCE_ID) throw new TypeError(`${account.source_id} has no Telegram session.`);
+  if (account.layout === 'folder') return join(accountFolder(account, env), 'session', 'telegram');
+  const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
+  return configured
+    ? (configured.endsWith('.session') ? configured.slice(0, -'.session'.length) : configured)
+    : join(legacyCaptureDataRoot(env), 'telegram', 'telegram.personal');
+}
+
+/**
+ * The path env a `folder` account's capture child is started with, and the
+ * only way it learns where its files are. A spawner applies these after every
+ * other source of env (the grant's included), so nothing in the process
+ * environment can move the child out of the folder.
+ */
+export function folderCaptureEnv(account: LayoutAccount, env: LayoutEnv = process.env): Record<string, string> {
+  if (account.layout !== 'folder') throw new TypeError('Only a folder account has its capture paths set from its folder.');
+  if (account.source_id === TELEGRAM_SOURCE_ID) {
+    return {
+      OLYMPUS_TELEGRAM_SESSION_PATH: accountSessionPath(account, env),
+      OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: accountRawPath(account, 'telegram-gateway', env),
+      OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: accountRawPath(account, 'telegram-spool', env),
+    };
+  }
+  if (account.source_id === WHATSAPP_SOURCE_ID) return { OLYMPUS_WHATSAPP_STATE_DIR: accountRawPath(account, 'whatsapp', env) };
+  throw new TypeError(`${account.source_id} has no capture child.`);
+}
+
+/** The env a `folder` account's capture child must not inherit: a path that would send its files out of the folder. */
+export function folderCaptureEnvRemoved(account: LayoutAccount): string[] {
+  return account.source_id === TELEGRAM_SOURCE_ID
+    ? ['OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR', 'OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH']
+    : [];
+}
+
+/** The directories a `folder` account's capture child writes into, for a spawner to create privately first. */
+export function folderCaptureDirs(account: LayoutAccount, env: LayoutEnv = process.env): string[] {
+  if (account.layout !== 'folder') return [];
+  if (account.source_id === TELEGRAM_SOURCE_ID) {
+    return [
+      dirname(accountSessionPath(account, env)),
+      accountRawPath(account, 'telegram-gateway', env),
+      accountRawPath(account, 'telegram-spool', env),
+    ];
+  }
+  return account.source_id === WHATSAPP_SOURCE_ID ? [accountRawPath(account, 'whatsapp', env)] : [];
+}
+
+/**
+ * Where a messaging account's capture files could be at their default
+ * locations, whichever of the places each capture process picks: the evidence
+ * that the account already lives in the legacy layout, beside its stores.
+ * (Directories count: a capture folder that exists is a legacy account.)
+ */
+/**
+ * The legacy folder whose presence keeps a messaging account `legacy` (the first
+ * of its raw legacy paths, which the placement decision looks at): a pairing that
+ * chose the legacy paths makes it first, so no later decision can place the
+ * account in a folder while its session is being made there.
+ */
+export function legacyCaptureClaimDir(sourceId: string, env: LayoutEnv = process.env): string | undefined {
+  return legacyMessagingPaths(sourceId, env).raw[0];
+}
+
+function legacyMessagingPaths(sourceId: string, env: LayoutEnv): { stores: string[]; raw: string[] } {
+  if (sourceId === TELEGRAM_SOURCE_ID) {
+    const capture = legacyCaptureDataRoot(env);
+    const state = olympusStateRoot(env);
+    return {
+      stores: [],
+      raw: [
+        join(capture, 'telegram'),
+        join(capture, 'telegram-capture'),
+        join(state, 'telegram-capture-gateway'),
+        join(state, 'telegram-spool-drain'),
+      ],
+    };
+  }
+  if (sourceId === WHATSAPP_SOURCE_ID) {
+    // The capture service's default ignores XDG_DATA_HOME, the bridge and the worker honor it.
+    return { stores: [], raw: [join(legacyCaptureDataRoot(env), 'whatsapp-live'), legacyWhatsAppServiceStateDir(env)] };
+  }
+  return { stores: [], raw: [] };
 }
 
 // ---------------------------------------------------------------------------
