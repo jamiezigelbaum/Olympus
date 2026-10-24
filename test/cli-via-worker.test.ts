@@ -4,7 +4,7 @@
 // refuses when it is busy and nothing answers. Spawning tests carry an
 // explicit per-test timeout (test/spawn-timeout-guard.test.ts).
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -20,6 +20,7 @@ import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import {
   WorkerUnreachableError,
+  canonicalDataRoot,
   callWorkerCli,
   runLocallyOrThroughWorker,
 } from '../src/core/cli-via-worker.ts';
@@ -36,7 +37,9 @@ const TOKEN = 'cli-worker-test-token';
 const roots: string[] = [];
 const children: Array<{ kill(signal?: number | NodeJS.Signals): void }> = [];
 const servers: Array<{ stop(closeActiveConnections?: boolean): unknown }> = [];
+const cleanups: Array<() => void> = [];
 afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) cleanup();
   for (const child of children.splice(0)) {
     try { child.kill('SIGKILL'); } catch { /* already gone */ }
   }
@@ -175,7 +178,8 @@ describe('runLocallyOrThroughWorker', () => {
     const asked = worker.requests.find((request) => request.path === '/v1/cli/tier')!;
     expect(asked.method).toBe('POST');
     expect(asked.authorization).toBe(`Bearer ${TOKEN}`);
-    expect(JSON.parse(asked.body)).toEqual({ args: ['explain', 'x'] });
+    // With the data root it is for, which the worker checks is its own.
+    expect(JSON.parse(asked.body)).toEqual({ args: ['explain', 'x'], data_root: canonicalDataRoot(olympusDataRoot(worker.env)) });
   }, 60_000);
 
   test('with the lock held and no worker answering it refuses as busy, naming the data and how to stop Olympus', async () => {
@@ -304,6 +308,35 @@ describe('the CLI while Olympus runs', () => {
     const withoutClock = (value: SourceIngestionLedgerSnapshot) => ({ ...value, generated_at: '<time>' });
     expect(JSON.stringify(withoutClock(viaWorker), null, 2)).toBe(JSON.stringify(withoutClock(local), null, 2));
     expect(formatSourceIngestionLedger(withoutClock(viaWorker))).toBe(formatSourceIngestionLedger(withoutClock(local)));
+  }, 60_000);
+
+  test('a busy lock on another data root does not send the command to the Olympus that answers', async () => {
+    // A script holds an alternate XDG_DATA_HOME's owner lock while the usual
+    // Olympus runs and answers on the usual worker URL with the usual token.
+    const other = mkdtempSync(join(tmpdir(), 'olympus-cli-other-root-'));
+    roots.push(other);
+    await startHolder(sharedEnv({ XDG_DATA_HOME: other }));
+    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!.connectorStorePaths!({})[0]!;
+    mkdirSync(dirname(store), { recursive: true });
+    writeFileSync(store, 'indexed');
+    // Not a database: later tests in this home export and read its stores.
+    cleanups.push(() => rmSync(store, { force: true }));
+    const served = serveRealWorker();
+    const otherEnv = { ...served.env, XDG_DATA_HOME: other };
+    let caught: unknown;
+    try {
+      await runLocallyOrThroughWorker(
+        () => { throw new Error('ran here while another process holds the lock'); },
+        () => callWorkerCli('data-delete', { source_id: 'dropbox.files', dry_run: false }, { env: otherEnv }),
+        otherEnv,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(OperationError);
+    expect((caught as OperationError).code).toBe('config_error');
+    expect((caught as OperationError).message).toContain(canonicalDataRoot(olympusDataRoot(otherEnv)));
+    expect(existsSync(store)).toBe(true);
   }, 60_000);
 
   test('data export writes the same export through the worker as it does locally, to the folder it was given', async () => {

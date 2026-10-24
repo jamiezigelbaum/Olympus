@@ -14,6 +14,8 @@
  *
  * Deliberately light (config, auth and transport only): the CLI imports it.
  */
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { loadConfig, normalizeSourceWorkerBaseUrl } from './config.ts';
 import { DataOwnerBusyError, STOP_OLYMPUS_HINT, tryDataOwnerLock } from './data-owner-lock.ts';
 import { olympusDataRoot, type LayoutEnv } from './olympus-layout.ts';
@@ -67,6 +69,18 @@ export async function runLocallyOrThroughWorker<T>(
   }
 }
 
+/**
+ * A data root as the CLI and the worker compare it: through symlinks when it
+ * exists (a busy owner lock means it does), as given otherwise.
+ */
+export function canonicalDataRoot(root: string): string {
+  try {
+    return realpathSync(root);
+  } catch {
+    return resolve(root);
+  }
+}
+
 export interface WorkerCliCallOptions {
   env?: LayoutEnv;
   /** Test seam: replaces the worker transport (the owner socket on Linux, plain fetch elsewhere). */
@@ -108,7 +122,9 @@ export async function callWorkerCli<T = unknown>(
     response = await fetchImpl(`${baseUrl}${WORKER_CLI_ROUTE_PREFIX}${operation}`, withWorkerAuthHeader({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      // A busy lock says only that someone holds this command's data root; the
+      // worker that answers checks it is the root it owns before acting.
+      body: JSON.stringify({ ...body, data_root: canonicalDataRoot(olympusDataRoot(env)) }),
     }, authToken));
   } catch (error) {
     // The worker answered a moment ago and is gone now (it restarted, or died

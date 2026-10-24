@@ -275,7 +275,7 @@ import { connectThisComputerSource, disconnectThisComputerSource, readThisComput
 import { dataDeleteCustody, deleteOlympusDataWithCustody, requireSource, type DataDeleteWithCustodyResult, type LifecyclePathContext } from '../../data-lifecycle.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
-import { exportForCli, ingestionStatusForCli, tierForCli } from '../cli-operations.ts';
+import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, tierForCli } from '../cli-operations.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -1126,6 +1126,8 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             .find((name) => name === url.pathname.slice(`${basePath}${WORKER_CLI_ROUTE_PREFIX}`.length));
           if (operation) {
             const body = await parseObjectBody(request);
+            const mismatch = cliDataRootMismatch(body, sourceDashboard?.dataLifecyclePathContext ?? { env: process.env });
+            if (mismatch) throw new EmailSourceWorkerError(409, 'config_error', mismatch.message, mismatch.suggestion);
             switch (operation) {
               case 'ingestion-status': return json(await ingestionStatusForCli());
               case 'data-export': return json(exportForCli(body));

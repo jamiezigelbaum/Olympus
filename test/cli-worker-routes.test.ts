@@ -14,7 +14,7 @@ import { RELAYED_REQUEST_HEADER } from '../src/core/remote-access.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
-import { deleteOlympusDataWithCustody, exportOlympusData, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { deleteOlympusDataWithCustody, exportOlympusData, lifecycleDataRoot, lifecycleSourceSpecs, type LifecyclePathContext } from '../src/data-lifecycle.ts';
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import { writeConnectedHandleRegistry, readConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -45,6 +45,11 @@ const post = (operation: string, body: unknown, headers: Record<string, string> 
     body: JSON.stringify(body),
   });
 const bearer = { Authorization: `Bearer ${TOKEN}` };
+/** A body as the CLI sends it: naming the data root it is for, here the worker's own. */
+const forRoot = (body: unknown, context: LifecyclePathContext = { env: process.env }) =>
+  body && typeof body === 'object' && !Array.isArray(body) && !('data_root' in body)
+    ? { ...body, data_root: lifecycleDataRoot(context) }
+    : body;
 
 /** A body that would do real work if the route ran. */
 const WORK: Record<string, Record<string, unknown>> = {
@@ -136,7 +141,7 @@ describe('who can reach the CLI routes', () => {
 });
 
 describe('what the CLI routes return', () => {
-  const run = (operation: string, body: unknown) => createEmailSourceWorker({}).fetch(post(operation, body));
+  const run = (operation: string, body: unknown) => createEmailSourceWorker({}).fetch(post(operation, forRoot(body)));
 
   test('ingestion-status is the ledger the CLI collects itself', async () => {
     const response = await run('ingestion-status', {});
@@ -259,7 +264,7 @@ describe('data-delete: the dashboard\'s delete, by id', () => {
           : { workerRestart: { canRestart: () => true, request: () => { restarts.requested += 1; return true; } } }),
       },
     });
-    const del = (body: Record<string, unknown>) => worker.fetch(post('data-delete', body));
+    const del = (body: Record<string, unknown>) => worker.fetch(post('data-delete', forRoot(body, context)));
     return { registryPath, context, store, restarts, del };
   }
 
@@ -278,6 +283,27 @@ describe('data-delete: the dashboard\'s delete, by id', () => {
     });
     expect(existsSync(f.store)).toBe(false);
     expect(f.restarts.requested).toBe(1);
+  });
+
+  test('refuses, deleting nothing, a command for a data root this worker does not own, or for none', async () => {
+    // A script holds another XDG_DATA_HOME's owner lock while this Olympus runs:
+    // the CLI's busy lock is that root's, and this worker must not act for it.
+    const f = fixture();
+    const elsewhere = tempDir('olympus-cli-route-other-root-');
+    const other = await f.del({ source_id: 'dropbox.files', dry_run: false, data_root: elsewhere });
+    expect(other.status).toBe(409);
+    const refusal = await other.json() as { error: { code: string; message: string; suggestion: string } };
+    expect(refusal.error.code).toBe('config_error');
+    expect(refusal.error.message).toContain(elsewhere);
+    expect(refusal.error.message).toContain(lifecycleDataRoot(f.context));
+    const unnamed = await f.del({ source_id: 'dropbox.files', dry_run: false, data_root: '' });
+    expect(unnamed.status).toBe(409);
+    expect(existsSync(f.store)).toBe(true);
+    expect(f.restarts.requested).toBe(0);
+    for (const operation of WORKER_CLI_OPERATIONS) {
+      const response = await createEmailSourceWorker({}).fetch(post(operation, { ...WORK[operation], data_root: elsewhere }));
+      expect(response.status, operation).toBe(409);
+    }
   });
 
   test('a dry run answers what the CLI\'s own dry run answers, and changes nothing', async () => {

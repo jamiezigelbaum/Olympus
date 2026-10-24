@@ -10,10 +10,11 @@
  * (workers/http.ts); the handlers stay thin: parse, call, return.
  */
 import { isAbsolute } from 'node:path';
+import { canonicalDataRoot } from '../core/cli-via-worker.ts';
 import { loadConfig } from '../core/config.ts';
 import { STOP_OLYMPUS_HINT } from '../core/data-owner-lock.ts';
 import { OperationError } from '../core/operation-error.ts';
-import { exportOlympusData, type DataExportResult } from '../data-lifecycle.ts';
+import { exportOlympusData, lifecycleDataRoot, type DataExportResult, type LifecyclePathContext } from '../data-lifecycle.ts';
 import {
   runTierCommand,
   tierCommandOpensStores,
@@ -23,6 +24,32 @@ import { collectLocalSourceIngestionLedger } from './source-ingestion-ledger.ts'
 
 const TIER_ARGS_MAX = 64;
 const TIER_ARG_MAX_LENGTH = 4096;
+
+/**
+ * Why this worker will not run a CLI command for the data root it names, or
+ * nothing when the root is its own. A busy owner lock says only that someone
+ * holds the command's root: an operator script on another XDG_DATA_HOME, say,
+ * while the usual Olympus runs and answers. That worker must not delete or
+ * export its own data in the other root's name.
+ */
+export function cliDataRootMismatch(
+  body: Record<string, unknown>,
+  context: LifecyclePathContext,
+): { message: string; suggestion: string } | undefined {
+  const owned = canonicalDataRoot(lifecycleDataRoot(context));
+  const asked = typeof body.data_root === 'string' && body.data_root ? canonicalDataRoot(body.data_root) : undefined;
+  if (asked === owned) return undefined;
+  if (!asked) {
+    return {
+      message: 'This command did not say which Olympus data it is for.',
+      suggestion: 'Run it with the olympus command that matches the running Olympus.',
+    };
+  }
+  return {
+    message: `The running Olympus owns its data at ${owned}, not ${asked}, which another process holds.`,
+    suggestion: `Wait for or stop whatever holds ${asked} (an operator script, or another Olympus), then run the command again.`,
+  };
+}
 
 /** `olympus ingestion status`: the ledger, collected in this process. */
 export function ingestionStatusForCli() {
