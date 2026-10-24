@@ -21,6 +21,23 @@
  *   member is entered by inflating from its start, unless a continuation
  *   (`ZipMemberReader.suspend`, kept by `continuation-cache.ts`) holds the
  *   inflater exactly where the last pass stopped.
+ * - Catching up: inflating a deflated member to the offset it was entered at
+ *   can be gigabytes of work, and `next()` is synchronous. A reader opened
+ *   with `replayStepBytes` does that work in steps: one `next()` or
+ *   `catchUp()` call inflates and discards about that many bytes (plus the
+ *   output of one push of compressed bytes), then says so. While
+ *   `catchingUp` is true `next()` returns an empty chunk and `catchUp()`
+ *   returns false. A connector that opens a member part-way:
+ *
+ *       const zip = ZipMemberReader.open(archive, entry, { start, replayStepBytes: ZIP_REPLAY_STEP_BYTES });
+ *       while (zip.catchingUp) {
+ *         if (!passBudgetLeft()) { park(zip.suspend()); return; }   // the next pass continues the catch-up
+ *         zip.catchUp();
+ *       }
+ *
+ *   `replayedBytes` counts what was inflated and thrown away, for the pass
+ *   budget. A parked catch-up is taken up by the pass that opens the member
+ *   at the same `start`; with no parked inflater the catch-up starts over.
  * - Changes: every read goes through the caller's range reader, which refuses
  *   a file that changed under it; `stoppableZipSource` turns that into the
  *   import's stopped error.
@@ -52,6 +69,12 @@ export const ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
  * more than about 1032 to 1, so one push yields at most about 17 MiB.
  */
 export const ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+/**
+ * How much of a deflated member one step of catching up inflates and throws
+ * away (the recommended `replayStepBytes`): long enough to be cheap, short
+ * enough that the pass budget is asked often.
+ */
+export const ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
 /**
  * More than this waiting in a suspended member is not kept: the next pass inflates again.
  */
@@ -675,7 +698,9 @@ export interface ZipMemberEnd {
  */
 export interface ZipContinuation {
   /**
-   * The offset in the member the next chunk starts at.
+   * The offset in the member the next chunk delivered starts at: where it
+   * must be opened. An inflater suspended while still catching up is that
+   * offset, not how far it has got.
    */
   readonly position: number;
   /**
@@ -686,6 +711,8 @@ export interface ZipContinuation {
 }
 
 interface ContinuationState extends ZipContinuation {
+  // How far the inflater has got: `position`, or less while it is still catching up.
+  readonly reached: number;
   readonly memberKey: string;
   readonly crc: number;
   readonly crcKnown: boolean;
@@ -713,6 +740,14 @@ export interface ZipMemberOpenOptions {
    * A continuation for exactly this member at exactly `start`.
    */
   continuation?: ZipContinuation;
+  /**
+   * Bounds the work of catching up to `start` in a deflated member: one
+   * `next()` or `catchUp()` call inflates and discards at least this many
+   * bytes at most before it returns (plus the output of the push it was in,
+   * under 17 MiB, about the size of the push for data that does not compress).
+   * Left out, the first `next()` catches up in one go.
+   */
+  replayStepBytes?: number;
 }
 
 /**
@@ -741,6 +776,11 @@ export class ZipMemberReader implements ArchiveByteSource {
   private compressedOffset = 0;
   private inflateFinished = false;
   private failure: ZipMemberError | undefined;
+  // Bytes inflated and thrown away to reach the offset the member was entered at.
+  private replayed = 0;
+  private readonly replayStep: number | undefined;
+  // The member ended before the offset it was entered at (a damaged stream): there is nothing more to catch up to.
+  private catchUpEnded = false;
 
   private constructor(archive: ZipArchive, entry: ZipEntry, dataStart: number, options: ZipMemberOpenOptions) {
     this.archive = archive;
@@ -751,6 +791,10 @@ export class ZipMemberReader implements ArchiveByteSource {
       throw new ZipMemberError('damaged', entry.name, 'The offset to start a member at is not inside it.');
     }
     this.startAt = start;
+    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
+      throw new RangeError('replayStepBytes must be a positive whole number');
+    }
+    this.replayStep = options.replayStepBytes;
     this.crcKnown = start === 0;
     // Nothing to inflate: a directory, a stored member of no bytes, or a deflated one that holds no stream at all.
     // A deflated member with a stream, even one that claims to expand to nothing, still runs its stream below.
@@ -778,7 +822,7 @@ export class ZipMemberReader implements ArchiveByteSource {
       this.compressedOffset = 0;
       this.out = [...kept.out];
       this.inflateFinished = kept.inflateFinished;
-      this.pos = start;
+      this.pos = kept.reached;
       this.runningCrc = kept.crc;
       this.crcKnown = kept.crcKnown;
       return;
@@ -823,7 +867,26 @@ export class ZipMemberReader implements ArchiveByteSource {
    * The CRC-32 of the bytes before `position`; undefined when this read cannot know it.
    */
   get crc32(): number | undefined {
-    return this.crcKnown ? this.runningCrc : undefined;
+    // While the inflater is still catching up, the sum is of less than the bytes before `position`.
+    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
+  }
+
+  /**
+   * The inflater has not reached the offset the member was entered at: the
+   * work of getting there is still being done in steps (`replayStepBytes`).
+   */
+  get catchingUp(): boolean {
+    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
+  }
+
+  /**
+   * How many bytes were inflated and thrown away to get to the offset this
+   * member was entered at: the cost of entering a deflated member somewhere
+   * other than its start with no continuation to take up. Zero otherwise.
+   * Only complete once the first `next()` has returned.
+   */
+  get replayedBytes(): number {
+    return this.replayed;
   }
 
   /**
@@ -834,28 +897,21 @@ export class ZipMemberReader implements ArchiveByteSource {
   }
 
   next(): Uint8Array | undefined {
-    if (this.closed) throw new Error('This member reader was suspended or closed.');
-    if (this.failure) throw this.failure;
+    this.assertUsable();
+    // Still catching up: an empty chunk says so (a chunk is otherwise never empty); `catchingUp` is true.
+    if (!this.replay()) {
+      this.heldLast = 0;
+      this.lastChunk = new Uint8Array(0);
+      return this.lastChunk;
+    }
     for (;;) {
-      let chunk = this.out.shift();
+      const chunk = this.out.shift();
       if (chunk === undefined) {
         if (!this.fillOrFail()) {
           this.conclude();
           return undefined;
         }
         continue;
-      }
-      if (this.pos < this.startAt) {
-        const skip = this.startAt - this.pos;
-        if (chunk.length <= skip) {
-          this.runningCrc = crc32Update(this.runningCrc, chunk);
-          this.pos += chunk.length;
-          continue;
-        }
-        const head = chunk.subarray(0, skip);
-        this.runningCrc = crc32Update(this.runningCrc, head);
-        this.pos += head.length;
-        chunk = chunk.subarray(skip);
       }
       this.crcBeforeLast = this.runningCrc;
       if (this.crcKnown) this.runningCrc = crc32Update(this.runningCrc, chunk);
@@ -864,6 +920,49 @@ export class ZipMemberReader implements ArchiveByteSource {
       this.pos += chunk.length;
       return chunk;
     }
+  }
+
+  /**
+   * One step of catching up to the offset the member was entered at: inflates
+   * and discards up to `replayStepBytes` (all of it when none was given) and
+   * delivers nothing. True once there is nothing more to catch up to; false
+   * while `catchingUp`. Calling it on a member that is not catching up is
+   * harmless and true.
+   */
+  catchUp(): boolean {
+    this.assertUsable();
+    return this.replay();
+  }
+
+  private assertUsable(): void {
+    if (this.closed) throw new Error('This member reader was suspended or closed.');
+    if (this.failure) throw this.failure;
+  }
+
+  /**
+   * Inflates and discards what comes before the offset the member was entered
+   * at, until there, or until the step is used up (false).
+   */
+  private replay(): boolean {
+    const stepFrom = this.replayed;
+    while (this.pos < this.startAt && !this.catchUpEnded) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep) return false;
+        if (!this.fillOrFail()) {
+          this.catchUpEnded = true;
+          break;
+        }
+        continue;
+      }
+      const skip = this.startAt - this.pos;
+      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
+      this.runningCrc = crc32Update(this.runningCrc, head);
+      this.pos += head.length;
+      this.replayed += head.length;
+      if (head.length < chunk.length) this.out.unshift(chunk.subarray(head.length));
+    }
+    return true;
   }
 
   unread(count: number): void {
@@ -888,10 +987,12 @@ export class ZipMemberReader implements ArchiveByteSource {
     this.closed = true;
     if (this.entry.method !== 8 || !this.inflate || (this.inflateFinished && this.out.length === 0)) return undefined;
     const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
-    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES || this.pos < this.startAt) return undefined;
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES) return undefined;
     const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
     const state: ContinuationState = {
-      position: this.pos,
+      // Still catching up: the next pass opens the member at `startAt` again, and goes on from where the inflater is.
+      position: Math.max(this.pos, this.startAt),
+      reached: this.pos,
       retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
       memberKey: memberKey(this.entry),
       crc: this.runningCrc,

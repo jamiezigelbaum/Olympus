@@ -43,6 +43,13 @@ export interface ArchiveProbeEntry {
    */
   members?: readonly ArchiveProbeEntry[];
   /**
+   * A zip with no member a format names as a signature (`signatureNames`)
+   * and more members a format asks for (`probeNames`) than the probe read the
+   * first bytes of: how many it did not. Absent when it read them all, or
+   * when a signature member says what the zip is.
+   */
+  membersNotLookedAt?: number;
+  /**
    * For a JSON file: reads on past `head` to the keys of the first record of
    * the list at `list` (the keys from the document's root; `[]` is the root
    * itself), skipping every value, so a first record that writes a long text
@@ -74,6 +81,22 @@ export interface ArchiveProbe {
    * names a format asks for (`probeNames`).
    */
   children: readonly ArchiveProbeEntry[];
+  /**
+   * For a chosen folder: how many of its entries whose names a format asks for
+   * (`probeNames`) the probe did not look at because there were more than
+   * ARCHIVE_PROBE_MAX_NAMED of them. Zero when it looked at all.
+   */
+  notLookedAt?: number;
+  /**
+   * For a chosen folder: how many files nobody asked for by name the probe did
+   * not read the first bytes of (more than it reads, or past the first
+   * ARCHIVE_PROBE_MAX_CHILDREN entries), and zips among the files it read
+   * that it did not open. A format that detects from the first bytes alone
+   * can have its export among them, whatever the format: when nothing is
+   * detected, the refusal says the look was not complete. Zero or absent when
+   * it read them all.
+   */
+  othersNotLookedAt?: number;
   /**
    * For a chosen folder, or a chosen zip: whether a read on past a first
    * bytes (`firstRecordKeys`, `listIsEmpty`) was refused because the
@@ -107,6 +130,14 @@ export interface ArchiveFormatDefinition {
    */
   probeNames?: readonly string[];
   /**
+   * The few `probeNames` that say what the export is by themselves (`result.json`,
+   * `_chat.txt`), as against patterns that match any file of a kind (`*.txt`).
+   * The probe lists and reads these before the broad ones, so a hundred
+   * ordinary text files ahead of `_chat.txt` in a zip or a folder cannot hide
+   * it. They count as asked names without being listed in `probeNames` too.
+   */
+  signatureNames?: readonly string[];
+  /**
    * Other forms of this format's export that cannot be read, recognised by the
    * same cheap probe, with what the person can do instead. Only consulted when
    * no format matched: the refusal then carries the advice beside the list of
@@ -118,6 +149,12 @@ export interface ArchiveFormatDefinition {
    * the probe is this format; undefined when it is not.
    */
   detect(probe: ArchiveProbe): readonly string[] | undefined;
+  /**
+   * For a chosen folder: how many of its files look like this format's
+   * exports but were not taken, because nothing besides their first bytes
+   * says so. They are counted and told, never silently left out.
+   */
+  unconfirmed?(probe: ArchiveProbe): number;
 }
 
 /**
@@ -159,6 +196,101 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
     const inner = probe.children.find((entry) =>
       entry.kind === 'file' && entry.name === 'mbox' && startsWithFromLine(entry.head));
     return inner ? [inner.relPath] : undefined;
+  },
+});
+
+// --- WhatsApp chat export ------------------------------------------------------
+
+// The signature of a WhatsApp message line, as a first line: a date and a
+// time in brackets, or a date and a time and a dash. The connector's grammar
+// (workers/archive-import/whatsapp/grammar.ts) reads every style the phones
+// write and decides what a line means; detection only has to tell a chat
+// export from other text, so this stays a loose shape and a test holds it in
+// step with the grammar.
+const WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
+const WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
+const WHATSAPP_FIRST_LINE = new RegExp(
+  `^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`,
+  'i',
+);
+// Direction marks, a byte order mark and no-break spaces that phones put around a line.
+const WHATSAPP_LINE_NOISE = new RegExp('[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]', 'g');
+const WHATSAPP_NARROW_SPACES = new RegExp('[\\u00a0\\u202f\\u2007\\u2009]', 'g');
+// How WhatsApp names the text of an export: iOS `_chat.txt`, Android `WhatsApp Chat with <name>.txt`.
+const WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
+
+function lastNameOf(name: string): string {
+  return name.split('/').pop() ?? name;
+}
+
+function whatsAppNoiseName(name: string): boolean {
+  const base = lastNameOf(name);
+  return name.endsWith('/') || name.startsWith('__MACOSX/') || name.includes('/__MACOSX/')
+    || base.startsWith('._') || base === '.DS_Store';
+}
+
+/** Whether a name says it is the text of a WhatsApp export: the evidence a folder's file needs. */
+function whatsAppNamed(name: string): boolean {
+  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
+}
+
+function startsLikeWhatsAppChat(head: Uint8Array | undefined): boolean {
+  if (!head || head.length < 10 || head.includes(0)) return false;
+  for (const raw of new TextDecoder('utf-8').decode(head).split('\n').slice(0, 8)) {
+    const line = raw.replace(WHATSAPP_LINE_NOISE, '').replace(WHATSAPP_NARROW_SPACES, ' ').replace(/\r$/, '');
+    if (line.trim() === '') continue;
+    return WHATSAPP_FIRST_LINE.test(line);
+  }
+  return false;
+}
+
+/**
+ * Whether a file starts like a chat export. A zip is one when a text member of it
+ * does; with `needName`, the member (or the text file) must also be named as
+ * WhatsApp names an export. A header-shaped first line alone is the weaker evidence.
+ */
+function whatsAppIsExport(entry: ArchiveProbeEntry, needName: boolean): boolean {
+  if (entry.kind !== 'file') return false;
+  if (entry.members) {
+    return entry.members.some((member) =>
+      member.kind === 'file' && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith('.txt')
+      && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
+  }
+  return entry.name.toLowerCase().endsWith('.txt') && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
+}
+
+/**
+ * A WhatsApp chat export: the text file of "Export Chat" (`_chat.txt` from an
+ * iPhone, `WhatsApp Chat with <name>.txt` from an Android phone), or the zip
+ * WhatsApp shares, which holds that text file and the chat's media. A chosen
+ * folder imports every export in it.
+ *
+ * What counts as an export depends on who chose it. A file the person chose
+ * themselves is one when it starts like a chat (any name). A file found in a
+ * chosen folder needs more: a text file named as WhatsApp names it, or a zip
+ * holding one, and the start of a chat inside. A header-shaped line alone is
+ * not enough there: a build log or a debug dump can start the same way.
+ */
+export const WHATSAPP_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'whatsapp_chat',
+  label: 'WhatsApp chat export',
+  family: 'chat',
+  provider: 'whatsapp_export',
+  chooseHint: 'a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)',
+  citationLabel: 'WhatsApp',
+  // Every text file and every zip is looked at, however it is named: the evidence is inside (see above).
+  // The names WhatsApp gives its exports are looked at before the rest, so ordinary files ahead of them cannot hide them.
+  probeNames: Object.freeze(['*.txt', '*.zip']),
+  signatureNames: Object.freeze(['_chat.txt', 'WhatsApp Chat with *.txt', 'WhatsApp Chat - *.txt', 'WhatsApp Chat*.zip']),
+  detect(probe: ArchiveProbe): readonly string[] | undefined {
+    if (probe.chosen.kind === 'file') return whatsAppIsExport(probe.chosen, false) ? [''] : undefined;
+    const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
+    return found.length > 0 ? found : undefined;
+  },
+  unconfirmed(probe: ArchiveProbe): number {
+    if (probe.chosen.kind === 'file') return 0;
+    // Files that start like a chat but nothing else says they are an export: left alone, and counted.
+    return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
   },
 });
 
@@ -558,6 +690,7 @@ export const TELEGRAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.free
 
 export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([
   MBOX_ARCHIVE_FORMAT,
+  WHATSAPP_ARCHIVE_FORMAT,
   REFLECT_JSON_ARCHIVE_FORMAT,
   REFLECT_MARKDOWN_ARCHIVE_FORMAT,
   ROAM_JSON_ARCHIVE_FORMAT,
@@ -618,7 +751,15 @@ export function archiveFormatsOfFamily(
  * Every name pattern the formats ask the probe to look for, once each.
  */
 export function archiveProbeNames(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): readonly string[] {
-  return [...new Set(formats.flatMap((format) => format.probeNames ?? []))];
+  return [...new Set(formats.flatMap((format) => [...(format.probeNames ?? []), ...(format.signatureNames ?? [])]))];
+}
+
+/**
+ * Every signature name pattern the formats have, once each: the names the
+ * probe looks for before any other.
+ */
+export function archiveSignatureNames(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): readonly string[] {
+  return [...new Set(formats.flatMap((format) => format.signatureNames ?? []))];
 }
 
 /**
@@ -680,10 +821,26 @@ export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[
 
 /**
  * What the person is told when a folder or a zip had more to look through
- * than the probe may read: nothing is imported, because a file or member left
- * unchecked could be a second export that would be dropped without a word.
+ * than the probe may read, in either way: a read on past a file's first bytes
+ * ran out of its allowance (some parts are very large), or there were more
+ * files than the first look takes in (their first bytes were not read, or
+ * they were not opened). A file or member left unchecked could be a second
+ * export that would be dropped without a word, so a pick whose look ran out
+ * of allowance is never imported, and one that found nothing says so.
  */
-export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through everything you chose to see which parts are exports, because some parts are very large. Choose just the export file, or a folder or zip that holds only the export.';
+export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.';
+
+/**
+ * How many files of a pick the look named but did not reach, and the record
+ * counts (`files_not_looked_at`): files a format asked for by name past the
+ * room for them, and members of a zip it asked for that were not read. A
+ * format that tells its export from the first bytes alone is covered too, by
+ * `othersNotLookedAt`, which only a refusal mentions.
+ */
+export function archiveFilesNotLookedAt(probe: ArchiveProbe): number {
+  return (probe.notLookedAt ?? 0)
+    + [probe.chosen, ...probe.children].reduce((sum, entry) => sum + (entry.membersNotLookedAt ?? 0), 0);
+}
 
 /**
  * Which format a probe is. No match says so and lists what is supported; two
@@ -705,10 +862,12 @@ export function detectArchiveFormat(
   const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
   const settled = new Set(onHeads.flatMap((match) => match.files));
   const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled, formats), formats);
-  const incomplete = probe.readsRanOut?.() === true;
-  if (matches.length === 1 && !incomplete) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
+  const ranOut = probe.readsRanOut?.() === true;
+  if (matches.length === 1 && !ranOut) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
   if (matches.length > 1) return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
   const supported = formats.map((format) => format.label);
+  // Nothing was taken: whatever the look did not reach, of any format, may be the export. One sentence says so, once.
+  const incomplete = ranOut || archiveFilesNotLookedAt(probe) + (probe.othersNotLookedAt ?? 0) > 0;
   const advice = [unsupportedAdvice(probe, formats), incomplete ? ARCHIVE_LOOK_INCOMPLETE_ADVICE : undefined]
     .filter((said): said is string => said !== undefined)
     .join(' ');
@@ -808,6 +967,11 @@ export interface ArchiveImportFinding {
   fileIndex: number;
   offset: number;
   count?: number;
+  // A finding that tallies several occurrences of one kind in one file (a page's worth of notices, say) tells the
+  // offset of each, `offset` being the first and `count` how many. The store counts only the occurrences past
+  // what it counted before, so a replay whose pages are cut differently counts each once. Without it, all
+  // `count` occurrences are taken to be at `offset`.
+  at?: readonly number[];
 }
 
 /**
@@ -826,6 +990,12 @@ export const ARCHIVE_COMMON_FINDINGS = {
   sectionNotImported: 'section_not_imported',
   /** A file inside the archive whose bytes did not check out, so what was read of it may be wrong. */
   fileDamaged: 'file_damaged',
+  /** Skipped: items the listing produced that the archive's stores already held from an earlier file, so they were imported once. */
+  itemRepeated: 'item_repeated',
+  /** Skipped: files in a chosen folder or zip the first look did not reach, so any export among them was not imported. */
+  filesNotLookedAt: 'files_not_looked_at',
+  /** Skipped: files in a chosen folder that look like exports but were not taken, because their names do not say so. */
+  filesUnconfirmed: 'files_unconfirmed',
 } as const;
 
 export interface ArchiveConnectorInput {
@@ -846,6 +1016,16 @@ export interface ArchiveConnectorInput {
    * page's cursor, never this.
    */
   reportPosition?(position: { fileIndex: number; offset: number }): void;
+  /**
+   * Where each item of the page about to go out is in the archive, in the
+   * order of the page's items and in the coordinates findings use (`fileIndex`
+   * and `offset`, strictly increasing over the archive's items). Told just
+   * before the page goes out. With it the import counts the items the stores
+   * already hold from another file once each, by position, however the same
+   * items are cut into pages when a listing is replayed after a restart. A
+   * connector that does not tell has such items counted by whole pages.
+   */
+  reportItemPositions?(positions: ReadonlyArray<{ fileIndex: number; offset: number }>): void;
   /** Bytes read per listing before it pauses with a resume point. */
   maxBytesPerListing?: number;
   pageSize?: number;

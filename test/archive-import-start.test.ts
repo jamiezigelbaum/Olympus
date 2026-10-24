@@ -9,10 +9,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ARCHIVE_FORMATS,
+  ARCHIVE_LOOK_INCOMPLETE_ADVICE,
+  ARCHIVE_PROBE_MAX_CHILDREN,
   MBOX_ARCHIVE_FORMAT,
   detectArchiveFormat,
   type ArchiveFormatDefinition,
 } from '../src/core/archive-formats.ts';
+import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
+import { probeArchivePath } from '../src/workers/archive-import/manifest.ts';
 import { requestArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { startArchiveImport } from '../src/workers/archive-import/start.ts';
 import { ArchiveImportStateStore } from '../src/workers/archive-import/state.ts';
@@ -128,6 +132,82 @@ describe('archive format detection', () => {
     expect(startArchiveImport({ state: f.state, path: 'exports/Inbox' })).toEqual({ kind: 'unreadable', code: 'escape' });
     expect(startArchiveImport({ state: f.state, path: join(f.exports, 'missing.mbox') })).toEqual({ kind: 'unreadable', code: 'not_found' });
     expect(existsSync(f.state.path)).toBe(false);
+  });
+});
+
+/** A format of some other kind that tells its export from the first bytes alone and asks for no name: nothing in its definition says where to look. */
+const CONTENT_ONLY: ArchiveFormatDefinition = {
+  ...MBOX_ARCHIVE_FORMAT,
+  id: 'synthetic-content-only',
+  label: 'Synthetic content-only export',
+  family: 'note',
+  detect(probe) {
+    const found = probe.children.filter((entry) => entry.kind === 'file' && new TextDecoder().decode(entry.head).startsWith('{"synthetic-export"')).map((entry) => entry.relPath);
+    return found.length > 0 ? found : undefined;
+  },
+};
+
+/** Runs `body` with every folder listed in name order, as some systems list it, so where a name falls in the listing does not depend on the machine. */
+function listedByName<T>(body: () => T): T {
+  const original = ScopeRoot.prototype.list;
+  ScopeRoot.prototype.list = function (this: ScopeRoot, relDir: string) {
+    return original.call(this, relDir).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  };
+  try {
+    return body();
+  } finally {
+    ScopeRoot.prototype.list = original;
+  }
+}
+
+describe('a folder the first look does not reach every file of', () => {
+  const ordinary = (dir: string, count: number) => { for (let index = 0; index < count; index += 1) writeFileSync(join(dir, `a-note-${String(index).padStart(4, '0')}.dat`), 'plain'); };
+
+  test('an export of any format that nobody asks for by name, past the first files read, is not silently lost: the refusal says the look was not complete', () => {
+    const f = fixture();
+    const dir = join(f.exports, 'Many files');
+    mkdirSync(dir);
+    ordinary(dir, 40);
+    writeFileSync(join(dir, 'z-export.dat'), '{"synthetic-export":1}');
+    const refused = listedByName(() => startArchiveImport({ state: f.state, path: dir, formats: [CONTENT_ONLY] }));
+    expect(refused.kind).toBe('unsupported');
+    if (refused.kind === 'unsupported') expect(refused.advice).toContain(ARCHIVE_LOOK_INCOMPLETE_ADVICE);
+    expect(existsSync(f.state.path)).toBe(false);
+  });
+
+  test('the same export among the files read is found, and a folder whose every file was read says nothing of the kind', () => {
+    const f = fixture();
+    const dir = join(f.exports, 'Few files');
+    mkdirSync(dir);
+    ordinary(dir, 10);
+    writeFileSync(join(dir, 'z-export.dat'), '{"synthetic-export":1}');
+    const started = listedByName(() => startArchiveImport({ state: f.state, path: dir, formats: [CONTENT_ONLY] }));
+    expect(started.kind).toBe('started');
+    if (started.kind === 'started') expect(started.archive.findings.skipped).toEqual({});
+    const empty = join(f.exports, 'Plain');
+    mkdirSync(empty);
+    ordinary(empty, 3);
+    const refused = listedByName(() => startArchiveImport({ state: f.state, path: empty, formats: [CONTENT_ONLY] }));
+    expect(refused.kind).toBe('unsupported');
+    if (refused.kind === 'unsupported') expect(refused.advice ?? '').not.toContain(ARCHIVE_LOOK_INCOMPLETE_ADVICE);
+  });
+
+  test('the probe counts the files it did not reach: past the few it reads, past the bound, and not those asked for by name', () => {
+    const f = fixture();
+    const dir = join(f.exports, 'Hundreds');
+    mkdirSync(dir);
+    const total = ARCHIVE_PROBE_MAX_CHILDREN + 20;
+    ordinary(dir, total);
+    const root = ScopeRoot.open(dir);
+    cleanups.push(() => root.close());
+    const probe = listedByName(() => probeArchivePath(root, '', { probeNames: [] }));
+    expect(probe.children.filter((child) => child.head)).toHaveLength(32);
+    expect(probe.othersNotLookedAt).toBe(total - 32);
+    // A name a format asks for is read ahead of the rest, and is not counted.
+    writeFileSync(join(dir, 'zz-asked.json'), '{"asked":1}');
+    const asked = listedByName(() => probeArchivePath(root, '', { probeNames: ['zz-asked.json'] }));
+    expect(asked.children.find((child) => child.name === 'zz-asked.json')?.head).toBeDefined();
+    expect(asked.othersNotLookedAt).toBe(total - 31);
   });
 });
 

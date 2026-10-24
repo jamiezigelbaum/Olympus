@@ -1996,6 +1996,12 @@ export interface DashboardArchiveNouns {
   readonly many: string;
   readonly none: string;
   readonly plural: string;
+  /**
+   * Said beside the archive's dates when its family's exports are a copy of
+   * a conversation as it was on the day it was exported: later messages are
+   * not added. Empty for a family whose archives are not.
+   */
+  readonly snapshot: string;
 }
 
 /**
@@ -2003,10 +2009,10 @@ export interface DashboardArchiveNouns {
  * them (`family` of the archive's entry). A family with no entry says items.
  */
 export const DASHBOARD_ARCHIVE_NOUNS: Readonly<Record<'email' | 'chat' | 'note' | 'other', DashboardArchiveNouns>> = {
-  email: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages' },
-  chat: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages' },
-  note: { one: '1 note', many: '{n} notes', none: 'no notes', plural: 'notes' },
-  other: { one: '1 item', many: '{n} items', none: 'no items', plural: 'items' },
+  email: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages', snapshot: '' },
+  chat: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages', snapshot: 'Snapshot, not updated' },
+  note: { one: '1 note', many: '{n} notes', none: 'no notes', plural: 'notes', snapshot: '' },
+  other: { one: '1 item', many: '{n} items', none: 'no items', plural: 'items', snapshot: '' },
 };
 
 /** The nouns for an archive's family, or the neutral ones. */
@@ -2107,6 +2113,9 @@ export const DASHBOARD_ARCHIVE_COPY = {
     attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+    message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
+    status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
     // Notes exports (Reflect, Roam): archive-import/notes/note.ts NOTE_FINDINGS.
     note_empty: { one: '1 note with nothing written in it left out', many: '{n} notes with nothing written in them left out' },
     note_unreadable: { one: '1 note could not be read', many: '{n} notes could not be read' },
@@ -2118,9 +2127,12 @@ export const DASHBOARD_ARCHIVE_COPY = {
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
     media_not_imported: { one: '1 picture, recording or other file the archive refers to was not imported', many: '{n} pictures, recordings or other files the archive refers to were not imported' },
     item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },
-    assumption: { one: '1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)', many: '{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)' },
+    assumption: { one: '1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, which part of a date is the day, that a line shaped like the start of a message is one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)', many: '{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, which parts of dates are the day, that lines shaped like the start of a message are one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)' },
     section_not_imported: { one: '1 part of the archive is not imported', many: '{n} parts of the archive are not imported' },
     file_damaged: { one: '1 file in the archive looks damaged, so what was read from it may be wrong', many: '{n} files in the archive look damaged, so what was read from them may be wrong' },
+    item_repeated: { one: '1 message was in more than one export file and was imported once', many: '{n} messages were in more than one export file and were imported once' },
+    files_not_looked_at: { one: '1 file in what you chose was not looked at, so it was not imported if it is an export', many: '{n} files in what you chose were not looked at, so any of them that are exports were not imported' },
+    files_unconfirmed: { one: '1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)', many: '{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },
   },
   seeWhy: 'See what was not read',

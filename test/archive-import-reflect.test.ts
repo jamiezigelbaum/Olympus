@@ -5,7 +5,7 @@
 // the runtime. Synthetic exports built in code, never a real one.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ARCHIVE_COMMON_FINDINGS,
@@ -1329,6 +1329,77 @@ describe('a second export that the first bytes do not tell is not left out of a 
     // The first export alone is the import.
     unlinkSync(join(dir, 'b.json'));
     expect(startArchiveImport({ state, path: dir }).kind).toBe('started');
+  });
+
+  // The listing in name order, so where the export falls among the files does not depend on the machine.
+  function inNameOrder<T>(body: () => T): T {
+    const original = ScopeRoot.prototype.list;
+    ScopeRoot.prototype.list = function (this: ScopeRoot, relDir: string) {
+      return original.call(this, relDir).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    };
+    try {
+      return body();
+    } finally {
+      ScopeRoot.prototype.list = original;
+    }
+  }
+
+  describe('a real Reflect export as the 33rd file of a folder is found or reported, never dropped', () => {
+    const realExport = () => reflectJson(reflectNotes(3, 'lighthouse'));
+    const pad = (index: number) => String(index).padStart(2, '0');
+    const fill = (dir: string, count: number, name: (index: number) => string, content: string) => {
+      for (let index = 0; index < count; index += 1) writeFileSync(join(dir, name(index)), content);
+    };
+    const probeInOrder = (dir: string) => {
+      const root = ScopeRoot.open(dir);
+      try {
+        return inNameOrder(() => probeArchivePath(root, '', { probeNames: archiveProbeNames() }));
+      } finally {
+        root.close();
+      }
+    };
+
+    test('named like a JSON export, it is read ahead of 32 other JSON files and is the match', () => {
+      const dir = tempFolder(cleanups);
+      fill(dir, 32, (index) => `a-${pad(index)}.json`, JSON.stringify([{ blob: 'word ', other: 1 }]));
+      writeFileSync(join(dir, 'z-notes.json'), realExport());
+      expect(readdirSync(dir)).toHaveLength(33);
+      const detection = detectArchiveFormat(probeInOrder(dir));
+      expect(detection).toMatchObject({ kind: 'match', files: ['z-notes.json'] });
+      expect(formatOf(detection)).toBe('reflect-json');
+    });
+
+    test('named like a JSON export, it is read ahead of 32 files nobody asks for and is the match', () => {
+      const dir = tempFolder(cleanups);
+      fill(dir, 32, (index) => `a-${pad(index)}.dat`, 'plain');
+      writeFileSync(join(dir, 'z-notes.json'), realExport());
+      expect(detectArchiveFormat(probeInOrder(dir))).toMatchObject({ kind: 'match', files: ['z-notes.json'] });
+    });
+
+    test('with a name no format asks for it is past the files read, and the refusal says the look was not complete', () => {
+      const dir = tempFolder(cleanups);
+      fill(dir, 32, (index) => `a-${pad(index)}.dat`, 'plain');
+      writeFileSync(join(dir, 'z-notes-export'), realExport());
+      const probe = probeInOrder(dir);
+      expect(probe.othersNotLookedAt).toBe(1);
+      expect(detectArchiveFormat(probe)).toMatchObject({ kind: 'none', advice: expect.stringContaining(ARCHIVE_LOOK_INCOMPLETE_ADVICE) });
+      // The same folder through the start: refused with the same words, nothing recorded.
+      const state = new ArchiveImportStateStore({ path: join(tempFolder(cleanups), 'data', 'archive-imports.json') });
+      const refused = inNameOrder(() => startArchiveImport({ state, path: dir }));
+      expect(refused.kind).toBe('unsupported');
+      if (refused.kind === 'unsupported') expect(refused.advice).toContain(ARCHIVE_LOOK_INCOMPLETE_ADVICE);
+      expect(state.list()).toEqual([]);
+    });
+
+    test('a folder of 32 such files and no export says nothing of a look not complete', () => {
+      const dir = tempFolder(cleanups);
+      fill(dir, 32, (index) => `a-${pad(index)}.dat`, 'plain');
+      const probe = probeInOrder(dir);
+      expect(probe.othersNotLookedAt).toBeUndefined();
+      const detection = detectArchiveFormat(probe);
+      expect(detection.kind).toBe('none');
+      if (detection.kind === 'none') expect(detection.advice ?? '').not.toContain(ARCHIVE_LOOK_INCOMPLETE_ADVICE);
+    });
   });
 });
 

@@ -73,7 +73,7 @@ async function main(): Promise<void> {
       return;
     }
     // Scoped to this connector's own completed runs, and sanitized: the store
-    // is shared with the archive-import lane, whose cursors are a different
+    // may hold runs of an earlier export import, whose cursors are a different
     // format, and an unfinished row hands back the cursor its run STARTED from.
     const cursor = sanitizeWhatsAppLiveCursor(
       store.lastCompletedSyncRun(WHATSAPP_LIVE_CONNECTOR_ID)?.cursor,

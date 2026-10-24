@@ -24,6 +24,7 @@ import { roamJson, roamJsonZip } from '../../test/support/archive-fixtures-roam.
 import {
   telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText,
 } from '../../test/support/archive-fixtures-telegram.ts';
+import { chatText, chatZip, mediaNames, notice, type SyntheticMessage } from '../../test/support/archive-fixtures-whatsapp.ts';
 
 /** The folder under the home directory the archives are written to, and the picker's first press. */
 export const FIXTURE_FOLDER = 'rc-archives';
@@ -292,6 +293,57 @@ export const TELEGRAM_FIXTURES: ArchiveFixtureSpec = {
 };
 
 // ---------------------------------------------------------------------------
+// WhatsApp chat export (the zip "Export Chat" shares)
+
+const WHATSAPP_FORMAT = 'whatsapp_chat';
+const WHATSAPP_LABEL = 'WhatsApp chat export';
+const WHATSAPP_CITATION = 'WhatsApp';
+
+/**
+ * The zip an iPhone shares from "Export Chat" with media: `_chat.txt` in iOS line style (bracketed day-first stamps, which the
+ * export writes in local wall time with no zone) and the picture beside it. Five readable messages (one a picture, named in its
+ * message and not imported), and one notice from WhatsApp itself that the dashboard counts and leaves out. The notice is the
+ * earliest by date, so a date range that counts it is wrong. Every message is at midday and every day is past the 12th, so the day
+ * is the same in any zone a machine is set to (the product's date range is the UTC day) and the order of day and month is plain
+ * from the file. What the file cannot say, the zone its times are in, is one thing the product assumes and counts. Names are made
+ * up; the word is in message bodies only, never in a name (the zip's name, the chat's, a sender's).
+ */
+function whatsappSmall(token: string): BuiltArchive {
+  const [picture] = mediaNames(1);
+  const messages: SyntheticMessage[] = [
+    notice('2023-12-30T12:00:00'),
+    { at: '2024-03-14T12:00:00', sender: 'Sam Example', text: `Packing for the lake trip: tent, stove, two jackets. The reference word for this trip is ${token}.` },
+    { at: '2024-03-15T12:00:00', sender: 'Alex Example', text: 'The route is the north shore road, then the ferry at noon.' },
+    { at: '2024-03-16T12:00:00', sender: 'Sam Example', text: `<attached: ${picture}>` },
+    { at: '2024-03-17T12:00:00', sender: 'Alex Example', text: `Lentil soup: onion, carrot, lentils, stock, forty minutes. Same reference word as before: ${token}.` },
+    { at: '2024-03-19T12:00:00', sender: 'Sam Example', text: 'The photos are in the shared album.' },
+  ];
+  return {
+    bytes: chatZip(chatText(messages, { style: 'ios-24-dmy' }), { media: [picture!] }),
+    expect: {
+      label: WHATSAPP_LABEL,
+      citationLabel: WHATSAPP_CITATION,
+      family: 'chat',
+      messages: 5,
+      earliest: '2024-03-14',
+      latest: '2024-03-19',
+      gaps: [{ kind: 'media_not_imported', count: 1 }, { kind: 'assumption', count: 1 }],
+      leftOut: [{ kind: 'system_message', count: 1 }],
+    },
+  };
+}
+
+export const WHATSAPP_FIXTURES: ArchiveFixtureSpec = {
+  format: WHATSAPP_FORMAT,
+  label: WHATSAPP_LABEL,
+  citationLabel: WHATSAPP_CITATION,
+  extension: '.zip',
+  family: 'chat',
+  provider: 'whatsapp_export',
+  small: whatsappSmall,
+};
+
+// ---------------------------------------------------------------------------
 // Reflect notes (JSON)
 
 const REFLECT_FORMAT = 'reflect-json';
@@ -402,6 +454,7 @@ export const ROAM_FIXTURES: ArchiveFixtureSpec = {
 export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = {
   mbox: MBOX_FIXTURES,
   [TELEGRAM_FORMAT]: TELEGRAM_FIXTURES,
+  [WHATSAPP_FORMAT]: WHATSAPP_FIXTURES,
   [REFLECT_FORMAT]: REFLECT_FIXTURES,
   [ROAM_FORMAT]: ROAM_FIXTURES,
 };

@@ -130,6 +130,8 @@ function validApproval(value: unknown): value is ArchiveImportApproval {
     && typeof value.root_identity.dev === 'string' && typeof value.root_identity.ino === 'string'
     && typeof value.chosen_rel_path === 'string'
     && value.files.every(validApprovedFile)
+    && (value.skipped === undefined
+      || (isRecord(value.skipped) && Object.values(value.skipped).every((count) => Number.isSafeInteger(count) && (count as number) > 0)))
     && value.manifest_sha256 === archiveManifestSha256(value.files as ArchiveImportApproval['files']);
 }
 

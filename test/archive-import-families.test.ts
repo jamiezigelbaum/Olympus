@@ -44,6 +44,12 @@ describe('store sets belong to the family, not to its first format', () => {
     ]);
     // The default is the registered formats.
     expect(archiveImportCorpora().filter((corpus) => corpus.family === 'email').map((corpus) => corpus.corpusId)).toEqual(corpora.map((corpus) => corpus.corpusId));
+    // Two chat formats share one family, so its stores carry the neutral provider.
+    expect(archiveImportCorpora().filter((corpus) => corpus.family === 'chat').map((corpus) => [corpus.corpusId, corpus.provider])).toEqual([
+      ['secure_local.archive.chat', ARCHIVE_NEUTRAL_PROVIDER],
+      ['internal.archive.chat', ARCHIVE_NEUTRAL_PROVIDER],
+      ['public_safe.archive.chat', ARCHIVE_NEUTRAL_PROVIDER],
+    ]);
     expect(ARCHIVE_FORMATS).toContain(MBOX_ARCHIVE_FORMAT);
   });
 
@@ -103,6 +109,14 @@ describe('the Archives card holds every family\'s stores', () => {
     expect(card.provider).toBe(ARCHIVE_NEUTRAL_PROVIDER);
   });
 
+  test('a WhatsApp chat archive\'s store set is counted on the card, not set aside as unassigned', () => {
+    const view = buildDashboardPreviewView('archives-chat-whatsapp');
+    const card = view.sources.find((source) => source.source_id === 'archive.imports')!;
+    expect(card.coverage.indexed_items).toBe(12_644);
+    expect(view.unassigned_corpora).toMatchObject({ corpus_count: 0, entries: [] });
+    expect(card.provider).toBe(ARCHIVE_NEUTRAL_PROVIDER);
+  });
+
   test('a mail archive is on the card as before', () => {
     const view = buildDashboardPreviewView('archives-imported');
     const card = view.sources.find((source) => source.source_id === 'archive.imports')!;
@@ -137,6 +151,20 @@ describe('the dashboard words come from the registry and the family', () => {
       expect(dashboardArchiveNouns(family)).toBe(DASHBOARD_ARCHIVE_NOUNS.other);
     }
     for (const nouns of Object.values(DASHBOARD_ARCHIVE_NOUNS)) expect(nouns.many).toContain('{n}');
+  });
+
+  test('only a chat archive is a snapshot: the family says so beside its dates, mail and notes do not', () => {
+    expect(dashboardArchiveNouns('chat').snapshot).toBe('Snapshot, not updated');
+    for (const family of ['email', 'note', 'other', 'unheard-of', undefined]) expect(dashboardArchiveNouns(family).snapshot).toBe('');
+  });
+
+  test('what a chat export leaves out has its own plain sentence, one and many, never the catch-all', () => {
+    for (const kind of ['system_message', 'message_empty', 'status_updates'] as const) {
+      const sentence = DASHBOARD_ARCHIVE_COPY.gaps[kind];
+      expect(sentence.one.length).toBeGreaterThan(10);
+      expect(sentence.many).toContain('{n}');
+      expect(sentence).not.toBe(DASHBOARD_ARCHIVE_COPY.gaps.other);
+    }
   });
 
   test('every kind of finding the spine reports has its own sentence, one and many, never the catch-all', () => {
