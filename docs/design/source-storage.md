@@ -170,17 +170,34 @@ Inside the data root:
   an unknown schema or lists an account twice is never read as empty: every
   open refuses until it is repaired, since it may hold a delete marker
   (`src/core/source-registry.ts`).
-- **The schema is 1 while every entry is `legacy`, and 2 from the first
-  `folder` entry** (the file is written as 2 whenever any account is a folder).
-  A build that only knows schema 1 (step 3) then reads the file as unreadable
-  and opens nothing, instead of ignoring `layout` and creating empty stores at
-  the legacy paths beside the data in the folder. An install with no folder
-  account keeps a schema-1 file.
+- **The schema is 1 while every entry is `legacy`, 2 from the first `folder`
+  entry, and 3 while any account has a move pending** (the file is written as
+  whichever fits its content). A build that only knows schema 1 (step 3) reads
+  a schema-2 or -3 file as unreadable and opens nothing, instead of ignoring
+  `layout` and creating empty stores at the legacy paths beside the data in the
+  folder. A 4a or 4b build knows 1 and 2, so it refuses a schema-3 file the
+  same way: while a move is pending nothing else opens the data root, and once
+  it is done the file is 2 again and the older build reads the folder accounts
+  as it always did. An install with no folder account keeps a schema-1 file,
+  records of a skipped or failed move included (they are additive fields on a
+  legacy entry, which older readers pass through).
 - `layout` is `legacy` (files still at today's paths, as step 2 adopts
   existing accounts) or `folder` (inside `sources/<source_id>/<slot>/`).
   Whether an account exists and where its files are are tracked apart: the
   storage service resolves an account's paths from `layout`, and migration
   selects on it.
+- **`migration` (4c)** is the record of the boot migration on an entry:
+  `{state, at, reason?, detail?, moves?, holders?, verified?, checked?}`.
+  `state` is `moving` or `reverting` (a plan is pending; the account is
+  closed: the storage service opens none of its files, the same refusal as an
+  account being deleted, so it does not mount), `done`,
+  `skipped` (the account stays legacy, `reason` is a short code and `detail`
+  plain words) or `failed` (the move was undone). Each entry of `moves` is
+  `{role: store|ledger|secrets|sniffer|raw, from, to, kind: file|dir, db?, dev,
+  ino, size}` with `from` and `to` relative to the data root and the identity
+  as strings; `holders` names each store's media-cache holder digests;
+  `checked` is what `PRAGMA quick_check` said before the move. A reader that
+  does not know the field passes it through unchanged.
 - **Placement of a new account (4a).** An account with no entry is recorded
   `folder` only if nothing says it lives elsewhere: its source has a folder
   layout, no env override or connector-store mount names its files, no file of
@@ -389,41 +406,104 @@ everything else.
 
 ## Migration of existing installs
 
-One-time, at worker boot, holding the owner lock, before mounting:
+One-time, at worker boot, holding the owner lock, after the re-placement of
+empty accounts and before adoption is enabled and anything mounts
+(`migrateAccountFolders` in `core/source-account-migration.ts`, called from the
+worker's `main()`). Step 4c moves every folder-layout source but Telegram and
+WhatsApp; those two are step 4d and the pass never touches them. For each
+account whose `layout` is `legacy` (the entries step 2 adopted, plus an entry
+created now, slot `1`, for any source with legacy files and none yet), in this
+order:
 
-1. Read the legacy locations through the layout module's legacy resolvers
-   (named in step 1, used for this purpose only).
-2. For each account whose `layout` is `legacy` (the entries step 2
-   adopted, plus an entry created now, slot `1`, for any source with legacy
-   files and none yet), and whose capture process (Telegram reader,
-   WhatsApp bridge) is confirmed stopped, not merely not yet started: write
-   a move plan into the entry, rename each file (stores, sidecars,
-   `-wal`/`-shm` together, spools, sessions, watch snapshots, settings) into
-   the account folder, verify by identity (the same `(dev, ino, size)` for
-   each file, then a read-only open of each store; `PRAGMA quick_check` runs
-   before the move, within a time budget, to record the existing state only),
-   then set `layout` to `folder` and mark the plan done. A
-   crash mid-move resumes from the plan; a failed verify moves the files
-   back and leaves the source on its legacy paths with a Needs you row. A
-   source whose capture is still running stays on its legacy paths until
-   the next boot; a capture process that reopened its session by the old
-   path would start an empty, unpaired session.
-3. Renames only. Legacy roots can sit on another volume without any
-   override (`legacyTelegramStoreRoot` ignores `XDG_DATA_HOME`, the WhatsApp
-   service state is under `$HOME`, the gateway state is under the state home),
-   so the plan compares `st_dev` of each file's legacy folder with the account
-   folder and skips the account on a mismatch: nothing is copied, the source
-   stays on legacy paths and the dashboard says why.
-4. Legacy pre-1.0 index files (`email-index.sqlite`,
-   `dropbox-files-index.sqlite`, `google-drive-docs-index.sqlite`,
-   `telegram-messages-index.sqlite`, `readwise-index.sqlite`; only in
-   `data-lifecycle.ts:292-408` today) are left alone and removed by Delete
-   all (owner decision 5).
-5. `runDataMigrations` (`data-lifecycle.ts:1015`, never called) is deleted.
+1. **Look.** Read the legacy locations through the layout module's legacy
+   resolvers (`legacyAccountFiles`, used for this purpose only). The account
+   stays legacy, and the registry records why (`migration.state: skipped`, a
+   reason code and plain words), when:
+   - `pinned`: an env override or a connector-store mount names its files;
+   - `unreadable`: a legacy location, or the account folder, cannot be looked at;
+   - `unexpected_file`: a legacy path is a link or the wrong kind of file;
+   - `destination_exists`: a file is at its old place and in the account folder
+     (nothing is merged);
+   - `other_device`: a file's `st_dev` differs from that of the nearest
+     existing folder above the account folder (a rename that answers `EXDEV`
+     later ends the same way, after undoing what it did). Nothing is copied;
+   - `files_elsewhere`: the registry lists stores that are not at the usual
+     place in the data folder, where an override may once have put them.
+2. **Plan.** `PRAGMA quick_check` each database to record how it was (within
+   a budget; a store over 512 MiB or past the budget is recorded `not_checked`,
+   a store that does not open `damaged`; this only records and never blocks),
+   then write the move plan into the entry: `migration: {state: moving, moves,
+   holders, checked}` (see Registry), which also turns the file into schema 3.
+   From here the account is closed. `moves` lists, per tier store, the store,
+   its `-wal`/`-shm`/`-journal`, its tier ledger, secret locations and sniffer,
+   plus raw state (the local files watch folder, X's reconcile state, an
+   archive import's state and request files), each with `(dev, ino, size)`. An
+   archive's stores go to `stores/<family>.<tier>.sqlite`.
+3. **Rename** every planned file into the folder, one `rename(2)` each. Nothing
+   is copied, so each is atomic and instant whatever its size.
+4. **Verify.** Each destination has the planned `(dev, ino, size)`, then each
+   database that opened before opens read-only. A failure undoes the move.
+5. **Rebind.** Each tier-set store keeps the path of its tier ledger inside
+   itself (`sync_runs`, `tiered_store_set_binding`), and a stale path fails
+   closed, so that one row is rewritten to the ledger's new place (and back, on
+   an undo). Besides the renames this is the only change to a store, and it
+   is made only when the stored path differs.
+6. **Re-key the media cache.** A cache picture is kept while some store holds
+   it, and a holder is named by a digest of the store's real path, so a store
+   that moves looks gone and the sweep would drop its pictures. Each holder
+   marker is written under the new name before the old is removed, so a crash
+   between the two leaves both and the sweep keeps the picture; the plan records
+   the digests, so a resume finishes the hand-over.
+7. **Flip** `layout` to `folder` and the plan to `done` in one registry write:
+   there is no moment at which an account is a folder with its plan pending, or
+   done and legacy.
+
+A crash anywhere resumes from the plan at the next boot, switch or no switch
+(the account is closed until the plan ends one way or the other). A failed
+verify, a file that is in neither place, or any other failure renames
+everything back (`reverting`, then `migration.state: failed`) and leaves the
+account legacy; a plan this build did not write is left alone and reported
+stuck. An account that ended in a move back is not started again in the same
+boot. If the account's files are deleted while a plan is part way, the plan is
+dropped.
+
+The dashboard turns four states into Needs you rows (`sourceStorageNotices`):
+a failed move ("its files could not be moved, so they were put back"), a plan
+that is part way ("its files are part way through a move"), an unreadable
+location ("Olympus cannot open the folder its files are in") and
+`destination_exists` ("its files are in two places"). The other skips are
+logged (`[storage] <id> stays where it is (<reason>)`) and, when the account
+has an entry, recorded with their plain words on it, but are not Needs you
+rows: nothing is wrong, the source works as before.
+
+**Time.** A boot spends at most 60 s starting new moves and 15 s on
+`quick_check` across all accounts, well inside the worker's 180 s startup
+timeout. An account the budget did not reach has no plan yet and goes on at
+the next boot; a pending plan is always finished first. A rename costs the
+same whatever the file's size, so the budget is spent on the checks.
+
+**What stays put.** Settings stay in the shared config files (see Layout). The
+X usage ledger stays shared; only X's reconcile state moves. Legacy pre-1.0
+index files (`email-index.sqlite`, `dropbox-files-index.sqlite`,
+`google-drive-docs-index.sqlite`, `telegram-messages-index.sqlite`,
+`readwise-index.sqlite`; only in `data-lifecycle.ts` today) are left alone and
+removed by Delete all (owner decision 5). `runDataMigrations` (never called)
+is deleted.
+
+**An older build.** After 4c, a build that knows schemas 1 and 2 (4a, 4b)
+refuses a schema-3 file, so it opens nothing while a move is pending, and
+reads a finished account as a folder like any other (a test reads the file
+with the 4b reader). A step-3 build refuses schema 2 and 3 alike, as designed.
+A build from before the registry (step 2) does not read it; that it would make
+empty stores at the old places has not been tried.
 
 No re-embed and no rescan: stores, cursors (`sync_runs.cursor`), tiers,
 embeddings and watch snapshots move as files. Embedding changes stay
 owner-gated and this plan makes none.
+
+The pass is behind `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker's
+environment. With it off, no move starts and the registry and every file are
+byte-identical to 4b's.
 
 ## What must not break
 
@@ -548,7 +628,13 @@ touch the store path (`eval/`).
      to 4d.
    - **4c, the boot migration of existing non-messaging accounts**, behind
      `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
-     default), with the tests in "What must not break". Retirement: default
+     default), with the tests in "What must not break". Built: the pass in
+     "Migration of existing installs", the `migration` record and schema 3 in
+     the registry, the tier-set binding rewrite, the media-cache hand-over,
+     and the four Needs you rows. Proof: a kill injected between every pair
+     of steps, and each skip reason, a failed verify moved back, a lost file,
+     Delete mid-move and the unreadable registry, on isolated homes, plus a
+     real worker booted on a legacy home with the switch off and on. Retirement: default
      on, then delete the switch, once release testing records, on Mac
      OpenClaw-hosted, Mac engine and standalone Linux with both receipt
      roots: every source migrated with real data; paired WhatsApp and

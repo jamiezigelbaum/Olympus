@@ -1,5 +1,5 @@
 import { dashboardSourceProgress } from '../src/workers/dashboard/phases.ts';
-import { dashboardWorkingSummary } from '../src/workers/dashboard/vocabulary.ts';
+import { dashboardAttentionLine, dashboardStatus, dashboardWorkingSummary } from '../src/workers/dashboard/vocabulary.ts';
 import { engineBriefFromViewModel } from '../src/core/engine-brief.ts';
 import { buildChatGptDashboardViewModel } from '../src/workers/chatgpt/dashboard-view-model.ts';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -765,6 +765,48 @@ describe('multi-source source dashboard', () => {
     const unchanged = build(false);
     expect(unchanged?.account_change).toBeUndefined();
     expect(unchanged?.answer_readiness.label).not.toBe('Connected to a different account');
+  });
+
+  test('files that could not be moved into their folder are a Needs you row with a route, whatever the connection says (source storage 4c)', () => {
+    const words = {
+      moved_back: { row: 'could not be moved', sheet: ['put everything back', 'what failed'] },
+      stuck: { row: 'part way through a move', sheet: ['Restart Olympus'] },
+      unreadable: { row: 'cannot open the folder', sheet: ['may open Olympus'] },
+      in_the_way: { row: 'two places', sheet: ['compare the two'] },
+    } as const;
+    for (const [kind, expected] of Object.entries(words)) {
+      for (const registry of [dropboxHandleRegistry(), { version: 1 as const, handles: [] }]) {
+        const dropbox = buildSourceDashboardViewModel({
+          sourceIndexStatus: fixtureStatus(),
+          schedulerStatus: fixtureScheduler(),
+          sovereigntyEngine: fixtureSovereigntyEngine(),
+          connectedHandleRegistry: registry,
+          storageNotices: { 'dropbox.files': kind as keyof typeof words },
+          now: new Date('2026-07-02T12:00:00.000Z'),
+        }).sources.find((source) => source.source_id === 'dropbox.files')!;
+        expect(dropbox.storage_notice?.kind).toBe(kind);
+        // It is a Needs you row, connected or not, with the reason in the row's words.
+        expect(dashboardStatus({ source: dropbox }), kind).toBe('Needs you');
+        expect(dashboardAttentionLine(dropbox), kind).toContain(expected.row);
+        // And its sheet names the way out.
+        expect(dropbox.setup?.next_action, kind).toBe(dropbox.storage_notice?.next_action);
+        for (const word of expected.sheet) expect(dropbox.storage_notice?.next_action, `${kind}: ${word}`).toContain(word);
+        expect(dropbox.setup?.condition, kind).toBe(kind === 'stuck' ? 'blocked' : 'degraded');
+        // No path of the owner's, no file name.
+        expect(JSON.stringify(dropbox.storage_notice)).not.toMatch(/\.sqlite|\/Users\/|\/home\//);
+      }
+    }
+    // Another source, and a source with nothing to report, are untouched.
+    const calm = buildSourceDashboardViewModel({
+      sourceIndexStatus: fixtureStatus(),
+      schedulerStatus: fixtureScheduler(),
+      sovereigntyEngine: fixtureSovereigntyEngine(),
+      connectedHandleRegistry: dropboxHandleRegistry(),
+      storageNotices: { 'gmail.email': 'moved_back' },
+      now: new Date('2026-07-02T12:00:00.000Z'),
+    });
+    expect(calm.sources.find((source) => source.source_id === 'dropbox.files')?.storage_notice).toBeUndefined();
+    expect(calm.sources.find((source) => source.source_id === 'gmail.email')?.storage_notice?.kind).toBe('moved_back');
   });
 
   test('renders reauth with missing OAuth client as reconnect, not first-time setup', () => {

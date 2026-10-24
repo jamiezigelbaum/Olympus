@@ -61,6 +61,7 @@ import {
   sourceAccountUnavailableReason,
 } from '../src/core/source-storage.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
+import { SqliteSourceDashboardHistory, defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
 import { migrateAccountFoldersAtBoot } from '../src/workers/email-source/server.ts';
 
 type Env = Record<string, string>;
@@ -347,6 +348,32 @@ describe('the move', () => {
     expect(left.map(identity)).toEqual(before);
   });
 
+  test('the dashboard\'s history is shared, not the account\'s: it stays, and its samples are all still there', () => {
+    const { env } = fixture();
+    install(env, 'dropbox.files');
+    const path = defaultSourceDashboardHistoryDbPath(env);
+    const history = new SqliteSourceDashboardHistory(path);
+    history.record([{
+      source_id: 'dropbox.files',
+      corpus_id: 'internal.dropbox.files',
+      sampled_at: '2026-10-20T10:00:00.000Z',
+      indexed_items: 120,
+      content_ready_items: 100,
+      queue_waiting: 3,
+      queue_active: 1,
+      queue_attention: 0,
+    }]);
+    const before = history.sampleCount();
+    const identityBefore = identity(path);
+    expect(before).toBe(1);
+
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+
+    expect(identity(path)).toBe(identityBefore);
+    expect(history.sampleCount()).toBe(before);
+    expect(new SqliteSourceDashboardHistory(path).sampleCount()).toBe(before);
+  });
+
   test('the account is a folder only once everything has moved: the entry never says folder with a plan pending', () => {
     const { env } = fixture();
     install(env, 'dropbox.files');
@@ -471,6 +498,58 @@ describe('a crash at any step', () => {
       expect(readdirSync(root).filter((name) => /connector-store|local-files-watch|reconcile|archive-import/.test(name)), label).toEqual([]);
     }
   }, 120_000);
+});
+
+// The data folder depends on the machine: a standalone Linux engine's receipt names it (and, with no receipt
+// yet, it is worked out from what is on disk), OpenClaw-hosted and Mac use `<XDG data home>/openclaw/olympus`.
+// The pass must move into whichever it is and leave it the same folder afterwards, so these run on the platform
+// they are about (the golden fixture pins the same cases for the resolvers).
+describe.skipIf(process.platform !== 'linux')('on Linux, in each data folder', () => {
+  const home = (env: Env): string => env.HOME!;
+  const layouts: Array<{ name: string; extra: (dir: string) => Env; root: (env: Env) => string; seed?: (env: Env) => void }> = [
+    { name: 'standalone receipt, a new data folder', extra: () => ({ OLYMPUS_STANDALONE: '1' }), root: (env) => join(home(env), '.local', 'share', 'olympus') },
+    {
+      name: 'standalone receipt, an existing data folder under openclaw/',
+      extra: () => ({ OLYMPUS_STANDALONE: '1' }),
+      root: (env) => join(home(env), '.local', 'share', 'openclaw', 'olympus'),
+      seed: (env) => {
+        mkdirSync(join(home(env), '.local', 'share', 'openclaw', 'olympus'), { recursive: true });
+        writeFileSync(join(home(env), '.local', 'share', 'openclaw', 'olympus', 'earlier-install.txt'), 'data from before');
+      },
+    },
+    { name: 'standalone receipt with its own XDG data home', extra: (dir) => ({ OLYMPUS_STANDALONE: '1', XDG_DATA_HOME: join(dir, 'xdg') }), root: (env) => join(env.XDG_DATA_HOME!, 'olympus') },
+    { name: 'OpenClaw-hosted', extra: (dir) => ({ OPENCLAW_STATE_DIR: join(dir, 'openclaw-state') }), root: (env) => join(home(env), '.local', 'share', 'openclaw', 'olympus') },
+  ];
+
+  test.each(layouts.map((layout) => [layout.name, layout] as const))('%s: accounts move inside the data folder, which stays the same folder, and its neighbors are untouched', (_name, layout) => {
+    const { dir, env } = fixture();
+    Object.assign(env, layout.extra(dir));
+    layout.seed?.(env);
+    const root = olympusDataRoot(env);
+    expect(root).toBe(layout.root(env));
+    for (const sourceId of ['gmail.email', 'dropbox.files', 'local.files']) install(env, sourceId);
+    // What else a standalone data folder holds: the engine's own folder and the capture folders of step 4d.
+    const neighbors = ['engine/engine.json', 'whatsapp-live/session.json', 'telegram/spool.json'].map((name) => join(root, name));
+    for (const path of neighbors) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `bytes of ${basename(path)}`);
+    }
+    const neighborsBefore = neighbors.map(identity);
+
+    const report = migrateAccountFolders(env);
+
+    expect(report.moved.sort(), JSON.stringify(report)).toEqual(['dropbox.files', 'gmail.email', 'local.files']);
+    // Still the same folder: worked out from the receipt or the disk, it does not shift because `sources/` now exists.
+    expect(olympusDataRoot(env)).toBe(root);
+    for (const sourceId of ['gmail.email', 'dropbox.files', 'local.files']) {
+      expect(accountFolder({ source_id: sourceId, slot: '1' }, env)).toBe(join(root, 'sources', sourceId, '1'));
+      expect(existsSync(join(root, 'sources', sourceId, '1', 'stores')), sourceId).toBe(true);
+    }
+    expect(sourceRegistryPath(env)).toBe(join(root, 'registry.json'));
+    expect(readdirSync(root).filter((name) => /connector-store|local-files-watch/.test(name))).toEqual([]);
+    expect(neighbors.map(identity)).toEqual(neighborsBefore);
+    expect(migrateAccountFolders(env)).toEqual({ moved: [], resumed: [], movedBack: [], skipped: [], stuck: [], deferred: [], errors: [] });
+  });
 });
 
 describe('the media cache: a moved store keeps its pictures', () => {
