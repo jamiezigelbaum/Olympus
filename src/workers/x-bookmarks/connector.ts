@@ -1,13 +1,11 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Contract 1 normalization for X bookmark snapshots. The real provider-facing
 // SourceConnector lives in api-connector.ts and owns auth, polling, pagination,
 // completeness, fetch, and classification; this module converts its bounded
 // acquisition into stable RawItems for the shared connector store.
 
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -109,8 +107,7 @@ export function defaultXBookmarksConnectorStoreDbPath(
 ): string {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'x-bookmarks-connector-store.sqlite');
+  return olympusDataPath(env, 'x-bookmarks-connector-store.sqlite');
 }
 
 export function xBookmarkLocalItemId(account: string, postId: string): string {

@@ -123,6 +123,17 @@ describe('journey runner', () => {
     expect(trace.steps[1]!.ok).toBe(false);
   });
 
+  test('FAILS when the control sits in a closed section, which a person cannot press; the section\'s summary is found', async () => {
+    // The box stub gives everything inside a closed <details> a box, as Chrome does.
+    const driver = new DomDriver({ '/dashboard': '<h2>Notes</h2><details><summary>More</summary><button>Save</button><p>Saved</p></details>' });
+    driver.onPress.set('Save', (document) => { document.body.insertAdjacentHTML('beforeend', '<p>Saved</p>'); });
+    const trace = await runJourney(driver, saveJourney, options());
+    expect(trace.ok).toBe(false);
+    expect(trace.steps[1]!.ok).toBe(false);
+    expect(await driver.probe('panel', `__rc.find({ role: 'button', name: 'More' })`)).not.toBeNull();
+    expect(await driver.probe('panel', `__rc.find({ text: 'Saved' })`)).toBeNull();
+  });
+
   test('generic rules: undefined, NaN, an unnamed button, a console error and a failed request each fail a step that expects something else', async () => {
     const driver = new DomDriver({ '/dashboard': '<h2>Notes</h2><p>You have undefined items and NaN% done</p><button></button>' });
     const journey: Journey = { id: 'rules', title: 'rules', source: 'test', steps: [{ name: 'Open', do: { open: 'dashboard' }, expect: [{ text: 'Notes' }] }] };

@@ -1,7 +1,5 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import type {
   RawItem,
   SourceClassificationSignals,
@@ -682,8 +680,7 @@ export function defaultGoogleDriveRequestBudgetStatePath(
 ): string {
   const configured = env[GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'google-drive-daily-request-budget.json');
+  return olympusDataPath(env, 'google-drive-daily-request-budget.json');
 }
 
 /**
@@ -1014,24 +1011,21 @@ export function defaultGoogleDriveConnectorStoreDbPath(env: Record<string, strin
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'google-drive-connector-store.sqlite');
+  return olympusDataPath(env, 'google-drive-connector-store.sqlite');
 }
 
 export function defaultGoogleDriveSecureConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'google-drive-secure-connector-store.sqlite');
+  return olympusDataPath(env, 'google-drive-secure-connector-store.sqlite');
 }
 
 export function defaultGoogleDrivePublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
   if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'google-drive-public-connector-store.sqlite');
+  return olympusDataPath(env, 'google-drive-public-connector-store.sqlite');
 }
 
 class RestGoogleDriveApiClient implements GoogleDriveApiClient {

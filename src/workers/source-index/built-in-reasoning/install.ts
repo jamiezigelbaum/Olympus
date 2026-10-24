@@ -1,5 +1,5 @@
 import { downloadPinnedFile, writeDownloadChunk } from '../pinned-download.ts';
-import { standaloneLinuxDataDir } from '../../../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../../../core/olympus-layout.ts';
 // Fetches, verifies and installs the built-in private reasoning model and the
 // llama.cpp server that runs it into the Olympus data directory, once. Every
 // file is checked against the pinned manifest before it is used; a file that
@@ -24,7 +24,6 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import {
   LLAMA_SERVER_RUNTIME,
@@ -185,7 +184,7 @@ export class BuiltInReasoningInstallError extends Error {
   }
 }
 
-/** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models/built-in-reasoning`. */
+/** `<data root>/models/built-in-reasoning`. */
 export function builtInReasoningPaths(
   model: Pick<BuiltInReasoningModelSpec, 'modelId'>,
   env: Record<string, string | undefined> = process.env,
@@ -209,10 +208,9 @@ function builtInReasoningRoot(env: Record<string, string | undefined>): string {
   return root;
 }
 
-/** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models`. */
+/** `<data root>/models` (core/olympus-layout.ts). */
 export function olympusModelsDir(env: Record<string, string | undefined> = process.env): string {
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataRoot, 'openclaw', 'olympus'), 'models');
+  return olympusDataPath(env, 'models');
 }
 
 /**

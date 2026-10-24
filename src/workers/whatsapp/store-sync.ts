@@ -3,8 +3,8 @@
 // records to the shared SourceConnector -> LocalConnectorStore spine.
 
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { legacyCaptureDataRoot } from '../../core/olympus-layout.ts';
 import {
   LocalConnectorStore,
   type ConnectorStoreSyncSummary,
@@ -108,10 +108,8 @@ export interface WhatsAppConnectorStoreSyncHandler {
 export function defaultWhatsAppStateDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const dataHome = env.XDG_DATA_HOME?.trim()
-    || join(env.HOME?.trim() || homedir(), '.local', 'share');
   return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim()
-    || join(dataHome, 'olympus', 'whatsapp-live');
+    || join(legacyCaptureDataRoot(env), 'whatsapp-live');
 }
 
 export function defaultWhatsAppSpoolDir(

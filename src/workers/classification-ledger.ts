@@ -1,4 +1,3 @@
-import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
 /**
  * The classification decision ledger: an append-only record of every change
  * to the model or prompt that judges which tier an item belongs in, and who
@@ -20,7 +19,7 @@ import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
  * use (`isClassifierApproved`). A model or prompt change therefore stops the
  * sniffer — items stay pending, held Private — until the owner approves it.
  */
-import { homedir } from 'node:os';
+import { olympusDataPath } from '../core/olympus-layout.ts';
 import { mkdir, open, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -77,8 +76,7 @@ export interface ClassificationLedgerReadResult {
 export function resolveClassificationLedgerPath(env: Record<string, string | undefined> = process.env): string {
   const configured = env[CLASSIFICATION_LEDGER_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'classification-ledger.jsonl');
+  return olympusDataPath(env, 'classification-ledger.jsonl');
 }
 
 export async function appendClassificationLedgerEntry(path: string, entry: ClassificationLedgerEntry): Promise<void> {
