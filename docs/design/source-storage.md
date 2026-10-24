@@ -278,8 +278,8 @@ everything else.
 
 One-time, at worker boot, holding the owner lock, before mounting:
 
-1. Read the legacy locations through the current resolvers (kept in one
-   `legacy-layout.ts` for this purpose only).
+1. Read the legacy locations through the layout module's legacy resolvers
+   (named in step 1, used for this purpose only).
 2. For each source with files there and no registry entry, and whose
    capture process (Telegram reader, WhatsApp bridge) is confirmed stopped,
    not merely not yet started: create the entry
@@ -336,11 +336,18 @@ touch the store path (`eval/`).
 
 1. **Layout module + tests isolation.** `olympus-layout.ts` returns today's
    paths; every inline data-folder expression and private `dataDir()` calls
-   it. Fix the drifts on the way (Telegram `HOME`, `handles.json` XDG, X
-   reconcile default, `olympusSharedDataFile` missing the Linux root).
-   Salvage #467's test isolation (refuse the real HOME, isolated HOME in
-   every package test script, spawn patches). No behavior change. Two PRs:
-   test isolation first, then the layout module.
+   it. A reader that disagrees with its writer is fixed to match the writer
+   (the X reconcile default, `olympusSharedDataFile` missing the Linux root,
+   the ingestion ledger's WhatsApp store, the Telegram readiness probe's
+   state directory). A writer that drifts from the layout keeps its files
+   where they are until step 4 moves them, named as legacy in the layout
+   module: Telegram's stores ignore `XDG_DATA_HOME`, and the WhatsApp bridge
+   and the Telegram capture spool sit in `<XDG data home>/olympus`, outside
+   the data root. `handles.json` ignores `XDG_CONFIG_HOME` in writer and
+   reader alike and also waits for step 4. Salvage #467's test isolation
+   (refuse the real HOME, isolated HOME in every package test script, spawn
+   patches). No behavior change beyond those reader fixes. Two PRs: test
+   isolation first, then the layout module.
 2. **Registry + storage service + owner lock + guard.** Registry adopted
    from legacy locations without moving files; all store opens through the
    service; drain direct mode removed; CLI and scripts take the owner lock.
