@@ -234,25 +234,51 @@ shrinks.
 
 ## Shared files
 
-Each shared file is either listed as holding no per-source data, or
-registers one forget step `forget({ source_id, slot, corpus_ids })` in
-`src/core/source-forget-registry.ts`. A test fails when a module opens a
-shared SQLite file without one of the two.
+Each shared file is either listed as holding no per-source data
+(`KEPT_SHARED_FILES`, with the reason) or has one forget step in
+`src/core/source-forget-registry.ts` (`FORGET_STEPS`). A step is
+`forget({ source_id, slot, corpus_ids }, context, { dryRun })`: its logic
+lives in the module that owns the file, and the registry lists the steps and
+`runForgetSteps` runs them in order, stopping at the first failure with an
+error that names the step and the file. Each step is idempotent, runs in its
+own transaction (SQLite) or atomic write (JSON), counts without writing on a
+dry run, and does nothing for a file that is not there. The account's
+`corpus_ids` are the registry entry's joined with the shipped corpus
+registry's for the source and its aliases. A test fails when a module opens a
+shared SQLite file without owning a step or a kept entry, or when a step or
+kept entry names a module that no longer opens one
+(`test/store-open-guard.test.ts`).
 
-| File | Per-source key | Plan |
+| File | Per-source key | Step id, or why kept |
 |---|---|---|
-| `source-dashboard.sqlite` | `source_id`, `corpus_id` | forget step |
-| `source-scheduler.sqlite` | `(source_id, corpus_id, task_id)` | forget step |
-| `file-extraction-jobs.sqlite` | `corpus_id`, `account_scope`; holds file **names** | forget step (names are item data, principle 3); later candidate to move into the account folder |
-| `waiting-private-questions.sqlite` | results' `corpusId`, provenance | forget step (`deleteForCorpora`, `deleteForAccountScope` exist) |
-| `source-watches.sqlite` | `corpus_id` | forget step |
-| `source-ingestion-doctor-state.json` | `sources[source_id]` | forget step |
+| `waiting-private-questions.sqlite` | results' `corpusId`, provenance | `waiting-private-questions`, first: answers go before anything they depend on |
+| `source-dashboard.sqlite` (with the ingestion ledger's tables) | `source_id`, ledger id, `corpus_id` | `source-dashboard` |
+| `source-scheduler.sqlite` | `(source_id, corpus_id, task_id)` | `source-scheduler` |
+| `file-extraction-jobs.sqlite` | `corpus_id`; holds file **names**; Secrets redaction claims keyed by the source's tier-ledger id | `file-extraction-jobs` (names are item data, principle 3): jobs, artifacts, re-reads, and the claims of the source's tier ledgers with each redaction no other ledger claims (the ids are read from the ledger files before they go; an unreadable ledger keeps its claims and is reported); later candidate to move into the account folder |
+| `source-watches.sqlite` | `corpus_id` | `source-watches` |
+| `source-ingestion-doctor-state.json` | `sources[ledger id]` | `ingestion-doctor-state` |
+| `tier-migration/reports/*.json` | `topPatterns[].source`; hold the owner's folder paths, senders, chat keys | `tier-migration-reports` (found by the sweep) |
+| `tier-migration/state.json` | `plans[].lanes[].sourceId`; `plans[].batches[].selector` holds the owner's raw selectors | `tier-migration-state`: in every plan with the source as a lane, each selector but `source:` becomes `<kind>:<forgotten>`; a stopped batch no longer resumes by it |
+| `~/.config/olympus/{file,mail}-source-scopes.json`, `this-computer.json`, `source-account-bindings.json` | `source_id` | `file-source-scopes`, `mail-source-scopes`, `this-computer`, `source-account-bindings` (last); move into the account's `settings/` in step 4 |
 | `embedding-ledger.jsonl`, `source-answer-latency.jsonl` | corpus ids only, no content | kept (accounting) |
 | `classification-ledger.jsonl` | none | kept |
 | request budgets, `tier-sniffer-budget.json` | per provider / global counters | kept |
 | `remote-connections.sqlite` | none (`provider` is the agent host) | kept |
+| `credential-broker-state.json`, `handles.json.unpaired` | handle, source id | kept: credential and Unpair custody, no item data (Disconnect and Unpair own them) |
+| `connect-relay/`, `models/`, `local-files/folder-access.json` | none | kept |
+| `~/.olympus/{sources/ingestion-exclusions.json, tier-rules.json, privacy.json}` | optional `source` per rule | kept: the owner's own policy. An exclusion is protective (dropping it would let a reconnected account ingest what the owner refused), and a tier rule is the owner's to change |
 | `media-cache` | holders per store | holders keyed by `(source_id, slot)`; Delete releases them |
-| `~/.config/olympus/{file,mail}-source-scopes.json`, `this-computer.json`, `source-account-bindings.json` | `source_id` | move into the account's `settings/`; until then forget steps |
+
+A per-source Delete runs the steps (`forgotten` in its result lists each file
+and count; a dry run lists what it would forget) after the account's state is
+reset and before any bytes are removed. A failing step fails the delete there.
+Disconnect runs none. The worker repeats the steps marked
+`repeatBeforeRestart` (`waiting-private-questions`, `source-dashboard`,
+`source-watches`) once it has stopped, just before the restart a Delete asks
+for, because until then a private question can be answered, a dashboard poll
+can record counts and the watch pass can queue matches, all through store
+handles still open. No owner-choice step is repeated: the owner can reconnect
+in that window, and a repeat would erase the reconnect.
 
 ## Delete
 
@@ -398,7 +424,8 @@ touch the store path (`eval/`).
    CLI, with the drain's direct mode removed; 2b-ii, the CLI through the
    worker's API while Olympus runs (`src/core/cli-via-worker.ts`).
 3. **Forget registry.** Forget steps for the shared files above, and the
-   guard test.
+   guard test (done). A per-source Delete runs them; the worker repeats them
+   before its restart.
 4. **Migration into account folders.** Behind the boot pass, with the
    tests in "What must not break". Trying it on real installs before it is
    on by default belongs to release testing.

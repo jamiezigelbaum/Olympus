@@ -1,4 +1,4 @@
-import { olympusDataPath } from './olympus-layout.ts';
+import { olympusDataPath, olympusDataRoot } from './olympus-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -16,6 +16,7 @@ import {
   type SqliteMigration,
 } from './sqlite-migrations.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
+import { filterFor, forgetSqliteRows } from './sqlite-forget.ts';
 
 export const SOURCE_WATCH_STORE_ID = 'source-watch';
 export const SOURCE_WATCH_SCHEMA_VERSION = 1;
@@ -378,7 +379,37 @@ const SYSTEM_CLOCK: SourceWatchClock = Object.freeze({
 export function defaultSourceWatchDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
+  // The layout returns a relative XDG data home as given (the Linux engine
+  // layout refuses one itself); this store refuses the RESOLVED root on every
+  // platform. A valid installed Linux receipt picks the root before any shell
+  // value, so it is checked after resolution, never on the ambient variable.
+  if (!isAbsolute(olympusDataRoot(env))) {
+    throw new TypeError('Source watch data home must be an absolute private data root.');
+  }
   return olympusDataPath(env, 'source-watches.sqlite');
+}
+
+/**
+ * One source's forget step on the watch database: the watches on its corpora,
+ * and with them (the foreign keys cascade) their watermarks, matches and
+ * pending deliveries, which name the deleted items. A watch on a corpus whose
+ * source is gone has nothing left to match. Counts the watches.
+ */
+export function forgetSourceWatches(
+  dbPath: string,
+  scope: { corpusIds: readonly string[] },
+  options: { dryRun?: boolean } = {},
+): number {
+  if (!existsSync(dbPath)) return 0;
+  const dryRun = options.dryRun === true;
+  const filters = filterFor('source_watches', [['corpus_id', scope.corpusIds]]);
+  const db = new Database(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  try {
+    db.exec(`PRAGMA busy_timeout = 10000; ${dryRun ? '' : 'PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;'}`);
+    return forgetSqliteRows(db, filters, dryRun).reduce((sum, count) => sum + count, 0);
+  } finally {
+    closeSqliteStore(db);
+  }
 }
 
 export function createTrustedSourceWatchOwnerContext(
