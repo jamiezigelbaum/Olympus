@@ -682,34 +682,6 @@ describe('control submit state', () => {
   });
 });
 
-describe('a Connect pressed with its key field empty', () => {
-  test('says on the page which field is needed, instead of leaving only the browser\'s own bubble', () => {
-    const root = document.createElement('div');
-    root.innerHTML = '<form data-connect-kind="api_key"><input name="source" type="hidden" value="venice">'
-      + '<input name="api_key" type="password" required aria-label="Venice API key"><button type="submit">Connect</button>'
-      + '<span data-action-message role="status"></span></form>'
-      + '<form data-other><input name="x" required aria-label="Other field"><span data-action-message></span></form>';
-    document.body.append(root);
-    const controller = mountDashboardController({
-      root,
-      transport: { control: noControl },
-      navigate() {},
-      async refresh() { return undefined; },
-      returnUrl: 'https://gateway.test/',
-      canWrite: true,
-      signal: new AbortController().signal,
-      pollIntervalMs: 0,
-    });
-    const form = root.querySelector<HTMLFormElement>('form[data-connect-kind="api_key"]')!;
-    expect(form.checkValidity()).toBe(false);
-    expect(form.querySelector('[data-action-message]')!.textContent).toBe('Venice API key is needed.');
-    // Only the dashboard's own connect forms speak; another form is left to the browser.
-    root.querySelector<HTMLFormElement>('form[data-other]')!.checkValidity();
-    expect(root.querySelector('form[data-other] [data-action-message]')!.textContent).toBe('');
-    controller.dispose();
-  });
-});
-
 describe('dashboard controller DOM lifetime', () => {
   test('a focused copy button in a read-only agent sheet does not freeze connection updates', async () => {
     const root = document.createElement('div');

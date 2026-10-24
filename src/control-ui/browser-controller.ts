@@ -838,20 +838,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     void submitControl(form, tab, submittedValues);
   }
 
-  /**
-   * The browser stops a submit with a required field empty and shows its own
-   * bubble, which nothing on the page records. Say it on the page as well, in
-   * the form's message slot: the first field that is missing, by its name.
-   */
-  function onInvalid(event: Event): void {
-    const field = event.target instanceof HTMLInputElement ? event.target : null;
-    const form = field ? field.form : null;
-    if (!field || !form || !root.contains(form) || !form.hasAttribute('data-connect-kind')) return;
-    const first = Array.from(form.elements).find((element) => element instanceof HTMLInputElement && !element.validity.valid);
-    if (first !== field) return;
-    say(form, `${field.getAttribute('aria-label') || field.getAttribute('placeholder') || 'A value'} is needed.`);
-  }
-
   function onClick(event: Event): void {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target)) return;
@@ -1030,7 +1016,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   root.addEventListener('submit', onSubmit);
-  root.addEventListener('invalid', onInvalid, true);
   root.addEventListener('click', onClick);
   // Coming back from the approval browser or tab is the moment the exchange
   // may have just landed: one authoritative read, and only while this
@@ -1059,7 +1044,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
-    root.removeEventListener('invalid', onInvalid, true);
     root.removeEventListener('click', onClick);
     root.removeEventListener(redrawEvent, onRedrawRequest);
   };

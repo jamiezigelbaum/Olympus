@@ -126473,16 +126473,6 @@ function mountDashboardController(options) {
     const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
     submitControl(form, tab, submittedValues);
   }
-  function onInvalid(event) {
-    const field = event.target instanceof HTMLInputElement ? event.target : null;
-    const form = field ? field.form : null;
-    if (!field || !form || !root.contains(form) || !form.hasAttribute("data-connect-kind"))
-      return;
-    const first = Array.from(form.elements).find((element) => element instanceof HTMLInputElement && !element.validity.valid);
-    if (first !== field)
-      return;
-    say(form, `${field.getAttribute("aria-label") || field.getAttribute("placeholder") || "A value"} is needed.`);
-  }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || !root.contains(target))
@@ -126647,7 +126637,6 @@ function mountDashboardController(options) {
     focus.focus();
   }
   root.addEventListener("submit", onSubmit);
-  root.addEventListener("invalid", onInvalid, true);
   root.addEventListener("click", onClick);
   const refreshOnReturn = () => {
     if (disposed || options.signal.aborted || !awaitingAuthorizationReturn)
@@ -126676,7 +126665,6 @@ function mountDashboardController(options) {
     view2.removeEventListener("focus", refreshOnReturn);
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
-    root.removeEventListener("invalid", onInvalid, true);
     root.removeEventListener("click", onClick);
     root.removeEventListener(redrawEvent, onRedrawRequest);
   };
