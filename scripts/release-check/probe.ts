@@ -9,6 +9,13 @@
  * than as its summary) is never found. A `css` selector is the last resort for a control that has no name.
  */
 
+/**
+ * A window the page opened blank is a tab kept for an address that is still coming (a sign-in's, fetched after the press), so
+ * `openedWindows` reports it by where it is when asked: still blank, closed again, or gone on to another site (whose address the page
+ * may not read).
+ */
+export const BLANK_WINDOW = { left: 'about:blank', closed: 'about:blank (closed)', elsewhere: 'about:blank, then another site' } as const;
+
 /** A target as the page-side script takes it: regular expressions arrive as { re, flags }. */
 export interface WireTarget {
   role?: string;
@@ -216,11 +223,22 @@ export const PROBE_SOURCE = String.raw`(() => {
     watchWindows: () => {
       if (window.__rcOpened) return window.__rcOpened.length;
       window.__rcOpened = [];
+      window.__rcWindows = [];
       const original = window.open;
-      window.open = function () { window.__rcOpened.push(String(arguments[0] || '').slice(0, 120)); return original ? original.apply(window, arguments) : null; };
+      window.open = function () {
+        window.__rcOpened.push(String(arguments[0] || '').slice(0, 120));
+        const opened = original ? original.apply(window, arguments) : null;
+        window.__rcWindows.push(opened);
+        return opened;
+      };
       return 0;
     },
-    openedWindows: () => (window.__rcOpened ? window.__rcOpened.slice() : []),
+    openedWindows: () => (window.__rcOpened || []).map((url, i) => {
+      if (url && url !== 'about:blank') return url;
+      const opened = (window.__rcWindows || [])[i];
+      if (!opened || opened.closed) return ${JSON.stringify(BLANK_WINDOW.closed)};
+      try { const now = opened.location.href; return !now || now === 'about:blank' ? ${JSON.stringify(BLANK_WINDOW.left)} : now.slice(0, 120); } catch { return ${JSON.stringify(BLANK_WINDOW.elsewhere)}; }
+    }),
     /** Every details element's state, for the menus and See why. */
     openDetails: () => Array.from(document.querySelectorAll('details[data-open-key]')).map((el) => {
       const summary = el.querySelector('summary');

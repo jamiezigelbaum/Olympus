@@ -10,7 +10,7 @@ import { buildInventory, setLiteral } from '../scripts/release-check/explore-inv
 import { kindOf } from '../scripts/release-check/explore-kinds.ts';
 import type { ElementInfo, JourneyDriver, PageEvents } from '../scripts/release-check/journey.ts';
 import { describeBody } from '../scripts/release-check/journey-driver.ts';
-import { PROBE_SOURCE, type WireTarget } from '../scripts/release-check/probe.ts';
+import { BLANK_WINDOW, PROBE_SOURCE, type WireTarget } from '../scripts/release-check/probe.ts';
 import { exploreSection, accessibilitySection } from '../scripts/release-check/report.ts';
 
 function evalIn(window: Window, code: string): unknown {
@@ -324,6 +324,11 @@ describe('exploring the Sources section', () => {
     const own = new PanelDriver({ connectOpens: 'https://olympusplugin.ai/open/connect' });
     const ownResult = await explore({ driver: own, seeds: [disconnected(own)], inventory: inventory(), ...quick() });
     expect(exploreChecks(ownResult).find((entry) => entry.id === 'explore.disconnected')!.status).toBe('pass');
+    // A blank tab kept for an address: closed again is left to the window count, left blank fails.
+    const closed = new PanelDriver({ connectOpens: BLANK_WINDOW.closed });
+    expect(exploreChecks(await explore({ driver: closed, seeds: [disconnected(closed)], inventory: inventory(), ...quick() })).find((entry) => entry.id === 'explore.disconnected')!.status).toBe('pass');
+    const blank = new PanelDriver({ connectOpens: BLANK_WINDOW.left });
+    expect(exploreChecks(await explore({ driver: blank, seeds: [disconnected(blank)], inventory: inventory(), ...quick() })).find((entry) => entry.id === 'explore.disconnected')!.detail).toContain('left blank');
   });
 
   test('a state that cannot be produced is reported as such and its controls count as missed with that reason', async () => {
