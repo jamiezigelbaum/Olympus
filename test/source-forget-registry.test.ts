@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { readTierMigrationState, TIER_MIGRATION_STATE_SCHEMA_VERSION } from '../src/workers/classification/tier-migration.ts';
 import {
   FORGET_STEPS,
   ForgetStepError,
@@ -17,8 +19,11 @@ import {
   accountOf,
   contextOf,
   layoutUnder,
+  migrationPlan,
   seedAllFiles,
+  tierLedgerIdOf,
   treeDigest,
+  writeBackAfterDelete,
   type SeededFile,
 } from './helpers/forget-seeds.ts';
 
@@ -102,7 +107,8 @@ describe('forget registry: one test file per step', () => {
         const seeded = treeDigest(root);
         const stranger = { source_id: 'made.up', slot: '1', corpus_ids: ['internal.made.up'] };
 
-        expect(stepOf(file).forget(stranger, context, { dryRun: false })).toEqual([]);
+        // A source nobody connected has no tier ledger either.
+        expect(stepOf(file).forget(stranger, { ...context, tierLedgerIds: [] }, { dryRun: false })).toEqual([]);
         expect(treeDigest(root)).toEqual(seeded);
         expect(file.left(layout, file.mine)).toBeGreaterThan(0);
       });
@@ -158,7 +164,7 @@ describe('forget registry: a file that cannot be read', () => {
   test('a malformed JSON file is left alone and does not fail the run', () => {
     const root = newRoot();
     const layout = layoutUnder(root);
-    for (const id of ['file-source-scopes', 'mail-source-scopes', 'this-computer', 'source-account-bindings', 'ingestion-doctor-state']) {
+    for (const id of ['file-source-scopes', 'mail-source-scopes', 'this-computer', 'source-account-bindings', 'ingestion-doctor-state', 'tier-migration-state']) {
       const file = SEEDED_FILES.find((entry) => entry.stepId === id)!;
       mkdirSync(dirname(file.path(layout)), { recursive: true });
       writeFileSync(file.path(layout), '{ not json');
@@ -238,5 +244,225 @@ describe('the registry\'s lists', () => {
   test('a kept file is never also a step\'s file', () => {
     const files = new Set(FORGET_STEPS.map((step) => step.file));
     for (const kept of KEPT_SHARED_FILES) expect(files.has(kept.file), kept.file).toBe(false);
+  });
+});
+
+const seededFile = (stepId: string): SeededFile => SEEDED_FILES.find((file) => file.stepId === stepId)!;
+
+describe('steps the worker repeats before its restart', () => {
+  test('only the steps its own background writers can write back are marked', () => {
+    // The dashboard history poll and the watch pass; no owner-choice step, and
+    // nothing a reconnect or a new private question could legitimately refill.
+    expect(FORGET_STEPS.filter((step) => step.repeatBeforeRestart).map((step) => step.id))
+      .toEqual(['source-dashboard', 'source-watches']);
+  });
+
+  test('a repeat-only run forgets the marked steps\' rows and no others', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    seedAllFiles(layout);
+    const before = new Map(SEEDED_FILES.map((file) => [file.stepId, file.left(layout, MINE)]));
+
+    const lines = runForgetSteps(accountOf(MINE), contextOf(layout), { dryRun: false, repeatableOnly: true });
+
+    expect(lines).toHaveLength(2);
+    for (const file of SEEDED_FILES) {
+      const marked = file.stepId === 'source-dashboard' || file.stepId === 'source-watches';
+      expect(file.left(layout, MINE), file.stepId).toBe(marked ? 0 : before.get(file.stepId)!);
+    }
+  });
+
+  test('a reconnect after the delete survives the repeat, while a write-back does not', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    seedAllFiles(layout);
+    runForgetSteps(accountOf(MINE), contextOf(layout), { dryRun: false });
+    for (const id of ['file-source-scopes', 'source-account-bindings']) expect(seededFile(id).left(layout, MINE)).toBe(0);
+
+    // The owner reconnects in the window; a poll writes the old counts back.
+    seededFile('file-source-scopes').seed(layout);
+    seededFile('source-account-bindings').seed(layout);
+    writeBackAfterDelete(layout, MINE);
+    expect(seededFile('source-dashboard').left(layout, MINE)).toBeGreaterThan(0);
+
+    runForgetSteps(accountOf(MINE), contextOf(layout), { dryRun: false, repeatableOnly: true });
+
+    expect(seededFile('file-source-scopes').left(layout, MINE)).toBeGreaterThan(0);
+    expect(seededFile('source-account-bindings').left(layout, MINE)).toBeGreaterThan(0);
+    expect(seededFile('source-dashboard').left(layout, MINE)).toBe(0);
+  });
+});
+
+describe('tier-migration-state: the owner\'s raw batch selectors', () => {
+  const statePath = (layout: ReturnType<typeof layoutUnder>): string => seededFile('tier-migration-state').path(layout);
+  const readPlans = (layout: ReturnType<typeof layoutUnder>) =>
+    (JSON.parse(readFileSync(statePath(layout), 'utf8')) as { plans: Array<{ planId: string; batches: Array<{ selector: string | null; moved: number; state: string }> }> }).plans;
+
+  test('replaces each selector but source: with the same kind and a non-identifying value, and keeps every other field', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    seededFile('tier-migration-state').seed(layout);
+    const before = readPlans(layout);
+
+    const lines = stepOf(seededFile('tier-migration-state')).forget(accountOf(MINE), contextOf(layout), { dryRun: false });
+
+    expect(lines).toEqual([`${statePath(layout)} (migration batch selectors: 3)`]);
+    const after = readPlans(layout);
+    const mine = after.find((plan) => plan.planId === 'plan-of-dropbox')!;
+    expect(mine.batches.map((batch) => batch.selector)).toEqual([
+      'source:dropbox.files',
+      'folder:<forgotten>',
+      'sender:<forgotten>',
+      'chat:<forgotten>',
+      null,
+    ]);
+    // Counts, states and ids stay; a stopped batch keeps its place (it no longer resumes by its selector).
+    const withoutSelector = (plan: (typeof before)[number]) => plan.batches.map(({ selector: _selector, ...rest }) => rest);
+    expect(withoutSelector(mine)).toEqual(withoutSelector(before.find((plan) => plan.planId === 'plan-of-dropbox')!));
+    expect(mine.batches[2]!.state).toBe('stopped');
+    // Another source's plan keeps its selectors, byte for byte.
+    expect(after.find((plan) => plan.planId === 'plan-of-google_drive')).toEqual(before.find((plan) => plan.planId === 'plan-of-google_drive'));
+  });
+
+  test('a plan that spans the source and another loses all of its selectors, and the name appears nowhere in the file', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    mkdirSync(dirname(statePath(layout)), { recursive: true });
+    writeFileSync(statePath(layout), JSON.stringify({
+      schemaVersion: 1,
+      plans: [migrationPlan(MINE, [OTHER.source_id]), migrationPlan(OTHER)],
+    }));
+
+    const lines = stepOf(seededFile('tier-migration-state')).forget(accountOf(MINE), contextOf(layout), { dryRun: false });
+
+    expect(lines).toEqual([`${statePath(layout)} (migration batch selectors: 3)`]);
+    const text = readFileSync(statePath(layout), 'utf8');
+    expect(text).not.toContain('person-dropbox@example.invalid');
+    expect(text).not.toContain('/synthetic/dropbox folder');
+    expect(text).toContain('person-google_drive@example.invalid');
+  });
+
+  test('the migration still reads the state file afterwards', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    seededFile('tier-migration-state').seed(layout);
+
+    stepOf(seededFile('tier-migration-state')).forget(accountOf(MINE), contextOf(layout), { dryRun: false });
+
+    const state = readTierMigrationState(statePath(layout));
+    expect(state.schemaVersion).toBe(TIER_MIGRATION_STATE_SCHEMA_VERSION);
+    expect(state.plans).toHaveLength(2);
+  });
+
+  test('a state file the migration would not read, or without plans, is left alone', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    mkdirSync(dirname(statePath(layout)), { recursive: true });
+    for (const content of ['{ not json', '[]', JSON.stringify({ schemaVersion: 1 })]) {
+      writeFileSync(statePath(layout), content);
+      expect(stepOf(seededFile('tier-migration-state')).forget(accountOf(MINE), contextOf(layout), { dryRun: false })).toEqual([]);
+      expect(readFileSync(statePath(layout), 'utf8')).toBe(content);
+    }
+  });
+});
+
+describe('file-extraction-jobs: Secrets redaction claims of the deleted source\'s tier ledgers', () => {
+  const jobsPath = (layout: ReturnType<typeof layoutUnder>): string => seededFile('file-extraction-jobs').path(layout);
+  const rows = (layout: ReturnType<typeof layoutUnder>, sql: string, ...params: string[]): number => {
+    const db = new Database(jobsPath(layout), { readonly: true });
+    try { return (db.query(sql).get(...params) as { n: number }).n; } finally { db.close(); }
+  };
+  const claimsOf = (layout: ReturnType<typeof layoutUnder>, claimant: string) =>
+    rows(layout, 'SELECT COUNT(*) AS n FROM secret_item_redaction_claims WHERE claimant = ?', claimant);
+  const redactionsOf = (layout: ReturnType<typeof layoutUnder>, accountScope: string) =>
+    rows(layout, 'SELECT COUNT(*) AS n FROM secret_item_redactions WHERE account_scope = ?', accountScope);
+  const mineScope = `${MINE.ledger_id}@example.com`;
+  const otherScope = `${OTHER.ledger_id}@example.com`;
+  const setup = () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    seededFile('file-extraction-jobs').seed(layout);
+    return layout;
+  };
+  const forget = (layout: ReturnType<typeof layoutUnder>, context = contextOf(layout), dryRun = false) =>
+    stepOf(seededFile('file-extraction-jobs')).forget(accountOf(MINE), context, { dryRun });
+
+  test('the deleted ledger\'s claim and its sole redaction go; another source\'s stay', () => {
+    const layout = setup();
+    expect(claimsOf(layout, tierLedgerIdOf(MINE))).toBe(1);
+    expect(redactionsOf(layout, mineScope)).toBe(1);
+
+    forget(layout);
+
+    expect(claimsOf(layout, tierLedgerIdOf(MINE))).toBe(0);
+    expect(redactionsOf(layout, mineScope)).toBe(0);
+    expect(claimsOf(layout, tierLedgerIdOf(OTHER))).toBe(1);
+    expect(redactionsOf(layout, otherScope)).toBe(1);
+  });
+
+  test('a redaction another ledger also claims stays, with that ledger\'s claim', () => {
+    const layout = setup();
+    const db = new Database(jobsPath(layout));
+    try {
+      db.query(`INSERT INTO secret_item_redaction_claims (provider, account_scope, provider_item_id, claimant, claimed_at)
+        VALUES ('example_provider', ?, 'item-1', 'ledger-of-a-second-store', '2026-10-01T00:00:00.000Z')`).run(mineScope);
+    } finally {
+      db.close();
+    }
+
+    forget(layout);
+
+    expect(claimsOf(layout, tierLedgerIdOf(MINE))).toBe(0);
+    expect(claimsOf(layout, 'ledger-of-a-second-store')).toBe(1);
+    expect(redactionsOf(layout, mineScope)).toBe(1);
+  });
+
+  test('a redaction with no claim on record cannot be attributed and stays', () => {
+    const layout = setup();
+    const db = new Database(jobsPath(layout));
+    try {
+      db.query(`INSERT INTO secret_item_redactions (provider, account_scope, provider_item_id, local_item_id, redacted_at)
+        VALUES ('example_provider', ?, 'old-item', '', '2026-10-01T00:00:00.000Z')`).run(mineScope);
+    } finally {
+      db.close();
+    }
+
+    forget(layout);
+
+    expect(redactionsOf(layout, mineScope)).toBe(1);
+  });
+
+  test('a dry run counts the claims and redactions and removes none; a second run reports nothing', () => {
+    const layout = setup();
+    const preview = forget(layout, contextOf(layout), true);
+
+    expect(claimsOf(layout, tierLedgerIdOf(MINE))).toBe(1);
+    expect(redactionsOf(layout, mineScope)).toBe(1);
+    expect(forget(layout)).toEqual(preview);
+    expect(forget(layout)).toEqual([]);
+  });
+
+  test('without the ledger ids no claim is retired, and the unreadable ledger is reported', () => {
+    const layout = setup();
+    const lines = forget(layout, { ...contextOf(layout), tierLedgerIds: [], unreadableTierLedgers: ['/synthetic/store.tier-ledger.sqlite'] });
+
+    expect(claimsOf(layout, tierLedgerIdOf(MINE))).toBe(1);
+    expect(redactionsOf(layout, mineScope)).toBe(1);
+    // The jobs go as always; the claims stay, and the report says why.
+    expect(lines.some((line) => line.includes('extraction rows'))).toBe(true);
+    expect(lines.at(-1)).toBe(`${jobsPath(layout)} (redaction claims kept, tier ledger unreadable: 1)`);
+  });
+
+  test('a ledger whose claims table is missing (an older schema) is not an error and keeps its redactions', () => {
+    const layout = setup();
+    const db = new Database(jobsPath(layout));
+    try {
+      db.exec('DROP TABLE secret_item_redaction_claims');
+    } finally {
+      db.close();
+    }
+
+    expect(() => forget(layout)).not.toThrow();
+    expect(redactionsOf(layout, mineScope)).toBe(1);
   });
 });

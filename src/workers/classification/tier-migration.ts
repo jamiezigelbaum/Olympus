@@ -1,4 +1,4 @@
-import { TIER_MIGRATION_DIR_ENV, tierMigrationDir, tierMigrationReportDir } from './tier-migration-reports.ts';
+import { TIER_MIGRATION_DIR_ENV, tierMigrationReportDir, tierMigrationStatePath } from './tier-migration-reports.ts';
 // Tier migration for EXISTING installs (design
 // docs/design/per-item-four-tier-classification.md, section 4.6, steps M0-M6).
 //
@@ -159,7 +159,7 @@ export function resolveTierMigrationPaths(
   env: Record<string, string | undefined>,
   embeddingLedgerPath: string,
 ): TierMigrationPaths {
-  return { statePath: join(tierMigrationDir(env), 'state.json'), reportDir: tierMigrationReportDir(env), embeddingLedgerPath };
+  return { statePath: tierMigrationStatePath(env), reportDir: tierMigrationReportDir(env), embeddingLedgerPath };
 }
 
 // ---- Registry ------------------------------------------------------------------

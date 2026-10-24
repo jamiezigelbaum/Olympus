@@ -20,6 +20,7 @@ import {
   SEEDED_FILES,
   layoutUnder,
   seedAllFiles,
+  seedTierLedgerBeside,
   treeDigest,
 } from './helpers/forget-seeds.ts';
 
@@ -35,6 +36,8 @@ function fixture() {
   const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === MINE.source_id)!.connectorStorePaths!({ homeDir })[0]!;
   mkdirSync(dirname(store), { recursive: true });
   writeFileSync(store, 'indexed');
+  // Its tier ledger, beside the store, with the id the seeded redaction claims name.
+  const ledgerPath = seedTierLedgerBeside(store, MINE);
   seedAllFiles(layout);
   const run = (options: { dryRun?: boolean; sourceId?: string } = {}) => deleteOlympusData({
     sourceId: options.sourceId ?? MINE.source_id,
@@ -42,7 +45,7 @@ function fixture() {
     handleRegistryPath: layout.handleRegistryPath,
     ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
   });
-  return { root, layout, homeDir, store, run };
+  return { root, layout, homeDir, store, ledgerPath, run };
 }
 
 /** Files this source has rows in, in this fixture: not Gmail's mail scope or the computer connection. */
@@ -66,6 +69,39 @@ describe('a per-source Delete forgets the source in the shared files', () => {
     }
     // The report lists files forgotten from, not files removed.
     expect(result.removed.some((path) => path.includes('(') )).toBe(false);
+  });
+
+  test('the tier ledger\'s id is read before the ledger goes, and the claims it held go with it', () => {
+    const f = fixture();
+    const jobs = SEEDED_FILES.find((file) => file.stepId === 'file-extraction-jobs')!;
+    expect(existsSync(f.ledgerPath)).toBe(true);
+
+    const result = f.run();
+
+    expect(existsSync(f.ledgerPath)).toBe(false);
+    // Left of the source in the jobs ledger: no job, artifact, re-read, claim or redaction.
+    expect(jobs.left(f.layout, MINE)).toBe(0);
+    expect(jobs.left(f.layout, OTHER)).toBeGreaterThan(0);
+    expect(result.forgotten!.some((line) => line.includes('file-extraction-jobs.sqlite (extraction rows: 5)'))).toBe(true);
+  });
+
+  test('a tier ledger that cannot be read keeps its claims, and the Delete says so', () => {
+    const f = fixture();
+    const jobs = SEEDED_FILES.find((file) => file.stepId === 'file-extraction-jobs')!;
+    // Still a database, but one whose identity cannot be read (the table lost its value column).
+    const db = new Database(f.ledgerPath);
+    try {
+      db.exec('DROP TABLE tier_ledger_meta; CREATE TABLE tier_ledger_meta (key TEXT PRIMARY KEY);');
+    } finally {
+      db.close();
+    }
+
+    const result = f.run();
+
+    // The jobs went; the ledger's claim and redaction were left alone, not guessed at.
+    const left = jobs.left(f.layout, MINE);
+    expect(left).toBe(2);
+    expect(result.forgotten!.some((line) => line.includes('(redaction claims kept, tier ledger unreadable: 1)'))).toBe(true);
   });
 
   test('a dry run reports what it would forget and changes nothing', () => {

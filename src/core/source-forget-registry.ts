@@ -34,7 +34,12 @@ import {
 } from '../workers/source-dashboard.ts';
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
-import { forgetTierMigrationReports, tierMigrationReportDir } from '../workers/classification/tier-migration-reports.ts';
+import {
+  forgetTierMigrationReports,
+  forgetTierMigrationSelectors,
+  tierMigrationReportDir,
+  tierMigrationStatePath,
+} from '../workers/classification/tier-migration-reports.ts';
 
 /** One account whose rows are forgotten. Slot is always `'1'` until accounts get a second slot. */
 export interface ForgetAccount {
@@ -56,10 +61,27 @@ export interface ForgetContext {
    * a corpus not in this list cannot be placed, so they go too.
    */
   knownCorpusIds?: readonly string[] | undefined;
+  /**
+   * The ids of the source's tier ledgers, read from the ledger files before
+   * any of them is removed. A ledger id is the `claimant` of the Secrets
+   * redaction claims it holds in the extraction job ledger; a reconnected
+   * source gets new ids, so the old claims could never be retired again.
+   */
+  tierLedgerIds?: readonly string[] | undefined;
+  /**
+   * Tier ledgers that exist but whose id could not be read. Their claims stay
+   * (nothing is guessed) and the extraction step says so in its report.
+   */
+  unreadableTierLedgers?: readonly string[] | undefined;
 }
 
 export interface ForgetOptions {
   dryRun: boolean;
+  /**
+   * Run only the steps marked `repeatBeforeRestart`: the repeat the worker
+   * makes just before the restart a Delete asks for.
+   */
+  repeatableOnly?: boolean | undefined;
 }
 
 export interface ForgetStep {
@@ -68,6 +90,17 @@ export interface ForgetStep {
   file: string;
   /** The modules that open the file; the store-open guard needs each to own a step or a kept entry. */
   modules: readonly string[];
+  /**
+   * True when the running worker's own background writers (a dashboard poll
+   * reading stores through handles still open, the watch pass) can write this
+   * file's rows back while the worker winds down after a Delete, so the worker
+   * repeats the step just before it restarts. Never set it on a step whose
+   * rows the owner can legitimately create again in that window (a reconnect
+   * writes scope approvals, the this-computer connection and the account
+   * binding; a remote agent can ask a new private question): a repeat there
+   * would erase the reconnect.
+   */
+  repeatBeforeRestart?: true;
   /** Report lines in the style `<path> (private answers: N)`, one per file with something to forget. */
   forget(account: ForgetAccount, context: ForgetContext, options: ForgetOptions): string[];
 }
@@ -127,6 +160,8 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     file: 'source-dashboard.sqlite',
     // The ingestion ledger shares the file; forgetSourceDashboardRows covers both writers' tables.
     modules: ['src/workers/source-dashboard.ts', 'src/workers/source-ingestion-ledger.ts'],
+    // The dashboard's history poll records a source's counts from stale handles.
+    repeatBeforeRestart: true,
     forget(account, context, { dryRun }) {
       const path = defaultSourceDashboardHistoryDbPath(context.env);
       return line(path, 'dashboard rows', forgetSourceDashboardRows(
@@ -155,14 +190,27 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     modules: ['src/workers/file-extraction/job-store.ts', 'src/workers/file-extraction/job-names.ts'],
     forget(account, context, { dryRun }) {
       // Every ledger this process opened, as the Secrets clearing does.
-      return extractionJobsDbPaths(context.env).flatMap((path) =>
-        line(path, 'extraction jobs', forgetExtractionJobs(path, { corpusIds: account.corpus_ids }, { dryRun })));
+      const paths = extractionJobsDbPaths(context.env);
+      const lines = paths.flatMap((path) =>
+        line(path, 'extraction rows', forgetExtractionJobs(
+          path,
+          { corpusIds: account.corpus_ids, tierLedgerIds: context.tierLedgerIds ?? [] },
+          { dryRun },
+        )));
+      // A tier ledger whose id could not be read: its Secrets redaction claims
+      // stay, because no claim is retired on a guess. Said in the report.
+      const unreadable = context.unreadableTierLedgers?.length ?? 0;
+      return unreadable > 0 && paths[0] !== undefined
+        ? [...lines, ...line(paths[0], 'redaction claims kept, tier ledger unreadable', unreadable)]
+        : lines;
     },
   },
   {
     id: 'source-watches',
     file: 'source-watches.sqlite',
     modules: ['src/core/source-watch.ts'],
+    // The watch pass can queue matches from stores that are being deleted.
+    repeatBeforeRestart: true,
     forget(account, context, { dryRun }) {
       const path = defaultSourceWatchDbPath(context.env);
       return line(path, 'watches', forgetSourceWatches(path, { corpusIds: account.corpus_ids }, { dryRun }));
@@ -189,6 +237,16 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     forget(account, context, { dryRun }) {
       const dir = tierMigrationReportDir(context.env);
       return line(dir, 'migration report patterns', forgetTierMigrationReports(dir, sourceIdsOf(account, context), { dryRun }));
+    },
+  },
+  {
+    // The migration's state file keeps the owner's raw batch selectors (folder paths, labels, senders, chats).
+    id: 'tier-migration-state',
+    file: 'tier-migration/state.json',
+    modules: [],
+    forget(account, context, { dryRun }) {
+      const path = tierMigrationStatePath(context.env);
+      return line(path, 'migration batch selectors', forgetTierMigrationSelectors(path, sourceIdsOf(account, context), { dryRun }));
     },
   },
   {
@@ -303,10 +361,12 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
  * Runs every step for one account, in order, and returns their report lines.
  * The first failure throws a ForgetStepError naming the step and the file.
  * Steps are idempotent, so after a failure the same call can simply run again.
+ * `repeatableOnly` runs just the steps marked `repeatBeforeRestart`.
  */
 export function runForgetSteps(account: ForgetAccount, context: ForgetContext, options: ForgetOptions): string[] {
   const lines: string[] = [];
   for (const step of FORGET_STEPS) {
+    if (options.repeatableOnly === true && step.repeatBeforeRestart !== true) continue;
     try {
       lines.push(...step.forget(account, context, options));
     } catch (error) {

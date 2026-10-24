@@ -25319,17 +25319,29 @@ function forgetExtractionJobs(dbPath, scope, options = {}) {
     return 0;
   const dryRun = options.dryRun === true;
   const jobs = rowsKeyedBy([["corpus_id", scope.corpusIds]]);
-  if (!jobs)
+  const claimants = [...new Set(scope.tierLedgerIds ?? [])];
+  if (!jobs && claimants.length === 0)
     return 0;
   const db = new Database4(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     if (!dryRun)
       db.exec("PRAGMA secure_delete = ON;");
+    const marks = claimants.map(() => "?").join(", ");
+    const sameItem = (alias) => `${alias}.provider = ${SECRET_ITEM_REDACTIONS_TABLE}.provider AND ${alias}.account_scope = ${SECRET_ITEM_REDACTIONS_TABLE}.account_scope` + ` AND ${alias}.provider_item_id = ${SECRET_ITEM_REDACTIONS_TABLE}.provider_item_id`;
     return forgetSqliteRows(db, [
-      { table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params },
+      ...jobs ? [{ table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params }] : [],
       ...filterFor("extraction_artifacts", [["corpus_id", scope.corpusIds]]),
-      ...filterFor("extraction_jobs", [["corpus_id", scope.corpusIds]])
+      ...filterFor("extraction_jobs", [["corpus_id", scope.corpusIds]]),
+      ...claimants.length > 0 && claimsTableExists(db) ? [{
+        table: SECRET_ITEM_REDACTIONS_TABLE,
+        where: `EXISTS (SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} AS mine WHERE ${sameItem("mine")} AND mine.claimant IN (${marks}))` + ` AND NOT EXISTS (SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} AS other WHERE ${sameItem("other")} AND other.claimant NOT IN (${marks}))`,
+        params: [...claimants, ...claimants]
+      }, {
+        table: SECRET_ITEM_REDACTION_CLAIMS_TABLE,
+        where: `claimant IN (${marks})`,
+        params: claimants
+      }] : []
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
     closeSqliteStore(db);
@@ -36954,6 +36966,7 @@ function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
   }
   const db = new Database6(dbPath, { readonly: true });
   try {
+    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get())
       return 0;
     const ids = new Set(input.corpusIds);
@@ -36961,7 +36974,7 @@ function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
     const rows = db.query("SELECT * FROM waiting_questions").all();
     return rows.filter((row) => questionTakenWithCorpora(row, ids, known)).length;
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 function revokeWaitingPrivateQuestions(remoteConnectionsDbPath, connectionId, options = {}) {
@@ -37433,7 +37446,7 @@ function sourceWatchAuthenticatedRouteHeaders(route) {
   return headers;
 }
 function defaultSourceWatchDbPath(env = process.env) {
-  if (!isAbsolute14(xdgDataHome(env))) {
+  if (!isAbsolute14(olympusDataRoot(env))) {
     throw new TypeError("Source watch data home must be an absolute private data root.");
   }
   return olympusDataPath(env, "source-watches.sqlite");
@@ -70691,6 +70704,9 @@ function tierMigrationDir(env) {
 function tierMigrationReportDir(env) {
   return join61(tierMigrationDir(env), "reports");
 }
+function tierMigrationStatePath(env) {
+  return join61(tierMigrationDir(env), "state.json");
+}
 function forgetTierMigrationReports(reportDir, sourceIds, options = {}) {
   if (!existsSync47(reportDir))
     return 0;
@@ -70717,7 +70733,49 @@ function forgetTierMigrationReports(reportDir, sourceIds, options = {}) {
   }
   return forgotten;
 }
-var TIER_MIGRATION_DIR_ENV = "OLYMPUS_TIER_MIGRATION_DIR", isRecord5 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function forgetTierMigrationSelectors(statePath, sourceIds, options = {}) {
+  if (!existsSync47(statePath))
+    return 0;
+  let state;
+  try {
+    state = JSON.parse(readFileSync41(statePath, "utf8"));
+  } catch {
+    return 0;
+  }
+  if (!isRecord5(state) || !Array.isArray(state.plans))
+    return 0;
+  let forgotten = 0;
+  const plans = state.plans.map((plan) => {
+    if (!isRecord5(plan) || !Array.isArray(plan.lanes) || !Array.isArray(plan.batches))
+      return plan;
+    const hasSource = plan.lanes.some((lane) => isRecord5(lane) && typeof lane.sourceId === "string" && sourceIds.includes(lane.sourceId));
+    if (!hasSource)
+      return plan;
+    const batches = plan.batches.map((batch) => {
+      if (!isRecord5(batch) || typeof batch.selector !== "string")
+        return batch;
+      const forgottenSelector = forgottenSelectorOf(batch.selector);
+      if (forgottenSelector === batch.selector)
+        return batch;
+      forgotten += 1;
+      return { ...batch, selector: forgottenSelector };
+    });
+    return { ...plan, batches };
+  });
+  if (forgotten > 0 && options.dryRun !== true) {
+    writePrivateFileAtomicSync(statePath, `${JSON.stringify({ ...state, plans }, null, 2)}
+`);
+  }
+  return forgotten;
+}
+function forgottenSelectorOf(selector) {
+  const colon = selector.indexOf(":");
+  const kind = colon > 0 ? selector.slice(0, colon) : "selector";
+  if (kind === "source")
+    return selector;
+  return `${kind}:${FORGOTTEN_SELECTOR_VALUE}`;
+}
+var TIER_MIGRATION_DIR_ENV = "OLYMPUS_TIER_MIGRATION_DIR", isRecord5 = (value) => typeof value === "object" && value !== null && !Array.isArray(value), FORGOTTEN_SELECTOR_VALUE = "<forgotten>";
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
   init_olympus_layout();
@@ -70727,6 +70785,8 @@ var init_tier_migration_reports = __esm(() => {
 function runForgetSteps(account, context2, options) {
   const lines = [];
   for (const step of FORGET_STEPS) {
+    if (options.repeatableOnly === true && step.repeatBeforeRestart !== true)
+      continue;
     try {
       lines.push(...step.forget(account, context2, options));
     } catch (error) {
@@ -70776,6 +70836,7 @@ var init_source_forget_registry = __esm(() => {
       id: "source-dashboard",
       file: "source-dashboard.sqlite",
       modules: ["src/workers/source-dashboard.ts", "src/workers/source-ingestion-ledger.ts"],
+      repeatBeforeRestart: true,
       forget(account, context2, { dryRun }) {
         const path = defaultSourceDashboardHistoryDbPath(context2.env);
         return line(path, "dashboard rows", forgetSourceDashboardRows(path, { sourceIds: sourceIdsOf(account, context2), corpusIds: account.corpus_ids }, { dryRun }));
@@ -70795,13 +70856,17 @@ var init_source_forget_registry = __esm(() => {
       file: "file-extraction-jobs.sqlite",
       modules: ["src/workers/file-extraction/job-store.ts", "src/workers/file-extraction/job-names.ts"],
       forget(account, context2, { dryRun }) {
-        return extractionJobsDbPaths(context2.env).flatMap((path) => line(path, "extraction jobs", forgetExtractionJobs(path, { corpusIds: account.corpus_ids }, { dryRun })));
+        const paths = extractionJobsDbPaths(context2.env);
+        const lines = paths.flatMap((path) => line(path, "extraction rows", forgetExtractionJobs(path, { corpusIds: account.corpus_ids, tierLedgerIds: context2.tierLedgerIds ?? [] }, { dryRun })));
+        const unreadable = context2.unreadableTierLedgers?.length ?? 0;
+        return unreadable > 0 && paths[0] !== undefined ? [...lines, ...line(paths[0], "redaction claims kept, tier ledger unreadable", unreadable)] : lines;
       }
     },
     {
       id: "source-watches",
       file: "source-watches.sqlite",
       modules: ["src/core/source-watch.ts"],
+      repeatBeforeRestart: true,
       forget(account, context2, { dryRun }) {
         const path = defaultSourceWatchDbPath(context2.env);
         return line(path, "watches", forgetSourceWatches(path, { corpusIds: account.corpus_ids }, { dryRun }));
@@ -70823,6 +70888,15 @@ var init_source_forget_registry = __esm(() => {
       forget(account, context2, { dryRun }) {
         const dir = tierMigrationReportDir(context2.env);
         return line(dir, "migration report patterns", forgetTierMigrationReports(dir, sourceIdsOf(account, context2), { dryRun }));
+      }
+    },
+    {
+      id: "tier-migration-state",
+      file: "tier-migration/state.json",
+      modules: [],
+      forget(account, context2, { dryRun }) {
+        const path = tierMigrationStatePath(context2.env);
+        return line(path, "migration batch selectors", forgetTierMigrationSelectors(path, sourceIdsOf(account, context2), { dryRun }));
       }
     },
     {
@@ -72301,9 +72375,9 @@ function deleteOlympusData(options) {
   };
 }
 function forgetSourceRowsAgain(options) {
-  return forgetSharedRows(requireSource(options.sourceId), options);
+  return forgetSharedRows(requireSource(options.sourceId), options, { repeatableOnly: true });
 }
-function forgetSharedRows(source, options) {
+function forgetSharedRows(source, options, only = {}) {
   const env = envForContext(options);
   const own3 = new Set([source.sourceId, ...source.sourceAliases ?? []]);
   const shipped = createSourceCorpusRegistry(withSourceCorpora(undefined, lifecycleSourceSpecs().flatMap((spec) => spec.registryCorpora?.() ?? []))).list();
@@ -72322,12 +72396,41 @@ function forgetSharedRows(source, options) {
       ...shipped.filter((corpus) => own3.has(corpus.sourceId)).map((corpus) => corpus.corpusId)
     ])]
   };
+  const ledgers = only.repeatableOnly === true ? { ids: [], unreadable: [] } : readTierLedgerIds(source.connectorStorePaths?.(options) ?? []);
   return runForgetSteps(account, {
     env,
     handleRegistryPath: options.handleRegistryPath || env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join63(resolveHome(options.homeDir), ".config", "olympus", "handles.json"),
     sourceAliases: source.sourceAliases,
-    knownCorpusIds: shipped.map((corpus) => corpus.corpusId)
-  }, { dryRun: options.dryRun === true });
+    knownCorpusIds: shipped.map((corpus) => corpus.corpusId),
+    tierLedgerIds: ledgers.ids,
+    unreadableTierLedgers: ledgers.unreadable
+  }, { dryRun: options.dryRun === true, ...only.repeatableOnly === true ? { repeatableOnly: true } : {} });
+}
+function readTierLedgerIds(storePaths) {
+  const ids = new Set;
+  const unreadable = [];
+  for (const storePath of storePaths) {
+    if (storePath === ":memory:")
+      continue;
+    const ledgerPath = tierLedgerPathForStore(storePath);
+    if (!existsSync50(ledgerPath))
+      continue;
+    let db;
+    try {
+      db = new Database15(ledgerPath, { readonly: true });
+      db.exec("PRAGMA busy_timeout = 10000;");
+      const meta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_ledger_meta'").get();
+      const row = meta ? db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() : null;
+      if (typeof row?.value === "string" && row.value !== "")
+        ids.add(row.value);
+    } catch {
+      unreadable.push(ledgerPath);
+    } finally {
+      if (db)
+        closeSqliteStore(db);
+    }
+  }
+  return { ids: [...ids], unreadable };
 }
 function deleteOlympusDataWithCustody(options) {
   const exclusive = options.dryRun !== true && options.sourceId ? lifecycleSourceSpecs().find((entry) => entry.sourceId === options.sourceId?.trim() || entry.sourceAliases?.includes(options.sourceId.trim()))?.approvals?.exclusive : undefined;
@@ -90155,7 +90258,7 @@ function domainTier(domain) {
   return domain === "public_safe" ? "public" : domain === "internal" ? "private" : "secure";
 }
 function resolveTierMigrationPaths(env, embeddingLedgerPath) {
-  return { statePath: join81(tierMigrationDir(env), "state.json"), reportDir: tierMigrationReportDir(env), embeddingLedgerPath };
+  return { statePath: tierMigrationStatePath(env), reportDir: tierMigrationReportDir(env), embeddingLedgerPath };
 }
 function readTierMigrationState(statePath) {
   if (!existsSync63(statePath))

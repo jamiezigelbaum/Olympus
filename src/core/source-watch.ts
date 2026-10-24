@@ -1,4 +1,4 @@
-import { olympusDataPath, xdgDataHome } from './olympus-layout.ts';
+import { olympusDataPath, olympusDataRoot } from './olympus-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -379,9 +379,11 @@ const SYSTEM_CLOCK: SourceWatchClock = Object.freeze({
 export function defaultSourceWatchDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  // The layout returns a relative XDG_DATA_HOME as given (the Linux engine
-  // layout refuses one itself); this store refuses it on every platform.
-  if (!isAbsolute(xdgDataHome(env))) {
+  // The layout returns a relative XDG data home as given (the Linux engine
+  // layout refuses one itself); this store refuses the RESOLVED root on every
+  // platform. A valid installed Linux receipt picks the root before any shell
+  // value, so it is checked after resolution, never on the ambient variable.
+  if (!isAbsolute(olympusDataRoot(env))) {
     throw new TypeError('Source watch data home must be an absolute private data root.');
   }
   return olympusDataPath(env, 'source-watches.sqlite');

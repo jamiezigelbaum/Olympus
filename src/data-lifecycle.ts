@@ -815,11 +815,14 @@ export function deleteOlympusData(options: {
  * Run a source's forget steps again, apart from a delete: the worker repeats
  * them just before the restart a delete asks for, because its own writers (a
  * dashboard poll reading the deleted stores through handles still open, the
- * watch pass) can write the source's rows back while it winds down. Every step
+ * watch pass) can write the source's rows back while it winds down. Only the
+ * steps marked `repeatBeforeRestart` run: the owner can reconnect in that
+ * window (it writes scope approvals, the this-computer connection, the account
+ * binding), and a repeat of those steps would erase the reconnect. Every step
  * is idempotent, so this removes only what came back.
  */
 export function forgetSourceRowsAgain(options: { sourceId: string } & LifecyclePathContext): string[] {
-  return forgetSharedRows(requireSource(options.sourceId), options);
+  return forgetSharedRows(requireSource(options.sourceId), options, { repeatableOnly: true });
 }
 
 /**
@@ -828,7 +831,11 @@ export function forgetSourceRowsAgain(options: { sourceId: string } & LifecycleP
  * registry entry's joined with the shipped corpus registry's for the source
  * (its id and aliases), the way the private answers were placed before.
  */
-function forgetSharedRows(source: LifecycleSourceSpec, options: { dryRun?: boolean } & LifecyclePathContext): string[] {
+function forgetSharedRows(
+  source: LifecycleSourceSpec,
+  options: { dryRun?: boolean } & LifecyclePathContext,
+  only: { repeatableOnly?: boolean } = {},
+): string[] {
   const env = envForContext(options);
   const own = new Set([source.sourceId, ...(source.sourceAliases ?? [])]);
   const shipped = createSourceCorpusRegistry(
@@ -852,6 +859,11 @@ function forgetSharedRows(source: LifecycleSourceSpec, options: { dryRun?: boole
       ...shipped.filter((corpus) => own.has(corpus.sourceId)).map((corpus) => corpus.corpusId),
     ])],
   };
+  // The ids of the source's tier ledgers, read now while the ledger files
+  // still exist: they are the claimants of its Secrets redaction claims.
+  const ledgers = only.repeatableOnly === true
+    ? { ids: [], unreadable: [] }
+    : readTierLedgerIds(source.connectorStorePaths?.(options) ?? []);
   return runForgetSteps(account, {
     env,
     handleRegistryPath: options.handleRegistryPath
@@ -859,7 +871,40 @@ function forgetSharedRows(source: LifecycleSourceSpec, options: { dryRun?: boole
       || join(resolveHome(options.homeDir), '.config', 'olympus', 'handles.json'),
     sourceAliases: source.sourceAliases,
     knownCorpusIds: shipped.map((corpus) => corpus.corpusId),
-  }, { dryRun: options.dryRun === true });
+    tierLedgerIds: ledgers.ids,
+    unreadableTierLedgers: ledgers.unreadable,
+  }, { dryRun: options.dryRun === true, ...(only.repeatableOnly === true ? { repeatableOnly: true } : {}) });
+}
+
+/**
+ * The ids of the tier ledgers beside a source's stores (the ledger file's
+ * identity, `tier_ledger_meta.ledger_id`). A ledger that is not there, or has
+ * no identity yet, never held a claim; one that exists but cannot be read is
+ * listed, and its claims are left alone.
+ */
+function readTierLedgerIds(storePaths: readonly string[]): { ids: string[]; unreadable: string[] } {
+  const ids = new Set<string>();
+  const unreadable: string[] = [];
+  for (const storePath of storePaths) {
+    if (storePath === ':memory:') continue;
+    const ledgerPath = tierLedgerPathForStore(storePath);
+    if (!existsSync(ledgerPath)) continue;
+    let db: Database | undefined;
+    try {
+      db = new Database(ledgerPath, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 10000;');
+      const meta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_ledger_meta'").get();
+      const row = meta
+        ? db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() as { value?: unknown } | null
+        : null;
+      if (typeof row?.value === 'string' && row.value !== '') ids.add(row.value);
+    } catch {
+      unreadable.push(ledgerPath);
+    } finally {
+      if (db) closeSqliteStore(db);
+    }
+  }
+  return { ids: [...ids], unreadable };
 }
 
 /**

@@ -249,31 +249,55 @@ export function retireExtractionJobRedaction(
  * One source's forget step on the ledger file at `dbPath`: every job row of
  * its corpora, which carry the names of the files they read, with their
  * extraction artifacts (structural refs can carry source names) and the
- * re-reads they were owed. Counts jobs, artifacts and re-reads together.
+ * re-reads they were owed. Counts jobs, artifacts, re-reads and the Secrets
+ * markers below together.
  *
- * The Secrets markers (`secret_item_redactions` and its claims) are keyed by
- * provider item id and hold no names, so they stay: a name captured for such an
- * item later is still cleared.
+ * The Secrets markers are keyed by provider item id and hold no names, but the
+ * claims are held by the source's tier ledger, whose id a reconnected source
+ * never gets again: `retireExtractionJobRedaction` could never retire the old
+ * claim, and the item would stay redacted for good. So the claims whose
+ * `claimant` is one of `tierLedgerIds` (the ids the caller read from the
+ * source's own ledger files) go, and with them each redaction left with no
+ * claim at all, but only an item whose claims all came from those ledgers. A
+ * redaction another tier ledger still claims, and that ledger's claim, stay; so
+ * does a redaction with no claim on record (written before claims existed),
+ * which cannot be attributed. With no ids nothing here is touched.
  */
 export function forgetExtractionJobs(
   dbPath: string,
-  scope: { corpusIds: readonly string[] },
+  scope: { corpusIds: readonly string[]; tierLedgerIds?: readonly string[] },
   options: { dryRun?: boolean } = {},
 ): number {
   if (dbPath === ':memory:' || !existsSync(dbPath)) return 0;
   const dryRun = options.dryRun === true;
   const jobs = rowsKeyedBy([['corpus_id', scope.corpusIds]]);
-  if (!jobs) return 0;
+  const claimants = [...new Set(scope.tierLedgerIds ?? [])];
+  if (!jobs && claimants.length === 0) return 0;
   const db = new Database(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
   try {
     db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
     // The names are the point: overwrite what is deleted.
     if (!dryRun) db.exec('PRAGMA secure_delete = ON;');
+    const marks = claimants.map(() => '?').join(', ');
+    const sameItem = (alias: string): string =>
+      `${alias}.provider = ${SECRET_ITEM_REDACTIONS_TABLE}.provider AND ${alias}.account_scope = ${SECRET_ITEM_REDACTIONS_TABLE}.account_scope`
+      + ` AND ${alias}.provider_item_id = ${SECRET_ITEM_REDACTIONS_TABLE}.provider_item_id`;
     return forgetSqliteRows(db, [
       // Before the jobs it selects them by.
-      { table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params },
+      ...(jobs ? [{ table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params }] : []),
       ...filterFor('extraction_artifacts', [['corpus_id', scope.corpusIds]]),
       ...filterFor('extraction_jobs', [['corpus_id', scope.corpusIds]]),
+      // The redactions go before their claims, which they are selected by.
+      ...(claimants.length > 0 && claimsTableExists(db) ? [{
+        table: SECRET_ITEM_REDACTIONS_TABLE,
+        where: `EXISTS (SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} AS mine WHERE ${sameItem('mine')} AND mine.claimant IN (${marks}))`
+          + ` AND NOT EXISTS (SELECT 1 FROM ${SECRET_ITEM_REDACTION_CLAIMS_TABLE} AS other WHERE ${sameItem('other')} AND other.claimant NOT IN (${marks}))`,
+        params: [...claimants, ...claimants],
+      }, {
+        table: SECRET_ITEM_REDACTION_CLAIMS_TABLE,
+        where: `claimant IN (${marks})`,
+        params: claimants,
+      }] : []),
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
     closeSqliteStore(db);

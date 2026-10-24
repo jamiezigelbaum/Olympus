@@ -712,13 +712,14 @@ export function forgetWaitingPrivateQuestions(
   }
   const db = new Database(dbPath, { readonly: true });
   try {
+    db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get()) return 0;
     const ids = new Set(input.corpusIds);
     const known = input.knownCorpusIds ? new Set(input.knownCorpusIds) : undefined;
     const rows = db.query('SELECT * FROM waiting_questions').all() as QuestionRow[];
     return rows.filter((row) => questionTakenWithCorpora(row, ids, known)).length;
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 

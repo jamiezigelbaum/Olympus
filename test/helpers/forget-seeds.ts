@@ -27,7 +27,8 @@ import {
 } from '../../src/core/source-watch.ts';
 import { defaultSourceDashboardHistoryDbPath, SqliteSourceDashboardHistory } from '../../src/workers/source-dashboard.ts';
 import { SqliteSourceIngestionLedgerStore } from '../../src/workers/source-ingestion-ledger.ts';
-import { tierMigrationReportDir } from '../../src/workers/classification/tier-migration-reports.ts';
+import { tierMigrationReportDir, tierMigrationStatePath } from '../../src/workers/classification/tier-migration-reports.ts';
+import { TierLedger, tierLedgerPathForStore } from '../../src/workers/classification/tier-ledger.ts';
 import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } from '../../src/workers/source-scheduler-state.ts';
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../../src/workers/file-extraction/job-store.ts';
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
@@ -61,8 +62,28 @@ export function layoutUnder(root: string): ForgetLayout {
   };
 }
 
-export const contextOf = (layout: ForgetLayout): ForgetContext =>
-  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id] });
+/** The tier ledger id the seeds give a source: the claimant of its Secrets redaction claims. */
+export const tierLedgerIdOf = (source: SeededSource): string => `ledger-of-${source.ledger_id}`;
+
+/** A context for forgetting `source` (the first seeded source by default): its tier ledger's id is known. */
+export const contextOf = (layout: ForgetLayout, source: SeededSource = MINE): ForgetContext =>
+  ({ ...layout, knownCorpusIds: [MINE.corpus_id, OTHER.corpus_id], tierLedgerIds: [tierLedgerIdOf(source)] });
+
+/**
+ * The tier ledger beside a connector store, with the id the seeded redaction
+ * claims name: the Delete reads it before it removes the ledger.
+ */
+export function seedTierLedgerBeside(storePath: string, source: SeededSource): string {
+  const ledgerPath = tierLedgerPathForStore(storePath);
+  new TierLedger({ dbPath: ledgerPath }).close();
+  const db = new Database(ledgerPath);
+  try {
+    db.query("UPDATE tier_ledger_meta SET value = ? WHERE key = 'ledger_id'").run(tierLedgerIdOf(source));
+  } finally {
+    db.close();
+  }
+  return ledgerPath;
+}
 
 const APPROVED_AT = '2026-10-01T00:00:00.000Z';
 const REVISION = '11111111-1111-4111-8111-111111111111';
@@ -124,6 +145,51 @@ const dashboardRows = (path: string, source: SeededSource): number =>
   + count(path, 'source_dashboard_movement', 'corpus_id = ?', source.corpus_id)
   + count(path, 'source_ingestion_ledger', 'source_id = ?', source.ledger_id)
   + count(path, 'source_ingestion_unreadable_content', 'source_id = ?', source.ledger_id);
+
+/** The migration plan the seeds give a source: one lane, and batches that carry the owner's raw selectors. */
+export function migrationPlan(source: SeededSource, extraLaneSourceIds: readonly string[] = []): Record<string, unknown> {
+  const batch = (n: number, selector: string | null) => ({
+    batchId: `${source.ledger_id}-batch-${n}`,
+    selector,
+    state: n === 3 ? 'stopped' : 'completed',
+    startedAt: APPROVED_AT,
+    moved: 4,
+    secrets: 0,
+    skipped: 0,
+    rolledBack: 0,
+  });
+  return {
+    planId: `plan-of-${source.ledger_id}`,
+    state: 'approved',
+    countsSha256: 'c'.repeat(64),
+    lanes: [source.source_id, ...extraLaneSourceIds].map((sourceId) => ({
+      sourceId,
+      ledgerPath: `/synthetic/${sourceId}.tier-ledger.sqlite`,
+      corpora: [source.corpus_id],
+    })),
+    batches: [
+      batch(1, `source:${source.source_id}`),
+      batch(2, `folder:/synthetic/${source.ledger_id} folder`),
+      batch(3, `sender:person-${source.ledger_id}@example.invalid`),
+      batch(4, `chat:chat-of-${source.ledger_id}`),
+      batch(5, null),
+    ],
+  };
+}
+
+/** Batch selectors in plans that have the source as a lane that still carry a name (not `source:`, null or forgotten). */
+function identifyingSelectors(layout: ForgetLayout, source: SeededSource): number {
+  const path = tierMigrationStatePath(layout.env);
+  if (!existsSync(path)) return 0;
+  const state = JSON.parse(readFileSync(path, 'utf8')) as {
+    plans: Array<{ lanes: Array<{ sourceId: string }>; batches: Array<{ selector: string | null }> }>;
+  };
+  return state.plans
+    .filter((plan) => plan.lanes.some((lane) => lane.sourceId === source.source_id))
+    .flatMap((plan) => plan.batches)
+    .filter((batch) => batch.selector !== null && !batch.selector.startsWith('source:') && !batch.selector.endsWith(':<forgotten>'))
+    .length;
+}
 
 export const SEEDED_FILES: readonly SeededFile[] = [
   {
@@ -280,6 +346,13 @@ export const SEEDED_FILES: readonly SeededFile[] = [
       const db = new Database(path);
       try {
         db.exec('INSERT INTO secret_restored_rereads (job_id) SELECT job_id FROM extraction_jobs');
+        // An item of each source that became Secrets in the source's own tier ledger.
+        for (const source of [MINE, OTHER]) {
+          db.query(`INSERT INTO secret_item_redactions (provider, account_scope, provider_item_id, local_item_id, redacted_at)
+            VALUES ('example_provider', ?, 'item-1', '', ?)`).run(`${source.ledger_id}@example.com`, APPROVED_AT);
+          db.query(`INSERT INTO secret_item_redaction_claims (provider, account_scope, provider_item_id, claimant, claimed_at)
+            VALUES ('example_provider', ?, 'item-1', ?, ?)`).run(`${source.ledger_id}@example.com`, tierLedgerIdOf(source), APPROVED_AT);
+        }
       } finally {
         db.close();
       }
@@ -288,7 +361,9 @@ export const SEEDED_FILES: readonly SeededFile[] = [
       const path = defaultFileExtractionJobsDbPath(layout.env);
       return count(path, 'extraction_jobs', 'corpus_id = ?', source.corpus_id)
         + count(path, 'extraction_artifacts', 'corpus_id = ?', source.corpus_id)
-        + count(path, 'secret_restored_rereads', 'job_id IN (SELECT job_id FROM extraction_jobs WHERE corpus_id = ?)', source.corpus_id);
+        + count(path, 'secret_restored_rereads', 'job_id IN (SELECT job_id FROM extraction_jobs WHERE corpus_id = ?)', source.corpus_id)
+        + count(path, 'secret_item_redaction_claims', 'claimant = ?', tierLedgerIdOf(source))
+        + count(path, 'secret_item_redactions', 'account_scope = ?', `${source.ledger_id}@example.com`);
     },
   },
   {
@@ -373,6 +448,19 @@ export const SEEDED_FILES: readonly SeededFile[] = [
         sum + (JSON.parse(readFileSync(join(dir, name), 'utf8')) as { topPatterns: Array<{ source: string }> }).topPatterns
           .filter((pattern) => pattern.source === source.source_id).length, 0);
     },
+  },
+  {
+    stepId: 'tier-migration-state',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => tierMigrationStatePath(layout.env),
+    seed(layout) {
+      writeJson(tierMigrationStatePath(layout.env), {
+        schemaVersion: 1,
+        plans: [MINE, OTHER].map((source) => migrationPlan(source)),
+      });
+    },
+    left: (layout, source) => identifyingSelectors(layout, source),
   },
   {
     stepId: 'file-source-scopes',

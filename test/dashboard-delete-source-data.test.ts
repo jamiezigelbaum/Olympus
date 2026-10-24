@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
-import { connectThisComputerSource } from '../src/core/this-computer.ts';
+import { connectThisComputerSource, disconnectThisComputerSource } from '../src/core/this-computer.ts';
 import { lifecycleDataRoot, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
 import type { ModelKeyReloadRequest } from '../src/core/model-key-reload.ts';
 import { defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
@@ -13,6 +13,7 @@ import {
   SEEDED_FILES,
   layoutUnder,
   seedAllFiles,
+  seedTierLedgerBeside,
   treeDigest,
   writeBackAfterDelete,
 } from './helpers/forget-seeds.ts';
@@ -198,6 +199,7 @@ describe('dashboard Delete indexed data route: the shared files', () => {
     const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!.connectorStorePaths!(context)[0]!;
     mkdirSync(dirname(store), { recursive: true });
     writeFileSync(store, 'indexed');
+    seedTierLedgerBeside(store, MINE);
     seedAllFiles(layout);
     const reloads: Array<ModelKeyReloadRequest | undefined> = [];
     const worker = createEmailSourceWorker({
@@ -256,8 +258,41 @@ describe('dashboard Delete indexed data route: the shared files', () => {
       await reload.beforeExit!();
 
       expect(dashboard.left(f.layout, MINE)).toBe(0);
-      expect(waiting.left(f.layout, MINE)).toBe(0);
-      expect({ dashboard: dashboard.left(f.layout, OTHER), waiting: waiting.left(f.layout, OTHER) }).toEqual(otherBefore);
+      // Not repeated: a remote agent can ask a new private question of the
+      // source (reconnected, say) in that window, and the repeat is limited to
+      // the files the worker's own background writers refill.
+      expect(waiting.left(f.layout, MINE)).toBeGreaterThan(0);
+      expect({ dashboard: dashboard.left(f.layout, OTHER), waiting: waiting.left(f.layout, OTHER) })
+        .toEqual({ dashboard: otherBefore.dashboard, waiting: otherBefore.waiting });
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a reconnect in the window before the exit survives the repeat; the poll\'s write-back does not', async () => {
+    const f = fixture();
+    const computer = { source_id: 'local.files', corpus_id: 'secure_local.local.files', ledger_id: 'local_files' };
+    const connection = SEEDED_FILES.find((file) => file.stepId === 'this-computer')!;
+    const dashboard = SEEDED_FILES.find((file) => file.stepId === 'source-dashboard')!;
+    try {
+      // Disconnect, then Delete (custody), as the owner does.
+      expect(disconnectThisComputerSource(f.layout.handleRegistryPath, 'local.files')).toBe(true);
+      const response = await f.del({ source_id: 'local.files', acknowledge: true });
+      expect(response.status).toBe(200);
+      const reload = f.reloads[0]!;
+      expect(connection.left(f.layout, computer)).toBe(0);
+
+      // The 750 ms before the restart: the owner connects this computer again,
+      // and a dashboard poll writes the old counts back.
+      connectThisComputerSource(f.layout.handleRegistryPath, 'local.files');
+      writeBackAfterDelete(f.layout, computer);
+      expect(connection.left(f.layout, computer)).toBe(1);
+      expect(dashboard.left(f.layout, computer)).toBeGreaterThan(0);
+
+      await reload.beforeExit!();
+
+      expect(connection.left(f.layout, computer)).toBe(1);
+      expect(dashboard.left(f.layout, computer)).toBe(0);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
