@@ -774,14 +774,14 @@ describe('multi-source source dashboard', () => {
       unreadable: { row: 'cannot open the folder', sheet: ['may open Olympus'] },
       in_the_way: { row: 'two places', sheet: ['compare the two'] },
     } as const;
-    for (const [kind, expected] of Object.entries(words)) {
+    for (const [kind, expected] of Object.entries(words) as Array<[keyof typeof words, (typeof words)[keyof typeof words]]>) {
       for (const registry of [dropboxHandleRegistry(), { version: 1 as const, handles: [] }]) {
         const dropbox = buildSourceDashboardViewModel({
           sourceIndexStatus: fixtureStatus(),
           schedulerStatus: fixtureScheduler(),
           sovereigntyEngine: fixtureSovereigntyEngine(),
           connectedHandleRegistry: registry,
-          storageNotices: { 'dropbox.files': kind as keyof typeof words },
+          storageNotices: { 'dropbox.files': kind },
           now: new Date('2026-07-02T12:00:00.000Z'),
         }).sources.find((source) => source.source_id === 'dropbox.files')!;
         expect(dropbox.storage_notice?.kind).toBe(kind);

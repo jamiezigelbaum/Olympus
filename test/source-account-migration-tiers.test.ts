@@ -44,7 +44,8 @@ const SPECS: FixtureSpec[] = [
   { id: 'launch', name: 'orchard-launch.txt', text: 'Our orchard launch post, already on the blog.', sharing: 'public_link' },
   { id: 'lab', name: 'orchard-lab.txt', text: 'Orchard lab panel notes kept in the private store.', legacyDomain: 'secure_local' },
 ];
-const DOMAINS: readonly SourceTrustDomain[] = ['public_safe', 'internal', 'secure_local'];
+const DOMAINS = ['public_safe', 'internal', 'secure_local'] as const satisfies readonly SourceTrustDomain[];
+type Tier = (typeof DOMAINS)[number];
 
 type Env = Record<string, string>;
 
@@ -69,23 +70,23 @@ function home(): { env: Env; root: string } {
   return { env, root: olympusDataRoot(env) };
 }
 
-const legacyPaths = (env: Env): Record<SourceTrustDomain, string> => {
+const legacyPaths = (env: Env): Record<Tier, string> => {
   const files = legacyAccountFiles('dropbox.files', env, []);
   const at = (tier: string): string => files.find((file) => file.area === 'store' && file.name === tier)!.legacy;
   return { public_safe: at('public_safe'), internal: at('internal'), secure_local: at('secure_local') };
 };
 
-const folderPaths = (env: Env): Record<SourceTrustDomain, string> => {
+const folderPaths = (env: Env): Record<Tier, string> => {
   const account = { source_id: 'dropbox.files', slot: '1', layout: 'folder' as const };
-  return Object.fromEntries(DOMAINS.map((tier) => [tier, accountStorePath(account, tier, env)])) as Record<SourceTrustDomain, string>;
+  return Object.fromEntries(DOMAINS.map((tier) => [tier, accountStorePath(account, tier, env)])) as Record<Tier, string>;
 };
 
-function open(paths: Record<SourceTrustDomain, string>): TierFixture {
+function open(paths: Record<Tier, string>): TierFixture {
   return openTierFixture(dirname(paths.secure_local), { paths, secretsPath: secretLocationsPathForStore(paths.secure_local) });
 }
 
 /** A source the way the engine leaves it: synced through the real tiered set, embedded, closed. */
-async function populate(env: Env): Promise<Record<SourceTrustDomain, string>> {
+async function populate(env: Env): Promise<Record<Tier, string>> {
   const paths = legacyPaths(env);
   mkdirSync(dirname(paths.secure_local), { recursive: true });
   const fixture = open(paths);
@@ -159,7 +160,7 @@ function boundLedger(path: string): string | undefined {
 
 const itemIds = SPECS.map((spec) => localId(spec.id));
 
-async function observe(paths: Record<SourceTrustDomain, string>) {
+async function observe(paths: Record<Tier, string>) {
   const tiered = open(paths);
   try {
     const result = await search(tiered, 'orchard');
@@ -174,7 +175,7 @@ async function observe(paths: Record<SourceTrustDomain, string>) {
   }
 }
 
-const snapshots = (paths: Record<SourceTrustDomain, string>) => Object.fromEntries(
+const snapshots = (paths: Record<Tier, string>) => Object.fromEntries(
   DOMAINS.map((tier) => [tier, { rows: snapshotStore(paths[tier], itemIds), history: syncHistory(paths[tier]) }]),
 );
 
