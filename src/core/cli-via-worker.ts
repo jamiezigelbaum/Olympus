@@ -27,7 +27,7 @@ import { createWorkerFetch } from './worker-transport.ts';
 export const WORKER_CLI_ROUTE_PREFIX = '/cli/';
 
 /** What the worker runs for a CLI command while it owns the data. */
-export const WORKER_CLI_OPERATIONS = ['ingestion-status', 'data-export', 'data-delete', 'tier'] as const;
+export const WORKER_CLI_OPERATIONS = ['ingestion-status', 'data-export', 'data-delete', 'tier', 'pairing-placement'] as const;
 export type WorkerCliOperation = (typeof WORKER_CLI_OPERATIONS)[number];
 
 /** How long a worker gets to answer a health probe before it counts as not answering. */

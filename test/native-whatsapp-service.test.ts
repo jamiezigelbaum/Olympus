@@ -4,14 +4,34 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
 import { createNativeWhatsAppService } from '../src/core/native-whatsapp-service.ts';
+import { accountFolder } from '../src/core/olympus-layout.ts';
+import { sourceRegistryPath } from '../src/core/source-registry.ts';
 
 const roots: string[] = [];
 const services: Array<ReturnType<typeof createNativeWhatsAppService>> = [];
+const savedEnv = { HOME: process.env.HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
 
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.stop()));
+  for (const [name, value] of Object.entries(savedEnv)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+/** A data folder whose registry lists WhatsApp with the given layout, the service's own environment pointed at it. */
+function registryWith(root: string, layout: 'folder' | 'legacy'): { folder: string } {
+  process.env.HOME = join(root, 'home');
+  process.env.XDG_DATA_HOME = join(root, 'data');
+  const env = { HOME: process.env.HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
+  mkdirSync(join(sourceRegistryPath(env), '..'), { recursive: true });
+  writeFileSync(sourceRegistryPath(env), `${JSON.stringify({
+    schema: layout === 'folder' ? 2 : 1,
+    accounts: [{ source_id: 'whatsapp.personal.messages', slot: '1', state: 'active', layout, corpus_ids: [], created_at: '2026-10-01T00:00:00.000Z' }],
+  })}\n`);
+  return { folder: accountFolder({ source_id: 'whatsapp.personal.messages', slot: '1' }, env) };
+}
 
 describe('native WhatsApp capture service', () => {
   test('refuses capture without native worker ownership and when worker supervision is disabled', async () => {
@@ -104,6 +124,106 @@ describe('native WhatsApp capture service', () => {
     expect(readFileSync(fixture.stopPath, 'utf8')).toBe('stopped\n');
   });
 
+  test('an account the registry keeps in a folder runs in the folder', async () => {
+    const fixture = whatsappFixture();
+    const { folder } = registryWith(fixture.root, 'folder');
+    const stateDir = join(folder, 'raw', 'whatsapp');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'session.db'), 'paired-fixture');
+    const config = structuredClone(fixture.pluginConfig) as Record<string, any>;
+    delete config.worker.whatsappCapture.stateDir;
+    const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
+      initialPluginConfig: config,
+      startupTimeoutMs: 2_000,
+      readinessPollMs: 10,
+      stopGraceMs: 10_000,
+    }));
+    await service.start({});
+    expect(readStarts(fixture.startsPath)[0]!.env.OLYMPUS_WHATSAPP_STATE_DIR).toBe(stateDir);
+  });
+
+  /** A registry in the data folder of `dataHome`, listing WhatsApp as a folder with a paired session in it. */
+  function pairedFolderIn(root: string, dataHome: string): string {
+    const home = join(root, 'home');
+    const env = { HOME: home, XDG_DATA_HOME: dataHome };
+    mkdirSync(join(sourceRegistryPath(env), '..'), { recursive: true });
+    writeFileSync(sourceRegistryPath(env), `${JSON.stringify({
+      schema: 2,
+      accounts: [{ source_id: 'whatsapp.personal.messages', slot: '1', state: 'active', layout: 'folder', corpus_ids: [], created_at: '2026-10-01T00:00:00.000Z' }],
+    })}\n`);
+    const stateDir = join(accountFolder({ source_id: 'whatsapp.personal.messages', slot: '1' }, env), 'raw', 'whatsapp');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'session.db'), 'paired-fixture');
+    return stateDir;
+  }
+  function workerEnvFile(root: string, lines: string[]): string {
+    const path = join(root, 'worker.env');
+    writeFileSync(path, `${lines.join('\n')}\n`, { mode: 0o600 });
+    chmodSync(path, 0o600);
+    return path;
+  }
+  async function startedStateDir(fixture: ReturnType<typeof whatsappFixture>, workerEnvPath: string): Promise<string | undefined> {
+    const config = structuredClone(fixture.pluginConfig) as Record<string, any>;
+    delete config.worker.whatsappCapture.stateDir;
+    const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
+      initialPluginConfig: config,
+      workerEnvPath,
+      startupTimeoutMs: 2_000,
+      readinessPollMs: 10,
+      stopGraceMs: 10_000,
+    }));
+    await service.start({});
+    return readStarts(fixture.startsPath)[0]!.env.OLYMPUS_WHATSAPP_STATE_DIR;
+  }
+
+  test('an XDG_DATA_HOME that only worker.env sets places the account where the worker finds it', async () => {
+    const fixture = whatsappFixture();
+    process.env.HOME = join(fixture.root, 'home');
+    delete process.env.XDG_DATA_HOME;
+    const stateDir = pairedFolderIn(fixture.root, join(fixture.root, 'data'));
+    const workerEnvPath = workerEnvFile(fixture.root, [`XDG_DATA_HOME=${join(fixture.root, 'data')}`]);
+    expect(await startedStateDir(fixture, workerEnvPath)).toBe(stateDir);
+  });
+
+  test('an XDG_DATA_HOME in the Gateway\'s environment wins over worker.env, as it does for the worker', async () => {
+    const fixture = whatsappFixture();
+    process.env.HOME = join(fixture.root, 'home');
+    process.env.XDG_DATA_HOME = join(fixture.root, 'ambient');
+    const stateDir = pairedFolderIn(fixture.root, join(fixture.root, 'ambient'));
+    const workerEnvPath = workerEnvFile(fixture.root, [`XDG_DATA_HOME=${join(fixture.root, 'other')}`]);
+    expect(await startedStateDir(fixture, workerEnvPath)).toBe(stateDir);
+  });
+
+  test('a configured state folder that is not the account folder contradicts the registry and is refused', async () => {
+    const fixture = whatsappFixture();
+    registryWith(fixture.root, 'folder');
+    const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
+      initialPluginConfig: fixture.pluginConfig,
+      startupTimeoutMs: 200,
+      readinessPollMs: 10,
+      stopGraceMs: 50,
+    }));
+    await expect(service.start({})).rejects.toThrow('keeps its files in its account folder');
+    expect(readStarts(fixture.startsPath)).toEqual([]);
+  });
+
+  test('an account the registry keeps at the legacy paths keeps the configured folder', async () => {
+    const fixture = whatsappFixture();
+    registryWith(fixture.root, 'legacy');
+    const service = track(createNativeWhatsAppService({
+      workerIsReady: () => true,
+      initialPluginConfig: fixture.pluginConfig,
+      startupTimeoutMs: 2_000,
+      readinessPollMs: 10,
+      stopGraceMs: 10_000,
+    }));
+    await service.start({});
+    expect(readStarts(fixture.startsPath)[0]!.env.OLYMPUS_WHATSAPP_STATE_DIR).toBe(fixture.stateDir);
+  });
+
   test('refuses a stale receipt and requires the full matching readiness contract', async () => {
     for (const receipt of [
       {
@@ -185,6 +305,7 @@ function whatsappFixture(options: {
   writeFileSync(binaryPath, fakeBinarySource(startsPath, stopPath, options.receipt), { mode: 0o700 });
   chmodSync(binaryPath, 0o700);
   return {
+    root,
     pluginConfig: {
       worker: { service: { enabled: true }, whatsappCapture: { enabled: true, binaryPath, stateDir } },
     },

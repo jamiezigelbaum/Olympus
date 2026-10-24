@@ -1,5 +1,5 @@
-import { join } from 'node:path';
-import { legacyTelegramStoreRoot } from '../../core/olympus-layout.ts';
+import { TELEGRAM_SOURCE_ID } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import { LEGACY_TELEGRAM_MESSAGES_CORPUS_ID } from '../../core/source-corpus-registry.ts';
 import { defineSourceIndexCorpus, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -15,16 +15,18 @@ export type TelegramMessagesCorpusId =
   | typeof LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID;
 export type TelegramMessagesCorpusTrustDomain = Extract<SourceTrustDomain, 'internal' | 'secure_local'>;
 
+// The account's stores: the registry's layout (core/source-placement.ts), and for a
+// `legacy` account the paths these resolvers always returned (core/olympus-layout.ts).
 export function defaultInternalTelegramConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return join(legacyTelegramStoreRoot(env), 'telegram-internal-connector-store.sqlite');
+  return resolvedStorePath(TELEGRAM_SOURCE_ID, 'internal', env);
 }
 
 export function defaultProtectedTelegramConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return join(legacyTelegramStoreRoot(env), 'telegram-protected-connector-store.sqlite');
+  return resolvedStorePath(TELEGRAM_SOURCE_ID, 'secure_local', env);
 }
 
 export function defineTelegramMessagesCorpus(): SourceIndexCorpusDefinition {

@@ -1,11 +1,17 @@
-import { waitForNativeWorkerOwnership } from './native-worker-service.ts';
+import { nativeWorkerEnvironment, waitForNativeWorkerOwnership } from './native-worker-service.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configFromPluginConfig, type OlympusConfig } from './config.ts';
-import { legacyTelegramGatewayStateDir } from './olympus-layout.ts';
+import {
+  TELEGRAM_SOURCE_ID,
+  folderCaptureDirs,
+  folderCaptureEnv,
+  legacyTelegramGatewayStateDir,
+} from './olympus-layout.ts';
+import { placedAccount } from './source-placement.ts';
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
@@ -145,6 +151,7 @@ async function prepareTelegramStart(
   }
 
   applyConfiguredPaths(config, env);
+  applyFolderPaths(config, nativeWorkerEnvironment(config, options.workerEnvPath), env);
   const sessionPath = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
   if (!sessionPath || !sessionPath.endsWith('.session')) {
     throw new NativeProcessConfigurationError(
@@ -231,6 +238,41 @@ function applyConfiguredPaths(config: OlympusConfig, env: NodeJS.ProcessEnv): vo
   if (capture.stateDir) env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR = capture.stateDir;
   if (capture.spoolDir) env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR = capture.spoolDir;
   if (capture.reportPath) env.OLYMPUS_TELEGRAM_GATEWAY_REPORT_PATH = capture.reportPath;
+}
+
+/**
+ * An account the registry keeps in a folder has its files there, whatever
+ * worker.env says about paths: a folder account honors no path override. The
+ * registry is only read, after the worker owns the data, and from the
+ * environment the worker was launched with (`nativeWorkerEnvironment`), so both
+ * look in the same data folder. A source this service owns that has no entry is
+ * `legacy` (its placement pins on the owner flag that environment carries), so
+ * it keeps the configured paths. Plugin config that
+ * names a path the folder does not hold contradicts the registry, and is
+ * refused rather than left to point the reader at another session.
+ */
+function applyFolderPaths(config: OlympusConfig, layoutEnv: NodeJS.ProcessEnv, env: NodeJS.ProcessEnv): void {
+  const account = placedAccount(TELEGRAM_SOURCE_ID, layoutEnv);
+  if (account.layout !== 'folder') return;
+  const folder = folderCaptureEnv(account, layoutEnv);
+  const session = `${folder.OLYMPUS_TELEGRAM_SESSION_PATH}.session`;
+  const capture = config.worker.telegramCapture;
+  const contradicts = (configured: string | undefined, folderPath: string | undefined): boolean =>
+    configured !== undefined && resolve(configured) !== resolve(folderPath ?? '');
+  if (
+    contradicts(capture.sessionPath, session)
+    || contradicts(capture.stateDir, folder.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR)
+    || contradicts(capture.spoolDir, folder.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR)
+  ) {
+    throw new NativeProcessConfigurationError(
+      'Olympus Telegram capture service: this account keeps its files in its account folder, so worker.telegramCapture.sessionPath, stateDir and spoolDir must be removed (or name that folder).',
+    );
+  }
+  env.OLYMPUS_TELEGRAM_SESSION_PATH = session;
+  env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR = folder.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR!;
+  env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR = folder.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR!;
+  delete env.OLYMPUS_TELEGRAM_GATEWAY_BACKFILL_REQUESTS_PATH;
+  for (const dir of folderCaptureDirs(account, layoutEnv)) mkdirSync(dir, { recursive: true, mode: 0o700 });
 }
 
 function assertUsableFile(path: string, label: string): void {

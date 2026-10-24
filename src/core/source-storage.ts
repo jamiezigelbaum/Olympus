@@ -34,11 +34,12 @@ import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
 import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
-import { decideAccountLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
+import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
 import {
   DEFAULT_ACCOUNT_SLOT,
   findRegistryAccount,
   readSourceRegistry,
+  SourceRegistryError,
   updateSourceRegistry,
   type SourceRegistry,
   type SourceRegistryAccountState,
@@ -131,6 +132,86 @@ export function openTierSniffer(
 export function recordAccountPlacement(account: StorageAccount, path: string, env: LayoutEnv = process.env): void {
   if (!adoptionEnabled) return;
   placeBeforeFirstFile(env, readSourceRegistry(env), account, path);
+}
+
+/**
+ * Settle an account's layout, recording it when the registry has no entry for
+ * it, from the same decision adoption makes. For a caller that owns the data and
+ * so is the only one deciding: the CLI holding the owner lock with no worker
+ * running, or the worker itself, answering the CLI from its own environment
+ * (`pairing-placement` in workers/cli-operations.ts; core/pairing-placement.ts
+ * is the CLI's side). An account that has an entry follows it.
+ *
+ * An unreadable registry fails the call, as it fails an open; so does an
+ * account being deleted. A data folder that cannot be worked out records
+ * nothing, and the account is `legacy`.
+ */
+export function placeOwnedAccount(account: StorageAccount, env: LayoutEnv = process.env): LayoutAccountLayout {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const existing = (registry: SourceRegistry): LayoutAccountLayout | undefined => {
+    assertOpenable(registry, account.sourceId, slot);
+    return findRegistryAccount(registry, account.sourceId, slot)?.layout;
+  };
+  let layout: LayoutAccountLayout | undefined;
+  try {
+    layout = existing(readSourceRegistry(env));
+  } catch (error) {
+    if (error instanceof SourceRegistryError || error instanceof SourceStorageUnavailableError) throw error;
+    // The data folder cannot be worked out (a Linux layout that refuses this environment).
+    return 'legacy';
+  }
+  if (layout !== undefined || !hasFolderLayout(account.sourceId)) return layout ?? 'legacy';
+  updateSourceRegistry(env, (registry) => {
+    layout = existing(registry);
+    if (layout !== undefined) return;
+    layout = decideAccountLayout(account.sourceId, env).layout;
+    registry.accounts.push({
+      source_id: account.sourceId,
+      slot,
+      state: 'active',
+      layout,
+      corpus_ids: [],
+      created_at: new Date().toISOString(),
+    });
+  });
+  return layout ?? 'legacy';
+}
+
+/**
+ * Worker boot, under the owner lock and before anything mounts: an account the
+ * registry lists as `legacy` that holds nothing yet is placed in a folder
+ * instead, so one recorded before its source had a folder layout (or before a
+ * pin was lifted) is not stuck at the legacy paths. Nothing moves, so it is not
+ * behind the migration switch. Returns the source ids it re-placed.
+ *
+ * It must never hide an account's files, so all of these must hold, checked
+ * again under the registry lease:
+ * - the entry is `active` and lists no corpus: no store was ever opened for
+ *   the account, so none exists at a path this process cannot see (a store's
+ *   path is not recorded, and an override lifted since could have placed it
+ *   anywhere);
+ * - the placement decision says `folder`: no pin (env override, mount,
+ *   native ownership, a capture grant that names a session path or cannot be
+ *   read), no file or capture folder at any legacy location, and every one of
+ *   them can be looked at.
+ */
+export function replaceEmptyLegacyAccounts(env: LayoutEnv = process.env): string[] {
+  const eligible = (account: SourceRegistry['accounts'][number]): boolean =>
+    account.state === 'active'
+    && account.layout === 'legacy'
+    && account.corpus_ids.length === 0
+    && hasFolderLayout(account.source_id)
+    && decideAccountLayout(account.source_id, env).layout === 'folder';
+  if (!readSourceRegistry(env).accounts.some(eligible)) return [];
+  const replaced: string[] = [];
+  updateSourceRegistry(env, (registry) => {
+    for (const account of registry.accounts) {
+      if (!eligible(account)) continue;
+      account.layout = 'folder';
+      replaced.push(account.source_id);
+    }
+  });
+  return replaced;
 }
 
 function placeSidecar(env: LayoutEnv, account: StorageAccount, path: string, readOnly?: boolean): void {

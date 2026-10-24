@@ -22,6 +22,8 @@ import {
   verifyOlympusDataExport,
 } from '../src/data-lifecycle.ts';
 
+import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
+
 const LIFECYCLE_SOURCE = readFileSync(join(import.meta.dir, '..', 'src', 'data-lifecycle.ts'), 'utf8');
 
 const openStores: Database[] = [];
@@ -130,6 +132,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
+      pinMessagingLegacy({ HOME: homeDir });
       const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'whatsapp.personal.messages');
       expect(spec).toBeDefined();
       expect(spec!.connectorStorePaths!({ homeDir })[0]).toBe(whatsappStorePath(homeDir));

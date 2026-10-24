@@ -13,6 +13,7 @@ import { loadConfig } from '../src/core/config.ts';
 import { RELAYED_REQUEST_HEADER } from '../src/core/remote-access.ts';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
+import { findRegistryAccount, readSourceRegistry } from '../src/core/source-registry.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
 import { deleteOlympusDataWithCustody, exportOlympusData, lifecycleDataRoot, lifecycleSourceSpecs, type LifecyclePathContext } from '../src/data-lifecycle.ts';
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
@@ -57,6 +58,7 @@ const WORK: Record<string, Record<string, unknown>> = {
   'data-export': { output: '/nonexistent/olympus-refused-export' },
   'data-delete': { source_id: 'dropbox.files', dry_run: true },
   tier: { args: ['migrate', 'status'] },
+  'pairing-placement': { source_id: 'telegram.messages' },
 };
 
 describe('who can reach the CLI routes', () => {
@@ -188,6 +190,34 @@ describe('what the CLI routes return', () => {
     expect(body.error.suggestion).toContain('writes the export itself');
     expect(body.error.suggestion).toContain('Choose');
     expect(existsSync(join(dir, 'out'))).toBe(false);
+  });
+
+  test('pairing-placement records where a new account goes from the worker\'s own environment, and says so', async () => {
+    const home = tempDir('olympus-cli-route-placement-');
+    const saved = { HOME: process.env.HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
+    process.env.HOME = home;
+    delete process.env.XDG_DATA_HOME;
+    try {
+      const response = await run('pairing-placement', { source_id: 'telegram.messages' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ layout: 'folder' });
+      expect(findRegistryAccount(readSourceRegistry(process.env), 'telegram.messages', '1')?.layout).toBe('folder');
+      // Asked again, it follows the entry it made.
+      expect(await (await run('pairing-placement', { source_id: 'telegram.messages' })).json()).toEqual({ layout: 'folder' });
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  test('pairing-placement answers for the messaging accounts only', async () => {
+    for (const source_id of ['dropbox.files', 'made.up', '', undefined]) {
+      const refused = await run('pairing-placement', { source_id });
+      expect(refused.status, String(source_id)).toBe(400);
+      await expect(refused.json()).resolves.toMatchObject({ error: { code: 'invalid_params' } });
+    }
   });
 
   test('tier answers what the CLI command answers, and its refusals read the same', async () => {

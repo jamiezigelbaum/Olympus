@@ -1,7 +1,7 @@
 # Source storage
 
 Status: approved by the owner 2026-10-24 (decisions 1–5 below); delivery in
-progress (steps 1–3 and 4a done). Replaces the storage half of the Delete work in #455/#467 (#467
+progress (steps 1–3, 4a and 4b done). Replaces the storage half of the Delete work in #455/#467 (#467
 frozen 2026-10-24). This page covers storage only: where each account's
 files live, who opens them, and the storage operations that Delete, Export,
 uninstall and ingestion call. The Delete feature itself (dashboard states,
@@ -99,7 +99,8 @@ Inside the data root:
                                  (archive imports: stores/<family>.<tier>.sqlite)
     raw/                         spools, watch snapshots, capture cursors,
                                  X's reconcile state (raw/x-reconcile.sqlite)
-    session/                     pairing sessions (WhatsApp session.db, Telegram .session)
+    session/                     Telegram's pairing session (telegram.session and its -journal);
+                                 WhatsApp's session.db lives with its bridge state in raw/whatsapp/
     settings/                    reserved; unused (see below)
   shared/                        shared files (dashboard, scheduler, jobs, ledgers)
   media-cache/                   content-addressed, holders keyed by account
@@ -131,10 +132,9 @@ Inside the data root:
 - **The X usage ledger stays shared.** It is the quota ledger, kept when X is
   deleted, so it stays in the data root; only X's reconcile state is
   per-account (`raw/x-reconcile.sqlite`). The request budgets stay shared too.
-- **Messaging, Reflect and Roam stay legacy for now.** Telegram and WhatsApp
-  capture run in separate processes that name their paths, so they keep
-  their legacy paths until steps 4b and 4d; Reflect and Roam name theirs
-  through JSON mounts.
+- **Reflect and Roam stay legacy for now.** They name their paths through
+  JSON mounts. Telegram and WhatsApp accounts are folders on a fresh install
+  (4b); an existing messaging account keeps its legacy paths until step 4d.
 - **Gateway-run capture stays legacy after 4d too.** In OpenClaw-hosted mode
   the Gateway runs the capture services, and the worker can neither stop nor
   coordinate them, so an account whose capture the Gateway owns, or whose
@@ -262,11 +262,11 @@ store:
 | Opener | After this change |
 |---|---|
 | Embedding drain | `http` mode only; direct mode removed (2b-i) |
-| CLI `data export`, `data delete --source`, `ingestion status`, `tier set`, `tier explain`, `tier migrate` | takes the lock and runs here when it is free; while Olympus runs, asks the worker over its local API (`POST /v1/cli/*`: worker bearer only, never forwarded by the relay) and prints what it returns; refuses as busy when no worker answers |
+| CLI `data export`, `data delete --source`, `ingestion status`, `tier set`, `tier explain`, `tier migrate`, and the placement step of `connect telegram\|whatsapp --pair` (4b) | takes the lock and runs here when it is free; while Olympus runs, asks the worker over its local API (`POST /v1/cli/*`: worker bearer only, never forwarded by the relay) and prints what it returns; refuses as busy when no worker answers |
 | CLI `tier migrate run`, `rollback`, `purge --approve` | take the lock when free; refuse while Olympus runs, because they move items between the stores the worker's lanes write |
 | CLI `data delete --all`, `data verify` | `--all` runs under the lock when free; while Olympus runs, custody refuses it (or, if only a script holds the lock, it is refused as busy) and the worker is not asked; `verify` reads only the export folder |
 | `connector-store:embed`, `whatsapp-live-sync`, repair and backfill scripts | take the owner lock, so they refuse while Olympus runs |
-| Telegram reader, WhatsApp bridge | write only `raw/` and `session/` of their account; stopped by Disconnect |
+| Telegram reader, WhatsApp bridge | write only `raw/` and `session/` of their account, at the paths their starter passes them; stopped by Disconnect |
 
 A guard test (`test/store-open-guard.test.ts`, salvaged from #467's)
 fails on any construction of `LocalConnectorStore`, `TierLedger`,
@@ -492,8 +492,60 @@ touch the store path (`eval/`).
      anything it would remove under `sources/` is reached through a link, and
      when another source's resolved path (a retained `OLYMPUS_*_DB_PATH`
      override, say) lies inside the folder it would take.
-   - **4b, capture paths.** Messaging accounts (Telegram, WhatsApp) can be
-     folders: the capture services are given their paths from the registry.
+   - **4b, capture paths (done).** A newly paired Telegram or WhatsApp account
+     keeps all its files in `sources/<source_id>/1/`; every existing messaging
+     account keeps exactly its legacy paths. In the folder, the stores are
+     `stores/<tier>.sqlite`, Telegram's session is `session/telegram.session`
+     (and its `-journal`), its gateway state is `raw/telegram-gateway/` and its
+     spool `raw/telegram-spool/`; WhatsApp's whole bridge state (`session.db`,
+     `spool/`, `media/`, the QR files) is `raw/whatsapp/`, so the Go bridge
+     needed no change. The placement predicate is 4a's plus three pins: the
+     native capture owner flag (`OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER`,
+     `OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER`), any capture path override
+     (the plugin-config capture paths reach the services as the same
+     `OLYMPUS_*` names), and the account's capture grant when it names a
+     session path (a legacy account's) or cannot be read; only a grant
+     confirmed absent, or one with no path, pins nothing. Pairing runs in the
+     CLI minutes before it saves a grant, and never decides while a worker
+     owns the data, since its environment is not the worker's. An account with
+     an entry follows it; one with none is decided by the CLI under the owner
+     lock when that is free, else by the running worker over its local API
+     (`pairing-placement`, `core/pairing-placement.ts`), which records the entry
+     from its own environment before the CLI picks a session path. A worker
+     that is starting or does not answer makes the pairing refuse, to be
+     retried. A `legacy` outcome is claimed at once by making the legacy capture
+     folder (the placement decision reads it as files already there) and reading
+     the registry again under its lease, so a boot re-placement that ran in
+     between is followed and one that runs later leaves the account legacy: the
+     pairing and re-placement cannot disagree. No child reads the registry. Whoever starts a child computes its paths and
+     passes them: the worker's supervisor sets `OLYMPUS_TELEGRAM_SESSION_PATH`,
+     `OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR`, `OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR`
+     and `OLYMPUS_WHATSAPP_STATE_DIR` last, after the grant's own environment;
+     the Gateway-run native services read the registry read-only once the
+     worker owns the data root, from the same environment the Gateway launches
+     the worker with (`nativeWorkerEnvironment`), and refuse a plugin-config
+     path that contradicts a folder account. A capture grant stores no paths for a
+     folder account; a legacy grant keeps its stored `sessionPath`, and an
+     account with a grant path but no entry is a legacy account. Unpair and
+     Delete accept the real data root next to the legacy roots, and stay strict
+     about everything else (absolute, no link, inside a root they know). WhatsApp
+     media is read only from the account's `raw/whatsapp/media` (a folder) or
+     the legacy audio directory. Delete refuses another source's delete, with
+     nothing removed, when a capture grant exists but cannot be read, since
+     then it cannot be shown that the session is outside what the delete
+     removes. At worker boot, under the owner lock and
+     before anything mounts, an `active` `legacy` entry of a folder-layout
+     source that lists no corpus (no store was ever opened for it) is
+     re-placed to `folder` when the 4a predicate says so again, checked a
+     second time under the registry lease. The predicate refuses while any file
+     of the account exists at a legacy location, and while an override, a
+     mount, native ownership or a capture grant (one that names a session path
+     or cannot be read) pins it; "lists no corpus" covers a store that an override once placed
+     elsewhere, because a store's path is not recorded. So the re-placement
+     cannot hide an account's files. An entry that lists a corpus, an empty
+     store opened by a 4a worker on a fresh install among them, stays legacy
+     until 4d. No existing file moves; the Go bridge's own session lock moves
+     to 4d.
    - **4c, the boot migration of existing non-messaging accounts**, behind
      `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
      default), with the tests in "What must not break". Retirement: default
@@ -504,7 +556,8 @@ touch the store path (`eval/`).
      startup timeout; one injected verify failure moved back with its Needs
      you row; one crash mid-move resumed; the downgrade behavior. The owner
      signs this off here.
-   - **4d, the messaging migration.**
+   - **4d, the messaging migration**, including the Go bridge's session
+     lock, which 4b leaves as it is.
 5. **Delete, export, uninstall on the registry.** Replace
    `lifecycleSourceSpecs` with the registry: a per-source delete marks the
    account `deleting` and the boot pass removes it; export and uninstall

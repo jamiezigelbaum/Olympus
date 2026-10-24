@@ -13,11 +13,15 @@
  * An account with no entry is placed in a folder only when nothing says it
  * already lives somewhere else:
  *
- * - its source has a folder layout at all (not messaging, Reflect or Roam,
- *   whose capture and mounts name their paths);
- * - no env override or connector-store mount pins a path for it;
+ * - its source has a folder layout at all (not Reflect or Roam, whose mounts
+ *   name their paths);
+ * - no env override or connector-store mount pins a path for it, and, for
+ *   messaging, the Gateway-run service does not own its capture (that
+ *   service reads its paths, plugin config included, and the account stays
+ *   where they are);
  * - no file of the source exists at any legacy location (stores, tier
- *   sidecars, `-wal`/`-shm`, raw state; lock files do not count);
+ *   sidecars, `-wal`/`-shm`, raw state, and for messaging the capture
+ *   session, spool and state; lock files do not count);
  * - every legacy location can be looked at: a folder the process may not
  *   search, or a dangling link, places it `legacy` rather than risk opening a
  *   second, empty set of stores beside data it cannot see.
@@ -39,12 +43,16 @@ import {
   accountStorePath,
   legacyAccountPaths,
   legacyOverrideEnvNames,
+  nativeCaptureOwnerPin,
   olympusDataRoot,
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SOURCE_ID,
   type AccountRawName,
   type LayoutAccount,
   type LayoutAccountLayout,
   type LayoutEnv,
 } from './olympus-layout.ts';
+import { captureGrantPathFromEnv, captureGrantSessionEvidence } from './messaging-capture-grant-file.ts';
 import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, SourceRegistryError } from './source-registry.ts';
 
@@ -73,11 +81,11 @@ export function decideAccountLayout(sourceId: string, env: LayoutEnv = process.e
   if (pin) return { layout: 'legacy', why: `${pin} pins its files` };
   const root = dataRootState(env);
   if (root === 'unreadable') return { layout: 'legacy', why: 'the data folder cannot be looked at' };
-  if (root === 'absent') return { layout: 'folder', why: 'nothing is stored yet' };
+  // Not skipped for a data folder that is not there: messaging keeps files outside it.
   const existing = legacyFilesState(sourceId, env);
   if (existing === 'present') return { layout: 'legacy', why: 'its files are already at the legacy paths' };
   if (existing === 'unreadable') return { layout: 'legacy', why: 'a legacy path cannot be looked at' };
-  return { layout: 'folder', why: 'new account with no legacy files' };
+  return { layout: 'folder', why: root === 'absent' ? 'nothing is stored yet' : 'new account with no legacy files' };
 }
 
 /**
@@ -205,11 +213,31 @@ function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim()) return name;
   }
+  const native = nativeCaptureOwnerPin(sourceId, env);
+  if (native) return native;
+  const grant = captureGrantPin(sourceId, env);
+  if (grant) return grant;
   const mounts = declaredConnectorStoreMounts(env);
   // The worker refuses a list it cannot read; until it is fixed nothing may move.
   if (mounts === 'unreadable') return `${MOUNTS_ENV} (unreadable)`;
   const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
   return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
+}
+
+/**
+ * A messaging account's capture grant, when it keeps the account at the paths it
+ * was paired at: a grant that names its session path (a folder account's names
+ * none), or one that cannot be read, since then nothing shows it names none. Only
+ * a grant confirmed absent, or readable and without a path, pins nothing. The
+ * grant exists before the account's first file is recorded here whenever the
+ * install was paired by an older build, which the environment cannot say.
+ */
+function captureGrantPin(sourceId: string, env: LayoutEnv): string | undefined {
+  const source = sourceId === TELEGRAM_SOURCE_ID ? 'telegram' : sourceId === WHATSAPP_SOURCE_ID ? 'whatsapp' : undefined;
+  if (!source) return undefined;
+  const evidence = captureGrantSessionEvidence(source, captureGrantPathFromEnv(source, env));
+  if (evidence.kind === 'path') return 'its capture grant (names the session path)';
+  return evidence.kind === 'unreadable' ? 'its capture grant (cannot be read)' : undefined;
 }
 
 /** Whether the legacy data folder can be told apart from a fresh one. */

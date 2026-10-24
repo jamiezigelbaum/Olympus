@@ -21,6 +21,7 @@ import {
   defaultWhatsAppSpoolDir,
   defaultWhatsAppStateDir,
 } from '../src/workers/whatsapp/index.ts';
+import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
 
 const roots: string[] = [];
 
@@ -32,6 +33,8 @@ describe('WhatsApp canonical product runtime', () => {
   test('keeps the existing state paths and honors explicit product overrides', () => {
     const stateDir = fixtureRoot();
     const dataHome = join(stateDir, 'xdg-data');
+    // An install from before messaging accounts had folders: the registry lists WhatsApp as legacy.
+    pinMessagingLegacy({ XDG_DATA_HOME: dataHome });
     expect(defaultWhatsAppStateDir({ XDG_DATA_HOME: dataHome }))
       .toBe(join(dataHome, 'olympus', 'whatsapp-live'));
     expect(defaultWhatsAppSpoolDir({ OLYMPUS_WHATSAPP_STATE_DIR: stateDir }))

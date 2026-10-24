@@ -26,8 +26,11 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import {
   ACCOUNT_FOLDERS_DIR,
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SOURCE_ID,
   accountFolder,
   accountFoldersRoot,
+  accountRawPath,
   legacyCaptureDataRoot,
   legacyTelegramGatewayStateDir,
   olympusDataPath,
@@ -92,8 +95,11 @@ import {
   defaultWhatsAppInternalConnectorStoreDbPath,
 } from './workers/whatsapp/index.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
+import { captureGrantPathBeside, captureGrantSessionEvidence, type CaptureGrantSessionEvidence } from './core/messaging-capture-grant-file.ts';
 import {
   olympusDataRoots,
+  pairingOwnedRoots,
+  pairingSessionPathsFromStoredValue,
   telegramPairingSessionPaths,
   whatsappPairingSessionPaths,
   whatsappStateDir as resolveWhatsAppStateDir,
@@ -426,7 +432,11 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
       // pairing login itself is NOT here: it is the Unpair's, and a re-pair
       // needs the account, not these.
       rawStatePaths: (context) => telegramCaptureStatePaths(envForContext(context)),
-      preservationOnlyPaths: (context) => telegramPairingSessionPaths({ env: envForContext(context) }),
+      // A folder account's login sits in its own folder and goes with it (a delete needs a
+      // clean Unpair first, so it is gone by then); naming it here would protect it from that delete.
+      preservationOnlyPaths: (context) => placedAccount(TELEGRAM_SOURCE_ID, envForContext(context)).layout === 'folder'
+        ? []
+        : telegramPairingSessionPaths({ env: envForContext(context) }),
       pairingSessionPaths: (context) => telegramPairingSessionPaths({ env: envForContext(context) }),
     },
     {
@@ -585,6 +595,9 @@ function whatsappStateDir(env: Record<string, string | undefined>): string {
  * are resolved from the state-dir knobs rather than from `dirname(store)`.
  */
 function whatsappRawStatePaths(env: Record<string, string | undefined>): string[] {
+  // A folder account keeps all of it in the one state folder, inside its account folder.
+  const account = placedAccount(WHATSAPP_SOURCE_ID, env);
+  if (account.layout === 'folder') return [accountRawPath(account, 'whatsapp', env)];
   const stateDir = whatsappStateDir(env);
   // The transcribe drain reads the captured audio through its own knobs, so a
   // media directory moved out from under the bridge is still named here.
@@ -603,6 +616,10 @@ function whatsappRawStatePaths(env: Record<string, string | undefined>): string[
 }
 
 function telegramCaptureStatePaths(env: Record<string, string | undefined>): string[] {
+  const account = placedAccount(TELEGRAM_SOURCE_ID, env);
+  if (account.layout === 'folder') {
+    return [accountRawPath(account, 'telegram-spool', env), accountRawPath(account, 'telegram-gateway', env)];
+  }
   const home = env.HOME?.trim() || homedir();
   const stateHome = env.XDG_STATE_HOME?.trim() || join(home, '.local', 'state');
   const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
@@ -1428,7 +1445,7 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
       // Spool and media are directories; the sole point of naming them is to
       // take the message history inside them.
       allowRecursive: true,
-      externalSourcePath: !isInsideKnownOlympusRoot(path, context),
+      externalSourcePath: !isInsideRawStateRoot(path, context),
     })),
     ...(source.policyPaths?.(context) ?? []).map((path): DeleteTarget => ({
       path,
@@ -2030,7 +2047,7 @@ function isStrictlyInside(path: string, root: string): boolean {
  */
 function assertRawStateTargetsContained(
   targets: readonly DeleteTarget[],
-  context: LifecyclePathContext,
+  context: LifecyclePathContext & { handleRegistryPath?: string },
   selectedSource: LifecycleSourceSpec | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
@@ -2040,7 +2057,7 @@ function assertRawStateTargetsContained(
     ? [...stateTargets, ...targets.filter((target) => target.kind === 'account_folder')]
     : stateTargets;
   if (overlapTargets.length === 0) return;
-  const roots = knownOlympusDataRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
+  const roots = rawStateRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
   const refuse = (path: string, why: string): never => {
     throw new OperationError(
       'invalid_params',
@@ -2073,6 +2090,20 @@ function assertRawStateTargetsContained(
     for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
+  // A legacy account's grant keeps the path its session was paired at, which an override lifted since
+  // no longer names: it may be inside an account folder this delete is about to take. A grant that exists
+  // but cannot be read says nothing, so another account's delete is refused rather than risk its session.
+  for (const grant of retainedGrants(context)) {
+    if (grant.evidence.kind === 'path') {
+      for (const path of pairingSessionPathsFromStoredValue(grant.source, grant.evidence.sessionPath)) protectedPaths.add(path);
+    } else if (grant.evidence.kind === 'unreadable' && !own.has(grant.sourceId)) {
+      throw new OperationError(
+        'invalid_params',
+        `Refusing to delete source state because the ${grant.source === 'telegram' ? 'Telegram' : 'WhatsApp'} capture grant cannot be read, so it cannot be shown that its session is outside what this delete removes.`,
+        'Fix or remove that grant (unpair the account), then delete again. Nothing was deleted.',
+      );
+    }
+  }
   // A store the connector-store mount list places by path (Reflect, Roam, an
   // operator's own) may sit anywhere, an account folder included: another
   // source's mounted store and its sidecars are protected where they really are.
@@ -2154,8 +2185,40 @@ function assertSourcesFolderTargetsUnlinked(targets: readonly DeleteTarget[], co
   }
 }
 
+/** What each messaging source's capture grant says about where its session lives (where the delete options name a registry, that one). */
+function retainedGrants(context: LifecyclePathContext & { handleRegistryPath?: string }): Array<{
+  source: 'telegram' | 'whatsapp';
+  sourceId: string;
+  evidence: CaptureGrantSessionEvidence;
+}> {
+  const registryPath = context.handleRegistryPath
+    || envForContext(context).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
+    || join(resolveHome(context.homeDir), '.config', 'olympus', 'handles.json');
+  return ([['telegram', TELEGRAM_SOURCE_ID], ['whatsapp', WHATSAPP_SOURCE_ID]] as const).map(([source, sourceId]) => ({
+    source,
+    sourceId,
+    evidence: captureGrantSessionEvidence(source, captureGrantPathBeside(source, registryPath)),
+  }));
+}
+
 function isInsideKnownOlympusRoot(path: string, context: LifecyclePathContext): boolean {
   return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));
+}
+
+/**
+ * The roots a raw-state delete (spool, media, gateway state) may reach: the
+ * known roots, and where the data and capture state really are when that is
+ * not under the home (a relocated XDG data or state home, a standalone Linux
+ * engine's data folder). Each is a folder Olympus names, so a path outside
+ * all of them is still the external fence's refusal. Not `knownOlympusDataRoots`,
+ * which `delete --all` removes recursively and which must not grow.
+ */
+function rawStateRoots(context: LifecyclePathContext): string[] {
+  return pairingOwnedRoots({ ...(context.homeDir ? { homeDir: context.homeDir } : {}), env: envForContext(context) });
+}
+
+function isInsideRawStateRoot(path: string, context: LifecyclePathContext): boolean {
+  return rawStateRoots(context).some((root) => isSameOrInsidePath(path, root));
 }
 
 function isSameOrInsidePath(path: string, root: string): boolean {

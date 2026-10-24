@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import { deleteOlympusData, exportOlympusData, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
 
 const SPOOL_LINE = JSON.stringify({
   id: '3EB0',
@@ -54,6 +55,7 @@ describe('lifecycle covers the raw WhatsApp state beside the connector store', (
     const dir = mkdtempSync(join(tmpdir(), 'olympus-lifecycle-whatsapp-state-'));
     const homeDir = join(dir, 'home');
     try {
+      pinMessagingLegacy({ HOME: homeDir });
       const storePath = whatsappSpec().connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(dirname(storePath), { recursive: true });
       const db = new Database(storePath, { create: true });
@@ -80,6 +82,7 @@ describe('lifecycle covers the raw WhatsApp state beside the connector store', (
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
+      pinMessagingLegacy({ HOME: homeDir });
       const storePath = whatsappSpec().connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(dirname(storePath), { recursive: true });
       const db = new Database(storePath, { create: true });
@@ -160,6 +163,7 @@ describe('lifecycle names Telegram capture state: the raw copy goes with a delet
     const dataHome = join(homeDir, '.local', 'share');
     const stateHome = join(homeDir, '.local', 'state');
     try {
+      pinMessagingLegacy({ HOME: homeDir });
       const result = exportOlympusData({ destination, sourceId: 'telegram.messages', homeDir });
       expect(result.skipped).toEqual(expect.arrayContaining([
         join(dataHome, 'olympus', 'telegram-capture', 'spool'),
