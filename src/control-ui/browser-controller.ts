@@ -86,7 +86,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const startedFromSheet = new WeakSet<HTMLFormElement>();
   const pendingForms = new WeakSet<HTMLFormElement>();
   let pendingFormCount = 0;
-  // Keep equal to the exported DASHBOARD_REDRAW_EVENT (serialized, as above).
+  // Keep equal to the exported redraw event constant above (serialized, as above).
   const redrawEvent = 'olympus:redraw';
   /** A redraw was asked for while a read was in flight: one forced read follows it. */
   let redrawOwed = false;
