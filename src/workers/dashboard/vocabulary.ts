@@ -2098,6 +2098,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
     attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    // Notes exports (Reflect, Roam): archive-import/notes/note.ts NOTE_FINDINGS.
+    note_empty: { one: '1 note with nothing written in it left out', many: '{n} notes with nothing written in them left out' },
+    note_unreadable: { one: '1 note could not be read', many: '{n} notes could not be read' },
+    note_too_large: { one: '1 note too large to read', many: '{n} notes too large to read' },
+    note_date_assumed: { one: '1 note has no date in the archive: Olympus used the day the file was saved', many: '{n} notes have no date in the archive: Olympus used the day the file was saved' },
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
     media_not_imported: { one: '1 picture, recording or other file in the archive was not imported', many: '{n} pictures, recordings or other files in the archive were not imported' },
     item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },

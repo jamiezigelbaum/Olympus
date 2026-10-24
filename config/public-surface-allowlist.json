@@ -18,26 +18,6 @@
       "retire_when": "Wired into the public source roster, or deleted."
     },
     {
-      "path": "src/workers/reflect/connector.ts",
-      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
-      "retire_when": "Wired into the public source roster, or deleted."
-    },
-    {
-      "path": "src/workers/reflect/index.ts",
-      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
-      "retire_when": "Wired into the public source roster, or deleted."
-    },
-    {
-      "path": "src/workers/roam/connector.ts",
-      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
-      "retire_when": "Wired into the public source roster, or deleted."
-    },
-    {
-      "path": "src/workers/roam/index.ts",
-      "reason": "Planned phase-1 source; declared in source-family and the credential broker but not wired into the scheduler or public source ids.",
-      "retire_when": "Wired into the public source roster, or deleted."
-    },
-    {
       "path": "src/core/resource-wiki.ts",
       "reason": "Phase-2 PKM feature, not yet on the public surface.",
       "retire_when": "Published on the public surface, or deleted."

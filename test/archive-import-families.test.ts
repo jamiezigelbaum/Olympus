@@ -43,7 +43,7 @@ describe('store sets belong to the family, not to its first format', () => {
       ['public_safe.archive.email', 'mbox', 'email'],
     ]);
     // The default is the registered formats.
-    expect(archiveImportCorpora().map((corpus) => corpus.corpusId)).toEqual(corpora.map((corpus) => corpus.corpusId));
+    expect(archiveImportCorpora().filter((corpus) => corpus.family === 'email').map((corpus) => corpus.corpusId)).toEqual(corpora.map((corpus) => corpus.corpusId));
     expect(ARCHIVE_FORMATS).toContain(MBOX_ARCHIVE_FORMAT);
   });
 

@@ -88,7 +88,7 @@ describe('archive format detection', () => {
     const f = fixture();
     const notes = join(f.exports, 'notes.mbox');
     writeFileSync(notes, 'Just some synthetic notes, not mail.');
-    expect(startArchiveImport({ state: f.state, path: notes })).toEqual({ kind: 'unsupported', supported: ['Mail (mbox)'] });
+    expect(startArchiveImport({ state: f.state, path: notes })).toEqual({ kind: 'unsupported', supported: expect.arrayContaining(['Mail (mbox)']) });
     // A folder that is not an export folder, even with mail inside.
     const folder = join(f.exports, 'Mail');
     mkdirSync(folder);
