@@ -49,6 +49,11 @@ const PROBE_MAX_FILE_HEADS = 32;
  */
 const PROBE_MAX_ZIPS = 4;
 /**
+ * More zips, past those, whose names a format asks for (`probeNames`): a folder
+ * of exports can hold a zip for each of many chats, and each one is the export.
+ */
+const PROBE_MAX_NAMED_ZIPS = 128;
+/**
  * Members of a zip whose first bytes the probe reads.
  */
 const PROBE_MAX_MEMBER_HEADS = 32;
@@ -208,18 +213,25 @@ export function probeArchivePath(
     }
     kinds.push(kind === 'directory' || kind === 'file' ? kind : undefined);
   }
-  // First bytes: the files a format asked for by name, then the rest in listing order.
+  // First bytes: the files a format asked for by name, then the rest in listing
+  // order. The first few files are always looked at; every file a format asked
+  // for by name is, however many there are (the listing already bounds them).
   const heads = new Map<number, Uint8Array>();
   const wanted = listed.map((entry, index) => index).filter((index) => kinds[index] === 'file');
+  const asked = wanted.filter((index) => matchesAnyName(listed[index]!, probeNames));
   const ordered = [
-    ...wanted.filter((index) => matchesAnyName(listed[index]!, probeNames)),
+    ...asked,
     ...wanted.filter((index) => !matchesAnyName(listed[index]!, probeNames)),
-  ].slice(0, PROBE_MAX_FILE_HEADS);
+  ].slice(0, Math.max(PROBE_MAX_FILE_HEADS, asked.length));
   for (const index of ordered) {
     const head = fileHead(root, joinRelative(chosenRelPath, listed[index]!.name));
     if (head) heads.set(index, head);
   }
-  const zips = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index))).slice(0, PROBE_MAX_ZIPS);
+  const zipsAmongHeads = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index)));
+  const zips = [
+    ...zipsAmongHeads.filter((index) => asked.includes(index)).slice(0, PROBE_MAX_NAMED_ZIPS),
+    ...zipsAmongHeads.filter((index) => !asked.includes(index)).slice(0, PROBE_MAX_ZIPS),
+  ];
   listed.forEach((entry, index) => {
     const kind = kinds[index];
     if (kind === 'directory') {

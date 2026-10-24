@@ -13,6 +13,7 @@
 import type { SourceConnector } from './contracts.ts';
 import type { ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
 import type { SourceFamily, SourceTrustDomain } from './source-index/types.ts';
+import { isWhatsAppChatMemberName, looksLikeWhatsAppChat } from './whatsapp-export-grammar.ts';
 
 /** How many first bytes the probe reads from a file. */
 export const ARCHIVE_PROBE_HEAD_BYTES = 4096;
@@ -116,7 +117,38 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   },
 });
 
-export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+/**
+ * A WhatsApp chat export: the text file of "Export Chat" (`_chat.txt` from an
+ * iPhone, `WhatsApp Chat with <name>.txt` from an Android phone, or any .txt
+ * that starts with a message line), or the zip WhatsApp shares, which holds
+ * that text file and the chat's media. A chosen folder imports every export in
+ * it. One format covers all of these, so a folder that mixes text files and zips
+ * is not ambiguous.
+ */
+export const WHATSAPP_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'whatsapp_chat',
+  label: 'WhatsApp chat export',
+  family: 'chat',
+  provider: 'whatsapp_export',
+  chooseHint: 'a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)',
+  citationLabel: 'WhatsApp',
+  probeNames: Object.freeze(['_chat.txt', '*whatsapp*.txt', '*whatsapp*.zip']),
+  detect(probe: ArchiveProbe): readonly string[] | undefined {
+    const isChat = (entry: ArchiveProbeEntry): boolean => {
+      if (entry.kind !== 'file') return false;
+      if (entry.members) {
+        return entry.members.some((member) =>
+          member.kind === 'file' && isWhatsAppChatMemberName(member.relPath) && looksLikeWhatsAppChat(member.head));
+      }
+      return entry.name.toLowerCase().endsWith('.txt') && looksLikeWhatsAppChat(entry.head);
+    };
+    if (probe.chosen.kind === 'file') return isChat(probe.chosen) ? [''] : undefined;
+    const found = probe.children.filter(isChat).map((entry) => entry.relPath).sort();
+    return found.length > 0 ? found : undefined;
+  },
+});
+
+export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([MBOX_ARCHIVE_FORMAT, WHATSAPP_ARCHIVE_FORMAT]);
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
