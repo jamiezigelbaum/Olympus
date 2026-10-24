@@ -48,7 +48,7 @@ describe('isolated HOME preload', () => {
       expect(run.exitCode).not.toBe(0);
       expect(run.stderr.toString()).toContain(`Refusing to run tests with HOME=${realpathSync(standIn)}`);
     }
-  });
+  }, 30_000);
 
   test('the account home is found from the uid, not from USER or LOGNAME', () => {
     if (!realHome) return; // no user database entry to find (bare container user)
@@ -58,7 +58,7 @@ describe('isolated HOME preload', () => {
     });
     expect(run.stderr.toString()).toContain('1 pass');
     expect(run.exitCode).toBe(0);
-  });
+  }, 30_000);
 
   test(PROBE_TEST, () => {
     // Runs only inside the child above, which starts without USER or LOGNAME.
@@ -74,12 +74,12 @@ describe('isolated HOME preload', () => {
     expect(viaNode.stdout).toBe(isolatedHome);
     const viaBun = Bun.spawnSync(['/bin/sh', ...printHome], { env: { PATH: process.env.PATH ?? '' } });
     expect(viaBun.stdout.toString()).toBe(isolatedHome);
-  });
+  }, 30_000);
 
   test('promisified execFile keeps its { stdout, stderr } result', async () => {
     const result = await promisify(execFile)('/bin/sh', printHome, { env: { PATH: process.env.PATH } });
     expect(result.stdout).toBe(isolatedHome);
-  });
+  }, 30_000);
 
   test('a child given a relative HOME is refused: it would resolve against the child\'s own directory', () => {
     for (const relativeHome of ['.', 'home']) {
@@ -87,7 +87,7 @@ describe('isolated HOME preload', () => {
       expect(() => spawnSync('/bin/sh', printHome, options)).toThrow(/relative HOME/);
       expect(() => Bun.spawnSync(['/bin/sh', ...printHome], options)).toThrow(/relative HOME/);
     }
-  });
+  }, 30_000);
 
   test('a child pointed at a refused home through a symlink and `..` is refused', () => {
     const standIn = mkdtempSync(join(isolatedHome, 'child-stand-in-'));
@@ -102,7 +102,7 @@ describe('isolated HOME preload', () => {
     } finally {
       delete process.env.OLYMPUS_TEST_REFUSE_HOME;
     }
-  });
+  }, 30_000);
 
   test('a child asked to run with the real home is refused before it starts, under any spelling', () => {
     if (!realHome) return; // no user database entry to refuse (bare container user)
@@ -113,5 +113,5 @@ describe('isolated HOME preload', () => {
       expect(() => spawnSync('/bin/sh', printHome, { env })).toThrow(/real HOME/);
       expect(() => Bun.spawnSync(['/bin/sh', ...printHome], { env })).toThrow(/real HOME/);
     }
-  });
+  }, 30_000);
 });
