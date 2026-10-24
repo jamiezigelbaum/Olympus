@@ -818,6 +818,14 @@ describe('telegram connector: resume', () => {
       const taken = all.items.slice(0, index + 1);
       expect({ index, ids: [...taken, ...rest.items].map((item) => item.identity.providerItemId) })
         .toEqual({ index, ids: all.items.map((item) => item.identity.providerItemId) });
+      // Each item after the restart is the item it was without one: the chat's name and kind came through the resume point.
+      const original = new Map(all.items.map((item) => [item.identity.providerItemId, item]));
+      for (const item of rest.items) {
+        const same = original.get(item.identity.providerItemId)!;
+        expect(item.identity).toEqual(same.identity);
+        expect(item.metadata).toEqual(same.metadata);
+        expect(item.content).toEqual(same.content);
+      }
       // Findings of the part already read are not reported again.
       const through = cursorOffset(cursor);
       for (const finding of resumed.findings) expect(finding.offset).toBeGreaterThan(through);

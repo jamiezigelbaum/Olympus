@@ -15,6 +15,7 @@ import { archiveCorpusId, type ArchiveConnectorFactory } from '../src/core/archi
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { searchToolResult } from '../src/workers/chatgpt/response-builder.ts';
 import { createTelegramArchiveConnector } from '../src/workers/archive-import/telegram/connector.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
@@ -443,6 +444,17 @@ describe('removing a Telegram archive', () => {
     for (const path of archiveStores) expect(existsSync(path)).toBe(false);
     expect(second.snapshot()).toEqual(before);
     expect(second.liveRows()).toBe(1);
+  });
+});
+
+describe('citing a Telegram archive', () => {
+  test('an imported message is cited as Telegram, from its format, with the title and date it has', () => {
+    const cited = searchToolResult({
+      evidence: [{ trust_domain: 'internal', provider: 'telegram_export', family: 'chat', title: 'Harbour Group', excerpt: 'harbour log', authored_at: telegramFixtureIso(2) }],
+      coverage: {},
+    });
+    const evidence = (cited.structuredContent as { evidence: Array<{ source: string; title?: string; date?: string }> }).evidence[0]!;
+    expect(evidence).toMatchObject({ source: 'Telegram', title: 'Harbour Group', date: '2015-01-05' });
   });
 });
 
