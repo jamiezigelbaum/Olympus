@@ -34,6 +34,21 @@ export interface ZipFixtureEntry {
   methodNumber?: number;
   /** The encryption flag. */
   encrypted?: boolean;
+  /** Written as the uncompressed size, in both headers, instead of the data's length. */
+  declaredSize?: number;
+  /** Written as the compressed size, in both headers, instead of the compressed bytes' length. */
+  declaredCompressedSize?: number;
+  /** Written as the local header's offset in the directory instead of where the member starts. */
+  directoryOffset?: number;
+  /** What the member's own header says where it should differ from the directory. */
+  localHeader?: {
+    name?: string;
+    methodNumber?: number;
+    encrypted?: boolean;
+    crc?: number;
+    compressedSize?: number;
+    uncompressedSize?: number;
+  };
 }
 
 export interface ZipFixtureOptions {
@@ -94,15 +109,21 @@ export function buildZip(entries: readonly ZipFixtureEntry[], options: ZipFixtur
     const compressed = entry.rawCompressed ?? (method === 'deflate' ? new Uint8Array(deflateRawSync(data)) : data);
     const crc = entry.badCrc !== undefined ? entry.badCrc >>> 0 : referenceCrc32(data);
     const name = new TextEncoder().encode(entry.name);
+    const localName = entry.localHeader?.name === undefined ? name : new TextEncoder().encode(entry.localHeader.name);
+    const compressedSize = entry.declaredCompressedSize ?? compressed.length;
+    const uncompressedSize = entry.declaredSize ?? data.length;
     const flags = (entry.descriptor ? 0x8 : 0) | (entry.utf8 ? 0x800 : 0) | (entry.encrypted ? 0x1 : 0);
+    const localFlags = entry.localHeader?.encrypted === undefined
+      ? flags
+      : (flags & ~0x1) | (entry.localHeader.encrypted ? 0x1 : 0);
     const methodNumber = entry.methodNumber ?? (method === 'deflate' ? 8 : 0);
     const offset = file.length;
     const zip64 = entry.zip64 === true;
 
     file.u32(0x04034b50);
     file.u16(zip64 ? 45 : 20);
-    file.u16(flags);
-    file.u16(methodNumber);
+    file.u16(localFlags);
+    file.u16(entry.localHeader?.methodNumber ?? methodNumber);
     file.u16(0);
     file.u16(0x21);
     if (entry.descriptor) {
@@ -110,30 +131,30 @@ export function buildZip(entries: readonly ZipFixtureEntry[], options: ZipFixtur
       file.u32(0);
       file.u32(0);
     } else {
-      file.u32(crc);
-      file.u32(zip64 ? 0xffffffff : compressed.length);
-      file.u32(zip64 ? 0xffffffff : data.length);
+      file.u32(entry.localHeader?.crc ?? crc);
+      file.u32(zip64 ? 0xffffffff : (entry.localHeader?.compressedSize ?? compressedSize));
+      file.u32(zip64 ? 0xffffffff : (entry.localHeader?.uncompressedSize ?? uncompressedSize));
     }
-    file.u16(name.length);
+    file.u16(localName.length);
     const localExtra = zip64 && !entry.descriptor ? 20 : 0;
     file.u16(localExtra);
-    file.bytes(name);
+    file.bytes(localName);
     if (localExtra) {
       file.u16(0x0001);
       file.u16(16);
-      file.u64(data.length);
-      file.u64(compressed.length);
+      file.u64(uncompressedSize);
+      file.u64(compressedSize);
     }
     file.bytes(compressed);
     if (entry.descriptor) {
       file.u32(0x08074b50);
       file.u32(crc);
       if (zip64) {
-        file.u64(compressed.length);
-        file.u64(data.length);
+        file.u64(compressedSize);
+        file.u64(uncompressedSize);
       } else {
-        file.u32(compressed.length);
-        file.u32(data.length);
+        file.u32(compressedSize);
+        file.u32(uncompressedSize);
       }
     }
 
@@ -145,22 +166,22 @@ export function buildZip(entries: readonly ZipFixtureEntry[], options: ZipFixtur
     central.u16(0);
     central.u16(0x21);
     central.u32(crc);
-    central.u32(zip64 ? 0xffffffff : compressed.length);
-    central.u32(zip64 ? 0xffffffff : data.length);
+    central.u32(zip64 ? 0xffffffff : compressedSize);
+    central.u32(zip64 ? 0xffffffff : uncompressedSize);
     central.u16(name.length);
     central.u16(zip64 ? 28 : 0);
     central.u16(0);
     central.u16(0);
     central.u16(0);
     central.u32(0);
-    central.u32(zip64 ? 0xffffffff : offset);
+    central.u32(zip64 ? 0xffffffff : (entry.directoryOffset ?? offset));
     central.bytes(name);
     if (zip64) {
       central.u16(0x0001);
       central.u16(24);
-      central.u64(data.length);
-      central.u64(compressed.length);
-      central.u64(offset);
+      central.u64(uncompressedSize);
+      central.u64(compressedSize);
+      central.u64(entry.directoryOffset ?? offset);
     }
   }
   const centralBytes = central.done();
