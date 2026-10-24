@@ -926,6 +926,9 @@ export function previewArchiveApprove(args: { key?: unknown }) {
  *                        with the reason and Check capture
  *   capture-late         WhatsApp's newest message is 3 days old and its pull is
  *                        late too: one row says both, with Check capture
+ *   capture-restarting   fresh messages, but WhatsApp's helper has just exited
+ *                        and is about to be started again: a quiet row that
+ *                        says capture restarting, nothing under Needs you
  */
 function capturePreview(state: string): SourceDashboardViewModel {
   const stale = state === 'capture-stale';
@@ -934,6 +937,7 @@ function capturePreview(state: string): SourceDashboardViewModel {
   const awaiting = state === 'capture-awaiting';
   const helperDown = state === 'capture-helper-down';
   const late = state === 'capture-late';
+  const restarting = state === 'capture-restarting';
   const status = emptyStatus();
   status.corpora = [
     corpus('internal.telegram.messages', 'chat', 'internal', 'telegram', 4_200, 4_200, { withText: 4_200, embedded: 4_200 }),
@@ -982,6 +986,11 @@ function capturePreview(state: string): SourceDashboardViewModel {
         }
     : late
       ? { 'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: { kind: 'chats', count: 3 } } }
+    : restarting
+      ? {
+          'whatsapp.personal.messages': { supervisor: { state: 'stopped', reason: 'restarting' }, scope: { kind: 'whole_account' } },
+          'telegram.messages': { supervisor: { state: 'running' }, scope: { kind: 'chats', count: 5 } },
+        }
     : {
         'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: stale ? { kind: 'chats', count: 3 } : { kind: 'whole_account' } },
         'telegram.messages': { supervisor: { state: stale ? 'stopped' : 'running' }, scope: { kind: 'chats', count: 5 } },
@@ -1192,7 +1201,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
   'delete-data', 'delete-data-done',
-  'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late',
+  'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late', 'capture-restarting',
   ...ARCHIVE_STATES,
 ] as const;
 

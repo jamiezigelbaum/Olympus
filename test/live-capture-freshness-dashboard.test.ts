@@ -390,6 +390,25 @@ describe('capture runtime on other cards', () => {
     expect(needsYou).toEqual([]);
   });
 
+  test('a helper between an exit and its restart is named as restarting, quietly: no alarm, no capture running', () => {
+    const quiet = build({
+      which: 'whatsapp',
+      counts: receiptCounts(fresh(600)),
+      captureRuntime: { 'whatsapp.personal.messages': { supervisor: { state: 'stopped', reason: 'restarting' }, scope: { kind: 'chats', count: 2 } } },
+    });
+    expect(quiet.card.answer_readiness.state).toBe('ready');
+    expect(quiet.row.status).toBe('Fresh');
+    expect(quiet.row.detail).toBe('synced 6m ago · capture restarting · 2 chats');
+    expect(quiet.needsYou).toEqual([]);
+    // Under a stale feed it is named beside the age, and the stale feed is still the problem.
+    const stale2 = build({
+      which: 'telegram',
+      counts: receiptCounts(stale(2 * DAY)),
+      captureRuntime: { 'telegram.messages': { supervisor: { state: 'stopped', reason: 'restarting' } } },
+    });
+    expect(dashboardAttentionLine(stale2.card)).toBe('capture stale: newest message 2d ago · capture restarting');
+  });
+
   test('the panel drops anything outside the closed words and counts', () => {
     const { row, needsYou } = build({
       which: 'whatsapp',

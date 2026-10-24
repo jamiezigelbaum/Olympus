@@ -823,7 +823,9 @@ export type DashboardCaptureSupervisorReason =
   /** The helper process could not be started at all (no Python, the executable is gone). */
   | 'start_failed'
   /** The helper keeps exiting on its own shortly after it starts. */
-  | 'helper_exited';
+  | 'helper_exited'
+  /** The helper exited and has not been started again yet. Not a fault by itself. */
+  | 'restarting';
 
 /** What this worker's capture supervisor last reported for one source. */
 export interface DashboardCaptureSupervisor {

@@ -583,11 +583,13 @@ export const DASHBOARD_CAPTURE_COPY = {
     helper_exited: 'capture keeps stopping: its helper exits soon after it starts',
     grant_missing: 'capture stopped: its approval is missing',
     handle_unavailable: 'capture stopped: its sign-in is no longer available',
-  } satisfies Record<DashboardCaptureSupervisorReason, string>,
+  } satisfies Record<Exclude<DashboardCaptureSupervisorReason, 'restarting'>, string>,
   /** A helper fault with no reason the page knows. */
   helperUnknown: 'capture cannot start',
   running: 'capture running',
   stopped: 'capture stopped',
+  /** The helper exited and the next check will start it again: not a fault, and not running either. */
+  restarting: 'capture restarting',
   wholeAccount: 'whole account',
   chats: (count: number) => `${dashboardCount(count)} ${count === 1 ? 'chat' : 'chats'}`,
   nextAction: {
@@ -653,12 +655,19 @@ export function dashboardCaptureAttentionReason(source: DashboardSourceCard): st
   const problem = dashboardCaptureProblem(source);
   if (!problem) return undefined;
   if (problem.cause === 'helper') {
-    return problem.reason === undefined ? DASHBOARD_CAPTURE_COPY.helperUnknown : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
+    return problem.reason === undefined || problem.reason === 'restarting'
+      ? DASHBOARD_CAPTURE_COPY.helperUnknown
+      : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
   }
   const age = source.freshness.capture?.age_seconds;
   const relative = typeof age === 'number' ? dashboardRelativeFromMs(age * 1_000) : '';
   const base = relative ? DASHBOARD_CAPTURE_COPY.stale(relative) : DASHBOARD_CAPTURE_COPY.staleNoAge;
-  return source.capture?.supervisor?.state === 'stopped' ? `${base} · ${DASHBOARD_CAPTURE_COPY.stopped}` : base;
+  return source.capture?.supervisor?.state === 'stopped' ? `${base} · ${dashboardStoppedClause(source)}` : base;
+}
+
+/** A stopped helper in words: restarting when it only exited and will be started again, else stopped. */
+function dashboardStoppedClause(source: DashboardSourceCard): string {
+  return source.capture?.supervisor?.reason === 'restarting' ? DASHBOARD_CAPTURE_COPY.restarting : DASHBOARD_CAPTURE_COPY.stopped;
 }
 
 /**
@@ -683,7 +692,7 @@ export function dashboardCaptureClause(source: DashboardSourceCard): string {
   if (source.freshness.capture?.state === 'unavailable') parts.push(DASHBOARD_CAPTURE_COPY.unavailable);
   const supervisor = source.capture?.supervisor?.state;
   if (supervisor === 'running') parts.push(DASHBOARD_CAPTURE_COPY.running);
-  else if (supervisor === 'stopped') parts.push(DASHBOARD_CAPTURE_COPY.stopped);
+  else if (supervisor === 'stopped') parts.push(dashboardStoppedClause(source));
   const scope = source.capture?.scope;
   if (scope?.kind === 'whole_account') parts.push(DASHBOARD_CAPTURE_COPY.wholeAccount);
   else if (scope?.kind === 'chats' && scope.count > 0) parts.push(DASHBOARD_CAPTURE_COPY.chats(scope.count));

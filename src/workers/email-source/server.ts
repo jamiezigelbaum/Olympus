@@ -533,6 +533,8 @@ export async function reconcileWorkerCaptures(input: {
     await Promise.all(entries.map(async ([source, capture]) => {
       await capture.stop();
       input.statuses[source] = { source, state: 'stopped' };
+      // An earlier failure to start is moot once capture is stopped on purpose.
+      delete input.failures[source];
     }));
     return;
   }

@@ -151,8 +151,9 @@ export interface MessagingCaptureStatus {
 
 /**
  * Why capture is not running. The first five come from the supervisor's own
- * reconcile; the last two are what the worker adds when the helper process
- * would not start or keeps exiting (see effectiveMessagingCaptureStatus).
+ * reconcile; the last three are what the worker adds when the helper process
+ * would not start, keeps exiting, or is between an exit and its restart (see
+ * effectiveMessagingCaptureStatus).
  */
 export type MessagingCaptureReason =
   | 'grant_missing'
@@ -161,7 +162,8 @@ export type MessagingCaptureReason =
   | 'session_missing'
   | 'secret_missing'
   | 'start_failed'
-  | 'helper_exited';
+  | 'helper_exited'
+  | 'restarting';
 
 /** Whether the helper process is alive now, and how often it exited on its own lately. */
 export interface MessagingCaptureLiveness {
@@ -180,7 +182,9 @@ const STABLE_RUN_MS = 60_000;
  * facts that came after it. A reconcile that threw (Python missing, the
  * executable gone) leaves no new status, so the old one must not stand: the
  * helper did not start. A helper that keeps exiting by itself is not running,
- * whatever the last reconcile said. Reporting only: nothing here starts or
+ * whatever the last reconcile said. One that exited and has not been started
+ * again yet (the next reconcile is at most ten seconds away) is reported as
+ * restarting, which is not an alarm. Reporting only: nothing here starts or
  * stops anything.
  */
 export function effectiveMessagingCaptureStatus(input: {
@@ -195,6 +199,9 @@ export function effectiveMessagingCaptureStatus(input: {
   }
   if (status?.state === 'running' && input.liveness && input.liveness.unexpectedExits >= MESSAGING_CAPTURE_REPEATED_EXITS) {
     return { ...(source ? { source } : {}), state: 'blocked', reason: 'helper_exited' };
+  }
+  if (status?.state === 'running' && input.liveness && !input.liveness.alive) {
+    return { ...(source ? { source } : {}), state: 'stopped', reason: 'restarting' };
   }
   return status;
 }
@@ -231,7 +238,11 @@ export class MessagingCaptureSupervisor {
   }
 
   private childExited(child: CaptureChild): void {
-    if (!this.expectedStops.has(child)) this.unexpectedExitTimes.push((this.options.now ?? Date.now)());
+    const now = (this.options.now ?? Date.now)();
+    // A run that lasted a minute forgives the exits before it, whether or not
+    // anyone read liveness() while it ran.
+    if (this.child === child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS) this.unexpectedExitTimes = [];
+    if (!this.expectedStops.has(child)) this.unexpectedExitTimes.push(now);
     if (this.child === child) {
       this.child = undefined;
       this.fingerprint = undefined;

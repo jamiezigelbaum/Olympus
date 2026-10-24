@@ -1424,6 +1424,7 @@ const CAPTURE_SUPERVISOR_REASONS: ReadonlySet<string> = new Set([
   'secret_missing',
   'start_failed',
   'helper_exited',
+  'restarting',
 ]);
 
 /** A live feed's verdict from the closed state set and finite numbers only. */

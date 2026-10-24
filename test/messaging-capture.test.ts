@@ -395,11 +395,14 @@ describe('a helper that exits on its own is not reported as running', () => {
     let lastReconcile: MessagingCaptureStatus | undefined;
     for (let round = 1; round <= MESSAGING_CAPTURE_REPEATED_EXITS; round += 1) {
       lastReconcile = await supervisor.reconcile();
+      expect(effectiveMessagingCaptureStatus({ status: lastReconcile, liveness: supervisor.liveness() }))
+        .toEqual({ source: 'telegram', state: 'running' });
       helpers.at(-1)!.die(1);
       await settle();
       clock += 10_000;
       const effective = effectiveMessagingCaptureStatus({ status: lastReconcile, liveness: supervisor.liveness() });
-      if (round < MESSAGING_CAPTURE_REPEATED_EXITS) expect(effective).toEqual({ source: 'telegram', state: 'running' });
+      // Between exits nothing is running, but the next check starts it again: restarting, not an alarm.
+      if (round < MESSAGING_CAPTURE_REPEATED_EXITS) expect(effective).toEqual({ source: 'telegram', state: 'stopped', reason: 'restarting' });
       else expect(effective).toEqual({ source: 'telegram', state: 'blocked', reason: 'helper_exited' });
     }
     // The reconcile itself kept saying running: that is the stale report this corrects.
@@ -433,6 +436,41 @@ describe('a helper that exits on its own is not reported as running', () => {
     expect(supervisor.liveness()).toEqual({ alive: true, unexpectedExits: 3 });
     clock += 31_000;
     expect(supervisor.liveness()).toEqual({ alive: true, unexpectedExits: 0 });
+  });
+
+  test('a run of a minute forgives earlier exits even when nobody reads liveness() while it runs', async () => {
+    let clock = 9_000_000;
+    const helpers: Array<ReturnType<typeof mortalChild>> = [];
+    const supervisor = captureSupervisorFixture({
+      now: () => clock,
+      spawn: () => { const helper = mortalChild(); helpers.push(helper); return helper.child; },
+    });
+    // Two quick failures, then a run of ninety seconds that ends on its own. No liveness() call in between.
+    for (let round = 0; round < 2; round += 1) {
+      await supervisor.reconcile();
+      clock += 5_000;
+      helpers.at(-1)!.die(1);
+      await settle();
+    }
+    await supervisor.reconcile();
+    clock += 90_000;
+    helpers.at(-1)!.die(1);
+    await settle();
+    // Only the last exit counts: the long run cleared the two before it, so this is not "keeps exiting".
+    expect(supervisor.liveness()).toEqual({ alive: false, unexpectedExits: 1 });
+    expect(effectiveMessagingCaptureStatus({ status: { source: 'telegram', state: 'running' }, liveness: supervisor.liveness() }))
+      .toEqual({ source: 'telegram', state: 'stopped', reason: 'restarting' });
+  });
+
+  test('a helper that is not alive reads restarting until it is started again; repeated exits outrank that', () => {
+    const running: MessagingCaptureStatus = { source: 'whatsapp', state: 'running' };
+    expect(effectiveMessagingCaptureStatus({ status: running, liveness: { alive: false, unexpectedExits: 1 } }))
+      .toEqual({ source: 'whatsapp', state: 'stopped', reason: 'restarting' });
+    expect(effectiveMessagingCaptureStatus({ status: running, liveness: { alive: false, unexpectedExits: 3 } }))
+      .toEqual({ source: 'whatsapp', state: 'blocked', reason: 'helper_exited' });
+    // Only a status that claims running is corrected.
+    const blocked: MessagingCaptureStatus = { source: 'whatsapp', state: 'blocked', reason: 'session_missing' };
+    expect(effectiveMessagingCaptureStatus({ status: blocked, liveness: { alive: false, unexpectedExits: 0 } })).toEqual(blocked);
   });
 
   test('fewer than three exits, or a failed reconcile with nothing to correct, change nothing', () => {
@@ -476,6 +514,39 @@ describe('a capture helper that cannot be started is reported, not hidden by the
     expect(failures).toEqual({});
   });
 
+  test('stopping capture on purpose ends an earlier start failure for that source, and only that one', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-failure-then-stop-'));
+    const registryPath = join(root, 'handles.json');
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('telegram', registryPath), pairing: telegramPairing('/fixture/telegram'), now: PAIRED });
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('whatsapp', registryPath), pairing: whatsappPairing('*'), now: PAIRED });
+    const statuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
+    const failures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+    const captures = {
+      telegram: stubSupervisor(async () => { throw new Error('Python 3 is required to start Telegram capture.'); }),
+      whatsapp: stubSupervisor(async () => { throw new Error('bridge missing'); }),
+    };
+    await reconcileWorkerCaptures({ captures, statuses, failures, warn: () => {} });
+    const supervisors = (): Array<'telegram' | 'whatsapp'> => ['telegram', 'whatsapp'];
+    expect(failures).toEqual({ telegram: true, whatsapp: true });
+    expect(workerCaptureRuntime({ sources: supervisors(), statuses, failures, registryPath })['telegram.messages']?.supervisor)
+      .toEqual({ state: 'blocked', reason: 'start_failed' });
+    // Secure-local capture is switched off: the stop succeeds, so the failure to start no longer applies.
+    await reconcileWorkerCaptures({ captures, statuses, failures, stopAll: true });
+    expect(failures).toEqual({});
+    const runtime = workerCaptureRuntime({ sources: supervisors(), statuses, failures, registryPath });
+    expect(runtime['telegram.messages']?.supervisor).toEqual({ state: 'stopped' });
+    expect(runtime['whatsapp.personal.messages']?.supervisor).toEqual({ state: 'stopped' });
+    // A stop that itself fails clears nothing.
+    failures.telegram = true;
+    await expect(reconcileWorkerCaptures({
+      captures: { telegram: { reconcile: async () => ({ state: 'running' }), stop: async () => { throw new Error('did not exit'); } } },
+      statuses,
+      failures,
+      stopAll: true,
+    })).rejects.toThrow('did not exit');
+    expect(failures).toEqual({ telegram: true });
+  });
+
   test('the dashboard says start_failed over a previous running status, and when nothing ever reported', () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-capture-start-failed-'));
     const registryPath = join(root, 'handles.json');
@@ -489,6 +560,16 @@ describe('a capture helper that cannot be started is reported, not hidden by the
     // The very first reconcile threw: there is no status at all, and the failure is still a fact.
     expect(workerCaptureRuntime({ sources: ['telegram'], statuses: {}, failures: { telegram: true }, registryPath })['telegram.messages']?.supervisor)
       .toEqual({ state: 'blocked', reason: 'start_failed' });
+  });
+
+  test('the dashboard says restarting, not running, for a helper that exited and has not been started again', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-restarting-'));
+    expect(workerCaptureRuntime({
+      sources: ['whatsapp'],
+      statuses: { whatsapp: { source: 'whatsapp', state: 'running' } },
+      liveness: { whatsapp: { alive: false, unexpectedExits: 1 } },
+      registryPath: join(root, 'handles.json'),
+    })['whatsapp.personal.messages']?.supervisor).toEqual({ state: 'stopped', reason: 'restarting' });
   });
 
   test('the dashboard says helper_exited for a helper that keeps exiting, from live liveness', () => {
