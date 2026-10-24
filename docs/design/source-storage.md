@@ -190,8 +190,14 @@ Inside the data root:
   a pure function of the registry, the file system and the environment
   (`core/source-placement.ts`), so the worker, the CLI and scripts reach the
   same answer before the entry exists; only the worker, which holds the owner
-  lock, records it, at the account's first writable open and before any file is
-  created. A registry that cannot be read resolves to the folder when one is
+  lock, records it, before the account's first file is created, whichever file
+  that is: a store, a tier sidecar opened ahead of its stores, or raw state
+  written with no store open (an archive import request, the X reconcile
+  state, the local files watch folder; `recordAccountPlacement`). Recording
+  is the worker's alone: the CLI, which holds the owner lock only while the
+  worker is down, writes no first file of an account (a tier command opens only
+  lanes whose stores exist), so it records nothing and adoption stays off for
+  it. A registry that cannot be read resolves to the folder when one is
   on disk, else to the legacy paths: nothing opens until it is repaired.
 - The registry is the only list of accounts. Export, Delete, uninstall,
   `ingestion status`, the tier commands, the dashboard and the scheduler
@@ -482,7 +488,10 @@ touch the store path (`eval/`).
      (step 6 deletes the wrappers). The registry schema becomes 2 with the first
      folder entry. Delete takes the whole folder, Delete all keeps
      `data-owner.lock`, Export names `raw/` and `session/` and never copies
-     them. No existing file moves.
+     them. No existing file moves. Delete refuses, with nothing removed, when
+     anything it would remove under `sources/` is reached through a link, and
+     when another source's resolved path (a retained `OLYMPUS_*_DB_PATH`
+     override, say) lies inside the folder it would take.
    - **4b, capture paths.** Messaging accounts (Telegram, WhatsApp) can be
      folders: the capture services are given their paths from the registry.
    - **4c, the boot migration of existing non-messaging accounts**, behind

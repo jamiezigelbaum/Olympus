@@ -12,7 +12,9 @@
  * `removing` from the moment a removal starts until every derived row is gone,
  * so a removal interrupted by a restart carries on from where it was.
  */
+import type { LayoutEnv } from '../../core/olympus-layout.ts';
 import { resolvedRawPath } from '../../core/source-placement.ts';
+import { recordAccountPlacement } from '../../core/source-storage.ts';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -195,10 +197,13 @@ export interface NewArchiveImportRecord {
 export class ArchiveImportStateStore {
   readonly path: string;
   private readonly now: () => Date;
+  // The environment the path was resolved in; it decides where the account's placement is recorded.
+  readonly env: LayoutEnv;
 
-  constructor(options: { path: string; now?: () => Date }) {
+  constructor(options: { path: string; now?: () => Date; env?: LayoutEnv }) {
     this.path = options.path;
     this.now = options.now ?? (() => new Date());
+    this.env = options.env ?? process.env;
   }
 
   list(): ArchiveImportRecord[] {
@@ -310,6 +315,8 @@ export class ArchiveImportStateStore {
   }
 
   private mutate(change: (state: PersistedArchiveImportState) => boolean | void): void {
+    // This can be the account's first file, with no store opened yet.
+    recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, this.path, this.env);
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readState(this.path);

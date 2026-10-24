@@ -790,6 +790,9 @@ export function deleteOlympusData(options: {
   // target must be provably Olympus's own and nobody else's (see
   // assertRawStateTargetsContained). A refusal here deletes nothing.
   assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
+  // The same for everything under the account folders: reached through no
+  // link, so a store inside one account's folder is never another account's.
+  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
   for (const target of uniqueDeleteTargets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
@@ -2024,7 +2027,12 @@ function assertRawStateTargetsContained(
   selectedSource: LifecycleSourceSpec | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
-  if (stateTargets.length === 0) return;
+  // One source's delete also takes its whole account folder recursively, which
+  // is held to the same overlap rule (3): no other source's path may sit in it.
+  const overlapTargets = selectedSource
+    ? [...stateTargets, ...targets.filter((target) => target.kind === 'account_folder')]
+    : stateTargets;
+  if (overlapTargets.length === 0) return;
   const roots = knownOlympusDataRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
   const refuse = (path: string, why: string): never => {
     throw new OperationError(
@@ -2067,16 +2075,54 @@ function assertRawStateTargetsContained(
     ...mediaCacheDeleteTargets(context).map((target) => target.path),
   ]) protectedPaths.add(path);
   const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve(path), canonicalPath(path)]);
-  for (const target of stateTargets) {
+  for (const target of overlapTargets) {
     const candidates = [resolve(target.path), canonicalPath(target.path)];
     for (const protectedPath of protectedCanonical) {
       for (const candidate of candidates) {
         if (candidate === protectedPath || isStrictlyInside(protectedPath, candidate) || isStrictlyInside(candidate, protectedPath)) {
           // A target legitimately inside its OWN source's other path is not
           // reachable here: own paths are not in the protected set.
+          if (target.kind === 'account_folder') {
+            // Typically another source's retained path override (a legacy
+            // account pinned by OLYMPUS_*_DB_PATH) pointing into this folder.
+            throw new OperationError(
+              'invalid_params',
+              `Refusing to delete the account folder because it overlaps another source's or shared Olympus data (${protectedPath}): ${target.path}`,
+              'Check the OLYMPUS_* path overrides, move that data out of this folder or remove the folder by hand. Nothing was deleted.',
+            );
+          }
           refuse(target.path, `because it overlaps another source's or shared Olympus data (${protectedPath})`);
         }
       }
+    }
+  }
+}
+
+/**
+ * Everything a delete reaches under `<data>/sources` (the account folders) is
+ * reached through no link, the target itself included and every directory
+ * between the data root and it: the real path must equal the lexical path
+ * under the data root's real path. `stores` of one account linked to another
+ * account's `stores` would otherwise send the per-file removals, which pass
+ * their own checks as regular files, into the other account. The account
+ * folder targets have their own check (assertAccountFolderOwned). Runs for
+ * every target before anything is removed; a refusal deletes nothing.
+ */
+function assertSourcesFolderTargetsUnlinked(targets: readonly DeleteTarget[], context: LifecyclePathContext): void {
+  const env = envForContext(context);
+  const owned = resolve(olympusDataRoot(env));
+  const sources = resolve(accountFoldersRoot(env));
+  const ownedReal = canonicalPath(owned);
+  for (const target of targets) {
+    if (target.kind === 'account_folder') continue;
+    const lexical = resolve(target.path);
+    if (!isStrictlyInside(lexical, sources)) continue;
+    if (canonicalPath(lexical) !== join(ownedReal, relative(owned, lexical))) {
+      throw new OperationError(
+        'invalid_params',
+        `Refusing to delete inside the account folders because it, or a folder above it, is a symbolic link: ${target.path}`,
+        'Check the Olympus data folder, then remove what the link points at by hand. Nothing was deleted.',
+      );
     }
   }
 }

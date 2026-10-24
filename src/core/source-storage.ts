@@ -17,6 +17,14 @@
  * opens, and every open while adoption is off (the CLI, scripts, tests),
  * never write the registry; they resolve the entry, or the same decision.
  *
+ * The entry is recorded before the account's FIRST file, whichever file that
+ * is. A store open does it, and so does the open of a tier ledger, secret
+ * index or sniffer that comes first, and `recordAccountPlacement` does it for
+ * raw state written without any store (an archive import request, the X
+ * reconcile state, the local files watch folder). An account whose files sit
+ * in its folder while the registry is still schema 1 would be invisible to a
+ * step-3 build, which would then place it at the legacy paths.
+ *
  * No instance cache: callers share the objects they open, as before.
  */
 import { statSync } from 'node:fs';
@@ -79,13 +87,15 @@ export function openConnectorStore(
   assertOpenable(registry, account.sourceId, slot);
   if (adoptionEnabled && options.readOnly !== true) {
     const entry = findRegistryAccount(registry, account.sourceId, slot);
-    if (!entry?.corpus_ids.includes(options.corpusId)) adopt(env, account.sourceId, slot, options.corpusId, options.dbPath);
+    if (!entry?.corpus_ids.includes(options.corpusId)) adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
   }
   return new LocalConnectorStore(options);
 }
 
+// A sidecar can be the first file of an account: a tiered set opens its ledger
+// before its stores.
 export function openTierLedger(account: StorageAccount, options: TierLedgerOptions, env: LayoutEnv = process.env): TierLedger {
-  assertOpenable(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeSidecar(env, account, options.dbPath);
   return new TierLedger(options);
 }
 
@@ -94,7 +104,7 @@ export function openSecretLocations(
   options: ConstructorParameters<typeof SecretLocationsIndex>[0],
   env: LayoutEnv = process.env,
 ): SecretLocationsIndex {
-  assertOpenable(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeSidecar(env, account, options.dbPath, options.readOnly);
   return new SecretLocationsIndex(options);
 }
 
@@ -103,8 +113,37 @@ export function openTierSniffer(
   options: ConstructorParameters<typeof TierSnifferStore>[0],
   env: LayoutEnv = process.env,
 ): TierSnifferStore {
-  assertOpenable(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierSnifferStore(options);
+}
+
+/**
+ * Record the account's placement, and with it the registry's schema, before
+ * the first file of it is written, for a writer that opens no store: raw
+ * state (`raw/` of the account's folder) such as an archive import request,
+ * the X reconcile state or the local files watch folder. Call it before the
+ * path's folder is created. Like adoption it does nothing while adoption is
+ * off (the registry is not even read), for an account that already has an
+ * entry, and for `:memory:`; it records `legacy` (no schema change) for an
+ * account the decision keeps at the legacy paths, or for a path outside the
+ * folder. An unreadable registry fails the call, as it fails an open.
+ */
+export function recordAccountPlacement(account: StorageAccount, path: string, env: LayoutEnv = process.env): void {
+  if (!adoptionEnabled) return;
+  placeBeforeFirstFile(env, readSourceRegistry(env), account, path);
+}
+
+function placeSidecar(env: LayoutEnv, account: StorageAccount, path: string, readOnly?: boolean): void {
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  if (readOnly !== true) placeBeforeFirstFile(env, registry, account, path);
+}
+
+function placeBeforeFirstFile(env: LayoutEnv, registry: SourceRegistry, account: StorageAccount, path: string): void {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  if (!adoptionEnabled || path === ':memory:') return;
+  if (findRegistryAccount(registry, account.sourceId, slot)) return;
+  adopt(env, account.sourceId, slot, path);
 }
 
 /**
@@ -161,7 +200,8 @@ function assertOpenable(registry: SourceRegistry, sourceId: string, slot: string
   if (state !== undefined && state !== 'active') throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
 
-function adopt(env: LayoutEnv, sourceId: string, slot: string, corpusId: string, dbPath: string): void {
+/** Record the account (and the corpus, when a store's open names one) under the registry lease. */
+function adopt(env: LayoutEnv, sourceId: string, slot: string, dbPath: string, corpusId?: string): void {
   updateSourceRegistry(env, (registry) => {
     // Read again under the lease: a delete marked since the first read wins.
     assertOpenable(registry, sourceId, slot);
@@ -172,10 +212,10 @@ function adopt(env: LayoutEnv, sourceId: string, slot: string, corpusId: string,
         slot,
         state: 'active',
         layout: adoptedLayout(env, sourceId, slot, dbPath),
-        corpus_ids: [corpusId],
+        corpus_ids: corpusId === undefined ? [] : [corpusId],
         created_at: new Date().toISOString(),
       });
-    } else if (!entry.corpus_ids.includes(corpusId)) {
+    } else if (corpusId !== undefined && !entry.corpus_ids.includes(corpusId)) {
       entry.corpus_ids.push(corpusId);
     }
   });

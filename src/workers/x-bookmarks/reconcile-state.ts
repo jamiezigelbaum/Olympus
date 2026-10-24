@@ -1,4 +1,5 @@
 import { resolvedRawPath } from '../../core/source-placement.ts';
+import { recordAccountPlacement } from '../../core/source-storage.ts';
 import { X_BOOKMARKS_SOURCE_ID } from './connector.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
@@ -301,9 +302,13 @@ export class LocalXBookmarksReconcileStateStore {
   readonly dbPath: string;
   private readonly db: Database;
 
-  constructor(dbPath = defaultXBookmarksReconcileStateDbPath()) {
+  constructor(dbPath = defaultXBookmarksReconcileStateDbPath(), env: Record<string, string | undefined> = process.env) {
     this.dbPath = dbPath;
-    if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    if (dbPath !== ':memory:') {
+      // This can be the account's first file, before its store opens.
+      recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
+      mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    }
     this.db = new Database(dbPath, { create: true });
     if (dbPath !== ':memory:') chmodSync(dbPath, 0o600);
     this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');

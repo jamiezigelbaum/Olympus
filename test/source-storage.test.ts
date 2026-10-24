@@ -176,9 +176,27 @@ describe('storage service: adoption', () => {
     expect(existsSync(sourceRegistryPath(env))).toBe(false);
   });
 
-  test('the sidecar openers never adopt', () => {
-    enableSourceRegistryAdoption();
+  test('the sidecar openers record nothing while adoption is off', () => {
     openTierLedger({ sourceId: 'dropbox.files' }, { dbPath: join(dir, 'ledger.sqlite') }, env).close();
+    expect(existsSync(sourceRegistryPath(env))).toBe(false);
+  });
+
+  test('a sidecar opened before any store records the account with no corpus, and the store joins that entry', () => {
+    enableSourceRegistryAdoption();
+    const ledgerPath = join(dir, 'ledger.sqlite');
+    openTierLedger({ sourceId: 'dropbox.files' }, { dbPath: ledgerPath }, env).close();
+    const [placed] = readSourceRegistry(env).accounts;
+    expect(placed).toMatchObject({ source_id: 'dropbox.files', slot: '1', state: 'active', layout: 'legacy', corpus_ids: [] });
+
+    openConnectorStore({ sourceId: 'dropbox.files' }, storeOptions('dropbox', 'secure_local.dropbox.files'), env).close();
+    const accounts = readSourceRegistry(env).accounts;
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]).toMatchObject({ layout: 'legacy', corpus_ids: ['secure_local.dropbox.files'], created_at: placed!.created_at });
+  });
+
+  test('an in-memory sidecar records nothing', () => {
+    enableSourceRegistryAdoption();
+    openTierLedger({ sourceId: 'dropbox.files' }, { dbPath: ':memory:' }, env).close();
     expect(existsSync(sourceRegistryPath(env))).toBe(false);
   });
 });

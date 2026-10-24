@@ -5,11 +5,11 @@
 // Spawning tests carry an explicit timeout (test/spawn-timeout-guard.test.ts).
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { holdDataOwnerLock, isDataOwnerLockName, type HeldDataOwnerLock } from '../src/core/data-owner-lock.ts';
-import { accountFolder, olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { accountFolder, FOLDER_LAYOUT_SOURCES, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
@@ -52,8 +52,8 @@ function put(path: string, text = 'x'): string {
   return path;
 }
 
-/** A connected Readwise (two tiers) and X, as the worker opens them. */
-function connect(env: Env): { readwise: string[]; x: string } {
+/** A connected Readwise (two tiers), as the worker opens it. */
+function connectReadwise(env: Env): string[] {
   enableSourceRegistryAdoption();
   const internal = createReadwiseConnectorStore(defaultReadwiseConnectorStoreDbPath(env), env);
   internal.close();
@@ -64,9 +64,32 @@ function connect(env: Env): { readwise: string[]; x: string } {
     family: 'readwise',
     trustDomain: 'secure_local',
   }, env).close();
+  return [defaultReadwiseConnectorStoreDbPath(env), secureDb];
+}
+
+/** A connected Readwise (two tiers) and X, as the worker opens them. */
+function connect(env: Env): { readwise: string[]; x: string } {
+  const readwise = connectReadwise(env);
   const xDb = defaultXBookmarksConnectorStoreDbPath(env);
   createXBookmarksConnectorStore(xDb, env).close();
-  return { readwise: [defaultReadwiseConnectorStoreDbPath(env), secureDb], x: xDb };
+  return { readwise, x: xDb };
+}
+
+/** Every path under a folder with what it holds (links by their target), to prove a refusal changed nothing. */
+function snapshot(root: string): Record<string, string> {
+  const seen: Record<string, string> = {};
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) seen[path] = `-> ${readlinkSync(path)}`;
+      else if (entry.isDirectory()) {
+        seen[path] = 'dir';
+        walk(path);
+      } else seen[path] = readFileSync(path).toString('base64');
+    }
+  };
+  walk(root);
+  return seen;
 }
 
 const readwiseFolder = (env: Env): string => accountFolder({ source_id: 'readwise.library', slot: '1' }, env);
@@ -175,6 +198,104 @@ describe('Delete of one folder account', () => {
     symlinkSync(victim, dirname(readwiseFolder(env)));
     expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env })).toThrow(/symbolic link/);
     expect(readFileSync(join(victim, '1', 'stores', 'internal.sqlite'), 'utf8')).toBe('mine too');
+  });
+});
+
+describe('Delete never reaches into another account', () => {
+  test('a stores folder linked to another account is refused, and the other account keeps every file', () => {
+    const { homeDir, env } = fixture();
+    const stores = connect(env);
+    // X holds files named as Readwise's databases, ledgers and sidecars are.
+    const xStores = dirname(stores.x);
+    const readwiseStores = join(readwiseFolder(env), 'stores');
+    for (const name of readdirSync(readwiseStores)) copyFileSync(join(readwiseStores, name), join(xStores, name));
+    put(join(xStores, 'internal.sqlite-wal'), 'x wal');
+    put(join(xStores, 'internal.sqlite-shm'), 'x shm');
+    // Readwise's own stores folder is now a link to X's.
+    rmSync(readwiseStores, { recursive: true });
+    symlinkSync(xStores, readwiseStores);
+    const before = snapshot(olympusDataRoot(env));
+    expect(Object.keys(before).filter((path) => path.startsWith(`${xStores}/`)).length).toBeGreaterThanOrEqual(stores.readwise.length + 1);
+
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env })).toThrow(/symbolic link/);
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, dryRun: true })).toThrow(/symbolic link/);
+
+    // Nothing was deleted: X's files, Readwise's folder and the link are as they were.
+    expect(snapshot(olympusDataRoot(env))).toEqual(before);
+    expect(readlinkSync(readwiseStores)).toBe(xStores);
+  });
+
+  test('a store that is itself a link into another account is refused', () => {
+    const { homeDir, env } = fixture();
+    const stores = connect(env);
+    const [internal] = stores.readwise as [string, string];
+    const xOwned = put(join(dirname(stores.x), 'internal.sqlite'), 'x owns this');
+    rmSync(internal);
+    symlinkSync(xOwned, internal);
+    const before = snapshot(olympusDataRoot(env));
+
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env })).toThrow(/symbolic link/);
+
+    expect(snapshot(olympusDataRoot(env))).toEqual(before);
+    expect(readFileSync(xOwned, 'utf8')).toBe('x owns this');
+  });
+
+  test('Delete all refuses a linked stores folder too, with every file in place', () => {
+    const { homeDir, env, dir } = fixture();
+    connect(env);
+    const outside = join(dir, 'outside');
+    put(join(outside, 'precious.txt'), 'mine');
+    const readwiseStores = join(readwiseFolder(env), 'stores');
+    rmSync(readwiseStores, { recursive: true });
+    symlinkSync(outside, readwiseStores);
+    const before = snapshot(olympusDataRoot(env));
+
+    expect(() => deleteOlympusData({ all: true, homeDir, env })).toThrow(/symbolic link/);
+
+    expect(snapshot(olympusDataRoot(env))).toEqual(before);
+    expect(readFileSync(join(outside, 'precious.txt'), 'utf8')).toBe('mine');
+  });
+
+  // The legacy account's retained override: `OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH`
+  // names a file inside Readwise's folder. Removing Readwise's folder whole would take X's store.
+  test('a legacy account whose retained override points inside the folder keeps its store, and the delete is refused naming it', () => {
+    const { homeDir, env: base } = fixture();
+    const stores = connectReadwise(base);
+    __sourceStorageTestHooks.disableAdoption();
+    const xStore = join(readwiseFolder(base), 'stores', 'x.sqlite');
+    const env = { ...base, OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH: xStore };
+    createXBookmarksConnectorStore(defaultXBookmarksConnectorStoreDbPath(env), env).close();
+    expect(defaultXBookmarksConnectorStoreDbPath(env)).toBe(xStore);
+    expect(existsSync(xStore)).toBe(true);
+    const before = snapshot(olympusDataRoot(env));
+
+    let message = '';
+    try {
+      deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
+    } catch (error) {
+      message = error instanceof OperationError ? `${error.message}\n${error.suggestion ?? ''}` : String(error);
+    }
+
+    expect(message).toContain('overlaps another source');
+    expect(message).toContain(xStore);
+    expect(message).toContain(readwiseFolder(env));
+    expect(snapshot(olympusDataRoot(env))).toEqual(before);
+    for (const store of stores) expect(existsSync(store)).toBe(true);
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, dryRun: true })).toThrow(/overlaps another source/);
+    // Deleting the account that owns the override takes its store and leaves the folder that holds it.
+    deleteOlympusData({ sourceId: 'x.bookmarks', homeDir, env });
+    expect(existsSync(xStore)).toBe(false);
+    for (const store of stores) expect(existsSync(store)).toBe(true);
+  });
+
+  test('every account folder deletes cleanly beside the others, so the overlap rule never refuses a normal install', () => {
+    const { homeDir, env } = fixture();
+    for (const sourceId of FOLDER_LAYOUT_SOURCES) put(join(accountFolder({ source_id: sourceId, slot: '1' }, env), 'raw', 'note.txt'));
+    for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+      const folder = accountFolder({ source_id: sourceId, slot: '1' }, env);
+      const preview = deleteOlympusData({ sourceId, homeDir, env, dryRun: true });
+      expect(preview.removed).toContain(folder);
+    }
   });
 });
 

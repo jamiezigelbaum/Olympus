@@ -316,6 +316,7 @@ import {
   enableSourceRegistryAdoption,
   openConnectorStore,
   openSecretLocations,
+  recordAccountPlacement,
   sourceAccountUnavailableReason,
   storageAccountForCorpus,
   type StorageAccount,
@@ -2869,6 +2870,9 @@ export async function main(): Promise<void> {
     if (!localFilesConnectorStore || !fileSourceScopeAuthority) return undefined;
     const key = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key) return localFilesSyncCache.handler;
+    // The watch folder is the account's raw state, written only from here on. The store is open
+    // (the guard above), so the account is already placed; this keeps that true by construction.
+    recordAccountPlacement({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesWatchDir(process.env));
     const handler = createLocalFilesProviderStoreSyncHandler({
       ...(localFilesTierLane ? { tierSet: localFilesTierLane.set } : {}),
       store: localFilesConnectorStore,
@@ -6713,6 +6717,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
       usageStore ??= new LocalXBookmarksApiUsageStore();
       reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(
         defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath),
+        env,
       );
       cachedRuntime = bindXBookmarksConnectorStoreRuntime({
         ...binding,

@@ -234,6 +234,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   const state = options.runtime.state;
   const requests = new ArchiveImportRequestStore({
     path: options.requestsPath ?? archiveImportRequestsPath(state.path),
+    env: state.env,
     ...(options.now ? { now: options.now } : {}),
   });
   const pause = options.pause ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));

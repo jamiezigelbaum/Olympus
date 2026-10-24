@@ -22,10 +22,21 @@ import {
   SourceRegistryError as Step3RegistryError,
   readSourceRegistry as readSourceRegistryAsStep3,
 } from './fixtures/source-registry-step3.ts';
-import { __sourceStorageTestHooks, enableSourceRegistryAdoption, openConnectorStore } from '../src/core/source-storage.ts';
+import {
+  __sourceStorageTestHooks,
+  enableSourceRegistryAdoption,
+  openConnectorStore,
+  openSecretLocations,
+  openTierLedger,
+  openTierSniffer,
+  recordAccountPlacement,
+} from '../src/core/source-storage.ts';
 import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
-import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { archiveConnectorStoreDbPath } from '../src/workers/archive-import/store.ts';
+import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
+import { ArchiveImportStateStore, defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
+import { defaultXBookmarksReconcileStateDbPath, LocalXBookmarksReconcileStateStore } from '../src/workers/x-bookmarks/reconcile-state.ts';
 import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/connector.ts';
 
@@ -335,6 +346,156 @@ describe('adoption records the decision before the first file exists', () => {
     const entry = readSourceRegistry(env).accounts[0]!;
     expect(entry.layout).toBe('folder');
     expect(entry.corpus_ids).toEqual(['internal.readwise.library', 'secure_local.readwise.library']);
+  });
+});
+
+describe('placement is recorded before the first file of an account, whichever file that is', () => {
+  /** An install from before folders: the registry exists at schema 1 (a messaging account), no archive account. */
+  function schemaOneInstall(): void {
+    updateSourceRegistry(env, (registry) => {
+      registry.accounts.push({ source_id: 'telegram.messages', slot: '1', state: 'active', layout: 'legacy', corpus_ids: ['internal.telegram'], created_at: '2026-10-24T00:00:00.000Z' });
+    });
+    expect(JSON.parse(readFileSync(sourceRegistryPath(env), 'utf8')).schema).toBe(1);
+  }
+  const entryFor = (sourceId: string) => readSourceRegistry(env).accounts.find((account) => account.source_id === sourceId);
+  const step3Refuses = (): void => {
+    let thrown: unknown;
+    try {
+      readSourceRegistryAsStep3(env);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Step3RegistryError);
+    expect((thrown as Error).message).toContain('unknown schema 2');
+  };
+
+  test('a pending archive import request records the folder and schema 2, so a step-3 build refuses the registry instead of missing the request', () => {
+    schemaOneInstall();
+    enableSourceRegistryAdoption();
+    const requestsPath = archiveImportRequestsPath(defaultArchiveImportStatePath(env));
+    expect(requestsPath).toBe(join(accountFolder({ source_id: 'archive.imports', slot: '1' }, env), 'raw', 'archive-import-requests.json'));
+    expect(existsSync(requestsPath)).toBe(false);
+    expect(entryFor('archive.imports')).toBeUndefined();
+
+    const requests = new ArchiveImportRequestStore({ path: requestsPath, env });
+    expect(requests.addPending('/Users/me/Downloads/export.zip')).toBeDefined();
+
+    expect(existsSync(requestsPath)).toBe(true);
+    expect(entryFor('archive.imports')).toMatchObject({ layout: 'folder', slot: '1', state: 'active', corpus_ids: [] });
+    expect(JSON.parse(readFileSync(sourceRegistryPath(env), 'utf8')).schema).toBe(2);
+    // The registry already holds the telegram account at schema 1; it is untouched.
+    expect(entryFor('telegram.messages')).toMatchObject({ layout: 'legacy', corpus_ids: ['internal.telegram'] });
+    step3Refuses();
+  });
+
+  test('the entry is written before the first file, not after it: a write that cannot start still leaves the placement', () => {
+    schemaOneInstall();
+    enableSourceRegistryAdoption();
+    // Something that is not a folder where the account's folder goes: creating raw/ fails.
+    const blocker = accountFolder({ source_id: 'archive.imports', slot: '1' }, env);
+    touch(blocker);
+    const requestsPath = archiveImportRequestsPath(defaultArchiveImportStatePath(env));
+
+    expect(() => new ArchiveImportRequestStore({ path: requestsPath, env }).addPending('/Users/me/export.zip')).toThrow();
+
+    expect(existsSync(requestsPath)).toBe(false);
+    expect(entryFor('archive.imports')).toMatchObject({ layout: 'folder' });
+    expect(JSON.parse(readFileSync(sourceRegistryPath(env), 'utf8')).schema).toBe(2);
+    step3Refuses();
+  });
+
+  test('the archive record (state) is placed the same way', () => {
+    schemaOneInstall();
+    enableSourceRegistryAdoption();
+    const statePath = defaultArchiveImportStatePath(env);
+    new ArchiveImportStateStore({ path: statePath, env }).delete('00000000-0000-4000-8000-000000000000');
+    expect(entryFor('archive.imports')).toMatchObject({ layout: 'folder' });
+    step3Refuses();
+  });
+
+  test('an account that already lives at the legacy paths is recorded legacy and the schema stays 1', () => {
+    schemaOneInstall();
+    touch(join(olympusDataRoot(env), 'archive-imports.json'));
+    enableSourceRegistryAdoption();
+    const statePath = defaultArchiveImportStatePath(env);
+    expect(statePath).toBe(join(olympusDataRoot(env), 'archive-imports.json'));
+
+    new ArchiveImportRequestStore({ path: archiveImportRequestsPath(statePath), env }).addPending('/Users/me/export.zip');
+
+    expect(entryFor('archive.imports')).toMatchObject({ layout: 'legacy' });
+    expect(JSON.parse(readFileSync(sourceRegistryPath(env), 'utf8')).schema).toBe(1);
+    expect(readSourceRegistryAsStep3(env).accounts).toHaveLength(2);
+    expect(existsSync(join(olympusDataRoot(env), 'sources'))).toBe(false);
+  });
+
+  test('the X reconcile state is placed before its database file exists', () => {
+    schemaOneInstall();
+    enableSourceRegistryAdoption();
+    const dbPath = defaultXBookmarksReconcileStateDbPath(env);
+    expect(dbPath).toBe(join(accountFolder({ source_id: 'x.bookmarks', slot: '1' }, env), 'raw', 'x-reconcile.sqlite'));
+    expect(existsSync(dbPath)).toBe(false);
+
+    new LocalXBookmarksReconcileStateStore(dbPath, env).close();
+
+    expect(existsSync(dbPath)).toBe(true);
+    expect(entryFor('x.bookmarks')).toMatchObject({ layout: 'folder', corpus_ids: [] });
+    step3Refuses();
+  });
+
+  test('a tier ledger opened before any store places the account, and the store then joins that entry', () => {
+    schemaOneInstall();
+    enableSourceRegistryAdoption();
+    const store = defaultReadwiseConnectorStoreDbPath(env);
+    const ledger = openTierLedger({ sourceId: 'readwise.library' }, { dbPath: tierLedgerPathForStore(store) }, env);
+    ledger.close();
+    expect(entryFor('readwise.library')).toMatchObject({ layout: 'folder', corpus_ids: [] });
+    expect(existsSync(tierLedgerPathForStore(store))).toBe(true);
+    step3Refuses();
+
+    openConnectorStore({ sourceId: 'readwise.library' }, { dbPath: store, corpusId: 'internal.readwise.library', family: 'readwise', trustDomain: 'internal' }, env).close();
+    expect(readSourceRegistry(env).accounts.filter((account) => account.source_id === 'readwise.library')).toHaveLength(1);
+    expect(entryFor('readwise.library')?.corpus_ids).toEqual(['internal.readwise.library']);
+  });
+
+  test('a sniffer or secret-locations index opened first places the account; a read-only open places nothing', () => {
+    schemaOneInstall();
+    const readwise = { sourceId: 'readwise.library' };
+    const store = defaultReadwiseConnectorStoreDbPath(env);
+    const snifferPath = tierSnifferPathForStore(store);
+    // The file exists already (adoption is off for this open), so a read-only open can follow.
+    openTierSniffer(readwise, { dbPath: snifferPath }, env).close();
+    expect(entryFor('readwise.library')).toBeUndefined();
+
+    enableSourceRegistryAdoption();
+    openTierSniffer(readwise, { dbPath: snifferPath, readOnly: true }, env).close();
+    expect(entryFor('readwise.library')).toBeUndefined();
+
+    openSecretLocations(readwise, { dbPath: secretLocationsPathForStore(store) }, env).close();
+    expect(entryFor('readwise.library')).toMatchObject({ layout: 'folder', corpus_ids: [] });
+    step3Refuses();
+  });
+
+  test('with adoption off nothing is recorded, and the registry is not even read', () => {
+    schemaOneInstall();
+    const before = readFileSync(sourceRegistryPath(env), 'utf8');
+    recordAccountPlacement({ sourceId: 'archive.imports' }, resolvedRawPath('archive.imports', 'archive-import-requests.json', env), env);
+    new ArchiveImportRequestStore({ path: archiveImportRequestsPath(defaultArchiveImportStatePath(env)), env }).addPending('/Users/me/export.zip');
+    expect(readFileSync(sourceRegistryPath(env), 'utf8')).toBe(before);
+    // An unreadable registry is no obstacle either: with adoption off the call is a no-op.
+    writeFileSync(sourceRegistryPath(env), '{ not json');
+    expect(() => recordAccountPlacement({ sourceId: 'archive.imports' }, join(dir, 'anything'), env)).not.toThrow();
+  });
+
+  test('a path with no file (:memory:) and an account that already has an entry change nothing', () => {
+    schemaOneInstall();
+    enableSourceRegistryAdoption();
+    recordAccountPlacement({ sourceId: 'archive.imports' }, ':memory:', env);
+    expect(entryFor('archive.imports')).toBeUndefined();
+    recordAccountPlacement({ sourceId: 'telegram.messages' }, join(olympusDataRoot(env), 'telegram-internal-connector-store.sqlite'), env);
+    const text = readFileSync(sourceRegistryPath(env), 'utf8');
+    recordAccountPlacement({ sourceId: 'telegram.messages' }, join(olympusDataRoot(env), 'anything'), env);
+    expect(readFileSync(sourceRegistryPath(env), 'utf8')).toBe(text);
+    expect(JSON.parse(text).schema).toBe(1);
   });
 });
 
