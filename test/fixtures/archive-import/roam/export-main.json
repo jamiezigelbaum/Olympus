@@ -1,0 +1,61 @@
+[
+  {
+    "title": "Project Olympus",
+    "uid": "uid-olympus",
+    "children": [
+      {
+        "string": "Top priority: ship the connector",
+        "uid": "b1",
+        "create-time": 1717200000000,
+        "edit-time": 1717300000000,
+        "children": [
+          {
+            "string": "Nested detail A with [[Argus]] and **markup**",
+            "uid": "b1a",
+            "create-time": 1717210000000,
+            "edit-time": 1717400000000,
+            "children": [
+              {
+                "string": "Deep grandchild {{[[TODO]]}} kept verbatim",
+                "uid": "b1a1",
+                "create-time": 1717220000000,
+                "edit-time": 1717250000000
+              }
+            ]
+          },
+          {
+            "string": "Nested detail B",
+            "uid": "b1b",
+            "create-time": 1717230000000,
+            "edit-time": 1717260000000
+          }
+        ]
+      },
+      {
+        "string": "Second top-level block",
+        "uid": "b2",
+        "create-time": 1717100000000,
+        "edit-time": 1717350000000
+      }
+    ]
+  },
+  {
+    "title": "Daily Notes! (June 10th, 2026)",
+    "children": [
+      {
+        "string": "A note on a title-only page",
+        "uid": "b3",
+        "create-time": 1717000000000,
+        "edit-time": 1717050000000
+      }
+    ]
+  },
+  {
+    "title": "Empty Page",
+    "uid": "uid-empty",
+    "children": []
+  },
+  {
+    "title": "Stub Page"
+  }
+]

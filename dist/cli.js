@@ -35744,6 +35744,175 @@ function startsWithFromLine(head) {
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
 }
+function archiveHeadText(head) {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
+}
+function isJunkArchiveMember(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
+}
+function reflectDailyNoteDate(fileName) {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match)
+    return;
+  const weekday = match[1].slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function headRecordKeys(head) {
+  const text2 = archiveHeadText(head);
+  const n = text2.length;
+  let i = 0;
+  const isSpace = (char) => char === " " || char === "\t" || char === `
+` || char === "\r";
+  while (i < n && isSpace(text2[i]))
+    i += 1;
+  const stack = [];
+  let shape;
+  let listDepth = 0;
+  let closed = false;
+  let hasElements = false;
+  let objectRoot = false;
+  let notesNotAList = false;
+  if (text2[i] === "[") {
+    shape = "list";
+    listDepth = 1;
+    stack.push("a");
+  } else if (text2[i] === "{") {
+    objectRoot = true;
+    stack.push("o");
+  } else {
+    return;
+  }
+  i += 1;
+  const records = [];
+  let current2;
+  while (i < n) {
+    const char = text2[i];
+    if (listDepth > 0 && stack.length === listDepth && !isSpace(char) && char !== "," && char !== "]")
+      hasElements = true;
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text2[end] !== '"')
+        end += text2[end] === "\\" ? 2 : 1;
+      if (end >= n)
+        break;
+      const raw = text2.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text2[after]))
+        after += 1;
+      if (text2[after] === ":" && stack[stack.length - 1] === "o") {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current2?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
+          let value = after + 1;
+          while (value < n && isSpace(text2[value]))
+            value += 1;
+          if (text2[value] === "[") {
+            shape = "notes";
+            listDepth = 2;
+          } else if (value < n) {
+            notesNotAList = true;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char === "[" ? "a" : "o");
+      if (char === "{" && listDepth > 0 && stack.length === listDepth + 1) {
+        current2 = new Set;
+        records.push(current2);
+      }
+    } else if (char === "]" || char === "}") {
+      stack.pop();
+      if (listDepth > 0 && stack.length < listDepth) {
+        closed = true;
+        listDepth = 0;
+      }
+      if (stack.length === 0)
+        break;
+      if (listDepth > 0 && stack.length === listDepth)
+        current2 = undefined;
+    }
+    i += 1;
+  }
+  if (!shape) {
+    if (objectRoot && !notesNotAList && stack.length > 0) {
+      return { shape: "notes", records: [], empty: false, firstRecordCut: true, unreached: true };
+    }
+    return;
+  }
+  const open2 = listDepth > 0;
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open2 && records.length === 1 && current2 !== undefined, unreached: false };
+}
+function isReflectRecord(keys) {
+  return REFLECT_BODY_KEYS.some((key2) => keys.has(key2)) && REFLECT_NOTE_KEYS.some((key2) => keys.has(key2));
+}
+function isRoamRecord(keys) {
+  return keys.has("title") && (ROAM_TIME_KEYS.some((key2) => keys.has(key2)) || keys.has("children") && keys.has("uid"));
+}
+function recordsFormat(records, shape) {
+  const reflect = records.some(isReflectRecord);
+  const roam = records.some(isRoamRecord);
+  if (reflect === roam)
+    return;
+  if (roam)
+    return shape === "list" ? "roam" : undefined;
+  return "reflect";
+}
+function notesJsonFormat(probe) {
+  const parsed = headRecordKeys(probe.head);
+  if (!parsed)
+    return;
+  const fromHead = recordsFormat(parsed.records, parsed.shape);
+  if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
+    return fromHead;
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
+}
+function isEmptyRecordList(head, inNotes) {
+  const parsed = headRecordKeys(head);
+  return parsed !== undefined && parsed.empty && (inNotes || parsed.shape === "list");
+}
+function acceptsReflectJson(probe) {
+  if (notesJsonFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true))
+    return true;
+  if (!probe.listIsEmpty || SCANNED.get(probe)?.keys)
+    return false;
+  return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
+}
+function acceptsRoamJson(probe) {
+  return notesJsonFormat(probe) === "roam" || isEmptyRecordList(probe.head, false);
+}
+function detectFile(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0].relPath] : undefined;
+}
+function zipJsonMembers(entry) {
+  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+function readsJsonExport(entry, format) {
+  const other = format === "reflect" ? "roam" : "reflect";
+  if (entry.members) {
+    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
+    return members.includes(format) && !members.includes(other);
+  }
+  return notesJsonFormat(entry) === format;
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -35817,6 +35986,19 @@ function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
 function detectArchiveFormat(probe, formats = ARCHIVE_FORMATS) {
+  const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
+  const settled = new Set(onHeads.flatMap((match) => match.files));
+  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled, formats), formats);
+  const incomplete = probe.readsRanOut?.() === true;
+  if (matches.length === 1 && !incomplete)
+    return { kind: "match", format: matches[0].format, files: matches[0].files };
+  if (matches.length > 1)
+    return { kind: "ambiguous", formats: matches.map((match) => match.format.id) };
+  const supported = formats.map((format) => format.label);
+  const advice = [unsupportedAdvice(probe, formats), incomplete ? ARCHIVE_LOOK_INCOMPLETE_ADVICE : undefined].filter((said) => said !== undefined).join(" ");
+  return advice ? { kind: "none", supported, advice } : { kind: "none", supported };
+}
+function matchesOf(probe, formats) {
   const matches = [];
   for (const format of formats) {
     let files;
@@ -35828,14 +36010,30 @@ function detectArchiveFormat(probe, formats = ARCHIVE_FORMATS) {
     if (files && files.length > 0)
       matches.push({ format, files });
   }
-  if (matches.length === 1)
-    return { kind: "match", format: matches[0].format, files: matches[0].files };
-  if (matches.length === 0) {
-    const supported = formats.map((format) => format.label);
-    const advice = unsupportedAdvice(probe, formats);
-    return advice ? { kind: "none", supported, advice } : { kind: "none", supported };
-  }
-  return { kind: "ambiguous", formats: matches.map((match) => match.format.id) };
+  return matches;
+}
+function entryWithoutFurtherReads(entry) {
+  const { firstRecordKeys: _keys, listIsEmpty: _empty, members, ...rest } = entry;
+  return { ...rest, ...members ? { members: members.map(entryWithoutFurtherReads) } : {} };
+}
+function probeWithoutFurtherReads(probe) {
+  return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
+}
+function probeReadingPastHeadsExcept(probe, settled, formats) {
+  const keep = (entry) => {
+    const members = entry.members?.map((member) => toldOnItsFirstBytes(member, formats) ? entryWithoutFurtherReads(member) : member);
+    if (!settled.has(entry.relPath))
+      return members ? { ...entry, members } : entry;
+    const { firstRecordKeys: _keys, listIsEmpty: _empty, members: _members, ...rest } = entry;
+    return { ...rest, ...members ? { members } : {} };
+  };
+  return { ...probe, chosen: keep(probe.chosen), children: probe.children.map(keep) };
+}
+function toldOnItsFirstBytes(member, formats) {
+  if (member.kind !== "file")
+    return false;
+  const alone = { ...entryWithoutFurtherReads(member), relPath: "" };
+  return matchesOf({ chosen: alone, children: [] }, formats).length > 0;
 }
 function unsupportedAdvice(probe, formats) {
   for (const format of formats) {
@@ -35856,7 +36054,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -35874,6 +36072,54 @@ var init_archive_formats = __esm(() => {
       const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
       return inner ? [inner.relPath] : undefined;
     }
+  });
+  leniencyDecoder = new TextDecoder("utf-8");
+  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
+  REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
+  REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
+  ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  SCANNED = new WeakMap;
+  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-json",
+    label: "Reflect notes (JSON)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
+  });
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-markdown",
+    label: "Reflect notes (Markdown zip)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export as Markdown (the .zip file)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*, *, ????.md"]),
+    detect: (probe) => detectFile(probe, (entry) => {
+      if (!entry.members || /^roam/i.test(entry.name))
+        return false;
+      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
+      if (files.some((member) => /\.json$/i.test(member.name)))
+        return false;
+      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+      if (notes.length === 0)
+        return false;
+      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+    })
+  });
+  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "roam-json",
+    label: "Roam notes (JSON)",
+    family: "note",
+    provider: "roam",
+    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
+    citationLabel: "Roam",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -35917,7 +36163,13 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
+  ARCHIVE_FORMATS = Object.freeze([
+    MBOX_ARCHIVE_FORMAT,
+    REFLECT_JSON_ARCHIVE_FORMAT,
+    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+    ROAM_JSON_ARCHIVE_FORMAT,
+    TELEGRAM_JSON_ARCHIVE_FORMAT
+  ]);
   ARCHIVE_COMMON_FINDINGS = {
     mediaNotImported: "media_not_imported",
     itemTruncated: "item_truncated",
@@ -41086,6 +41338,11 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
+      note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
+      note_too_large: { one: "1 note too large to read", many: "{n} notes too large to read" },
+      note_content_unsupported: { one: "1 note with a kind of content Olympus cannot read yet", many: "{n} notes with a kind of content Olympus cannot read yet" },
+      note_date_assumed: { one: "1 note has no date in the archive: Olympus used the day the file was saved", many: "{n} notes have no date in the archive: Olympus used the day the file was saved" },
       service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
       media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
@@ -67677,7 +67934,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -71636,6 +71893,1926 @@ var init_scope_safe_fs = __esm(() => {
   };
 });
 
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data2, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data2.length; index += 1) {
+    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data2) {
+  if (data2.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
+}
+function fileByteSource(reader, options = {}) {
+  const end = Math.min(reader.size, options.end ?? reader.size);
+  const chunkBytes = Math.max(1, options.chunkBytes ?? ARCHIVE_SOURCE_CHUNK_BYTES);
+  let readFrom = Math.max(0, options.start ?? 0);
+  let position = readFrom;
+  let pending;
+  let last = new Uint8Array(0);
+  let held = 0;
+  return {
+    get position() {
+      return position;
+    },
+    next() {
+      let chunk;
+      if (pending) {
+        chunk = pending;
+        pending = undefined;
+      } else {
+        if (readFrom >= end)
+          return;
+        chunk = reader.readAt(readFrom, Math.min(chunkBytes, end - readFrom));
+        readFrom += chunk.length;
+        if (chunk.length === 0)
+          return;
+      }
+      last = chunk;
+      held = chunk.length;
+      position += chunk.length;
+      return chunk;
+    },
+    unread(count) {
+      if (!Number.isInteger(count) || count < 0 || count > held)
+        throw new RangeError("unread past the last chunk");
+      if (count === 0)
+        return;
+      held -= count;
+      position -= count;
+      pending = last.subarray(held);
+    }
+  };
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/bufferedString.js
+class NonBufferedString {
+  constructor() {
+    this.decoder = new TextDecoder("utf-8", { fatal: true });
+    this.pending = [];
+    this.string = "";
+    this.byteLength = 0;
+  }
+  appendChar(char) {
+    this.pending.push(String.fromCharCode(char));
+    this.byteLength += 1;
+  }
+  appendBuf(buf, start = 0, end = buf.length) {
+    this.pending.push(this.decoder.decode(buf.subarray(start, end)));
+    this.byteLength += end - start;
+  }
+  appendCharCode(code) {
+    this.pending.push(String.fromCharCode(code));
+  }
+  reset() {
+    this.pending = [];
+    this.string = "";
+    this.byteLength = 0;
+  }
+  toString() {
+    if (this.pending.length > 0) {
+      this.string += this.pending.join("");
+      this.pending = [];
+    }
+    return this.string;
+  }
+}
+
+class BufferedString {
+  constructor(bufferSize) {
+    this.decoder = new TextDecoder("utf-8", { fatal: true });
+    this.bufferOffset = 0;
+    this.string = "";
+    this.byteLength = 0;
+    this.buffer = new Uint8Array(bufferSize);
+  }
+  appendChar(char) {
+    if (this.bufferOffset >= this.buffer.length)
+      this.flushStringBuffer();
+    this.buffer[this.bufferOffset++] = char;
+    this.byteLength += 1;
+  }
+  appendBuf(buf, start = 0, end = buf.length) {
+    const size = end - start;
+    if (this.bufferOffset + size > this.buffer.length)
+      this.flushStringBuffer();
+    if (size > this.buffer.length) {
+      this.string += this.decoder.decode(buf.subarray(start, end));
+      this.byteLength += size;
+      return;
+    }
+    this.buffer.set(buf.subarray(start, end), this.bufferOffset);
+    this.bufferOffset += size;
+    this.byteLength += size;
+  }
+  appendCharCode(code) {
+    this.flushStringBuffer();
+    this.string += String.fromCharCode(code);
+  }
+  flushStringBuffer() {
+    this.string += this.decoder.decode(this.buffer.subarray(0, this.bufferOffset));
+    this.bufferOffset = 0;
+  }
+  reset() {
+    this.string = "";
+    this.bufferOffset = 0;
+    this.byteLength = 0;
+  }
+  toString() {
+    this.flushStringBuffer();
+    return this.string;
+  }
+}
+
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType, tokenType_default;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+  tokenType_default = TokenType;
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset, escapedSequences;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+  escapedSequences = {
+    [34]: 34,
+    [92]: 92,
+    [47]: 47,
+    [98]: 8,
+    [102]: 12,
+    [110]: 10,
+    [114]: 13,
+    [116]: 9
+  };
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+function TokenizerStateToString(tokenizerState) {
+  return [
+    "START",
+    "ENDED",
+    "ERROR",
+    "TRUE1",
+    "TRUE2",
+    "TRUE3",
+    "FALSE1",
+    "FALSE2",
+    "FALSE3",
+    "FALSE4",
+    "NULL1",
+    "NULL2",
+    "NULL3",
+    "STRING_DEFAULT",
+    "STRING_AFTER_BACKSLASH",
+    "STRING_UNICODE_DIGIT_1",
+    "STRING_UNICODE_DIGIT_2",
+    "STRING_UNICODE_DIGIT_3",
+    "STRING_UNICODE_DIGIT_4",
+    "STRING_INCOMPLETE_CHAR",
+    "NUMBER_AFTER_INITIAL_MINUS",
+    "NUMBER_AFTER_INITIAL_ZERO",
+    "NUMBER_AFTER_INITIAL_NON_ZERO",
+    "NUMBER_AFTER_FULL_STOP",
+    "NUMBER_AFTER_DECIMAL",
+    "NUMBER_AFTER_E",
+    "NUMBER_AFTER_E_AND_SIGN",
+    "NUMBER_AFTER_E_AND_DIGIT",
+    "SEPARATOR",
+    "BOM_OR_START",
+    "BOM"
+  ][tokenizerState];
+}
+function validateBufferSize(name, size) {
+  if (size === undefined)
+    return;
+  if (!Number.isInteger(size) || size < 0) {
+    throw new TokenizerError(`Invalid "${name}": ${size}. Expected a non-negative integer.`);
+  }
+}
+function utf8SequenceLength(leadByte) {
+  if (leadByte >= 194 && leadByte <= 223)
+    return 2;
+  if (leadByte <= 239)
+    return 3;
+  return 4;
+}
+function multiByteRunEnd(buffer, start) {
+  let j = start;
+  while (j < buffer.length && buffer[j] >= 128) {
+    const seqLength = utf8SequenceLength(buffer[j]);
+    if (j + seqLength > buffer.length)
+      break;
+    j += seqLength;
+  }
+  return j;
+}
+
+class Tokenizer {
+  constructor(opts) {
+    this.state = 29;
+    this.bomIndex = 0;
+    this.separatorIndex = 0;
+    this.escapedCharsByteLength = 0;
+    this.bytes_remaining = 0;
+    this.bytes_in_sequence = 0;
+    this.char_split_buffer = new Uint8Array(4);
+    this.encoder = new TextEncoder;
+    this.offset = -1;
+    this.streamByteLength = 0;
+    opts = Object.assign(Object.assign({}, defaultOpts), opts);
+    validateBufferSize("stringBufferSize", opts.stringBufferSize);
+    validateBufferSize("numberBufferSize", opts.numberBufferSize);
+    this.emitPartialTokens = opts.emitPartialTokens === true;
+    this.bufferedString = opts.stringBufferSize && opts.stringBufferSize > 4 ? new BufferedString(opts.stringBufferSize) : new NonBufferedString;
+    this.bufferedNumber = opts.numberBufferSize && opts.numberBufferSize > 0 ? new BufferedString(opts.numberBufferSize) : new NonBufferedString;
+    this.separator = opts.separator;
+    this.separatorBytes = opts.separator ? this.encoder.encode(opts.separator) : undefined;
+  }
+  get isEnded() {
+    return this.state === 1;
+  }
+  appendUnicodeCodeUnit(intVal) {
+    if (this.highSurrogate !== undefined) {
+      if (intVal >= 56320 && intVal <= 57343) {
+        const unicodeString2 = String.fromCharCode(this.highSurrogate, intVal);
+        const unicodeBuffer2 = this.encoder.encode(unicodeString2);
+        this.bufferedString.appendBuf(unicodeBuffer2);
+        this.escapedCharsByteLength += 6 - unicodeBuffer2.byteLength;
+        this.highSurrogate = undefined;
+        return;
+      }
+      this.flushPendingHighSurrogate();
+    }
+    if (intVal >= 55296 && intVal <= 56319) {
+      this.highSurrogate = intVal;
+      this.escapedCharsByteLength += 6;
+      return;
+    }
+    if (intVal >= 56320 && intVal <= 57343) {
+      this.bufferedString.appendCharCode(intVal);
+      this.escapedCharsByteLength += 6;
+      return;
+    }
+    const unicodeString = String.fromCharCode(intVal);
+    const unicodeBuffer = this.encoder.encode(unicodeString);
+    this.bufferedString.appendBuf(unicodeBuffer);
+    this.escapedCharsByteLength += 6 - unicodeBuffer.byteLength;
+  }
+  flushPendingHighSurrogate() {
+    if (this.highSurrogate !== undefined) {
+      this.bufferedString.appendCharCode(this.highSurrogate);
+      this.highSurrogate = undefined;
+    }
+  }
+  startIncompleteChar(buffer, start) {
+    this.bytes_in_sequence = utf8SequenceLength(buffer[start]);
+    this.bytes_remaining = start + this.bytes_in_sequence - buffer.length;
+    this.char_split_buffer.set(buffer.subarray(start));
+    this.state = 19;
+  }
+  write(input) {
+    try {
+      let buffer;
+      if (input instanceof Uint8Array) {
+        buffer = input;
+      } else if (typeof input === "string") {
+        if (this.pendingStringSurrogate !== undefined) {
+          input = this.pendingStringSurrogate + input;
+          this.pendingStringSurrogate = undefined;
+        }
+        const lastCharCode = input.charCodeAt(input.length - 1);
+        if (lastCharCode >= 55296 && lastCharCode <= 56319) {
+          this.pendingStringSurrogate = input[input.length - 1];
+          input = input.slice(0, -1);
+        }
+        buffer = this.encoder.encode(input);
+      } else if (ArrayBuffer.isView(input)) {
+        buffer = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      } else if (input !== null && typeof input === "object" && typeof input[Symbol.iterator] === "function") {
+        buffer = Uint8Array.from(input);
+      } else {
+        throw new TypeError("Unexpected type. The `write` function only accepts Iterables (e.g. Arrays, Sets, Generators), TypedArrays and Strings.");
+      }
+      for (let i = 0;i < buffer.length; i += 1) {
+        const n = buffer[i];
+        switch (this.state) {
+          case 29:
+            if (n === 239) {
+              this.bom = [239, 187, 191];
+              this.bomIndex += 1;
+              this.state = 30;
+              continue;
+            }
+            if (input instanceof Uint16Array) {
+              if (n === 254) {
+                this.bom = [254, 255];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+              if (n === 255) {
+                this.bom = [255, 254];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+            }
+            if (input instanceof Uint32Array) {
+              if (n === 0) {
+                this.bom = [0, 0, 254, 255];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+              if (n === 255) {
+                this.bom = [255, 254, 0, 0];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+            }
+          case 0:
+            this.offset += 1;
+            if (this.separatorBytes && n === this.separatorBytes[0]) {
+              if (this.separatorBytes.length === 1) {
+                this.state = 0;
+                this.onToken({
+                  token: tokenType_default.SEPARATOR,
+                  value: this.separator,
+                  offset: this.offset + this.separatorBytes.length - 1
+                });
+                continue;
+              }
+              this.state = 28;
+              continue;
+            }
+            if (n === 32 || n === 10 || n === 13 || n === 9) {
+              continue;
+            }
+            if (n === 123) {
+              this.onToken({
+                token: tokenType_default.LEFT_BRACE,
+                value: "{",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 125) {
+              this.onToken({
+                token: tokenType_default.RIGHT_BRACE,
+                value: "}",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 91) {
+              this.onToken({
+                token: tokenType_default.LEFT_BRACKET,
+                value: "[",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 93) {
+              this.onToken({
+                token: tokenType_default.RIGHT_BRACKET,
+                value: "]",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 58) {
+              this.onToken({
+                token: tokenType_default.COLON,
+                value: ":",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 44) {
+              this.onToken({
+                token: tokenType_default.COMMA,
+                value: ",",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 116) {
+              this.state = 3;
+              continue;
+            }
+            if (n === 102) {
+              this.state = 6;
+              continue;
+            }
+            if (n === 110) {
+              this.state = 10;
+              continue;
+            }
+            if (n === 34) {
+              this.bufferedString.reset();
+              this.escapedCharsByteLength = 0;
+              this.state = 13;
+              continue;
+            }
+            if (n >= 49 && n <= 57) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 22;
+              continue;
+            }
+            if (n === 48) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 21;
+              continue;
+            }
+            if (n === 45) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 20;
+              continue;
+            }
+            break;
+          case 13:
+            if (n === 34) {
+              this.flushPendingHighSurrogate();
+              const string = this.bufferedString.toString();
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.STRING,
+                value: string,
+                offset: this.offset
+              });
+              this.offset += this.escapedCharsByteLength + this.bufferedString.byteLength + 1;
+              continue;
+            }
+            if (n === 92) {
+              this.state = 14;
+              continue;
+            }
+            if (n >= 128) {
+              this.flushPendingHighSurrogate();
+              const runEnd = multiByteRunEnd(buffer, i);
+              if (runEnd > i) {
+                this.bufferedString.appendBuf(buffer, i, runEnd);
+                i = runEnd - 1;
+              }
+              if (runEnd < buffer.length && buffer[runEnd] >= 128) {
+                this.startIncompleteChar(buffer, runEnd);
+                i = buffer.length - 1;
+              }
+              continue;
+            }
+            if (n >= 32) {
+              this.flushPendingHighSurrogate();
+              let j = i;
+              while (j < buffer.length) {
+                const b = buffer[j];
+                if (b < 32 || b >= 128 || b === 34 || b === 92)
+                  break;
+                j += 1;
+              }
+              if (j - i >= 16) {
+                this.bufferedString.appendBuf(buffer, i, j);
+              } else {
+                for (let k = i;k < j; k += 1)
+                  this.bufferedString.appendChar(buffer[k]);
+              }
+              i = j - 1;
+              continue;
+            }
+            break;
+          case 19: {
+            const available = Math.min(this.bytes_remaining, buffer.length - i);
+            this.char_split_buffer.set(buffer.subarray(i, i + available), this.bytes_in_sequence - this.bytes_remaining);
+            this.bytes_remaining -= available;
+            if (this.bytes_remaining > 0) {
+              i = buffer.length - 1;
+              continue;
+            }
+            this.bufferedString.appendBuf(this.char_split_buffer, 0, this.bytes_in_sequence);
+            i += available - 1;
+            this.state = 13;
+            continue;
+          }
+          case 14: {
+            const controlChar = escapedSequences[n];
+            if (controlChar) {
+              this.flushPendingHighSurrogate();
+              this.bufferedString.appendChar(controlChar);
+              this.escapedCharsByteLength += 1;
+              this.state = 13;
+              continue;
+            }
+            if (n === 117) {
+              this.unicode = "";
+              this.state = 15;
+              continue;
+            }
+            break;
+          }
+          case 15:
+          case 16:
+          case 17:
+            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
+              this.unicode += String.fromCharCode(n);
+              this.state += 1;
+              continue;
+            }
+            break;
+          case 18:
+            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
+              const intVal = parseInt(this.unicode + String.fromCharCode(n), 16);
+              this.appendUnicodeCodeUnit(intVal);
+              this.state = 13;
+              continue;
+            }
+            break;
+          case 20:
+            if (n === 48) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 21;
+              continue;
+            }
+            if (n >= 49 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 22;
+              continue;
+            }
+            break;
+          case 21:
+            if (n === 46) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 23;
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 22:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            if (n === 46) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 23;
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 23:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 24;
+              continue;
+            }
+            break;
+          case 24:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 25:
+            if (n === 43 || n === 45) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 26;
+              continue;
+            }
+          case 26:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 27;
+              continue;
+            }
+            break;
+          case 27:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 3:
+            if (n === 114) {
+              this.state = 4;
+              continue;
+            }
+            break;
+          case 4:
+            if (n === 117) {
+              this.state = 5;
+              continue;
+            }
+            break;
+          case 5:
+            if (n === 101) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.TRUE,
+                value: true,
+                offset: this.offset
+              });
+              this.offset += 3;
+              continue;
+            }
+            break;
+          case 6:
+            if (n === 97) {
+              this.state = 7;
+              continue;
+            }
+            break;
+          case 7:
+            if (n === 108) {
+              this.state = 8;
+              continue;
+            }
+            break;
+          case 8:
+            if (n === 115) {
+              this.state = 9;
+              continue;
+            }
+            break;
+          case 9:
+            if (n === 101) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.FALSE,
+                value: false,
+                offset: this.offset
+              });
+              this.offset += 4;
+              continue;
+            }
+            break;
+          case 10:
+            if (n === 117) {
+              this.state = 11;
+              continue;
+            }
+            break;
+          case 11:
+            if (n === 108) {
+              this.state = 12;
+              continue;
+            }
+            break;
+          case 12:
+            if (n === 108) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.NULL,
+                value: null,
+                offset: this.offset
+              });
+              this.offset += 3;
+              continue;
+            }
+            break;
+          case 28:
+            this.separatorIndex += 1;
+            if (!this.separatorBytes || n !== this.separatorBytes[this.separatorIndex]) {
+              break;
+            }
+            if (this.separatorIndex === this.separatorBytes.length - 1) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.SEPARATOR,
+                value: this.separator,
+                offset: this.offset + this.separatorIndex
+              });
+              this.separatorIndex = 0;
+            }
+            continue;
+          case 30:
+            if (n === this.bom[this.bomIndex]) {
+              if (this.bomIndex === this.bom.length - 1) {
+                this.state = 0;
+                this.bom = undefined;
+                this.bomIndex = 0;
+                continue;
+              }
+              this.bomIndex += 1;
+              continue;
+            }
+            break;
+          case 1:
+            if (n === 32 || n === 10 || n === 13 || n === 9) {
+              continue;
+            }
+        }
+        throw new TokenizerError(`Unexpected "${String.fromCharCode(n)}" at chunk position "${i}" (absolute position "${this.streamByteLength + i}") in state ${TokenizerStateToString(this.state)}`);
+      }
+      this.streamByteLength += buffer.length;
+      if (this.emitPartialTokens) {
+        switch (this.state) {
+          case 3:
+          case 4:
+          case 5:
+            this.onToken({
+              token: tokenType_default.TRUE,
+              value: true,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 6:
+          case 7:
+          case 8:
+          case 9:
+            this.onToken({
+              token: tokenType_default.FALSE,
+              value: false,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 10:
+          case 11:
+          case 12:
+            this.onToken({
+              token: tokenType_default.NULL,
+              value: null,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 13: {
+            const string = this.bufferedString.toString();
+            this.onToken({
+              token: tokenType_default.STRING,
+              value: string,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          }
+          case 21:
+          case 22:
+          case 24:
+          case 27:
+            try {
+              this.onToken({
+                token: tokenType_default.NUMBER,
+                value: this.parseNumber(this.bufferedNumber.toString()),
+                offset: this.offset,
+                partial: true
+              });
+            } catch (_a2) {}
+        }
+      }
+    } catch (err) {
+      this.error(err);
+    }
+  }
+  emitNumber() {
+    this.onToken({
+      token: tokenType_default.NUMBER,
+      value: this.parseNumber(this.bufferedNumber.toString()),
+      offset: this.offset
+    });
+    this.offset += this.bufferedNumber.byteLength - 1;
+  }
+  parseNumber(numberStr) {
+    return Number(numberStr);
+  }
+  error(err) {
+    if (this.state !== 1) {
+      this.state = 2;
+    }
+    this.onError(err);
+  }
+  end() {
+    switch (this.state) {
+      case 21:
+      case 22:
+      case 24:
+      case 27:
+        this.state = 1;
+        this.emitNumber();
+        this.onEnd();
+        break;
+      case 29:
+      case 0:
+      case 2:
+        this.state = 1;
+        this.onEnd();
+        break;
+      default:
+        this.error(new TokenizerError(`Tokenizer ended in the middle of a token (state: ${TokenizerStateToString(this.state)}). Either not all the data was received or the data was invalid.`));
+    }
+  }
+  onToken(parsedToken) {
+    throw new TokenizerError(`Can't emit tokens before the "onToken" callback has been set up.`);
+  }
+  onError(err) {
+    throw err;
+  }
+  onEnd() {}
+}
+var TokenizerStates, defaultOpts, TokenizerError;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+  defaultOpts = {
+    stringBufferSize: 0,
+    numberBufferSize: 0,
+    separator: undefined,
+    emitPartialTokens: false
+  };
+  TokenizerError = class TokenizerError extends Error {
+    constructor(message2) {
+      super(message2);
+      Object.setPrototypeOf(this, TokenizerError.prototype);
+    }
+  };
+});
+
+// src/workers/archive-import/stop-errors.ts
+function archiveStopFromScopeError(error, relPath) {
+  if (!(error instanceof ScopeSafeError))
+    return error;
+  if (error.code === "not_found") {
+    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
+  }
+  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
+    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
+  }
+  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
+}
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/json-stream.ts
+function isHexDigit(byte) {
+  return byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102;
+}
+function isEscapeByte(byte) {
+  return byte === 34 || byte === 92 || byte === 47 || byte === 98 || byte === 102 || byte === 110 || byte === 114 || byte === 116;
+}
+function isSpaceOrStructure(byte) {
+  return byte === 32 || byte === 10 || byte === 13 || byte === 9 || byte === 44 || byte === 58 || byte === 91 || byte === 93 || byte === 123 || byte === 125;
+}
+function isValueStart(type) {
+  return type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET || type === tokenType_default.STRING || type === tokenType_default.NUMBER || type === tokenType_default.TRUE || type === tokenType_default.FALSE || type === tokenType_default.NULL || type === OVERSIZE;
+}
+function invalid() {
+  return new JsonStreamError("invalid_json", "This file is not valid JSON.");
+}
+function classify(kind, phase, type) {
+  if (kind === "root") {
+    if (phase === "root" && isValueStart(type))
+      return "value";
+    throw invalid();
+  }
+  if (kind === "object") {
+    if (phase === "first") {
+      if (type === tokenType_default.STRING)
+        return "key";
+      if (type === tokenType_default.RIGHT_BRACE)
+        return "close";
+    } else if (phase === "next") {
+      if (type === tokenType_default.STRING)
+        return "key";
+    } else if (phase === "colon") {
+      if (type === tokenType_default.COLON)
+        return "colon";
+    } else if (phase === "value") {
+      if (isValueStart(type))
+        return "value";
+    } else if (phase === "after") {
+      if (type === tokenType_default.COMMA)
+        return "comma";
+      if (type === tokenType_default.RIGHT_BRACE)
+        return "close";
+    }
+    throw invalid();
+  }
+  if (phase === "first") {
+    if (isValueStart(type))
+      return "value";
+    if (type === tokenType_default.RIGHT_BRACKET)
+      return "close";
+  } else if (phase === "next") {
+    if (isValueStart(type))
+      return "value";
+  } else if (phase === "after") {
+    if (type === tokenType_default.COMMA)
+      return "comma";
+    if (type === tokenType_default.RIGHT_BRACKET)
+      return "close";
+  }
+  throw invalid();
+}
+function setOwn(target, key2, value) {
+  Object.defineProperty(target, key2, { value, enumerable: true, writable: true, configurable: true });
+}
+function copyFrame(frame) {
+  const out = {};
+  for (const key2 of Object.keys(frame))
+    setOwn(out, key2, frame[key2]);
+  return out;
+}
+function serializeJsonResume(point) {
+  return JSON.stringify({
+    o: point.offset,
+    l: point.levels.map((level) => [level.kind === "object" ? "o" : "a", level.pointer, level.frame])
+  });
+}
+function parseJsonResume(text2) {
+  let raw;
+  try {
+    raw = JSON.parse(text2);
+  } catch {
+    return;
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return;
+  const { o, l } = raw;
+  if (typeof o !== "number" || !Number.isSafeInteger(o) || o < 0)
+    return;
+  if (!Array.isArray(l) || l.length === 0 || l.length > JSON_STREAM_MAX_DEPTH)
+    return;
+  const levels = [];
+  for (const entry of l) {
+    if (!Array.isArray(entry) || entry.length !== 3)
+      return;
+    const [code, pointer, frame] = entry;
+    if (code !== "o" && code !== "a")
+      return;
+    if (code === "a") {
+      if (typeof pointer !== "number" || !Number.isSafeInteger(pointer) || pointer < 0)
+        return;
+    } else if (typeof pointer !== "string" || pointer.length > JSON_STREAM_MAX_KEY_CHARS) {
+      return;
+    }
+    if (typeof frame !== "object" || frame === null || Array.isArray(frame))
+      return;
+    const keys = Object.keys(frame);
+    if (keys.length > JSON_STREAM_MAX_FRAME_KEYS)
+      return;
+    const clean2 = {};
+    for (const key2 of keys) {
+      const value = frame[key2];
+      if (value !== null && typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean")
+        return;
+      if (typeof value === "string" && value.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
+        return;
+      setOwn(clean2, key2, value);
+    }
+    levels.push({ kind: code === "o" ? "object" : "array", pointer, frame: clean2 });
+  }
+  return { offset: o, levels };
+}
+
+class JsonStreamReader {
+  source;
+  itemPaths;
+  maxItemBytes;
+  queue = [];
+  queueAt = 0;
+  peakQueued = 0;
+  levels = [];
+  phase = "root";
+  capture;
+  pending;
+  merged;
+  tokenizer;
+  base = 0;
+  inbox;
+  inboxAt = 0;
+  inboxBase = 0;
+  lex = LEX_OUT;
+  hexLeft = 0;
+  utfLeft = 0;
+  utfLow = 128;
+  utfHigh = 191;
+  stringStart = 0;
+  stringLimit = 0;
+  runStart = -1;
+  stop = STOP_END;
+  skipping = false;
+  failure;
+  resuming;
+  started = false;
+  head;
+  finished = false;
+  constructor(source, options) {
+    this.source = source;
+    this.itemPaths = options.itemPaths;
+    this.maxItemBytes = Math.max(1, options.maxItemBytes);
+    this.resuming = options.resume !== undefined;
+    if (options.resume) {
+      const resume = options.resume;
+      if (source.position !== resume.offset || resume.levels.length === 0 || resume.levels.length > JSON_STREAM_MAX_DEPTH) {
+        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
+      }
+      this.levels = resume.levels.map((level) => ({ kind: level.kind, pointer: level.pointer, frame: level.frame }));
+      this.phase = "after";
+      this.started = true;
+    }
+  }
+  get position() {
+    return this.source.position;
+  }
+  get peakQueuedEvents() {
+    return this.peakQueued;
+  }
+  next() {
+    for (;; ) {
+      if (this.queueAt < this.queue.length) {
+        const event = this.queue[this.queueAt];
+        this.queueAt += 1;
+        if (this.queueAt === this.queue.length) {
+          this.queue.length = 0;
+          this.queueAt = 0;
+        }
+        return event;
+      }
+      if (this.failure)
+        throw this.failure;
+      if (this.inbox) {
+        this.pump();
+        continue;
+      }
+      if (this.finished)
+        return;
+      const chunk = this.source.next();
+      if (chunk === undefined) {
+        if (this.head) {
+          this.inbox = this.head;
+          this.inboxAt = 0;
+          this.inboxBase = 0;
+          this.head = undefined;
+          this.started = true;
+          continue;
+        }
+        this.finished = true;
+        this.finish();
+        continue;
+      }
+      this.feed(chunk);
+    }
+  }
+  startTokenizer(base) {
+    const tokenizer = new ExactNumberTokenizer;
+    this.base = base;
+    tokenizer.onToken = (info) => {
+      if (this.failure)
+        return;
+      try {
+        this.handle(info.token, info.value, this.base + info.offset);
+      } catch (error) {
+        this.failure = error instanceof JsonStreamError ? error : invalid();
+        throw this.failure;
+      }
+    };
+    tokenizer.onError = () => {
+      this.failure ??= this.resuming ? new JsonStreamError("resume_invalid", "No item ends where this import was to resume.") : invalid();
+    };
+    this.tokenizer = tokenizer;
+    return tokenizer;
+  }
+  feed(chunk) {
+    let data2 = chunk;
+    let at = this.source.position - chunk.length;
+    if (!this.started) {
+      const joined = this.head ? concat(this.head, data2) : data2;
+      at -= this.head ? this.head.length : 0;
+      if (joined.length < 3) {
+        this.head = joined;
+        return;
+      }
+      this.head = undefined;
+      this.started = true;
+      data2 = joined;
+      if (data2[0] === 239 && data2[1] === 187 && data2[2] === 191) {
+        data2 = data2.subarray(3);
+        at += 3;
+      }
+    }
+    if (data2.length === 0)
+      return;
+    this.inbox = data2;
+    this.inboxAt = 0;
+    this.inboxBase = at;
+  }
+  pump() {
+    const inbox = this.inbox;
+    try {
+      while (this.inboxAt < inbox.length && !this.failure && this.queue.length <= JSON_STREAM_MAX_QUEUED_EVENTS) {
+        const begin = this.inboxAt;
+        const end = Math.min(inbox.length, begin + JSON_STREAM_FEED_SLICE_BYTES);
+        this.inboxAt = end;
+        this.consume(inbox, begin, end, this.inboxBase);
+        if (this.queue.length > this.peakQueued)
+          this.peakQueued = this.queue.length;
+      }
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+    if (this.failure || this.inboxAt >= inbox.length)
+      this.inbox = undefined;
+  }
+  consume(data2, begin, end, base) {
+    let index = begin;
+    let fed = begin;
+    while (index < end) {
+      if (this.skipping) {
+        const stopped2 = this.skipScan(data2, index, end);
+        if (this.stop === STOP_END) {
+          index = end;
+          fed = end;
+          break;
+        }
+        if (this.stop === STOP_BAD) {
+          this.failure ??= invalid();
+          return;
+        }
+        const start = this.stringStart;
+        this.skipping = false;
+        index = stopped2 + 1;
+        fed = index;
+        this.deliver(OVERSIZE, undefined, start);
+        continue;
+      }
+      const stopped = this.scanNormal(data2, index, end, base);
+      if (this.stop === STOP_END) {
+        index = end;
+        break;
+      }
+      if (this.stop === STOP_BAD) {
+        this.write(data2.subarray(fed, stopped), base + fed);
+        this.failure ??= invalid();
+        return;
+      }
+      const quote = this.stringStart - base;
+      if (quote >= fed)
+        this.write(data2.subarray(fed, quote + 1), base + fed);
+      if (this.failure)
+        return;
+      this.tokenizer = undefined;
+      this.skipping = true;
+      fed = stopped;
+      index = stopped;
+    }
+    if (!this.skipping && fed < end && !this.failure)
+      this.write(data2.subarray(fed, end), base + fed);
+  }
+  write(piece, offset) {
+    if (piece.length === 0)
+      return;
+    const tokenizer = this.tokenizer ?? this.startTokenizer(offset);
+    try {
+      tokenizer.write(piece);
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+  }
+  scanNormal(data2, from, to, at) {
+    const max = this.maxItemBytes;
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let runStart = this.runStart;
+    let index = from;
+    this.stop = STOP_END;
+    for (;index < to; index += 1) {
+      const byte = data2[index];
+      if (lex === LEX_OUT) {
+        if (byte === 34) {
+          lex = LEX_STRING;
+          this.stringStart = at + index;
+          this.stringLimit = at + index + max;
+          runStart = -1;
+          utfLeft = 0;
+        } else if (isSpaceOrStructure(byte)) {
+          runStart = -1;
+        } else if (runStart < 0) {
+          runStart = at + index;
+        } else if (at + index + 1 - runStart > max) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        continue;
+      }
+      if (at + index === this.stringLimit) {
+        this.stop = STOP_OVERSIZE;
+        break;
+      }
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 128;
+        this.utfHigh = 191;
+        continue;
+      }
+      if (lex === LEX_STRING) {
+        if (byte === 34) {
+          lex = LEX_OUT;
+        } else if (byte === 92) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 32) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 128) {
+          utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 117) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else if (isEscapeByte(byte)) {
+          lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
+        }
+      } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        hexLeft -= 1;
+        if (hexLeft === 0)
+          lex = LEX_STRING;
+      }
+    }
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = runStart;
+    return index;
+  }
+  utfLead(byte) {
+    this.utfLow = 128;
+    this.utfHigh = 191;
+    if (byte >= 194 && byte <= 223)
+      return 1;
+    if (byte >= 224 && byte <= 239) {
+      if (byte === 224)
+        this.utfLow = 160;
+      else if (byte === 237)
+        this.utfHigh = 159;
+      return 2;
+    }
+    if (byte >= 240 && byte <= 244) {
+      if (byte === 240)
+        this.utfLow = 144;
+      else if (byte === 244)
+        this.utfHigh = 143;
+      return 3;
+    }
+    return 0;
+  }
+  skipScan(data2, from, to) {
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let index = from;
+    this.stop = STOP_END;
+    for (;index < to; index += 1) {
+      const byte = data2[index];
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 128;
+        this.utfHigh = 191;
+        continue;
+      }
+      if (lex === LEX_STRING) {
+        if (byte === 34) {
+          lex = LEX_OUT;
+          this.stop = STOP_CLOSED;
+          break;
+        }
+        if (byte === 92) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 32) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 128) {
+          utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 117) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else if (isEscapeByte(byte)) {
+          lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
+        }
+      } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        hexLeft -= 1;
+        if (hexLeft === 0)
+          lex = LEX_STRING;
+      }
+    }
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = -1;
+    return index;
+  }
+  finish() {
+    try {
+      if (this.lex !== LEX_OUT || this.skipping) {
+        throw new JsonStreamError("truncated", "This file ends inside a piece of text.");
+      }
+      if (this.tokenizer) {
+        try {
+          this.tokenizer.end();
+        } catch (error) {
+          throw this.failure ?? (error instanceof JsonStreamError ? error : invalid());
+        }
+        if (this.failure)
+          throw this.failure;
+      }
+      if (this.capture || this.pending || this.levels.length > 0 || this.phase === "first" || this.phase === "next" || this.phase === "colon" || this.phase === "value") {
+        throw new JsonStreamError("truncated", "This file ends before its last item does.");
+      }
+      if (this.phase === "root")
+        throw new JsonStreamError("empty", "This file holds no JSON.");
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+  }
+  deliver(type, value, start) {
+    try {
+      this.handle(type, value, start);
+    } catch (error) {
+      this.failure = error instanceof JsonStreamError ? error : invalid();
+      throw this.failure;
+    }
+  }
+  handle(type, value, start) {
+    if (this.resuming) {
+      this.resuming = false;
+      const top2 = this.levels[this.levels.length - 1];
+      const fits = type === tokenType_default.COMMA || (top2.kind === "object" ? type === tokenType_default.RIGHT_BRACE : type === tokenType_default.RIGHT_BRACKET);
+      if (!fits)
+        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
+    }
+    if (this.capture) {
+      this.captureToken(this.capture, type, value, start);
+      return;
+    }
+    const top = this.levels[this.levels.length - 1];
+    const role = classify(top ? top.kind : "root", this.phase, type);
+    switch (role) {
+      case "key": {
+        const key2 = value;
+        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
+          throw invalid();
+        this.levels[this.levels.length - 1] = { kind: "object", pointer: key2, frame: top.frame };
+        this.phase = "colon";
+        return;
+      }
+      case "colon":
+        this.phase = "value";
+        return;
+      case "comma":
+        this.flush(start);
+        this.phase = "next";
+        return;
+      case "close":
+        this.flush(start);
+        this.levels.pop();
+        this.merged = undefined;
+        this.phase = this.levels.length === 0 ? "done" : "after";
+        return;
+      case "value":
+        this.beginValue(type, value, start);
+        return;
+    }
+  }
+  beginValue(type, value, start) {
+    let top = this.levels[this.levels.length - 1];
+    if (top && top.kind === "array") {
+      top = { kind: "array", pointer: typeof top.pointer === "number" ? top.pointer + 1 : 0, frame: top.frame };
+      this.levels[this.levels.length - 1] = top;
+    }
+    if (top) {
+      const index = this.matchingPath();
+      if (index >= 0) {
+        const path = this.levels.map((level) => level.pointer);
+        const capture = {
+          start,
+          pathIndex: index,
+          path,
+          frame: this.mergedFrame(),
+          oversize: false,
+          depth: 0,
+          build: [],
+          result: undefined
+        };
+        this.capture = capture;
+        this.captureToken(capture, type, value, start);
+        return;
+      }
+    }
+    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+      if (this.levels.length >= JSON_STREAM_MAX_DEPTH)
+        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
+      this.levels.push({
+        kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
+        pointer: undefined,
+        frame: EMPTY_FRAME
+      });
+      this.merged = undefined;
+      this.phase = "first";
+      return;
+    }
+    if (top && top.kind === "object" && type !== OVERSIZE)
+      this.recordFrame(top, value);
+    this.phase = top ? "after" : "done";
+  }
+  recordFrame(top, value) {
+    if (typeof value === "string" && value.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
+      return;
+    const key2 = top.pointer;
+    if (!Object.prototype.hasOwnProperty.call(top.frame, key2) && Object.keys(top.frame).length >= JSON_STREAM_MAX_FRAME_KEYS)
+      return;
+    const frame = copyFrame(top.frame);
+    setOwn(frame, key2, value);
+    this.levels[this.levels.length - 1] = { kind: "object", pointer: top.pointer, frame };
+    this.merged = undefined;
+  }
+  matchingPath() {
+    const depth = this.levels.length - 1;
+    for (let index = 0;index < this.itemPaths.length; index += 1) {
+      const path = this.itemPaths[index];
+      if (path.length !== depth)
+        continue;
+      let all = true;
+      for (let at = 0;at < depth; at += 1) {
+        const wanted = path[at];
+        if (wanted !== JSON_STREAM_ANY && wanted !== this.levels[at].pointer) {
+          all = false;
+          break;
+        }
+      }
+      if (all)
+        return index;
+    }
+    return -1;
+  }
+  mergedFrame() {
+    if (this.merged)
+      return this.merged;
+    const out = {};
+    for (const level of this.levels) {
+      for (const key2 of Object.keys(level.frame))
+        setOwn(out, key2, level.frame[key2]);
+    }
+    this.merged = Object.keys(out).length === 0 ? EMPTY_FRAME : out;
+    return this.merged;
+  }
+  captureToken(capture, type, value, start) {
+    if (!capture.oversize && (type === OVERSIZE || start - capture.start > this.maxItemBytes)) {
+      capture.oversize = true;
+      capture.result = undefined;
+      for (const level of capture.build)
+        level.value = undefined;
+    }
+    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+      capture.depth += 1;
+      if (capture.depth > JSON_STREAM_MAX_DEPTH)
+        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
+    } else if (type === tokenType_default.RIGHT_BRACE || type === tokenType_default.RIGHT_BRACKET) {
+      capture.depth -= 1;
+      if (capture.depth < 0)
+        throw invalid();
+    }
+    this.build(capture, capture.build, type, value);
+    if (capture.depth === 0) {
+      this.capture = undefined;
+      this.pending = capture;
+      this.phase = "after";
+    }
+  }
+  build(capture, stack, type, value) {
+    const top = stack[stack.length - 1];
+    const role = classify(top ? top.kind : "root", top ? top.phase : "root", type);
+    const place = (placed) => {
+      const parent = stack[stack.length - 1];
+      if (!parent) {
+        capture.result = capture.oversize ? undefined : placed;
+        return;
+      }
+      if (!capture.oversize) {
+        if (parent.kind === "array")
+          parent.value.push(placed);
+        else
+          setOwn(parent.value, parent.key, placed);
+      }
+      parent.phase = "after";
+    };
+    switch (role) {
+      case "key": {
+        const key2 = value;
+        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
+          throw invalid();
+        top.key = key2;
+        top.phase = "colon";
+        return;
+      }
+      case "colon":
+        top.phase = "value";
+        return;
+      case "comma":
+        top.phase = "next";
+        return;
+      case "close": {
+        const closed = stack.pop();
+        place(closed.value);
+        return;
+      }
+      case "value":
+        if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+          stack.push({
+            kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
+            phase: "first",
+            key: undefined,
+            value: capture.oversize ? undefined : type === tokenType_default.LEFT_BRACE ? {} : []
+          });
+        } else {
+          place(value);
+        }
+        return;
+    }
+  }
+  flush(delimiterAt) {
+    const capture = this.pending;
+    if (!capture)
+      return;
+    this.pending = undefined;
+    const oversize = capture.oversize || delimiterAt - capture.start > this.maxItemBytes;
+    this.queue.push({
+      kind: oversize ? "oversize" : "item",
+      path: capture.path,
+      pathIndex: capture.pathIndex,
+      value: oversize ? undefined : capture.result,
+      frame: capture.frame,
+      start: capture.start,
+      end: delimiterAt,
+      resume: { offset: delimiterAt, levels: this.levels.slice() }
+    });
+  }
+}
+function concat(first, second) {
+  const out = new Uint8Array(first.length + second.length);
+  out.set(first);
+  out.set(second, first.length);
+  return out;
+}
+function archiveStopFromReaderError(error, relPath) {
+  if (error instanceof JsonStreamError) {
+    return error.code === "resume_invalid" ? new ArchiveImportStoppedError("resume_point_invalid", "Nothing starts where this import was to resume.", relPath) : new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
+  }
+  return archiveStopFromScopeError(error, relPath);
+}
+var JSON_STREAM_ANY = "*", JSON_STREAM_MAX_DEPTH = 512, JSON_STREAM_MAX_KEY_CHARS = 1024, JSON_STREAM_MAX_FRAME_VALUE_CHARS = 1024, JSON_STREAM_MAX_FRAME_KEYS = 64, JSON_STREAM_FEED_SLICE_BYTES = 1024, JSON_STREAM_MAX_QUEUED_EVENTS = 64, JsonStreamError, OVERSIZE = -1, LEX_OUT = 0, LEX_STRING = 1, LEX_ESCAPE = 2, LEX_HEX = 3, STOP_END = 0, STOP_OVERSIZE = 1, STOP_BAD = 2, STOP_CLOSED = 3, EMPTY_FRAME, MAX_SAFE_DIGITS, ExactNumberTokenizer;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  init_archive_formats();
+  init_stop_errors();
+  JsonStreamError = class JsonStreamError extends Error {
+    code;
+    constructor(code, message2) {
+      super(message2);
+      this.name = "JsonStreamError";
+      this.code = code;
+    }
+  };
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+  ExactNumberTokenizer = class ExactNumberTokenizer extends Tokenizer {
+    parseNumber(numberStr) {
+      const value = Number(numberStr);
+      if (Number.isSafeInteger(value) || !Number.isFinite(value))
+        return value;
+      const digits = numberStr.startsWith("-") ? numberStr.slice(1) : numberStr;
+      let wholeNumber = digits.length > 0;
+      for (let index = 0;index < digits.length; index += 1) {
+        const code = digits.charCodeAt(index);
+        if (code < 48 || code > 57) {
+          wholeNumber = false;
+          break;
+        }
+      }
+      if (!wholeNumber)
+        return value;
+      if (digits.length < MAX_SAFE_DIGITS.length)
+        return value;
+      return numberStr;
+    }
+  };
+});
+
+// src/workers/archive-import/record-probe.ts
+function recordProbeBudget(bytes = RECORD_PROBE_MAX_SCAN_BYTES) {
+  return { left: bytes };
+}
+function capped(inner, budgets) {
+  const drawn = Array.isArray(budgets) ? budgets : [budgets];
+  let refused = false;
+  return {
+    source: {
+      get position() {
+        return inner.position;
+      },
+      next() {
+        const chunk = inner.next();
+        if (chunk === undefined)
+          return;
+        const spent = drawn.find((budget) => budget.left <= 0);
+        if (spent) {
+          spent.ranOut = true;
+          refused = true;
+          return;
+        }
+        for (const budget of drawn)
+          budget.left -= chunk.length;
+        return chunk;
+      },
+      unread: (count) => inner.unread(count)
+    },
+    capped: () => refused
+  };
+}
+function probeFirstRecordKeys(source, list, enough, budget = recordProbeBudget()) {
+  const keys = new Set;
+  let found = false;
+  const limited = capped(source, budget);
+  try {
+    const reader = new JsonStreamReader(limited.source, { itemPaths: [[...list, JSON_STREAM_ANY]], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
+    for (;; ) {
+      const event = reader.next();
+      if (!event)
+        break;
+      const record = event.path[list.length];
+      const key2 = event.path[list.length + 1];
+      if (typeof record !== "number" || typeof key2 !== "string")
+        continue;
+      if (record !== 0)
+        break;
+      found = true;
+      if (keys.size < RECORD_PROBE_MAX_KEYS)
+        keys.add(key2);
+      if (enough?.(keys))
+        break;
+    }
+  } catch (error) {
+    if (!(error instanceof JsonStreamError))
+      throw error;
+  }
+  return found && !limited.capped() ? keys : undefined;
+}
+function probeListIsEmpty(source, list, budget = recordProbeBudget()) {
+  if (list.length === 0)
+    return false;
+  const limited = capped(source, budget);
+  try {
+    const reader = new JsonStreamReader(limited.source, { itemPaths: [list.slice(0, -1)], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
+    for (;; ) {
+      const event = reader.next();
+      if (!event)
+        break;
+      if (event.path.length === list.length && event.path.every((part, at) => part === list[at])) {
+        return !limited.capped() && event.kind === "item" && Array.isArray(event.value) && event.value.length === 0;
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof JsonStreamError))
+      throw error;
+  }
+  return false;
+}
+var RECORD_PROBE_MAX_KEYS = 256, RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
+var init_record_probe = __esm(() => {
+  init_json_stream();
+  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
+});
+
 // node_modules/fflate/esm/browser.js
 var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
   var b = new u16(31);
@@ -71948,93 +74125,6 @@ var init_browser = __esm(() => {
     td.decode(et, { stream: true });
     tds = 1;
   } catch (e) {}
-});
-
-// src/workers/archive-import/stop-errors.ts
-function archiveStopFromScopeError(error, relPath) {
-  if (!(error instanceof ScopeSafeError))
-    return error;
-  if (error.code === "not_found") {
-    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
-  }
-  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
-    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
-  }
-  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
-}
-var init_stop_errors = __esm(() => {
-  init_archive_formats();
-  init_scope_safe_fs();
-});
-
-// src/workers/archive-import/byte-source.ts
-import * as zlib from "node:zlib";
-function tableCrc32(data2, value) {
-  if (!crcTable) {
-    crcTable = new Int32Array(256);
-    for (let n = 0;n < 256; n += 1) {
-      let c = n;
-      for (let k = 0;k < 8; k += 1)
-        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
-      crcTable[n] = c;
-    }
-  }
-  let crc = ~value;
-  for (let index = 0;index < data2.length; index += 1) {
-    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
-  }
-  return ~crc >>> 0;
-}
-function crc32Update(value, data2) {
-  if (data2.length === 0)
-    return value >>> 0;
-  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
-}
-function fileByteSource(reader, options = {}) {
-  const end = Math.min(reader.size, options.end ?? reader.size);
-  const chunkBytes = Math.max(1, options.chunkBytes ?? ARCHIVE_SOURCE_CHUNK_BYTES);
-  let readFrom = Math.max(0, options.start ?? 0);
-  let position = readFrom;
-  let pending;
-  let last = new Uint8Array(0);
-  let held = 0;
-  return {
-    get position() {
-      return position;
-    },
-    next() {
-      let chunk;
-      if (pending) {
-        chunk = pending;
-        pending = undefined;
-      } else {
-        if (readFrom >= end)
-          return;
-        chunk = reader.readAt(readFrom, Math.min(chunkBytes, end - readFrom));
-        readFrom += chunk.length;
-        if (chunk.length === 0)
-          return;
-      }
-      last = chunk;
-      held = chunk.length;
-      position += chunk.length;
-      return chunk;
-    },
-    unread(count) {
-      if (!Number.isInteger(count) || count < 0 || count > held)
-        throw new RangeError("unread past the last chunk");
-      if (count === 0)
-        return;
-      held -= count;
-      position -= count;
-      pending = last.subarray(held);
-    }
-  };
-}
-var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
-var init_byte_source = __esm(() => {
-  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-  nativeCrc32 = zlib.crc32;
 });
 
 // src/workers/archive-import/zip-reader.ts
@@ -72467,6 +74557,20 @@ function sameBytes(a, b) {
       return false;
   return true;
 }
+function stoppableZipSource(reader, relPath) {
+  return {
+    get size() {
+      return reader.size;
+    },
+    readAt(offset, length) {
+      try {
+        return reader.readAt(offset, length);
+      } catch (error) {
+        throw archiveStopFromScopeError(error, relPath);
+      }
+    }
+  };
+}
 function memberKey(entry) {
   return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
 }
@@ -72768,6 +74872,9 @@ function readZipMemberHead(archive, entry, maxBytes) {
   }
   return out;
 }
+function zipFindingOffset(memberIndex, offsetInMember) {
+  return memberIndex * 8589934592 + Math.min(Math.max(0, offsetInMember), 8589934591);
+}
 var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, ZIP_OVERLAP_SORT_MAX_ENTRIES = 262144, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
   init_browser();
@@ -72824,11 +74931,60 @@ function fileHead(root, relPath) {
     throw error;
   }
 }
+function scanAllowance(options, shared) {
+  return {
+    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...shared ? [shared] : []],
+    sharedRanOut: () => shared?.ranOut === true
+  };
+}
+function fileFirstRecordKeys(root, relPath, allowance) {
+  const budgets = allowance.budgetsForDocument();
+  return (list, enough) => {
+    try {
+      const reader = root.openFile(relPath);
+      try {
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough, budgets);
+      } finally {
+        reader.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError)
+        return;
+      throw error;
+    }
+  };
+}
+function zipMemberFirstRecordKeys(root, zipRelPath, memberIndex, allowance) {
+  const budgets = allowance.budgetsForDocument();
+  return (list, enough) => {
+    try {
+      const file = root.openFile(zipRelPath);
+      try {
+        const archive = ZipArchive.open(file);
+        const entry = archive.entryAt(memberIndex);
+        if (!entry)
+          return;
+        const member = ZipMemberReader.open(archive, entry);
+        try {
+          return probeFirstRecordKeys(member, list, enough, budgets);
+        } finally {
+          member.close();
+        }
+      } finally {
+        file.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError || error instanceof ZipFormatError || error instanceof ZipMemberError)
+        return;
+      throw error;
+    }
+  };
+}
 function lastSegment(name) {
   const parts = name.split("/").filter((part) => part !== "");
   return parts[parts.length - 1] ?? name;
 }
-function probeZipMembers(root, relPath, probeNames) {
+function probeZipMembers(root, relPath, probeNames, allowance) {
   let reader;
   try {
     reader = root.openFile(relPath);
@@ -72861,7 +75017,8 @@ function probeZipMembers(root, relPath, probeNames) {
         relPath: entry.name,
         name: lastSegment(entry.name),
         kind: entry.isDirectory ? "directory" : "file",
-        ...head ? { head } : {}
+        ...head ? { head } : {},
+        ...head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}
       };
     });
   } catch (error) {
@@ -72880,15 +75037,25 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   const stat2 = chosenRelPath === "" ? root.statRelative("") : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat2.kind === "file") {
+    const alone = scanAllowance(options.scanBytes);
+    const zipShare = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.document ?? RECORD_PROBE_MAX_SCAN_BYTES));
     const head = fileHead(root, chosenRelPath);
-    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames) : undefined;
+    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, zipShare) : undefined;
     return {
-      chosen: { relPath: "", name, kind: "file", ...head ? { head } : {}, ...members ? { members } : {} },
-      children: []
+      chosen: {
+        relPath: "",
+        name,
+        kind: "file",
+        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath, alone) } : {},
+        ...members ? { members } : {}
+      },
+      children: [],
+      ...members ? { readsRanOut: zipShare.sharedRanOut } : {}
     };
   }
   if (stat2.kind !== "directory")
     throw new ScopeSafeError("not_regular", "neither a file nor a folder");
+  const folderAllowance = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES));
   const everything = root.list(chosenRelPath);
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
@@ -72925,11 +75092,17 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
       children.push({ relPath: entry.name, name: entry.name, kind: "directory" });
     } else if (kind === "file") {
       const head = heads.get(index);
-      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames) : undefined;
-      children.push({ relPath: entry.name, name: entry.name, kind: "file", ...head ? { head } : {}, ...members ? { members } : {} });
+      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, folderAllowance) : undefined;
+      children.push({
+        relPath: entry.name,
+        name: entry.name,
+        kind: "file",
+        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name), folderAllowance) } : {},
+        ...members ? { members } : {}
+      });
     }
   });
-  return { chosen: { relPath: "", name, kind: "directory" }, children };
+  return { chosen: { relPath: "", name, kind: "directory" }, children, readsRanOut: folderAllowance.sharedRanOut };
 }
 function sha2563(bytes) {
   return createHash47("sha256").update(bytes).digest("hex");
@@ -73074,6 +75247,8 @@ var ARCHIVE_FINGERPRINT_BYTES, PROBE_MAX_FILE_HEADS = 32, PROBE_MAX_ZIPS = 4, PR
 var init_manifest2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
+  init_byte_source();
+  init_record_probe();
   init_zip_reader();
   ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
   ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
@@ -79443,10 +81618,10 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
   if (onStatus) {
     const stream = statusChannel?.reader ?? child.stdio[3];
     let pending = "";
-    let invalid = false;
+    let invalid2 = false;
     const reject = () => {
-      if (!invalid) {
-        invalid = true;
+      if (!invalid2) {
+        invalid2 = true;
         onStatus({ event: "refused", code: "no_status_event" });
       }
     };
@@ -79454,7 +81629,7 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
       reject();
     stream?.setEncoding("utf8");
     stream?.on("data", (chunk) => {
-      if (invalid)
+      if (invalid2)
         return;
       pending += chunk;
       if (pending.length > 65536) {
@@ -84993,18 +87168,18 @@ function questionModel(subQuestions) {
     const variants = [viewTokens, viewTokens.map((token) => /\p{L}/u.test(token) ? mapCharacters(token, LEET) : token)];
     for (const variant of variants) {
       for (let start = 0;start < variant.length; start += 1) {
-        let concat = "";
+        let concat2 = "";
         let onlyFunctionWords = true;
         for (let end = start;end < variant.length && end - start < CONSULT_GATE_COMPACT_WINDOW_TOKENS; end += 1) {
-          concat += variant[end];
+          concat2 += variant[end];
           onlyFunctionWords &&= FUNCTION_WORDS.has(viewTokens[end] ?? "");
-          if (concat.length > CONSULT_GATE_COMPACT_WINDOW_CHARS)
+          if (concat2.length > CONSULT_GATE_COMPACT_WINDOW_CHARS)
             break;
-          if (!forms.has(concat))
-            forms.set(concat, source);
+          if (!forms.has(concat2))
+            forms.set(concat2, source);
           if (onlyFunctionWords)
             continue;
-          const reversed = [...concat].reverse().join("");
+          const reversed = [...concat2].reverse().join("");
           if (!forms.has(reversed))
             forms.set(reversed, source);
         }
@@ -87539,12 +89714,12 @@ function parseConsultSettingsText(text2) {
   try {
     parsed = JSON.parse(text2);
   } catch {
-    return invalid("malformed_json");
+    return invalid2("malformed_json");
   }
   if (hasDuplicateObjectKey(text2))
-    return invalid("duplicate_key");
+    return invalid2("duplicate_key");
   const settings = parseConsultSettings(parsed);
-  return settings ? { state: "valid", settings } : invalid("invalid_shape");
+  return settings ? { state: "valid", settings } : invalid2("invalid_shape");
 }
 function readConsultSettings(location = {}) {
   try {
@@ -87559,20 +89734,20 @@ function readConsultSettings(location = {}) {
       if (code === "ENOENT" || code === "ENOTDIR")
         return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
       if (code === "ELOOP" || code === "EMLINK")
-        return invalid("not_a_regular_file");
-      return invalid("unreadable");
+        return invalid2("not_a_regular_file");
+      return invalid2("unreadable");
     }
     try {
       __consultSettingsTestHooks.afterOpen?.(path);
       const stats = fstatSync5(descriptor);
       if (!stats.isFile())
-        return invalid("not_a_regular_file");
+        return invalid2("not_a_regular_file");
       if ((stats.mode & 18) !== 0)
-        return invalid("insecure_permissions");
+        return invalid2("insecure_permissions");
       if (typeof process.getuid === "function" && stats.uid !== process.getuid())
-        return invalid("insecure_permissions");
+        return invalid2("insecure_permissions");
       if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
-        return invalid("too_large");
+        return invalid2("too_large");
       __consultSettingsTestHooks.afterStat?.(path);
       const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
       let length = 0;
@@ -87584,19 +89759,19 @@ function readConsultSettings(location = {}) {
       }
       __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES)
-        return invalid("too_large");
+        return invalid2("too_large");
       let text2;
       try {
         text2 = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
       } catch {
-        return invalid("invalid_utf8");
+        return invalid2("invalid_utf8");
       }
       return parseConsultSettingsText(text2);
     } finally {
       closeSync18(descriptor);
     }
   } catch {
-    return invalid("unreadable");
+    return invalid2("unreadable");
   }
 }
 function consultGateOptionsFromSettings(settings) {
@@ -87612,7 +89787,7 @@ function consultWriterIdentity(choice) {
     return "built-in";
   return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
 }
-function invalid(reason) {
+function invalid2(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
 }
 function hasDuplicateObjectKey(text2) {
@@ -89382,7 +91557,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
     confidence: weightedConfidence(read),
     warnings
   });
-  const capped = stopReason === "pages" || stopReason === "time";
+  const capped2 = stopReason === "pages" || stopReason === "time";
   return {
     status: "indexed",
     text: bounded.text,
@@ -89394,7 +91569,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
         ...totalPages !== undefined ? { totalPages } : {}
       }
     }],
-    ...capped || bounded.warnings.length > 0 ? {
+    ...capped2 || bounded.warnings.length > 0 ? {
       warnings: [
         ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
         ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
@@ -91104,6 +93279,7 @@ var init_operations = __esm(() => {
         "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
         "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
+        "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
         "Never open, read or copy the file yourself, and never retry to get around the approval.",
         `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
         "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
@@ -91545,28 +93721,28 @@ function privacyOwnerContext(options = {}) {
 function parsePrivacyProfileInput(raw) {
   const record2 = asRecord13(raw);
   if (!record2)
-    throw invalid2("The privacy settings must be an object.");
+    throw invalid3("The privacy settings must be an object.");
   const unknownKeys = Object.keys(record2).filter((key2) => key2 !== "description" && key2 !== "rules");
   if (unknownKeys.length > 0)
-    throw invalid2("The privacy settings have unknown fields.");
+    throw invalid3("The privacy settings have unknown fields.");
   const out = {};
   if (record2.description !== undefined) {
     if (typeof record2.description !== "string")
-      throw invalid2("description must be text.");
+      throw invalid3("description must be text.");
     const description = record2.description.replace(/\r\n/g, `
 `).trim();
     if (description.length > PRIVACY_DESCRIPTION_MAX_CHARS) {
-      throw invalid2(`description may be at most ${PRIVACY_DESCRIPTION_MAX_CHARS} characters.`);
+      throw invalid3(`description may be at most ${PRIVACY_DESCRIPTION_MAX_CHARS} characters.`);
     }
     if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(description))
-      throw invalid2("description has control characters.");
+      throw invalid3("description has control characters.");
     out.description = description;
   }
   if (record2.rules !== undefined) {
     if (!Array.isArray(record2.rules))
-      throw invalid2("rules must be a list.");
+      throw invalid3("rules must be a list.");
     if (record2.rules.length > PRIVACY_RULES_MAX)
-      throw invalid2(`At most ${PRIVACY_RULES_MAX} rules.`);
+      throw invalid3(`At most ${PRIVACY_RULES_MAX} rules.`);
     const seen = new Set;
     out.rules = [];
     for (const entry of record2.rules) {
@@ -91583,47 +93759,47 @@ function parsePrivacyProfileInput(raw) {
 function parsePrivacyRule(raw) {
   const record2 = asRecord13(raw);
   if (!record2)
-    throw invalid2("Each rule must be an object.");
+    throw invalid3("Each rule must be an object.");
   const unknownKeys = Object.keys(record2).filter((key3) => !["kind", "source_id", "key", "value", "display"].includes(key3));
   if (unknownKeys.length > 0)
-    throw invalid2("A rule has unknown fields.");
+    throw invalid3("A rule has unknown fields.");
   const kind = record2.kind;
   if (typeof kind !== "string" || !PRIVACY_RULE_KINDS.includes(kind)) {
-    throw invalid2("A rule kind must be folder, label or sender.");
+    throw invalid3("A rule kind must be folder, label or sender.");
   }
   const sources = RULE_SOURCES[kind];
   const sourceId = record2.source_id;
   if (typeof sourceId !== "string" || !Object.prototype.hasOwnProperty.call(sources, sourceId)) {
-    throw invalid2("A rule names a source that kind of rule does not apply to.");
+    throw invalid3("A rule names a source that kind of rule does not apply to.");
   }
   const display = record2.display === undefined ? undefined : boundedName(record2.display, "display");
   if (kind === "sender") {
     if (record2.key !== undefined)
-      throw invalid2("A sender rule takes value, not key.");
+      throw invalid3("A sender rule takes value, not key.");
     const value2 = typeof record2.value === "string" ? record2.value.trim().toLowerCase() : "";
     if (value2.length > 240 || !/^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(value2)) {
-      throw invalid2("A sender rule needs an address (name@example.com) or a whole domain (@example.com).");
+      throw invalid3("A sender rule needs an address (name@example.com) or a whole domain (@example.com).");
     }
     return { kind, source_id: sourceId, value: value2 };
   }
   const key2 = typeof record2.key === "string" ? record2.key.trim() : "";
   if (!key2 || key2.length > PRIVACY_KEY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(key2)) {
-    throw invalid2(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
+    throw invalid3(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
   }
   if (sources[sourceId].match === "pathPrefix" && !key2.startsWith("/"))
-    throw invalid2("A folder key for this source is a path.");
+    throw invalid3("A folder key for this source is a path.");
   if (kind === "label") {
     const value2 = boundedName(record2.value, "value");
     return { kind, source_id: sourceId, key: key2, value: value2 };
   }
   if (record2.value !== undefined)
-    throw invalid2("A folder rule takes key, not value.");
+    throw invalid3("A folder rule takes key, not value.");
   return { kind, source_id: sourceId, key: key2, ...display ? { display } : {} };
 }
 function boundedName(value2, field) {
   const name = typeof value2 === "string" ? value2.trim() : "";
   if (!name || name.length > PRIVACY_DISPLAY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(name)) {
-    throw invalid2(`A rule's ${field} must be a name of at most ${PRIVACY_DISPLAY_MAX_CHARS} characters.`);
+    throw invalid3(`A rule's ${field} must be a name of at most ${PRIVACY_DISPLAY_MAX_CHARS} characters.`);
   }
   return name;
 }
@@ -91664,7 +93840,7 @@ function writePrivacyProfile(update, options = {}) {
 `);
   return next;
 }
-function invalid2(message2) {
+function invalid3(message2) {
   return new OperationError("invalid_params", message2);
 }
 function asRecord13(value2) {
@@ -109329,8 +111505,8 @@ var require_multipleOf = __commonJS((exports) => {
       const { gen, data: data2, schemaCode, it } = cxt;
       const prec = it.opts.multipleOfPrecision;
       const res = gen.let("res");
-      const invalid3 = prec ? (0, codegen_1._)`Math.abs(Math.round(${res}) - ${res}) > 1e-${prec}` : (0, codegen_1._)`${res} !== parseInt(${res})`;
-      cxt.fail$data((0, codegen_1._)`(${schemaCode} === 0 || (${res} = ${data2}/${schemaCode}, ${invalid3}))`);
+      const invalid4 = prec ? (0, codegen_1._)`Math.abs(Math.round(${res}) - ${res}) > 1e-${prec}` : (0, codegen_1._)`${res} !== parseInt(${res})`;
+      cxt.fail$data((0, codegen_1._)`(${schemaCode} === 0 || (${res} = ${data2}/${schemaCode}, ${invalid4}))`);
     }
   };
   exports.default = def;
@@ -118193,14 +120369,14 @@ import { chmodSync as chmodSync27, mkdirSync as mkdirSync49 } from "node:fs";
 import { createHash as createHash65, randomUUID as randomUUID27 } from "node:crypto";
 import { dirname as dirname71 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
-function settleUnreadable(candidates, classify) {
+function settleUnreadable(candidates, classify2) {
   const items = [];
   let blocked = 0;
   for (const candidate of candidates) {
     let verdict = "unreadable";
-    if (classify) {
+    if (classify2) {
       try {
-        verdict = classify(candidate);
+        verdict = classify2(candidate);
       } catch {
         verdict = "blocked_policy";
       }
@@ -121364,7 +123540,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
     confidence: 0.5,
     warnings
   });
-  const capped = stopReason === "pages" || stopReason === "time";
+  const capped2 = stopReason === "pages" || stopReason === "time";
   return {
     status: "indexed",
     text: bounded.text,
@@ -121376,7 +123552,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
         ...info.totalPages !== undefined ? { totalPages: info.totalPages } : {}
       }
     }],
-    ...capped || bounded.warnings.length > 0 ? {
+    ...capped2 || bounded.warnings.length > 0 ? {
       warnings: [
         ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
         ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
@@ -129657,7 +131833,7 @@ function outsideHelpBlockerWords(code) {
 }
 function shortDate(iso2) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso2);
-  const month = match ? MONTHS[Number(match[2]) - 1] : undefined;
+  const month = match ? MONTHS2[Number(match[2]) - 1] : undefined;
   return match && month ? `${Number(match[3])} ${month}` : iso2;
 }
 function shortTime(iso2) {
@@ -129735,14 +131911,14 @@ function outsideHelpScriptConfig(csrfToken) {
 function renderStatusBlock(status, summary, access) {
   const route = status.route;
   const on = status.settings.state === "on";
-  const invalid3 = status.settings.state === "invalid";
+  const invalid4 = status.settings.state === "invalid";
   const unavailable2 = summary.state === "unavailable";
-  const blockedReason = invalid3 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable2 && !on ? "" : access === "unlock" ? unlockFirst(invalid3 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid3 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const blockedReason = invalid4 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const button = access === "read" || unavailable2 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
   const usage = !unavailable2 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
   const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable2 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
-  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid3 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid4 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
   const count = ready.requestsToday.count;
@@ -129866,14 +132042,14 @@ function renderBeforeTurningOn() {
   });
 }
 function renderLevel(status, canEdit) {
-  const invalid3 = status.settings.state === "invalid";
+  const invalid4 = status.settings.state === "invalid";
   const current2 = status.settings.level;
-  const blocked = !canEdit || invalid3 ? ' disabled aria-disabled="true"' : "";
+  const blocked = !canEdit || invalid4 ? ' disabled aria-disabled="true"' : "";
   const options = ["unnamed", "general"].map((level) => {
     const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
     return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current2 ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
   }).join("");
-  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid3 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid4 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current2].short, body });
 }
 function renderStandard(standard, level, canEdit) {
@@ -129900,13 +132076,13 @@ function renderSetupSteps(secretRef, toolsHtml, daemon) {
 }
 function renderLimits(route, canEdit) {
   const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  const capped = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
-  const limit = capped ? [
+  const capped2 = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
+  const limit = capped2 ? [
     ...route.dailyRequestCap !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsRequests, { n: String(route.dailyRequestCap) })] : [],
     ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
   ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
   const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
-  const noLimit = capped && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const noLimit = capped2 && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
   const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
   const body = `<p class="pnote" data-outside-cost-line>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled2}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled2}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, body });
@@ -130214,7 +132390,7 @@ function outsideHelpClientScript(config2) {
   });
 })();`;
 }
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS2, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
 var init_outside_help = __esm(() => {
   init_zkapi_consult_settings();
   init_components();
@@ -130243,7 +132419,7 @@ var init_outside_help = __esm(() => {
     de: "German",
     it: "Italian"
   };
-  MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
   FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
   SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
@@ -133591,7 +135767,7 @@ function chatgptPickerProgram(kit) {
     const from = inherited(key2);
     const now = effective(key2);
     const selectable = !node || node.selectable !== false;
-    const capped = !own3 && p.own.size >= MAX_RULES2;
+    const capped2 = !own3 && p.own.size >= MAX_RULES2;
     return segControl(name, "picker:seg:" + key2 + ":", {
       pressed: own3,
       inherited: own3 ? now !== own3 ? now : "" : from.state,
@@ -133600,7 +135776,7 @@ function chatgptPickerProgram(kit) {
           return Q.cannotChoose;
         if (!allowed(key2, state))
           return fill2(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] });
-        if (capped)
+        if (capped2)
           return fill2(Q.capReached, { max: kit.count(MAX_RULES2) });
         return "";
       },
@@ -136258,7 +138434,7 @@ function calendarDate(iso2) {
   const date4 = new Date(iso2);
   if (Number.isNaN(date4.getTime()))
     return "on an unknown date";
-  return `${MONTHS2[date4.getUTCMonth()]} ${date4.getUTCDate()}, ${date4.getUTCFullYear()}`;
+  return `${MONTHS3[date4.getUTCMonth()]} ${date4.getUTCDate()}, ${date4.getUTCFullYear()}`;
 }
 function relativeDay(iso2, now) {
   const at = new Date(iso2);
@@ -136282,7 +138458,7 @@ function hostOf(url) {
     return url;
   }
 }
-var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS2;
+var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS3;
 var init_agents = __esm(() => {
   init_agent_connections();
   init_agent_instructions();
@@ -136363,7 +138539,7 @@ var init_agents = __esm(() => {
     'args = ["serve"]'
   ].join(`
 `);
-  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  MONTHS3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 });
 
 // src/workers/dashboard/static-styles.ts
@@ -147152,19 +149328,19 @@ function decodeBase642(base642) {
   }
   return arrayBuffer;
 }
-function normalizeCharset(charset) {
-  return charset.replace(/^(?:x-ms-|x-|cs)/, "").replace(/[\s._-]+/g, "");
+function normalizeCharset(charset2) {
+  return charset2.replace(/^(?:x-ms-|x-|cs)/, "").replace(/[\s._-]+/g, "");
 }
-function resolveLabel(charset) {
-  charset = (charset || "utf8").trim().toLowerCase();
-  if (ENCODING_LABELS.has(charset)) {
-    return charset;
+function resolveLabel(charset2) {
+  charset2 = (charset2 || "utf8").trim().toLowerCase();
+  if (ENCODING_LABELS.has(charset2)) {
+    return charset2;
   }
-  const utf16 = UTF16_LABELS.get(charset);
+  const utf16 = UTF16_LABELS.get(charset2);
   if (utf16) {
     return utf16;
   }
-  const normalized = normalizeCharset(charset);
+  const normalized = normalizeCharset(charset2);
   const codePage = normalized.match(codePagePattern);
   const alias = codePage && codePageAliases.get(codePage[1]) || charsetAliases.get(normalized) || normalized;
   return ENCODING_LABELS.has(alias) ? alias : null;
@@ -147183,12 +149359,12 @@ function tryDecoder(label) {
   }
   return decoder;
 }
-function findDecoder(charset) {
-  const label = resolveLabel(charset);
+function findDecoder(charset2) {
+  const label = resolveLabel(charset2);
   return label ? tryDecoder(label) : null;
 }
-function getDecoder2(charset) {
-  return findDecoder(charset) || tryDecoder("windows-1252") || utf8Decoder;
+function getDecoder2(charset2) {
+  return findDecoder(charset2) || tryDecoder("windows-1252") || utf8Decoder;
 }
 function bomByteOrder(bytes) {
   if (bytes[0] === 254 && bytes[1] === 255) {
@@ -147238,9 +149414,9 @@ function decodeUtf8OrWindows1252(bytes, utf83 = utf8Decoder) {
   const view3 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   return isUtf8(view3) ? utf83.decode(view3) : getDecoder2("windows-1252").decode(view3);
 }
-function decodeCharset(bytes, charset) {
+function decodeCharset(bytes, charset2) {
   const view3 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const label = resolveLabel(charset);
+  const label = resolveLabel(charset2);
   let decoder = label ? tryDecoder(label) : null;
   if (label && UTF16_UNORDERED_LABELS.has(label)) {
     const order = bomByteOrder(view3);
@@ -147264,10 +149440,10 @@ function sniffHtmlCharset(bytes) {
   }
   return null;
 }
-function decodeText(bytes, charset, html3) {
+function decodeText(bytes, charset2, html3) {
   const view3 = new Uint8Array(bytes);
-  if (charset) {
-    return decodeCharset(view3, charset);
+  if (charset2) {
+    return decodeCharset(view3, charset2);
   }
   const sniffed = html3 ? sniffHtmlCharset(view3) : null;
   const decoder = sniffed ? findDecoder(sniffed) : null;
@@ -147306,10 +149482,10 @@ function hexNibble(c) {
 function foldLineBreaks(str) {
   return str.replace(/[\r\n]+/g, " ");
 }
-function decodeWord(charset, encoding, str) {
-  let splitPos = charset.indexOf("*");
+function decodeWord(charset2, encoding, str) {
+  let splitPos = charset2.indexOf("*");
   if (splitPos >= 0) {
-    charset = charset.slice(0, splitPos);
+    charset2 = charset2.slice(0, splitPos);
   }
   encoding = encoding.toUpperCase();
   let byteStr;
@@ -147340,7 +149516,7 @@ function decodeWord(charset, encoding, str) {
   } else {
     byteStr = textEncoder.encode(str);
   }
-  return foldLineBreaks(decodeCharset(byteStr, charset));
+  return foldLineBreaks(decodeCharset(byteStr, charset2));
 }
 function isEncodedWordsOnly(str) {
   return ENCODED_WORDS_ONLY_REGEX.test(str);
@@ -147414,8 +149590,8 @@ function decodeWords(str) {
   const result = renderTokens(tokens, true);
   return result.indexOf("�") < 0 ? result : renderTokens(tokens, false);
 }
-function decodeURIComponentWithCharset(encodedStr, charset) {
-  charset = charset || "utf-8";
+function decodeURIComponentWithCharset(encodedStr, charset2) {
+  charset2 = charset2 || "utf-8";
   let encodedBytes = [];
   for (let i2 = 0;i2 < encodedStr.length; i2++) {
     let c = encodedStr.charAt(i2);
@@ -147438,7 +149614,7 @@ function decodeURIComponentWithCharset(encodedStr, charset) {
   for (let i2 = 0, len = encodedBytes.length;i2 < len; i2++) {
     dataView.setUint8(i2, encodedBytes[i2]);
   }
-  return decodeCharset(byteStr, charset);
+  return decodeCharset(byteStr, charset2);
 }
 function decodeParameterValueContinuations(header) {
   let paramKeys = new Map;
@@ -151286,7 +153462,7 @@ function _handleAddress(tokens, from, to) {
   return address;
 }
 
-class Tokenizer {
+class Tokenizer2 {
   constructor(str) {
     this.str = (str || "").toString();
     this.operatorCurrent = "";
@@ -151518,7 +153694,7 @@ function mergeNameFragments(list) {
   return merged.reverse();
 }
 function parseAddressList(str) {
-  const tokens = new Tokenizer(str).tokenize();
+  const tokens = new Tokenizer2(str).tokenize();
   const parsedAddresses = [];
   let group = null;
   let members = [];
@@ -152335,8 +154511,8 @@ function isoDate(value2) {
 function stripHtml2(value2) {
   return value2.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
-function charsetDecodable(charset) {
-  const label = charset.trim().toLowerCase();
+function charsetDecodable(charset2) {
+  const label = charset2.trim().toLowerCase();
   if (!label)
     return true;
   const cached3 = decodableCharsets.get(label);
@@ -152412,7 +154588,7 @@ async function messageOutcome(input, span) {
   const attachments = attachmentInventory(email2);
   if (attachments.count > 0)
     findings.push({ kind: MBOX_FINDINGS.attachments, count: attachments.count });
-  if (declaredCharsets(raw).some((charset) => !charsetDecodable(charset)))
+  if (declaredCharsets(raw).some((charset2) => !charsetDecodable(charset2)))
     findings.push({ kind: MBOX_FINDINGS.charset });
   const summary = [
     email2.subject?.trim() ? `Subject: ${email2.subject.trim()}` : undefined,
@@ -152614,1748 +154790,1418 @@ var init_connector6 = __esm(() => {
   decodableCharsets = new Map;
 });
 
-// node_modules/@streamparser/json/dist/mjs/utils/bufferedString.js
-class NonBufferedString {
-  constructor() {
-    this.decoder = new TextDecoder("utf-8", { fatal: true });
-    this.pending = [];
-    this.string = "";
-    this.byteLength = 0;
-  }
-  appendChar(char) {
-    this.pending.push(String.fromCharCode(char));
-    this.byteLength += 1;
-  }
-  appendBuf(buf, start = 0, end = buf.length) {
-    this.pending.push(this.decoder.decode(buf.subarray(start, end)));
-    this.byteLength += end - start;
-  }
-  appendCharCode(code) {
-    this.pending.push(String.fromCharCode(code));
-  }
-  reset() {
-    this.pending = [];
-    this.string = "";
-    this.byteLength = 0;
-  }
-  toString() {
-    if (this.pending.length > 0) {
-      this.string += this.pending.join("");
-      this.pending = [];
-    }
-    return this.string;
-  }
+// src/workers/archive-import/continuation-cache.ts
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
 }
 
-class BufferedString {
-  constructor(bufferSize) {
-    this.decoder = new TextDecoder("utf-8", { fatal: true });
-    this.bufferOffset = 0;
-    this.string = "";
-    this.byteLength = 0;
-    this.buffer = new Uint8Array(bufferSize);
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
   }
-  appendChar(char) {
-    if (this.bufferOffset >= this.buffer.length)
-      this.flushStringBuffer();
-    this.buffer[this.bufferOffset++] = char;
-    this.byteLength += 1;
+  get size() {
+    this.expire();
+    return this.entries.length;
   }
-  appendBuf(buf, start = 0, end = buf.length) {
-    const size = end - start;
-    if (this.bufferOffset + size > this.buffer.length)
-      this.flushStringBuffer();
-    if (size > this.buffer.length) {
-      this.string += this.decoder.decode(buf.subarray(start, end));
-      this.byteLength += size;
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
       return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
     }
-    this.buffer.set(buf.subarray(start, end), this.bufferOffset);
-    this.bufferOffset += size;
-    this.byteLength += size;
-  }
-  appendCharCode(code) {
-    this.flushStringBuffer();
-    this.string += String.fromCharCode(code);
-  }
-  flushStringBuffer() {
-    this.string += this.decoder.decode(this.buffer.subarray(0, this.bufferOffset));
-    this.bufferOffset = 0;
-  }
-  reset() {
-    this.string = "";
-    this.bufferOffset = 0;
-    this.byteLength = 0;
-  }
-  toString() {
-    this.flushStringBuffer();
-    return this.string;
   }
 }
-
-// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
-var TokenType, tokenType_default;
-var init_tokenType = __esm(() => {
-  (function(TokenType2) {
-    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-    TokenType2[TokenType2["COLON"] = 4] = "COLON";
-    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
-    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
-    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
-    TokenType2[TokenType2["NULL"] = 8] = "NULL";
-    TokenType2[TokenType2["STRING"] = 9] = "STRING";
-    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
-    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
-  })(TokenType || (TokenType = {}));
-  tokenType_default = TokenType;
+var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
+var init_continuation_cache = __esm(() => {
+  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+  archiveContinuations = new ContinuationCache;
 });
 
-// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
-var charset, escapedSequences;
-var init_utf_8 = __esm(() => {
-  (function(charset2) {
-    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
-    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
-    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
-    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-    charset2[charset2["TAB"] = 9] = "TAB";
-    charset2[charset2["SPACE"] = 32] = "SPACE";
-    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
-    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
-    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
-    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-    charset2[charset2["COMMA"] = 44] = "COMMA";
-    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
-    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
-    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-    charset2[charset2["COLON"] = 58] = "COLON";
-    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
-    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
-    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-    charset2[charset2["TILDE"] = 126] = "TILDE";
-  })(charset || (charset = {}));
-  escapedSequences = {
-    [34]: 34,
-    [92]: 92,
-    [47]: 47,
-    [98]: 8,
-    [102]: 12,
-    [110]: 10,
-    [114]: 13,
-    [116]: 9
-  };
-});
-
-// node_modules/@streamparser/json/dist/mjs/tokenizer.js
-function TokenizerStateToString(tokenizerState) {
-  return [
-    "START",
-    "ENDED",
-    "ERROR",
-    "TRUE1",
-    "TRUE2",
-    "TRUE3",
-    "FALSE1",
-    "FALSE2",
-    "FALSE3",
-    "FALSE4",
-    "NULL1",
-    "NULL2",
-    "NULL3",
-    "STRING_DEFAULT",
-    "STRING_AFTER_BACKSLASH",
-    "STRING_UNICODE_DIGIT_1",
-    "STRING_UNICODE_DIGIT_2",
-    "STRING_UNICODE_DIGIT_3",
-    "STRING_UNICODE_DIGIT_4",
-    "STRING_INCOMPLETE_CHAR",
-    "NUMBER_AFTER_INITIAL_MINUS",
-    "NUMBER_AFTER_INITIAL_ZERO",
-    "NUMBER_AFTER_INITIAL_NON_ZERO",
-    "NUMBER_AFTER_FULL_STOP",
-    "NUMBER_AFTER_DECIMAL",
-    "NUMBER_AFTER_E",
-    "NUMBER_AFTER_E_AND_SIGN",
-    "NUMBER_AFTER_E_AND_DIGIT",
-    "SEPARATOR",
-    "BOM_OR_START",
-    "BOM"
-  ][tokenizerState];
-}
-function validateBufferSize(name, size) {
-  if (size === undefined)
-    return;
-  if (!Number.isInteger(size) || size < 0) {
-    throw new TokenizerError(`Invalid "${name}": ${size}. Expected a non-negative integer.`);
-  }
-}
-function utf8SequenceLength(leadByte) {
-  if (leadByte >= 194 && leadByte <= 223)
-    return 2;
-  if (leadByte <= 239)
-    return 3;
-  return 4;
-}
-function multiByteRunEnd(buffer, start) {
-  let j = start;
-  while (j < buffer.length && buffer[j] >= 128) {
-    const seqLength = utf8SequenceLength(buffer[j]);
-    if (j + seqLength > buffer.length)
-      break;
-    j += seqLength;
-  }
-  return j;
-}
-
-class Tokenizer2 {
-  constructor(opts) {
-    this.state = 29;
-    this.bomIndex = 0;
-    this.separatorIndex = 0;
-    this.escapedCharsByteLength = 0;
-    this.bytes_remaining = 0;
-    this.bytes_in_sequence = 0;
-    this.char_split_buffer = new Uint8Array(4);
-    this.encoder = new TextEncoder;
-    this.offset = -1;
-    this.streamByteLength = 0;
-    opts = Object.assign(Object.assign({}, defaultOpts), opts);
-    validateBufferSize("stringBufferSize", opts.stringBufferSize);
-    validateBufferSize("numberBufferSize", opts.numberBufferSize);
-    this.emitPartialTokens = opts.emitPartialTokens === true;
-    this.bufferedString = opts.stringBufferSize && opts.stringBufferSize > 4 ? new BufferedString(opts.stringBufferSize) : new NonBufferedString;
-    this.bufferedNumber = opts.numberBufferSize && opts.numberBufferSize > 0 ? new BufferedString(opts.numberBufferSize) : new NonBufferedString;
-    this.separator = opts.separator;
-    this.separatorBytes = opts.separator ? this.encoder.encode(opts.separator) : undefined;
-  }
-  get isEnded() {
-    return this.state === 1;
-  }
-  appendUnicodeCodeUnit(intVal) {
-    if (this.highSurrogate !== undefined) {
-      if (intVal >= 56320 && intVal <= 57343) {
-        const unicodeString2 = String.fromCharCode(this.highSurrogate, intVal);
-        const unicodeBuffer2 = this.encoder.encode(unicodeString2);
-        this.bufferedString.appendBuf(unicodeBuffer2);
-        this.escapedCharsByteLength += 6 - unicodeBuffer2.byteLength;
-        this.highSurrogate = undefined;
+// src/workers/archive-import/resume-crc.ts
+function trackBoundaries(inner, startCrc) {
+  let chunk;
+  let chunkStart = 0;
+  let crcBeforeChunk;
+  let first = true;
+  let kept;
+  return {
+    get position() {
+      return inner.position;
+    },
+    get crc32() {
+      return inner.crc32;
+    },
+    get boundary() {
+      return kept?.offset;
+    },
+    next() {
+      const crcBefore = first ? startCrc : inner.crc32;
+      const pulled = inner.next();
+      first = false;
+      if (pulled) {
+        chunk = pulled;
+        chunkStart = inner.position - pulled.length;
+        crcBeforeChunk = crcBefore;
+      }
+      return pulled;
+    },
+    unread(count) {
+      inner.unread(count);
+      if (chunk && count > 0)
+        chunk = chunk.subarray(0, Math.max(0, chunk.length - count));
+    },
+    markBoundary(offset) {
+      const within2 = offset - chunkStart;
+      if (!chunk || crcBeforeChunk === undefined || within2 < 0 || within2 > chunk.length) {
+        kept = undefined;
         return;
       }
-      this.flushPendingHighSurrogate();
+      kept = { offset, crcBefore: crcBeforeChunk, prefix: chunk.subarray(0, within2) };
+    },
+    crcAtBoundary() {
+      return kept ? crc32Update(kept.crcBefore, kept.prefix) >>> 0 : undefined;
     }
-    if (intVal >= 55296 && intVal <= 56319) {
-      this.highSurrogate = intVal;
-      this.escapedCharsByteLength += 6;
-      return;
-    }
-    if (intVal >= 56320 && intVal <= 57343) {
-      this.bufferedString.appendCharCode(intVal);
-      this.escapedCharsByteLength += 6;
-      return;
-    }
-    const unicodeString = String.fromCharCode(intVal);
-    const unicodeBuffer = this.encoder.encode(unicodeString);
-    this.bufferedString.appendBuf(unicodeBuffer);
-    this.escapedCharsByteLength += 6 - unicodeBuffer.byteLength;
-  }
-  flushPendingHighSurrogate() {
-    if (this.highSurrogate !== undefined) {
-      this.bufferedString.appendCharCode(this.highSurrogate);
-      this.highSurrogate = undefined;
-    }
-  }
-  startIncompleteChar(buffer, start) {
-    this.bytes_in_sequence = utf8SequenceLength(buffer[start]);
-    this.bytes_remaining = start + this.bytes_in_sequence - buffer.length;
-    this.char_split_buffer.set(buffer.subarray(start));
-    this.state = 19;
-  }
-  write(input) {
-    try {
-      let buffer;
-      if (input instanceof Uint8Array) {
-        buffer = input;
-      } else if (typeof input === "string") {
-        if (this.pendingStringSurrogate !== undefined) {
-          input = this.pendingStringSurrogate + input;
-          this.pendingStringSurrogate = undefined;
-        }
-        const lastCharCode = input.charCodeAt(input.length - 1);
-        if (lastCharCode >= 55296 && lastCharCode <= 56319) {
-          this.pendingStringSurrogate = input[input.length - 1];
-          input = input.slice(0, -1);
-        }
-        buffer = this.encoder.encode(input);
-      } else if (ArrayBuffer.isView(input)) {
-        buffer = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-      } else if (input !== null && typeof input === "object" && typeof input[Symbol.iterator] === "function") {
-        buffer = Uint8Array.from(input);
-      } else {
-        throw new TypeError("Unexpected type. The `write` function only accepts Iterables (e.g. Arrays, Sets, Generators), TypedArrays and Strings.");
-      }
-      for (let i2 = 0;i2 < buffer.length; i2 += 1) {
-        const n = buffer[i2];
-        switch (this.state) {
-          case 29:
-            if (n === 239) {
-              this.bom = [239, 187, 191];
-              this.bomIndex += 1;
-              this.state = 30;
-              continue;
-            }
-            if (input instanceof Uint16Array) {
-              if (n === 254) {
-                this.bom = [254, 255];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-              if (n === 255) {
-                this.bom = [255, 254];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-            }
-            if (input instanceof Uint32Array) {
-              if (n === 0) {
-                this.bom = [0, 0, 254, 255];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-              if (n === 255) {
-                this.bom = [255, 254, 0, 0];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-            }
-          case 0:
-            this.offset += 1;
-            if (this.separatorBytes && n === this.separatorBytes[0]) {
-              if (this.separatorBytes.length === 1) {
-                this.state = 0;
-                this.onToken({
-                  token: tokenType_default.SEPARATOR,
-                  value: this.separator,
-                  offset: this.offset + this.separatorBytes.length - 1
-                });
-                continue;
-              }
-              this.state = 28;
-              continue;
-            }
-            if (n === 32 || n === 10 || n === 13 || n === 9) {
-              continue;
-            }
-            if (n === 123) {
-              this.onToken({
-                token: tokenType_default.LEFT_BRACE,
-                value: "{",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 125) {
-              this.onToken({
-                token: tokenType_default.RIGHT_BRACE,
-                value: "}",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 91) {
-              this.onToken({
-                token: tokenType_default.LEFT_BRACKET,
-                value: "[",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 93) {
-              this.onToken({
-                token: tokenType_default.RIGHT_BRACKET,
-                value: "]",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 58) {
-              this.onToken({
-                token: tokenType_default.COLON,
-                value: ":",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 44) {
-              this.onToken({
-                token: tokenType_default.COMMA,
-                value: ",",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 116) {
-              this.state = 3;
-              continue;
-            }
-            if (n === 102) {
-              this.state = 6;
-              continue;
-            }
-            if (n === 110) {
-              this.state = 10;
-              continue;
-            }
-            if (n === 34) {
-              this.bufferedString.reset();
-              this.escapedCharsByteLength = 0;
-              this.state = 13;
-              continue;
-            }
-            if (n >= 49 && n <= 57) {
-              this.bufferedNumber.reset();
-              this.bufferedNumber.appendChar(n);
-              this.state = 22;
-              continue;
-            }
-            if (n === 48) {
-              this.bufferedNumber.reset();
-              this.bufferedNumber.appendChar(n);
-              this.state = 21;
-              continue;
-            }
-            if (n === 45) {
-              this.bufferedNumber.reset();
-              this.bufferedNumber.appendChar(n);
-              this.state = 20;
-              continue;
-            }
-            break;
-          case 13:
-            if (n === 34) {
-              this.flushPendingHighSurrogate();
-              const string5 = this.bufferedString.toString();
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.STRING,
-                value: string5,
-                offset: this.offset
-              });
-              this.offset += this.escapedCharsByteLength + this.bufferedString.byteLength + 1;
-              continue;
-            }
-            if (n === 92) {
-              this.state = 14;
-              continue;
-            }
-            if (n >= 128) {
-              this.flushPendingHighSurrogate();
-              const runEnd = multiByteRunEnd(buffer, i2);
-              if (runEnd > i2) {
-                this.bufferedString.appendBuf(buffer, i2, runEnd);
-                i2 = runEnd - 1;
-              }
-              if (runEnd < buffer.length && buffer[runEnd] >= 128) {
-                this.startIncompleteChar(buffer, runEnd);
-                i2 = buffer.length - 1;
-              }
-              continue;
-            }
-            if (n >= 32) {
-              this.flushPendingHighSurrogate();
-              let j = i2;
-              while (j < buffer.length) {
-                const b = buffer[j];
-                if (b < 32 || b >= 128 || b === 34 || b === 92)
-                  break;
-                j += 1;
-              }
-              if (j - i2 >= 16) {
-                this.bufferedString.appendBuf(buffer, i2, j);
-              } else {
-                for (let k = i2;k < j; k += 1)
-                  this.bufferedString.appendChar(buffer[k]);
-              }
-              i2 = j - 1;
-              continue;
-            }
-            break;
-          case 19: {
-            const available = Math.min(this.bytes_remaining, buffer.length - i2);
-            this.char_split_buffer.set(buffer.subarray(i2, i2 + available), this.bytes_in_sequence - this.bytes_remaining);
-            this.bytes_remaining -= available;
-            if (this.bytes_remaining > 0) {
-              i2 = buffer.length - 1;
-              continue;
-            }
-            this.bufferedString.appendBuf(this.char_split_buffer, 0, this.bytes_in_sequence);
-            i2 += available - 1;
-            this.state = 13;
-            continue;
-          }
-          case 14: {
-            const controlChar = escapedSequences[n];
-            if (controlChar) {
-              this.flushPendingHighSurrogate();
-              this.bufferedString.appendChar(controlChar);
-              this.escapedCharsByteLength += 1;
-              this.state = 13;
-              continue;
-            }
-            if (n === 117) {
-              this.unicode = "";
-              this.state = 15;
-              continue;
-            }
-            break;
-          }
-          case 15:
-          case 16:
-          case 17:
-            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
-              this.unicode += String.fromCharCode(n);
-              this.state += 1;
-              continue;
-            }
-            break;
-          case 18:
-            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
-              const intVal = parseInt(this.unicode + String.fromCharCode(n), 16);
-              this.appendUnicodeCodeUnit(intVal);
-              this.state = 13;
-              continue;
-            }
-            break;
-          case 20:
-            if (n === 48) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 21;
-              continue;
-            }
-            if (n >= 49 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 22;
-              continue;
-            }
-            break;
-          case 21:
-            if (n === 46) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 23;
-              continue;
-            }
-            if (n === 101 || n === 69) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 25;
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 22:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              continue;
-            }
-            if (n === 46) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 23;
-              continue;
-            }
-            if (n === 101 || n === 69) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 25;
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 23:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 24;
-              continue;
-            }
-            break;
-          case 24:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              continue;
-            }
-            if (n === 101 || n === 69) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 25;
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 25:
-            if (n === 43 || n === 45) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 26;
-              continue;
-            }
-          case 26:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 27;
-              continue;
-            }
-            break;
-          case 27:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 3:
-            if (n === 114) {
-              this.state = 4;
-              continue;
-            }
-            break;
-          case 4:
-            if (n === 117) {
-              this.state = 5;
-              continue;
-            }
-            break;
-          case 5:
-            if (n === 101) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.TRUE,
-                value: true,
-                offset: this.offset
-              });
-              this.offset += 3;
-              continue;
-            }
-            break;
-          case 6:
-            if (n === 97) {
-              this.state = 7;
-              continue;
-            }
-            break;
-          case 7:
-            if (n === 108) {
-              this.state = 8;
-              continue;
-            }
-            break;
-          case 8:
-            if (n === 115) {
-              this.state = 9;
-              continue;
-            }
-            break;
-          case 9:
-            if (n === 101) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.FALSE,
-                value: false,
-                offset: this.offset
-              });
-              this.offset += 4;
-              continue;
-            }
-            break;
-          case 10:
-            if (n === 117) {
-              this.state = 11;
-              continue;
-            }
-            break;
-          case 11:
-            if (n === 108) {
-              this.state = 12;
-              continue;
-            }
-            break;
-          case 12:
-            if (n === 108) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.NULL,
-                value: null,
-                offset: this.offset
-              });
-              this.offset += 3;
-              continue;
-            }
-            break;
-          case 28:
-            this.separatorIndex += 1;
-            if (!this.separatorBytes || n !== this.separatorBytes[this.separatorIndex]) {
-              break;
-            }
-            if (this.separatorIndex === this.separatorBytes.length - 1) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.SEPARATOR,
-                value: this.separator,
-                offset: this.offset + this.separatorIndex
-              });
-              this.separatorIndex = 0;
-            }
-            continue;
-          case 30:
-            if (n === this.bom[this.bomIndex]) {
-              if (this.bomIndex === this.bom.length - 1) {
-                this.state = 0;
-                this.bom = undefined;
-                this.bomIndex = 0;
-                continue;
-              }
-              this.bomIndex += 1;
-              continue;
-            }
-            break;
-          case 1:
-            if (n === 32 || n === 10 || n === 13 || n === 9) {
-              continue;
-            }
-        }
-        throw new TokenizerError(`Unexpected "${String.fromCharCode(n)}" at chunk position "${i2}" (absolute position "${this.streamByteLength + i2}") in state ${TokenizerStateToString(this.state)}`);
-      }
-      this.streamByteLength += buffer.length;
-      if (this.emitPartialTokens) {
-        switch (this.state) {
-          case 3:
-          case 4:
-          case 5:
-            this.onToken({
-              token: tokenType_default.TRUE,
-              value: true,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          case 6:
-          case 7:
-          case 8:
-          case 9:
-            this.onToken({
-              token: tokenType_default.FALSE,
-              value: false,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          case 10:
-          case 11:
-          case 12:
-            this.onToken({
-              token: tokenType_default.NULL,
-              value: null,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          case 13: {
-            const string5 = this.bufferedString.toString();
-            this.onToken({
-              token: tokenType_default.STRING,
-              value: string5,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          }
-          case 21:
-          case 22:
-          case 24:
-          case 27:
-            try {
-              this.onToken({
-                token: tokenType_default.NUMBER,
-                value: this.parseNumber(this.bufferedNumber.toString()),
-                offset: this.offset,
-                partial: true
-              });
-            } catch (_a5) {}
-        }
-      }
-    } catch (err2) {
-      this.error(err2);
-    }
-  }
-  emitNumber() {
-    this.onToken({
-      token: tokenType_default.NUMBER,
-      value: this.parseNumber(this.bufferedNumber.toString()),
-      offset: this.offset
-    });
-    this.offset += this.bufferedNumber.byteLength - 1;
-  }
-  parseNumber(numberStr) {
-    return Number(numberStr);
-  }
-  error(err2) {
-    if (this.state !== 1) {
-      this.state = 2;
-    }
-    this.onError(err2);
-  }
-  end() {
-    switch (this.state) {
-      case 21:
-      case 22:
-      case 24:
-      case 27:
-        this.state = 1;
-        this.emitNumber();
-        this.onEnd();
-        break;
-      case 29:
-      case 0:
-      case 2:
-        this.state = 1;
-        this.onEnd();
-        break;
-      default:
-        this.error(new TokenizerError(`Tokenizer ended in the middle of a token (state: ${TokenizerStateToString(this.state)}). Either not all the data was received or the data was invalid.`));
-    }
-  }
-  onToken(parsedToken) {
-    throw new TokenizerError(`Can't emit tokens before the "onToken" callback has been set up.`);
-  }
-  onError(err2) {
-    throw err2;
-  }
-  onEnd() {}
+  };
 }
-var TokenizerStates, defaultOpts, TokenizerError;
-var init_tokenizer = __esm(() => {
-  init_tokenType();
-  init_utf_8();
-  (function(TokenizerStates2) {
-    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
-    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
-    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
-    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
-    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
-    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
-    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
-    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
-    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
-    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
-    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
-    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
-    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
-    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
-    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
-    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
-  })(TokenizerStates || (TokenizerStates = {}));
-  defaultOpts = {
-    stringBufferSize: 0,
-    numberBufferSize: 0,
-    separator: undefined,
-    emitPartialTokens: false
-  };
-  TokenizerError = class TokenizerError extends Error {
-    constructor(message2) {
-      super(message2);
-      Object.setPrototypeOf(this, TokenizerError.prototype);
+function recoverZipMemberCrc(archive, entry, offset, shouldContinue) {
+  if (offset === 0)
+    return { kind: "crc", crc: 0 };
+  let reader;
+  try {
+    reader = ZipMemberReader.open(archive, entry);
+  } catch (error2) {
+    if (error2 instanceof ZipMemberError || error2 instanceof ZipFormatError)
+      return { kind: "unavailable" };
+    throw error2;
+  }
+  try {
+    for (;; ) {
+      if (!shouldContinue())
+        return { kind: "interrupted" };
+      const chunk = reader.next();
+      if (!chunk)
+        return { kind: "unavailable" };
+      if (reader.position >= offset) {
+        reader.unread(reader.position - offset);
+        const crc = reader.crc32;
+        return crc === undefined ? { kind: "unavailable" } : { kind: "crc", crc };
+      }
     }
-  };
+  } catch (error2) {
+    if (error2 instanceof ZipMemberError || error2 instanceof ZipFormatError)
+      return { kind: "unavailable" };
+    throw error2;
+  } finally {
+    reader.close();
+  }
+}
+var init_resume_crc = __esm(() => {
+  init_byte_source();
+  init_zip_reader();
 });
 
-// src/workers/archive-import/json-stream.ts
-function isHexDigit(byte) {
-  return byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102;
+// src/workers/archive-import/notes/note.ts
+import { createHash as createHash78 } from "node:crypto";
+function isRecord10(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
-function isEscapeByte(byte) {
-  return byte === 34 || byte === 92 || byte === 47 || byte === 98 || byte === 102 || byte === 110 || byte === 114 || byte === 116;
-}
-function isSpaceOrStructure(byte) {
-  return byte === 32 || byte === 10 || byte === 13 || byte === 9 || byte === 44 || byte === 58 || byte === 91 || byte === 93 || byte === 123 || byte === 125;
-}
-function isValueStart(type) {
-  return type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET || type === tokenType_default.STRING || type === tokenType_default.NUMBER || type === tokenType_default.TRUE || type === tokenType_default.FALSE || type === tokenType_default.NULL || type === OVERSIZE;
-}
-function invalid3() {
-  return new JsonStreamError("invalid_json", "This file is not valid JSON.");
-}
-function classify(kind, phase, type) {
-  if (kind === "root") {
-    if (phase === "root" && isValueStart(type))
-      return "value";
-    throw invalid3();
+function firstString(...values) {
+  for (const value2 of values) {
+    if (typeof value2 === "string" && value2.trim() !== "")
+      return value2.trim();
   }
-  if (kind === "object") {
-    if (phase === "first") {
-      if (type === tokenType_default.STRING)
-        return "key";
-      if (type === tokenType_default.RIGHT_BRACE)
-        return "close";
-    } else if (phase === "next") {
-      if (type === tokenType_default.STRING)
-        return "key";
-    } else if (phase === "colon") {
-      if (type === tokenType_default.COLON)
-        return "colon";
-    } else if (phase === "value") {
-      if (isValueStart(type))
-        return "value";
-    } else if (phase === "after") {
-      if (type === tokenType_default.COMMA)
-        return "comma";
-      if (type === tokenType_default.RIGHT_BRACE)
-        return "close";
-    }
-    throw invalid3();
-  }
-  if (phase === "first") {
-    if (isValueStart(type))
-      return "value";
-    if (type === tokenType_default.RIGHT_BRACKET)
-      return "close";
-  } else if (phase === "next") {
-    if (isValueStart(type))
-      return "value";
-  } else if (phase === "after") {
-    if (type === tokenType_default.COMMA)
-      return "comma";
-    if (type === tokenType_default.RIGHT_BRACKET)
-      return "close";
-  }
-  throw invalid3();
+  return;
 }
-function setOwn(target, key2, value2) {
-  Object.defineProperty(target, key2, { value: value2, enumerable: true, writable: true, configurable: true });
+function idText(value2) {
+  if (typeof value2 === "string" && value2.trim() !== "")
+    return value2.trim().slice(0, 200);
+  if (typeof value2 === "number" && Number.isFinite(value2))
+    return String(value2);
+  return;
 }
-function copyFrame(frame) {
-  const out = {};
-  for (const key2 of Object.keys(frame))
-    setOwn(out, key2, frame[key2]);
+function isoTime(value2) {
+  let ms;
+  if (typeof value2 === "number" && Number.isFinite(value2)) {
+    ms = Math.abs(value2) < 100000000000 ? value2 * 1000 : value2;
+  } else if (typeof value2 === "string" && value2.trim() !== "") {
+    const text3 = value2.trim();
+    ms = /^-?\d+(?:\.\d+)?$/.test(text3) ? Math.abs(Number(text3)) < 100000000000 ? Number(text3) * 1000 : Number(text3) : Date.parse(text3);
+  }
+  if (ms === undefined || !Number.isFinite(ms))
+    return;
+  const date4 = new Date(ms);
+  return Number.isNaN(date4.getTime()) ? undefined : date4.toISOString();
+}
+function earliestIso(...times) {
+  const known = times.filter((time3) => time3 !== undefined);
+  return known.length === 0 ? undefined : known.reduce((a, b) => a <= b ? a : b);
+}
+function latestIso2(...times) {
+  const known = times.filter((time3) => time3 !== undefined);
+  return known.length === 0 ? undefined : known.reduce((a, b) => a >= b ? a : b);
+}
+function cleanTags(tags) {
+  const out = [];
+  const seen = new Set;
+  for (const tag of tags) {
+    const text3 = tag.trim().replace(/^#+/, "").trim().slice(0, MAX_TAG_CHARS);
+    if (text3 === "" || seen.has(text3))
+      continue;
+    seen.add(text3);
+    out.push(text3);
+    if (out.length >= MAX_TAGS)
+      break;
+  }
   return out;
 }
-function serializeJsonResume(point) {
-  return JSON.stringify({
-    o: point.offset,
-    l: point.levels.map((level) => [level.kind === "object" ? "o" : "a", level.pointer, level.frame])
+function sha2568(value2) {
+  return createHash78("sha256").update(value2).digest("hex");
+}
+function buildNoteItem(input, draft, place, savedAt) {
+  const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
+  const given = draft.createdAt ?? draft.updatedAt ?? draft.titleDate;
+  const authoredAt = given ?? savedAt;
+  const lines = [
+    title,
+    draft.tags.length > 0 ? `Tags: ${draft.tags.join(", ")}` : undefined,
+    draft.createdAt ? `Created: ${draft.createdAt.slice(0, 10)}` : given ? `Date: ${given.slice(0, 10)}` : undefined,
+    draft.updatedAt && draft.updatedAt !== draft.createdAt ? `Updated: ${draft.updatedAt.slice(0, 10)}` : undefined
+  ].filter((line2) => line2 !== undefined && line2 !== "");
+  let text3 = [lines.join(`
+`), draft.body].filter((part) => part !== "").join(`
+
+`);
+  let truncated = false;
+  if (text3.length > NOTE_MAX_TEXT_CHARS) {
+    text3 = text3.slice(0, NOTE_MAX_TEXT_CHARS);
+    truncated = true;
+  }
+  const providerItemId = sha2568(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
+  const contentHash = sha2568(text3);
+  const item = {
+    identity: {
+      family: input.format.family,
+      provider: input.format.provider,
+      accountScope: input.accountScope,
+      providerItemId,
+      localItemId: `${input.accountScope}:${providerItemId}`,
+      sourceVersion: contentHash.slice(0, 32)
+    },
+    mimeType: "text/markdown",
+    content: { kind: "text", text: text3 },
+    metadata: Object.freeze({
+      title: title || "(untitled)",
+      tags: draft.tags,
+      authoredAt,
+      ...draft.createdAt ? { createdAt: draft.createdAt } : {},
+      ...draft.updatedAt ? { updatedAt: draft.updatedAt } : {},
+      ...draft.blockCount !== undefined ? { blockCount: draft.blockCount } : {},
+      contentHash
+    }),
+    fetchedAt: new Date().toISOString()
+  };
+  return { item, truncated, dateAssumed: given === undefined };
+}
+function noteClassificationSignals(item) {
+  return compactClassificationSignals({
+    title: signalText(item.metadata, "title"),
+    labels: signalTexts(item.metadata, "tags")
   });
 }
-function parseJsonResume(text3) {
-  let raw;
-  try {
-    raw = JSON.parse(text3);
-  } catch {
-    return;
-  }
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
-    return;
-  const { o, l } = raw;
-  if (typeof o !== "number" || !Number.isSafeInteger(o) || o < 0)
-    return;
-  if (!Array.isArray(l) || l.length === 0 || l.length > JSON_STREAM_MAX_DEPTH)
-    return;
-  const levels = [];
-  for (const entry of l) {
-    if (!Array.isArray(entry) || entry.length !== 3)
-      return;
-    const [code, pointer, frame] = entry;
-    if (code !== "o" && code !== "a")
-      return;
-    if (code === "a") {
-      if (typeof pointer !== "number" || !Number.isSafeInteger(pointer) || pointer < 0)
-        return;
-    } else if (typeof pointer !== "string" || pointer.length > JSON_STREAM_MAX_KEY_CHARS) {
-      return;
-    }
-    if (typeof frame !== "object" || frame === null || Array.isArray(frame))
-      return;
-    const keys = Object.keys(frame);
-    if (keys.length > JSON_STREAM_MAX_FRAME_KEYS)
-      return;
-    const clean2 = {};
-    for (const key2 of keys) {
-      const value2 = frame[key2];
-      if (value2 !== null && typeof value2 !== "string" && typeof value2 !== "number" && typeof value2 !== "boolean")
-        return;
-      if (typeof value2 === "string" && value2.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
-        return;
-      setOwn(clean2, key2, value2);
-    }
-    levels.push({ kind: code === "o" ? "object" : "array", pointer, frame: clean2 });
-  }
-  return { offset: o, levels };
-}
+var NOTE_MAX_TEXT_CHARS = 1e6, NOTE_MAX_RECORD_BYTES, MAX_TAGS = 100, MAX_TAG_CHARS = 200, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
+var init_note = __esm(() => {
+  NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
+  NOTE_FINDINGS = {
+    empty: "note_empty",
+    unreadable: "note_unreadable",
+    tooLarge: "note_too_large",
+    unsupported: "note_content_unsupported",
+    dateAssumed: "note_date_assumed"
+  };
+});
 
-class JsonStreamReader {
-  source;
-  itemPaths;
-  maxItemBytes;
-  queue = [];
-  queueAt = 0;
-  peakQueued = 0;
-  levels = [];
-  phase = "root";
-  capture;
-  pending;
-  merged;
-  tokenizer;
-  base = 0;
-  inbox;
-  inboxAt = 0;
-  inboxBase = 0;
-  lex = LEX_OUT;
-  hexLeft = 0;
-  utfLeft = 0;
-  utfLow = 128;
-  utfHigh = 191;
-  stringStart = 0;
-  stringLimit = 0;
-  runStart = -1;
-  stop = STOP_END;
-  skipping = false;
-  failure;
-  resuming;
-  started = false;
-  head;
-  finished = false;
-  constructor(source, options) {
-    this.source = source;
-    this.itemPaths = options.itemPaths;
-    this.maxItemBytes = Math.max(1, options.maxItemBytes);
-    this.resuming = options.resume !== undefined;
-    if (options.resume) {
-      const resume = options.resume;
-      if (source.position !== resume.offset || resume.levels.length === 0 || resume.levels.length > JSON_STREAM_MAX_DEPTH) {
-        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
-      }
-      this.levels = resume.levels.map((level) => ({ kind: level.kind, pointer: level.pointer, frame: level.frame }));
-      this.phase = "after";
-      this.started = true;
+// src/workers/archive-import/notes/archive.ts
+function rootKindOf(head) {
+  if (!head)
+    return;
+  let at = head[0] === 239 && head[1] === 187 && head[2] === 191 ? 3 : 0;
+  while (at < head.length && (head[at] === 32 || head[at] === 9 || head[at] === 10 || head[at] === 13))
+    at += 1;
+  if (head[at] === 91)
+    return "array";
+  if (head[at] === 123)
+    return "object";
+  return;
+}
+function createNoteArchiveConnector(input, spec) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? NOTES_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? NOTES_DEFAULT_MAX_BYTES_PER_LISTING);
+  const tag = input.manifestSha256.slice(0, 16);
+  const prefix = `${spec.cursorPrefix}${tag}:`;
+  const source = spec.source;
+  const DONE2 = { file: input.files.length, member: -1, offset: 0, done: true };
+  const startOfFile = (file) => file >= input.files.length ? DONE2 : { file, member: -1, offset: 0, done: false };
+  const invalid4 = (message2) => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const encode3 = (cursor) => {
+    if (cursor.done)
+      return `${prefix}done`;
+    const resume = cursor.resume ? Buffer.from(serializeJsonResume(cursor.resume)).toString("base64url") : "";
+    return `${prefix}${cursor.file}:${cursor.member}:${cursor.offset}:${cursor.crc ?? ""}:${resume}`;
+  };
+  const decode3 = (text3) => {
+    if (!text3)
+      return startOfFile(0);
+    if (!text3.startsWith(prefix))
+      throw invalid4("The resume point belongs to other files than this archive's.");
+    const rest = text3.slice(prefix.length);
+    if (rest === "done")
+      return DONE2;
+    const parts = rest.split(":");
+    if (parts.length !== 5)
+      throw invalid4("The resume point is not a position in this archive.");
+    const [fileText, memberText, offsetText, crcText, resumeText] = parts;
+    const file = Number(fileText);
+    const member = Number(memberText);
+    const offset = Number(offsetText);
+    const crc = crcText === "" ? undefined : Number(crcText);
+    if (!Number.isSafeInteger(file) || file < 0 || file >= input.files.length || !Number.isSafeInteger(member) || member < -1 || !Number.isSafeInteger(offset) || offset < 0 || crc !== undefined && (!Number.isSafeInteger(crc) || crc < 0 || crc > 4294967295)) {
+      throw invalid4("The resume point is not a position in this archive.");
     }
-  }
-  get position() {
-    return this.source.position;
-  }
-  get peakQueuedEvents() {
-    return this.peakQueued;
-  }
-  next() {
-    for (;; ) {
-      if (this.queueAt < this.queue.length) {
-        const event = this.queue[this.queueAt];
-        this.queueAt += 1;
-        if (this.queueAt === this.queue.length) {
-          this.queue.length = 0;
-          this.queueAt = 0;
-        }
-        return event;
-      }
-      if (this.failure)
-        throw this.failure;
-      if (this.inbox) {
-        this.pump();
-        continue;
-      }
-      if (this.finished)
-        return;
-      const chunk = this.source.next();
-      if (chunk === undefined) {
-        if (this.head) {
-          this.inbox = this.head;
-          this.inboxAt = 0;
-          this.inboxBase = 0;
-          this.head = undefined;
-          this.started = true;
-          continue;
-        }
-        this.finished = true;
-        this.finish();
-        continue;
-      }
-      this.feed(chunk);
+    let resume;
+    if (resumeText !== "") {
+      resume = parseJsonResume(Buffer.from(resumeText, "base64url").toString("utf8"));
+      if (!resume || resume.offset !== offset)
+        throw invalid4("The resume point is not a position in this archive.");
     }
-  }
-  startTokenizer(base) {
-    const tokenizer = new ExactNumberTokenizer;
-    this.base = base;
-    tokenizer.onToken = (info) => {
-      if (this.failure)
-        return;
-      try {
-        this.handle(info.token, info.value, this.base + info.offset);
-      } catch (error2) {
-        this.failure = error2 instanceof JsonStreamError ? error2 : invalid3();
-        throw this.failure;
-      }
-    };
-    tokenizer.onError = () => {
-      this.failure ??= this.resuming ? new JsonStreamError("resume_invalid", "No item ends where this import was to resume.") : invalid3();
-    };
-    this.tokenizer = tokenizer;
-    return tokenizer;
-  }
-  feed(chunk) {
-    let data2 = chunk;
-    let at = this.source.position - chunk.length;
-    if (!this.started) {
-      const joined = this.head ? concat(this.head, data2) : data2;
-      at -= this.head ? this.head.length : 0;
-      if (joined.length < 3) {
-        this.head = joined;
-        return;
-      }
-      this.head = undefined;
-      this.started = true;
-      data2 = joined;
-      if (data2[0] === 239 && data2[1] === 187 && data2[2] === 191) {
-        data2 = data2.subarray(3);
-        at += 3;
-      }
-    }
-    if (data2.length === 0)
+    if (offset > 0 !== (resume !== undefined))
+      throw invalid4("The resume point is not a position in this archive.");
+    return { file, member, offset, ...crc !== undefined ? { crc } : {}, ...resume ? { resume } : {}, done: false };
+  };
+  const stoppedFrom2 = (error2, relPath) => archiveStopFromReaderError(error2, relPath);
+  const report = (kind, findingClass, fileIndex, offset, count) => {
+    input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
+  };
+  const takeNote = (segment, outcome, place, offset, savedAt, cut = false) => {
+    segment.consumed += 1;
+    if (outcome.kind === "empty") {
+      report(NOTE_FINDINGS.empty, "skipped", place.fileIndex, offset);
       return;
-    this.inbox = data2;
-    this.inboxAt = 0;
-    this.inboxBase = at;
-  }
-  pump() {
-    const inbox = this.inbox;
-    try {
-      while (this.inboxAt < inbox.length && !this.failure && this.queue.length <= JSON_STREAM_MAX_QUEUED_EVENTS) {
-        const begin = this.inboxAt;
-        const end = Math.min(inbox.length, begin + JSON_STREAM_FEED_SLICE_BYTES);
-        this.inboxAt = end;
-        this.consume(inbox, begin, end, this.inboxBase);
-        if (this.queue.length > this.peakQueued)
-          this.peakQueued = this.queue.length;
-      }
-    } catch (error2) {
-      this.failure ??= error2 instanceof JsonStreamError ? error2 : invalid3();
     }
-    if (this.failure || this.inboxAt >= inbox.length)
-      this.inbox = undefined;
-  }
-  consume(data2, begin, end, base) {
-    let index = begin;
-    let fed = begin;
-    while (index < end) {
-      if (this.skipping) {
-        const stopped2 = this.skipScan(data2, index, end);
-        if (this.stop === STOP_END) {
-          index = end;
-          fed = end;
-          break;
-        }
-        if (this.stop === STOP_BAD) {
-          this.failure ??= invalid3();
-          return;
-        }
-        const start = this.stringStart;
-        this.skipping = false;
-        index = stopped2 + 1;
-        fed = index;
-        this.deliver(OVERSIZE, undefined, start);
-        continue;
-      }
-      const stopped = this.scanNormal(data2, index, end, base);
-      if (this.stop === STOP_END) {
-        index = end;
-        break;
-      }
-      if (this.stop === STOP_BAD) {
-        this.write(data2.subarray(fed, stopped), base + fed);
-        this.failure ??= invalid3();
-        return;
-      }
-      const quote = this.stringStart - base;
-      if (quote >= fed)
-        this.write(data2.subarray(fed, quote + 1), base + fed);
-      if (this.failure)
-        return;
-      this.tokenizer = undefined;
-      this.skipping = true;
-      fed = stopped;
-      index = stopped;
-    }
-    if (!this.skipping && fed < end && !this.failure)
-      this.write(data2.subarray(fed, end), base + fed);
-  }
-  write(piece, offset) {
-    if (piece.length === 0)
+    if (outcome.kind === "unreadable") {
+      report(NOTE_FINDINGS.unreadable, "gap", place.fileIndex, offset);
       return;
-    const tokenizer = this.tokenizer ?? this.startTokenizer(offset);
-    try {
-      tokenizer.write(piece);
-    } catch (error2) {
-      this.failure ??= error2 instanceof JsonStreamError ? error2 : invalid3();
     }
-  }
-  scanNormal(data2, from, to, at) {
-    const max2 = this.maxItemBytes;
-    let lex = this.lex;
-    let hexLeft = this.hexLeft;
-    let utfLeft = this.utfLeft;
-    let runStart = this.runStart;
-    let index = from;
-    this.stop = STOP_END;
-    for (;index < to; index += 1) {
-      const byte = data2[index];
-      if (lex === LEX_OUT) {
-        if (byte === 34) {
-          lex = LEX_STRING;
-          this.stringStart = at + index;
-          this.stringLimit = at + index + max2;
-          runStart = -1;
-          utfLeft = 0;
-        } else if (isSpaceOrStructure(byte)) {
-          runStart = -1;
-        } else if (runStart < 0) {
-          runStart = at + index;
-        } else if (at + index + 1 - runStart > max2) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        continue;
-      }
-      if (at + index === this.stringLimit) {
-        this.stop = STOP_OVERSIZE;
-        break;
-      }
-      if (utfLeft > 0) {
-        if (byte < this.utfLow || byte > this.utfHigh) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        utfLeft -= 1;
-        this.utfLow = 128;
-        this.utfHigh = 191;
-        continue;
-      }
-      if (lex === LEX_STRING) {
-        if (byte === 34) {
-          lex = LEX_OUT;
-        } else if (byte === 92) {
-          lex = LEX_ESCAPE;
-        } else if (byte < 32) {
-          this.stop = STOP_BAD;
-          break;
-        } else if (byte >= 128) {
-          utfLeft = this.utfLead(byte);
-          if (utfLeft === 0) {
-            this.stop = STOP_BAD;
-            break;
-          }
-        }
-      } else if (lex === LEX_ESCAPE) {
-        if (byte === 117) {
-          lex = LEX_HEX;
-          hexLeft = 4;
-        } else if (isEscapeByte(byte)) {
-          lex = LEX_STRING;
-        } else {
-          this.stop = STOP_BAD;
-          break;
-        }
-      } else {
-        if (!isHexDigit(byte)) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        hexLeft -= 1;
-        if (hexLeft === 0)
-          lex = LEX_STRING;
-      }
+    if (outcome.kind === "unsupported") {
+      report(NOTE_FINDINGS.unsupported, "gap", place.fileIndex, offset);
+      return;
     }
-    this.lex = lex;
-    this.hexLeft = hexLeft;
-    this.utfLeft = utfLeft;
-    this.runStart = runStart;
-    return index;
-  }
-  utfLead(byte) {
-    this.utfLow = 128;
-    this.utfHigh = 191;
-    if (byte >= 194 && byte <= 223)
-      return 1;
-    if (byte >= 224 && byte <= 239) {
-      if (byte === 224)
-        this.utfLow = 160;
-      else if (byte === 237)
-        this.utfHigh = 159;
-      return 2;
+    const built = buildNoteItem(input, outcome.note, place, savedAt);
+    segment.items.push(built.item);
+    if (outcome.note.unsupported)
+      report(NOTE_FINDINGS.unsupported, "gap", place.fileIndex, offset);
+    if (built.truncated || cut)
+      report(ARCHIVE_COMMON_FINDINGS.itemTruncated, "gap", place.fileIndex, offset);
+    if (built.dateAssumed)
+      report(NOTE_FINDINGS.dateAssumed, "gap", place.fileIndex, offset);
+  };
+  const plainUnit = (reader) => ({
+    member: -1,
+    posOf: (offset) => offset,
+    progressOf: (offset) => offset,
+    head: () => reader.readAt(0, ROOT_PEEK_BYTES),
+    open: (offset) => fileByteSource(reader, { start: offset }),
+    mark: () => {
+      return;
+    },
+    checkpoint: () => ({}),
+    end: () => {
+      return;
+    },
+    close: () => {
+      return;
     }
-    if (byte >= 240 && byte <= 244) {
-      if (byte === 240)
-        this.utfLow = 144;
-      else if (byte === 244)
-        this.utfHigh = 143;
-      return 3;
-    }
-    return 0;
-  }
-  skipScan(data2, from, to) {
-    let lex = this.lex;
-    let hexLeft = this.hexLeft;
-    let utfLeft = this.utfLeft;
-    let index = from;
-    this.stop = STOP_END;
-    for (;index < to; index += 1) {
-      const byte = data2[index];
-      if (utfLeft > 0) {
-        if (byte < this.utfLow || byte > this.utfHigh) {
-          this.stop = STOP_BAD;
-          break;
+  });
+  const zipUnit = (archive, entry, fileIndex, segment) => {
+    let reader;
+    let tracked;
+    const key2 = { archiveId: input.archiveId, manifestTag: tag, fileIndex, memberIndex: entry.index };
+    return {
+      member: entry.index,
+      posOf: (offset) => zipFindingOffset(entry.index, offset),
+      progressOf: (offset) => entry.localHeaderOffset + Math.floor(entry.compressedSize * Math.min(1, offset / Math.max(1, entry.uncompressedSize))),
+      head: () => readZipMemberHead(archive, entry, ROOT_PEEK_BYTES),
+      open(offset, crc) {
+        let startCrc = offset === 0 ? 0 : crc;
+        if (startCrc === undefined && entry.method === 0) {
+          const replay = recoverZipMemberCrc(archive, entry, offset, input.shouldContinue);
+          if (replay.kind === "interrupted")
+            throw new ReadInterrupted;
+          segment.bytes += offset;
+          if (replay.kind === "crc")
+            startCrc = replay.crc;
         }
-        utfLeft -= 1;
-        this.utfLow = 128;
-        this.utfHigh = 191;
-        continue;
-      }
-      if (lex === LEX_STRING) {
-        if (byte === 34) {
-          lex = LEX_OUT;
-          this.stop = STOP_CLOSED;
-          break;
-        }
-        if (byte === 92) {
-          lex = LEX_ESCAPE;
-        } else if (byte < 32) {
-          this.stop = STOP_BAD;
-          break;
-        } else if (byte >= 128) {
-          utfLeft = this.utfLead(byte);
-          if (utfLeft === 0) {
-            this.stop = STOP_BAD;
-            break;
-          }
-        }
-      } else if (lex === LEX_ESCAPE) {
-        if (byte === 117) {
-          lex = LEX_HEX;
-          hexLeft = 4;
-        } else if (isEscapeByte(byte)) {
-          lex = LEX_STRING;
-        } else {
-          this.stop = STOP_BAD;
-          break;
-        }
-      } else {
-        if (!isHexDigit(byte)) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        hexLeft -= 1;
-        if (hexLeft === 0)
-          lex = LEX_STRING;
-      }
-    }
-    this.lex = lex;
-    this.hexLeft = hexLeft;
-    this.utfLeft = utfLeft;
-    this.runStart = -1;
-    return index;
-  }
-  finish() {
-    try {
-      if (this.lex !== LEX_OUT || this.skipping) {
-        throw new JsonStreamError("truncated", "This file ends inside a piece of text.");
-      }
-      if (this.tokenizer) {
+        const continuation = offset > 0 ? archiveContinuations.take(key2, offset) : undefined;
+        reader = ZipMemberReader.open(archive, entry, {
+          start: offset,
+          ...startCrc !== undefined && offset > 0 ? { startCrc } : {},
+          ...continuation ? { continuation } : {}
+        });
+        tracked = trackBoundaries(reader, offset === 0 || entry.method === 0 ? startCrc : undefined);
+        return tracked;
+      },
+      mark: (offset) => tracked?.markBoundary(offset),
+      checkpoint(endOffset) {
+        const member = reader;
+        if (!member)
+          return {};
+        let crc = tracked?.boundary === endOffset ? tracked.crcAtBoundary() : undefined;
         try {
-          this.tokenizer.end();
-        } catch (error2) {
-          throw this.failure ?? (error2 instanceof JsonStreamError ? error2 : invalid3());
+          const back = member.position - endOffset;
+          if (back > 0)
+            member.unread(back);
+          crc = member.crc32 ?? crc;
+          const continuation = member.suspend();
+          if (continuation)
+            archiveContinuations.put(key2, continuation);
+        } catch {
+          member.close();
         }
-        if (this.failure)
-          throw this.failure;
-      }
-      if (this.capture || this.pending || this.levels.length > 0 || this.phase === "first" || this.phase === "next" || this.phase === "colon" || this.phase === "value") {
-        throw new JsonStreamError("truncated", "This file ends before its last item does.");
-      }
-      if (this.phase === "root")
-        throw new JsonStreamError("empty", "This file holds no JSON.");
-    } catch (error2) {
-      this.failure ??= error2 instanceof JsonStreamError ? error2 : invalid3();
-    }
-  }
-  deliver(type, value2, start) {
-    try {
-      this.handle(type, value2, start);
-    } catch (error2) {
-      this.failure = error2 instanceof JsonStreamError ? error2 : invalid3();
-      throw this.failure;
-    }
-  }
-  handle(type, value2, start) {
-    if (this.resuming) {
-      this.resuming = false;
-      const top2 = this.levels[this.levels.length - 1];
-      const fits = type === tokenType_default.COMMA || (top2.kind === "object" ? type === tokenType_default.RIGHT_BRACE : type === tokenType_default.RIGHT_BRACKET);
-      if (!fits)
-        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
-    }
-    if (this.capture) {
-      this.captureToken(this.capture, type, value2, start);
-      return;
-    }
-    const top = this.levels[this.levels.length - 1];
-    const role = classify(top ? top.kind : "root", this.phase, type);
-    switch (role) {
-      case "key": {
-        const key2 = value2;
-        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
-          throw invalid3();
-        this.levels[this.levels.length - 1] = { kind: "object", pointer: key2, frame: top.frame };
-        this.phase = "colon";
-        return;
-      }
-      case "colon":
-        this.phase = "value";
-        return;
-      case "comma":
-        this.flush(start);
-        this.phase = "next";
-        return;
-      case "close":
-        this.flush(start);
-        this.levels.pop();
-        this.merged = undefined;
-        this.phase = this.levels.length === 0 ? "done" : "after";
-        return;
-      case "value":
-        this.beginValue(type, value2, start);
-        return;
-    }
-  }
-  beginValue(type, value2, start) {
-    let top = this.levels[this.levels.length - 1];
-    if (top && top.kind === "array") {
-      top = { kind: "array", pointer: typeof top.pointer === "number" ? top.pointer + 1 : 0, frame: top.frame };
-      this.levels[this.levels.length - 1] = top;
-    }
-    if (top) {
-      const index = this.matchingPath();
-      if (index >= 0) {
-        const path = this.levels.map((level) => level.pointer);
-        const capture = {
-          start,
-          pathIndex: index,
-          path,
-          frame: this.mergedFrame(),
-          oversize: false,
-          depth: 0,
-          build: [],
-          result: undefined
-        };
-        this.capture = capture;
-        this.captureToken(capture, type, value2, start);
-        return;
-      }
-    }
-    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
-      if (this.levels.length >= JSON_STREAM_MAX_DEPTH)
-        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
-      this.levels.push({
-        kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
-        pointer: undefined,
-        frame: EMPTY_FRAME
-      });
-      this.merged = undefined;
-      this.phase = "first";
-      return;
-    }
-    if (top && top.kind === "object" && type !== OVERSIZE)
-      this.recordFrame(top, value2);
-    this.phase = top ? "after" : "done";
-  }
-  recordFrame(top, value2) {
-    if (typeof value2 === "string" && value2.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
-      return;
-    const key2 = top.pointer;
-    if (!Object.prototype.hasOwnProperty.call(top.frame, key2) && Object.keys(top.frame).length >= JSON_STREAM_MAX_FRAME_KEYS)
-      return;
-    const frame = copyFrame(top.frame);
-    setOwn(frame, key2, value2);
-    this.levels[this.levels.length - 1] = { kind: "object", pointer: top.pointer, frame };
-    this.merged = undefined;
-  }
-  matchingPath() {
-    const depth2 = this.levels.length - 1;
-    for (let index = 0;index < this.itemPaths.length; index += 1) {
-      const path = this.itemPaths[index];
-      if (path.length !== depth2)
-        continue;
-      let all = true;
-      for (let at = 0;at < depth2; at += 1) {
-        const wanted = path[at];
-        if (wanted !== JSON_STREAM_ANY && wanted !== this.levels[at].pointer) {
-          all = false;
-          break;
-        }
-      }
-      if (all)
-        return index;
-    }
-    return -1;
-  }
-  mergedFrame() {
-    if (this.merged)
-      return this.merged;
-    const out = {};
-    for (const level of this.levels) {
-      for (const key2 of Object.keys(level.frame))
-        setOwn(out, key2, level.frame[key2]);
-    }
-    this.merged = Object.keys(out).length === 0 ? EMPTY_FRAME : out;
-    return this.merged;
-  }
-  captureToken(capture, type, value2, start) {
-    if (!capture.oversize && (type === OVERSIZE || start - capture.start > this.maxItemBytes)) {
-      capture.oversize = true;
-      capture.result = undefined;
-      for (const level of capture.build)
-        level.value = undefined;
-    }
-    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
-      capture.depth += 1;
-      if (capture.depth > JSON_STREAM_MAX_DEPTH)
-        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
-    } else if (type === tokenType_default.RIGHT_BRACE || type === tokenType_default.RIGHT_BRACKET) {
-      capture.depth -= 1;
-      if (capture.depth < 0)
-        throw invalid3();
-    }
-    this.build(capture, capture.build, type, value2);
-    if (capture.depth === 0) {
-      this.capture = undefined;
-      this.pending = capture;
-      this.phase = "after";
-    }
-  }
-  build(capture, stack, type, value2) {
-    const top = stack[stack.length - 1];
-    const role = classify(top ? top.kind : "root", top ? top.phase : "root", type);
-    const place = (placed) => {
-      const parent = stack[stack.length - 1];
-      if (!parent) {
-        capture.result = capture.oversize ? undefined : placed;
-        return;
-      }
-      if (!capture.oversize) {
-        if (parent.kind === "array")
-          parent.value.push(placed);
-        else
-          setOwn(parent.value, parent.key, placed);
-      }
-      parent.phase = "after";
+        return crc !== undefined ? { crc } : {};
+      },
+      end: () => reader?.end ?? MEMBER_NOT_CHECKED,
+      close: () => reader?.close()
     };
-    switch (role) {
-      case "key": {
-        const key2 = value2;
-        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
-          throw invalid3();
-        top.key = key2;
-        top.phase = "colon";
-        return;
+  };
+  const watched = (inner) => ({
+    get position() {
+      return inner.position;
+    },
+    get crc32() {
+      return inner.crc32;
+    },
+    next() {
+      if (!input.shouldContinue())
+        throw new ReadInterrupted;
+      return inner.next();
+    },
+    unread: (count) => inner.unread(count)
+  });
+  const listIsThere = (unit, paths, relPath) => {
+    for (const path of paths) {
+      if (path.length === 0 || path.some((part) => typeof part !== "string" || part === JSON_STREAM_ANY))
+        return true;
+      let bytes;
+      try {
+        bytes = watched(unit.open(0, undefined));
+      } catch (error2) {
+        if (error2 instanceof ZipMemberError)
+          return true;
+        throw stoppedFrom2(error2, relPath);
       }
-      case "colon":
-        top.phase = "value";
-        return;
-      case "comma":
-        top.phase = "next";
-        return;
-      case "close": {
-        const closed = stack.pop();
-        place(closed.value);
-        return;
-      }
-      case "value":
-        if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
-          stack.push({
-            kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
-            phase: "first",
-            key: undefined,
-            value: capture.oversize ? undefined : type === tokenType_default.LEFT_BRACE ? {} : []
-          });
-        } else {
-          place(value2);
+      let found = false;
+      try {
+        const scan = new JsonStreamReader(bytes, { itemPaths: [path.slice(0, -1)], maxItemBytes: LIST_PEEK_BYTES });
+        for (;; ) {
+          const event = scan.next();
+          if (!event)
+            break;
+          if (event.path.length === path.length && event.path.every((part, at) => part === path[at])) {
+            found = event.kind === "item" && Array.isArray(event.value);
+            break;
+          }
         }
-        return;
+      } catch (error2) {
+        unit.close();
+        if (error2 instanceof ReadInterrupted)
+          return "interrupted";
+        if (error2 instanceof ArchiveImportStoppedError)
+          throw error2;
+        if (error2 instanceof ZipMemberError || error2 instanceof JsonStreamError)
+          return true;
+        throw stoppedFrom2(error2, relPath);
+      }
+      unit.close();
+      if (found)
+        return true;
     }
-  }
-  flush(delimiterAt) {
-    const capture = this.pending;
-    if (!capture)
-      return;
-    this.pending = undefined;
-    const oversize = capture.oversize || delimiterAt - capture.start > this.maxItemBytes;
-    this.queue.push({
-      kind: oversize ? "oversize" : "item",
-      path: capture.path,
-      pathIndex: capture.pathIndex,
-      value: oversize ? undefined : capture.result,
-      frame: capture.frame,
-      start: capture.start,
-      end: delimiterAt,
-      resume: { offset: delimiterAt, levels: this.levels.slice() }
-    });
-  }
-}
-function concat(first, second) {
-  const out = new Uint8Array(first.length + second.length);
-  out.set(first);
-  out.set(second, first.length);
-  return out;
-}
-function archiveStopFromReaderError(error2, relPath) {
-  if (error2 instanceof JsonStreamError) {
-    return error2.code === "resume_invalid" ? new ArchiveImportStoppedError("resume_point_invalid", "Nothing starts where this import was to resume.", relPath) : new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
-  }
-  return archiveStopFromScopeError(error2, relPath);
-}
-var JSON_STREAM_ANY = "*", JSON_STREAM_MAX_DEPTH = 512, JSON_STREAM_MAX_KEY_CHARS = 1024, JSON_STREAM_MAX_FRAME_VALUE_CHARS = 1024, JSON_STREAM_MAX_FRAME_KEYS = 64, JSON_STREAM_FEED_SLICE_BYTES = 1024, JSON_STREAM_MAX_QUEUED_EVENTS = 64, JsonStreamError, OVERSIZE = -1, LEX_OUT = 0, LEX_STRING = 1, LEX_ESCAPE = 2, LEX_HEX = 3, STOP_END = 0, STOP_OVERSIZE = 1, STOP_BAD = 2, STOP_CLOSED = 3, EMPTY_FRAME, MAX_SAFE_DIGITS, ExactNumberTokenizer;
-var init_json_stream = __esm(() => {
-  init_tokenizer();
-  init_tokenType();
-  init_archive_formats();
-  init_stop_errors();
-  JsonStreamError = class JsonStreamError extends Error {
-    code;
-    constructor(code, message2) {
-      super(message2);
-      this.name = "JsonStreamError";
-      this.code = code;
+    return false;
+  };
+  const readJsonUnit = (unit, unitCursor, fileIndex, relPath, limits, segment, savedAt) => {
+    if (source.kind !== "json")
+      return "ended";
+    const damaged = (offset) => report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, unit.posOf(offset));
+    const notRead = () => report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", fileIndex, unit.posOf(0));
+    let root;
+    if (unitCursor.resume) {
+      root = unitCursor.resume.levels[0]?.kind;
+    } else {
+      try {
+        root = rootKindOf(unit.head());
+      } catch (error2) {
+        throw stoppedFrom2(error2, relPath);
+      }
+      if (!root) {
+        damaged(0);
+        return "ended";
+      }
+    }
+    const itemPaths = root ? source.itemPaths(root) : undefined;
+    if (!itemPaths) {
+      notRead();
+      return "ended";
+    }
+    let bytes;
+    try {
+      bytes = watched(unit.open(unitCursor.offset, unitCursor.crc));
+    } catch (error2) {
+      if (error2 instanceof ReadInterrupted) {
+        segment.stopped = true;
+        segment.next = unitCursor;
+        segment.position = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+        return "paused";
+      }
+      if (error2 instanceof ZipMemberError) {
+        if (unitCursor.offset > 0)
+          throw invalid4("Nothing starts where this import was to resume.");
+        damaged(0);
+        return "ended";
+      }
+      throw stoppedFrom2(error2, relPath);
+    }
+    let reader;
+    try {
+      reader = new JsonStreamReader(bytes, {
+        itemPaths,
+        maxItemBytes: NOTE_MAX_RECORD_BYTES,
+        ...unitCursor.resume ? { resume: unitCursor.resume } : {}
+      });
+    } catch (error2) {
+      unit.close();
+      throw stoppedFrom2(error2, relPath);
+    }
+    let last;
+    const pause = () => {
+      if (!last) {
+        unit.close();
+        segment.next = unitCursor;
+        segment.position = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+        return "paused";
+      }
+      segment.bytes += last.end - unitCursor.offset;
+      const { crc } = unit.checkpoint(last.end);
+      segment.next = {
+        file: fileIndex,
+        member: unit.member,
+        offset: last.end,
+        ...crc !== undefined ? { crc } : {},
+        resume: last.resume,
+        done: false
+      };
+      segment.position = { fileIndex, offset: unit.progressOf(last.end) };
+      return "paused";
+    };
+    for (;; ) {
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        return pause();
+      }
+      if (segment.items.length >= limits.items || segment.consumed >= limits.units)
+        return pause();
+      const spent = segment.bytes + (last ? last.end - unitCursor.offset : 0);
+      if (spent >= limits.bytes && (last !== undefined || segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        return pause();
+      }
+      let event;
+      try {
+        event = reader.next();
+      } catch (error2) {
+        if (error2 instanceof ReadInterrupted) {
+          segment.stopped = true;
+          return pause();
+        }
+        unit.close();
+        if (error2 instanceof ArchiveImportStoppedError)
+          throw error2;
+        if (error2 instanceof ZipMemberError || error2 instanceof JsonStreamError && error2.code !== "resume_invalid") {
+          segment.bytes += (last?.end ?? unitCursor.offset) - unitCursor.offset;
+          damaged(last?.end ?? unitCursor.offset);
+          return "ended";
+        }
+        throw stoppedFrom2(error2, relPath);
+      }
+      if (!event) {
+        unit.close();
+        const readTo = Math.max(last?.end ?? unitCursor.offset, reader.position);
+        const end = unit.end();
+        if (end && (end.crcOk !== true || !end.sizeOk)) {
+          segment.bytes += readTo - unitCursor.offset;
+          damaged(end.bytes);
+          return "ended";
+        }
+        if (!last && !unitCursor.resume) {
+          const there = listIsThere(unit, itemPaths, relPath);
+          if (there === "interrupted") {
+            segment.stopped = true;
+            return pause();
+          }
+          if (!there)
+            notRead();
+        }
+        segment.bytes += readTo - unitCursor.offset;
+        return "ended";
+      }
+      last = event;
+      unit.mark(event.end);
+      const offset = unit.posOf(event.start);
+      if (event.resume.levels[event.resume.levels.length - 1]?.kind !== "array") {
+        unit.close();
+        segment.bytes += event.end - unitCursor.offset;
+        notRead();
+        return "ended";
+      }
+      if (event.kind === "oversize") {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.tooLarge, "gap", fileIndex, offset);
+        continue;
+      }
+      const index = event.path[event.path.length - 1];
+      const place = { fileIndex, member: unit.member, ordinal: typeof index === "number" ? index : event.start };
+      takeNote(segment, source.parse(event.value), place, offset, savedAt);
     }
   };
-  EMPTY_FRAME = Object.freeze({});
-  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
-  ExactNumberTokenizer = class ExactNumberTokenizer extends Tokenizer2 {
-    parseNumber(numberStr) {
-      const value2 = Number(numberStr);
-      if (Number.isSafeInteger(value2) || !Number.isFinite(value2))
-        return value2;
-      const digits = numberStr.startsWith("-") ? numberStr.slice(1) : numberStr;
-      let wholeNumber2 = digits.length > 0;
-      for (let index = 0;index < digits.length; index += 1) {
-        const code = digits.charCodeAt(index);
-        if (code < 48 || code > 57) {
-          wholeNumber2 = false;
+  const readMarkdownMember = (archive, entry) => {
+    let member;
+    try {
+      member = ZipMemberReader.open(archive, entry);
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError)
+        return;
+      throw error2;
+    }
+    const parts = [];
+    let kept = 0;
+    let cut = false;
+    try {
+      for (;; ) {
+        if (!input.shouldContinue())
+          return "stopped";
+        const chunk = member.next();
+        if (!chunk)
           break;
+        if (kept < MARKDOWN_MAX_BYTES) {
+          const take = chunk.subarray(0, MARKDOWN_MAX_BYTES - kept);
+          parts.push(take);
+          kept += take.length;
+          if (take.length < chunk.length)
+            cut = true;
+        } else {
+          cut = true;
         }
       }
-      if (!wholeNumber2)
-        return value2;
-      if (digits.length < MAX_SAFE_DIGITS.length)
-        return value2;
-      return numberStr;
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError)
+        return;
+      throw error2;
+    } finally {
+      member.close();
+    }
+    const joined = new Uint8Array(kept);
+    let at = 0;
+    for (const part of parts) {
+      joined.set(part, at);
+      at += part.length;
+    }
+    return { text: new TextDecoder("utf-8").decode(joined), cut, end: member.end };
+  };
+  const readMarkdownZip = (archive, fileIndex, cursor, limits, segment, savedAt) => {
+    if (source.kind !== "markdown")
+      return;
+    const from = Math.max(0, cursor.member);
+    for (const entry of archive.entries()) {
+      if (entry.index < from || entry.isDirectory || isJunkArchiveMember(entry.name) || !source.isNote(entry.name))
+        continue;
+      const here = { file: fileIndex, member: entry.index, offset: 0, done: false };
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        segment.next = here;
+        return;
+      }
+      if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
+      if (segment.bytes + entry.uncompressedSize > limits.bytes && (segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
+      const offset = zipFindingOffset(entry.index, 0);
+      const fileName = entry.name.slice(entry.name.lastIndexOf("/") + 1);
+      const read = readMarkdownMember(archive, entry);
+      if (read === "stopped") {
+        segment.stopped = true;
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
+      segment.bytes += entry.uncompressedSize;
+      if (!read) {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.unreadable, "gap", fileIndex, offset);
+      } else {
+        const place = { fileIndex, member: entry.index, ordinal: entry.index };
+        takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt, read.cut);
+        if (!read.end || read.end.crcOk !== true || !read.end.sizeOk) {
+          report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, zipFindingOffset(entry.index, entry.uncompressedSize));
+        }
+      }
+      segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+      segment.position = { fileIndex, offset: entry.localHeaderOffset };
+    }
+    segment.next = startOfFile(fileIndex + 1);
+    finishZip(archive, fileIndex);
+  };
+  const memberAccepted = (archive, entry, segment) => {
+    if (source.kind !== "json")
+      return false;
+    const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
+    segment.bytes += head?.length ?? 0;
+    if (!head || head.length === 0)
+      return true;
+    const budget = recordProbeBudget();
+    const look = (read, none2) => {
+      let member;
+      try {
+        member = ZipMemberReader.open(archive, entry);
+      } catch (error2) {
+        if (error2 instanceof ZipMemberError)
+          return none2;
+        throw error2;
+      }
+      try {
+        return read(watched(member));
+      } catch (error2) {
+        if (error2 instanceof ZipMemberError)
+          return none2;
+        throw error2;
+      } finally {
+        segment.bytes += member.position;
+        member.close();
+      }
+    };
+    const firstRecordKeys = (list, enough) => look((bytes) => probeFirstRecordKeys(bytes, list, enough, budget), undefined);
+    const listIsEmpty = (list) => look((bytes) => probeListIsEmpty(bytes, list, budget), false);
+    try {
+      return source.accepts({ head, firstRecordKeys, listIsEmpty });
+    } catch (error2) {
+      if (error2 instanceof ReadInterrupted)
+        return "interrupted";
+      throw error2;
+    }
+  };
+  const readJsonZip = (archive, file, fileIndex, cursor, limits, segment, savedAt) => {
+    if (source.kind !== "json")
+      return;
+    const from = Math.max(0, cursor.member);
+    let foundResume = cursor.offset === 0;
+    for (const entry of archive.entries()) {
+      if (entry.index < from || entry.isDirectory || isJunkArchiveMember(entry.name) || !/\.json$/i.test(entry.name))
+        continue;
+      const resuming = entry.index === cursor.member && cursor.offset > 0;
+      if (resuming)
+        foundResume = true;
+      const unitCursor = resuming ? cursor : { file: fileIndex, member: entry.index, offset: 0, done: false };
+      if (!resuming) {
+        if (!input.shouldContinue()) {
+          segment.stopped = true;
+          segment.next = unitCursor;
+          return;
+        }
+        if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+          segment.next = unitCursor;
+          segment.position = { fileIndex, offset: entry.localHeaderOffset };
+          return;
+        }
+        if (segment.bytes >= limits.bytes && (segment.consumed > 0 || limits.started)) {
+          segment.budgetHit = true;
+          segment.next = unitCursor;
+          segment.position = { fileIndex, offset: entry.localHeaderOffset };
+          return;
+        }
+        const accepted = memberAccepted(archive, entry, segment);
+        if (accepted === "interrupted") {
+          segment.stopped = true;
+          segment.next = unitCursor;
+          return;
+        }
+        if (!accepted) {
+          segment.consumed += 1;
+          report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", fileIndex, zipFindingOffset(entry.index, 0));
+          segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+          segment.position = { fileIndex, offset: entry.localHeaderOffset + entry.compressedSize };
+          continue;
+        }
+      }
+      const unit = zipUnit(archive, entry, fileIndex, segment);
+      const result = readJsonUnit(unit, unitCursor, fileIndex, file.relPath, limits, segment, savedAt);
+      if (result === "paused")
+        return;
+      segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+      segment.position = { fileIndex, offset: entry.localHeaderOffset + entry.compressedSize };
+    }
+    if (!foundResume)
+      throw invalid4("Nothing starts where this import was to resume.");
+    segment.next = startOfFile(fileIndex + 1);
+    finishZip(archive, fileIndex);
+  };
+  const finishZip = (archive, fileIndex) => {
+    let other = 0;
+    for (const entry of archive.entries()) {
+      if (entry.isDirectory || isJunkArchiveMember(entry.name))
+        continue;
+      const read = source.kind === "json" ? /\.json$/i.test(entry.name) : source.isNote(entry.name);
+      if (!read)
+        other += 1;
+    }
+    if (other > 0)
+      report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", fileIndex, zipFindingOffset(archive.entryCount, 0), other);
+  };
+  const readSegment = (cursor, limits) => {
+    const file = input.files[cursor.file];
+    const segment = { items: [], next: cursor, consumed: 0, bytes: 0, stopped: false, budgetHit: false };
+    let reader;
+    try {
+      reader = input.root.openFile(file.relPath, { expected: file.version });
+    } catch (error2) {
+      throw stoppedFrom2(error2, file.relPath);
+    }
+    try {
+      const savedAt = new Date(Number.isFinite(file.version.mtimeMs) ? file.version.mtimeMs : 0).toISOString();
+      let head;
+      try {
+        head = reader.readAt(0, 4);
+      } catch (error2) {
+        throw stoppedFrom2(error2, file.relPath);
+      }
+      if (ZipArchive.looksLikeZip(head)) {
+        let archive;
+        try {
+          archive = ZipArchive.open(stoppableZipSource(reader, file.relPath));
+        } catch (error2) {
+          if (!(error2 instanceof ZipFormatError))
+            throw stoppedFrom2(error2, file.relPath);
+          report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+          segment.next = startOfFile(cursor.file + 1);
+          return segment;
+        }
+        try {
+          if (source.kind === "json")
+            readJsonZip(archive, file, cursor.file, cursor, limits, segment, savedAt);
+          else
+            readMarkdownZip(archive, cursor.file, cursor, limits, segment, savedAt);
+        } catch (error2) {
+          if (error2 instanceof ZipFormatError) {
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, zipFindingOffset(archive.entryCount, 0));
+            segment.next = startOfFile(cursor.file + 1);
+          } else {
+            throw stoppedFrom2(error2, file.relPath);
+          }
+        }
+      } else if (source.kind === "json") {
+        const result = readJsonUnit(plainUnit(reader), cursor, cursor.file, file.relPath, limits, segment, savedAt);
+        if (result === "ended")
+          segment.next = startOfFile(cursor.file + 1);
+      } else {
+        report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+        segment.next = startOfFile(cursor.file + 1);
+      }
+      try {
+        reader.assertCurrent();
+      } catch (error2) {
+        throw stoppedFrom2(error2, file.relPath);
+      }
+      return segment;
+    } finally {
+      reader.close();
+    }
+  };
+  return {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        let cursor = decode3(options?.cursor);
+        if (cursor.done) {
+          yield { items: [], nextCursor: encode3(DONE2), done: true };
+          return;
+        }
+        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
+        let emitted = 0;
+        let bytesRead = 0;
+        let page2 = [];
+        let units = 0;
+        let pending = false;
+        let position;
+        for (;; ) {
+          const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page2.length);
+          const segment = readSegment(cursor, {
+            items: room,
+            units: Math.max(1, NOTES_MAX_UNITS_PER_PAGE - units),
+            bytes: Math.max(1, byteBudget - bytesRead),
+            started: bytesRead > 0 || emitted > 0 || page2.length > 0 || units > 0
+          });
+          page2.push(...segment.items);
+          cursor = segment.next;
+          units += segment.consumed;
+          bytesRead += segment.bytes;
+          if (segment.consumed > 0 || segment.items.length > 0)
+            pending = true;
+          if (segment.position)
+            position = segment.position;
+          if (segment.stopped) {
+            if (pending) {
+              if (position)
+                input.reportPosition?.(position);
+              yield { items: page2, nextCursor: encode3(cursor), done: false };
+            }
+            return;
+          }
+          if (cursor.done) {
+            yield { items: page2, nextCursor: encode3(DONE2), done: true };
+            return;
+          }
+          const spentBudget = segment.budgetHit || bytesRead >= byteBudget;
+          const full = page2.length >= Math.min(pageSizeDefault, limit - emitted);
+          if (full || spentBudget || units >= NOTES_MAX_UNITS_PER_PAGE) {
+            if (position)
+              input.reportPosition?.(position);
+            yield { items: page2, nextCursor: encode3(cursor), done: false };
+            emitted += page2.length;
+            page2 = [];
+            units = 0;
+            pending = false;
+            if (emitted >= limit || spentBudget)
+              return;
+          }
+        }
+      }();
+    },
+    async fetchItem() {
+      throw new Error("An imported note is read only while its archive is listed.");
+    },
+    classificationSignals(item) {
+      return noteClassificationSignals(item);
+    }
+  };
+}
+var NOTES_DEFAULT_PAGE_SIZE = 100, NOTES_DEFAULT_MAX_BYTES_PER_LISTING, NOTES_MAX_UNITS_PER_PAGE = 5000, MARKDOWN_MAX_BYTES, ROOT_PEEK_BYTES = 1024, LIST_PEEK_BYTES, ReadInterrupted, MEMBER_NOT_CHECKED;
+var init_archive = __esm(() => {
+  init_archive_formats();
+  init_byte_source();
+  init_continuation_cache();
+  init_json_stream();
+  init_record_probe();
+  init_resume_crc();
+  init_zip_reader();
+  init_note();
+  NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
+  LIST_PEEK_BYTES = 64 * 1024;
+  ReadInterrupted = class ReadInterrupted extends Error {
+  };
+  MEMBER_NOT_CHECKED = Object.freeze({ bytes: 0, sizeOk: false, crcOk: undefined });
+});
+
+// src/workers/archive-import/reflect/markdown.ts
+function unquote2(value2) {
+  const text3 = value2.trim();
+  if (text3.length >= 2 && (text3.startsWith('"') && text3.endsWith('"') || text3.startsWith("'") && text3.endsWith("'"))) {
+    return text3.slice(1, -1);
+  }
+  return text3;
+}
+function splitFrontMatter(text3) {
+  const plain = text3.charCodeAt(0) === 65279 ? text3.slice(1) : text3;
+  const lines = plain.split(/\r?\n/);
+  const whole = { meta: new Map, body: plain };
+  if (lines[0]?.trim() !== "---")
+    return whole;
+  let close = -1;
+  for (let index = 1;index < lines.length && index <= MAX_FRONT_MATTER_LINES; index += 1) {
+    const line2 = lines[index].trim();
+    if (line2 === "---" || line2 === "...") {
+      close = index;
+      break;
+    }
+  }
+  if (close < 0)
+    return whole;
+  const meta2 = new Map;
+  let listKey;
+  for (const line2 of lines.slice(1, close)) {
+    if (line2.trim() === "" || /^\s*#/.test(line2))
+      continue;
+    const item = /^\s*-\s+(.*)$/.exec(line2);
+    if (item && listKey !== undefined) {
+      const current2 = meta2.get(listKey);
+      if (Array.isArray(current2))
+        current2.push(unquote2(item[1]));
+      continue;
+    }
+    const pair = /^([A-Za-z_][\w -]*?)\s*:\s*(.*)$/.exec(line2);
+    if (!pair)
+      return whole;
+    const key2 = pair[1].toLowerCase();
+    const value2 = pair[2].trim();
+    if (value2 === "") {
+      meta2.set(key2, []);
+      listKey = key2;
+    } else {
+      meta2.set(key2, value2);
+      listKey = undefined;
+    }
+  }
+  if (![...meta2.keys()].some((key2) => FRONT_MATTER_KEYS.has(key2)))
+    return whole;
+  return { meta: meta2, body: lines.slice(close + 1).join(`
+`) };
+}
+function metaText(meta2, ...keys) {
+  for (const key2 of keys) {
+    const value2 = meta2.get(key2);
+    if (typeof value2 === "string" && value2.trim() !== "")
+      return unquote2(value2);
+  }
+  return;
+}
+function metaTags(meta2) {
+  const value2 = meta2.get("tags") ?? meta2.get("tag");
+  if (Array.isArray(value2))
+    return cleanTags(value2);
+  if (typeof value2 !== "string")
+    return [];
+  const inner = value2.trim().replace(/^\[/, "").replace(/\]$/, "");
+  return cleanTags(inner.split(",").map(unquote2));
+}
+function parseReflectMarkdown(text3, fileName) {
+  const { meta: meta2, body: rest } = splitFrontMatter(text3);
+  let body = rest.trim();
+  const heading = /^#\s+(.+?)(?:\s+#+)?\s*$/m.exec(body);
+  const baseName = fileName.replace(/\.(?:md|markdown)$/i, "").trim();
+  const fromHeading = body.startsWith("# ") && heading ? heading[1].trim() : undefined;
+  const title = metaText(meta2, "title", "subject") ?? fromHeading ?? baseName;
+  if (fromHeading !== undefined && title === fromHeading) {
+    body = body.slice(body.indexOf(`
+`) < 0 ? body.length : body.indexOf(`
+`) + 1).trim();
+  }
+  if (body === "")
+    return { kind: "empty" };
+  const createdAt = isoTime(metaText(meta2, "created", "created_at", "createdat", "created-at", "date"));
+  const updatedAt = isoTime(metaText(meta2, "updated", "updated_at", "updatedat", "updated-at", "modified"));
+  const titleDate = reflectDailyNoteDate(fileName);
+  return {
+    kind: "note",
+    note: {
+      title,
+      body,
+      tags: metaTags(meta2),
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {}
+    }
+  };
+}
+var MAX_FRONT_MATTER_LINES = 100, FRONT_MATTER_KEYS;
+var init_markdown = __esm(() => {
+  init_archive_formats();
+  init_note();
+  FRONT_MATTER_KEYS = new Set([
+    "created",
+    "created_at",
+    "createdat",
+    "created-at",
+    "date",
+    "id",
+    "modified",
+    "subject",
+    "tag",
+    "tags",
+    "title",
+    "uid",
+    "updated",
+    "updated_at",
+    "updatedat",
+    "updated-at"
+  ]);
+});
+
+// src/workers/archive-import/reflect/parse.ts
+function nodeType(node) {
+  return isRecord10(node) && typeof node.type === "string" ? node.type.toLowerCase().replace(/[_-]/g, "") : "";
+}
+function isBlockEditorNode(node) {
+  return BLOCK_EDITOR_NODE_TYPES.has(nodeType(node));
+}
+function isKnownEditorNode(node) {
+  const type = nodeType(node);
+  return BLOCK_EDITOR_NODE_TYPES.has(type) || INLINE_EDITOR_NODE_TYPES.has(type);
+}
+function isPresent(value2) {
+  return value2 !== undefined && value2 !== null;
+}
+function isEditorNode(value2) {
+  if (!isRecord10(value2) || !isKnownEditorNode(value2))
+    return false;
+  return typeof value2.text === "string" || CHILD_KEYS.some((key2) => isPresent(value2[key2]));
+}
+function isEditorDocument(value2) {
+  if (Array.isArray(value2))
+    return value2.some(isEditorNode);
+  if (!isRecord10(value2))
+    return false;
+  if (isEditorNode(value2))
+    return true;
+  return CHILD_KEYS.some((key2) => {
+    const children = value2[key2];
+    return Array.isArray(children) && children.some(isEditorNode);
+  });
+}
+function flattenEditorNodes(nodes, depth2) {
+  let text3 = "";
+  let unsupported = 0;
+  let previousWasBlock = false;
+  let first = true;
+  for (const node of nodes) {
+    const flat2 = flattenNode(node, depth2 + 1);
+    unsupported += flat2.unsupported;
+    if (!flat2.text)
+      continue;
+    const block = isBlockEditorNode(node);
+    if (!first && (block || previousWasBlock))
+      text3 += `
+`;
+    text3 += flat2.text;
+    previousWasBlock = block;
+    first = false;
+  }
+  return { text: text3, unsupported };
+}
+function flattenNode(node, depth2) {
+  if (typeof node === "string")
+    return { text: node, unsupported: 0 };
+  if (node === null || node === undefined)
+    return NOTHING;
+  if (depth2 > MAX_EDITOR_DEPTH)
+    return { text: "", unsupported: 1 };
+  if (Array.isArray(node))
+    return flattenEditorNodes(node, depth2);
+  if (!isRecord10(node))
+    return { text: "", unsupported: 1 };
+  let unsupported = 0;
+  let ownText = "";
+  if (typeof node.text === "string")
+    ownText = node.text;
+  else if (isPresent(node.text))
+    unsupported += 1;
+  let childText = "";
+  for (const key2 of CHILD_KEYS) {
+    const children = node[key2];
+    if (!isPresent(children))
+      continue;
+    if (!Array.isArray(children)) {
+      unsupported += 1;
+      continue;
+    }
+    const flat2 = flattenEditorNodes(children, depth2);
+    unsupported += flat2.unsupported;
+    childText = childText && flat2.text ? `${childText}
+${flat2.text}` : childText || flat2.text;
+  }
+  const text3 = ownText && childText ? `${ownText}
+${childText}` : ownText || childText;
+  if (text3 === "" && unsupported === 0 && !isKnownEditorNode(node))
+    unsupported = 1;
+  return { text: text3, unsupported };
+}
+function readReflectBody(value2) {
+  if (value2 === undefined || value2 === null)
+    return NOTHING;
+  if (typeof value2 === "string") {
+    const trimmed2 = value2.trim();
+    if (trimmed2.startsWith("{") || trimmed2.startsWith("[")) {
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed2);
+      } catch {
+        return { text: value2, unsupported: 0 };
+      }
+      if (isEditorDocument(parsed))
+        return flattenNode(parsed, 0);
+    }
+    return { text: value2, unsupported: 0 };
+  }
+  if (isEditorDocument(value2))
+    return flattenNode(value2, 0);
+  return { text: "", unsupported: 1 };
+}
+function reflectTags(value2) {
+  const entries = Array.isArray(value2) ? value2 : typeof value2 === "string" ? value2.split(",") : [];
+  const tags = [];
+  for (const entry of entries) {
+    const tag = typeof entry === "string" ? firstString(entry) : isRecord10(entry) ? firstString(entry.name, entry.tag, entry.title) : undefined;
+    if (tag !== undefined)
+      tags.push(tag);
+  }
+  return cleanTags(tags);
+}
+function parseReflectNote(record5) {
+  if (!isRecord10(record5))
+    return { kind: "unreadable" };
+  let body = "";
+  let unsupported = 0;
+  for (const candidate of [record5.content, record5.body, record5.document_json, record5.documentJson]) {
+    const read = readReflectBody(candidate);
+    unsupported += read.unsupported;
+    body = read.text.trim();
+    if (body !== "")
+      break;
+  }
+  if (body === "")
+    return unsupported > 0 ? { kind: "unsupported" } : { kind: "empty" };
+  const key2 = idText(record5.id ?? record5.uid);
+  const createdAt = isoTime(record5.created_at ?? record5.createdAt);
+  const updatedAt = isoTime(record5.updated_at ?? record5.updatedAt);
+  const title = firstString(record5.subject, record5.title) ?? "";
+  const titleDate = reflectDailyNoteDate(title);
+  return {
+    kind: "note",
+    note: {
+      ...key2 !== undefined ? { key: key2 } : {},
+      title,
+      body,
+      tags: reflectTags(record5.tags),
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {},
+      ...unsupported > 0 ? { unsupported } : {}
+    }
+  };
+}
+var MAX_EDITOR_DEPTH = 200, BLOCK_EDITOR_NODE_TYPES, INLINE_EDITOR_NODE_TYPES, CHILD_KEYS, NOTHING;
+var init_parse4 = __esm(() => {
+  init_archive_formats();
+  init_note();
+  BLOCK_EDITOR_NODE_TYPES = new Set([
+    "blockquote",
+    "bulletlist",
+    "checklist",
+    "checklistitem",
+    "codeblock",
+    "doc",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "heading",
+    "horizontalrule",
+    "li",
+    "lic",
+    "listitem",
+    "ol",
+    "orderedlist",
+    "p",
+    "paragraph",
+    "table",
+    "tablecell",
+    "tableheader",
+    "tablerow",
+    "taskitem",
+    "tasklist",
+    "ul"
+  ]);
+  INLINE_EDITOR_NODE_TYPES = new Set(["hardbreak", "text"]);
+  CHILD_KEYS = ["content", "children"];
+  NOTHING = { text: "", unsupported: 0 };
+});
+
+// src/workers/archive-import/reflect/connector.ts
+function createReflectJsonArchiveConnector(input) {
+  return createNoteArchiveConnector(input, REFLECT_JSON_SPEC);
+}
+function createReflectMarkdownArchiveConnector(input) {
+  return createNoteArchiveConnector(input, REFLECT_MARKDOWN_SPEC);
+}
+function registerReflectArchiveConnectors() {
+  registerArchiveFormatConnector("reflect-json", createReflectJsonArchiveConnector);
+  registerArchiveFormatConnector("reflect-markdown", createReflectMarkdownArchiveConnector);
+}
+var REFLECT_JSON_CURSOR_PREFIX = "reflect1:", REFLECT_MARKDOWN_CURSOR_PREFIX = "reflectmd1:", REFLECT_JSON_SPEC, REFLECT_MARKDOWN_SPEC;
+var init_connector7 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_markdown();
+  init_parse4();
+  REFLECT_JSON_SPEC = {
+    cursorPrefix: REFLECT_JSON_CURSOR_PREFIX,
+    source: {
+      kind: "json",
+      itemPaths: (root) => root === "array" ? [[]] : [[REFLECT_NOTES_LIST_KEY]],
+      accepts: acceptsReflectJson,
+      parse: parseReflectNote
+    }
+  };
+  REFLECT_MARKDOWN_SPEC = {
+    cursorPrefix: REFLECT_MARKDOWN_CURSOR_PREFIX,
+    source: {
+      kind: "markdown",
+      isNote: (name) => /\.(?:md|markdown)$/i.test(name),
+      parse: parseReflectMarkdown
+    }
+  };
+});
+
+// src/workers/archive-import/roam/parse.ts
+function roamDailyPageDate(title) {
+  const match = DAILY_PAGE_TITLE.exec(title.trim());
+  if (!match)
+    return;
+  const month = MONTHS4.indexOf(match[1].toLowerCase());
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  if (month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function flattenBlocks(children) {
+  const out = { lines: [], blockCount: 0, created: undefined, edited: undefined, hasText: false, unsupported: 0 };
+  const walk = (nodes, depth2) => {
+    if (nodes === undefined || nodes === null)
+      return;
+    if (!Array.isArray(nodes) || depth2 > MAX_BLOCK_DEPTH) {
+      out.unsupported += 1;
+      return;
+    }
+    for (const node of nodes) {
+      if (!isRecord10(node)) {
+        out.unsupported += 1;
+        continue;
+      }
+      out.blockCount += 1;
+      const hasString = node.string !== undefined && node.string !== null;
+      if (hasString ? typeof node.string !== "string" : !Array.isArray(node.children))
+        out.unsupported += 1;
+      const text3 = typeof node.string === "string" ? node.string.trimEnd() : "";
+      if (text3.trim() !== "") {
+        out.lines.push(`${"  ".repeat(depth2)}- ${text3}`);
+        out.hasText = true;
+      }
+      out.created = earliestIso(out.created, isoTime(node["create-time"]));
+      out.edited = latestIso2(out.edited, isoTime(node["edit-time"]));
+      walk(node.children, depth2 + 1);
+    }
+  };
+  walk(children, 0);
+  return out;
+}
+function parseRoamPage(record5) {
+  if (!isRecord10(record5))
+    return { kind: "unreadable" };
+  const flat2 = flattenBlocks(record5.children);
+  if (!flat2.hasText)
+    return flat2.unsupported > 0 ? { kind: "unsupported" } : { kind: "empty" };
+  const title = typeof record5.title === "string" ? record5.title.trim() : "";
+  const key2 = idText(record5.uid);
+  const createdAt = earliestIso(isoTime(record5["create-time"]), flat2.created);
+  const updatedAt = latestIso2(isoTime(record5["edit-time"]), flat2.edited);
+  const titleDate = roamDailyPageDate(title);
+  return {
+    kind: "note",
+    note: {
+      ...key2 !== undefined ? { key: key2 } : {},
+      title: firstString(title) ?? "",
+      body: flat2.lines.join(`
+`),
+      tags: [],
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {},
+      blockCount: flat2.blockCount,
+      ...flat2.unsupported > 0 ? { unsupported: flat2.unsupported } : {}
+    }
+  };
+}
+var MAX_BLOCK_DEPTH = 256, MONTHS4, DAILY_PAGE_TITLE;
+var init_parse5 = __esm(() => {
+  init_note();
+  MONTHS4 = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  DAILY_PAGE_TITLE = /^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th),?\s+(\d{4})$/;
+});
+
+// src/workers/archive-import/roam/connector.ts
+function createRoamArchiveConnector(input) {
+  return createNoteArchiveConnector(input, ROAM_SPEC);
+}
+function registerRoamArchiveConnector() {
+  registerArchiveFormatConnector("roam-json", createRoamArchiveConnector);
+}
+var ROAM_CURSOR_PREFIX = "roam1:", ROAM_SPEC;
+var init_connector8 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_parse5();
+  ROAM_SPEC = {
+    cursorPrefix: ROAM_CURSOR_PREFIX,
+    source: {
+      kind: "json",
+      itemPaths: (root) => root === "array" ? [[]] : undefined,
+      accepts: acceptsRoamJson,
+      parse: parseRoamPage
     }
   };
 });
@@ -154467,7 +156313,7 @@ function telegramJsonSource(source) {
 var BACKSLASH = 92, LOWER_X = 120, SPACE = 32, ESCAPE_LENGTH = 4;
 
 // src/workers/archive-import/telegram/message.ts
-function isRecord10(value2) {
+function isRecord11(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
 function text3(value2) {
@@ -154492,7 +156338,7 @@ function flattenTelegramText(value2) {
   for (const part of value2) {
     if (typeof part === "string") {
       out += part;
-    } else if (isRecord10(part)) {
+    } else if (isRecord11(part)) {
       const label = typeof part.text === "string" ? part.text : "";
       const href = typeof part.href === "string" ? part.href.trim() : "";
       out += part.type === "text_link" && href !== "" && href !== label ? label !== "" ? `${label} (${href})` : href : label;
@@ -154544,7 +156390,7 @@ function mediaLine(message2, content, lines) {
 }
 function factLines(message2, lines) {
   const contact = message2.contact_information;
-  if (isRecord10(contact)) {
+  if (isRecord11(contact)) {
     const name = [text3(contact.first_name), text3(contact.last_name)].filter(Boolean).join(" ");
     const detail = [name || undefined, text3(contact.phone_number)].filter(Boolean).join(", ");
     if (detail)
@@ -154554,17 +156400,17 @@ function factLines(message2, lines) {
   if (place)
     lines.push(`Place: ${cut(place)}`);
   const location = message2.location_information;
-  if (isRecord10(location) && typeof location.latitude === "number" && typeof location.longitude === "number") {
+  if (isRecord11(location) && typeof location.latitude === "number" && typeof location.longitude === "number") {
     lines.push(`Location: ${location.latitude}, ${location.longitude}`);
   }
   const poll = message2.poll;
-  if (isRecord10(poll)) {
+  if (isRecord11(poll)) {
     const question = flattenTelegramText(poll.question).trim();
     if (question)
       lines.push(`Poll: ${cut(question)}`);
     if (Array.isArray(poll.answers)) {
       for (const answer of poll.answers.slice(0, MAX_LIST_ENTRIES)) {
-        if (!isRecord10(answer))
+        if (!isRecord11(answer))
           continue;
         const label = flattenTelegramText(answer.text).trim();
         if (!label)
@@ -154575,12 +156421,12 @@ function factLines(message2, lines) {
     }
   }
   const todo = message2.todo_list;
-  if (isRecord10(todo)) {
+  if (isRecord11(todo)) {
     const title = flattenTelegramText(todo.title).trim();
     const tasks = [];
     if (Array.isArray(todo.answers)) {
       for (const task of todo.answers.slice(0, MAX_LIST_ENTRIES)) {
-        const label = isRecord10(task) ? flattenTelegramText(task.text).trim() : "";
+        const label = isRecord11(task) ? flattenTelegramText(task.text).trim() : "";
         if (label)
           tasks.push(`- ${cut(label)}`);
       }
@@ -154589,7 +156435,7 @@ function factLines(message2, lines) {
       lines.push(title ? `To-do list: ${cut(title)}` : "To-do list:", ...tasks);
   }
   const invoice = message2.invoice_information;
-  if (isRecord10(invoice)) {
+  if (isRecord11(invoice)) {
     const detail = [text3(invoice.title), text3(invoice.description)].filter(Boolean).map((part) => cut(part)).join(", ");
     if (detail)
       lines.push(`Invoice: ${detail}`);
@@ -154669,7 +156515,7 @@ var init_message = __esm(() => {
 });
 
 // src/workers/archive-import/telegram/connector.ts
-import { createHash as createHash78 } from "node:crypto";
+import { createHash as createHash79 } from "node:crypto";
 function manifestTag2(input) {
   return input.manifestSha256.slice(0, 16);
 }
@@ -154735,8 +156581,8 @@ function parseCursor2(input, cursor) {
   }
   return { resume, assumedZone: flag === "1:", done: false };
 }
-function sha2568(value2) {
-  return createHash78("sha256").update(value2).digest("hex");
+function sha2569(value2) {
+  return createHash79("sha256").update(value2).digest("hex");
 }
 function placeOf(event) {
   const path = event.path;
@@ -154786,7 +156632,7 @@ function messageOutcome2(input, event, fetchedAt) {
   const messageId = telegramScalar(record5.id);
   const reply = telegramScalar(record5.reply_to_message_id);
   const forwarded = typeof record5.forwarded_from === "string" && record5.forwarded_from.trim() !== "" ? record5.forwarded_from : undefined;
-  const providerItemId = sha2568(`${place.section}\x00${place.chatIndex}\x00${place.ordinal}\x00${messageId ?? ""}`).slice(0, 32);
+  const providerItemId = sha2569(`${place.section}\x00${place.chatIndex}\x00${place.ordinal}\x00${messageId ?? ""}`).slice(0, 32);
   const item = {
     identity: {
       family: input.format.family,
@@ -154796,7 +156642,7 @@ function messageOutcome2(input, event, fetchedAt) {
       providerThreadId: conversationId,
       providerConversationId: conversationId,
       localItemId: `${input.accountScope}:${providerItemId}`,
-      sourceVersion: sha2568(body).slice(0, 32)
+      sourceVersion: sha2569(body).slice(0, 32)
     },
     mimeType: "text/plain; charset=utf-8",
     content: { kind: "text", text: body },
@@ -154815,7 +156661,7 @@ function messageOutcome2(input, event, fetchedAt) {
       ...forwarded ? { forwardSource: forwarded } : {},
       ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
       attachmentsNotIngested: content.mediaFiles,
-      contentHash: sha2568(body)
+      contentHash: sha2569(body)
     }),
     fetchedAt
   };
@@ -154964,7 +156810,7 @@ function registerTelegramArchiveConnector() {
   registerArchiveFormatConnector("telegram_json", createTelegramArchiveConnector);
 }
 var TELEGRAM_CURSOR_PREFIX = "tg1:", TELEGRAM_DEFAULT_PAGE_SIZE = 200, TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_ITEM_TEXT_CHARS = 1e6, TELEGRAM_MAX_MESSAGE_BYTES, TELEGRAM_FINDINGS, MESSAGE_PATHS, SECTION_PATHS, ITEM_PATHS, CHAT_TYPE_KINDS, CHAT_TYPE_TITLES, SECTION_ROOTS, LISTED_SECTIONS;
-var init_connector7 = __esm(() => {
+var init_connector9 = __esm(() => {
   init_archive_formats();
   init_byte_source();
   init_json_stream();
@@ -155019,11 +156865,15 @@ var init_connector7 = __esm(() => {
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
+  registerReflectArchiveConnectors();
+  registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
 }
 var init_format_connectors = __esm(() => {
   init_connector6();
   init_connector7();
+  init_connector8();
+  init_connector9();
 });
 
 // src/workers/archive-import/start.ts
@@ -155537,71 +157387,6 @@ var init_agent = __esm(() => {
       failed: "It was not imported: {reason}"
     }
   };
-});
-
-// src/workers/archive-import/continuation-cache.ts
-function sameKey(a, b) {
-  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
-}
-
-class ContinuationCache {
-  entries = [];
-  maxEntries;
-  maxBytes;
-  maxIdleMs;
-  now;
-  constructor(options = {}) {
-    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
-    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
-    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
-    this.now = options.now ?? Date.now;
-  }
-  get size() {
-    this.expire();
-    return this.entries.length;
-  }
-  get retainedBytes() {
-    this.expire();
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  put(key2, continuation) {
-    this.expire();
-    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
-    if (continuation.retainedBytes > this.maxBytes)
-      return;
-    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
-    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
-      this.entries.shift();
-  }
-  take(key2, offset) {
-    this.expire();
-    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
-    if (index < 0)
-      return;
-    const [parked] = this.entries.splice(index, 1);
-    return parked.continuation.position === offset ? parked.continuation : undefined;
-  }
-  dropArchive(archiveId) {
-    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
-  }
-  clear() {
-    this.entries = [];
-  }
-  retainedTotal() {
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  expire() {
-    const cutoff = this.now() - this.maxIdleMs;
-    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
-      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
-    }
-  }
-}
-var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
-var init_continuation_cache = __esm(() => {
-  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
-  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
-  archiveContinuations = new ContinuationCache;
 });
 
 // src/workers/archive-import/removal.ts
@@ -156284,7 +158069,7 @@ var init_dashboard2 = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash79 } from "node:crypto";
+import { createHash as createHash80 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -156310,7 +158095,7 @@ function receiptOf(record5, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash79("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash80("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -156713,7 +158498,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash80 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { existsSync as existsSync78, lstatSync as lstatSync39, readFileSync as readFileSync75, readdirSync as readdirSync17, realpathSync as realpathSync21 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
@@ -156877,7 +158662,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash80("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash81("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -158259,7 +160044,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash81 } from "node:crypto";
+import { createHash as createHash82 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -158292,7 +160077,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash81("sha256").update(`${accessToken}
+    const key2 = createHash82("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -158323,7 +160108,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash81("sha256").update(session.token).digest("hex");
+    const key2 = createHash82("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -174102,7 +175887,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash82, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash83, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -174228,7 +176013,7 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
-    const transaction = sha2569(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    const transaction = sha25610(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
       if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
@@ -174274,7 +176059,7 @@ function createRemoteOAuthHandler(options) {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes27(32).toString("base64url");
-    codes.set(sha2569(code), {
+    codes.set(sha25610(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -174453,7 +176238,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha2569(code);
+      const hash2 = sha25610(code);
       const issued = codes.get(hash2);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash2);
@@ -174470,7 +176255,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash82("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash83("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -174736,8 +176521,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha2569(value2) {
-  return createHash82("sha256").update(value2).digest("hex");
+function sha25610(value2) {
+  return createHash83("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -176852,7 +178637,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash83 } from "node:crypto";
+import { createHash as createHash84 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -176869,7 +178654,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash83("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash84("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -177245,7 +179030,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash84 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -177269,7 +179054,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest3 = createHash84("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest3 = createHash85("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest3.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {

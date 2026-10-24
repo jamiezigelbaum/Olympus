@@ -34,7 +34,23 @@ import {
   type ScopeFileVersion,
   type ScopeRoot,
 } from '../../core/scope-safe-fs.ts';
-import { ZipArchive, ZipFormatError, readZipMemberHead, type ZipEntry, type ZipMemberTable } from './zip-reader.ts';
+import { fileByteSource } from './byte-source.ts';
+import {
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES,
+  RECORD_PROBE_MAX_SCAN_BYTES,
+  probeFirstRecordKeys,
+  recordProbeBudget,
+  type RecordProbeBudget,
+} from './record-probe.ts';
+import {
+  ZipArchive,
+  ZipFormatError,
+  ZipMemberError,
+  ZipMemberReader,
+  readZipMemberHead,
+  type ZipEntry,
+  type ZipMemberTable,
+} from './zip-reader.ts';
 
 /**
  * How much of each end of a file the content fingerprint hashes.
@@ -100,6 +116,83 @@ function fileHead(root: ScopeRoot, relPath: string): Uint8Array | undefined {
   }
 }
 
+type FirstRecordKeys = NonNullable<ArchiveProbeEntry['firstRecordKeys']>;
+
+/**
+ * How much the probe reads on past first bytes: each document has its own
+ * allowance, and the documents that belong together share another between
+ * them, so a folder of many large files, or a zip of many large members,
+ * costs a bounded read however many there are. A document read on its own
+ * shares nothing.
+ */
+interface ScanAllowance {
+  budgetsForDocument(): readonly RecordProbeBudget[];
+  /**
+   * Whether a read was refused because the shared allowance was spent.
+   */
+  sharedRanOut(): boolean;
+}
+
+type ScanBytes = { document?: number; folder?: number };
+
+function scanAllowance(options: ScanBytes | undefined, shared?: RecordProbeBudget): ScanAllowance {
+  return {
+    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...(shared ? [shared] : [])],
+    sharedRanOut: () => shared?.ranOut === true,
+  };
+}
+
+/**
+ * The way on past a JSON file's first bytes: a read of the file from its start
+ * to the keys of the first record of a list (`probeFirstRecordKeys`). The file
+ * is opened when asked and closed after, so a probe that never asks holds
+ * nothing; a file that changed or cannot be read has no keys.
+ */
+function fileFirstRecordKeys(root: ScopeRoot, relPath: string, allowance: ScanAllowance): FirstRecordKeys {
+  const budgets = allowance.budgetsForDocument();
+  return (list, enough) => {
+    try {
+      const reader = root.openFile(relPath);
+      try {
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough, budgets);
+      } finally {
+        reader.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError) return undefined;
+      throw error;
+    }
+  };
+}
+
+/**
+ * The same for a member of a zip, which is inflated from its start.
+ */
+function zipMemberFirstRecordKeys(root: ScopeRoot, zipRelPath: string, memberIndex: number, allowance: ScanAllowance): FirstRecordKeys {
+  const budgets = allowance.budgetsForDocument();
+  return (list, enough) => {
+    try {
+      const file = root.openFile(zipRelPath);
+      try {
+        const archive = ZipArchive.open(file);
+        const entry = archive.entryAt(memberIndex);
+        if (!entry) return undefined;
+        const member = ZipMemberReader.open(archive, entry);
+        try {
+          return probeFirstRecordKeys(member, list, enough, budgets);
+        } finally {
+          member.close();
+        }
+      } finally {
+        file.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError || error instanceof ZipFormatError || error instanceof ZipMemberError) return undefined;
+      throw error;
+    }
+  };
+}
+
 function lastSegment(name: string): string {
   const parts = name.split('/').filter((part) => part !== '');
   return parts[parts.length - 1] ?? name;
@@ -115,6 +208,7 @@ function probeZipMembers(
   root: ScopeRoot,
   relPath: string,
   probeNames: readonly string[],
+  allowance: ScanAllowance,
 ): readonly ArchiveProbeEntry[] | undefined {
   let reader: ScopeFileReader;
   try {
@@ -146,6 +240,7 @@ function probeZipMembers(
         name: lastSegment(entry.name),
         kind: entry.isDirectory ? 'directory' as const : 'file' as const,
         ...(head ? { head } : {}),
+        ...(head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}),
       };
     });
   } catch (error) {
@@ -176,20 +271,38 @@ function matchesAnyName(entry: ScopeDirEntry, probeNames: readonly string[]): bo
 export function probeArchivePath(
   root: ScopeRoot,
   chosenRelPath: string,
-  options: { probeNames?: readonly string[] } = {},
+  options: {
+    probeNames?: readonly string[];
+    /**
+     * Test seam: the bytes one document may be read on through, and the
+     * files of a chosen folder (or the members of a chosen zip: a document's
+     * worth) together.
+     */
+    scanBytes?: ScanBytes;
+  } = {},
 ): ArchiveProbe {
   const probeNames = options.probeNames ?? archiveProbeNames();
   const stat = chosenRelPath === '' ? root.statRelative('') : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat.kind === 'file') {
+    const alone = scanAllowance(options.scanBytes);
+    const zipShare = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.document ?? RECORD_PROBE_MAX_SCAN_BYTES));
     const head = fileHead(root, chosenRelPath);
-    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames) : undefined;
+    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, zipShare) : undefined;
     return {
-      chosen: { relPath: '', name, kind: 'file', ...(head ? { head } : {}), ...(members ? { members } : {}) },
+      chosen: {
+        relPath: '',
+        name,
+        kind: 'file',
+        ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath, alone) } : {}),
+        ...(members ? { members } : {}),
+      },
       children: [],
+      ...(members ? { readsRanOut: zipShare.sharedRanOut } : {}),
     };
   }
   if (stat.kind !== 'directory') throw new ScopeSafeError('not_regular', 'neither a file nor a folder');
+  const folderAllowance = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES));
   const everything = root.list(chosenRelPath);
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
@@ -226,11 +339,17 @@ export function probeArchivePath(
       children.push({ relPath: entry.name, name: entry.name, kind: 'directory' });
     } else if (kind === 'file') {
       const head = heads.get(index);
-      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames) : undefined;
-      children.push({ relPath: entry.name, name: entry.name, kind: 'file', ...(head ? { head } : {}), ...(members ? { members } : {}) });
+      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, folderAllowance) : undefined;
+      children.push({
+        relPath: entry.name,
+        name: entry.name,
+        kind: 'file',
+        ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name), folderAllowance) } : {}),
+        ...(members ? { members } : {}),
+      });
     }
   });
-  return { chosen: { relPath: '', name, kind: 'directory' }, children };
+  return { chosen: { relPath: '', name, kind: 'directory' }, children, readsRanOut: folderAllowance.sharedRanOut };
 }
 
 function sha256(bytes: Uint8Array): string {
