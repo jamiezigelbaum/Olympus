@@ -44,7 +44,7 @@ same way, with the same privacy and the same status.
 |---|---|
 | Mail (mbox) | Built in step 1 (2026-10-23): the shared spine in `workers/archive-import/`, and a thin mbox connector (`workers/archive-import/mbox/`) that splits the file itself and parses each message with `postal-mime`. Gmail items come from the Gmail API's JSON, so Gmail shares none of it. |
 | WhatsApp chat export | Parser and connector exist (`workers/whatsapp/connector.ts`, `parseWhatsAppChatExport`) and are tested, but nothing in the product calls them. Live WhatsApp capture is wired separately. |
-| Telegram Desktop export | Nothing. Telegram in the product is live capture only (`telegram-messages/capture-spool-connector.ts`). |
+| Telegram Desktop export | Built in step 4 (2026-10-24): a thin connector (`workers/archive-import/telegram/`) that streams a JSON `result.json`, whole-account or single-chat, as family `chat`, provider `telegram_export`. Live Telegram capture (`telegram-messages/`) is a different provider in different stores, and the import never opens it. |
 | Reflect export | Connector exists (`workers/reflect/connector.ts`), unwired, allowlisted. |
 | Roam export | Connector exists (`workers/roam/connector.ts`), unwired, allowlisted. |
 
@@ -183,10 +183,45 @@ Both are in scope. They come after mail because they reuse the same spine
   parsing, streaming inflate, with limits on expanded bytes and zip members.
   Hitting a limit fails visibly, naming the file. The same rule applies to
   Telegram's `result.json` (streaming JSON) and to any zip a format accepts.
-- **Telegram Desktop export** ("Export chat history", JSON format,
-  `result.json` plus media folders). A new thin connector: one item per
-  message, chats as threads, media named as gaps at first, like mail
-  attachments.
+- **Telegram Desktop export** (JSON only: "Export Telegram data" or "Export
+  chat history" with the format set to Machine-readable JSON; `result.json`
+  plus media folders). A thin connector, built from Telegram Desktop's own
+  JSON writer (`export_output_json.cpp`, read in releases 1.3.10 to 6.0.0;
+  no real export was available, so the tests follow the writer's code):
+  - *Shape.* A whole-account export is `{about, personal_information,
+    profile_pictures, contacts, frequent_contacts, sessions, web_sessions,
+    other_data, chats: {about, list: [{name, type, id, messages}]},
+    left_chats: {...}}`, the personal sections first, so `chats` starts far
+    past any probe. A single-chat export is the chat object itself. Detection
+    reads the first keys (`about` and a known section, or `name`/`type`/`id`
+    then `messages`); the folder form is found by the name `result.json`.
+  - *Items.* One per message. The thread is the chat, keyed by its position
+    in the file (`chats:3`), because a chat's own `id` repeats across users,
+    groups and channels. The text is the words with links kept (`label
+    (address)` when they differ), then a line per picture, file, contact,
+    place, poll or game. `authoredAt` is `date_unixtime` (releases 4.0 and
+    later), else the zone-less `date` read in this computer's zone and
+    counted as one `assumption`.
+  - *Control characters.* Telegram writes them as `\xNN`, which is not JSON
+    and stops a strict reader at the first one. A byte filter
+    (`telegram/json-repair.ts`) turns each into four spaces of the same
+    length, so byte offsets in resume points stay file offsets.
+  - *Left out, counted.* Service messages (joins, calls, pins) and messages
+    with nothing to read are `skipped`; media files are named in the text
+    and counted as `media_not_imported` (never opened); each part of the
+    account export that is not messages (personal information, contacts,
+    sessions, other data and so on) is one `section_not_imported`, said once
+    and never stored. A message over 1,000,000 characters keeps its start
+    (`item_truncated`); one over 16 MiB is `message_too_large`; a file cut
+    short imports what came before and counts `file_damaged`.
+  - *Resume.* The cursor is the JSON reader's point after a message, bound to
+    the manifest; any other cursor stops the import. A bounded read keeps a
+    mid-file JSON error from costing more than one read of messages.
+  - *HTML form.* `messages.html` is recognised and turned away with plain
+    advice to export again as JSON (`unsupportedVariants` on the format).
+  - *Limits of the finding shape.* A finding has no name or path field, so
+    the dashboard says "6 parts of the archive are not imported" without
+    naming them, and a media gap cannot name the file (the item text does).
 - Both import as snapshots alongside any live capture of the same account.
   The dashboard keeps "imported archive" and "live capture" apart, as the
   release plan requires. Overlap between an export and live capture is the

@@ -39,6 +39,7 @@ import {
   telegramMessageContent,
   telegramTime,
 } from '../src/workers/archive-import/telegram/message.ts';
+import { DASHBOARD_ARCHIVE_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { memoryRangeReader } from './helpers/zip-fixture.ts';
 import {
   TELEGRAM_FIXTURE_FIRST_SECONDS,
@@ -974,6 +975,19 @@ describe('telegram connector: the file must stay the file approved', () => {
     const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: telegramTexts(1) }))));
     const { connector } = connectorFor(file.dir, file.name);
     await expect(connector.fetchItem('x')).rejects.toThrow();
+  });
+});
+
+describe('telegram findings on the dashboard', () => {
+  test('every kind this connector can report has its own plain sentence, one and many, never the catch-all', () => {
+    const gaps = DASHBOARD_ARCHIVE_COPY.gaps as Record<string, { one: string; many: string } | undefined>;
+    for (const kind of [...Object.values(TELEGRAM_FINDINGS), ...Object.values(ARCHIVE_COMMON_FINDINGS)]) {
+      const sentence = gaps[kind];
+      expect({ kind, has: sentence !== undefined }).toEqual({ kind, has: true });
+      expect(sentence!.one).not.toBe(gaps.other!.one);
+      expect(sentence!.many).toContain('{n}');
+      expect(sentence!.one).not.toContain('{n}');
+    }
   });
 });
 

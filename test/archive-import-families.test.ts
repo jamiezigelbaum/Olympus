@@ -43,7 +43,7 @@ describe('store sets belong to the family, not to its first format', () => {
       ['public_safe.archive.email', 'mbox', 'email'],
     ]);
     // The default is the registered formats.
-    expect(archiveImportCorpora().map((corpus) => corpus.corpusId)).toEqual(corpora.map((corpus) => corpus.corpusId));
+    expect(archiveImportCorpora().filter((corpus) => corpus.family === 'email').map((corpus) => corpus.corpusId)).toEqual(corpora.map((corpus) => corpus.corpusId));
     expect(ARCHIVE_FORMATS).toContain(MBOX_ARCHIVE_FORMAT);
   });
 
@@ -114,7 +114,10 @@ describe('the Archives card holds every family\'s stores', () => {
 describe('the dashboard words come from the registry and the family', () => {
   test('the picker names each registered format in its own words, or its label', () => {
     const one = archivePickIntro([MBOX_ARCHIVE_FORMAT]);
-    expect(one).toBe(DASHBOARD_ARCHIVE_COPY.pick.intro);
+    expect(one).toContain(MBOX_ARCHIVE_FORMAT.chooseHint!);
+    // The words the dashboard ships name every registered format.
+    expect(archivePickIntro(ARCHIVE_FORMATS)).toBe(DASHBOARD_ARCHIVE_COPY.pick.intro);
+    for (const format of ARCHIVE_FORMATS) expect(DASHBOARD_ARCHIVE_COPY.pick.intro).toContain(format.chooseHint ?? format.label);
     const two = archivePickIntro([MBOX_ARCHIVE_FORMAT, NOTES, SECOND_MAIL]);
     expect(two).toContain('a notes export (a .zip file)');
     expect(two).toContain('; or Fake fakemail');
