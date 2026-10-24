@@ -370,6 +370,7 @@ describe('exploring the Sources section', () => {
     const check = exploreChecks(result).find((entry) => entry.id === 'explore.populated')!;
     expect(check.status).toBe('fail');
     expect(check.detail).toContain('Cancel changed the source');
+    expect(check.detail).toMatch(/no longer offers [^;)]*menu:readwise\.library:1/);
   });
 
   test('See why has to open and say something', () => {
