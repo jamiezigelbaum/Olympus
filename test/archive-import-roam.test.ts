@@ -427,6 +427,94 @@ describe('the Roam connector', () => {
     expect(rest.done).toBe(true);
   });
 
+  describe('a deflated member resumed cold, deep inside it', () => {
+    // Text that does not compress away, so the member is long to inflate.
+    const noise = (seed: number, chars: number): string => {
+      let x = seed;
+      let out = '';
+      while (out.length < chars) {
+        x = (Math.imul(x, 1103515245) + 12345) & 0x7fffffff;
+        out += x.toString(16).padStart(8, '0');
+      }
+      return out.slice(0, chars);
+    };
+    const bigPages = (count: number) => roamPages(count).map((page, index) => ({
+      ...page,
+      children: [{ ...page.children![0]!, string: `${page.children![0]!.string} ${noise(index + 1, 1500)}` }],
+    }));
+    const SMALL = { pageSize: 25, maxBytesPerListing: 64 * 1024 };
+
+    /** Passes from `cursor` until the listing is done, a fresh connector each, the way a pass after a restart is made. */
+    async function passesFrom(opened: ReturnType<typeof roamConnector>, cursor: string, between?: (pass: number) => void) {
+      const passes: Array<{ ids: string[]; pages: number[]; cursor: string | undefined; done: boolean }> = [];
+      let at = cursor;
+      for (let pass = 0; pass < 60; pass += 1) {
+        const out = await listAll(opened.again(SMALL).connector, at);
+        passes.push({ ids: out.items.map((item) => item.identity.providerItemId), pages: out.pages, cursor: out.cursors.at(-1), done: out.done });
+        if (out.done) return passes;
+        at = out.cursors.at(-1)!;
+        between?.(pass);
+      }
+      throw new Error('the listing did not finish');
+    }
+
+    test('the way to the resume point is a step a pass, the pass budget is asked between steps, and the notes are the same', async () => {
+      const opened = roamConnector('deep.zip', roamJsonZip(roamJson(bigPages(300)), { method: 'deflate' }), { pageSize: 25 });
+      const all = await listAll(opened.connector);
+      const ids = all.items.map((item) => item.identity.providerItemId);
+      expect(ids).toHaveLength(300);
+      const resumeAt = all.cursors[7]!;
+
+      archiveContinuations.clear();
+      const passes = await passesFrom(opened, resumeAt);
+      // Catching up comes first and delivers nothing: the first passes hold the same resume point and no notes.
+      const catching = passes.findIndex((pass) => pass.ids.length > 0);
+      expect(catching).toBeGreaterThanOrEqual(3);
+      expect(catching).toBeLessThanOrEqual(12);
+      for (const pass of passes.slice(0, catching)) expect(pass).toMatchObject({ ids: [], cursor: resumeAt, done: false });
+      // Then the notes, a bounded pass at a time (the budget holds a pass to a few dozen of these notes), and every note after the resume point once.
+      expect(passes.every((pass) => pass.pages.every((page) => page <= SMALL.pageSize))).toBe(true);
+      expect(Math.max(...passes.map((pass) => pass.ids.length))).toBeLessThan(60);
+      expect(passes.flatMap((pass) => pass.ids)).toEqual(ids.slice(200));
+      expect(passes.length).toBeLessThanOrEqual(30);
+      expect(passes.at(-1)!.done).toBe(true);
+    });
+
+    test('a restart in the middle of the catch-up starts it over and still ends with the same notes', async () => {
+      const opened = roamConnector('deep.zip', roamJsonZip(roamJson(bigPages(300)), { method: 'deflate' }), { pageSize: 25 });
+      const all = await listAll(opened.connector);
+      const ids = all.items.map((item) => item.identity.providerItemId);
+      const resumeAt = all.cursors[7]!;
+
+      archiveContinuations.clear();
+      const passes = await passesFrom(opened, resumeAt, (pass) => {
+        // The inflater is parked after the first pass; the process goes away after it.
+        if (pass === 0) {
+          expect(archiveContinuations.size).toBe(1);
+          archiveContinuations.clear();
+        }
+      });
+      expect(passes[0]).toMatchObject({ ids: [], cursor: resumeAt });
+      expect(passes.flatMap((pass) => pass.ids)).toEqual(ids.slice(200));
+    });
+
+    test('a stop in the middle of the catch-up leaves the resume point where it was and the inflater parked', async () => {
+      const opened = roamConnector('deep.zip', roamJsonZip(roamJson(bigPages(300)), { method: 'deflate' }), { pageSize: 25 });
+      const all = await listAll(opened.connector);
+      const resumeAt = all.cursors[7]!;
+      archiveContinuations.clear();
+      let calls = 0;
+      // Stops asked for after the first step of the catch-up.
+      const stopped = opened.again({ ...SMALL, shouldContinue: () => ++calls <= 2 });
+      const out = await listAll(stopped.connector, resumeAt);
+      expect(out.items).toEqual([]);
+      expect(archiveContinuations.size).toBe(1);
+      // The next pass takes it up and the notes follow.
+      const rest = await passesFrom(opened, resumeAt);
+      expect(rest.flatMap((pass) => pass.ids)).toEqual(all.items.slice(200).map((item) => item.identity.providerItemId));
+    });
+  });
+
   test('a stored member keeps its checksum across pages, so damage past the first page is still found', async () => {
     const json = roamJson(roamPages(6));
     const damaged = buildZip([{ name: 'roam-export.json', data: json, method: 'stored', badCrc: 0x12345678 }]);

@@ -821,10 +821,26 @@ export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[
 
 /**
  * What the person is told when a folder or a zip had more to look through
- * than the probe may read: nothing is imported, because a file or member left
- * unchecked could be a second export that would be dropped without a word.
+ * than the probe may read, in either way: a read on past a file's first bytes
+ * ran out of its allowance (some parts are very large), or there were more
+ * files than the first look takes in (their first bytes were not read, or
+ * they were not opened). A file or member left unchecked could be a second
+ * export that would be dropped without a word, so a pick whose look ran out
+ * of allowance is never imported, and one that found nothing says so.
  */
-export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through everything you chose to see which parts are exports, because some parts are very large. Choose just the export file, or a folder or zip that holds only the export.';
+export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.';
+
+/**
+ * How many files of a pick the look named but did not reach, and the record
+ * counts (`files_not_looked_at`): files a format asked for by name past the
+ * room for them, and members of a zip it asked for that were not read. A
+ * format that tells its export from the first bytes alone is covered too, by
+ * `othersNotLookedAt`, which only a refusal mentions.
+ */
+export function archiveFilesNotLookedAt(probe: ArchiveProbe): number {
+  return (probe.notLookedAt ?? 0)
+    + [probe.chosen, ...probe.children].reduce((sum, entry) => sum + (entry.membersNotLookedAt ?? 0), 0);
+}
 
 /**
  * Which format a probe is. No match says so and lists what is supported; two
@@ -846,10 +862,12 @@ export function detectArchiveFormat(
   const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
   const settled = new Set(onHeads.flatMap((match) => match.files));
   const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled, formats), formats);
-  const incomplete = probe.readsRanOut?.() === true;
-  if (matches.length === 1 && !incomplete) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
+  const ranOut = probe.readsRanOut?.() === true;
+  if (matches.length === 1 && !ranOut) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
   if (matches.length > 1) return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
   const supported = formats.map((format) => format.label);
+  // Nothing was taken: whatever the look did not reach, of any format, may be the export. One sentence says so, once.
+  const incomplete = ranOut || archiveFilesNotLookedAt(probe) + (probe.othersNotLookedAt ?? 0) > 0;
   const advice = [unsupportedAdvice(probe, formats), incomplete ? ARCHIVE_LOOK_INCOMPLETE_ADVICE : undefined]
     .filter((said): said is string => said !== undefined)
     .join(' ');
@@ -949,6 +967,11 @@ export interface ArchiveImportFinding {
   fileIndex: number;
   offset: number;
   count?: number;
+  // A finding that tallies several occurrences of one kind in one file (a page's worth of notices, say) tells the
+  // offset of each, `offset` being the first and `count` how many. The store counts only the occurrences past
+  // what it counted before, so a replay whose pages are cut differently counts each once. Without it, all
+  // `count` occurrences are taken to be at `offset`.
+  at?: readonly number[];
 }
 
 /**

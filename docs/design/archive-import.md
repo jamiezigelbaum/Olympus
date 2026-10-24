@@ -171,7 +171,13 @@ make its reason true.
   asked about (its first bytes, and the first record's keys when those do not
   say) under the same limits: the unit limit is checked before each member is
   asked, and the bytes read to ask are charged to the byte budget whether the
-  member is taken or not.
+  member is taken or not. A deflated member resumed deep inside it (a restart
+  empties the parked inflater) is inflated up to the resume point in steps of
+  at most 16 MiB or the listing's budget, whichever is smaller, charged to
+  the budget; when it is spent the inflater is parked where it got to and the
+  next pass goes on, so no pass spends more than a budget catching up. (The
+  detection reads and the first-record probes open a member at its start, so
+  they have nothing to catch up to.)
 - **Checksums.** A stored member's CRC-32 is kept at every whole record as the
   records are handed out (`resume-crc.ts`, generic), so a stop in the middle
   of a record longer than a chunk still resumes with the sum at the last
@@ -270,7 +276,10 @@ Both are in scope. They come after mail because they reuse the same spine
   text files ahead of the chat cannot hide it. A zip with no signature member
   whose text files the first look (32 members) did not all read says how many
   it did not (`files_not_looked_at`, "in what you chose"); when nothing is
-  detected, the refusal says the look was not complete. That refusal is
+  detected, the refusal says the look was not complete, in the one sentence
+  every format shares (`ARCHIVE_LOOK_INCOMPLETE_ADVICE`, also what a look
+  that ran out of its byte allowance says: choose just the export file, or a
+  folder or zip that holds only the export). That refusal is
   generic, for every format: files nobody asked for by name that the folder
   look did not read (`othersNotLookedAt` on the probe) count toward it, so a
   format that detects from the first bytes alone is never refused silently.
@@ -340,7 +349,14 @@ Both are in scope. They come after mail because they reuse the same spine
   (`status_updates`) are skipped and counted. Media stays in the message text
   as the phone's marker and is counted as `media_not_imported` ("the archive
   refers to" it); a message over 1,048,576 characters (or 8 MiB) is cut and
-  reported as `item_truncated`.
+  reported as `item_truncated`. The notices, empty messages and assumptions
+  of a page are told as one finding per kind, and each carries the place of
+  every occurrence (`ArchiveImportFinding.at`); the state store counts only
+  the occurrences past the position it counted before, so a restart whose
+  pages are longer than the first pass's counts each once, and none is lost
+  to a tally that started at an occurrence already counted. The other
+  archive connectors tell each finding at its own message or record, so need
+  nothing more.
 - **Real exports.** The shapes above come from the open-source parsers of
   real exports and from the synthetic builders in
   `test/support/archive-fixtures-whatsapp.ts`; no real export was read here.

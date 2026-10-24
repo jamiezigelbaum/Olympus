@@ -19,6 +19,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { posix } from 'node:path';
 import {
   ARCHIVE_COMMON_FINDINGS,
+  archiveFilesNotLookedAt,
   archiveProbeNames,
   archiveSignatureNames,
   detectArchiveFormat,
@@ -36,9 +37,6 @@ import {
   verifyArchiveManifest,
 } from './manifest.ts';
 import type { ArchiveImportRecord, ArchiveImportStateStore, NewArchiveImportRecord } from './state.ts';
-
-// Said beside a refusal when the first look did not reach every file it was asked to.
-const NOT_LOOKED_AT_ADVICE = 'Some files in what you chose were not looked at, so the export may be among them; choose the export file itself.';
 
 export type ArchiveImportStart =
   | { kind: 'started'; archive: ArchiveImportRecord }
@@ -104,13 +102,11 @@ export function prepareArchiveImport(input: {
       signatureNames: archiveSignatureNames(input.formats),
     });
     const detection = detectArchiveFormat(probe, input.formats);
-    // Files the first look did not reach, in the folder or in a zip: counted, never silent.
-    const notLookedAt = (probe.notLookedAt ?? 0)
-      + [probe.chosen, ...probe.children].reduce((sum, entry) => sum + (entry.membersNotLookedAt ?? 0), 0);
+    // Files the first look did not reach, in the folder or in a zip: counted, never silent. A refusal says so in the
+    // detection's own advice (one sentence for every way a look can be incomplete).
+    const notLookedAt = archiveFilesNotLookedAt(probe);
     if (detection.kind === 'none') {
-      // Nothing was detected: whatever the look did not reach, of any format, may be the export.
-      const advice = [detection.advice, notLookedAt + (probe.othersNotLookedAt ?? 0) > 0 ? NOT_LOOKED_AT_ADVICE : undefined].filter(Boolean).join(' ');
-      return { kind: 'unsupported', supported: detection.supported, ...(advice ? { advice } : {}) };
+      return { kind: 'unsupported', supported: detection.supported, ...(detection.advice ? { advice: detection.advice } : {}) };
     }
     if (detection.kind === 'ambiguous') return { kind: 'ambiguous', formats: detection.formats };
     const relPaths = detection.files.map((file) => (file === '' ? chosenRelPath : joinRelative(chosenRelPath, file)));

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ARCHIVE_FORMATS,
+  ARCHIVE_LOOK_INCOMPLETE_ADVICE,
   ARCHIVE_PROBE_MAX_CHILDREN,
   MBOX_ARCHIVE_FORMAT,
   detectArchiveFormat,
@@ -170,7 +171,7 @@ describe('a folder the first look does not reach every file of', () => {
     writeFileSync(join(dir, 'z-export.dat'), '{"synthetic-export":1}');
     const refused = listedByName(() => startArchiveImport({ state: f.state, path: dir, formats: [CONTENT_ONLY] }));
     expect(refused.kind).toBe('unsupported');
-    if (refused.kind === 'unsupported') expect(refused.advice).toContain('were not looked at');
+    if (refused.kind === 'unsupported') expect(refused.advice).toContain(ARCHIVE_LOOK_INCOMPLETE_ADVICE);
     expect(existsSync(f.state.path)).toBe(false);
   });
 
@@ -188,7 +189,7 @@ describe('a folder the first look does not reach every file of', () => {
     ordinary(empty, 3);
     const refused = listedByName(() => startArchiveImport({ state: f.state, path: empty, formats: [CONTENT_ONLY] }));
     expect(refused.kind).toBe('unsupported');
-    if (refused.kind === 'unsupported') expect(refused.advice ?? '').not.toContain('not looked at');
+    if (refused.kind === 'unsupported') expect(refused.advice ?? '').not.toContain(ARCHIVE_LOOK_INCOMPLETE_ADVICE);
   });
 
   test('the probe counts the files it did not reach: past the few it reads, past the bound, and not those asked for by name', () => {

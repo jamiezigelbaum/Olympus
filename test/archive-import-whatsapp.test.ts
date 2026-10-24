@@ -16,6 +16,7 @@ import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/c
 import {
   ARCHIVE_COMMON_FINDINGS,
   ARCHIVE_FORMATS,
+  ARCHIVE_LOOK_INCOMPLETE_ADVICE,
   ARCHIVE_PROBE_MAX_CHILDREN,
   ARCHIVE_PROBE_MAX_NAMED,
   ArchiveImportStoppedError,
@@ -1361,6 +1362,46 @@ describe('whatsapp archive on the shared spine', () => {
     expect(record.findings.gaps).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 2, [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 5 });
   });
 
+  test('a crash after a page of notices was counted, and a restart whose pages are longer, count every notice once', async () => {
+    const f = fixture();
+    // A notice before each of 24 messages: every page's notices are one tally, whatever the page is.
+    const pad2 = (value: number) => String(value).padStart(2, '0');
+    const clock = (minute: number) => `2026-02-14T${pad2(Math.floor(minute / 60))}:${pad2(minute % 60)}:00`;
+    const messages: SyntheticMessage[] = [];
+    for (let index = 0; index < 24; index += 1) {
+      messages.push(notice(clock(480 + index * 10)));
+      messages.push({ at: clock(485 + index * 10), sender: 'Sam Example', text: `The synthetic harbour log, entry ${index}.` });
+    }
+    put(f.exports, '_chat.txt', chatText(messages, { style: 'android-24-dmy' }));
+    const archiveId = f.start(join(f.exports, '_chat.txt'));
+    const dying = (): ((formatId: string) => ArchiveConnectorFactory) => () => (input) => {
+      const real = createWhatsAppArchiveConnector(input);
+      const connector: SourceConnector = {
+        ...real,
+        listItems(options) {
+          return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+            let pages = 0;
+            for await (const page of real.listItems(options)) {
+              // The first page, four messages and the four notices before them, is counted; then the pass dies before its cursor is kept.
+              if (pages > 0) throw new Error('synthetic crash');
+              pages += 1;
+              yield page;
+            }
+          })();
+        },
+      };
+      return connector;
+    };
+    await expect(pull(f.runtime, archiveId, { pageSize: 4, connectorFactory: dying() })).rejects.toThrow('synthetic crash');
+    expect(f.runtime.state.get(archiveId)!.findings.skipped).toEqual({ [WHATSAPP_FINDINGS.systemMessage]: 4 });
+    // The restart lists the same messages in pages of eight: the first page holds the four counted notices and four that were not.
+    await importAll(f.runtime, archiveId, { pageSize: 8 });
+    const record = f.runtime.state.get(archiveId)!;
+    expect(record.status).toBe('imported');
+    expect(rowsOf(f.env, archiveId)).toHaveLength(24);
+    expect(record.findings.skipped).toEqual({ [WHATSAPP_FINDINGS.systemMessage]: 24 });
+  });
+
   test('an overlapping .txt and .zip of one chat import each message once, and the overlap is counted', async () => {
     const f = fixture();
     const folder = join(f.exports, 'both');
@@ -1475,7 +1516,7 @@ describe('whatsapp archive on the shared spine', () => {
     put(f.exports, 'Hidden chat.zip', buildZip([...memos(40, 0), { name: 'my chat.txt', data: chatText(syntheticChat(4), { style: 'ios-24-dmy' }), method: 'deflate' as const }]));
     const refused = f.runtime.start(join(f.exports, 'Hidden chat.zip'));
     expect(refused.kind).toBe('unsupported');
-    if (refused.kind === 'unsupported') expect(refused.advice).toContain('were not looked at');
+    if (refused.kind === 'unsupported') expect(refused.advice).toContain(ARCHIVE_LOOK_INCOMPLETE_ADVICE);
     // A zip with the export named as WhatsApp names it says nothing of the files beside it.
     put(f.exports, 'Named chat.zip', buildZip([...memos(40, 0), { name: '_chat.txt', data: chatText(syntheticChat(4), { style: 'ios-24-dmy' }), method: 'deflate' as const }]));
     const named = f.start(join(f.exports, 'Named chat.zip'));

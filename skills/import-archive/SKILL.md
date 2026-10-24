@@ -22,16 +22,12 @@ WhatsApp shares, or a folder of them. A chat export is a snapshot: later
 messages are not added. In a folder, only files named the way WhatsApp names
 an export (or zips holding one) are taken; a chat saved under another name
 imports when the user chooses that file by itself. Messages that appear in two
-export files of the same chat are imported once. When a folder holds more files
-than the first look takes in, Olympus says some files were not looked at; ask
-the user to choose the export file itself.
-
-A Telegram Desktop export works too: its `result.json` (or the folder that
-holds it), exported as Machine-readable JSON. Messages are imported as text;
-pictures and files are counted, not imported. If the user only has the HTML
-form (`messages.html`), tell them to export again from Telegram Desktop
-(Settings, Advanced, Export Telegram data) with the format set to
-Machine-readable JSON.
+export files of the same chat are imported once. When what the user chose is
+too much to look through (a lot of files, or very large ones), Olympus may
+import nothing and say so in one sentence: ask the user to choose just the
+export file, or a folder or zip that holds only the export. When it found the
+export but did not reach some files, those are counted on the archive as not
+looked at.
 
 A Telegram Desktop export works too: its `result.json` (or the folder that
 holds it), exported as Machine-readable JSON. Messages are imported as text;

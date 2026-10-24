@@ -318,22 +318,39 @@ export class ArchiveImportStateStore {
       const before = (fileIndex: number, offset: number): boolean => through !== undefined
         && (fileIndex < through.file_index || (fileIndex === through.file_index && offset <= through.offset));
       let last = through;
+      const reach = (fileIndex: number, offset: number): void => {
+        if (!last || fileIndex > last.file_index || (fileIndex === last.file_index && offset > last.offset)) {
+          last = { file_index: fileIndex, offset };
+        }
+      };
       for (const finding of findings) {
-        if (before(finding.fileIndex, finding.offset)) continue;
+        // A tally that tells where each of its occurrences is counts the ones past `through`, however it was cut.
+        let counted = Math.max(1, finding.count ?? 1);
+        let firstCounted = finding.offset;
+        let lastCounted = finding.offset;
+        if (finding.at) {
+          counted = 0;
+          for (const offset of finding.at) {
+            if (before(finding.fileIndex, offset)) continue;
+            if (counted === 0 || offset < firstCounted) firstCounted = offset;
+            if (counted === 0 || offset > lastCounted) lastCounted = offset;
+            counted += 1;
+          }
+        } else if (before(finding.fileIndex, finding.offset)) {
+          continue;
+        }
+        if (counted === 0) continue;
         const bucket = finding.class === 'gap' ? tally.gaps : tally.skipped;
-        bucket[finding.kind] = (bucket[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+        bucket[finding.kind] = (bucket[finding.kind] ?? 0) + counted;
         if (finding.class === 'gap') {
           const byFile = (tally.gaps_by_file ??= {});
           const inFile = (byFile[String(finding.fileIndex)] ??= {});
-          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + counted;
         }
         if (finding.class === 'gap' && tally.samples.length < ARCHIVE_FINDING_SAMPLES_MAX) {
-          tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: finding.offset });
+          tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: firstCounted });
         }
-        if (!last || finding.fileIndex > last.file_index
-          || (finding.fileIndex === last.file_index && finding.offset > last.offset)) {
-          last = { file_index: finding.fileIndex, offset: finding.offset };
-        }
+        reach(finding.fileIndex, lastCounted);
       }
       if (last) tally.through = last;
     });

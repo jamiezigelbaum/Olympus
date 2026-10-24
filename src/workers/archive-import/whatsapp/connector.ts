@@ -417,17 +417,28 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
               ...(count !== undefined ? { count } : {}),
             });
           };
-          // What was left out or assumed, by kind, and where the first of each was: told in one
-          // finding per kind at each page, so a file of notices stays small.
-          const tallies = new Map<string, { kind: string; findingClass: 'gap' | 'skipped'; offset: number; count: number }>();
+          // What was left out or assumed, by kind, and where each one was: told in one finding per kind at each
+          // page, so a file of notices stays small. The finding carries every occurrence's place (`at`), so a
+          // replay whose pages are cut differently counts each one once however the tallies fall.
+          const tallies = new Map<string, { kind: string; findingClass: 'gap' | 'skipped'; at: number[] }>();
           const note = (kind: string, findingClass: 'gap' | 'skipped', offset: number): void => {
             const key = `${findingClass}:${kind}`;
+            const place = findingOffsetOf(context, unit, offset);
             const seen = tallies.get(key);
-            if (seen) seen.count += 1;
-            else tallies.set(key, { kind, findingClass, offset, count: 1 });
+            if (seen) seen.at.push(place);
+            else tallies.set(key, { kind, findingClass, at: [place] });
           };
           const flushTallies = (): void => {
-            for (const seen of tallies.values()) report(seen.kind, seen.findingClass, seen.offset, seen.count);
+            for (const seen of tallies.values()) {
+              input.report({
+                kind: seen.kind,
+                class: seen.findingClass,
+                fileIndex: unit.fileIndex,
+                offset: seen.at[0]!,
+                count: seen.at.length,
+                ...(seen.at.length > 1 ? { at: seen.at } : {}),
+              });
+            }
             tallies.clear();
           };
           const isLastFile = unit.fileIndex === input.files.length - 1;
