@@ -10,7 +10,8 @@
  *     Import is pressed on the file.
  *   - The import settles. The dashboard's row must say what the fixture holds (archive-fixtures.ts): the format, the messages, the
  *     days, what could not be read and what was left out, behind a real press of See what was not read. The agent's own status says
- *     the same and carries no message text. A search for the archive's word is cited as "Imported mail".
+ *     the same and carries no message text. A search for the archive's word is cited as the format's own label ("Imported mail" for
+ *     mbox, "Telegram" for a Telegram Desktop export). Every format in ARCHIVE_FORMATS but the stress one goes through this path.
  *   - Remove deletes everything made from it, and only that archive's: counts reach zero, the row is gone, the stores hold none of the
  *     archive's content, and another archive is untouched.
  *   - With the private model off, imported messages stay Private and say so; none of their content reaches the Personal or Public
@@ -22,8 +23,8 @@
  * machine-agent.ts does the pressing, the waiting, the store reading and the egress watch, and hands back the observations below.
  * Nothing here holds message text: a row is the dashboard's own sentences, counts and names, which are the fixture's.
  */
-import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../../src/workers/dashboard/vocabulary.ts';
-import { FIXTURE_FOLDER, type ArchiveExpectation, type LegFixture } from './archive-fixtures.ts';
+import { DASHBOARD_ARCHIVE_COPY as A, DASHBOARD_CHATGPT_PAGE_COPY as PANEL, dashboardArchiveNouns } from '../../src/workers/dashboard/vocabulary.ts';
+import { FIXTURE_FOLDER, STRESS_FORMAT, type ArchiveExpectation, type LegFixture } from './archive-fixtures.ts';
 import { egressVerdict, type EgressView } from './inbox.ts';
 import { journeyChecks, type Journey, type JourneyTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
@@ -63,8 +64,11 @@ const fill = (template: string, values: Record<string, string>): string => {
 const escapeRe = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const grouped = (n: number): string => n.toLocaleString('en-US');
 
-/** "4 messages" / "1 message", as the dashboard writes a count. */
-export const messagesWord = (n: number): string => (n === 1 ? A.items.one : fill(A.items.many, { n: grouped(n) }));
+/** "4 messages" / "1 message", as the dashboard writes a count: what an archive's items are called depends on its format's family (mail and chat are messages). */
+export const messagesWord = (n: number, family = 'email'): string => {
+  const nouns = dashboardArchiveNouns(family);
+  return n === 1 ? nouns.one : fill(nouns.many, { n: grouped(n) });
+};
 
 /** One line of "what was not read" or "what was left out" for a kind, as the dashboard writes it. */
 export function gapSentence(kind: string, count: number): string {
@@ -239,7 +243,8 @@ export function statusViewOf(json: unknown, token: string): StatusView {
       name: optText(archive.name) ?? '',
       format: optText(archive.format) ?? '',
       status: optText(archive.status) ?? '',
-      ...(optNumber(archive.messages) !== undefined ? { messages: optNumber(archive.messages)! } : {}),
+      // `messages` is the count for mail and chat; any family also gives `items`, the same number.
+      ...((optNumber(archive.messages) ?? optNumber(archive.items)) !== undefined ? { messages: (optNumber(archive.messages) ?? optNumber(archive.items))! } : {}),
       ...(optNumber(archive.judged) !== undefined ? { judged: optNumber(archive.judged)! } : {}),
       ...(optNumber(archive.waiting_for_private_model) !== undefined ? { waiting: optNumber(archive.waiting_for_private_model)! } : {}),
       ...(optText(archive.earliest) ? { earliest: optText(archive.earliest)! } : {}),
@@ -318,6 +323,8 @@ export interface RemoveObservation {
   detail?: string;
   removals: Array<{
     role: string;
+    /** The format of the archive removed: two archives of one role may be of different formats. */
+    format: string;
     fileName: string;
     archiveId?: string;
     traces: JourneyTrace[];
@@ -328,7 +335,7 @@ export interface RemoveObservation {
     unlisted: boolean;
     stores: StoreView[];
     /** The archives that were not removed, with what their stores still hold. */
-    others: Array<{ role: string; fileName: string; stores: StoreView[] }>;
+    others: Array<{ role: string; format: string; fileName: string; stores: StoreView[] }>;
   }>;
 }
 
@@ -453,6 +460,12 @@ export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; s
   };
 }
 
+/**
+ * What names an archive's removal in the report: the role alone for the stress format (the ids of the first format's journeys do not
+ * change), and the role with the format for every other, so two archives of one role never share a journey id or a check.
+ */
+export const removalLabel = (fx: { role: string; format: string }): string => (fx.format === STRESS_FORMAT ? fx.role : `${fx.role}-${fx.format}`);
+
 /** Remove, pressed on the archive's row and confirmed, until the row is gone. */
 export function removeJourney(role: string, fileName: string, removeS: number = ARCHIVE_BOUNDS.removeS, openS: number = OPEN_S): Journey {
   const confirm = fill(PANEL.confirm, { label: A.remove.toLowerCase() });
@@ -523,7 +536,7 @@ export function rowProblems(row: RowView, expect: ArchiveExpectation): string[] 
   if (!row.facts.includes(expect.label)) problems.push(`the format is not "${expect.label}" (facts line: "${row.facts.slice(0, 80)}")`);
   if (!row.facts.includes(FIXTURE_FOLDER)) problems.push(`the folder ${FIXTURE_FOLDER} is not on the facts line ("${row.facts.slice(0, 80)}")`);
   if (!row.facts.includes(datesWord(expect))) problems.push(`the days are not "${datesWord(expect)}" (facts line: "${row.facts.slice(0, 80)}")`);
-  if (!row.text.includes(messagesWord(expect.messages))) problems.push(`the row does not say "${messagesWord(expect.messages)}"`);
+  if (!row.text.includes(messagesWord(expect.messages, expect.family))) problems.push(`the row does not say "${messagesWord(expect.messages, expect.family)}"`);
   const expected = expectedGapLines(expect);
   if (expected.length > 0 && row.whyOpen !== true) problems.push(`See what was not read was not open (${row.whyOpen === null ? 'the row has none' : 'closed'})`);
   if (!sameSet(row.gapLines, expected)) problems.push(`what was not read or left out is [${row.gapLines.join('; ') || 'nothing'}], expected [${expected.join('; ') || 'nothing'}]`);
@@ -593,7 +606,7 @@ function importCoreChecks(obs: ImportObservation, fx: LegFixture): CheckResult[]
   if (obs.row) {
     const problems = rowProblems(obs.row, fx.expect);
     out.push(check(`${prefix}.dashboard`, 'The dashboard row shows the format, the messages, the days, what was not read and what was left out', problems.length === 0,
-      problems.length === 0 ? `${messagesWord(fx.expect.messages)}, ${datesWord(fx.expect)}, ${fx.expect.label}${expectedGapLines(fx.expect).length > 0 ? `, ${expectedGapLines(fx.expect).join('; ')}` : ', nothing unread'}` : problems.join('; ')));
+      problems.length === 0 ? `${messagesWord(fx.expect.messages, fx.expect.family)}, ${datesWord(fx.expect)}, ${fx.expect.label}${expectedGapLines(fx.expect).length > 0 ? `, ${expectedGapLines(fx.expect).join('; ')}` : ', nothing unread'}` : problems.join('; ')));
     const view = obs.status?.archives.find((archive) => archive.name === fx.fileName);
     const stat = agentViewProblems(view, fx.expect);
     if (obs.status?.carriesContent) stat.push('the agent\'s status repeated a word of the archive\'s contents');
@@ -704,8 +717,8 @@ export function removeChecks(obs: RemoveObservation | undefined, fixtures: Reado
   }
   if (!obs.ok) out.push(check('archive.remove.ran', 'Archives were removed from their rows', false, obs.detail ?? 'the machine reported a problem'));
   for (const removal of obs.removals) {
-    const fx = fixtures.find((candidate) => candidate.role === removal.role);
-    const prefix = fx ? prefixOf(fx) : `archive.${removal.role}`;
+    const fx = fixtures.find((candidate) => candidate.role === removal.role && candidate.format === removal.format);
+    const prefix = fx ? prefixOf(fx) : `archive.${removal.role}.${removal.format}`;
     out.push(...journeyChecks(removal.traces));
     const problems: string[] = [];
     if (!removal.gone) problems.push('the row is still on the page');
@@ -725,7 +738,7 @@ export function removeChecks(obs: RemoveObservation | undefined, fixtures: Reado
         ? `row gone after ${secs(removal.goneMs)}, the agent no longer lists it, no live item or content of it in any store${removal.others.length > 0 ? `; ${removal.others.map((other) => other.fileName).join(', ')} untouched` : ''}`
         : problems.join('; '), removal.goneMs));
   }
-  const missing = fixtures.filter((fx) => !obs.removals.some((removal) => removal.role === fx.role));
+  const missing = fixtures.filter((fx) => !obs.removals.some((removal) => removal.role === fx.role && removal.format === fx.format));
   if (missing.length > 0) out.push(check('archive.remove.ran', 'Archives were removed from their rows', false, `no removal was made for: ${missing.map((fx) => fx.fileName).join(', ')}`));
   return out;
 }

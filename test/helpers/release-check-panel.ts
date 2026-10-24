@@ -3,6 +3,7 @@
 // archive-import-dashboard-ui.test.ts mounts it, on a host that answers its tool calls from `serve`; a journey that goes to the
 // dashboard mounts it afresh, as a page load would.
 
+import { createHash } from 'node:crypto';
 import { Window } from 'happy-dom';
 import {
   COMPUTER_META_KEY,
@@ -106,10 +107,17 @@ export class PanelDriver implements JourneyDriver {
 
 export const PANEL_IDS = { agent: '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60', picker: '7b2a1f3e-5d4c-4b6a-9f8e-2c3d4e5f6a71', held: '8c3b2a1f-6e5d-4c7b-8a9f-3d4e5f6a7b82' };
 
+/** The archive's id on the page: the fixed one for the first format's archive of a role, one derived from the file's name for any other format's. */
+export function panelIdFor(fx: LegFixture): string {
+  if (fx.format === 'mbox') return PANEL_IDS[fx.role as keyof typeof PANEL_IDS] ?? PANEL_IDS.agent;
+  const hex = createHash('sha256').update(fx.fileName).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 export function entryFor(fx: LegFixture, over: Partial<ComputerArchiveEntry> = {}): ComputerArchiveEntry {
   const expect = fx.expect;
   return {
-    id: PANEL_IDS[fx.role as keyof typeof PANEL_IDS] ?? PANEL_IDS.agent, name: fx.fileName, format: expect.label, where: `~/${FIXTURE_FOLDER}`, status: 'imported',
+    id: panelIdFor(fx), name: fx.fileName, format: expect.label, family: expect.family, where: `~/${FIXTURE_FOLDER}`, status: 'imported',
     items: expect.messages, judged: expect.messages, held: 0, earliest: expect.earliest, latest: expect.latest,
     startedAt: '2026-10-22T08:00:00.000Z', importedAt: '2026-10-22T09:00:00.000Z', gaps: expect.gaps.map((g) => ({ ...g })), skipped: expect.leftOut.map((g) => ({ ...g })), ...over,
   };

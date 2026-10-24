@@ -92,6 +92,7 @@ export function telegramService(index: number, action = 'join_group_by_link', op
     actor: options.from ?? 'Sam Example',
     actor_id: options.fromId ?? 'user1001',
     action,
+    ...options.extra,
   };
 }
 

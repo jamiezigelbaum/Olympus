@@ -15,7 +15,7 @@ import {
   type FixtureRole, type LegFixture,
 } from './archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, drainBoundS, panelArchivesOf, pickerImportJourney, removeJourney, rowNamed,
+  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, drainBoundS, panelArchivesOf, pickerImportJourney, removalLabel, removeJourney, rowNamed,
   shownPath, startViewOf, statusViewOf, stoppedJourney,
   type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
   type SearchView, type StatusView, type StoreView,
@@ -271,24 +271,25 @@ export async function removeStage(host: ArchiveHost, args: { targets: readonly R
       for (const [index, target] of args.targets.entries()) {
         const before = await statusNow(host, target.token, 30_000);
         const archiveId = before?.archives.find((archive) => archive.name === target.fileName)?.id;
-        const journey = removeJourney(target.role, target.fileName, args.removeS);
+        const journey = removeJourney(removalLabel(target), target.fileName, args.removeS);
         const trace = await runJourney(driver, journey);
         host.say(`${journey.id}: ${trace.ok ? 'ok' : 'FAILED'}`);
         const gone = stepMs(trace, 'Confirm');
         const after = await statusNow(host, target.token, 30_000);
-        const spec = formatSpec(target.format);
+        // What is left of each archive still to be removed is read in its own format's stores: a chat archive is not in the mail stores.
         const others = args.targets.slice(index + 1).map((other) => ({
-          role: other.role, fileName: other.fileName, stores: host.readStores(spec, undefined, other.token),
+          role: other.role, format: other.format, fileName: other.fileName, stores: host.readStores(formatSpec(other.format), undefined, other.token),
         }));
         obs.removals.push({
           role: target.role,
+          format: target.format,
           fileName: target.fileName,
           ...(archiveId ? { archiveId } : {}),
           traces: [trace],
           gone: gone.ok,
           goneMs: gone.ms,
           unlisted: after !== undefined && !after.archives.some((archive) => archive.name === target.fileName),
-          stores: host.readStores(spec, archiveId, target.token),
+          stores: host.readStores(formatSpec(target.format), archiveId, target.token),
           others,
         });
       }
