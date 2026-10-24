@@ -882,7 +882,9 @@ test('a redraw asked for while a Connect is pending runs once that Connect has a
   await Bun.sleep(0);
   expect(reads).toBe(0);
   answer({ status: 400, body: { ok: false, error: { message: 'Bad key.' } } });
-  await Bun.sleep(5);
+  // The owed redraw is scheduled after the control settles; wait for it, not for a fixed time.
+  for (let waited = 0; reads === 0 && waited < 2000; waited += 10) await Bun.sleep(10);
+  for (let waited = 0; root.querySelector('[data-outside-help]')!.textContent !== 'Redrawn' && waited < 2000; waited += 10) await Bun.sleep(10);
   expect(reads).toBeGreaterThan(0);
   expect(root.querySelector('[data-outside-help]')!.textContent).toBe('Redrawn');
   controller.dispose();
