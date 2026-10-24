@@ -1,9 +1,9 @@
 # Import an archive
 
-Status: owner direction 2026-10-23. Steps 1 (mail with the shared spine), 3
-(WhatsApp chat exports) and 4 (Telegram Desktop exports) are built; step 2 is
-not. Where this
-page and the code differ, the code is current.
+Status: owner direction 2026-10-23. Step 1 (mail with the shared spine),
+step 2 (Reflect and Roam), step 3 (WhatsApp chat exports) and step 4
+(Telegram Desktop), the last three on 2026-10-24, are built. Where this page
+and the code differ, the code is current.
 
 ## Outcome
 
@@ -21,8 +21,9 @@ same way, with the same privacy and the same status.
   say "this is Roam".
 - **Mail archives first** (mbox), because old mail is the largest gap and no
   importer exists.
-- **Reflect and Roam move onto the public product.** Their connectors exist
-  but are on the public-surface allowlist as leftovers.
+- **Reflect and Roam move onto the public product.** Their old connectors were
+  on the public-surface allowlist as leftovers; step 2 replaced them with
+  archive formats (below).
 - **Reviewed** by Astra (Codex, high) on 2026-10-23. Its five findings are
   folded in: per-archive identity and removal, bounded streaming reads,
   file-version-bound cursors, collision-safe mail identity, and the
@@ -46,12 +47,17 @@ same way, with the same privacy and the same status.
 | Mail (mbox) | Built in step 1 (2026-10-23): the shared spine in `workers/archive-import/`, and a thin mbox connector (`workers/archive-import/mbox/`) that splits the file itself and parses each message with `postal-mime`. Gmail items come from the Gmail API's JSON, so Gmail shares none of it. |
 | WhatsApp chat export | Built in step 3 (2026-10-24): one format (`whatsapp_chat`, family `chat`, provider `whatsapp_export`) over `_chat.txt`, `WhatsApp Chat with <name>.txt` and the zip WhatsApp shares, in `workers/archive-import/whatsapp/`, with the line grammar in `workers/archive-import/whatsapp/grammar.ts` (core keeps only the small detection signature). The old export connector (`workers/whatsapp/connector.ts`) is deleted. Live WhatsApp capture is wired separately and untouched. |
 | Telegram Desktop export | Built in step 4 (2026-10-24): a thin connector (`workers/archive-import/telegram/`) that streams a JSON `result.json`, whole-account or single-chat, as family `chat`, provider `telegram_export`. Live Telegram capture (`telegram-messages/`) is a different provider in different stores, and the import never opens it. |
-| Reflect export | Connector exists (`workers/reflect/connector.ts`), unwired, allowlisted. |
-| Roam export | Connector exists (`workers/roam/connector.ts`), unwired, allowlisted. |
+| Reflect export | Built in step 2 (2026-10-24): JSON (a list of notes, or `{"notes": [...]}`, either key style, in a `.json` file or a zip) and Markdown (a zip of `.md` files), as formats `reflect-json` and `reflect-markdown` with thin connectors in `workers/archive-import/reflect/` over the shared notes engine in `workers/archive-import/notes/`. The old connector is deleted. CSV and HTML exports are not read; choosing one gets the supported-formats answer. |
+| Roam export | Built in step 2 (2026-10-24): "Export All" as JSON (a list of pages with nested blocks, in a `.json` file or a zip), format `roam-json`, `workers/archive-import/roam/`, same engine. The old connector is deleted. Roam's Markdown and EDN exports are not read. |
 
 `source-family.ts` already models this: ingest mode `archive_import`,
-credential kind `archive_path`, custodian `archive_importer`. Reflect and Roam
-are declared there as `planned`.
+credential kind `archive_path`, custodian `archive_importer`. Mail, Reflect and
+Roam are declared there as `working`, because they are shipped; a posture is
+`planned` only for a source that is not. Their resting tier is Private
+(`secure_local`, S4), the same as `archive.imports`. The Private hold is a
+separate thing from availability: until the private model has judged a note,
+its content stays Private, and after that it takes the tier the judge and the
+person's privacy settings give it (the lane option below).
 
 ## Shape
 
@@ -61,9 +67,9 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Piece | What it is |
 |---|---|
 | Format registry | One registry of archive formats (`core/archive-formats.ts`, pure data like `core/file-scope-sources.ts`). Each entry: format id, label, a `detect(path)` probe, the source family, and a connector factory. Adding a format adds one entry and one thin connector. Nothing downstream branches on format. |
-| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is a text file (or a zip holding one) that starts with a message line, and, in a chosen folder, is named as WhatsApp names it; Telegram Desktop is `result.json` with its export keys; Reflect and Roam by their JSON shape (the connectors already parse liberally). No match: say so and list what is supported. Two matches: ask. |
+| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is a text file (or a zip holding one) that starts with a message line, and, in a chosen folder, is named as WhatsApp names it; Telegram Desktop is `result.json` with its export keys; Reflect JSON and Roam JSON by the keys of the records at the start of the `.json` file (or of a JSON member of a zip), never by a word in a note's text: a Reflect note has a body key (`content`, `body`, `document_json`) and a title or date key, a Roam page has a `title` and one of Roam's time or author keys (or `children` with a `uid`), and a file that shows only one key of the kind, or both kinds, is not guessed at (a zip with one JSON file of each is refused too). The first 4 KB decide when they can. When they end inside the first record, before the keys that would tell, the probe reads on through the shared JSON reader (`record-probe.ts`, a generic helper that learns no format's keys) to the end of that record, skipping every value and keeping the key names: memory is the names and one chunk, work is that record (and the first field after it), it stops early once the keys so far decide, and a scan that does not decide is a file that is not told by it, never a refusal for size. When the file is an object and its list of notes has not shown yet (earlier keys with long values), the same read walks the object's top-level keys, skipping their values, until it reaches the list's key (named by the format) and then reads the first note's keys; an object that never has the key is read in constant memory until the allowance runs out. The look is for a picker that must stay fast: a file a format matched on the first bytes alone is never read further (a Telegram `result.json` never gets it), but every other file of the pick is, and so is every member of a zip that no format takes for its own file on its first bytes, so a second export in a chosen folder or zip whose first bytes do not tell it is found beside one that does (two exports are then refused or asked about exactly as when both are told at once, never one imported and one dropped); one document is read for at most 64 MiB in all (`RECORD_PROBE_MAX_SCAN_BYTES`, shared by the passes over it), and past that the answer is "no match", which with nothing else matching is the supported-formats answer. The files of one chosen folder also share 256 MiB between them (`RECORD_PROBE_MAX_FOLDER_SCAN_BYTES`), as do the members of a zip picked on its own (one document's worth, 64 MiB; a zip inside a picked folder draws on the folder's); when that runs out before every file or member was looked through, nothing is imported and the refusal says so in plain words (`ARCHIVE_LOOK_INCOMPLETE_ADVICE`: choose just the export file, or a folder or zip that holds only the export), because an unchecked file could be a second export. A zip's JSON member gets the same read, and the formats that ask about one file share one scan. When a zip member's notes list was not reached and the first-record read found no record, one more read asks whether the list is there and empty, so an empty list after long earlier keys reads as an export with no notes. A zip's other JSON files are not read as that format: they are left out and counted (`section_not_imported`); Reflect Markdown by a zip of `.md` files that shows Reflect's hand (Reflect in the file name, a daily-note file name such as `Tue, March 21st, 2023.md`, or a reflect.app link) and holds no JSON, so a Roam Markdown zip is not mistaken for it. No match: say so and list what is supported. Two matches: ask. |
 | Connectors | Thin `SourceConnector`s (contracts.ts), one per format. Pages honour the `done` / `truncated` rule in contracts.ts. |
-| Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. Today Reflect uses one constant connector id (`reflect/connector.ts:87`) and the store keys resume on it (`connector-store/local-index.ts:11083`); that changes when Reflect moves onto the registry. |
+| Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. The old Reflect connector used one constant connector id and the store keyed resume on it; moving Reflect onto the registry (step 2) retired that. |
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
 | Picker | The local-files picker (`workers/local-files/scope-browser.ts`), extended to offer files as well as folders in a "choose one file or folder" mode (today it lists folders only, `scope-browser.ts:121`). |
 | Reading | Only the chosen path, through the scope-safe reader (`core/scope-safe-fs.ts`), so no symlink escape. `ScopeRoot.readFile` loads a whole file, so archive reading adds a bounded streaming read on `openRelative`, with a per-message size cap. |
@@ -99,20 +105,98 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 
 ### Reflect and Roam, promoted
 
-Register both in the format registry, wire them into the scheduler and public
-source ids, and remove their five entries from
-`config/public-surface-allowlist.json`. Re-check both connectors against a
-current export from each app first; they were written before the shared
-tier classifier and may need their classification signals updated.
+Built in step 2 (2026-10-24). Both are formats in the registry (family `note`,
+providers `reflect` and `roam`, citation labels "Reflect" and "Roam"), read
+through the shared JSON stream and zip readers, with the shared notes engine
+(`workers/archive-import/notes/`) doing the paging, resume and findings, so
+each format is a record parser and a place to find its records. The old
+`workers/reflect/` and `workers/roam/` connectors and their tests are deleted,
+and their four entries are off the public-surface allowlist. The
+`source-family.ts` allowlist entry stays: its other planned postures still
+make its reason true.
 
-Their privacy defaults disagree today: the family postures say `internal`/S3
-(`source-family.ts:241`, Personal), the connectors default to `secure_local`
-(`reflect/connector.ts:53`, `roam/connector.ts:62`, Private). Keeping
-`secure_local` would leave ordinary notes Private for good, because the
-classifier does not judge content already at that tier
-(`tier-classifier.ts:858`). The connectors' default becomes `internal`, so
-notes are judged per item like every other source instead of resting at
-Private.
+- **No prior.** The old connectors defaulted to `secure_local` (Private),
+  which would have left ordinary notes Private for good: a configured resting
+  tier is never lowered by an automatic signal (`resolveVerdicts` in
+  `tier-classifier.ts`). The new connectors publish no prior, only the title
+  and tags, so each note gets its tier from the privacy settings and the
+  judge like every other imported item, and is held Private until the private
+  model judges it (the lane option above). Nothing sets `internal` as a
+  default either.
+- **One note per record.** A Reflect JSON record, a Reflect Markdown file, or
+  a Roam page (its blocks as nested `- ` bullets, text as written). Notes with
+  nothing written in them are counted as left out (`note_empty`), never
+  imported as titles alone or reported as errors. Two records with one id
+  are two notes: identity includes the record's place in the file.
+- **Dates.** Every item carries `metadata.authoredAt`: the note's own created
+  time, else its edited time, else (Roam and Reflect daily notes, in Reflect's
+  JSON as well as its Markdown) the day in its title, else the day the archive
+  file was saved, which is reported as `note_date_assumed`.
+- **Bodies and front matter.** A Reflect body is flattened only when it is
+  positively an editor document (an editor node that carries its text or its
+  children, alone or in a list); text that merely looks like JSON
+  (`{"budget":100}`, `{"type":"text","value":"..."}`) is the note, kept as
+  written. Once the document is recognised each node is read on its own: a
+  node of a kind Olympus has no rule for, a text that is not text and children
+  that are not a list are counted as unsupported and never hide the readable
+  nodes beside them. A Roam block is checked the same way (a `string` that is
+  there and is not text is unsupported, whatever its children are). A Markdown file's leading
+  `---` block is front matter only when every line is a `key: value` pair,
+  list item or comment and a key is one Reflect writes (title, dates, tags,
+  id); any other text between two rules stays in the note.
+- **Findings.** `note_empty` (left out: the body is there and empty, or there
+  is none), `note_unreadable` (not a note), `note_too_large` (a record over
+  16 MiB is not read; its place is named), `note_content_unsupported` (a body,
+  editor node or block of a kind Olympus has no rule for: the rest of the note
+  is imported, and a note with nothing else is left out; this is never
+  reported as `note_empty`; the same idea as Telegram's
+  `message_content_unsupported`), `note_date_assumed`, and the common kinds: `item_truncated` (text over one
+  million characters keeps its start), `media_not_imported` (other files in a
+  zip), `file_damaged` (bad checksum, cut-short JSON), `section_not_imported`
+  (a JSON document without the list its notes would be in, or with another
+  kind of value there; a Roam document that is not a list of pages; a JSON
+  file in a zip that is not this format's). A file whose list is there and
+  empty (`[]`, or `{"notes": []}` for Reflect) is an export with no notes and
+  reports nothing, in a zip as well as on its own.
+- **Streaming.** Records are read one at a time from the JSON stream, a zip
+  member through streaming inflate; a page boundary keeps the byte offset,
+  the member's running checksum and the JSON reader's resume point, and a
+  deflated member's inflater is parked between pages. No whole-file read.
+- **Bounds.** The listing's byte budget is held at every record and every
+  Markdown member, not after a whole file; the first record of a listing is
+  always read, so a listing always moves on. Whether the import is still
+  wanted is asked before each record and with every chunk read, so a huge
+  record or Markdown member does not outlast a removal: a stop part-way
+  through a record is resumed from the last whole one. A JSON file in a zip is
+  asked about (its first bytes, and the first record's keys when those do not
+  say) under the same limits: the unit limit is checked before each member is
+  asked, and the bytes read to ask are charged to the byte budget whether the
+  member is taken or not.
+- **Checksums.** A stored member's CRC-32 is kept at every whole record as the
+  records are handed out (`resume-crc.ts`, generic), so a stop in the middle
+  of a record longer than a chunk still resumes with the sum at the last
+  whole one; a resume point that carries none is replayed from the member's
+  start (charged to the byte budget) before the member is entered. A member
+  whose end does not say its checksum matched (`crcOk` is anything but true,
+  including not checked) is reported as `file_damaged`, never accepted.
+
+What is known about the real exports. Confirmed from the apps' documentation
+and community write-ups: Reflect exports to JSON, CSV, Markdown (zip) and HTML
+(zip); the Markdown zip is flat, daily notes are named like `Tue, March 21st,
+2023`, and backlinks are Reflect links; Roam's Export All offers JSON,
+Markdown and EDN, delivered as an archive. Community-sourced only, with no
+published specification: Roam's page keys (`title`, `uid`, `children`, and
+`string`, `create-time`, `edit-time` in milliseconds on blocks). Not
+confirmed against a real export: Reflect's JSON field names (read liberally:
+`id`/`uid`, `subject`/`title`, `content`/`body`, a `document_json` editor
+document stored as a JSON string, `created_at`/`createdAt`), whether Reflect's
+JSON arrives as a bare file or in a zip (both are read), Reflect's Markdown
+front matter (read if present, not required), and the member names inside
+Roam's zip (a `.json` member is read when its first record's keys show the
+format's hand; the others are left out and counted). The order of the keys
+inside a record is unverified too: detection reads past a long text to find
+them, so it does not depend on it. A real export from each app is the next
+check; anything that differs becomes a parser change, not a new path.
 
 ## Privacy while an import is judged
 
@@ -152,13 +236,10 @@ Ordinary cloud models never judge.
   re-judge every routed item for nothing. It lands in step 1, before any
   archive format is public.
 
-Both connectors also load a whole export at once (`reflect/connector.ts:139`,
-`roam/connector.ts:69`), so a large export could run the engine out of
-memory. They change to read incrementally before either is public: a
-streaming JSON parser (a proven library, not our own) for a single export
-file, one zip member at a time with streaming inflate, and only the current
-page of notes held in memory. No size limit: any export a person has must
-import.
+The old connectors loaded a whole export at once, so a large export could
+run the engine out of memory. The new ones read incrementally (above): only
+the current page of notes is held in memory, and no export is too large to
+import, only a single note over the per-record bound is left out.
 
 ### WhatsApp and Telegram exports
 
@@ -332,8 +413,9 @@ Both are in scope. They come after mail because they reuse the same spine
    removal, `archive_import` operation, Archives source in the dashboard,
    the streaming reader and the file-selecting picker. The
    hold-until-judged rule lands here too, through its classifier gate.
-2. Reflect and Roam onto the registry, with streaming reads and the
-   `internal` default; all their allowlist entries removed.
+2. Reflect and Roam onto the registry, with streaming reads and no prior
+   (each note judged per item, held Private until then); their allowlist
+   entries removed. Built 2026-10-24.
 3. WhatsApp chat export, with the selected-file, scope-safe reads (built).
 4. Telegram Desktop export.
 

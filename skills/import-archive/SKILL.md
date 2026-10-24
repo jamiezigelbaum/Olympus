@@ -40,6 +40,14 @@ form (`messages.html`), tell them to export again from Telegram Desktop
 (Settings, Advanced, Export Telegram data) with the format set to
 Machine-readable JSON.
 
+Notes exports work too: a Reflect export (the JSON file, or the zip of
+Markdown files) and a Roam export (Export All, as JSON; a zip holding the JSON
+works as well). A Reflect CSV or HTML export, or a Roam Markdown or EDN
+export, is not read: if that is all the user has, tell them to export again
+from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on
+its own, like mail, and a note or page with nothing written in it is left out
+and counted. For a notes archive the counts are notes.
+
 ## The rule
 
 `archive_import` only asks. The user approves every import and every removal on

@@ -2116,6 +2116,12 @@ export const DASHBOARD_ARCHIVE_COPY = {
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
     status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
+    // Notes exports (Reflect, Roam): archive-import/notes/note.ts NOTE_FINDINGS.
+    note_empty: { one: '1 note with nothing written in it left out', many: '{n} notes with nothing written in them left out' },
+    note_unreadable: { one: '1 note could not be read', many: '{n} notes could not be read' },
+    note_too_large: { one: '1 note too large to read', many: '{n} notes too large to read' },
+    note_content_unsupported: { one: '1 note with a kind of content Olympus cannot read yet', many: '{n} notes with a kind of content Olympus cannot read yet' },
+    note_date_assumed: { one: '1 note has no date in the archive: Olympus used the day the file was saved', many: '{n} notes have no date in the archive: Olympus used the day the file was saved' },
     service_message: { one: '1 service message (a join, a call or a pin) left out', many: '{n} service messages (joins, calls or pins) left out' },
     message_without_text: { one: '1 message with nothing to read (no text, picture or file) left out', many: '{n} messages with nothing to read (no text, picture or file) left out' },
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).

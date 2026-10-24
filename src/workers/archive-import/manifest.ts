@@ -35,7 +35,23 @@ import {
   type ScopeFileVersion,
   type ScopeRoot,
 } from '../../core/scope-safe-fs.ts';
-import { ZipArchive, ZipFormatError, readZipMemberHead, type ZipEntry, type ZipMemberTable } from './zip-reader.ts';
+import { fileByteSource } from './byte-source.ts';
+import {
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES,
+  RECORD_PROBE_MAX_SCAN_BYTES,
+  probeFirstRecordKeys,
+  recordProbeBudget,
+  type RecordProbeBudget,
+} from './record-probe.ts';
+import {
+  ZipArchive,
+  ZipFormatError,
+  ZipMemberError,
+  ZipMemberReader,
+  readZipMemberHead,
+  type ZipEntry,
+  type ZipMemberTable,
+} from './zip-reader.ts';
 
 /**
  * How much of each end of a file the content fingerprint hashes.
@@ -101,6 +117,83 @@ function fileHead(root: ScopeRoot, relPath: string): Uint8Array | undefined {
   }
 }
 
+type FirstRecordKeys = NonNullable<ArchiveProbeEntry['firstRecordKeys']>;
+
+/**
+ * How much the probe reads on past first bytes: each document has its own
+ * allowance, and the documents that belong together share another between
+ * them, so a folder of many large files, or a zip of many large members,
+ * costs a bounded read however many there are. A document read on its own
+ * shares nothing.
+ */
+interface ScanAllowance {
+  budgetsForDocument(): readonly RecordProbeBudget[];
+  /**
+   * Whether a read was refused because the shared allowance was spent.
+   */
+  sharedRanOut(): boolean;
+}
+
+type ScanBytes = { document?: number; folder?: number };
+
+function scanAllowance(options: ScanBytes | undefined, shared?: RecordProbeBudget): ScanAllowance {
+  return {
+    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...(shared ? [shared] : [])],
+    sharedRanOut: () => shared?.ranOut === true,
+  };
+}
+
+/**
+ * The way on past a JSON file's first bytes: a read of the file from its start
+ * to the keys of the first record of a list (`probeFirstRecordKeys`). The file
+ * is opened when asked and closed after, so a probe that never asks holds
+ * nothing; a file that changed or cannot be read has no keys.
+ */
+function fileFirstRecordKeys(root: ScopeRoot, relPath: string, allowance: ScanAllowance): FirstRecordKeys {
+  const budgets = allowance.budgetsForDocument();
+  return (list, enough) => {
+    try {
+      const reader = root.openFile(relPath);
+      try {
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough, budgets);
+      } finally {
+        reader.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError) return undefined;
+      throw error;
+    }
+  };
+}
+
+/**
+ * The same for a member of a zip, which is inflated from its start.
+ */
+function zipMemberFirstRecordKeys(root: ScopeRoot, zipRelPath: string, memberIndex: number, allowance: ScanAllowance): FirstRecordKeys {
+  const budgets = allowance.budgetsForDocument();
+  return (list, enough) => {
+    try {
+      const file = root.openFile(zipRelPath);
+      try {
+        const archive = ZipArchive.open(file);
+        const entry = archive.entryAt(memberIndex);
+        if (!entry) return undefined;
+        const member = ZipMemberReader.open(archive, entry);
+        try {
+          return probeFirstRecordKeys(member, list, enough, budgets);
+        } finally {
+          member.close();
+        }
+      } finally {
+        file.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError || error instanceof ZipFormatError || error instanceof ZipMemberError) return undefined;
+      throw error;
+    }
+  };
+}
+
 function lastSegment(name: string): string {
   const parts = name.split('/').filter((part) => part !== '');
   return parts[parts.length - 1] ?? name;
@@ -120,6 +213,7 @@ function probeZipMembers(
   relPath: string,
   probeNames: readonly string[],
   signatureNames: readonly string[],
+  allowance: ScanAllowance,
 ): { members: readonly ArchiveProbeEntry[]; notLookedAt: number } | undefined {
   let reader: ScopeFileReader;
   try {
@@ -166,6 +260,7 @@ function probeZipMembers(
           name: lastSegment(entry.name),
           kind: entry.isDirectory ? 'directory' as const : 'file' as const,
           ...(head ? { head } : {}),
+          ...(head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}),
         };
       }),
       // A signature member says what the zip is; the ordinary files beside it are not candidates.
@@ -199,26 +294,41 @@ function matchesAnyName(entry: ScopeDirEntry, probeNames: readonly string[]): bo
 export function probeArchivePath(
   root: ScopeRoot,
   chosenRelPath: string,
-  options: { probeNames?: readonly string[]; signatureNames?: readonly string[] } = {},
+  options: {
+    probeNames?: readonly string[];
+    signatureNames?: readonly string[];
+    /**
+     * Test seam: the bytes one document may be read on through, and the
+     * files of a chosen folder (or the members of a chosen zip: a document's
+     * worth) together.
+     */
+    scanBytes?: ScanBytes;
+  } = {},
 ): ArchiveProbe {
   const signatureNames = options.signatureNames ?? archiveSignatureNames();
   const probeNames = [...new Set([...(options.probeNames ?? archiveProbeNames()), ...signatureNames])];
   const stat = chosenRelPath === '' ? root.statRelative('') : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat.kind === 'file') {
+    const alone = scanAllowance(options.scanBytes);
+    const zipShare = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.document ?? RECORD_PROBE_MAX_SCAN_BYTES));
     const head = fileHead(root, chosenRelPath);
-    const zip = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, signatureNames) : undefined;
+    const zip = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, signatureNames, zipShare) : undefined;
     return {
       chosen: {
-        relPath: '', name, kind: 'file',
-        ...(head ? { head } : {}),
+        relPath: '',
+        name,
+        kind: 'file',
+        ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath, alone) } : {}),
         ...(zip ? { members: zip.members } : {}),
         ...(zip && zip.notLookedAt > 0 ? { membersNotLookedAt: zip.notLookedAt } : {}),
       },
       children: [],
+      ...(zip ? { readsRanOut: zipShare.sharedRanOut } : {}),
     };
   }
   if (stat.kind !== 'directory') throw new ScopeSafeError('not_regular', 'neither a file nor a folder');
+  const folderAllowance = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES));
   const everything = root.list(chosenRelPath);
   // Names a format asks for are looked at past the usual bound, up to a larger one; what is past that is counted.
   // The names that say what an export is by themselves come first, so ordinary files ahead of them cannot hide them.
@@ -278,10 +388,12 @@ export function probeArchivePath(
       children.push({ relPath: entry.name, name: entry.name, kind: 'directory' });
     } else if (kind === 'file') {
       const head = heads.get(index);
-      const zip = zips.has(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, signatureNames) : undefined;
+      const zip = zips.has(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, signatureNames, folderAllowance) : undefined;
       children.push({
-        relPath: entry.name, name: entry.name, kind: 'file',
-        ...(head ? { head } : {}),
+        relPath: entry.name,
+        name: entry.name,
+        kind: 'file',
+        ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name), folderAllowance) } : {}),
         ...(zip ? { members: zip.members } : {}),
         ...(zip && zip.notLookedAt > 0 ? { membersNotLookedAt: zip.notLookedAt } : {}),
       });
@@ -292,6 +404,7 @@ export function probeArchivePath(
     children,
     ...(notLookedAt > 0 ? { notLookedAt } : {}),
     ...(othersNotLookedAt > 0 ? { othersNotLookedAt } : {}),
+    readsRanOut: folderAllowance.sharedRanOut,
   };
 }
 

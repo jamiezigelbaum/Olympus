@@ -353,12 +353,16 @@ describe('each archive under the Archives row', () => {
     expect(lines).toEqual([
       fill(A.gaps.media_not_imported.many, { n: '287' }),
       fill(A.gaps.item_truncated.many, { n: '4' }),
+      fill(A.gaps.note_date_assumed.many, { n: '12' }),
+      A.gaps.note_too_large.one,
       A.gaps.assumption.one,
       fill(A.gaps.section_not_imported.many, { n: '2' }),
       A.gaps.file_damaged.one,
+      // What was left out on purpose comes after what could not be read.
+      fill(A.gaps.note_empty.many, { n: '38' }),
     ]);
     // Every kind has both a one and a many sentence, none of them the catch-all.
-    for (const kind of ['media_not_imported', 'item_truncated', 'assumption', 'section_not_imported', 'file_damaged'] as const) {
+    for (const kind of ['media_not_imported', 'item_truncated', 'assumption', 'section_not_imported', 'file_damaged', 'note_empty', 'note_unreadable', 'note_too_large', 'note_content_unsupported', 'note_date_assumed'] as const) {
       expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
       expect(A.gaps[kind].many).toContain('{n}');
     }
