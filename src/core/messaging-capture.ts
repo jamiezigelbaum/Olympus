@@ -1,5 +1,5 @@
 import { telegramPythonExecutable } from './messaging-runtime.ts';
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ import {
   folderCaptureEnvRemoved,
   type LayoutAccount,
 } from './olympus-layout.ts';
+import { captureGrantPathBeside, readCaptureGrantFile } from './messaging-capture-grant-file.ts';
 import { placedAccount } from './source-placement.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './source-registry.ts';
 import { recordAccountPlacement } from './source-storage.ts';
@@ -55,7 +56,7 @@ export function defaultMessagingCaptureGrantPath(
   source: MessagingPairingSource,
   registryPath = defaultHandleRegistryPath(),
 ): string {
-  return join(dirname(registryPath), `messaging-capture.${source}.json`);
+  return captureGrantPathBeside(source, registryPath);
 }
 
 export function saveMessagingCaptureGrant(input: {
@@ -132,23 +133,6 @@ export function readMessagingCaptureGrantFacts(
     return facts;
   } catch {
     return {};
-  }
-}
-
-/**
- * The session path a `legacy` account's grant retains, if there is a readable
- * grant that names one: where the session was paired, which an override lifted
- * since cannot be told from the environment. A `folder` account's grant has none.
- */
-export function readMessagingCaptureGrantSessionPath(
-  source: MessagingPairingSource,
-  grantPath = defaultMessagingCaptureGrantPath(source),
-): string | undefined {
-  try {
-    const read = readGrant(grantPath);
-    return read.kind === 'valid' && read.grant.source === source ? read.grant.sessionPath : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -382,27 +366,7 @@ async function observeChildExit(child: CaptureChild, timeoutMs: number): Promise
   return observed;
 }
 
-function readGrant(path: string): { kind: 'missing' } | { kind: 'invalid' } | { kind: 'valid'; grant: MessagingCaptureGrant } {
-  if (!existsSync(path)) return { kind: 'missing' };
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    const info = fstatSync(descriptor);
-    const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-    if (!info.isFile() || (info.mode & 0o022) !== 0 || (currentUid !== undefined && info.uid !== currentUid)) {
-      return { kind: 'invalid' };
-    }
-    const value = JSON.parse(readFileSync(descriptor, 'utf8')) as MessagingCaptureGrant;
-    if (value.version !== 1 || !['telegram', 'whatsapp'].includes(value.source) || !value.handle) return { kind: 'invalid' };
-    if (value.sessionPath !== undefined && (typeof value.sessionPath !== 'string' || value.sessionPath === '')) return { kind: 'invalid' };
-    if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment)) return { kind: 'invalid' };
-    return { kind: 'valid', grant: value };
-  } catch {
-    return { kind: 'invalid' };
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-  }
-}
+const readGrant = readCaptureGrantFile;
 
 function resolveCurrentLaunch(
   options: {

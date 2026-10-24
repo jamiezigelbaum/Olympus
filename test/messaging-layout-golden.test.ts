@@ -29,6 +29,7 @@ import {
   defaultWhatsAppMediaDir,
   defaultWhatsAppSpoolDir,
   defaultWhatsAppStateDir,
+  whatsAppLiveSyncScriptPaths,
 } from '../src/workers/whatsapp/store-sync.ts';
 import golden from './fixtures/messaging-resolution-golden.json';
 
@@ -65,6 +66,11 @@ const resolvers: Resolvers = {
   'wa.lifecycle.stores': (env) => whatsappSpec().connectorStorePaths!({ env }),
   'wa.lifecycle.raw': (env) => whatsappSpec().rawStatePaths!({ env }),
   'wa.lifecycle.pairing': (env) => whatsappSpec().pairingSessionPaths!({ env }),
+  // scripts/whatsapp-live-sync.ts: its own legacy resolution (it ignored XDG and the spool and store overrides), expected from the script as it stood on main.
+  'script.wa.paths': (env) => {
+    const { spoolDir, dbPath } = whatsAppLiveSyncScriptPaths(env, env.HOME);
+    return { spoolDir, dbPath };
+  },
 };
 
 const GOLDEN = golden.cases as Record<string, Record<string, unknown>>;
@@ -279,7 +285,7 @@ describe('a legacy messaging account resolves exactly what main resolved', () =>
         const prefixes = [set(TELEGRAM_OVERRIDES) ? 'tg.' : undefined, set(WHATSAPP_OVERRIDES) ? 'wa.' : undefined].filter((p): p is string => p !== undefined);
         expect(prefixes.length, name).toBeGreaterThan(0);
         for (const [key, expected] of Object.entries(results)) {
-          if (prefixes.some((prefix) => key.startsWith(prefix))) expectResolves(name, key, env, expected);
+          if (prefixes.some((prefix) => key.startsWith(prefix) || key.startsWith(`script.${prefix}`))) expectResolves(name, key, env, expected);
         }
       });
     }

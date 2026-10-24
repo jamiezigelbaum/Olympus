@@ -324,7 +324,6 @@ import {
   type StoreFileOwner,
 } from '../../core/source-storage.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
-import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID } from '../../core/olympus-layout.ts';
 import { lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
@@ -2086,13 +2085,7 @@ let dataOwnerLock: HeldDataOwnerLock | undefined;
  */
 export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefined>): string[] {
   try {
-    const handleRegistryPath = handleRegistryPathFromEnv(env, true)!;
-    const replaced = replaceEmptyLegacyAccounts(env, {
-      // A paired messaging account keeps the paths its capture grant names.
-      isPaired: (sourceId) => sourceId === TELEGRAM_SOURCE_ID
-        ? existsSync(defaultMessagingCaptureGrantPath('telegram', handleRegistryPath))
-        : sourceId === WHATSAPP_SOURCE_ID && existsSync(defaultMessagingCaptureGrantPath('whatsapp', handleRegistryPath)),
-    });
+    const replaced = replaceEmptyLegacyAccounts(env);
     for (const sourceId of replaced) console.log(`[storage] ${sourceId} holds nothing yet; its files will live in its account folder.`);
     return replaced;
   } catch (error) {

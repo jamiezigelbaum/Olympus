@@ -16,6 +16,8 @@ import {
   saveMessagingCaptureGrant,
   type CaptureChild,
 } from '../src/core/messaging-capture.ts';
+import { openConnectorStore, __sourceStorageTestHooks, enableSourceRegistryAdoption } from '../src/core/source-storage.ts';
+import { defaultInternalTelegramConnectorStoreDbPath } from '../src/workers/telegram-messages/corpus-adapter.ts';
 import {
   TELEGRAM_API_HASH_SECRET_KEY,
   TELEGRAM_API_ID_SECRET_KEY,
@@ -34,10 +36,12 @@ import {
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { decideAccountLayout, placedAccount } from '../src/core/source-placement.ts';
 import { readSourceRegistry, sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
-import { SourceStorageUnavailableError, recordPairingPlacement, replaceEmptyLegacyAccounts } from '../src/core/source-storage.ts';
+import { SourceStorageUnavailableError, placeOwnedAccount, replaceEmptyLegacyAccounts } from '../src/core/source-storage.ts';
+import { settlePairingPlacement } from '../src/core/pairing-placement.ts';
+import { pairingPlacementForCli } from '../src/workers/cli-operations.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { replaceEmptyAccountsAtBoot } from '../src/workers/email-source/server.ts';
-import { defaultWhatsAppMediaRoots } from '../src/workers/whatsapp/store-sync.ts';
+import { defaultWhatsAppMediaRoots, whatsAppLiveSyncScriptPaths } from '../src/workers/whatsapp/store-sync.ts';
 import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
 
 type Env = Record<string, string>;
@@ -156,7 +160,11 @@ interface Paired {
   result: Awaited<ReturnType<typeof pairMessagingSource>> & { status: 'connected' };
 }
 
-async function pairTelegram(f: { dir: string; home: string; env: Env }, runCommandSession: (path: string | undefined) => void = () => {}): Promise<Paired> {
+async function pairTelegram(
+  f: { dir: string; home: string; env: Env },
+  runCommandSession: (path: string | undefined) => void = () => {},
+  extra: Partial<Parameters<typeof pairMessagingSource>[0]> = {},
+): Promise<Paired> {
   const pkg = packageFixture(f.dir);
   const result = await pairMessagingSource({
     source: 'telegram',
@@ -171,6 +179,7 @@ async function pairTelegram(f: { dir: string; home: string; env: Env }, runComma
       return telegramReady(request.env.OLYMPUS_TELEGRAM_SESSION_PATH);
     },
     registerSession: async () => ({ ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] }),
+    ...extra,
   });
   if (result.status !== 'connected') throw new Error('expected connected result');
   const registryPath = join(f.dir, 'config', 'handles.json');
@@ -561,8 +570,8 @@ describe('Unpair accepts the real data folder and stays strict', () => {
 describe('Delete of a folder messaging account', () => {
   test('WhatsApp: takes the folder with its store, spool, media and session, and nothing beside it', () => {
     const f = fresh();
-    recordPairingPlacement({ sourceId: WHATSAPP }, f.env);
-    recordPairingPlacement({ sourceId: 'x.bookmarks' }, f.env);
+    placeOwnedAccount({ sourceId: WHATSAPP }, f.env);
+    placeOwnedAccount({ sourceId: 'x.bookmarks' }, f.env);
     const folder = folderOf(WHATSAPP, f.env);
     const state = join(folder, 'raw', 'whatsapp');
     const db = new Database(put(join(folder, 'stores', 'secure_local.sqlite'), ''), { create: true });
@@ -588,7 +597,7 @@ describe('Delete of a folder messaging account', () => {
 
   test('Telegram: takes the folder with its spool, gateway state and session', () => {
     const f = fresh({ relocated: true });
-    recordPairingPlacement({ sourceId: TELEGRAM }, f.env);
+    placeOwnedAccount({ sourceId: TELEGRAM }, f.env);
     const folder = folderOf(TELEGRAM, f.env);
     put(join(folder, 'raw', 'telegram-spool', '0001.jsonl'), 'message text');
     put(join(folder, 'raw', 'telegram-gateway', 'state.json'));
@@ -605,7 +614,7 @@ describe('Delete of a folder messaging account', () => {
     const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
     Object.defineProperty(process, 'platform', { value: 'linux' });
     try {
-      recordPairingPlacement({ sourceId: WHATSAPP }, env);
+      placeOwnedAccount({ sourceId: WHATSAPP }, env);
       const state = join(folderOf(WHATSAPP, env), 'raw', 'whatsapp');
       put(join(state, 'spool', '0001.jsonl'));
       put(join(state, 'session.db'));
@@ -632,7 +641,7 @@ describe('Delete of a folder messaging account', () => {
 
   test('a legacy account whose raw state an override points into another account\'s folder protects that folder, and is refused itself', () => {
     const f = fresh();
-    recordPairingPlacement({ sourceId: 'readwise.library' }, f.env);
+    placeOwnedAccount({ sourceId: 'readwise.library' }, f.env);
     pinMessagingLegacy({ ...f.env });
     // pinMessagingLegacy replaced the registry: put the folder account back beside the legacy ones.
     updateSourceRegistry(f.env, (registry) => {
@@ -650,7 +659,7 @@ describe('Delete of a folder messaging account', () => {
 
   test('a retained grant path inside another account\'s folder protects that folder', async () => {
     const f = fresh();
-    recordPairingPlacement({ sourceId: 'readwise.library' }, f.env);
+    placeOwnedAccount({ sourceId: 'readwise.library' }, f.env);
     const readwise = folderOf('readwise.library', f.env);
     const session = put(join(readwise, 'raw', 'tg', 'telegram.personal.session'), 'login');
     const registryPath = join(f.dir, 'config', 'handles.json');
@@ -667,6 +676,22 @@ describe('Delete of a folder messaging account', () => {
     const env = { ...f.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath };
     expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir: f.home, env })).toThrow('overlaps another source');
     expect(existsSync(session)).toBe(true);
+  });
+
+  test('a grant that cannot be read refuses another source\'s Delete: where its session lives cannot be shown', () => {
+    const f = fresh();
+    placeOwnedAccount({ sourceId: 'readwise.library' }, f.env);
+    const readwise = folderOf('readwise.library', f.env);
+    const session = put(join(readwise, 'raw', 'tg', 'telegram.personal.session'), 'login');
+    const { env, grantPath } = writeGrant(f, 'telegram', join(readwise, 'raw', 'tg', 'telegram.personal'));
+    const deleteEnv = { ...env, HOME: f.home };
+    // Readable, the grant protects the session (the test above). Unreadable, nothing can be shown, so nothing is removed.
+    writeFileSync(grantPath, '{not json');
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir: f.home, env: deleteEnv })).toThrow('capture grant');
+    expect(existsSync(session)).toBe(true);
+    expect(existsSync(readwise)).toBe(true);
+    // Its own grant being unreadable is not another account's concern.
+    expect(() => deleteOlympusData({ sourceId: 'telegram.messages', homeDir: f.home, env: deleteEnv })).not.toThrow('capture grant');
   });
 });
 
@@ -743,7 +768,7 @@ describe('an empty legacy account is placed in a folder at worker boot, and noth
 
     const paired = fresh();
     legacyEntry(paired.env, WHATSAPP);
-    expect(replaceEmptyLegacyAccounts(paired.env, { isPaired: (sourceId) => sourceId === WHATSAPP })).toEqual([]);
+    expect(replaceEmptyLegacyAccounts(writeGrant(paired, 'whatsapp', join(paired.dir, 'old', 'whatsapp-live')).env)).toEqual([]);
     expect(layouts(paired.env)[WHATSAPP]).toBe('active:legacy');
 
     const deleting = fresh();
@@ -754,12 +779,12 @@ describe('an empty legacy account is placed in a folder at worker boot, and noth
 
   test('a folder entry, and an account with no entry, are left alone', () => {
     const f = fresh();
-    recordPairingPlacement({ sourceId: TELEGRAM }, f.env);
+    placeOwnedAccount({ sourceId: TELEGRAM }, f.env);
     expect(replaceEmptyLegacyAccounts(f.env)).toEqual([]);
     expect(Object.keys(layouts(f.env))).toEqual([TELEGRAM]);
   });
 
-  test('the worker boot step is paired-aware and never throws', () => {
+  test('the worker boot step honors a grant and never throws', () => {
     const f = fresh();
     legacyEntry(f.env, TELEGRAM);
     legacyEntry(f.env, WHATSAPP);
@@ -777,45 +802,301 @@ describe('an empty legacy account is placed in a folder at worker boot, and noth
 });
 
 describe('pairing records the account before it picks a path', () => {
-  test('no entry: recorded from the placement decision; an existing entry is followed', () => {
+  const TOKEN = 'fixture-worker-token';
+  const asWorker = (env: Env): Env => ({ ...env, OLYMPUS_WORKER_AUTH_TOKEN: TOKEN });
+  /** A running worker, answering as the worker does: its own environment decides. */
+  function runningWorker(workerEnv: Env, asked: string[] = []): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/health')) return new Response('{}');
+      asked.push(url.slice(url.indexOf('/cli/') + '/cli/'.length));
+      return Response.json(pairingPlacementForCli(JSON.parse(String(init?.body)), workerEnv));
+    }) as typeof fetch;
+  }
+  const accounts = (env: Env): Array<[string, string]> => readSourceRegistry(env).accounts.map((a) => [a.source_id, a.layout]);
+
+  test('no entry: recorded from the placement decision; an existing entry is followed', async () => {
     const fresher = fresh();
-    expect(recordPairingPlacement({ sourceId: TELEGRAM }, fresher.env)).toBe('folder');
-    expect(readSourceRegistry(fresher.env).accounts.map((a) => [a.source_id, a.layout])).toEqual([[TELEGRAM, 'folder']]);
+    expect(await settlePairingPlacement({ sourceId: TELEGRAM }, fresher.env)).toBe('folder');
+    expect(accounts(fresher.env)).toEqual([[TELEGRAM, 'folder']]);
 
     const legacy = fresh();
     pinMessagingLegacy(legacy.env);
-    expect(recordPairingPlacement({ sourceId: WHATSAPP }, legacy.env)).toBe('legacy');
-    // Following the entry means no files are needed to keep it legacy.
-    expect(decideAccountLayout(WHATSAPP, legacy.env).layout).toBe('folder');
+    expect(await settlePairingPlacement({ sourceId: WHATSAPP }, legacy.env)).toBe('legacy');
     expect(placedAccount(WHATSAPP, legacy.env).layout).toBe('legacy');
   });
 
-  test('the pins: existing files, an override and native ownership record legacy', () => {
+  test('the pins: existing files, an override and native ownership record legacy', async () => {
     const files = fresh();
     put(join(files.home, '.local', 'share', 'olympus', 'telegram', 'telegram.personal.session'));
-    expect(recordPairingPlacement({ sourceId: TELEGRAM }, files.env)).toBe('legacy');
+    expect(await settlePairingPlacement({ sourceId: TELEGRAM }, files.env)).toBe('legacy');
 
     const override = fresh();
-    expect(recordPairingPlacement({ sourceId: WHATSAPP }, { ...override.env, OLYMPUS_WHATSAPP_STATE_DIR: '/elsewhere' })).toBe('legacy');
+    expect(await settlePairingPlacement({ sourceId: WHATSAPP }, { ...override.env, OLYMPUS_WHATSAPP_STATE_DIR: '/elsewhere' })).toBe('legacy');
 
     const native = fresh();
-    expect(recordPairingPlacement({ sourceId: TELEGRAM }, { ...native.env, OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER: 'true' })).toBe('legacy');
-    expect(readSourceRegistry(native.env).accounts.map((a) => [a.source_id, a.layout])).toEqual([[TELEGRAM, 'legacy']]);
+    expect(await settlePairingPlacement({ sourceId: TELEGRAM }, { ...native.env, OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER: 'true' })).toBe('legacy');
+    expect(accounts(native.env)).toEqual([[TELEGRAM, 'legacy']]);
   });
 
-  test('while another process owns the data nothing is recorded and the pairing keeps the old paths', () => {
-    const f = fresh();
-    held.push(holdDataOwnerLock(f.env));
-    expect(recordPairingPlacement({ sourceId: TELEGRAM }, f.env)).toBe('legacy');
-    expect(existsSync(sourceRegistryPath(f.env))).toBe(false);
-  });
-
-  test('an account being deleted cannot be paired', () => {
+  test('an account being deleted cannot be paired', async () => {
     const f = fresh();
     updateSourceRegistry(f.env, (registry) => {
       registry.accounts.push({ source_id: TELEGRAM, slot: '1', state: 'deleting', layout: 'folder', corpus_ids: [], created_at: '2026-10-01T00:00:00.000Z' });
     });
-    expect(() => recordPairingPlacement({ sourceId: TELEGRAM }, f.env)).toThrow(SourceStorageUnavailableError);
+    await expect(settlePairingPlacement({ sourceId: TELEGRAM }, f.env)).rejects.toBeInstanceOf(SourceStorageUnavailableError);
+  });
+
+  test('while a worker owns the data it decides, from its own environment, and the pairing uses its folder', async () => {
+    const f = fresh();
+    held.push(holdDataOwnerLock(f.env)); // the worker, booted but not yet recorded
+    const asked: string[] = [];
+    const sessions: Array<string | undefined> = [];
+    const paired = await pairTelegram(f, (path) => sessions.push(path), { env: asWorker(f.env), workerFetch: runningWorker(f.env, asked) });
+    expect(asked).toEqual(['pairing-placement']);
+    expect(paired.result.sessionLayout).toBe('folder');
+    expect(sessions).toEqual([`${telegramSessionBasePath({ env: f.env, homeDir: f.home })}`]);
+    expect(inside(sessions[0]!, folderOf(TELEGRAM, f.env))).toBe(true);
+    // What the worker recorded is what the pairing used, so a later boot finds nothing to change.
+    expect(accounts(f.env)).toEqual([[TELEGRAM, 'folder']]);
+    expect(replaceEmptyLegacyAccounts(f.env)).toEqual([]);
+  });
+
+  test('a worker whose environment pins the account keeps it legacy, whatever the CLI\'s environment says', async () => {
+    const f = fresh();
+    held.push(holdDataOwnerLock(f.env));
+    const workerEnv = { ...f.env, OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'true' };
+    expect(await settlePairingPlacement({ sourceId: WHATSAPP }, asWorker(f.env), { fetchImpl: runningWorker(workerEnv) })).toBe('legacy');
+    expect(accounts(f.env)).toEqual([[WHATSAPP, 'legacy']]);
+  });
+
+  test('a worker that does not answer makes the pairing refuse before anything is made or run', async () => {
+    const f = fresh();
+    held.push(holdDataOwnerLock(f.env));
+    let helperRan = false;
+    await expect(pairTelegram(f, () => { helperRan = true; }, {
+      env: asWorker(f.env),
+      workerFetch: (async () => { throw new Error('connection refused'); }) as unknown as typeof fetch,
+    })).rejects.toThrow('Olympus');
+    expect(helperRan).toBe(false);
+    expect(existsSync(sourceRegistryPath(f.env))).toBe(false);
+    expect(existsSync(join(f.home, '.local', 'share', 'olympus', 'telegram'))).toBe(false);
+  });
+
+  test('an entry that exists is followed without asking the worker', async () => {
+    const f = fresh();
+    placeOwnedAccount({ sourceId: TELEGRAM }, f.env);
+    held.push(holdDataOwnerLock(f.env));
+    const asked: string[] = [];
+    expect(await settlePairingPlacement({ sourceId: TELEGRAM }, asWorker(f.env), { fetchImpl: runningWorker(f.env, asked) })).toBe('folder');
+    expect(asked).toEqual([]);
+  });
+
+  test('a pairing that took the legacy paths cannot be re-placed into a folder under it', async () => {
+    const f = fresh();
+    pinMessagingLegacy(f.env); // an empty legacy entry: exactly what boot re-placement would move
+    const boot: string[][] = [];
+    const paired = await pairTelegram(f, (path) => {
+      // The worker restarts while the helper waits for the login code, before any grant exists.
+      boot.push(replaceEmptyAccountsAtBoot(f.env));
+      put(`${path}.session`, 'login');
+    });
+    // Only WhatsApp, which nothing is pairing, is placed in its folder.
+    expect(boot).toEqual([[WHATSAPP]]);
+    expect(paired.result.sessionLayout).toBe('legacy');
+    expect(accounts(f.env)).toEqual([[TELEGRAM, 'legacy'], [WHATSAPP, 'folder']]);
+    const grant = JSON.parse(readFileSync(paired.grantPath, 'utf8'));
+    expect(grant.sessionPath).toBe(telegramSessionBasePath({ env: f.env, homeDir: f.home }));
+  });
+
+  test('a re-placement that ran between the answer and the claim is followed, and the claim given back', async () => {
+    const f = fresh();
+    held.push(holdDataOwnerLock(f.env));
+    const workerEnv = { ...f.env, OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER: 'true' };
+    const answering = runningWorker(workerEnv);
+    const restartedWorker = (async (input: string | URL | Request, init?: RequestInit) => {
+      const response = await answering(input, init);
+      // The worker answered legacy; then it restarted, without the flag, and re-placed the empty entry.
+      if (String(input).includes('/cli/')) replaceEmptyLegacyAccounts(f.env);
+      return response;
+    }) as typeof fetch;
+    expect(await settlePairingPlacement({ sourceId: TELEGRAM }, asWorker(f.env), { fetchImpl: restartedWorker })).toBe('folder');
+    expect(accounts(f.env)).toEqual([[TELEGRAM, 'folder']]);
+    expect(existsSync(join(f.home, '.local', 'share', 'olympus', 'telegram'))).toBe(false);
+  });
+});
+
+/** A legacy account's capture grant, at the handle registry an environment names: it records the path the session was paired at. */
+function writeGrant(
+  f: { dir: string; env: Env },
+  source: 'telegram' | 'whatsapp',
+  sessionPath: string | undefined,
+): { env: Env; grantPath: string; registryPath: string } {
+  const registryPath = join(f.dir, 'config', 'handles.json');
+  writeHandles(registryPath, source);
+  const grantPath = defaultMessagingCaptureGrantPath(source, registryPath);
+  saveMessagingCaptureGrant({
+    path: grantPath,
+    pairing: {
+      ok: true, source, handles: [source === 'telegram' ? 'telegram.personal' : 'whatsapp.personal_local'], secretRefs: [], status: 'connected',
+      sessionPath: sessionPath ?? join(f.dir, 'unused'), ...(sessionPath === undefined ? { sessionLayout: 'folder' } : {}),
+      accountProof: `${source}:fixture`, chats: [], captureStarted: false, registered: true,
+      producer: { source, executable: '/fixture/python3', args: [], env: {}, secretEnvironment: [], captureStarted: false },
+    } as never,
+  });
+  return { env: { ...f.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: registryPath }, grantPath, registryPath };
+}
+
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+describe('a capture grant pins its account to the paths it was paired at', () => {
+  test('a grant that names its session path keeps the account legacy when a store opens first, and the capture child then finds its session', async () => {
+    const f = fresh();
+    const paired = await pairTelegram(f, (path) => writeFileSync(`${path}.session`, 'login'));
+    // An older install's pairing: the grant names a place of its own, and the registry has no entry yet.
+    const legacyBase = join(f.dir, 'old-place', 'telegram.personal');
+    put(`${legacyBase}.session`);
+    const grant = JSON.parse(readFileSync(paired.grantPath, 'utf8'));
+    grant.sessionPath = legacyBase;
+    grant.producer.env.OLYMPUS_TELEGRAM_SESSION_PATH = legacyBase;
+    writeFileSync(paired.grantPath, JSON.stringify(grant));
+    rmSync(sourceRegistryPath(f.env), { force: true });
+    const env = { ...f.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: paired.registryPath };
+
+    // Store mounting runs at worker boot, before the capture supervisor reconciles.
+    enableSourceRegistryAdoption();
+    try {
+      openConnectorStore({ sourceId: TELEGRAM }, {
+        dbPath: defaultInternalTelegramConnectorStoreDbPath(env),
+        corpusId: 'internal.telegram.messages',
+        family: 'chat',
+        trustDomain: 'internal',
+      }, env).close();
+    } finally {
+      __sourceStorageTestHooks.disableAdoption();
+    }
+    expect(readSourceRegistry(env).accounts.map((a) => [a.source_id, a.layout])).toEqual([[TELEGRAM, 'legacy']]);
+
+    let childEnv: Record<string, string> | undefined;
+    expect(await telegramSupervisor({ env }, paired, (spawned) => {
+      childEnv = spawned;
+      return fakeChild();
+    }).reconcile()).toEqual({ source: 'telegram', state: 'running' });
+    expect(childEnv!.OLYMPUS_TELEGRAM_SESSION_PATH).toBe(legacyBase);
+  });
+
+  test('a grant that cannot be read, or sits where it cannot be looked for, pins legacy; no grant, and a grant with no path, pin nothing', () => {
+    const none = fresh();
+    expect(decideAccountLayout(TELEGRAM, { ...none.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: join(none.dir, 'config', 'handles.json') }).layout).toBe('folder');
+
+    const folderGrant = fresh();
+    expect(decideAccountLayout(TELEGRAM, writeGrant(folderGrant, 'telegram', undefined).env).layout).toBe('folder');
+
+    const named = fresh();
+    expect(decideAccountLayout(TELEGRAM, writeGrant(named, 'telegram', join(named.dir, 'old', 'telegram.personal')).env)).toMatchObject({
+      layout: 'legacy',
+      why: expect.stringContaining('capture grant'),
+    });
+
+    const broken = fresh();
+    const brokenGrant = writeGrant(broken, 'telegram', undefined);
+    writeFileSync(brokenGrant.grantPath, '{not json');
+    expect(decideAccountLayout(TELEGRAM, brokenGrant.env)).toMatchObject({ layout: 'legacy', why: expect.stringContaining('capture grant') });
+
+    const loose = fresh();
+    const looseGrant = writeGrant(loose, 'whatsapp', undefined);
+    chmodSync(looseGrant.grantPath, 0o666);
+    expect(decideAccountLayout(WHATSAPP, looseGrant.env).layout).toBe('legacy');
+
+    const other = fresh();
+    const otherGrant = writeGrant(other, 'telegram', undefined);
+    const wrongSource = JSON.parse(readFileSync(otherGrant.grantPath, 'utf8'));
+    writeFileSync(otherGrant.grantPath, JSON.stringify({ ...wrongSource, source: 'whatsapp', producer: { ...wrongSource.producer, source: 'whatsapp' } }));
+    expect(decideAccountLayout(TELEGRAM, otherGrant.env).layout).toBe('legacy');
+
+    // A path through something that is not a folder cannot hold a grant: confirmed absent.
+    const blocked = fresh();
+    put(join(blocked.dir, 'config'), 'a file where the folder should be');
+    expect(decideAccountLayout(TELEGRAM, { ...blocked.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: join(blocked.dir, 'config', 'handles.json') }).layout).toBe('folder');
+  });
+
+  test.skipIf(isRoot)('a grant place that cannot be searched is not taken for no grant', () => {
+    const f = fresh();
+    const { env, grantPath } = writeGrant(f, 'telegram', undefined);
+    const folder = dirname(grantPath);
+    chmodSync(folder, 0o000);
+    try {
+      expect(decideAccountLayout(TELEGRAM, env)).toMatchObject({ layout: 'legacy', why: expect.stringContaining('capture grant') });
+    } finally {
+      chmodSync(folder, 0o700);
+    }
+  });
+
+  test('boot re-placement leaves an account alone whose grant names a path or cannot be read', () => {
+    const legacyEntry = (env: Env, sourceId: string): void => {
+      updateSourceRegistry(env, (registry) => {
+        registry.accounts.push({ source_id: sourceId, slot: '1', state: 'active', layout: 'legacy', corpus_ids: [], created_at: '2026-10-01T00:00:00.000Z' });
+      });
+    };
+    const control = fresh();
+    legacyEntry(control.env, TELEGRAM);
+    expect(replaceEmptyLegacyAccounts({ ...control.env, OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH: join(control.dir, 'config', 'handles.json') })).toEqual([TELEGRAM]);
+
+    const named = fresh();
+    legacyEntry(named.env, TELEGRAM);
+    expect(replaceEmptyLegacyAccounts(writeGrant(named, 'telegram', join(named.dir, 'old', 'telegram.personal')).env)).toEqual([]);
+
+    const broken = fresh();
+    legacyEntry(broken.env, WHATSAPP);
+    const brokenGrant = writeGrant(broken, 'whatsapp', undefined);
+    writeFileSync(brokenGrant.grantPath, '{not json');
+    expect(replaceEmptyLegacyAccounts(brokenGrant.env)).toEqual([]);
+    expect(readSourceRegistry(broken.env).accounts.map((a) => [a.source_id, a.layout])).toEqual([[WHATSAPP, 'legacy']]);
+  });
+
+  test.skipIf(isRoot)('the boot step does not take an inaccessible grant for an absent one', () => {
+    const f = fresh();
+    updateSourceRegistry(f.env, (registry) => {
+      registry.accounts.push({ source_id: TELEGRAM, slot: '1', state: 'active', layout: 'legacy', corpus_ids: [], created_at: '2026-10-01T00:00:00.000Z' });
+    });
+    const { env, grantPath } = writeGrant(f, 'telegram', join(f.dir, 'old', 'telegram.personal'));
+    const folder = dirname(grantPath);
+    chmodSync(folder, 0o000);
+    try {
+      expect(replaceEmptyAccountsAtBoot(env)).toEqual([]);
+    } finally {
+      chmodSync(folder, 0o700);
+    }
+    expect(readSourceRegistry(f.env).accounts.map((a) => [a.source_id, a.layout])).toEqual([[TELEGRAM, 'legacy']]);
+  });
+});
+
+describe('the WhatsApp live-sync script', () => {
+  test('a legacy account keeps the script\'s own paths: it ignored a relocated data folder and every override but the state folder\'s', () => {
+    const f = fresh({ relocated: true });
+    pinMessagingLegacy(f.env);
+    const old = join(f.home, '.local', 'share', 'olympus', 'whatsapp-live');
+    const env = {
+      ...f.env,
+      OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR: join(f.dir, 'elsewhere', 'spool'),
+      OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH: join(f.dir, 'elsewhere', 'store.db'),
+      OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH: join(f.dir, 'elsewhere', 'index.db'),
+    };
+    expect(whatsAppLiveSyncScriptPaths(env, f.home)).toEqual({ spoolDir: join(old, 'spool'), dbPath: join(old, 'connector-store.db') });
+    // The state folder override it always honored.
+    const state = join(f.dir, 'bridge-state');
+    expect(whatsAppLiveSyncScriptPaths({ ...env, OLYMPUS_WHATSAPP_STATE_DIR: ` ${state} ` }, f.home))
+      .toEqual({ spoolDir: join(state, 'spool'), dbPath: join(state, 'connector-store.db') });
+  });
+
+  test('a folder account uses the folder: the worker\'s paths', () => {
+    const f = fresh({ relocated: true });
+    placeOwnedAccount({ sourceId: WHATSAPP }, f.env);
+    const folder = folderOf(WHATSAPP, f.env);
+    expect(whatsAppLiveSyncScriptPaths(f.env, f.home)).toEqual({
+      spoolDir: join(folder, 'raw', 'whatsapp', 'spool'),
+      dbPath: join(folder, 'stores', 'secure_local.sqlite'),
+    });
   });
 });
 

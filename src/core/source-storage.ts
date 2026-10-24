@@ -33,7 +33,6 @@ import { SecretLocationsIndex } from '../workers/classification/secret-locations
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
-import { tryDataOwnerLock } from './data-owner-lock.ts';
 import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
 import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
 import {
@@ -136,17 +135,18 @@ export function recordAccountPlacement(account: StorageAccount, path: string, en
 }
 
 /**
- * Settle a pairing's layout before it picks a session path (messaging accounts,
- * delivery step 4b). Pairing runs in the CLI, which has adoption off, so this
- * reads the registry itself: an account that has an entry follows it. One that
- * has none is recorded here, from the same decision adoption would make, when
- * this process can take the data owner lock (no worker is running, so nothing
- * else is deciding); while a worker owns the data it records the entry, and
- * until it has, a pairing keeps the paths that were always there, `legacy`.
- * An unreadable registry fails the pairing, as it fails an open. A data folder
- * that cannot be worked out records nothing, and pairing is `legacy`.
+ * Settle an account's layout, recording it when the registry has no entry for
+ * it, from the same decision adoption makes. For a caller that owns the data and
+ * so is the only one deciding: the CLI holding the owner lock with no worker
+ * running, or the worker itself, answering the CLI from its own environment
+ * (`pairing-placement` in workers/cli-operations.ts; core/pairing-placement.ts
+ * is the CLI's side). An account that has an entry follows it.
+ *
+ * An unreadable registry fails the call, as it fails an open; so does an
+ * account being deleted. A data folder that cannot be worked out records
+ * nothing, and the account is `legacy`.
  */
-export function recordPairingPlacement(account: StorageAccount, env: LayoutEnv = process.env): LayoutAccountLayout {
+export function placeOwnedAccount(account: StorageAccount, env: LayoutEnv = process.env): LayoutAccountLayout {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
   const existing = (registry: SourceRegistry): LayoutAccountLayout | undefined => {
     assertOpenable(registry, account.sourceId, slot);
@@ -155,32 +155,26 @@ export function recordPairingPlacement(account: StorageAccount, env: LayoutEnv =
   let layout: LayoutAccountLayout | undefined;
   try {
     layout = existing(readSourceRegistry(env));
-    if (layout !== undefined || !hasFolderLayout(account.sourceId)) return layout ?? 'legacy';
-    const held = tryDataOwnerLock(env);
-    if (!held) return 'legacy';
-    try {
-      updateSourceRegistry(env, (registry) => {
-        layout = existing(registry);
-        if (layout !== undefined) return;
-        layout = decideAccountLayout(account.sourceId, env).layout;
-        registry.accounts.push({
-          source_id: account.sourceId,
-          slot,
-          state: 'active',
-          layout,
-          corpus_ids: [],
-          created_at: new Date().toISOString(),
-        });
-      });
-    } finally {
-      held.release();
-    }
-    return layout ?? 'legacy';
   } catch (error) {
     if (error instanceof SourceRegistryError || error instanceof SourceStorageUnavailableError) throw error;
     // The data folder cannot be worked out (a Linux layout that refuses this environment).
     return 'legacy';
   }
+  if (layout !== undefined || !hasFolderLayout(account.sourceId)) return layout ?? 'legacy';
+  updateSourceRegistry(env, (registry) => {
+    layout = existing(registry);
+    if (layout !== undefined) return;
+    layout = decideAccountLayout(account.sourceId, env).layout;
+    registry.accounts.push({
+      source_id: account.sourceId,
+      slot,
+      state: 'active',
+      layout,
+      corpus_ids: [],
+      created_at: new Date().toISOString(),
+    });
+  });
+  return layout ?? 'legacy';
 }
 
 /**
@@ -197,21 +191,16 @@ export function recordPairingPlacement(account: StorageAccount, env: LayoutEnv =
  *   path is not recorded, and an override lifted since could have placed it
  *   anywhere);
  * - the placement decision says `folder`: no pin (env override, mount,
- *   native ownership), no file or capture folder at any legacy location, and
- *   every one of them can be looked at;
- * - `isPaired` does not hold: a paired messaging account keeps the paths of
- *   its grant, which the decision cannot see.
+ *   native ownership, a capture grant that names a session path or cannot be
+ *   read), no file or capture folder at any legacy location, and every one of
+ *   them can be looked at.
  */
-export function replaceEmptyLegacyAccounts(
-  env: LayoutEnv = process.env,
-  options: { isPaired?: (sourceId: string) => boolean } = {},
-): string[] {
+export function replaceEmptyLegacyAccounts(env: LayoutEnv = process.env): string[] {
   const eligible = (account: SourceRegistry['accounts'][number]): boolean =>
     account.state === 'active'
     && account.layout === 'legacy'
     && account.corpus_ids.length === 0
     && hasFolderLayout(account.source_id)
-    && options.isPaired?.(account.source_id) !== true
     && decideAccountLayout(account.source_id, env).layout === 'folder';
   if (!readSourceRegistry(env).accounts.some(eligible)) return [];
   const replaced: string[] = [];

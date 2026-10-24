@@ -10,7 +10,7 @@ import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
 import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, whatsappStateDir } from './pairing-session-paths.ts';
-import { recordPairingPlacement } from './source-storage.ts';
+import { settlePairingPlacement } from './pairing-placement.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
 export const TELEGRAM_API_ID_SECRET_KEY = 'telegram.personal.app.api_id';
@@ -113,6 +113,8 @@ export interface PairMessagingSourceOptions {
   registerSession?: MessagingSessionRegistrar;
   which?: (command: string) => string | null;
   buildWhatsAppBridge?: (input: { go: string; sourceDir: string; outputPath: string }) => Promise<boolean>;
+  /** Test seam: replaces the transport to the running worker, which decides a new account's layout while it owns the data. */
+  workerFetch?: typeof fetch;
 }
 
 export type MessagingSessionRegistrar = (
@@ -143,9 +145,10 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   // The account is placed before a path is picked: pairing creates its first file.
-  const layout = recordPairingPlacement(
+  const layout = await settlePairingPlacement(
     { sourceId: options.source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID },
     pairingLayoutEnv({ env, ...(options.homeDir ? { homeDir: options.homeDir } : {}) }),
+    options.workerFetch ? { fetchImpl: options.workerFetch } : {},
   );
   const pathContext = {
     env,

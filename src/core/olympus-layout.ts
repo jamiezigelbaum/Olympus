@@ -66,6 +66,17 @@ export function legacyWhatsAppServiceStateDir(env: LayoutEnv = process.env): str
 }
 
 /**
+ * Legacy: the state folder scripts/whatsapp-live-sync.ts has always used (a cron
+ * job's, not the worker's): `OLYMPUS_WHATSAPP_STATE_DIR` or `<home>/.local/share/olympus/whatsapp-live`.
+ * It reads no other variable (`XDG_DATA_HOME` and every spool or store override
+ * included), so an install that relocates the data folder does not move it.
+ * Kept exactly, with the home as the OS reports it, not `env.HOME`.
+ */
+export function legacyWhatsAppLiveSyncStateDir(env: LayoutEnv = process.env, homeDir: string = homedir()): string {
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join(homeDir, '.local', 'share', 'olympus', 'whatsapp-live');
+}
+
+/**
  * Legacy: where Telegram's connector stores live today. It ignores
  * `XDG_DATA_HOME` (every other store honors it), so with a non-default
  * `XDG_DATA_HOME` the stores sit outside the data root. Kept exactly, because
@@ -618,6 +629,16 @@ export function folderCaptureDirs(account: LayoutAccount, env: LayoutEnv = proce
  * that the account already lives in the legacy layout, beside its stores.
  * (Directories count: a capture folder that exists is a legacy account.)
  */
+/**
+ * The legacy folder whose presence keeps a messaging account `legacy` (the first
+ * of its raw legacy paths, which the placement decision looks at): a pairing that
+ * chose the legacy paths makes it first, so no later decision can place the
+ * account in a folder while its session is being made there.
+ */
+export function legacyCaptureClaimDir(sourceId: string, env: LayoutEnv = process.env): string | undefined {
+  return legacyMessagingPaths(sourceId, env).raw[0];
+}
+
 function legacyMessagingPaths(sourceId: string, env: LayoutEnv): { stores: string[]; raw: string[] } {
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const capture = legacyCaptureDataRoot(env);

@@ -95,7 +95,7 @@ import {
   defaultWhatsAppInternalConnectorStoreDbPath,
 } from './workers/whatsapp/index.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
-import { defaultMessagingCaptureGrantPath, readMessagingCaptureGrantSessionPath } from './core/messaging-capture.ts';
+import { captureGrantPathBeside, captureGrantSessionEvidence, type CaptureGrantSessionEvidence } from './core/messaging-capture-grant-file.ts';
 import {
   olympusDataRoots,
   pairingOwnedRoots,
@@ -2047,7 +2047,7 @@ function isStrictlyInside(path: string, root: string): boolean {
  */
 function assertRawStateTargetsContained(
   targets: readonly DeleteTarget[],
-  context: LifecyclePathContext,
+  context: LifecyclePathContext & { handleRegistryPath?: string },
   selectedSource: LifecycleSourceSpec | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
@@ -2091,8 +2091,19 @@ function assertRawStateTargetsContained(
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
   // A legacy account's grant keeps the path its session was paired at, which an override lifted since
-  // no longer names: it may be inside an account folder this delete is about to take.
-  for (const path of retainedGrantSessionPaths(context)) protectedPaths.add(path);
+  // no longer names: it may be inside an account folder this delete is about to take. A grant that exists
+  // but cannot be read says nothing, so another account's delete is refused rather than risk its session.
+  for (const grant of retainedGrants(context)) {
+    if (grant.evidence.kind === 'path') {
+      for (const path of pairingSessionPathsFromStoredValue(grant.source, grant.evidence.sessionPath)) protectedPaths.add(path);
+    } else if (grant.evidence.kind === 'unreadable' && !own.has(grant.sourceId)) {
+      throw new OperationError(
+        'invalid_params',
+        `Refusing to delete source state because the ${grant.source === 'telegram' ? 'Telegram' : 'WhatsApp'} capture grant cannot be read, so it cannot be shown that its session is outside what this delete removes.`,
+        'Fix or remove that grant (unpair the account), then delete again. Nothing was deleted.',
+      );
+    }
+  }
   // A store the connector-store mount list places by path (Reflect, Roam, an
   // operator's own) may sit anywhere, an account folder included: another
   // source's mounted store and its sidecars are protected where they really are.
@@ -2174,13 +2185,20 @@ function assertSourcesFolderTargetsUnlinked(targets: readonly DeleteTarget[], co
   }
 }
 
-function retainedGrantSessionPaths(context: LifecyclePathContext): string[] {
-  const registryPath = envForContext(context).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
+/** What each messaging source's capture grant says about where its session lives (where the delete options name a registry, that one). */
+function retainedGrants(context: LifecyclePathContext & { handleRegistryPath?: string }): Array<{
+  source: 'telegram' | 'whatsapp';
+  sourceId: string;
+  evidence: CaptureGrantSessionEvidence;
+}> {
+  const registryPath = context.handleRegistryPath
+    || envForContext(context).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
     || join(resolveHome(context.homeDir), '.config', 'olympus', 'handles.json');
-  return (['telegram', 'whatsapp'] as const).flatMap((source) => {
-    const stored = readMessagingCaptureGrantSessionPath(source, defaultMessagingCaptureGrantPath(source, registryPath));
-    return stored ? pairingSessionPathsFromStoredValue(source, stored) : [];
-  });
+  return ([['telegram', TELEGRAM_SOURCE_ID], ['whatsapp', WHATSAPP_SOURCE_ID]] as const).map(([source, sourceId]) => ({
+    source,
+    sourceId,
+    evidence: captureGrantSessionEvidence(source, captureGrantPathBeside(source, registryPath)),
+  }));
 }
 
 function isInsideKnownOlympusRoot(path: string, context: LifecyclePathContext): boolean {

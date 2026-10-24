@@ -2,9 +2,11 @@
 // work stays in the thin whatsmeow bridge; this module only hands captured
 // records to the shared SourceConnector -> LocalConnectorStore spine.
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
-import { WHATSAPP_SOURCE_ID } from '../../core/olympus-layout.ts';
-import { resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
+import { WHATSAPP_SOURCE_ID, legacyWhatsAppLiveSyncStateDir } from '../../core/olympus-layout.ts';
+import { placedAccount, resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
 import type {
   LocalConnectorStore,
   ConnectorStoreSyncSummary,
@@ -138,6 +140,24 @@ export function defaultWhatsAppConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
   return resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env);
+}
+
+/**
+ * Where scripts/whatsapp-live-sync.ts reads and writes: the account's own
+ * folder when it lives in one, else the places that script always used, which
+ * are not the worker's: it ignored XDG_DATA_HOME and every override but the
+ * state folder's, so a cron job keeps its spool and database when an install
+ * relocates the data folder or sets a spool or store override for the worker.
+ */
+export function whatsAppLiveSyncScriptPaths(
+  env: Record<string, string | undefined> = process.env,
+  homeDir: string | undefined = homedir(),
+): { spoolDir: string; dbPath: string } {
+  if (placedAccount(WHATSAPP_SOURCE_ID, env).layout === 'folder') {
+    return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: defaultWhatsAppConnectorStoreDbPath(env) };
+  }
+  const stateDir = legacyWhatsAppLiveSyncStateDir(env, homeDir ?? homedir());
+  return { spoolDir: join(stateDir, 'spool'), dbPath: join(stateDir, 'connector-store.db') };
 }
 
 // The store may also contain archive-import runs. Only a cursor shaped like the

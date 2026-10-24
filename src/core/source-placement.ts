@@ -45,11 +45,14 @@ import {
   legacyOverrideEnvNames,
   nativeCaptureOwnerPin,
   olympusDataRoot,
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SOURCE_ID,
   type AccountRawName,
   type LayoutAccount,
   type LayoutAccountLayout,
   type LayoutEnv,
 } from './olympus-layout.ts';
+import { captureGrantPathFromEnv, captureGrantSessionEvidence } from './messaging-capture-grant-file.ts';
 import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, SourceRegistryError } from './source-registry.ts';
 
@@ -212,11 +215,29 @@ function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
   }
   const native = nativeCaptureOwnerPin(sourceId, env);
   if (native) return native;
+  const grant = captureGrantPin(sourceId, env);
+  if (grant) return grant;
   const mounts = declaredConnectorStoreMounts(env);
   // The worker refuses a list it cannot read; until it is fixed nothing may move.
   if (mounts === 'unreadable') return `${MOUNTS_ENV} (unreadable)`;
   const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
   return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
+}
+
+/**
+ * A messaging account's capture grant, when it keeps the account at the paths it
+ * was paired at: a grant that names its session path (a folder account's names
+ * none), or one that cannot be read, since then nothing shows it names none. Only
+ * a grant confirmed absent, or readable and without a path, pins nothing. The
+ * grant exists before the account's first file is recorded here whenever the
+ * install was paired by an older build, which the environment cannot say.
+ */
+function captureGrantPin(sourceId: string, env: LayoutEnv): string | undefined {
+  const source = sourceId === TELEGRAM_SOURCE_ID ? 'telegram' : sourceId === WHATSAPP_SOURCE_ID ? 'whatsapp' : undefined;
+  if (!source) return undefined;
+  const evidence = captureGrantSessionEvidence(source, captureGrantPathFromEnv(source, env));
+  if (evidence.kind === 'path') return 'its capture grant (names the session path)';
+  return evidence.kind === 'unreadable' ? 'its capture grant (cannot be read)' : undefined;
 }
 
 /** Whether the legacy data folder can be told apart from a fresh one. */

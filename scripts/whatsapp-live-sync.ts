@@ -7,8 +7,9 @@
 //   OLYMPUS_WHATSAPP_STATE_DIR=~/.local/share/olympus/whatsapp-live \
 //     bun scripts/whatsapp-live-sync.ts [--db <path>] [--account personal] [--max-items N]
 //
-// The store db defaults to the account's secure_local store (<state dir>/connector-store.db
-// for a legacy account), which the product worker now mounts directly. This command remains a diagnostic/convergence
+// The store db defaults to <state dir>/connector-store.db, which the product
+// worker now mounts directly (an account kept in its own account folder uses
+// that folder's spool and secure_local store instead). This command remains a diagnostic/convergence
 // utility; normal runtime sync is owned by the shared scheduler.
 // Output is a Castor-safe JSON summary (counts + spool gap diagnostics only,
 // never message text).
@@ -16,8 +17,7 @@
 import {
   WHATSAPP_PERSONAL_SOURCE_ID,
   WHATSAPP_STORE_PLACEMENT,
-  defaultWhatsAppConnectorStoreDbPath,
-  defaultWhatsAppSpoolDir,
+  whatsAppLiveSyncScriptPaths,
 } from '../src/workers/whatsapp/store-sync.ts';
 import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
@@ -41,9 +41,10 @@ interface Args {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  // The worker's own resolution, so the account's layout and every override apply here as there.
-  const spoolDir = defaultWhatsAppSpoolDir(process.env);
-  const dbPath = args.dbPath ?? defaultWhatsAppConnectorStoreDbPath(process.env);
+  // An account in a folder is where the worker has it; any other keeps the paths this script always used.
+  const paths = whatsAppLiveSyncScriptPaths(process.env);
+  const spoolDir = paths.spoolDir;
+  const dbPath = args.dbPath ?? paths.dbPath;
 
   const connector = createWhatsAppLiveSourceConnector({
     spoolDir,

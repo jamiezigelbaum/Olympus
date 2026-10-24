@@ -276,7 +276,7 @@ import { dataDeleteCustody, deleteOlympusDataWithCustody, forgetSourceRowsAgain,
 import type { ModelKeyReloadRequest } from '../../core/model-key-reload.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
-import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, tierForCli } from '../cli-operations.ts';
+import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, pairingPlacementForCli, tierForCli } from '../cli-operations.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -1134,6 +1134,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               case 'data-export': return json(exportForCli(body));
               case 'data-delete': return json(await deleteSourceDataForCli(body));
               case 'tier': return json(await tierForCli(body));
+              case 'pairing-placement': return json(pairingPlacementForCli(body));
             }
           }
         }
