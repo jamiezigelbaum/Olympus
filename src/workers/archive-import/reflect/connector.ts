@@ -14,6 +14,7 @@
  *   the judge, and is held Private until judged.
  */
 import {
+  REFLECT_NOTES_LIST_KEY,
   acceptsReflectJson,
   registerArchiveFormatConnector,
   type ArchiveConnectorInput,
@@ -30,7 +31,7 @@ const REFLECT_JSON_SPEC: NoteArchiveSpec = {
   cursorPrefix: REFLECT_JSON_CURSOR_PREFIX,
   source: {
     kind: 'json',
-    itemPaths: (root) => (root === 'array' ? [[]] : [['notes']]),
+    itemPaths: (root) => (root === 'array' ? [[]] : [[REFLECT_NOTES_LIST_KEY]]),
     accepts: acceptsReflectJson,
     parse: parseReflectNote,
   },

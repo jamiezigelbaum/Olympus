@@ -184,6 +184,12 @@ export function reflectDailyNoteDate(fileName: string): string | undefined {
   return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
 }
 
+/**
+ * The key a Reflect JSON export keeps its list of notes under when the document
+ * is an object (`{"notes": [...]}`); Reflect's connector reads the same list.
+ */
+export const REFLECT_NOTES_LIST_KEY = 'notes';
+
 /** What the first bytes of a JSON document show of its list of records. */
 interface HeadRecords {
   /** `list`: the document is the list; `notes`: it is an object whose `notes` key holds the list. */
@@ -192,13 +198,16 @@ interface HeadRecords {
   records: ReadonlySet<string>[];
   /** The list closed within the head with no element in it at all. */
   empty: boolean;
-  /** The head ended inside the list's first record: the keys that follow are not shown. */
+  /**
+   * The keys of the first record are not all shown: the head ended inside it,
+   * or (in an object) before the list's own key was reached.
+   */
   firstRecordCut: boolean;
 }
 
 /**
  * The keys of the records at the head of a JSON document: every object that is
- * a direct element of its top-level list, or of the list under its `notes` key.
+ * a direct element of its top-level list, or of the list under the object's notes key.
  * A record cut off by the end of the head keeps the keys seen so far. Only
  * keys count: a word inside a piece of text never does.
  */
@@ -213,11 +222,16 @@ function headRecordKeys(head: Uint8Array | undefined): HeadRecords | undefined {
   let listDepth = 0;
   let closed = false;
   let hasElements = false;
+  // The document is an object that goes on past the head without its notes key shown, or with the key's value cut off.
+  let objectRoot = false;
+  // The notes key is there and holds something that is not a list: nothing to read on for.
+  let notesNotAList = false;
   if (text[i] === '[') {
     shape = 'list';
     listDepth = 1;
     stack.push('a');
   } else if (text[i] === '{') {
+    objectRoot = true;
     stack.push('o');
   } else {
     return undefined;
@@ -239,12 +253,14 @@ function headRecordKeys(head: Uint8Array | undefined): HeadRecords | undefined {
       if (text[after] === ':' && stack[stack.length - 1] === 'o') {
         if (listDepth > 0 && stack.length === listDepth + 1) {
           current?.add(raw);
-        } else if (shape === undefined && stack.length === 1 && raw === 'notes') {
+        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
           let value = after + 1;
           while (value < n && isSpace(text[value])) value += 1;
           if (text[value] === '[') {
             shape = 'notes';
             listDepth = 2;
+          } else if (value < n) {
+            notesNotAList = true;
           }
         }
       }
@@ -269,7 +285,13 @@ function headRecordKeys(head: Uint8Array | undefined): HeadRecords | undefined {
     }
     i += 1;
   }
-  if (!shape) return undefined;
+  if (!shape) {
+    // An object still open at the end of the head, whose notes key has not shown: the list may follow further down.
+    if (objectRoot && !notesNotAList && stack.length > 0) {
+      return { shape: 'notes', records: [], empty: false, firstRecordCut: true };
+    }
+    return undefined;
+  }
   const open = listDepth > 0;
   return { shape, records, empty: closed && !hasElements, firstRecordCut: open && records.length === 1 && current !== undefined };
 }
@@ -325,7 +347,7 @@ function notesJsonFormat(probe: ArchiveJsonProbe): 'reflect' | 'roam' | undefine
   if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys) return fromHead;
   // Every format asks about the same entry; the file is read on once.
   if (SCANNED.has(probe)) return SCANNED.get(probe);
-  const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : ['notes'], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+  const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
   const found = keys ? recordsFormat([keys], parsed.shape) : undefined;
   SCANNED.set(probe, found);
   return found;

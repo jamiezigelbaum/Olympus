@@ -1108,3 +1108,72 @@ describe('a long first record does not hide what a Reflect file is', () => {
     expect(enough(new Set(['title', 'create-time']))).toBe(true);
   });
 });
+
+describe('a long value before the list of notes does not hide what a Reflect file is', () => {
+  const note = { id: 'a', content: 'Hello from the harbour.', subject: 'Title', created_at: '2023-01-01T00:00:00Z' };
+  const lateNote = { id: 'a', content: 'word '.repeat(40_000), subject: 'Late title', created_at: '2023-01-01T00:00:00Z' };
+
+  test('the list is looked for through the root object\'s other keys, whatever their values are', () => {
+    const bigObject = Object.fromEntries(Array.from({ length: 20_000 }, (_, index) => [`key${index}`, 'v'.repeat(40)]));
+    const roots: Array<[string, unknown]> = [
+      ['a long text', { settings: 'x'.repeat(1_000_000), notes: [note] }],
+      ['a big object', { settings: bigObject, notes: [note] }],
+      ['a long list', { settings: Array.from({ length: 200_000 }, (_, index) => index), notes: [note] }],
+      ['several, then a first note that is long too', { a: 'x'.repeat(600_000), b: bigObject, version: 2, notes: [lateNote, note] }],
+    ];
+    for (const [what, root] of roots) {
+      const text = JSON.stringify(root);
+      expect({ what, size: text.length > 4096, format: formatOf(detectFile('export.json', text)) }).toEqual({ what, size: true, format: 'reflect-json' });
+    }
+    const zipped = JSON.stringify({ settings: 'x'.repeat(1_000_000), notes: [note] });
+    expect(formatOf(detectFile('Reflect.zip', reflectJsonZip(zipped)))).toBe('reflect-json');
+    expect(formatOf(detectFile('Reflect stored.zip', reflectJsonZip(zipped, { method: 'stored' })))).toBe('reflect-json');
+  });
+
+  test('an object that has no list of notes, however long it is, is not Reflect\'s', () => {
+    const settings = 'x'.repeat(1_000_000);
+    for (const root of [
+      { settings },
+      { settings, notes: 5 },
+      { settings, notes: { a: note } },
+      { settings, notes: [1, 2, 3] },
+      { settings, other: [note] },
+      { settings, notes: [{ id: 1, content: 'a comment, not a note' }] },
+    ]) {
+      expect(formatOf(detectFile('export.json', JSON.stringify(root)))).toBe('none');
+    }
+    // A notes key that shows in the first bytes holding no list needs no reading on.
+    expect(formatOf(detectFile('export.json', JSON.stringify({ notes: 'none yet', settings })))).toBe('none');
+  });
+
+  test('the way on is asked, for the notes list, only while the first bytes end before it is reached', () => {
+    const calls: Array<readonly string[]> = [];
+    const probeOf = (head: string, keys?: readonly string[]): ArchiveProbe => ({
+      chosen: {
+        relPath: '',
+        name: 'a.json',
+        kind: 'file',
+        head: new TextEncoder().encode(head),
+        firstRecordKeys: (list) => {
+          calls.push(list);
+          return keys ? new Set(keys) : undefined;
+        },
+      },
+      children: [],
+    });
+    const idOf = (probe: ArchiveProbe) => formatOf(detectArchiveFormat(probe));
+    const long = 'x'.repeat(5000);
+    // An object that goes on past the first bytes: the list may be further down.
+    expect(idOf(probeOf(`{"settings":"${long}`, ['content', 'subject']))).toBe('reflect-json');
+    expect(idOf(probeOf(`{"settings":{"a":[1,2,3],"b":"${long}`))).toBe('none');
+    expect(idOf(probeOf(`{"settings":"short","notes":`, ['content', 'title']))).toBe('reflect-json');
+    expect(calls).toEqual([['notes'], ['notes'], ['notes']]);
+    calls.length = 0;
+    // Settled by the first bytes: not asked.
+    expect(idOf(probeOf('{"settings":"short"}'))).toBe('none');
+    expect(idOf(probeOf(`{"notes":{"a":1},"pad":"${long}`))).toBe('none');
+    expect(idOf(probeOf(`{"notes":"none yet","pad":"${long}`))).toBe('none');
+    expect(idOf(probeOf('{}'))).toBe('none');
+    expect(calls).toEqual([]);
+  });
+});

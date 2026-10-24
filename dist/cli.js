@@ -35694,11 +35694,14 @@ function headRecordKeys(head) {
   let listDepth = 0;
   let closed = false;
   let hasElements = false;
+  let objectRoot = false;
+  let notesNotAList = false;
   if (text2[i] === "[") {
     shape = "list";
     listDepth = 1;
     stack.push("a");
   } else if (text2[i] === "{") {
+    objectRoot = true;
     stack.push("o");
   } else {
     return;
@@ -35723,13 +35726,15 @@ function headRecordKeys(head) {
       if (text2[after] === ":" && stack[stack.length - 1] === "o") {
         if (listDepth > 0 && stack.length === listDepth + 1) {
           current2?.add(raw);
-        } else if (shape === undefined && stack.length === 1 && raw === "notes") {
+        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
           let value = after + 1;
           while (value < n && isSpace(text2[value]))
             value += 1;
           if (text2[value] === "[") {
             shape = "notes";
             listDepth = 2;
+          } else if (value < n) {
+            notesNotAList = true;
           }
         }
       }
@@ -35755,8 +35760,12 @@ function headRecordKeys(head) {
     }
     i += 1;
   }
-  if (!shape)
+  if (!shape) {
+    if (objectRoot && !notesNotAList && stack.length > 0) {
+      return { shape: "notes", records: [], empty: false, firstRecordCut: true };
+    }
     return;
+  }
   const open2 = listDepth > 0;
   return { shape, records, empty: closed && !hasElements, firstRecordCut: open2 && records.length === 1 && current2 !== undefined };
 }
@@ -35784,7 +35793,7 @@ function notesJsonFormat(probe) {
     return fromHead;
   if (SCANNED.has(probe))
     return SCANNED.get(probe);
-  const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : ["notes"], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+  const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
   const found = keys ? recordsFormat([keys], parsed.shape) : undefined;
   SCANNED.set(probe, found);
   return found;
@@ -35928,7 +35937,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -155390,7 +155399,7 @@ var init_connector7 = __esm(() => {
     cursorPrefix: REFLECT_JSON_CURSOR_PREFIX,
     source: {
       kind: "json",
-      itemPaths: (root) => root === "array" ? [[]] : [["notes"]],
+      itemPaths: (root) => root === "array" ? [[]] : [[REFLECT_NOTES_LIST_KEY]],
       accepts: acceptsReflectJson,
       parse: parseReflectNote
     }
