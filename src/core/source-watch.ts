@@ -1,4 +1,4 @@
-import { olympusDataPath } from './olympus-layout.ts';
+import { olympusDataPath, xdgDataHome } from './olympus-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -379,6 +379,11 @@ const SYSTEM_CLOCK: SourceWatchClock = Object.freeze({
 export function defaultSourceWatchDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
+  // The layout returns a relative XDG_DATA_HOME as given (the Linux engine
+  // layout refuses one itself); this store refuses it on every platform.
+  if (!isAbsolute(xdgDataHome(env))) {
+    throw new TypeError('Source watch data home must be an absolute private data root.');
+  }
   return olympusDataPath(env, 'source-watches.sqlite');
 }
 

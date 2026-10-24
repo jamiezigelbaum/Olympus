@@ -37433,6 +37433,9 @@ function sourceWatchAuthenticatedRouteHeaders(route) {
   return headers;
 }
 function defaultSourceWatchDbPath(env = process.env) {
+  if (!isAbsolute14(xdgDataHome(env))) {
+    throw new TypeError("Source watch data home must be an absolute private data root.");
+  }
   return olympusDataPath(env, "source-watches.sqlite");
 }
 function forgetSourceWatches(dbPath, scope, options = {}) {

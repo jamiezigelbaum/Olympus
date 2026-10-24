@@ -295,7 +295,7 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
   {
     file: '~/.olympus/{sources/ingestion-exclusions.json, tier-rules.json, privacy.json}',
     modules: [],
-    reason: 'The owner\'s own policy files: exclusion and tier rules (folder paths, senders, labels, each optionally naming a source) and the privacy profile, written by the owner or by the dispositions and tier-rule writers. A rule may cover several sources or all of them, and exclusion rules may also sit inline in plugin config, which a Delete cannot reach, so none is edited here. OPEN: owner decision 2 may want rules that name only the deleted source dropped.',
+    reason: 'The owner\'s own policy files: exclusion and tier rules (folder paths, senders, labels, each optionally naming a source) and the privacy profile, written by the owner or by the dispositions and tier-rule writers. A rule may cover several sources or all of them, and exclusion rules may also sit inline in plugin config, which a Delete cannot reach, so none is edited here. An exclusion beats any inclusion, so dropping one would let a reconnected account ingest what the owner refused; a tier rule is the owner\'s own classification, which may tighten or loosen a tier, and is theirs to change. Delete forgets the account\'s connection choices (folder picks, scope approvals, the account binding) and keeps these.',
   },
 ];
 

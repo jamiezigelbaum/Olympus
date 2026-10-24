@@ -265,7 +265,7 @@ kept entry names a module that no longer opens one
 | `remote-connections.sqlite` | none (`provider` is the agent host) | kept |
 | `credential-broker-state.json`, `handles.json.unpaired` | handle, source id | kept: credential and Unpair custody, no item data (Disconnect and Unpair own them) |
 | `connect-relay/`, `models/`, `local-files/folder-access.json` | none | kept |
-| `~/.olympus/{sources/ingestion-exclusions.json, tier-rules.json, privacy.json}` | optional `source` per rule | kept: the owner's own policy; open whether Delete should drop rules that name only the deleted source |
+| `~/.olympus/{sources/ingestion-exclusions.json, tier-rules.json, privacy.json}` | optional `source` per rule | kept: the owner's own policy. An exclusion is protective (dropping it would let a reconnected account ingest what the owner refused), and a tier rule is the owner's to change |
 | `media-cache` | holders per store | holders keyed by `(source_id, slot)`; Delete releases them |
 
 A per-source Delete runs the steps (`forgotten` in its result lists each file
