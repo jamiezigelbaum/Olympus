@@ -1,9 +1,10 @@
 ---
 name: import-archive
 version: 0.1.0
-description: Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder). archive_import only asks; the user approves every import and every removal on the Olympus dashboard on their computer.
+description: Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat). archive_import only asks; the user approves every import and every removal on the Olympus dashboard on their computer.
 triggers:
   - user mentions an old mail export, a Google Takeout download, an .mbox file, or an Apple Mail export they want searchable
+  - user mentions an exported WhatsApp chat (a _chat.txt, a "WhatsApp Chat with" file, or the zip WhatsApp shares) they want searchable
   - user asks to remove an archive they imported earlier
   - user asks how an archive import is going
 tools:
@@ -16,7 +17,9 @@ mutating: true
 Use this skill when the user has an old export on their computer and wants
 Olympus to search it like any other source. Today that means mail: an `.mbox`
 file (Google Takeout, Thunderbird) or an Apple Mail export folder ending in
-`.mbox`.
+`.mbox`; and WhatsApp chats exported with Export Chat: the `.txt`, the `.zip`
+WhatsApp shares, or a folder of them. A chat export is a snapshot: later
+messages are not added.
 
 ## The rule
 

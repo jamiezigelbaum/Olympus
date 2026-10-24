@@ -364,6 +364,30 @@ describe('each archive under the Archives row', () => {
     }
   });
 
+  test('a chat archive counts messages, says Snapshot, not updated beside its dates, and names what it left out in plain words', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.chat.many, { n: '12,644' }));
+    const facts = item.querySelector('.archive-facts')!;
+    expect(facts.textContent).toContain('WhatsApp chat export');
+    expect(facts.textContent).toContain(fill(A.dates, { earliest: '2019-06-08', latest: '2026-09-30' }));
+    expect(facts.querySelector('.archive-snapshot')!.textContent).toBe('Snapshot, not updated');
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '1,870' }),
+      fill(A.gaps.item_truncated.many, { n: '2' }),
+      fill(A.gaps.assumption.many, { n: '2' }),
+      A.gaps.file_damaged.one,
+      fill(A.gaps.system_message.many, { n: '318' }),
+      fill(A.gaps.message_empty.many, { n: '6' }),
+      fill(A.gaps.status_updates.many, { n: '41' }),
+    ]);
+    // A mail archive is not a snapshot.
+    const mail = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-imported') });
+    expect(archiveItem(mail, 'imported').textContent).not.toContain('Snapshot');
+    expect(archiveItem(mail, 'imported').querySelector('.archive-snapshot')).toBeNull();
+  });
+
   test('an archive from an engine that sends no family says items, and an empty import says it found nothing', async () => {
     const { family: _family, ...old } = ARCHIVE;
     const unknown = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });

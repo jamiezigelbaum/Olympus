@@ -218,6 +218,12 @@ function kindLine(kinds: Readonly<Record<string, { one: string; many: string }>>
   };
 }
 
+/** A family's exports that are a copy as of the export day say so, after the count. */
+function snapshotOf(entry: ComputerArchiveEntry): string {
+  const snapshot = dashboardArchiveNouns(entry.family).snapshot;
+  return snapshot ? ` ${snapshot}.` : '';
+}
+
 function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | undefined): string {
   const copy = DASHBOARD_ARCHIVE_COPY;
   if (entry.countsUnavailable && entry.status !== 'stopped' && entry.status !== 'removing') {
@@ -235,7 +241,7 @@ function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | u
     case 'imported':
       // A finished import that found nothing says so, never "0 notes".
       if (entry.items === 0) return fill(copy.emptyImport, { none: dashboardArchiveNouns(entry.family).none });
-      return `${fill(copy.importedLineNoTime, { items })}.${held}`;
+      return `${fill(copy.importedLineNoTime, { items })}.${snapshotOf(entry)}${held}`;
     case 'stopped':
       return `Stopped: ${stopped?.why ?? ''} ${stopped?.fix ?? ''}`.trim();
     case 'removing':

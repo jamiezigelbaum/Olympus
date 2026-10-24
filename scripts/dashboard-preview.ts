@@ -56,7 +56,8 @@ import {
   type ComputerArchivesMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
-import { ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER } from '../src/core/archive-formats.ts';
+import { ARCHIVE_FORMATS, archiveFamilyProvider } from '../src/core/archive-formats.ts';
+import type { SourceFamily } from '../src/core/source-index/types.ts';
 import { ARCHIVE_APPROVE_COPY } from '../src/workers/archive-import/dashboard.ts';
 import { captureFreshness, captureFreshnessCounts } from '../src/workers/connector-store/capture-freshness.ts';
 import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
@@ -708,6 +709,7 @@ function localFilesPreview(state: string) {
  *   archives-not-running an import waiting while background syncing is turned off: not running, Remove not pressable, See why names the setting
  *   archives-notes       a notes archive imported: its items are notes, with the kinds of gap any format can report
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
+ *   archives-chat        a WhatsApp chat export imported: messages, a snapshot (not updated), and what was left out in plain words
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
  * messages no private model can judge are each a Needs you line too.
@@ -717,6 +719,7 @@ const ARCHIVE_STATES = [
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty',
+  'archives-chat',
 ] as const;
 
 function archivesPreview(state: string): SourceDashboardViewModel {
@@ -729,7 +732,7 @@ function archivesPreview(state: string): SourceDashboardViewModel {
     // The store set of the first archive's family: notes sit in the notes set, under the family's neutral name.
     const family = meta.archives[0]?.family ?? 'email';
     status.corpora = [{
-      ...corpus(`secure_local.archive.${family}`, family, 'secure_local', family === 'email' ? 'mbox' : ARCHIVE_NEUTRAL_PROVIDER, items, items * 3, { withText: items, embedded }),
+      ...corpus(`secure_local.archive.${family}`, family, 'secure_local', archiveFamilyProvider(family as SourceFamily), items, items * 3, { withText: items, embedded }),
       last_refresh: { sync_run_id: 'preview-archive-pass', status: 'completed', started_at: at(2 * 3600 + 60), completed_at: at(2 * 3600), items_seen: 2_000, items_indexed: 2_000 },
     }];
   }
@@ -859,6 +862,32 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
         { kind: 'assumption', count: 1 },
         { kind: 'section_not_imported', count: 2 },
         { kind: 'file_damaged', count: 1 },
+      ],
+    });
+  } else if (state === 'archives-chat') {
+    // An invented chat export: the family's own words, the date range with "Snapshot, not updated" beside it.
+    archives.push({
+      ...takeout,
+      id: '8c4e6a20-9d1b-4e3f-a5b7-2c3d4e5f6a7b',
+      name: 'WhatsApp Chat with Harbour crew.zip',
+      format: 'WhatsApp chat export',
+      family: 'chat',
+      where: '~/Downloads',
+      items: 12_644,
+      judged: 12_600,
+      held: 44,
+      earliest: '2019-06-08',
+      latest: '2026-09-30',
+      gaps: [
+        { kind: 'media_not_imported', count: 1_870 },
+        { kind: 'item_truncated', count: 2 },
+        { kind: 'assumption', count: 2 },
+        { kind: 'file_damaged', count: 1 },
+      ],
+      skipped: [
+        { kind: 'system_message', count: 318 },
+        { kind: 'message_empty', count: 6 },
+        { kind: 'status_updates', count: 41 },
       ],
     });
   } else if (state === 'archives-empty') {

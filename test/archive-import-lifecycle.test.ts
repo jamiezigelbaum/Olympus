@@ -555,10 +555,14 @@ describe('archive corpora in the registry', () => {
       'secure_local.archive.email',
       'internal.archive.email',
       'public_safe.archive.email',
+      'secure_local.archive.chat',
+      'internal.archive.chat',
+      'public_safe.archive.chat',
     ]);
-    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(['secure_local.archive.email']);
+    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(['secure_local.archive.email', 'secure_local.archive.chat']);
     for (const corpus of withArchives.list().filter((entry) => entry.sourceId === 'archive.imports')) {
-      expect(corpus).toMatchObject({ provider: 'mbox', family: 'email', createdOnDemand: true });
+      const own = corpus.family === 'chat' ? 'whatsapp_export' : 'mbox';
+      expect(corpus).toMatchObject({ provider: own, createdOnDemand: true });
     }
     // Added once, whatever the config already holds.
     expect(withArchiveImportCorpora(withArchiveImportCorpora()).corpora).toHaveLength(withArchives.list().length);

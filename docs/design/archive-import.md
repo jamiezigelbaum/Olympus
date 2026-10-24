@@ -1,8 +1,8 @@
 # Import an archive
 
-Status: owner direction 2026-10-23. Step 1 (mail with the shared spine) is
-built; steps 2 to 4 are not. Where this page and the code differ, the code is
-current.
+Status: owner direction 2026-10-23. Step 1 (mail with the shared spine) and
+step 3 (WhatsApp chat exports) are built; steps 2 and 4 are not. Where this
+page and the code differ, the code is current.
 
 ## Outcome
 
@@ -43,7 +43,7 @@ same way, with the same privacy and the same status.
 | Format | Today |
 |---|---|
 | Mail (mbox) | Built in step 1 (2026-10-23): the shared spine in `workers/archive-import/`, and a thin mbox connector (`workers/archive-import/mbox/`) that splits the file itself and parses each message with `postal-mime`. Gmail items come from the Gmail API's JSON, so Gmail shares none of it. |
-| WhatsApp chat export | Parser and connector exist (`workers/whatsapp/connector.ts`, `parseWhatsAppChatExport`) and are tested, but nothing in the product calls them. Live WhatsApp capture is wired separately. |
+| WhatsApp chat export | Built in step 3 (2026-10-24): one format (`whatsapp_chat`, family `chat`, provider `whatsapp_export`) over `_chat.txt`, `WhatsApp Chat with <name>.txt` and the zip WhatsApp shares, in `workers/archive-import/whatsapp/`, with the line grammar in `core/whatsapp-export-grammar.ts`. The old export connector (`workers/whatsapp/connector.ts`) is deleted. Live WhatsApp capture is wired separately and untouched. |
 | Telegram Desktop export | Nothing. Telegram in the product is live capture only (`telegram-messages/capture-spool-connector.ts`). |
 | Reflect export | Connector exists (`workers/reflect/connector.ts`), unwired, allowlisted. |
 | Roam export | Connector exists (`workers/roam/connector.ts`), unwired, allowlisted. |
@@ -164,25 +164,41 @@ import.
 Both are in scope. They come after mail because they reuse the same spine
 (identity, resume, removal), not because they are optional.
 
-- **WhatsApp chat export** (`_chat.txt`, or the zip WhatsApp shares). The
-  existing parser (`parseWhatsAppChatExport`) is reused, but the connector
-  cannot join as is: it reads every `.txt` and `.zip` in a folder
-  (`whatsapp/connector.ts:321`), so pointing it at one chat's parent folder
-  would import neighbouring chats, and its plain reads bypass the scope-safe
-  reader. It changes to read exactly the selected files through the
-  scope-safe reader. Picking a folder of exports imports each chat in it, as
-  the user chose.
-- **WhatsApp message identity.** Today an id hashes chat, time, sender and
-  position only (`whatsapp/connector.ts:298`), so a `.txt` and a `.zip`
-  export of the same chat in one folder can overwrite messages whose text
-  differs. Ids gain the source file (or zip member) identity and a hash of
-  the message text. Test with an overlapping-export fixture.
-- **Bounded parsing.** The parser splits the whole text and keeps every
-  message (`whatsapp/connector.ts:155`), and zip entries are inflated whole
-  (`whatsapp/connector.ts:397`). Both become incremental: line-by-line
-  parsing, streaming inflate, with limits on expanded bytes and zip members.
-  Hitting a limit fails visibly, naming the file. The same rule applies to
-  Telegram's `result.json` (streaming JSON) and to any zip a format accepts.
+- **WhatsApp chat export** (built, step 3). One format reads the chat text
+  file of "Export Chat" (`_chat.txt` from an iPhone, `WhatsApp Chat with
+  <name>.txt` from an Android phone, or any `.txt` that starts with a message
+  line) and the zip WhatsApp shares, which holds that file and the media. A
+  chosen folder imports each export in it and nothing else; only the approved
+  files are read, through the scope-safe reader. The text is read as a
+  stream (and a zip member by streaming inflate, resumable from a parked
+  inflater or by re-inflating to the resume point), never loaded whole.
+- **Dates.** The export writes wall time with no zone and in the phone's
+  locale order. The order is decided per file from its own headers (any day
+  above 12 settles it) and, when nothing does, read day first and reported as
+  an `assumption`. The time is read in this computer's zone and reported once
+  per archive. Dates with a weekday or month name, non-Latin digits and
+  non-UTF-8 files are not read.
+- **Items and identity.** One item per message; the chat is the thread, named
+  from the export's file name (the zip's, or its folder's, for a `_chat.txt`).
+  The id hashes the source (file and member), the chat, the written time, the
+  sender, the message's number among the file's headers and a hash of its text,
+  so a `.txt` and a `.zip` of one chat keep every message of both.
+- **Left out, and counted.** Notices from WhatsApp itself (`system_message`),
+  messages with no text (`message_empty`) and the status updates chat
+  (`status_updates`) are skipped and counted. Media stays in the message text
+  as the phone's marker and is counted as `media_not_imported`; a message over
+  1,048,576 characters is cut and reported as `item_truncated`.
+- **Real exports.** The shapes above come from the open-source parsers of
+  real exports and from the synthetic builders in
+  `test/support/archive-fixtures-whatsapp.ts`; no real export was read here.
+  Localized export file names (`WhatsApp Chat with` in other languages), exports
+  with the chat text in a subfolder of a chosen folder, and right-to-left
+  locales are unverified. The open-source parsers report that newer iOS
+  exports put a narrow no-break space before AM/PM and a left-to-right mark
+  before each line; both are handled.
+- **Imported chats are a snapshot.** The dashboard says "Snapshot, not
+  updated" beside a chat archive's date range (by family, so another chat
+  format gets it too).
 - **Telegram Desktop export** ("Export chat history", JSON format,
   `result.json` plus media folders). A new thin connector: one item per
   message, chats as threads, media named as gaps at first, like mail
@@ -201,7 +217,7 @@ Both are in scope. They come after mail because they reuse the same spine
    hold-until-judged rule lands here too, through its classifier gate.
 2. Reflect and Roam onto the registry, with streaming reads and the
    `internal` default; all their allowlist entries removed.
-3. WhatsApp chat export, with the selected-file, scope-safe reads.
+3. WhatsApp chat export, with the selected-file, scope-safe reads (built).
 4. Telegram Desktop export.
 
 Each step is one PR with focused tests on synthetic fixtures (never real

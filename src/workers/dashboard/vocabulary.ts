@@ -1996,6 +1996,12 @@ export interface DashboardArchiveNouns {
   readonly many: string;
   readonly none: string;
   readonly plural: string;
+  /**
+   * Said beside the archive's dates when its family's exports are a copy of
+   * a conversation as it was on the day it was exported: later messages are
+   * not added. Empty for a family whose archives are not.
+   */
+  readonly snapshot: string;
 }
 
 /**
@@ -2003,10 +2009,10 @@ export interface DashboardArchiveNouns {
  * them (`family` of the archive's entry). A family with no entry says items.
  */
 export const DASHBOARD_ARCHIVE_NOUNS: Readonly<Record<'email' | 'chat' | 'note' | 'other', DashboardArchiveNouns>> = {
-  email: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages' },
-  chat: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages' },
-  note: { one: '1 note', many: '{n} notes', none: 'no notes', plural: 'notes' },
-  other: { one: '1 item', many: '{n} items', none: 'no items', plural: 'items' },
+  email: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages', snapshot: '' },
+  chat: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages', snapshot: 'Snapshot, not updated' },
+  note: { one: '1 note', many: '{n} notes', none: 'no notes', plural: 'notes', snapshot: '' },
+  other: { one: '1 item', many: '{n} items', none: 'no items', plural: 'items', snapshot: '' },
 };
 
 /** The nouns for an archive's family, or the neutral ones. */
@@ -2098,10 +2104,13 @@ export const DASHBOARD_ARCHIVE_COPY = {
     attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+    message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
+    status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
     media_not_imported: { one: '1 picture, recording or other file in the archive was not imported', many: '{n} pictures, recordings or other files in the archive were not imported' },
     item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },
-    assumption: { one: '1 thing Olympus had to assume because the archive does not say (such as a time zone)', many: '{n} things Olympus had to assume because the archive does not say (such as time zones)' },
+    assumption: { one: '1 thing Olympus had to assume because the archive does not say (such as a time zone, or which part of a date is the day)', many: '{n} things Olympus had to assume because the archive does not say (such as time zones, or which part of a date is the day)' },
     section_not_imported: { one: '1 part of the archive is not imported', many: '{n} parts of the archive are not imported' },
     file_damaged: { one: '1 file in the archive looks damaged, so what was read from it may be wrong', many: '{n} files in the archive look damaged, so what was read from them may be wrong' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },

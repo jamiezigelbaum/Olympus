@@ -630,6 +630,10 @@ describe('status carries no content and tells the truth', () => {
     // None of these is an index that cannot be read (checked first: a matcher can stand in for the value it matched).
     for (const archive of status.archives) expect(archive.summary).not.toContain("can't count");
     const byId = new Map(status.archives.map((archive) => [archive.archive_id, archive]));
+    // (before the matchers below, which can stand in for the values they matched.) A chat export is a snapshot, and an agent is told so; a mail or notes archive is not.
+    expect(byId.get('c-chat')!.summary).toContain('Snapshot, not updated.');
+    expect(byId.get('a-mail')!.summary).not.toContain('Snapshot');
+    expect(byId.get('b-notes')!.summary).not.toContain('Snapshot');
     expect(byId.get('a-mail')).toMatchObject({ family: 'email', items: 12, messages: 12, summary: expect.stringContaining('12 messages') });
     expect(byId.get('b-notes')).toMatchObject({ family: 'note', items: 12, summary: expect.stringContaining('12 notes') });
     expect(byId.get('b-notes')).not.toHaveProperty('messages');
