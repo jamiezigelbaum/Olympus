@@ -8,8 +8,7 @@
  * - `internal.local.files` and `public_safe.local.files`: created only when a
  *   file is first routed to them.
  */
-import { olympusDataRoot } from '../../core/olympus-layout.ts';
-import { join } from 'node:path';
+import { resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
 import { defineSourceIndexCorpus, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import {
@@ -78,31 +77,25 @@ export function defineLocalFilesCorpus(): SourceIndexCorpusDefinition {
   });
 }
 
-function dataDir(env: Record<string, string | undefined>): string {
-  return olympusDataRoot(env);
-}
-
 export function defaultLocalFilesConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  return env[LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV]?.trim() || join(dataDir(env), 'local-files-connector-store.sqlite');
+  return resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'secure_local', env);
 }
 
 export function defaultLocalFilesInternalConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env[LOCAL_FILES_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV]?.trim()
-    || join(dataDir(env), 'local-files-internal-connector-store.sqlite');
+  return resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'internal', env);
 }
 
 export function defaultLocalFilesPublicConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env[LOCAL_FILES_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV]?.trim()
-    || join(dataDir(env), 'local-files-public-connector-store.sqlite');
+  return resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'public_safe', env);
 }
 
 /** Where change snapshots for the watched folders are kept. */
 export function localFilesWatchDir(env: Record<string, string | undefined> = process.env): string {
-  return join(dataDir(env), 'local-files-watch');
+  return resolvedRawPath(LOCAL_FILES_SOURCE_ID, 'watch', env);
 }
 
 /** Every local files tier store's path: the lifecycle deletes all of them with the source. */

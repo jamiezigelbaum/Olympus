@@ -3,7 +3,7 @@
 // through the file lease and lands whole.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { FileLeaseBusyError, withFileLeaseSync } from '../src/core/file-lease.ts';
@@ -50,7 +50,7 @@ describe('source registry', () => {
 
   test.each([
     ['not JSON', '{"schema": 1, "accounts": ['],
-    ['an unknown schema', JSON.stringify({ schema: 2, accounts: [] })],
+    ['an unknown schema', JSON.stringify({ schema: 3, accounts: [] })],
     ['no account list', JSON.stringify({ schema: 1 })],
     ['an unknown state', JSON.stringify({ schema: 1, accounts: [{ ...account('dropbox.files', []), state: 'gone' }] })],
     ['an account without a slot', JSON.stringify({ schema: 1, accounts: [{ ...account('dropbox.files', []), slot: '' }] })],
@@ -112,6 +112,30 @@ describe('source registry', () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
     // No temp file is left beside it; only the registry and its lease lock.
     expect(readdirSync(dirname(path)).filter((name) => !name.startsWith('registry.json.lock'))).toEqual(['registry.json']);
+  });
+
+  test('the schema follows the layouts: 1 until an account lives in a folder, then 2', () => {
+    const path = sourceRegistryPath(env);
+    const schemaOnDisk = (): unknown => JSON.parse(readFileSync(path, 'utf8')).schema;
+    updateSourceRegistry(env, (registry) => {
+      registry.accounts.push(account('dropbox.files', ['secure_local.dropbox.files']));
+    });
+    expect(schemaOnDisk()).toBe(1);
+    updateSourceRegistry(env, (registry) => {
+      registry.accounts.push({ ...account('gmail.email', ['internal.email']), layout: 'folder' });
+    });
+    expect(schemaOnDisk()).toBe(2);
+    expect(readSourceRegistry(env).schema).toBe(2);
+    // Later writes keep it, whichever account they touch.
+    updateSourceRegistry(env, (registry) => {
+      registry.accounts.push(account('readwise.library', []));
+    });
+    expect(schemaOnDisk()).toBe(2);
+    // A schema-2 file with no folder account reads fine (and is written back as 1).
+    writeRaw(JSON.stringify({ schema: 2, accounts: [account('dropbox.files', [])] }));
+    expect(readSourceRegistry(env).accounts).toHaveLength(1);
+    updateSourceRegistry(env, () => undefined);
+    expect(schemaOnDisk()).toBe(1);
   });
 
   test('a mutation that throws writes nothing', () => {

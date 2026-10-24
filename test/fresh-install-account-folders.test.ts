@@ -1,0 +1,217 @@
+// A fresh install puts its accounts in folders from the start (docs/design/
+// source-storage.md, delivery step 4a): the worker boots on an empty home, and
+// every source it connects (here with fakes) writes only under
+// `sources/<source_id>/1/`. Messaging stays on its legacy paths until a later
+// step. Spawning tests carry an explicit timeout (test/spawn-timeout-guard.test.ts).
+
+import { afterEach, describe, expect, test } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
+import { archiveImportFamilies } from '../src/core/archive-formats.ts';
+import { accountFolder, olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { readSourceRegistry, sourceRegistryPath } from '../src/core/source-registry.ts';
+import { __sourceStorageTestHooks, enableSourceRegistryAdoption, openConnectorStore } from '../src/core/source-storage.ts';
+import { defaultArchiveImportStatePath, ArchiveImportStateStore } from '../src/workers/archive-import/state.ts';
+import { createArchiveConnectorStore } from '../src/workers/archive-import/store.ts';
+import type { ConnectedCredentialHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import {
+  createRefreshableReadwiseConnectorStoreRuntime,
+  createXBookmarksConnectorStoreRuntime,
+} from '../src/workers/email-source/server.ts';
+import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
+import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
+import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
+import { LocalXBookmarksApiUsageStore } from '../src/workers/x-bookmarks/index.ts';
+
+const SERVER = join(import.meta.dir, '..', 'src', 'workers', 'email-source', 'server.ts');
+const REPO = join(import.meta.dir, '..');
+
+const roots: string[] = [];
+afterEach(() => {
+  __sourceStorageTestHooks.disableAdoption();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function freshHome(): { home: string; env: Record<string, string> } {
+  const home = mkdtempSync(join(tmpdir(), 'olympus-fresh-folders-'));
+  roots.push(home);
+  return {
+    home,
+    env: {
+      HOME: home,
+      XDG_DATA_HOME: join(home, '.local', 'share'),
+      XDG_STATE_HOME: join(home, '.local', 'state'),
+      XDG_CONFIG_HOME: join(home, '.config'),
+      XDG_RUNTIME_DIR: join(home, 'run'),
+    },
+  };
+}
+
+function everyPath(root: string): string[] {
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(root, entry.name);
+    return entry.isDirectory() ? [path, ...everyPath(path)] : [path];
+  });
+}
+
+/** SQLite's own `-wal`/`-shm` and lock files are not the question. */
+const significant = (paths: string[]): string[] => paths.filter((path) => !/-(wal|shm)$/.test(path));
+
+async function freePort(): Promise<number> {
+  const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+  const port = server.port;
+  server.stop(true);
+  return port;
+}
+
+describe('a fresh install: the worker boots', () => {
+  test('Gmail, Drive, Dropbox and local files land in their folders; messaging stays on its legacy paths', async () => {
+    const { home, env } = freshHome();
+    const port = await freePort();
+    const child = Bun.spawn([process.execPath, SERVER], {
+      env: { PATH: process.env.PATH ?? '', ...env, OLYMPUS_EMAIL_SOURCE_PORT: String(port) },
+      cwd: REPO,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    let output = '';
+    void (async () => {
+      const decoder = new TextDecoder();
+      const reader = child.stdout.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        output += decoder.decode(value);
+      }
+    })();
+    const registryPath = join(home, '.local', 'share', 'openclaw', 'olympus', 'registry.json');
+    try {
+      const deadline = Date.now() + 40_000;
+      while (Date.now() < deadline) {
+        let accounts = 0;
+        try { accounts = JSON.parse(readFileSync(registryPath, 'utf8')).accounts.length; } catch { /* not written yet */ }
+        if (accounts >= 6 && output.includes('worker listening')) break;
+        await Bun.sleep(100);
+      }
+    } finally {
+      child.kill('SIGKILL');
+      await child.exited;
+    }
+    expect(output).toContain('worker listening');
+
+    const registry = JSON.parse(readFileSync(registryPath, 'utf8')) as { schema: number; accounts: Array<{ source_id: string; layout: string; state: string }> };
+    // The first folder account made it schema 2.
+    expect(registry.schema).toBe(2);
+    expect(Object.fromEntries(registry.accounts.map((account) => [account.source_id, `${account.state}:${account.layout}`]))).toEqual({
+      'gmail.email': 'active:folder',
+      'google_drive.docs': 'active:folder',
+      'dropbox.files': 'active:folder',
+      'local.files': 'active:folder',
+      'telegram.messages': 'active:legacy',
+      'whatsapp.personal.messages': 'active:legacy',
+    });
+
+    const dataRoot = olympusDataRoot(env);
+    for (const sourceId of ['gmail.email', 'google_drive.docs', 'dropbox.files', 'local.files']) {
+      const stores = join(dataRoot, 'sources', sourceId, '1', 'stores');
+      expect(significant(readdirSync(stores)).some((name) => /^secure_local\.sqlite$/.test(name)), sourceId).toBe(true);
+    }
+    // Nothing of those four, and nothing of the others yet, at the legacy paths of the data folder.
+    const topLevel = readdirSync(dataRoot);
+    expect(topLevel.filter((name) => /^(gmail|google-drive|dropbox-files|local-files|readwise|x-bookmarks|archive)[a-z-]*connector-store/.test(name))).toEqual([]);
+    expect(topLevel).not.toContain('local-files-watch');
+    // Under sources/ only the four accounts, only under slot 1, only stores.
+    expect(readdirSync(join(dataRoot, 'sources')).sort()).toEqual(['dropbox.files', 'gmail.email', 'google_drive.docs', 'local.files']);
+    for (const path of significant(everyPath(join(dataRoot, 'sources')))) {
+      const rel = relative(join(dataRoot, 'sources'), path).split('/');
+      if (rel.length > 1) expect(rel[1], path).toBe('1');
+      if (rel.length > 2) expect(rel[2], path).toBe('stores');
+    }
+    // Messaging is where it always was.
+    expect(statSync(join(dataRoot, 'telegram-internal-connector-store.sqlite')).isFile()).toBe(true);
+    expect(statSync(join(dataRoot, 'telegram-protected-connector-store.sqlite')).isFile()).toBe(true);
+    expect(statSync(join(home, '.local', 'share', 'olympus', 'whatsapp-live', 'connector-store.db')).isFile()).toBe(true);
+  }, 90_000);
+});
+
+describe('a fresh install: Readwise, X and an imported archive connect (with fakes)', () => {
+  test('write only under their folders, keep the shared files shared, and record folder accounts', () => {
+    const { env } = freshHome();
+    enableSourceRegistryAdoption();
+    const embeddingProvider: SourceEmbeddingProvider = {
+      provider: 'test',
+      modelId: 'test-embedding',
+      dimension: 2,
+      configHash: 'test-config',
+      epochId: 'test-epoch',
+      backend: 'cloud',
+      async embed(inputs) { return inputs.map(() => [1, 0]); },
+    };
+    const xHandle: ConnectedCredentialHandle = {
+      handle: 'x.bookmarks.personal',
+      provider: 'x',
+      accountRole: 'personal',
+      providerAccountId: '42',
+      allowedCapabilities: ['x.bookmarks.sync'],
+      scopes: ['bookmark.read'],
+      connectedAt: '2026-07-18T00:00:00.000Z',
+    };
+
+    const readwise = createRefreshableReadwiseConnectorStoreRuntime({ enabled: true, embeddingProvider, env });
+    expect(readwise).toBeDefined();
+    openConnectorStore({ sourceId: 'readwise.library' }, {
+      dbPath: defaultReadwiseSecureConnectorStoreDbPath(env),
+      corpusId: 'secure_local.readwise.library',
+      family: 'readwise',
+      trustDomain: 'secure_local',
+    }, env).close();
+    // The X runtime builds its reconcile state beside the usage ledger it is given, as the worker does.
+    const usage = new LocalXBookmarksApiUsageStore(defaultXBookmarksApiUsageDbPath(env));
+    const x = createXBookmarksConnectorStoreRuntime({ enabled: true, handle: xHandle, embeddingProvider, usageStore: usage, env });
+    expect(x).toBeDefined();
+    const family = archiveImportFamilies()[0]!;
+    createArchiveConnectorStore('secure_local', family, env).close();
+    mkdirSync(join(env.HOME!, 'archive-root'), { recursive: true });
+    new ArchiveImportStateStore({ path: defaultArchiveImportStatePath(env) }).create({
+      format: family,
+      provider: family,
+      family,
+      label: 'Fixture archive',
+      root_path: join(env.HOME!, 'archive-root'),
+      root_identity: { dev: '1', ino: '1' },
+      chosen_rel_path: 'archive.zip',
+      files: [],
+      manifest_sha256: '0'.repeat(64),
+    });
+    readwise!.store.close();
+    x!.store.close();
+    usage.close();
+
+    const registry = readSourceRegistry(env);
+    expect(registry.schema).toBe(2);
+    expect(registry.accounts.map((account) => [account.source_id, account.layout])).toEqual([
+      ['readwise.library', 'folder'],
+      ['x.bookmarks', 'folder'],
+      ['archive.imports', 'folder'],
+    ]);
+
+    const dataRoot = olympusDataRoot(env);
+    const top = readdirSync(dataRoot).filter((name) => !/-(wal|shm)$/.test(name) && !name.startsWith('registry.json')).sort();
+    // The shared X quota ledger stays where it is, beside the account folders.
+    expect(top).toEqual(['sources', 'x-bookmarks-api-usage.sqlite']);
+    expect(significant(everyPath(join(dataRoot, 'sources', 'readwise.library', '1'))).map((path) => relative(dataRoot, path))).toEqual(
+      expect.arrayContaining(['sources/readwise.library/1/stores', 'sources/readwise.library/1/stores/internal.sqlite', 'sources/readwise.library/1/stores/secure_local.sqlite']),
+    );
+    expect(existsSync(join(accountFolder({ source_id: 'x.bookmarks', slot: '1' }, env), 'stores', 'internal.sqlite'))).toBe(true);
+    // X's reconcile state is in the account's raw/, no longer beside the usage ledger.
+    expect(existsSync(join(accountFolder({ source_id: 'x.bookmarks', slot: '1' }, env), 'raw', 'x-reconcile.sqlite'))).toBe(true);
+    expect(top.some((name) => name.endsWith('.reconcile'))).toBe(false);
+    // The archive's stores are `<family>.<tier>.sqlite` and its state is under raw/.
+    const archiveFolder = accountFolder({ source_id: 'archive.imports', slot: '1' }, env);
+    expect(existsSync(join(archiveFolder, 'stores', `${family}.secure_local.sqlite`))).toBe(true);
+    expect(existsSync(join(archiveFolder, 'raw', 'archive-imports.json'))).toBe(true);
+    expect(sourceRegistryPath(env).startsWith(dataRoot)).toBe(true);
+  });
+});

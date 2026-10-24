@@ -13,7 +13,7 @@
  * lifecycle module both resolve through it.
  */
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 
 export type LayoutEnv = Record<string, string | undefined>;
@@ -83,4 +83,279 @@ export function legacyTelegramStoreRoot(env: LayoutEnv = process.env): string {
 export function legacyTelegramGatewayStateDir(env: LayoutEnv = process.env): string {
   return env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim()
     || join(env.XDG_STATE_HOME?.trim() || join(layoutHome(env), '.local', 'state'), 'olympus', 'telegram-capture-gateway');
+}
+
+// ---------------------------------------------------------------------------
+// Account folders (docs/design/source-storage.md, "Layout"; delivery step 4a)
+//
+// An account's files are either `legacy` (where they have always been: one
+// file per store beside the other sources', per-store env overrides honored)
+// or `folder` (inside `<data>/sources/<source_id>/<slot>/`). The registry
+// says which (core/source-registry.ts), and core/source-placement.ts decides
+// it for an account that has no entry yet. These resolvers only turn an
+// account into a path; they read no file.
+
+/** Which layout an account's files follow: the registry's `layout`. */
+export type LayoutAccountLayout = 'legacy' | 'folder';
+
+/** The account a resolver answers for. */
+export interface LayoutAccount {
+  source_id: string;
+  slot: string;
+  layout: LayoutAccountLayout;
+}
+
+/** The data root's folder of account folders. */
+export const ACCOUNT_FOLDERS_DIR = 'sources';
+
+const FOLDER_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// A tier name (`secure_local`) or a family and a tier (`chat.secure_local`).
+const STORE_NAME = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$/;
+
+function folderSegment(value: string, what: string): string {
+  if (!FOLDER_SEGMENT.test(value) || value === '.' || value === '..') {
+    throw new TypeError(`An account folder needs a plain ${what}; got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+
+/** `<data>/sources/<source_id>/<slot>`: everything one account owns, in the `folder` layout. */
+export function accountFolder(account: Pick<LayoutAccount, 'source_id' | 'slot'>, env: LayoutEnv = process.env): string {
+  return olympusDataPath(
+    env,
+    ACCOUNT_FOLDERS_DIR,
+    folderSegment(account.source_id, 'source id'),
+    folderSegment(account.slot, 'slot'),
+  );
+}
+
+/** The folder of all account folders: `<data>/sources`. */
+export function accountFoldersRoot(env: LayoutEnv = process.env): string {
+  return olympusDataPath(env, ACCOUNT_FOLDERS_DIR);
+}
+
+const TIERS = ['secure_local', 'internal', 'public_safe'] as const;
+type LegacyTier = (typeof TIERS)[number];
+
+/** A file that sits beside the others in the data root, and the env override that moves it. */
+interface LegacyFile {
+  file: string;
+  override?: string;
+}
+
+const gmailStore = (infix: string, overrideInfix: string): LegacyFile => ({
+  file: `gmail-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_GMAIL_${overrideInfix}CONNECTOR_STORE_DB_PATH`,
+});
+const driveStore = (infix: string, overrideInfix: string): LegacyFile => ({
+  file: `google-drive-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_${overrideInfix}CONNECTOR_STORE_DB_PATH`,
+});
+const dropboxStore = (infix: string, overrideInfix: string): LegacyFile => ({
+  file: `dropbox-files-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_DROPBOX_${overrideInfix}CONNECTOR_STORE_DB_PATH`,
+});
+const localFilesStore = (infix: string, overrideInfix: string): LegacyFile => ({
+  file: `local-files-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_LOCAL_FILES_${overrideInfix}CONNECTOR_STORE_DB_PATH`,
+});
+
+/**
+ * Where each store of a folder-capable source sits in the `legacy` layout, and
+ * the override that relocates it. Moved word for word from the connectors'
+ * `default*DbPath` functions, which now ask here; delivery step 6 deletes the
+ * overrides with the rest of this table.
+ */
+const LEGACY_STORES: Readonly<Record<string, Readonly<Record<LegacyTier, LegacyFile | undefined>>>> = {
+  'gmail.email': {
+    internal: gmailStore('', ''),
+    secure_local: gmailStore('secure-', 'SECURE_'),
+    public_safe: gmailStore('public-', 'PUBLIC_'),
+  },
+  'google_drive.docs': {
+    internal: driveStore('', ''),
+    secure_local: driveStore('secure-', 'SECURE_'),
+    public_safe: driveStore('public-', 'PUBLIC_'),
+  },
+  'dropbox.files': {
+    secure_local: dropboxStore('', ''),
+    internal: dropboxStore('internal-', 'INTERNAL_'),
+    public_safe: dropboxStore('public-', 'PUBLIC_'),
+  },
+  'local.files': {
+    secure_local: localFilesStore('', ''),
+    internal: localFilesStore('internal-', 'INTERNAL_'),
+    public_safe: localFilesStore('public-', 'PUBLIC_'),
+  },
+  'readwise.library': {
+    internal: {
+      file: 'readwise-connector-store.sqlite',
+      override: 'OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH',
+    },
+    secure_local: {
+      file: 'readwise-secure-connector-store.sqlite',
+      override: 'OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH',
+    },
+    public_safe: undefined,
+  },
+  'x.bookmarks': {
+    internal: {
+      file: 'x-bookmarks-connector-store.sqlite',
+      override: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH',
+    },
+    secure_local: {
+      file: 'x-bookmarks-secure-connector-store.sqlite',
+      override: 'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH',
+    },
+    public_safe: undefined,
+  },
+  // Imported archives: one store set per family (`<family>.<tier>`), no override.
+  'archive.imports': { secure_local: undefined, internal: undefined, public_safe: undefined },
+};
+
+const ARCHIVE_IMPORTS = 'archive.imports';
+const ARCHIVE_FILE_LABEL: Readonly<Record<string, string>> = { secure_local: '', internal: '-internal', public_safe: '-public' };
+
+/** The source ids that have a layout for their files: the rest are `legacy` for good (until a later step). */
+export const FOLDER_LAYOUT_SOURCES: readonly string[] = Object.keys(LEGACY_STORES);
+
+function legacyStoreFile(sourceId: string, name: string): LegacyFile {
+  if (sourceId === ARCHIVE_IMPORTS) {
+    const [family, tier, extra] = name.split('.');
+    if (!family || !tier || extra !== undefined || !(tier in ARCHIVE_FILE_LABEL)) {
+      throw new TypeError(`An archive store is named <family>.<tier>; got ${JSON.stringify(name)}.`);
+    }
+    return { file: `archive-${family}${ARCHIVE_FILE_LABEL[tier]}-connector-store.sqlite` };
+  }
+  const file = LEGACY_STORES[sourceId]?.[name as LegacyTier];
+  if (!file) throw new TypeError(`${sourceId} has no store named ${JSON.stringify(name)}.`);
+  return file;
+}
+
+/** `override.trim()` when set, else a file in the data root: the one rule every legacy resolver followed. */
+function legacyFilePath(env: LayoutEnv, entry: LegacyFile): string {
+  const configured = entry.override ? env[entry.override]?.trim() : undefined;
+  return configured || olympusDataPath(env, entry.file);
+}
+
+/**
+ * The path of one of an account's stores: `stores/<name>.sqlite` in its
+ * folder, or, for a `legacy` account, exactly what the connector's resolver
+ * returned before folders, its env override included. `name` is the tier
+ * (`secure_local`, `internal`, `public_safe`), or `<family>.<tier>` for
+ * imported archives. The tier sidecars sit beside the store under their usual
+ * names (classification/tier-ledger-path.ts).
+ */
+export function accountStorePath(account: LayoutAccount, name: string, env: LayoutEnv = process.env): string {
+  if (!STORE_NAME.test(name)) throw new TypeError(`A store name is a tier or <family>.<tier>; got ${JSON.stringify(name)}.`);
+  if (account.layout === 'folder') return join(accountFolder(account, env), 'stores', `${name}.sqlite`);
+  return legacyFilePath(env, legacyStoreFile(account.source_id, name));
+}
+
+/** The env overrides that relocate a source's files today. A `folder` account never honors one. */
+export function legacyOverrideEnvNames(sourceId: string): string[] {
+  const names = Object.values(LEGACY_STORES[sourceId] ?? {}).flatMap((file) => (file?.override ? [file.override] : []));
+  return [...names, ...(LEGACY_RAW_OVERRIDES[sourceId] ?? [])];
+}
+
+/** The env override of one store's legacy path (the connectors export it as a constant). */
+export function legacyStoreOverrideEnv(sourceId: string, name: string): string {
+  const override = legacyStoreFile(sourceId, name).override;
+  if (!override) throw new TypeError(`${sourceId} ${name} has no path override.`);
+  return override;
+}
+
+// Raw state kept outside the stores. Each is a file or folder in the account's
+// `raw/` folder, named for what it is.
+export type AccountRawName =
+  | 'watch'
+  | 'x-reconcile.sqlite'
+  | 'archive-imports.json'
+  | 'archive-import-requests.json';
+
+const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
+  watch: 'local.files',
+  'x-reconcile.sqlite': 'x.bookmarks',
+  'archive-imports.json': ARCHIVE_IMPORTS,
+  'archive-import-requests.json': ARCHIVE_IMPORTS,
+};
+
+const ARCHIVE_STATE_OVERRIDE = 'OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH';
+const X_USAGE_OVERRIDE = 'OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH';
+const X_RECONCILE_OVERRIDE = 'OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH';
+const LEGACY_RAW_OVERRIDES: Readonly<Record<string, readonly string[]>> = {
+  // The reconcile state sits beside the usage ledger today, so relocating
+  // either one relocates it.
+  'x.bookmarks': [X_USAGE_OVERRIDE, X_RECONCILE_OVERRIDE],
+  [ARCHIVE_IMPORTS]: [ARCHIVE_STATE_OVERRIDE],
+};
+
+/** X's API usage ledger. It is the quota ledger, kept when a source is deleted, so it is shared and has no account folder. */
+export function xBookmarksApiUsageDbPath(env: LayoutEnv = process.env): string {
+  return env[X_USAGE_OVERRIDE]?.trim() || olympusDataPath(env, 'x-bookmarks-api-usage.sqlite');
+}
+
+function legacyArchiveStatePath(env: LayoutEnv): string {
+  return env[ARCHIVE_STATE_OVERRIDE]?.trim() || olympusDataPath(env, 'archive-imports.json');
+}
+
+/**
+ * The path of a file or folder of an account's raw state: `raw/<name>` in its
+ * folder, or, for a `legacy` account, exactly what its resolver returned
+ * before folders. `options.usageDbPath` is the X usage ledger a reconcile
+ * state accompanies, for a caller that was given one; the reconcile state of
+ * a `folder` account follows it only when it is not at its default (a test's
+ * or an operator's own ledger), so the shared ledger no longer decides where
+ * it lives.
+ */
+export function accountRawPath(
+  account: LayoutAccount,
+  name: AccountRawName,
+  env: LayoutEnv = process.env,
+  options: { usageDbPath?: string } = {},
+): string {
+  if (RAW_OWNER[name] !== account.source_id) throw new TypeError(`${account.source_id} has no raw state named ${name}.`);
+  const usage = options.usageDbPath;
+  if (name === 'x-reconcile.sqlite') {
+    if (account.layout === 'legacy') {
+      const configured = env[X_RECONCILE_OVERRIDE]?.trim();
+      if (configured) return configured;
+      if (usage === ':memory:') return ':memory:';
+      if (usage?.trim()) return `${usage.trim()}.reconcile`;
+      // Beside the API usage store, where the worker keeps it: a caller without a
+      // usage path (the CLI's recovery command) must open the same file.
+      return `${xBookmarksApiUsageDbPath(env)}.reconcile`;
+    }
+    if (usage === ':memory:') return ':memory:';
+    const relocated = usage?.trim();
+    if (relocated && relocated !== xBookmarksApiUsageDbPath(env)) return `${relocated}.reconcile`;
+  } else if (account.layout === 'legacy') {
+    if (name === 'watch') return olympusDataPath(env, 'local-files-watch');
+    const state = legacyArchiveStatePath(env);
+    // The requests sit beside the state, wherever it is.
+    return name === 'archive-imports.json' ? state : join(dirname(state), 'archive-import-requests.json');
+  }
+  return join(accountFolder(account, env), 'raw', name);
+}
+
+/**
+ * Every file or folder a `legacy` account of this source could have at its
+ * default locations, no override applied: the evidence that an account
+ * already lives in the legacy layout. Tier sidecars and SQLite's `-wal` and
+ * `-shm` are not listed; core/source-placement.ts adds them to each store.
+ */
+export function legacyAccountPaths(
+  sourceId: string,
+  env: LayoutEnv = process.env,
+  archiveFamilies: readonly string[] = [],
+): { stores: string[]; raw: string[] } {
+  const names = sourceId === ARCHIVE_IMPORTS
+    ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`))
+    : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
+  const stores = names.map((name) => olympusDataPath(env, legacyStoreFile(sourceId, name).file));
+  const raw: string[] = [];
+  if (sourceId === 'local.files') raw.push(olympusDataPath(env, 'local-files-watch'));
+  if (sourceId === 'x.bookmarks') raw.push(`${olympusDataPath(env, 'x-bookmarks-api-usage.sqlite')}.reconcile`);
+  if (sourceId === ARCHIVE_IMPORTS) raw.push(olympusDataPath(env, 'archive-imports.json'), olympusDataPath(env, 'archive-import-requests.json'));
+  return { stores, raw };
 }

@@ -12,9 +12,9 @@
  * `removing` from the moment a removal starts until every derived row is gone,
  * so a removal interrupted by a restart carries on from where it was.
  */
-import { olympusDataRoot } from '../../core/olympus-layout.ts';
+import { resolvedRawPath } from '../../core/source-placement.ts';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import type { ArchiveImportFinding } from '../../core/archive-formats.ts';
@@ -103,12 +103,8 @@ interface PersistedArchiveImportState {
   archives: ArchiveImportRecord[];
 }
 
-function dataDir(env: Record<string, string | undefined>): string {
-  return olympusDataRoot(env);
-}
-
 export function defaultArchiveImportStatePath(env: Record<string, string | undefined> = process.env): string {
-  return env[ARCHIVE_IMPORTS_STATE_PATH_ENV]?.trim() || join(dataDir(env), 'archive-imports.json');
+  return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID, 'archive-imports.json', env);
 }
 
 export function archiveConnectorId(archiveId: string): string {

@@ -1,4 +1,5 @@
 import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -492,9 +493,7 @@ export function createReadwiseConnectorStore(
 export function defaultReadwiseConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH?.trim();
-  if (configured) return configured;
-  return olympusDataPath(env, 'readwise-connector-store.sqlite');
+  return resolvedStorePath(READWISE_SOURCE_ID, 'internal', env);
 }
 
 export function readwiseDailyRequestBudgetFromEnv(

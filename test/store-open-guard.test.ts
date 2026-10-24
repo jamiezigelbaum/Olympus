@@ -26,11 +26,11 @@ const ALLOWED: Record<string, string> = {
   'src/workers/classification/sniffer-store.ts': 'the sniffer store class opening its own database',
   'src/core/file-lease.ts': 'the lock databases themselves',
   'src/workers/apple-messages/connector.ts': 'reads the macOS Messages chat.db, never an Olympus store',
-  // X's per-account state outside the stores.
+  // X's state outside the stores.
   'src/workers/x-bookmarks/live-control.ts':
-    'X\'s API usage ledger: per-account state, not a tier store; it joins the service when it moves into the account folder (step 4)',
+    'X\'s API usage ledger: the quota ledger, shared across accounts and kept when X is deleted, so it stays in the data folder and outside the account folder; not a tier store',
   'src/workers/x-bookmarks/reconcile-state.ts':
-    'X\'s reconcile state: per-account state, not a tier store; it joins the service when it moves into the account folder (step 4)',
+    'X\'s reconcile state: per-account state, not a tier store; it sits in the account\'s raw/ folder (beside the usage ledger for a legacy account) and goes with the account\'s folder on Delete',
   'src/data-lifecycle.ts': 'the deleter and exporter, which step 5 rebuilds on the registry',
   // Generic code that reopens sidecars of stores already opened through the
   // service, found by path: no source is in scope there.
@@ -49,7 +49,7 @@ const ALLOWED: Record<string, string> = {
   'src/workers/source-index/status.ts': 'counts secret locations beside a mounted Private store, read-only',
   // Release testing, on a machine kept for it.
   'scripts/release-check/machine-agent.ts':
-    'the release check\'s agent on a test machine: reads its stand-in Readwise stores and ledger, read-only, to compare an upgrade; it runs beside the engine under test by design, so it takes no owner lock',
+    'the release check\'s agent on a test machine: reads its stand-in Readwise and archive stores and ledger, read-only, at the paths the resolvers give, to compare an upgrade; it runs beside the engine under test by design, so it takes no owner lock',
   // Operator scripts on a database named on their command line; each holds
   // the owner lock for its run (core/data-owner-lock.ts), so it refuses
   // while Olympus runs.

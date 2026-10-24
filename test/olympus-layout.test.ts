@@ -62,11 +62,20 @@ describe('olympus layout', () => {
   });
 
   test('the X recovery command opens the reconcile state the worker writes', () => {
+    // A new account keeps it in its own folder; the usage ledger stays shared in the data root.
     const env = { HOME: home };
-    const workerPath = `${defaultXBookmarksApiUsageDbPath(env)}.reconcile`;
-    expect(defaultXBookmarksReconcileStateDbPath(env)).toBe(workerPath);
+    const folderPath = `${olympusDataRoot(env)}/sources/x.bookmarks/1/raw/x-reconcile.sqlite`;
+    expect(defaultXBookmarksApiUsageDbPath(env)).toBe(`${olympusDataRoot(env)}/x-bookmarks-api-usage.sqlite`);
+    expect(defaultXBookmarksReconcileStateDbPath(env)).toBe(folderPath);
+    expect(defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env))).toBe(folderPath);
     const lifecycle = lifecycleSourceSpecs().find((spec) => spec.sourceId === 'x.bookmarks');
-    expect(lifecycle?.accountStateSqlite?.({ env }).map((entry) => entry.path)).toContain(workerPath);
+    expect(lifecycle?.accountStateSqlite?.({ env }).map((entry) => entry.path)).toContain(folderPath);
+    // An account an override pins keeps the old rule: beside the usage ledger.
+    const pinned = { HOME: home, OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH: '/pinned/usage.sqlite' };
+    const workerPath = `${defaultXBookmarksApiUsageDbPath(pinned)}.reconcile`;
+    expect(workerPath).toBe('/pinned/usage.sqlite.reconcile');
+    expect(defaultXBookmarksReconcileStateDbPath(pinned)).toBe(workerPath);
+    expect(lifecycle?.accountStateSqlite?.({ env: pinned }).map((entry) => entry.path)).toContain(workerPath);
   });
 });
 

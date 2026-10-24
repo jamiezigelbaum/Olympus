@@ -1,4 +1,5 @@
-import { defaultXBookmarksApiUsageDbPath } from './live-control.ts';
+import { resolvedRawPath } from '../../core/source-placement.ts';
+import { X_BOOKMARKS_SOURCE_ID } from './connector.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -277,17 +278,18 @@ export interface XBookmarksPreservationFloorAssessment {
   requiredAuthorizationSha256: string;
 }
 
+/**
+ * Where X's reconcile state lives. The usage ledger is shared (it is the
+ * quota ledger, kept when X is deleted), so the state no longer derives from
+ * its path: it is the account's own `raw/x-reconcile.sqlite` once X lives in a
+ * folder. A `legacy` account keeps the old rule (core/olympus-layout.ts).
+ * `usageDbPath` is the ledger of a caller that was given one.
+ */
 export function defaultXBookmarksReconcileStateDbPath(
   env: Record<string, string | undefined> = process.env,
   usageDbPath?: string,
 ): string {
-  const configured = env.OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH?.trim();
-  if (configured) return configured;
-  if (usageDbPath === ':memory:') return ':memory:';
-  if (usageDbPath?.trim()) return `${usageDbPath.trim()}.reconcile`;
-  // Beside the API usage store, where the worker keeps it: a caller without a
-  // usage path (the CLI's recovery command) must open the same file.
-  return `${defaultXBookmarksApiUsageDbPath(env)}.reconcile`;
+  return resolvedRawPath(X_BOOKMARKS_SOURCE_ID, 'x-reconcile.sqlite', env, usageDbPath === undefined ? {} : { usageDbPath });
 }
 
 /**

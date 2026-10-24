@@ -5,14 +5,17 @@
  * Every open reads the account registry first. An account whose state is not
  * `active` (being deleted, or deleted) is never opened: the caller gets
  * `SourceStorageUnavailableError`, the same answer as a lane that is not
- * mounted, and never a stand-in store. Paths are the caller's, exactly as
- * they resolve today; nothing here moves a file.
+ * mounted, and never a stand-in store. Paths are the caller's, resolved by the
+ * account's layout (core/olympus-layout.ts, core/source-placement.ts); nothing
+ * here moves a file.
  *
  * Adoption: the worker turns it on once at boot. From then on a writable open
- * of an account with no registry entry records one (`layout: 'legacy'`, the
- * files at today's paths), and an open of a corpus the entry does not list
- * yet adds it. Read-only opens, and every open while adoption is off (the
- * CLI, scripts, tests), never write the registry.
+ * of an account with no registry entry records one, before the store's first
+ * file exists: `layout: 'folder'` for a new account that core/source-placement.ts
+ * places in a folder, `'legacy'` (the files at today's paths) for every other,
+ * and an open of a corpus the entry does not list yet adds it. Read-only
+ * opens, and every open while adoption is off (the CLI, scripts, tests),
+ * never write the registry; they resolve the entry, or the same decision.
  *
  * No instance cache: callers share the objects they open, as before.
  */
@@ -22,10 +25,10 @@ import { SecretLocationsIndex } from '../workers/classification/secret-locations
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
-import { isArchiveCorpusId } from './archive-formats.ts';
-import type { LayoutEnv } from './olympus-layout.ts';
-import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
+import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
+import { decideAccountLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
 import {
+  DEFAULT_ACCOUNT_SLOT,
   findRegistryAccount,
   readSourceRegistry,
   updateSourceRegistry,
@@ -33,16 +36,15 @@ import {
   type SourceRegistryAccountState,
 } from './source-registry.ts';
 
+export { storageAccountForCorpus };
+
 /** One connected account of a source. Every source has one slot today. */
 export interface StorageAccount {
   sourceId: string;
   slot?: string;
 }
 
-export const DEFAULT_STORAGE_SLOT = '1';
-
-// workers/archive-import/state.ts names it too; that module is the worker's.
-const ARCHIVE_IMPORTS_SOURCE_ID = 'archive.imports';
+export const DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
 
 export class SourceStorageUnavailableError extends Error {
   readonly code = 'source_storage_unavailable';
@@ -77,7 +79,7 @@ export function openConnectorStore(
   assertOpenable(registry, account.sourceId, slot);
   if (adoptionEnabled && options.readOnly !== true) {
     const entry = findRegistryAccount(registry, account.sourceId, slot);
-    if (!entry?.corpus_ids.includes(options.corpusId)) adopt(env, account.sourceId, slot, options.corpusId);
+    if (!entry?.corpus_ids.includes(options.corpusId)) adopt(env, account.sourceId, slot, options.corpusId, options.dbPath);
   }
   return new LocalConnectorStore(options);
 }
@@ -126,27 +128,6 @@ export function isSourceAccountOpenable(account: StorageAccount, env: LayoutEnv 
   return sourceAccountUnavailableReason(account, env) === undefined;
 }
 
-/**
- * The account of a store declared only by its corpus (a connector-store JSON
- * mount, an operator script's `--db`): the corpus registry's source for that
- * corpus; an imported archive's corpus (any family) is `archive.imports`,
- * whose corpora are not shipped defaults; else the corpus id without its
- * trust-domain prefix (`secure_local.reflect.notes` is `reflect.notes`, the
- * id the data lifecycle names it by).
- */
-export function storageAccountForCorpus(
-  corpus: { corpusId: string; trustDomain: string },
-  registered: ReadonlyArray<{ corpusId: string; sourceId: string }> = [],
-): StorageAccount {
-  const known = [...registered, ...defaultSourceCorpusRegistryConfig().corpora]
-    .find((entry) => entry.corpusId === corpus.corpusId);
-  if (known) return { sourceId: known.sourceId };
-  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain)) return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
-  const prefix = `${corpus.trustDomain}.`;
-  const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : '';
-  return { sourceId: unprefixed || corpus.corpusId };
-}
-
 /** The source that owns a store file, if any. */
 export type StoreFileOwner = (dbPath: string) => string | undefined;
 
@@ -180,7 +161,7 @@ function assertOpenable(registry: SourceRegistry, sourceId: string, slot: string
   if (state !== undefined && state !== 'active') throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
 
-function adopt(env: LayoutEnv, sourceId: string, slot: string, corpusId: string): void {
+function adopt(env: LayoutEnv, sourceId: string, slot: string, corpusId: string, dbPath: string): void {
   updateSourceRegistry(env, (registry) => {
     // Read again under the lease: a delete marked since the first read wins.
     assertOpenable(registry, sourceId, slot);
@@ -190,7 +171,7 @@ function adopt(env: LayoutEnv, sourceId: string, slot: string, corpusId: string)
         source_id: sourceId,
         slot,
         state: 'active',
-        layout: 'legacy',
+        layout: adoptedLayout(env, sourceId, slot, dbPath),
         corpus_ids: [corpusId],
         created_at: new Date().toISOString(),
       });
@@ -198,6 +179,17 @@ function adopt(env: LayoutEnv, sourceId: string, slot: string, corpusId: string)
       entry.corpus_ids.push(corpusId);
     }
   });
+}
+
+/**
+ * The layout a new entry records, decided before the store's first file
+ * exists (core/source-placement.ts). A store that is not inside the folder the
+ * decision names was opened at a path of the caller's own, and `folder` would
+ * then promise files that are not there: that account is `legacy`.
+ */
+function adoptedLayout(env: LayoutEnv, sourceId: string, slot: string, dbPath: string): LayoutAccountLayout {
+  if (decideAccountLayout(sourceId, env).layout !== 'folder') return 'legacy';
+  return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? 'folder' : 'legacy';
 }
 
 export const __sourceStorageTestHooks = {

@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
@@ -73,7 +73,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
 
       const result = exportOlympusData({ destination, sourceId: 'x.bookmarks', homeDir });
 
-      const exported = result.files.find((file) => file.endsWith('/x-bookmarks-connector-store.sqlite'));
+      const exported = result.files.find((file) => file.endsWith(`/${basename(storePath)}`));
       expect(exported).toBeDefined();
       // Opened WITHOUT its sidecars: a consolidated snapshot carries the
       // committed row on its own, a copied main file does not.
@@ -90,11 +90,12 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const destination = join(dir, 'export');
     try {
       const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
-      seedWalStore(spec.connectorStorePaths!({ homeDir })[0]!, 'integrity');
+      const storePath = spec.connectorStorePaths!({ homeDir })[0]!;
+      seedWalStore(storePath, 'integrity');
 
       const result = exportOlympusData({ destination, sourceId: 'x.bookmarks', homeDir });
 
-      const exported = result.files.find((file) => file.endsWith('/x-bookmarks-connector-store.sqlite'))!;
+      const exported = result.files.find((file) => file.endsWith(`/${basename(storePath)}`))!;
       const snapshot = new Database(exported, { readonly: true });
       try {
         expect(snapshot.query('PRAGMA integrity_check').all()).toEqual([{ integrity_check: 'ok' }]);

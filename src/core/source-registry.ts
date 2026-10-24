@@ -16,7 +16,19 @@ import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
 import { olympusDataPath, type LayoutEnv } from './olympus-layout.ts';
 
+/**
+ * The schema of a registry with no `folder` account. The file is written as
+ * `SOURCE_REGISTRY_FOLDER_SCHEMA` from the moment one account is: a build that
+ * only knows schema 1 (delivery step 3) then fails closed on it, as on any
+ * unknown schema, instead of ignoring `layout` and opening empty stores at the
+ * legacy paths beside the folder that holds the data.
+ */
 export const SOURCE_REGISTRY_SCHEMA = 1;
+export const SOURCE_REGISTRY_FOLDER_SCHEMA = 2;
+const KNOWN_SCHEMAS: readonly unknown[] = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA];
+
+/** Every source has one account slot today (docs/design/source-storage.md, "Registry"). */
+export const DEFAULT_ACCOUNT_SLOT = '1';
 
 export type SourceRegistryAccountState = 'active' | 'deleting' | 'deleted';
 export type SourceRegistryAccountLayout = 'legacy' | 'folder';
@@ -33,7 +45,7 @@ export interface SourceRegistryAccount {
 }
 
 export interface SourceRegistry {
-  schema: 1;
+  schema: typeof SOURCE_REGISTRY_SCHEMA | typeof SOURCE_REGISTRY_FOLDER_SCHEMA;
   accounts: SourceRegistryAccount[];
 }
 
@@ -68,6 +80,10 @@ export function updateSourceRegistry(
   return withFileLeaseSync(path, (lease) => {
     const current = readSourceRegistryAt(path);
     const next = mutate(current) ?? current;
+    // The schema follows the content: 2 once any account lives in a folder.
+    next.schema = next.accounts.some((account) => account.layout === 'folder')
+      ? SOURCE_REGISTRY_FOLDER_SCHEMA
+      : SOURCE_REGISTRY_SCHEMA;
     const text = `${JSON.stringify(validateRegistry(next, path), null, 2)}\n`;
     lease.commit(() => writePrivateFileAtomicSync(path, text));
     return next;
@@ -106,7 +122,7 @@ const LAYOUTS: readonly string[] = ['legacy', 'folder'];
 
 function validateRegistry(value: unknown, path: string): SourceRegistry {
   if (!isRecord(value)) throw new SourceRegistryError(path, 'not an object');
-  if (value.schema !== SOURCE_REGISTRY_SCHEMA) throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
+  if (!KNOWN_SCHEMAS.includes(value.schema)) throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
   if (!Array.isArray(value.accounts)) throw new SourceRegistryError(path, 'accounts is not a list');
   const seen = new Set<string>();
   for (const [index, account] of value.accounts.entries()) {
