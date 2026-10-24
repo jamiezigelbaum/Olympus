@@ -43,6 +43,8 @@ import {
   DASHBOARD_NO_ARCHIVES_LABEL,
   DASHBOARD_SUPPORTED_SOURCES,
   DASHBOARD_UNPAIRED_LABEL,
+  type DashboardCaptureFreshness,
+  type DashboardCaptureRuntime,
   type DashboardImportAttention,
   type DashboardSourceAction,
   type DashboardSourceCard,
@@ -51,6 +53,9 @@ import {
 } from '../source-dashboard.ts';
 import {
   DASHBOARD_ARCHIVE_COPY,
+  DASHBOARD_CAPTURE_BLOCKED_LABEL,
+  DASHBOARD_CAPTURE_COPY,
+  DASHBOARD_CAPTURE_STALE_LABEL,
   dashboardAttentionLine,
   dashboardImportAttentionSentence,
   dashboardIsConnectedSource,
@@ -167,6 +172,8 @@ const KNOWN_READINESS_LABELS = new Set([
   'Preparing answer-ready text',
   'Waiting for the first sync',
   DASHBOARD_MANY_UNREADABLE_LABEL,
+  DASHBOARD_CAPTURE_STALE_LABEL,
+  DASHBOARD_CAPTURE_BLOCKED_LABEL,
 ]);
 
 /** Provider refusal codes the vocabulary words on their own; any other reads as a generic refusal. */
@@ -443,7 +450,9 @@ function sourceEntry(
       ? (actionKind === 'none' ? undefined : connectFix(definition))
       : scopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
-        : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
+        : reconnect ?? (late && captureProblem(card)
+          ? captureFix(definition)
+          : late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu: DashboardFix[] = [];
   // Sync now sits first in the ⋯ menu of every connected source that can
   // sync; on a late or unresponsive source it is the row's button instead
@@ -573,7 +582,9 @@ function attentionItem(
     ? scopeFix(definition, card) ?? checkAgainFix()
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
-      : sync ?? checkAgainFix();
+      : captureProblem(card)
+        ? captureFix(definition)
+        : sync ?? checkAgainFix();
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -608,6 +619,20 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
     case 'unreadable':
       return { id: 'archives:unreadable', sentence, fix: helpLinkFix(words.seeWhy, archives) };
   }
+}
+
+/**
+ * A live chat feed that has gone quiet, or whose capture helper cannot start.
+ * Sync now reads what was captured and cannot capture what was missed, so the
+ * route is the source's panel on the computer, where it is linked.
+ */
+function captureProblem(card: DashboardSourceCard): boolean {
+  return card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL
+    || card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL;
+}
+
+function captureFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
+  return helpLinkFix(DASHBOARD_CAPTURE_COPY.fixLabel, openOnComputer(definition, 'reconnect'));
 }
 
 /**
@@ -1249,7 +1274,9 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       label: freshnessLabel,
       ...(finite(card.freshness.hours) ? { hours: card.freshness.hours } : {}),
       stale: card.freshness.stale === true,
+      ...(scrubCaptureFreshness(card.freshness.capture)),
     },
+    ...(scrubCaptureRuntime(card.capture)),
     coverage: {
       indexed_items: count(card.coverage.indexed_items),
       content_ready_items: count(card.coverage.content_ready_items),
@@ -1364,6 +1391,49 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
         }
       : {}),
   };
+}
+
+const CAPTURE_STATES: ReadonlySet<string> = new Set(['fresh', 'stale', 'unavailable']);
+const CAPTURE_SUPERVISOR_STATES: ReadonlySet<string> = new Set(['running', 'stopped', 'blocked']);
+const CAPTURE_SUPERVISOR_REASONS: ReadonlySet<string> = new Set([
+  'grant_missing',
+  'grant_invalid',
+  'handle_unavailable',
+  'session_missing',
+  'secret_missing',
+]);
+
+/** A live feed's verdict from the closed state set and finite numbers only. */
+function scrubCaptureFreshness(input: DashboardCaptureFreshness | undefined): { capture?: DashboardCaptureFreshness } {
+  if (!input || !CAPTURE_STATES.has(input.state) || !finite(input.threshold_seconds)) return {};
+  return {
+    capture: {
+      state: input.state,
+      threshold_seconds: count(input.threshold_seconds),
+      ...(finite(input.age_seconds) ? { age_seconds: count(input.age_seconds) } : {}),
+    },
+  };
+}
+
+/** The capture helper's state and approved scope: closed enums and one count, never a chat. */
+function scrubCaptureRuntime(input: DashboardCaptureRuntime | undefined): { capture?: DashboardCaptureRuntime } {
+  if (!input) return {};
+  const supervisor = input.supervisor && CAPTURE_SUPERVISOR_STATES.has(input.supervisor.state)
+    ? {
+        state: input.supervisor.state,
+        ...(input.supervisor.reason && CAPTURE_SUPERVISOR_REASONS.has(input.supervisor.reason)
+          ? { reason: input.supervisor.reason }
+          : {}),
+      }
+    : undefined;
+  const scope = input.scope?.kind === 'whole_account'
+    ? { kind: 'whole_account' as const }
+    : input.scope?.kind === 'chats' && finite(input.scope.count)
+      ? { kind: 'chats' as const, count: count(input.scope.count) }
+      : undefined;
+  return supervisor || scope
+    ? { capture: { ...(supervisor ? { supervisor } : {}), ...(scope ? { scope } : {}) } }
+    : {};
 }
 
 const MANUAL_SYNC_OUTCOMES: ReadonlySet<string> = new Set(['checking', 'checked', 'failed', 'busy']);

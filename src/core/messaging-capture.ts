@@ -71,6 +71,30 @@ export function revokeMessagingCaptureGrant(path: string): void {
   rmSync(path, { force: true });
 }
 
+/** What a capture grant approved to read: the whole linked account, or a number of chats. Never the chats themselves. */
+export type MessagingCaptureScope =
+  | { kind: 'whole_account' }
+  | { kind: 'chats'; count: number };
+
+/**
+ * The approved scope of a capture grant, as a count, or undefined when there
+ * is no readable grant or its scope list is empty. Reads the same grant file
+ * the supervisor starts capture from, by the same checks, and returns neither
+ * chat ids nor names: the dashboard says how much was approved, not what.
+ */
+export function readMessagingCaptureScope(
+  source: MessagingPairingSource,
+  grantPath = defaultMessagingCaptureGrantPath(source),
+): MessagingCaptureScope | undefined {
+  const read = readGrant(grantPath);
+  if (read.kind !== 'valid' || read.grant.source !== source) return undefined;
+  const env = read.grant.producer.env;
+  const raw = source === 'telegram' ? env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES : env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS;
+  const scopes = (raw ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  if (scopes.length === 0) return undefined;
+  return scopes.includes('*') ? { kind: 'whole_account' } : { kind: 'chats', count: new Set(scopes).size };
+}
+
 export interface CaptureChild {
   exited: Promise<number>;
   kill(signal?: NodeJS.Signals): void;

@@ -17,6 +17,13 @@ import {
 } from '../connector-store/capture-spool-secrets.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
 import {
+  captureFreshness,
+  captureFreshnessCounts,
+  captureStaleThresholdSeconds,
+  type CaptureFreshness,
+  type CaptureFreshnessCounts,
+} from '../connector-store/capture-freshness.ts';
+import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   type TelegramMessagesCorpusTrustDomain,
@@ -30,6 +37,7 @@ import {
   createTelegramCaptureSpoolConnector,
   defaultTelegramCaptureSpoolDir,
   readTelegramCaptureSpool,
+  readTelegramCaptureSpoolNewestCapturedAt,
   redactTelegramCaptureSpoolSecrets,
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
@@ -79,7 +87,15 @@ export interface TelegramConnectorStoreSyncReceipt {
      * rewrote without their text (blanked ones included).
      */
     spool_records_redacted: number;
-  };
+  } & CaptureFreshnessCounts;
+  /**
+   * What the newest captured message says about the live feed: a pull can
+   * succeed on schedule while the helper has captured nothing for days. The
+   * same verdict WhatsApp reports, from the spool's newest `captured_at` (the
+   * helper's own gateway report reads the same field). The time itself is not
+   * returned.
+   */
+  capture: CaptureFreshness;
   warnings?: string[];
   policy: {
     counts_only: true;
@@ -156,6 +172,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
   reconciliation?: { maxItems?: number; maxWindows?: number };
   /** Test seam for proving the preflight receives the same bounded window. */
   preflightRead?: typeof readTelegramCaptureSpool;
+  /** Seconds of silence after which the feed reads stale. Defaults to the helper's own threshold. */
+  spoolStaleThresholdSeconds?: number;
+  now?: () => Date;
   /** The lanes' per-tier stores. Omitted: a set over the two stores, kept whole per message. */
   tierSet?: TieredStoreSet;
   secretLocations?: SecretLocationsIndex;
@@ -164,6 +183,12 @@ export function createTelegramConnectorStoreSyncHandler(options: {
 }): TelegramConnectorStoreSyncHandler {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultTelegramCaptureSpoolDir(env);
+  const staleThresholdSeconds = captureStaleThresholdSeconds(
+    options.spoolStaleThresholdSeconds,
+    env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_STALE_THRESHOLD_SECONDS,
+    'Telegram',
+  );
+  const now = options.now ?? (() => new Date());
   const tierSet = options.tierSet ?? createLaneTieredStoreSet({
     setId: TELEGRAM_MESSAGES_SOURCE_ID,
     internalStore: options.stores.internal,
@@ -327,6 +352,11 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished,
         redacted,
         redactionFailed,
+        captureFreshness(
+          readTelegramCaptureSpoolNewestCapturedAt(spoolDir),
+          now().getTime(),
+          staleThresholdSeconds,
+        ),
       );
     },
 
@@ -449,6 +479,7 @@ function telegramSyncReceipt(
   trustConflictEvictions: number,
   redacted: CaptureSpoolRedactionResult | undefined,
   redactionFailed: boolean,
+  capture: CaptureFreshness,
 ): TelegramConnectorStoreSyncReceipt {
   const runs = [internal, secureLocal];
   const counts = {
@@ -466,6 +497,7 @@ function telegramSyncReceipt(
     trust_conflict_items: trustConflictItems,
     trust_conflict_evictions: trustConflictEvictions,
     spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
+    ...captureFreshnessCounts(capture),
   };
   const warnings = [
     ...(malformedRecords > 0 ? [TELEGRAM_MALFORMED_SPOOL_WARNING] : []),
@@ -475,6 +507,7 @@ function telegramSyncReceipt(
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? 'progress' : 'idle',
     counts,
+    capture,
     ...(warnings.length > 0 ? { warnings } : {}),
     policy: {
       counts_only: true,

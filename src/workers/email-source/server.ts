@@ -18,7 +18,9 @@ import {
   MessagingCaptureSupervisor,
   NativeMessagingCaptureOwnerError,
   defaultMessagingCaptureGrantPath,
+  readMessagingCaptureScope,
   revokeMessagingCaptureGrant,
+  type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
@@ -378,7 +380,7 @@ import {
   createWhatsAppConnectorStoreSyncHandler,
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
-import { SqliteSourceDashboardHistory, type SourceDashboardViewModel } from '../source-dashboard.ts';
+import { SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
@@ -2070,16 +2072,44 @@ export async function main(): Promise<void> {
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
   let capturesClosed = false;
+  // What each supervisor last reported, for the dashboard. Absent for a source
+  // whose capture the native service owns: this worker runs nothing there.
+  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
+  const captureEntries = () => Object.entries(captures) as Array<['telegram' | 'whatsapp', WorkerMessagingCaptureSupervisor]>;
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning) return;
     captureReconcileRunning = true;
     if (sovereigntyEngine.config.routes.secure_local?.mode === 'disabled' || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
-      try { await Promise.all(Object.values(captures).map((capture) => capture.stop())); } finally { captureReconcileRunning = false; }
+      try {
+        await Promise.all(captureEntries().map(async ([source, capture]) => {
+          await capture.stop();
+          captureStatuses[source] = { source, state: 'stopped' };
+        }));
+      } finally { captureReconcileRunning = false; }
       return;
     }
-    try { await Promise.all(Object.values(captures).map((capture) => capture.reconcile())); }
+    try {
+      await Promise.all(captureEntries().map(async ([source, capture]) => {
+        captureStatuses[source] = await capture.reconcile();
+      }));
+    }
     catch { console.warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.'); }
     finally { captureReconcileRunning = false; }
+  };
+  // The dashboard's view of capture on this computer, by source id: the
+  // supervisor's last report and what the grant approved, as a count.
+  const dashboardCaptureRuntime = (): Record<string, DashboardCaptureRuntime> => {
+    const runtime: Record<string, DashboardCaptureRuntime> = {};
+    for (const [source] of captureEntries()) {
+      const status = captureStatuses[source];
+      const scope = readMessagingCaptureScope(source, defaultMessagingCaptureGrantPath(source, connectedHandleRegistryPath));
+      if (!status && !scope) continue;
+      runtime[source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages'] = {
+        ...(status ? { supervisor: { state: status.state, ...(status.reason ? { reason: status.reason } : {}) } } : {}),
+        ...(scope ? { scope } : {}),
+      };
+    }
+    return runtime;
   };
   const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
     await captureOwnership.stopForUnpair(source);
@@ -4937,6 +4967,7 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            captureRuntime: dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
             // change uses. `canRestart` has no side effect, so the route can
             // check it before deleting anything.

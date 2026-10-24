@@ -43,9 +43,15 @@ import {
 // view-model imports are all `import type` — so the page's one wording source
 // is reachable from the builder without a cycle.
 import {
+  DASHBOARD_CAPTURE_BLOCKED_LABEL,
+  DASHBOARD_CAPTURE_COPY,
+  DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
+// The receipt counts a live feed reports about its newest captured message.
+// Pure, with no imports of its own.
+import { captureFreshnessFromCounts } from './connector-store/capture-freshness.ts';
 // The phase model's own test for a finished pass, so the sample history and
 // the bars can never disagree about what "settled" means. Same no-cycle rule:
 // phases.ts imports this module for types only.
@@ -790,6 +796,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The newest captured message of a live feed, as a verdict. `age_seconds` is how
+ * old that message is now (the last pull's reading plus the time since that
+ * pull) and is absent when no captured message carries a readable time.
+ */
+export interface DashboardCaptureFreshness {
+  state: 'fresh' | 'stale' | 'unavailable';
+  age_seconds?: number;
+  threshold_seconds: number;
+}
+
+/** Why a capture helper is not running, in the supervisor's own closed vocabulary. */
+export type DashboardCaptureSupervisorReason =
+  | 'grant_missing'
+  | 'grant_invalid'
+  | 'handle_unavailable'
+  | 'session_missing'
+  | 'secret_missing';
+
+/** What this worker's capture supervisor last reported for one source. */
+export interface DashboardCaptureSupervisor {
+  state: 'running' | 'stopped' | 'blocked';
+  reason?: DashboardCaptureSupervisorReason;
+}
+
+/** What capture was approved to read: the whole linked account, or a number of chats. Counts only. */
+export type DashboardCaptureScope =
+  | { kind: 'whole_account' }
+  | { kind: 'chats'; count: number };
+
+export interface DashboardCaptureRuntime {
+  /** Absent when something other than this worker runs capture, or nothing has reported yet. */
+  supervisor?: DashboardCaptureSupervisor;
+  /** Absent when no approval can be read. */
+  scope?: DashboardCaptureScope;
+}
+
 export interface DashboardSourceCard {
   corpus_id: string;
   source_id: string;
@@ -814,8 +857,21 @@ export interface DashboardSourceCard {
     label: string;
     hours?: number;
     threshold_hours?: number;
+    /** The refresh is late. Capture that has gone quiet is `capture`, not this. */
     stale: boolean;
+    /**
+     * What the newest captured message says about a live feed, from its last
+     * pull's receipt (WhatsApp, Telegram). Absent for a source that reports
+     * none. A successful pull and a quiet feed are different facts.
+     */
+    capture?: DashboardCaptureFreshness;
   };
+  /**
+   * How live capture runs on this computer, for a source whose messages are
+   * captured by a helper (WhatsApp, Telegram). Present only on a connected
+   * source, and only the parts this worker can read.
+   */
+  capture?: DashboardCaptureRuntime;
   coverage: {
     indexed_items: number;
     content_ready_items: number;
@@ -1329,6 +1385,13 @@ export interface SourceDashboardBuildOptions {
    * unpaired state over a session file that is still there.
    */
   unpairedSources?: readonly DashboardUnpairedSourceState[];
+  /**
+   * How live capture runs on this computer, per source id: the supervisor's
+   * last report and what capture was approved to read. Stamped on a connected
+   * card after it is built. A blocked supervisor puts the source under Needs
+   * you; a source absent here shows neither.
+   */
+  captureRuntime?: Readonly<Record<string, DashboardCaptureRuntime>>;
   /**
    * The last Sync now result per source id, kept by the worker that ran it.
    * Stamped on the card only while dashboardLiveManualSync says it is news.
@@ -2312,6 +2375,24 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       card.answer_readiness = { state: 'needs_attention', label: 'Connected to a different account' };
       card.setup = dashboardSourceSetupStatus(card);
     }
+    // How live capture runs on this computer, for a connected chat source. A
+    // helper that cannot start is a fault whatever the pull says, but it never
+    // replaces a more specific reason the card already gives.
+    const captureRuntime = options.captureRuntime?.[definition.source_id];
+    if (card.configured && captureRuntime && (captureRuntime.supervisor || captureRuntime.scope)) {
+      card.capture = {
+        ...(captureRuntime.supervisor ? { supervisor: { ...captureRuntime.supervisor } } : {}),
+        ...(captureRuntime.scope ? { scope: { ...captureRuntime.scope } } : {}),
+      };
+      const readiness = card.answer_readiness;
+      const replaceable = readiness.state !== 'needs_attention'
+        || readiness.label === DASHBOARD_CAPTURE_STALE_LABEL
+        || readiness.label === 'Needs attention before answers';
+      if (captureRuntime.supervisor?.state === 'blocked' && replaceable && !card.account_change) {
+        card.answer_readiness = { state: 'needs_attention', label: DASHBOARD_CAPTURE_BLOCKED_LABEL };
+      }
+      card.setup = dashboardSourceSetupStatus(card);
+    }
     // Stamped after the card is built rather than threaded through it: the
     // dispatch chain is a fact about the worker, and whether there is anything
     // to sync is a fact about the card.
@@ -2562,7 +2643,9 @@ function sourceCardFromDefinition(
   const queue = throughput?.state === 'stalled'
     ? { ...baseQueue, label: 'Needs attention' as const, needs_attention: baseQueue.needs_attention + 1 }
     : baseQueue;
-  const freshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
+  const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
+  const captureFreshness = schedulerCaptureFreshness(schedulers, now);
+  const freshness = captureFreshness ? { ...refreshFreshness, capture: captureFreshness } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === 'embedding_lane_disabled');
   const schedule = scheduleFromSchedulers(schedulers);
   // A provider refusing requests is a credential problem the broker has not
@@ -2851,6 +2934,17 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       next_action: card.scope_selection.kind === 'mail'
         ? `Choose which ${card.label} mail Olympus may use, then press Save scope and start.`
         : `Choose the ${card.label} folders Olympus may use, then press Save scope and start.`,
+      dependencies,
+    };
+  }
+  if (card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL || card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL) {
+    // Sync now reads what was captured; it cannot capture what was missed.
+    return {
+      stage: 'source_health',
+      condition: 'degraded',
+      next_action: card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL
+        ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
+        : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
       dependencies,
     };
   }
@@ -4716,6 +4810,55 @@ function liveQueueCount(counts: Record<string, number>, gaugeKeys: string[], job
   return Math.max(gauge, 0) + Math.max(jobs, 0);
 }
 
+const CAPTURE_STATE_RANK: Readonly<Record<DashboardCaptureFreshness['state'], number>> = {
+  fresh: 0,
+  unavailable: 1,
+  stale: 2,
+};
+
+/**
+ * What the newest captured message says about a live feed, from the receipt
+ * counts of each sync task's last successful pull (see connector-store/
+ * capture-freshness.ts). Read per task rather than summed with
+ * schedulerTaskCounts, because the verdict is three flags and a threshold, and
+ * adding two tasks' flags would make a reading nothing measured. The worst
+ * reading across tasks wins: stale, then unavailable, then fresh.
+ *
+ * A failed run's counts are not a reading of the feed. The age the receipt
+ * carries was true when the pull finished, so the time since then is added:
+ * a pull that stopped running three days ago does not leave "newest message
+ * 2 hours ago" on the card. Undefined when no task reports a verdict.
+ */
+function schedulerCaptureFreshness(
+  schedulers: readonly SourceSchedulerSourceStatus[],
+  now: Date,
+): DashboardCaptureFreshness | undefined {
+  let worst: DashboardCaptureFreshness | undefined;
+  for (const scheduler of new Set(schedulers)) {
+    for (const task of scheduler.tasks) {
+      const counts = task.last_result?.counts;
+      if (task.kind !== 'sync' || !counts || task.last_result?.status === 'failed') continue;
+      const reading = captureFreshnessFromCounts(counts);
+      if (!reading) continue;
+      const pulledAt = Date.parse(task.last_success_at ?? '');
+      const sincePull = Number.isFinite(pulledAt) ? Math.max(0, Math.floor((now.getTime() - pulledAt) / 1_000)) : 0;
+      const verdict: DashboardCaptureFreshness = reading.status === 'unavailable' || reading.age_seconds === undefined
+        ? {
+            state: reading.status,
+            threshold_seconds: reading.threshold_seconds,
+            ...(reading.age_seconds !== undefined ? { age_seconds: reading.age_seconds } : {}),
+          }
+        : {
+            state: reading.age_seconds + sincePull > reading.threshold_seconds ? 'stale' : 'fresh',
+            threshold_seconds: reading.threshold_seconds,
+            age_seconds: reading.age_seconds + sincePull,
+          };
+      if (!worst || CAPTURE_STATE_RANK[verdict.state] > CAPTURE_STATE_RANK[worst.state]) worst = verdict;
+    }
+  }
+  return worst;
+}
+
 function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined): Record<string, number> {
   const output: Record<string, number> = {};
   for (const task of scheduler?.tasks ?? []) {
@@ -4863,6 +5006,11 @@ function answerReadinessFrom(
   }
   if (unreadableShareTooHigh(coverage)) {
     return { state: 'needs_attention', label: DASHBOARD_MANY_UNREADABLE_LABEL };
+  }
+  // The pull is on time and the feed behind it has gone quiet. A pause does not
+  // explain this: Olympus parking a lane does not stop messages being captured.
+  if (freshness.capture?.state === 'stale') {
+    return { state: 'needs_attention', label: DASHBOARD_CAPTURE_STALE_LABEL };
   }
   if (coverage.content_ready_items > 0 || coverage.embedded_items > 0) {
     return operatorPaused

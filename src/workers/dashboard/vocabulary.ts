@@ -453,6 +453,10 @@ export function dashboardAttentionLine(
   if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return DASHBOARD_FOLDER_NEEDS_HELPER;
   if (source.schedule?.degraded_reason === 'scope_root_unreadable') return DASHBOARD_FOLDER_UNREADABLE;
   if (source.schedule?.degraded_reason === 'scope_root_missing' || (source.schedule?.missing_folders?.length ?? 0) > 0) return DASHBOARD_MISSING_FOLDER;
+  // A live feed gone quiet, or a capture helper that cannot start, is stated as
+  // itself too: it is never a pause, and Sync now does not touch it.
+  const captureReason = dashboardCaptureAttentionReason(source);
+  if (captureReason) return captureReason;
   // "Paused" is said only of a real pause — Olympus parked the lane on a budget
   // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
   // a failing task is stated as itself.
@@ -518,6 +522,80 @@ const READINESS_REASONS: Readonly<Record<string, string>> = {
 
 /** The view model's catch-all readiness label, which names no cause. */
 const GENERIC_READINESS_ATTENTION_LABEL = 'Needs attention before answers';
+
+/**
+ * Live capture: WhatsApp and Telegram messages arrive through a helper that
+ * holds a linked session. A pull of what it captured can succeed on schedule
+ * while the helper has captured nothing for days, so "synced a minute ago"
+ * and "no new messages in days" are different facts and the card says both.
+ *
+ * The two readiness labels source-dashboard.ts raises for a live feed; the
+ * sentence is built from the card's capture fields, not from the label.
+ */
+export const DASHBOARD_CAPTURE_STALE_LABEL = 'Live capture is stale';
+export const DASHBOARD_CAPTURE_BLOCKED_LABEL = 'Live capture cannot start';
+
+/** Why the capture helper cannot start, by the supervisor's closed reasons. Reasons that are not a fault have no words. */
+const CAPTURE_BLOCKED_WORDS: Readonly<Record<string, string>> = {
+  grant_invalid: 'its approval cannot be read',
+  session_missing: 'its linked session is missing',
+  secret_missing: 'its saved sign-in key is missing',
+};
+
+export const DASHBOARD_CAPTURE_COPY = {
+  /** The label of the route to the source's panel on the computer. */
+  fixLabel: 'Check capture',
+  /** The newest captured message is older than the threshold. */
+  stale: (age: string) => `capture stale: newest message ${age}`,
+  /** The age is unknown; stale cannot be proven without one, so this is never reached by the worker today. */
+  staleNoAge: 'capture stale',
+  /** A pull succeeded, and nothing it holds says when a message was captured. */
+  unavailable: 'no live messages captured yet',
+  blocked: (reason: string | undefined) => (reason ? `capture cannot start: ${reason}` : 'capture cannot start'),
+  running: 'capture running',
+  stopped: 'capture stopped',
+  wholeAccount: 'whole account',
+  chats: (count: number) => `${dashboardCount(count)} ${count === 1 ? 'chat' : 'chats'}`,
+  nextAction: {
+    stale: (label: string) => `Open ${label} on this computer to check the link and capture. Syncing again will not bring in messages that were never captured.`,
+    blocked: (label: string) => `Open ${label} on this computer and link it again so live capture can start.`,
+  },
+} as const;
+
+/**
+ * The reason half of a Needs you row for a live feed that is stale or cannot
+ * start, or undefined when the card is neither. "capture stale: newest message
+ * 3d ago", with a stopped helper named when it is the likely reason.
+ */
+export function dashboardCaptureAttentionReason(source: DashboardSourceCard): string | undefined {
+  const label = source.answer_readiness.label;
+  if (label === DASHBOARD_CAPTURE_BLOCKED_LABEL) {
+    const reason = source.capture?.supervisor?.reason;
+    return DASHBOARD_CAPTURE_COPY.blocked(reason === undefined ? undefined : CAPTURE_BLOCKED_WORDS[reason]);
+  }
+  if (label !== DASHBOARD_CAPTURE_STALE_LABEL) return undefined;
+  const age = source.freshness.capture?.age_seconds;
+  const relative = typeof age === 'number' ? dashboardRelativeFromMs(age * 1_000) : '';
+  const base = relative ? DASHBOARD_CAPTURE_COPY.stale(relative) : DASHBOARD_CAPTURE_COPY.staleNoAge;
+  return source.capture?.supervisor?.state === 'stopped' ? `${base} · ${DASHBOARD_CAPTURE_COPY.stopped}` : base;
+}
+
+/**
+ * What a quiet row says about live capture beside its sync time: nothing
+ * captured yet, whether the helper runs, and what it was approved to read.
+ * Empty for a source that reports none of it.
+ */
+export function dashboardCaptureClause(source: DashboardSourceCard): string {
+  const parts: string[] = [];
+  if (source.freshness.capture?.state === 'unavailable') parts.push(DASHBOARD_CAPTURE_COPY.unavailable);
+  const supervisor = source.capture?.supervisor?.state;
+  if (supervisor === 'running') parts.push(DASHBOARD_CAPTURE_COPY.running);
+  else if (supervisor === 'stopped') parts.push(DASHBOARD_CAPTURE_COPY.stopped);
+  const scope = source.capture?.scope;
+  if (scope?.kind === 'whole_account') parts.push(DASHBOARD_CAPTURE_COPY.wholeAccount);
+  else if (scope?.kind === 'chats' && scope.count > 0) parts.push(DASHBOARD_CAPTURE_COPY.chats(scope.count));
+  return parts.join(' · ');
+}
 
 function lowerFirst(value: string): string {
   return value.length > 0 ? value[0]!.toLowerCase() + value.slice(1) : value;
@@ -1005,16 +1083,18 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   // The owner's own Sync now press, while it is the latest word, says what it
   // found in place of the bare sync time.
   const manual = dashboardManualSyncLine(source, now);
-  if (manual) return unreadable ? `${manual} · ${unreadable}` : manual;
+  const capture = dashboardCaptureClause(source);
+  const tail = [unreadable, capture].filter((part): part is string => !!part).join(' · ');
+  if (manual) return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
-  if (typeof hours !== 'number' || !Number.isFinite(hours)) return unreadable ?? '';
+  if (typeof hours !== 'number' || !Number.isFinite(hours)) return tail;
   const relative = dashboardRelativeFromHours(hours);
-  if (!relative) return unreadable ?? '';
+  if (!relative) return tail;
   // A lane Olympus parked is calm, not idle by accident. Saying so keeps this
   // line from implying the sync is still running, and matches the detail
   // page's paused sentence for the same marker.
   const synced = dashboardOperatorPaused(source) ? `synced ${relative} · sync paused` : `synced ${relative}`;
-  return unreadable ? `${synced} · ${unreadable}` : synced;
+  return tail ? `${synced} · ${tail}` : synced;
 }
 
 /**
