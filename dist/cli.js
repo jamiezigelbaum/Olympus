@@ -15006,16 +15006,41 @@ function saveMessagingCaptureGrant(input) {
 function revokeMessagingCaptureGrant(path) {
   rmSync8(path, { force: true });
 }
-function readMessagingCaptureScope(source, grantPath = defaultMessagingCaptureGrantPath(source)) {
-  const read = readGrant(grantPath);
-  if (read.kind !== "valid" || read.grant.source !== source)
-    return;
-  const env = read.grant.producer.env;
-  const raw = source === "telegram" ? env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES : env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS;
-  const scopes = (raw ?? "").split(",").map((item) => item.trim()).filter(Boolean);
-  if (scopes.length === 0)
-    return;
-  return scopes.includes("*") ? { kind: "whole_account" } : { kind: "chats", count: new Set(scopes).size };
+function isPlainRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function readMessagingCaptureGrantFacts(source, grantPath = defaultMessagingCaptureGrantPath(source)) {
+  try {
+    const read = readGrant(grantPath);
+    if (read.kind !== "valid" || read.grant.source !== source)
+      return {};
+    const facts = {};
+    const grantedAt = typeof read.grant.grantedAt === "string" ? Date.parse(read.grant.grantedAt) : Number.NaN;
+    if (Number.isFinite(grantedAt))
+      facts.pairedAt = new Date(grantedAt).toISOString();
+    const env = read.grant.producer.env;
+    const raw = isPlainRecord(env) ? env[source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS"] : undefined;
+    if (typeof raw === "string") {
+      const scopes = raw.split(",").map((item) => item.trim()).filter(Boolean);
+      if (scopes.length > 0) {
+        facts.scope = scopes.includes("*") ? { kind: "whole_account" } : { kind: "chats", count: new Set(scopes).size };
+      }
+    }
+    return facts;
+  } catch {
+    return {};
+  }
+}
+function effectiveMessagingCaptureStatus(input) {
+  const { status } = input;
+  const source = status?.source;
+  if (input.reconcileFailed) {
+    return { ...source ? { source } : {}, state: "blocked", reason: "start_failed" };
+  }
+  if (status?.state === "running" && input.liveness && input.liveness.unexpectedExits >= MESSAGING_CAPTURE_REPEATED_EXITS) {
+    return { ...source ? { source } : {}, state: "blocked", reason: "helper_exited" };
+  }
+  return status;
 }
 
 class MessagingCaptureSupervisor {
@@ -15023,8 +15048,27 @@ class MessagingCaptureSupervisor {
   child;
   fingerprint;
   generation = 0;
+  startedAt;
+  expectedStops = new WeakSet;
+  unexpectedExitTimes = [];
   constructor(options) {
     this.options = options;
+  }
+  liveness() {
+    const now = (this.options.now ?? Date.now)();
+    if (this.child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS)
+      this.unexpectedExitTimes = [];
+    this.unexpectedExitTimes = this.unexpectedExitTimes.filter((at) => now - at < UNEXPECTED_EXIT_WINDOW_MS);
+    return { alive: this.child !== undefined, unexpectedExits: this.unexpectedExitTimes.length };
+  }
+  childExited(child) {
+    if (!this.expectedStops.has(child))
+      this.unexpectedExitTimes.push((this.options.now ?? Date.now)());
+    if (this.child === child) {
+      this.child = undefined;
+      this.fingerprint = undefined;
+      this.startedAt = undefined;
+    }
   }
   async reconcile() {
     const generation = ++this.generation;
@@ -15076,17 +15120,8 @@ class MessagingCaptureSupervisor {
     const child = spawn3({ executable: launch.executable, args: launch.args, env: childEnv });
     this.child = child;
     this.fingerprint = nextFingerprint;
-    child.exited.then(() => {
-      if (this.child === child) {
-        this.child = undefined;
-        this.fingerprint = undefined;
-      }
-    }, () => {
-      if (this.child === child) {
-        this.child = undefined;
-        this.fingerprint = undefined;
-      }
-    });
+    this.startedAt = (this.options.now ?? Date.now)();
+    child.exited.then(() => this.childExited(child), () => this.childExited(child));
     return { source: grant.source, state: "running" };
   }
   async stop() {
@@ -15094,6 +15129,7 @@ class MessagingCaptureSupervisor {
     const child = this.child;
     if (!child)
       return;
+    this.expectedStops.add(child);
     child.kill("SIGTERM");
     const timeoutMs = this.options.stopTimeoutMs ?? 5000;
     if (!await observeChildExit(child, timeoutMs)) {
@@ -15105,6 +15141,7 @@ class MessagingCaptureSupervisor {
     if (this.child === child) {
       this.child = undefined;
       this.fingerprint = undefined;
+      this.startedAt = undefined;
     }
   }
 }
@@ -15174,7 +15211,7 @@ function spawnCapture(input) {
   });
   return { exited: child.exited, kill: (signal) => child.kill(signal) };
 }
-var NativeMessagingCaptureOwnerError;
+var NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000;
 var init_messaging_capture = __esm(() => {
   init_messaging_runtime();
   init_atomic_file();
@@ -15192,6 +15229,7 @@ var init_messaging_capture = __esm(() => {
       this.configKey = configKey;
     }
   };
+  UNEXPECTED_EXIT_WINDOW_MS = 10 * 60000;
 });
 
 // src/core/open-targets.ts
@@ -53635,28 +53673,15 @@ function readTelegramCaptureSpoolNewestCapturedAt(spoolDir) {
 `) + 1).split(`
 `);
     for (let index = lines.length - 1;index >= 0; index -= 1) {
-      const capturedAt = spoolLineCapturedAt(lines[index]);
-      if (capturedAt !== undefined)
-        return capturedAt;
+      const line = lines[index];
+      if (!line.trim())
+        continue;
+      try {
+        return parseTelegramCaptureSpoolRecord(line).capturedAt;
+      } catch {}
     }
   }
   return;
-}
-function spoolLineCapturedAt(line) {
-  if (!line.trim())
-    return;
-  try {
-    const record = JSON.parse(line);
-    if (!record || typeof record !== "object" || Array.isArray(record))
-      return;
-    const { provider, captured_at: capturedAt } = record;
-    if (provider !== "telegram" || typeof capturedAt !== "string")
-      return;
-    const at = Date.parse(capturedAt);
-    return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
-  } catch {
-    return;
-  }
 }
 function redactTelegramCaptureSpoolSecrets(options) {
   assertTelegramCaptureSpoolDirectory(options.spoolDir);
@@ -74969,8 +74994,13 @@ function dashboardStatusResolution(input) {
   if (readinessStatus === "Needs you" || queueStatus === "Needs you") {
     return { status: "Needs you", mappedUnknown: false };
   }
+  if (dashboardCaptureProblem(source) !== undefined)
+    return { status: "Needs you", mappedUnknown: false };
   if (dashboardScopePending(source))
     return { status: "Waiting", mappedUnknown: false };
+  if (connectionStatus === "Fresh" && source.freshness.capture?.state === "awaiting") {
+    return { status: "Waiting", mappedUnknown: false };
+  }
   return { status: connectionStatus, mappedUnknown: false };
 }
 function dashboardScopePending(source) {
@@ -75018,48 +75048,51 @@ function dashboardUnsettledWithData(source) {
   return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
 }
 function dashboardAttentionLine(source, options) {
+  const { reason, capture } = dashboardAttentionParts(source, options);
+  return [reason, capture].filter((part) => !!part).join(" · ");
+}
+function dashboardAttentionParts(source, options) {
+  const capture = dashboardCaptureAttentionReason(source);
+  const withCapture = (reason) => capture ? { reason, capture } : { reason };
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
-    return clause ? `can't sign in · ${clause}` : `can't sign in`;
+    return withCapture(clause ? `can't sign in · ${clause}` : `can't sign in`);
   }
   if (source.connection.provider_refusal)
-    return dashboardProviderRefusalLine(source, options);
+    return withCapture(dashboardProviderRefusalLine(source, options));
   switch (source.connection.state) {
     case "reauth_required":
-      return DASHBOARD_SIGNED_OUT;
+      return withCapture(DASHBOARD_SIGNED_OUT);
     case "awaiting_consent": {
       const base = `finish signing in to ${source.label}`;
       const minutes = source.connection.pending?.expires_in_minutes;
-      return minutes !== undefined && minutes > 0 ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min` : base;
+      return withCapture(minutes !== undefined && minutes > 0 ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min` : base);
     }
     case "needs_setup":
     case "not_connected":
-      return source.connection.label;
+      return withCapture(source.connection.label);
     default:
       break;
   }
   if (source.connection.imports_attention?.length)
-    return source.connection.label;
+    return withCapture(source.connection.label);
   if (source.schedule?.degraded_reason === "scope_root_permission_needed")
-    return DASHBOARD_FOLDER_NEEDS_PERMISSION;
+    return withCapture(DASHBOARD_FOLDER_NEEDS_PERMISSION);
   if (source.schedule?.degraded_reason === "scope_root_helper_needed")
-    return DASHBOARD_FOLDER_NEEDS_HELPER;
+    return withCapture(DASHBOARD_FOLDER_NEEDS_HELPER);
   if (source.schedule?.degraded_reason === "scope_root_unreadable")
-    return DASHBOARD_FOLDER_UNREADABLE;
+    return withCapture(DASHBOARD_FOLDER_UNREADABLE);
   if (source.schedule?.degraded_reason === "scope_root_missing" || (source.schedule?.missing_folders?.length ?? 0) > 0)
-    return DASHBOARD_MISSING_FOLDER;
-  const captureReason = dashboardCaptureAttentionReason(source);
-  if (captureReason)
-    return captureReason;
-  if (source.answer_readiness.state === "needs_attention") {
-    return dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source);
+    return withCapture(DASHBOARD_MISSING_FOLDER);
+  if (source.answer_readiness.state === "needs_attention" && !dashboardReadinessNamesCapture(source)) {
+    return withCapture(dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source));
   }
   if (source.queue_health.needs_attention > 0)
-    return "some items could not be read";
+    return withCapture("some items could not be read");
   if ((source.queue_health.retrying_tasks ?? 0) > 0)
-    return "a sync is retrying on its own";
-  return "";
+    return withCapture("a sync is retrying on its own");
+  return withCapture("");
 }
 function dashboardActionLabel(label) {
   return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
@@ -75078,18 +75111,38 @@ function pausedReason(source) {
   const relative9 = typeof source.freshness.hours === "number" ? dashboardRelativeFromHours(source.freshness.hours) : "";
   return relative9 ? `last synced ${relative9}, later than expected` : "it has not synced when expected";
 }
-function dashboardCaptureAttentionReason(source) {
-  const label = source.answer_readiness.label;
-  if (label === DASHBOARD_CAPTURE_BLOCKED_LABEL) {
-    const reason = source.capture?.supervisor?.reason;
-    return DASHBOARD_CAPTURE_COPY.blocked(reason === undefined ? undefined : CAPTURE_BLOCKED_WORDS[reason]);
-  }
-  if (label !== DASHBOARD_CAPTURE_STALE_LABEL)
+function dashboardCaptureProblem(source) {
+  if (!CAPTURE_JUDGED_CONNECTION_STATES.has(source.connection.state))
     return;
+  const supervisor = source.capture?.supervisor;
+  if (supervisor?.state === "blocked" || supervisor?.state === "stopped" && supervisor.reason !== undefined && CAPTURE_UNEXPECTED_STOP_REASONS.has(supervisor.reason)) {
+    return { cause: "helper", ...supervisor.reason ? { reason: supervisor.reason } : {} };
+  }
+  if (source.freshness.capture?.state === "stale")
+    return { cause: "stale" };
+  return;
+}
+function dashboardReadinessNamesCapture(source) {
+  return source.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL || source.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL;
+}
+function dashboardCaptureAttentionReason(source) {
+  const problem = dashboardCaptureProblem(source);
+  if (!problem)
+    return;
+  if (problem.cause === "helper") {
+    return problem.reason === undefined ? DASHBOARD_CAPTURE_COPY.helperUnknown : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
+  }
   const age = source.freshness.capture?.age_seconds;
   const relative9 = typeof age === "number" ? dashboardRelativeFromMs(age * 1000) : "";
   const base = relative9 ? DASHBOARD_CAPTURE_COPY.stale(relative9) : DASHBOARD_CAPTURE_COPY.staleNoAge;
   return source.capture?.supervisor?.state === "stopped" ? `${base} · ${DASHBOARD_CAPTURE_COPY.stopped}` : base;
+}
+function dashboardCaptureAwaitingClause(source) {
+  const capture = source.freshness.capture;
+  if (capture?.state !== "awaiting")
+    return "";
+  const relative9 = typeof capture.age_seconds === "number" ? dashboardRelativeFromMs(capture.age_seconds * 1000) : "";
+  return relative9 ? DASHBOARD_CAPTURE_COPY.awaitingWithHistory(relative9) : DASHBOARD_CAPTURE_COPY.awaiting;
 }
 function dashboardCaptureClause(source) {
   const parts = [];
@@ -75372,6 +75425,11 @@ function workingLine(source) {
   return parts.join(" · ");
 }
 function waitingLine(source) {
+  const awaiting = dashboardCaptureAwaitingClause(source);
+  if (awaiting) {
+    const clause = dashboardCaptureClause(source);
+    return clause ? `${awaiting} · ${clause}` : awaiting;
+  }
   if (dashboardScopePending(source)) {
     return source.scope_selection?.kind === "mail" ? "choose which mail to include" : "choose which folders to include";
   }
@@ -75436,7 +75494,7 @@ function dashboardImportAttentionSentence(entry) {
       return words2.unreadable;
   }
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", CAPTURE_BLOCKED_WORDS, DASHBOARD_CAPTURE_COPY, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -75489,26 +75547,40 @@ var init_vocabulary = __esm(() => {
     "Content extraction is stalled": "reading files has stalled",
     [DASHBOARD_MANY_UNREADABLE_LABEL]: "many files can't be read"
   };
-  CAPTURE_BLOCKED_WORDS = {
-    grant_invalid: "its approval cannot be read",
-    session_missing: "its linked session is missing",
-    secret_missing: "its saved sign-in key is missing"
-  };
   DASHBOARD_CAPTURE_COPY = {
     fixLabel: "Check capture",
     stale: (age) => `capture stale: newest message ${age}`,
-    staleNoAge: "capture stale",
+    staleNoAge: "capture stale: nothing captured since linking",
     unavailable: "no live messages captured yet",
-    blocked: (reason) => reason ? `capture cannot start: ${reason}` : "capture cannot start",
+    awaiting: "waiting for the first live message",
+    awaitingWithHistory: (age) => `waiting for the first live message · newest kept message ${age}`,
+    helper: {
+      grant_invalid: "capture cannot start: its approval cannot be read",
+      session_missing: "capture cannot start: its linked session is missing",
+      secret_missing: "capture cannot start: its saved sign-in key is missing",
+      start_failed: "capture cannot start: its helper would not start",
+      helper_exited: "capture keeps stopping: its helper exits soon after it starts",
+      grant_missing: "capture stopped: its approval is missing",
+      handle_unavailable: "capture stopped: its sign-in is no longer available"
+    },
+    helperUnknown: "capture cannot start",
     running: "capture running",
     stopped: "capture stopped",
     wholeAccount: "whole account",
     chats: (count) => `${dashboardCount(count)} ${count === 1 ? "chat" : "chats"}`,
     nextAction: {
       stale: (label) => `Open ${label} on this computer to check the link and capture. Syncing again will not bring in messages that were never captured.`,
-      blocked: (label) => `Open ${label} on this computer and link it again so live capture can start.`
+      blocked: (label) => `Open ${label} on this computer and link it again so live capture can start.`,
+      awaiting: (label) => `Keep ${label} linked. The first live message since linking will end this wait; if none arrives within the day, this row says so.`
     }
   };
+  CAPTURE_JUDGED_CONNECTION_STATES = new Set([
+    "connected",
+    "waiting_for_first_sync",
+    "syncing",
+    "synced"
+  ]);
+  CAPTURE_UNEXPECTED_STOP_REASONS = new Set(["grant_missing", "handle_unavailable"]);
   REDIRECT_REFUSAL_CODES = new Set([
     "redirect_uri_mismatch",
     "invalid_redirect_uri",
@@ -77942,7 +78014,8 @@ function buildSourceDashboardViewModel(options) {
     const corpora = statusCorpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
-    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, options.importedArchives);
+    const captureRuntime = options.captureRuntime?.[definition.source_id];
+    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, options.importedArchives, captureRuntime?.paired_at);
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
     const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
@@ -77959,15 +78032,13 @@ function buildSourceDashboardViewModel(options) {
       card.answer_readiness = { state: "needs_attention", label: "Connected to a different account" };
       card.setup = dashboardSourceSetupStatus(card);
     }
-    const captureRuntime = options.captureRuntime?.[definition.source_id];
     if (card.configured && captureRuntime && (captureRuntime.supervisor || captureRuntime.scope)) {
       card.capture = {
         ...captureRuntime.supervisor ? { supervisor: { ...captureRuntime.supervisor } } : {},
         ...captureRuntime.scope ? { scope: { ...captureRuntime.scope } } : {}
       };
       const readiness = card.answer_readiness;
-      const replaceable = readiness.state !== "needs_attention" || readiness.label === DASHBOARD_CAPTURE_STALE_LABEL || readiness.label === "Needs attention before answers";
-      if (captureRuntime.supervisor?.state === "blocked" && replaceable && !card.account_change) {
+      if (dashboardCaptureProblem(card)?.cause === "helper" && (readiness.state !== "needs_attention" || readiness.label === DASHBOARD_CAPTURE_STALE_LABEL) && !card.account_change) {
         card.answer_readiness = { state: "needs_attention", label: DASHBOARD_CAPTURE_BLOCKED_LABEL };
       }
       card.setup = dashboardSourceSetupStatus(card);
@@ -78114,7 +78185,7 @@ function unreadableFilesFor(card, corpora, names) {
   }
   return { names: listed.slice(0, CARD_UNREADABLE_NAMES), corpus_ids: corpusIds };
 }
-function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled, importedArchives) {
+function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled, importedArchives, capturePairedAt) {
   const corpusCards = withoutCustodialDoubleCount(corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)), corpora);
   const schedulers = [
     ...corpora.map((corpus) => schedulerByCorpus.get(corpus.corpus_id)).filter((value2) => !!value2),
@@ -78129,7 +78200,7 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
   }) : undefined;
   const queue = throughput?.state === "stalled" ? { ...baseQueue, label: "Needs attention", needs_attention: baseQueue.needs_attention + 1 } : baseQueue;
   const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
-  const captureFreshness2 = schedulerCaptureFreshness(schedulers, now);
+  const captureFreshness2 = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
   const freshness = captureFreshness2 ? { ...refreshFreshness, capture: captureFreshness2 } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === "embedding_lane_disabled");
   const schedule = scheduleFromSchedulers(schedulers);
@@ -78283,11 +78354,20 @@ function dashboardSourceSetupStatus(card) {
       dependencies
     };
   }
-  if (card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL || card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL) {
+  const captureProblem = dashboardCaptureProblem(card);
+  if (captureProblem && (card.answer_readiness.state !== "needs_attention" || card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL || card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL)) {
     return {
       stage: "source_health",
       condition: "degraded",
-      next_action: card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      next_action: captureProblem.cause === "helper" ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      dependencies
+    };
+  }
+  if (card.freshness.capture?.state === "awaiting" && card.answer_readiness.state !== "needs_attention") {
+    return {
+      stage: "initial_sync",
+      condition: "usable",
+      next_action: DASHBOARD_CAPTURE_COPY.nextAction.awaiting(card.label),
       dependencies
     };
   }
@@ -78303,7 +78383,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: "source_health",
       condition: "degraded",
-      next_action: connection.action.kind === "oauth" || connection.action.kind === "api_key" ? `${connection.action.label} ${card.label}, then run Sync now.` : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`,
+      next_action: (connection.action.kind === "oauth" || connection.action.kind === "api_key" ? `${connection.action.label} ${card.label}, then run Sync now.` : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`) + (captureProblem ? ` ${captureProblem.cause === "helper" ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label)}` : ""),
       dependencies
     };
   }
@@ -79331,7 +79411,8 @@ function liveQueueCount(counts, gaugeKeys, jobKeys) {
     return -1;
   return Math.max(gauge, 0) + Math.max(jobs, 0);
 }
-function schedulerCaptureFreshness(schedulers, now) {
+function schedulerCaptureFreshness(schedulers, now, pairedAt) {
+  const pairedAtMs = pairedAt === undefined ? Number.NaN : Date.parse(pairedAt);
   let worst;
   for (const scheduler of new Set(schedulers)) {
     for (const task of scheduler.tasks) {
@@ -79352,11 +79433,21 @@ function schedulerCaptureFreshness(schedulers, now) {
         threshold_seconds: reading.threshold_seconds,
         age_seconds: reading.age_seconds + sincePull
       };
-      if (!worst || CAPTURE_STATE_RANK[verdict.state] > CAPTURE_STATE_RANK[worst.state])
-        worst = verdict;
+      const judged = Number.isFinite(pairedAtMs) ? underCurrentPairing(verdict, now.getTime(), pairedAtMs) : verdict;
+      if (!worst || CAPTURE_STATE_RANK[judged.state] > CAPTURE_STATE_RANK[worst.state])
+        worst = judged;
     }
   }
   return worst;
+}
+function underCurrentPairing(verdict, nowMs, pairedAtMs) {
+  const newestAtMs = verdict.age_seconds === undefined ? undefined : nowMs - verdict.age_seconds * 1000;
+  if (newestAtMs !== undefined && newestAtMs >= pairedAtMs)
+    return verdict;
+  const sincePairing = Math.max(0, (nowMs - pairedAtMs) / 1000);
+  if (sincePairing <= verdict.threshold_seconds)
+    return { ...verdict, state: "awaiting" };
+  return verdict.state === "unavailable" ? { ...verdict, state: "stale" } : verdict;
 }
 function schedulerTaskCounts(scheduler) {
   const output = {};
@@ -80032,8 +80123,9 @@ var init_source_dashboard = __esm(() => {
   };
   CAPTURE_STATE_RANK = {
     fresh: 0,
-    unavailable: 1,
-    stale: 2
+    awaiting: 1,
+    unavailable: 2,
+    stale: 3
   };
   DASHBOARD_TRUST_DOMAINS = ["secure_local", "internal", "public_safe"];
 });
@@ -154830,10 +154922,17 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late && captureProblem(card) ? captureFix(definition) : late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
+  const capture = captureProblem(card);
+  const captureOnly = capture && dashboardAttentionParts(card, {
+    surface: "chatgpt",
+    ...degraded ? { degradedCredentials: degraded } : {}
+  }).reason === "";
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late && captureOnly ? captureFix(definition) : late ? sync ?? (capture ? captureFix(definition) : undefined) : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu = [];
   if (sync)
     menu.push(sync);
+  if (capture && !connecting && status !== "Off")
+    menu.push(captureFix(definition));
   if (status !== "Off" && definition.connect_action.kind === "archive_import" && !card.connection.imports_attention?.some((entry) => entry.kind === "unreadable"))
     menu.push(connectFix(definition));
   if (status !== "Off" && card.scope_selection && !scopePending(card) && !missingScope(card)) {
@@ -154906,9 +155005,11 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   if (connecting) {
     return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
   }
-  const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
+  const attentionOptions = { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} };
+  const reason = dashboardAttentionLine(card, attentionOptions);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : captureProblem(card) ? captureFix(definition) : sync ?? checkAgainFix();
+  const captureOnly = captureProblem(card) && dashboardAttentionParts(card, attentionOptions).reason === "";
+  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : captureOnly ? captureFix(definition) : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function importAttentionItem(entry) {
@@ -154938,7 +155039,7 @@ function importAttentionItem(entry) {
   }
 }
 function captureProblem(card) {
-  return card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL || card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL;
+  return dashboardCaptureProblem(card) !== undefined;
 }
 function captureFix(definition) {
   return helpLinkFix(DASHBOARD_CAPTURE_COPY.fixLabel, openOnComputer(definition, "reconnect"));
@@ -155442,7 +155543,8 @@ function scrubCaptureRuntime(input) {
     ...input.supervisor.reason && CAPTURE_SUPERVISOR_REASONS.has(input.supervisor.reason) ? { reason: input.supervisor.reason } : {}
   } : undefined;
   const scope = input.scope?.kind === "whole_account" ? { kind: "whole_account" } : input.scope?.kind === "chats" && finite(input.scope.count) ? { kind: "chats", count: count(input.scope.count) } : undefined;
-  return supervisor || scope ? { capture: { ...supervisor ? { supervisor } : {}, ...scope ? { scope } : {} } } : {};
+  const pairedAt = isoOrUndefined(input.paired_at);
+  return supervisor || scope || pairedAt ? { capture: { ...supervisor ? { supervisor } : {}, ...scope ? { scope } : {}, ...pairedAt ? { paired_at: pairedAt } : {} } } : {};
 }
 function scrubDegradations(input) {
   if (!input || input.length === 0)
@@ -155545,14 +155647,16 @@ var init_dashboard_view_model = __esm(() => {
   TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
   IMPORT_UNREADABLE_REASONS = new Set(["damaged", "unknown_form", "permission", "other"]);
-  CAPTURE_STATES = new Set(["fresh", "stale", "unavailable"]);
+  CAPTURE_STATES = new Set(["fresh", "stale", "unavailable", "awaiting"]);
   CAPTURE_SUPERVISOR_STATES = new Set(["running", "stopped", "blocked"]);
   CAPTURE_SUPERVISOR_REASONS = new Set([
     "grant_missing",
     "grant_invalid",
     "handle_unavailable",
     "session_missing",
-    "secret_missing"
+    "secret_missing",
+    "start_failed",
+    "helper_exited"
   ]);
   MANUAL_SYNC_OUTCOMES = new Set(["checking", "checked", "failed", "busy"]);
 });
@@ -172966,6 +173070,7 @@ __export(exports_server2, {
   secureLocalAnalystRouteStatus: () => secureLocalAnalystRouteStatus,
   resolveEmailSourceBindHostFromEnv: () => resolveEmailSourceBindHostFromEnv,
   registerConnectorStoreEmbeddingLane: () => registerConnectorStoreEmbeddingLane,
+  reconcileWorkerCaptures: () => reconcileWorkerCaptures,
   parseSecureDerivativeDefault: () => parseSecureDerivativeDefault,
   parseOptionalTimeoutSecondsOrNone: () => parseOptionalTimeoutSecondsOrNone,
   parseOptionalTimeoutSeconds: () => parseOptionalTimeoutSeconds,
@@ -173031,17 +173136,44 @@ function createWorkerMessagingCaptureOwnership(options) {
     }
   };
 }
+async function reconcileWorkerCaptures(input) {
+  const warn = input.warn ?? ((message2) => console.warn(message2));
+  const entries = Object.entries(input.captures);
+  if (input.stopAll) {
+    await Promise.all(entries.map(async ([source, capture]) => {
+      await capture.stop();
+      input.statuses[source] = { source, state: "stopped" };
+    }));
+    return;
+  }
+  await Promise.all(entries.map(async ([source, capture]) => {
+    try {
+      input.statuses[source] = await capture.reconcile();
+      delete input.failures[source];
+    } catch {
+      input.failures[source] = true;
+      warn("An Olympus messaging capture process needs attention. Check pairing and its approved scope.");
+    }
+  }));
+}
 function workerCaptureRuntime(input) {
   const runtime = {};
   for (const source of input.sources) {
-    const status = input.statuses[source];
-    const scope = readMessagingCaptureScope(source, defaultMessagingCaptureGrantPath(source, input.registryPath));
-    if (!status && !scope)
-      continue;
-    runtime[source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"] = {
-      ...status ? { supervisor: { state: status.state, ...status.reason ? { reason: status.reason } : {} } } : {},
-      ...scope ? { scope } : {}
-    };
+    try {
+      const status = effectiveMessagingCaptureStatus({
+        status: input.statuses[source],
+        liveness: input.liveness?.[source],
+        reconcileFailed: input.failures?.[source] === true
+      });
+      const facts = readMessagingCaptureGrantFacts(source, defaultMessagingCaptureGrantPath(source, input.registryPath));
+      if (!status && !facts.scope && !facts.pairedAt)
+        continue;
+      runtime[source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"] = {
+        ...status ? { supervisor: { state: status.state, ...status.reason ? { reason: status.reason } : {} } } : {},
+        ...facts.scope ? { scope: facts.scope } : {},
+        ...facts.pairedAt ? { paired_at: facts.pairedAt } : {}
+      };
+    } catch {}
   }
   return runtime;
 }
@@ -174036,28 +174168,19 @@ async function main() {
   let captureReconcileRunning = false;
   let capturesClosed = false;
   const captureStatuses = {};
+  const captureFailures = {};
   const captureEntries = () => Object.entries(captures);
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning)
       return;
     captureReconcileRunning = true;
-    if (sovereigntyEngine.config.routes.secure_local?.mode === "disabled" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap") {
-      try {
-        await Promise.all(captureEntries().map(async ([source, capture]) => {
-          await capture.stop();
-          captureStatuses[source] = { source, state: "stopped" };
-        }));
-      } finally {
-        captureReconcileRunning = false;
-      }
-      return;
-    }
     try {
-      await Promise.all(captureEntries().map(async ([source, capture]) => {
-        captureStatuses[source] = await capture.reconcile();
-      }));
-    } catch {
-      console.warn("An Olympus messaging capture process needs attention. Check pairing and its approved scope.");
+      await reconcileWorkerCaptures({
+        captures,
+        statuses: captureStatuses,
+        failures: captureFailures,
+        stopAll: sovereigntyEngine.config.routes.secure_local?.mode === "disabled" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap"
+      });
     } finally {
       captureReconcileRunning = false;
     }
@@ -174065,7 +174188,9 @@ async function main() {
   const dashboardCaptureRuntime = () => workerCaptureRuntime({
     sources: captureEntries().map(([source]) => source),
     statuses: captureStatuses,
-    registryPath: connectedHandleRegistryPath
+    registryPath: connectedHandleRegistryPath,
+    liveness: Object.fromEntries(captureEntries().map(([source, capture]) => [source, capture.liveness?.()])),
+    failures: captureFailures
   });
   const stopMessagingCapture = async (source) => {
     await captureOwnership.stopForUnpair(source);

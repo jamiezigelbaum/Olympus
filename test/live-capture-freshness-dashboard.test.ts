@@ -408,7 +408,7 @@ describe('capture runtime on other cards', () => {
 
 describe.each(['whatsapp', 'telegram'] as const)('%s: a helper that is not running on a connected source', (which) => {
   const spec = SOURCES[which];
-  const runtime = (supervisor: DashboardCaptureRuntime['supervisor']) => ({ [spec.sourceId]: { supervisor } });
+  const runtime = (supervisor: NonNullable<DashboardCaptureRuntime['supervisor']>) => ({ [spec.sourceId]: { supervisor } });
 
   const unexpected: Array<[string, NonNullable<DashboardCaptureRuntime['supervisor']>, string]> = [
     ['its approval is gone', { state: 'stopped', reason: 'grant_missing' }, 'capture stopped: its approval is missing'],
