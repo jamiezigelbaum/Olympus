@@ -1348,7 +1348,7 @@ function selectSources(sourceId: string | undefined): LifecycleSourceSpec[] {
   return [requireSource(sourceId)];
 }
 
-function requireSource(sourceId: string | undefined): LifecycleSourceSpec {
+export function requireSource(sourceId: string | undefined): LifecycleSourceSpec {
   const normalized = requirePath(sourceId, '--source');
   const source = lifecycleSourceSpecs().find(
     (entry) => entry.sourceId === normalized || entry.sourceAliases?.includes(normalized),
