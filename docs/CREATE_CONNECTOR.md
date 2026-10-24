@@ -72,7 +72,7 @@ Read the closest one to your source before you write anything:
 | Readwise | `src/workers/readwise/{connector,live-control,live-sync,corpus-adapter}.ts` | The most complete chain: connector → dark store → bounded resumable pulls → budget parking → host enablement. This skill's spine. |
 | Google Drive | `src/workers/google-connectors/{drive,drive-live-control,drive-live-sync,request-budget}.ts` | The same chain done second, class-shaped, with a watermark cursor and a reusable budget module. |
 | X bookmarks | `src/workers/x-bookmarks/{api-connector,connector}.ts` | Provider I/O split from normalization; the scheduler two-task reference. |
-| Reflect / Roam | `src/workers/reflect/connector.ts`, `src/workers/roam/connector.ts` | The minimum viable connector: archive import, no broker, no budget, no scheduler. Start here if your source is a file export. |
+| Reflect / Roam | `src/workers/archive-import/roam/connector.ts`, `src/workers/archive-import/roam/parse.ts` (with the shared `src/workers/archive-import/notes/archive.ts`) | The minimum viable connector: an archive format, a record parser over the shared readers, no broker, no budget, no scheduler. Start here if your source is a file export; see `docs/design/archive-import.md`. |
 | Dropbox | `src/workers/dropbox-files/connector.ts` | `file`-family identity and content caps. |
 
 ---
