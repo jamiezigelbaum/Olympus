@@ -1,5 +1,5 @@
 import { olympusDataPath } from '../core/olympus-layout.ts';
-import { chmodSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import {
@@ -8,6 +8,7 @@ import {
   type SqliteMigration,
 } from '../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../core/sqlite-store.ts';
+import { filterFor, forgetSqliteRows } from '../core/sqlite-forget.ts';
 import { isBoundedSourceCheckpoint } from './source-checkpoint.ts';
 
 export { SOURCE_CHECKPOINT_MAX_LENGTH } from './source-checkpoint.ts';
@@ -199,6 +200,32 @@ export function defaultSourceSchedulerStateDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
   return olympusDataPath(env, 'source-scheduler.sqlite');
+}
+
+/**
+ * One source's forget step on the scheduler database: its task state (the
+ * checkpoint a lane resumes from, which must not outlive the store it points
+ * into) and its unpark requests. `sourceIds` are the source's registry ids
+ * (its id and legacy aliases); the scheduler files its tasks under those.
+ */
+export function forgetSourceSchedulerState(
+  dbPath: string,
+  scope: { sourceIds: readonly string[]; corpusIds: readonly string[] },
+  options: { dryRun?: boolean } = {},
+): number {
+  if (!existsSync(dbPath)) return 0;
+  const dryRun = options.dryRun === true;
+  const keys = [['source_id', scope.sourceIds], ['corpus_id', scope.corpusIds]] as const;
+  const db = new Database(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    return forgetSqliteRows(db, [
+      ...filterFor('source_scheduler_task_state', keys),
+      ...filterFor('source_scheduler_unpark_request', keys),
+    ], dryRun).reduce((sum, count) => sum + count, 0);
+  } finally {
+    closeSqliteStore(db);
+  }
 }
 
 /**

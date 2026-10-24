@@ -27,7 +27,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
+import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
@@ -2328,7 +2328,7 @@ export async function main(): Promise<void> {
       || bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id))) return 'applying';
     return 'ready';
   };
-  let requestModelReload: () => boolean = () => false;
+  let requestModelReload: (request?: ModelKeyReloadRequest) => boolean = () => false;
   // Set once the real reload is installed (after startup): until then a
   // request is a no-op, so Delete indexed data must refuse rather than leave
   // open handles serving deleted rows (PR #455 review).
@@ -5102,7 +5102,7 @@ export async function main(): Promise<void> {
             // check it before deleting anything.
             workerRestart: {
               canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
-              request: () => requestModelReload(),
+              request: (reload) => requestModelReload(reload),
             },
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,

@@ -27,7 +27,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath, olympusDataRoot } from './core/olympus-layout.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
-import { storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
+import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
 import {
@@ -42,10 +42,11 @@ import {
   resolveRemoteConnectionsDbPath,
 } from './core/remote-connections.ts';
 import {
-  openWaitingPrivateQuestionStore,
   WAITING_PRIVATE_QUESTIONS_STORE_ID,
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
+import { runForgetSteps, type ForgetAccount } from './core/source-forget-registry.ts';
+import { readSourceRegistry, SourceRegistryError } from './core/source-registry.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
@@ -99,6 +100,13 @@ import type { ConnectedHandleRegistry } from './workers/credential-broker/connec
 export interface LifecyclePathContext {
   homeDir?: string;
   env?: Record<string, string | undefined>;
+  /**
+   * The connected-handle registry the caller works from. The forget registry
+   * reads the config files beside it (this-computer.json and the others), so a
+   * caller that was given its registry path passes it rather than have it
+   * derived from the environment again.
+   */
+  handleRegistryPath?: string;
 }
 
 export interface LifecycleSourceSpec {
@@ -254,6 +262,8 @@ export interface DataDeleteResult {
   missing: string[];
   /** Databases kept with the source's account-specific rows cleared from them. */
   reset?: string[];
+  /** Shared files the source's rows were forgotten from (on a dry run, would be), by the forget registry. */
+  forgotten?: string[];
 }
 
 export interface DataDeleteCustody {
@@ -773,23 +783,10 @@ export function deleteOlympusData(options: {
   // Before anything is removed: a database that will not open fails the
   // delete with every store still in place.
   const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
-  // Erase dependent private answers before the source bytes. Pending
-  // questions have no known dependency yet, so delete them too; their ids
-  // disappear and generation-fenced in-flight completions cannot reinsert.
-  if (selectedSource && options.dryRun !== true) {
-    const inboxPath = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(envForContext(options)));
-    if (existsSync(inboxPath)) {
-      const inbox = openWaitingPrivateQuestionStore(inboxPath);
-      try {
-        const registry = createSourceCorpusRegistry(
-          withSourceCorpora(undefined, lifecycleSourceSpecs().flatMap((spec) => spec.registryCorpora?.() ?? [])),
-        ).list();
-        const corpora = registry.filter(c => c.sourceId === selectedSource.sourceId || selectedSource.sourceAliases?.includes(c.sourceId)).map(c => c.corpusId);
-        const count = inbox.deleteForCorpora(corpora, registry.map(c => c.corpusId));
-        if (count > 0) removed.push(`${inboxPath} (private answers: ${count})`);
-      } finally { inbox.close(); }
-    }
-  }
+  // Forget the source's rows in the shared files (the forget registry),
+  // starting with the dependent private answers, before any source bytes go.
+  // A failing step fails the delete here, with every store still in place.
+  const forgotten = selectedSource ? forgetSharedRows(selectedSource, options) : [];
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -810,7 +807,59 @@ export function deleteOlympusData(options: {
     removed,
     missing,
     ...(reset.length > 0 ? { reset } : {}),
+    ...(forgotten.length > 0 ? { forgotten } : {}),
   };
+}
+
+/**
+ * Run a source's forget steps again, apart from a delete: the worker repeats
+ * them just before the restart a delete asks for, because its own writers (a
+ * dashboard poll reading the deleted stores through handles still open, the
+ * watch pass) can write the source's rows back while it winds down. Every step
+ * is idempotent, so this removes only what came back.
+ */
+export function forgetSourceRowsAgain(options: { sourceId: string } & LifecyclePathContext): string[] {
+  return forgetSharedRows(requireSource(options.sourceId), options);
+}
+
+/**
+ * The forget registry's steps for one source (core/source-forget-registry.ts),
+ * or on a dry run what they would forget. The account's corpora are the
+ * registry entry's joined with the shipped corpus registry's for the source
+ * (its id and aliases), the way the private answers were placed before.
+ */
+function forgetSharedRows(source: LifecycleSourceSpec, options: { dryRun?: boolean } & LifecyclePathContext): string[] {
+  const env = envForContext(options);
+  const own = new Set([source.sourceId, ...(source.sourceAliases ?? [])]);
+  const shipped = createSourceCorpusRegistry(
+    withSourceCorpora(undefined, lifecycleSourceSpecs().flatMap((spec) => spec.registryCorpora?.() ?? [])),
+  ).list();
+  let registered: string[] = [];
+  try {
+    registered = readSourceRegistry(env).accounts
+      .filter((account) => account.slot === DEFAULT_STORAGE_SLOT && own.has(account.source_id))
+      .flatMap((account) => account.corpus_ids);
+  } catch (error) {
+    // A registry that cannot be read must not keep the owner from deleting;
+    // the shipped corpora are the ones the delete has always placed answers by.
+    if (!(error instanceof SourceRegistryError)) throw error;
+  }
+  const account: ForgetAccount = {
+    source_id: source.sourceId,
+    slot: DEFAULT_STORAGE_SLOT,
+    corpus_ids: [...new Set([
+      ...registered,
+      ...shipped.filter((corpus) => own.has(corpus.sourceId)).map((corpus) => corpus.corpusId),
+    ])],
+  };
+  return runForgetSteps(account, {
+    env,
+    handleRegistryPath: options.handleRegistryPath
+      || env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
+      || join(resolveHome(options.homeDir), '.config', 'olympus', 'handles.json'),
+    sourceAliases: source.sourceAliases,
+    knownCorpusIds: shipped.map((corpus) => corpus.corpusId),
+  }, { dryRun: options.dryRun === true });
 }
 
 /**

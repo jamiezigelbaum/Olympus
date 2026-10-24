@@ -16935,7 +16935,6 @@ var init_sniffer = __esm(() => {
     relationships: "intimate"
   };
 });
-
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync14 } from "node:fs";
 import { Database as Database4 } from "bun:sqlite";
@@ -39003,6 +39002,48 @@ var init_remote_connections = __esm(() => {
   init_olympus_layout();
 });
 
+// src/core/ingestion-health-state.ts
+var init_ingestion_health_state = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/this-computer.ts
+var init_this_computer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_file_scope_sources();
+});
+
+// src/workers/source-scheduler-state.ts
+var init_source_scheduler_state = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+});
+
+// src/workers/classification/tier-migration-reports.ts
+var init_tier_migration_reports = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/source-forget-registry.ts
+var init_source_forget_registry = __esm(() => {
+  init_operation_error();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_watch();
+  init_ingestion_health_state();
+  init_source_scope_approval();
+  init_mail_source_scope();
+  init_source_account_binding();
+  init_this_computer();
+  init_source_dashboard();
+  init_source_scheduler_state();
+  init_job_names();
+  init_tier_migration_reports();
+});
+
 // src/workers/archive-import/state.ts
 var init_state = __esm(() => {
   init_olympus_layout();
@@ -39089,6 +39130,8 @@ var init_data_lifecycle = __esm(() => {
   init_sqlite_migrations();
   init_remote_connections();
   init_waiting_private_questions();
+  init_source_forget_registry();
+  init_source_registry();
   init_source_ingestion_policy();
   init_dropbox_files();
   init_store();
@@ -39921,7 +39964,7 @@ var init_credential_degradation = __esm(() => {
 // src/workers/classification/tier-migration.ts
 var TIER_MIGRATION_REPLAN_STOP_REASONS;
 var init_tier_migration = __esm(() => {
-  init_olympus_layout();
+  init_tier_migration_reports();
   init_embedding_cost_estimates();
   init_operation_error();
   init_tier_move();
@@ -42392,12 +42435,8 @@ var CHAT_TITLE_STOPWORDS = new Set([
   "telegram"
 ]);
 
-// src/core/this-computer.ts
-init_atomic_file();
-init_file_lease();
-init_file_scope_sources();
-
 // src/workers/email-source/index.ts
+init_this_computer();
 init_data_lifecycle();
 
 // src/core/cli-via-worker.ts
@@ -42894,12 +42933,7 @@ init_x_bookmarks();
 init_live_control2();
 init_whatsapp();
 init_telegram_messages();
-
-// src/workers/source-scheduler-state.ts
-init_olympus_layout();
-init_sqlite_migrations();
-
-// src/workers/source-scheduler.ts
+init_source_scheduler_state();
 init_credential_broker();
 var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1000;
 var SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000;
@@ -45186,6 +45220,7 @@ init_connected_handles();
 // src/workers/source-scope-runtime.ts
 init_source_scope_approval();
 init_file_scope_sources();
+init_this_computer();
 init_connected_handles();
 init_mail_source_scope();
 

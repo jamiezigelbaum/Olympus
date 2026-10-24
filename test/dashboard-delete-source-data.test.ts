@@ -4,7 +4,18 @@ import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
-import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleDataRoot, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import type { ModelKeyReloadRequest } from '../src/core/model-key-reload.ts';
+import { defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
+import {
+  MINE,
+  OTHER,
+  SEEDED_FILES,
+  layoutUnder,
+  seedAllFiles,
+  treeDigest,
+  writeBackAfterDelete,
+} from './helpers/forget-seeds.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
 import { writeConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 
@@ -156,6 +167,170 @@ describe('dashboard Delete indexed data route', () => {
       const response = await post(f.worker, { source_id: 'made.up', acknowledge: true });
       expect(response.status).toBe(400);
       expect(existsSync(f.store)).toBe(true);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The forget registry in the worker's Delete (core/source-forget-registry.ts):
+ * the source's rows leave the shared files, and the worker repeats that just
+ * before the restart, because it keeps writing while it winds down.
+ */
+describe('dashboard Delete indexed data route: the shared files', () => {
+  function fixture(options: { connected?: boolean } = {}) {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-dashboard-delete-forget-'));
+    // The worker's registry sits somewhere the environment would never name:
+    // the config files beside it are the ones to forget.
+    const layout = { ...layoutUnder(root), handleRegistryPath: join(root, 'elsewhere', 'handles.json') };
+    const homeDir = join(root, 'home');
+    writeConnectedHandleRegistry(options.connected === true
+      ? {
+          version: 1,
+          handles: [{
+            handle: 'dropbox.personal', provider: 'dropbox', accountRole: 'personal', trustDomain: 'secure_local',
+            allowedCapabilities: ['dropbox.files.sync'], scopes: ['files.content.read'], connectedAt: '2026-08-30T00:00:00.000Z',
+          }],
+        }
+      : { version: 1, handles: [] }, layout.handleRegistryPath);
+    const context = { homeDir, env: {} };
+    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!.connectorStorePaths!(context)[0]!;
+    mkdirSync(dirname(store), { recursive: true });
+    writeFileSync(store, 'indexed');
+    seedAllFiles(layout);
+    const reloads: Array<ModelKeyReloadRequest | undefined> = [];
+    const worker = createEmailSourceWorker({
+      sourceDashboard: {
+        sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
+        registryPath: layout.handleRegistryPath,
+        registryAdoptionIntervalMs: 0,
+        dataLifecyclePathContext: context,
+        workerRestart: { canRestart: () => true, request: (reload) => { reloads.push(reload); return true; } },
+      },
+    });
+    const del = (body: Record<string, unknown>) => worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+    return { root, layout, context, store, reloads, worker, del };
+  }
+  const files = SEEDED_FILES.filter((file) => file.stepId !== 'mail-source-scopes' && file.stepId !== 'this-computer');
+
+  test('forgets the source in every shared file, the config files beside the worker\'s own registry included', async () => {
+    const f = fixture();
+    try {
+      const response = await f.del({ source_id: 'dropbox.files', acknowledge: true });
+      expect(response.status).toBe(200);
+      expect(existsSync(f.store)).toBe(false);
+      for (const file of files) {
+        expect(file.left(f.layout, MINE), file.stepId).toBe(0);
+        expect(file.left(f.layout, OTHER), file.stepId).toBeGreaterThan(0);
+      }
+      expect(existsSync(join(f.root, 'elsewhere', 'file-source-scopes.json'))).toBe(true);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a poll that wrote the source back while the worker wound down is forgotten again before the exit', async () => {
+    const f = fixture();
+    try {
+      const response = await f.del({ source_id: 'dropbox.files', acknowledge: true });
+      expect(response.status).toBe(200);
+      expect(f.reloads).toHaveLength(1);
+      const reload = f.reloads[0]!;
+      expect(reload.beforeExit).toBeFunction();
+
+      // Between the delete and the exit: a dashboard poll records the counts
+      // it read through stores that were still open, and an answer lands.
+      writeBackAfterDelete(f.layout, MINE);
+      writeBackAfterDelete(f.layout, OTHER);
+      const dashboard = SEEDED_FILES.find((file) => file.stepId === 'source-dashboard')!;
+      const waiting = SEEDED_FILES.find((file) => file.stepId === 'waiting-private-questions')!;
+      expect(dashboard.left(f.layout, MINE)).toBeGreaterThan(0);
+      expect(waiting.left(f.layout, MINE)).toBeGreaterThan(0);
+      const otherBefore = { dashboard: dashboard.left(f.layout, OTHER), waiting: waiting.left(f.layout, OTHER) };
+
+      await reload.beforeExit!();
+
+      expect(dashboard.left(f.layout, MINE)).toBe(0);
+      expect(waiting.left(f.layout, MINE)).toBe(0);
+      expect({ dashboard: dashboard.left(f.layout, OTHER), waiting: waiting.left(f.layout, OTHER) }).toEqual(otherBefore);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a repeat that cannot run does not keep the worker from restarting', async () => {
+    const f = fixture();
+    try {
+      await f.del({ source_id: 'dropbox.files', acknowledge: true });
+      writeFileSync(defaultSourceDashboardHistoryDbPath(f.layout.env), 'this is not a sqlite file '.repeat(200));
+
+      const logged: unknown[][] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => { logged.push(args); };
+      try {
+        await expect(Promise.resolve(f.reloads[0]!.beforeExit!())).resolves.toBeUndefined();
+      } finally {
+        console.error = original;
+      }
+      expect(String(logged[0]?.[0])).toContain('dropbox.files');
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a delete that failed on a step restarts the worker without a repeat, and removes no bytes', async () => {
+    const f = fixture();
+    try {
+      writeFileSync(defaultSourceDashboardHistoryDbPath(f.layout.env), 'this is not a sqlite file '.repeat(200));
+
+      const response = await f.del({ source_id: 'dropbox.files', acknowledge: true });
+
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_failed' } });
+      expect(existsSync(f.store)).toBe(true);
+      expect(f.reloads).toEqual([undefined]);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a refused delete forgets nothing and asks for no restart', async () => {
+    const f = fixture({ connected: true });
+    try {
+      const seeded = treeDigest(join(f.root, 'home'));
+
+      const response = await f.del({ source_id: 'dropbox.files', acknowledge: true });
+
+      expect(response.status).toBe(409);
+      expect(treeDigest(join(f.root, 'home'))).toEqual(seeded);
+      expect(f.reloads).toEqual([]);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  test('the CLI\'s dry run through the worker reports what would be forgotten and changes nothing', async () => {
+    const f = fixture();
+    try {
+      const seeded = treeDigest(f.root);
+
+      const response = await f.worker.fetch(new Request('http://worker.test/v1/cli/data-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_id: 'dropbox.files', dry_run: true, data_root: lifecycleDataRoot(f.context) }),
+      }));
+
+      expect(response.status).toBe(200);
+      const result = await response.json() as { dryRun: boolean; forgotten: string[]; worker_restarting: boolean };
+      expect(result).toMatchObject({ dryRun: true, worker_restarting: false });
+      expect(result.forgotten).toHaveLength(files.length);
+      expect(treeDigest(f.root)).toEqual(seeded);
+      expect(f.reloads).toEqual([]);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

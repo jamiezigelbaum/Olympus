@@ -4,7 +4,7 @@ import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { currentStoreMigrations, runSqliteMigrations } from '../core/sqlite-migrations.ts';
@@ -73,6 +73,7 @@ import type {
   SourceIngestionLedgerSnapshot,
 } from './source-ingestion-ledger.ts';
 import { closeSqliteStore } from '../core/sqlite-store.ts';
+import { filterFor, forgetSqliteRows } from '../core/sqlite-forget.ts';
 import {
   renderPublicSourceCapabilityForDashboard,
   type PublicSourceDashboardCapability,
@@ -1972,6 +1973,60 @@ const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
 
 export function defaultSourceDashboardHistoryDbPath(env: Record<string, string | undefined> = process.env): string {
   return olympusDataPath(env, 'source-dashboard.sqlite');
+}
+
+/**
+ * The ingestion ledger's short ids (`email`, `dropbox`, ...) for the sources
+ * these registry ids name. The ledger keys its rows by those, not by the
+ * registry's ids.
+ */
+export function ledgerSourceIdsFor(sourceIds: readonly string[]): string[] {
+  return dashboardCardsFor(sourceIds).map((card) => card.ingestion_ledger_source_id);
+}
+
+function dashboardCardsFor(sourceIds: readonly string[]): DashboardSupportedSourceDefinition[] {
+  return DASHBOARD_SUPPORTED_SOURCES.filter((card) =>
+    sourceIds.includes(card.source_id) || card.corpus_source_ids.some((id) => sourceIds.includes(id)));
+}
+
+/**
+ * One source's forget step on the dashboard database: the history samples and
+ * movement ledger above, and the ingestion ledger's rows and unreadable-file
+ * names (source-ingestion-ledger.ts), which share the file.
+ *
+ * The file keys its rows three ways: the card's source id (the dashboard's
+ * samples), the ledger's own short id (`email`, `dropbox`, ...; its rows and
+ * samples) and corpus ids (samples and the movement ledger). `sourceIds` are
+ * the source's registry ids (its id and legacy aliases); the card and ledger
+ * ids follow from DASHBOARD_SUPPORTED_SOURCES.
+ */
+export function forgetSourceDashboardRows(
+  dbPath: string,
+  scope: { sourceIds: readonly string[]; corpusIds: readonly string[] },
+  options: { dryRun?: boolean } = {},
+): number {
+  if (!existsSync(dbPath)) return 0;
+  const cards = dashboardCardsFor(scope.sourceIds);
+  const sourceIds = [...new Set([
+    ...scope.sourceIds,
+    ...cards.flatMap((card) => [card.source_id, card.ingestion_ledger_source_id]),
+  ])];
+  const corpusIds = [...new Set([...scope.corpusIds, ...cards.map((card) => card.primary_corpus_id)])];
+  const dryRun = options.dryRun === true;
+  const db = new Database(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  try {
+    db.exec('PRAGMA busy_timeout = 10000;');
+    // The unreadable-file table holds file names: overwrite what is deleted.
+    if (!dryRun) db.exec('PRAGMA secure_delete = ON;');
+    return forgetSqliteRows(db, [
+      ...filterFor('source_dashboard_samples', [['source_id', sourceIds], ['corpus_id', corpusIds]]),
+      ...filterFor('source_dashboard_movement', [['corpus_id', corpusIds]]),
+      ...filterFor('source_ingestion_ledger', [['source_id', sourceIds]]),
+      ...filterFor('source_ingestion_unreadable_content', [['source_id', sourceIds]]),
+    ], dryRun).reduce((sum, count) => sum + count, 0);
+  } finally {
+    closeSqliteStore(db);
+  }
 }
 
 /**

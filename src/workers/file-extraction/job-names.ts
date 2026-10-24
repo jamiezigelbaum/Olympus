@@ -34,6 +34,7 @@ import { olympusDataPath } from '../../core/olympus-layout.ts';
 import { existsSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { filterFor, forgetSqliteRows, rowsKeyedBy } from '../../core/sqlite-forget.ts';
 
 export const FILE_EXTRACTION_JOBS_DB_PATH_ENV = 'OLYMPUS_FILE_EXTRACTION_JOBS_DB_PATH';
 
@@ -239,6 +240,41 @@ export function retireExtractionJobRedaction(
       }
       return { retired, stillSecret: false };
     }).immediate();
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * One source's forget step on the ledger file at `dbPath`: every job row of
+ * its corpora, which carry the names of the files they read, with their
+ * extraction artifacts (structural refs can carry source names) and the
+ * re-reads they were owed. Counts jobs, artifacts and re-reads together.
+ *
+ * The Secrets markers (`secret_item_redactions` and its claims) are keyed by
+ * provider item id and hold no names, so they stay: a name captured for such an
+ * item later is still cleared.
+ */
+export function forgetExtractionJobs(
+  dbPath: string,
+  scope: { corpusIds: readonly string[] },
+  options: { dryRun?: boolean } = {},
+): number {
+  if (dbPath === ':memory:' || !existsSync(dbPath)) return 0;
+  const dryRun = options.dryRun === true;
+  const jobs = rowsKeyedBy([['corpus_id', scope.corpusIds]]);
+  if (!jobs) return 0;
+  const db = new Database(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    // The names are the point: overwrite what is deleted.
+    if (!dryRun) db.exec('PRAGMA secure_delete = ON;');
+    return forgetSqliteRows(db, [
+      // Before the jobs it selects them by.
+      { table: SECRET_RESTORED_REREADS_TABLE, where: `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${jobs.where})`, params: jobs.params },
+      ...filterFor('extraction_artifacts', [['corpus_id', scope.corpusIds]]),
+      ...filterFor('extraction_jobs', [['corpus_id', scope.corpusIds]]),
+    ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
     closeSqliteStore(db);
   }

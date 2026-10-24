@@ -18,8 +18,8 @@ import {
   type OlympusConfig,
 } from './config.ts';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { inspectEngine } from './engine-service.ts';
 import { resolveOpenClawExecutable } from './openclaw-executable.ts';
@@ -49,7 +49,12 @@ import {
 import { listDetachedOAuthStates } from './connect.ts';
 import { buildSourceIngestionLedgerSnapshot, type SourceIngestionLedgerSnapshot } from '../workers/source-ingestion-ledger.ts';
 import type { SourceSchedulerStatus } from '../workers/source-scheduler.ts';
-import { defaultSourceDashboardHistoryDbPath } from '../workers/source-dashboard.ts';
+import {
+  defaultIngestionHealthStatePath,
+  readIngestionHealthState,
+  writeIngestionHealthState,
+  type IngestionHealthDoctorState,
+} from './ingestion-health-state.ts';
 import type { SourceIndexStatusResult } from '../workers/source-index/status.ts';
 import {
   assessContentExtractionThroughput,
@@ -1640,17 +1645,9 @@ function sourceIngestionLedgerFromStatus(status: Record<string, unknown>): Sourc
   return ledger as unknown as SourceIngestionLedgerSnapshot;
 }
 
-interface IngestionHealthDoctorState {
-  generated_at: string;
-  sources: Record<string, {
-    actionable_stuck: number;
-    failed_terminal_by_class: Record<string, number>;
-  }>;
-}
-
 function ingestionHealthStatePath(deps: DoctorDeps): string {
   if (deps.ingestionHealthStatePath) return deps.ingestionHealthStatePath;
-  return join(dirname(defaultSourceDashboardHistoryDbPath(deps.env)), 'source-ingestion-doctor-state.json');
+  return defaultIngestionHealthStatePath(deps.env);
 }
 
 function ingestionHealthStateFromLedger(ledger: SourceIngestionLedgerSnapshot): IngestionHealthDoctorState {
@@ -1668,36 +1665,6 @@ function ingestionHealthStateFromLedger(ledger: SourceIngestionLedgerSnapshot): 
     };
   }
   return { generated_at: ledger.generated_at, sources };
-}
-
-function readIngestionHealthState(path: string): IngestionHealthDoctorState | undefined {
-  try {
-    if (!existsSync(path)) return undefined;
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-    const record = asRecord(parsed);
-    const sources = asRecord(record.sources);
-    const normalized: IngestionHealthDoctorState['sources'] = {};
-    for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord(sourceValue);
-      const terminal = asRecord(source.failed_terminal_by_class);
-      normalized[sourceId] = {
-        actionable_stuck: asCount(source.actionable_stuck),
-        failed_terminal_by_class: Object.fromEntries(Object.entries(terminal)
-          .map(([key, value]) => [key, asCount(value)])),
-      };
-    }
-    return {
-      generated_at: typeof record.generated_at === 'string' ? record.generated_at : new Date(0).toISOString(),
-      sources: normalized,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function writeIngestionHealthState(path: string, state: IngestionHealthDoctorState): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 function ingestionHealthHint(ledger: SourceIngestionLedgerSnapshot): string | undefined {

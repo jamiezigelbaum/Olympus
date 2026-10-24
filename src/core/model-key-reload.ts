@@ -21,20 +21,39 @@ export function workerRestartsItself(launch: WorkerLaunch, env: Record<string, s
   return launch.nativeServiceSupervised === true || env.OLYMPUS_MANAGED_WORKER === '1';
 }
 
+/**
+ * What a caller may ask of a reload (a restart of the worker). `beforeExit`
+ * runs once the worker has shut down and drained, so nothing in the process
+ * writes any more, and just before the exit: the place for a last repeat of an
+ * idempotent cleanup that an in-process writer could have undone while the
+ * worker was winding down.
+ */
+export interface ModelKeyReloadRequest {
+  beforeExit?: () => void | Promise<void>;
+}
+
 /** One deliberate credential reload, after the HTTP save response can finish. */
 export function createModelKeyReload(options: {
   managed: boolean;
   shutdown: () => void | Promise<void>;
   exit: (code: number) => void;
   schedule?: (run: () => void, delayMs: number) => unknown;
-}): () => boolean {
+}): (request?: ModelKeyReloadRequest) => boolean {
   let requested = false;
-  return () => {
+  const beforeExit: Array<() => void | Promise<void>> = [];
+  return (request) => {
     if (!options.managed) return false;
+    // A request that finds the reload already scheduled still adds its hook:
+    // the one exit serves everyone who asked for it.
+    if (request?.beforeExit) beforeExit.push(request.beforeExit);
     if (requested) return true;
     requested = true;
     (options.schedule ?? setTimeout)(() => {
-      void Promise.resolve().then(options.shutdown).finally(() => {
+      void Promise.resolve().then(options.shutdown).finally(async () => {
+        for (const hook of beforeExit) {
+          // A hook that fails must not keep the worker from restarting.
+          try { await hook(); } catch { /* the restart goes ahead */ }
+        }
         // Both generated supervisors restart unsuccessful exits. This is not
         // a Gateway restart, and it leaves all existing policy/data intact.
         options.exit(75);

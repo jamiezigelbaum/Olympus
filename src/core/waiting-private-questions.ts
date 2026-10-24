@@ -646,8 +646,7 @@ export function openWaitingPrivateQuestionStore(
         const rows = db.query('SELECT * FROM waiting_questions').all() as QuestionRow[];
         let removed = 0;
         for (const row of rows) {
-          const result = toQuestion(row).result;
-          if (!result || result.read.some(item => typeof item.corpusId !== 'string' || ids.has(item.corpusId) || (known && !known.has(item.corpusId)))) {
+          if (questionTakenWithCorpora(row, ids, known)) {
             removed += db.query('DELETE FROM waiting_questions WHERE id = ?').run(row.id).changes;
           }
         }
@@ -679,6 +678,48 @@ export function openWaitingPrivateQuestionStore(
       closeSqliteStore(db);
     },
   };
+}
+
+/**
+ * Whether deleting a source's corpora takes this record: a question still
+ * waiting (nothing says yet what it will read), an answer that read one of the
+ * corpora, or one that read something no corpus in `known` accounts for.
+ */
+function questionTakenWithCorpora(row: QuestionRow, ids: ReadonlySet<string>, known: ReadonlySet<string> | undefined): boolean {
+  const result = toQuestion(row).result;
+  return !result || result.read.some(item => typeof item.corpusId !== 'string' || ids.has(item.corpusId) || (known !== undefined && !known.has(item.corpusId)));
+}
+
+/**
+ * One source's forget step: `deleteForCorpora` on the store beside the
+ * remote-connections database, or on a dry run the count it would delete,
+ * from a read-only connection (opening the store would migrate it and drop
+ * expired records). A missing file has nothing to forget.
+ */
+export function forgetWaitingPrivateQuestions(
+  dbPath: string,
+  input: { corpusIds: readonly string[]; knownCorpusIds?: readonly string[] | undefined },
+  options: { dryRun?: boolean } = {},
+): number {
+  if (!existsSync(dbPath)) return 0;
+  if (options.dryRun !== true) {
+    const store = openWaitingPrivateQuestionStore(dbPath);
+    try {
+      return store.deleteForCorpora(input.corpusIds, input.knownCorpusIds);
+    } finally {
+      store.close();
+    }
+  }
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get()) return 0;
+    const ids = new Set(input.corpusIds);
+    const known = input.knownCorpusIds ? new Set(input.knownCorpusIds) : undefined;
+    const rows = db.query('SELECT * FROM waiting_questions').all() as QuestionRow[];
+    return rows.filter((row) => questionTakenWithCorpora(row, ids, known)).length;
+  } finally {
+    db.close();
+  }
 }
 
 /**

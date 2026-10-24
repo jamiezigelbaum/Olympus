@@ -2675,6 +2675,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           deleteOlympusDataWithCustody({
             sourceId,
             dryRun: options.dryRun,
+            handleRegistryPath: registryPath,
             connectedRegistry: readConnectedHandleRegistry(registryPath),
             thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
             // A paired-session source is "disconnected" only after a clean Unpair.

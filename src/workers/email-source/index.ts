@@ -272,7 +272,8 @@ import {
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../../core/this-computer.ts';
-import { dataDeleteCustody, deleteOlympusDataWithCustody, requireSource, type DataDeleteWithCustodyResult, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { dataDeleteCustody, deleteOlympusDataWithCustody, forgetSourceRowsAgain, requireSource, type DataDeleteWithCustodyResult, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import type { ModelKeyReloadRequest } from '../../core/model-key-reload.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
 import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, tierForCli } from '../cli-operations.ts';
@@ -620,7 +621,7 @@ export interface EmailSourceWorkerOptions {
      * schedules the restart after the response is sent. Absent: the route
      * refuses with `delete_reopen_unavailable` rather than leave stale handles.
      */
-    workerRestart?: { canRestart: () => boolean; request: () => boolean };
+    workerRestart?: { canRestart: () => boolean; request: (reload?: ModelKeyReloadRequest) => boolean };
     /**
      * The registry mutator Unpair uses to drop a handle.
      *
@@ -3707,7 +3708,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     | { ok: false; error: unknown; restarting: boolean }
   > {
     const registryPath = sourceDashboard?.registryPath ?? defaultHandleRegistryPath();
-    const pathContext: LifecyclePathContext = sourceDashboard?.dataLifecyclePathContext ?? { env: process.env };
+    const pathContext: LifecyclePathContext = {
+      ...(sourceDashboard?.dataLifecyclePathContext ?? { env: process.env }),
+      // The forget registry reads the config files beside this registry.
+      handleRegistryPath: registryPath,
+    };
     const custodyInputFor = () => ({
       sourceId,
       connectedRegistry: readConnectedHandleRegistry(registryPath),
@@ -3778,8 +3783,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         failure = error;
       }
       // Whatever the delete did, some stores may already be gone: the
-      // worker reopens them either way.
-      const restarting = restart.request();
+      // worker reopens them either way. After a delete that went through, it
+      // repeats the source's forget steps once the worker has stopped: until
+      // then a dashboard poll reads the deleted stores through handles still
+      // open and records their counts again, and the watch pass can queue
+      // matches from them.
+      const reload: ModelKeyReloadRequest | undefined = deleted
+        ? {
+            beforeExit: () => {
+              try {
+                forgetSourceRowsAgain({ sourceId, ...pathContext });
+              } catch {
+                // The delete already forgot these rows; a repeat that fails
+                // must not keep the worker from restarting.
+                console.error(`Olympus could not repeat ${sourceId}'s forget steps before the restart; run the delete again to clear any rows written back.`);
+              }
+            },
+          }
+        : undefined;
+      const restarting = restart.request(reload);
       return deleted ? { ok: true as const, result: deleted, restarting } : { ok: false as const, error: failure, restarting };
     });
   }
