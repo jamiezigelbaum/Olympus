@@ -19,6 +19,8 @@
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { reflectNoteRecord } from '../../test/support/archive-fixtures-reflect.ts';
+import { roamJson, roamJsonZip } from '../../test/support/archive-fixtures-roam.ts';
 import {
   telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText,
 } from '../../test/support/archive-fixtures-telegram.ts';
@@ -289,8 +291,120 @@ export const TELEGRAM_FIXTURES: ArchiveFixtureSpec = {
   small: telegramSmall,
 };
 
+// ---------------------------------------------------------------------------
+// Reflect notes (JSON)
+
+const REFLECT_FORMAT = 'reflect-json';
+const REFLECT_LABEL = 'Reflect notes (JSON)';
+const REFLECT_CITATION = 'Reflect';
+
+/** A time on a day, UTC: notes carry the exact time the export gives, and the product's date range is the UTC day it falls on. */
+const noonOn = (day: string, time = '12:00:00'): string => `${day}T${time}Z`;
+
+/**
+ * A Reflect JSON export, the bare file: four readable notes, one note with nothing written in it that is left out, and one entry in the
+ * list that is not a note at all and cannot be read. The empty note is the earliest by date, so a date range that counts it is wrong;
+ * one note was edited long after the last one was written, so a range taken from edit times is wrong too. Titles never hold the word;
+ * it is in note bodies only (one of them an editor document written as JSON inside a string, the way Reflect stores a body).
+ */
+function reflectSmall(token: string): BuiltArchive {
+  const notes = [
+    { id: `rc-${token}-0`, title: 'A page with nothing on it', body: '', created: noonOn('2023-12-30'), updated: noonOn('2023-12-30') },
+    { id: `rc-${token}-1`, title: 'Lake trip packing list', body: `Packing for the lake trip: tent, stove, two jackets. The reference word for this trip is ${token}.`,
+      created: noonOn('2024-03-04'), updated: noonOn('2024-03-04', '12:30:00'), tags: ['trips'] },
+    { id: `rc-${token}-2`, title: 'Itinerary for the weekend', doc: ['The route is the north shore road, then the ferry at noon.', `The reference word is the same as before: ${token}.`],
+      created: noonOn('2024-03-05'), updated: noonOn('2024-04-02'), tags: [{ name: 'trips' }] },
+    { id: `rc-${token}-3`, title: 'Lentil soup', body: 'Lentil soup: onion, carrot, lentils, stock, forty minutes.', created: noonOn('2024-03-06'), updated: noonOn('2024-03-06', '13:00:00') },
+    { id: `rc-${token}-4`, title: 'Photos from Saturday', body: 'The photos are in the shared album. The light on the water was good.', created: noonOn('2024-03-09'), updated: noonOn('2024-03-09', '14:00:00') },
+  ].map((note) => reflectNoteRecord(note));
+  // A bare number between the notes is an entry that is not a note: written by hand, since the note builder writes only notes.
+  const text = JSON.stringify([...notes.slice(0, 3), 42, ...notes.slice(3)]);
+  return {
+    bytes: bytesOf(text),
+    expect: {
+      label: REFLECT_LABEL,
+      citationLabel: REFLECT_CITATION,
+      family: 'note',
+      messages: 4,
+      earliest: '2024-03-04',
+      latest: '2024-03-09',
+      gaps: [{ kind: 'note_unreadable', count: 1 }],
+      leftOut: [{ kind: 'note_empty', count: 1 }],
+    },
+  };
+}
+
+export const REFLECT_FIXTURES: ArchiveFixtureSpec = {
+  format: REFLECT_FORMAT,
+  label: REFLECT_LABEL,
+  citationLabel: REFLECT_CITATION,
+  extension: '.json',
+  family: 'note',
+  provider: 'reflect',
+  small: reflectSmall,
+};
+
+// ---------------------------------------------------------------------------
+// Roam notes (JSON)
+
+const ROAM_FORMAT = 'roam-json';
+const ROAM_LABEL = 'Roam notes (JSON)';
+const ROAM_CITATION = 'Roam';
+
+/** Roam writes times as milliseconds since 1970. */
+const ms = (day: string, time = '12:00:00'): number => Date.parse(`${day}T${time}Z`);
+
+/**
+ * Roam's Export All as it is downloaded: a zip holding the JSON of every page. Four readable pages (one dated only by its title, as
+ * a daily page is; one with a block that has no text to read, so the rest of the page is kept and the block is said not to be read),
+ * and one page whose only block is empty, which is left out. The empty page is the earliest by date and one page was edited after the
+ * last was written, so a date range that counts either is wrong. The word is in block text only, never in a page title.
+ */
+function roamSmall(token: string): BuiltArchive {
+  const json = roamJson([
+    { title: 'Scratch', uid: `rc-${token}-0`, 'create-time': ms('2024-04-28'), 'edit-time': ms('2024-04-28'), children: [{ string: '', uid: `rc-${token}-0a`, 'create-time': ms('2024-04-28') }] },
+    { title: 'Lake trip packing list', uid: `rc-${token}-1`, 'create-time': ms('2024-05-06'), 'edit-time': ms('2024-05-06', '12:30:00'),
+      children: [{ string: `Packing for the lake trip: tent, stove, two jackets. The reference word for this trip is ${token}.`, uid: `rc-${token}-1a`, 'create-time': ms('2024-05-06'),
+        children: [{ string: 'Check the stove gas before leaving.', uid: `rc-${token}-1b`, 'create-time': ms('2024-05-06', '12:05:00') }] }] },
+    { title: 'May 7th, 2024', uid: `rc-${token}-2`,
+      children: [{ string: 'The route is the north shore road, then the ferry at noon.', uid: `rc-${token}-2a` }, { string: `Same reference word as before: ${token}.`, uid: `rc-${token}-2b` }] },
+    { title: 'Lentil soup', uid: `rc-${token}-3`, 'create-time': ms('2024-05-08'), 'edit-time': ms('2024-06-20'),
+      children: [{ string: 'Lentil soup: onion, carrot, lentils, stock, forty minutes.', uid: `rc-${token}-3a`, 'create-time': ms('2024-05-08') }] },
+    { title: 'Harbour walk', uid: `rc-${token}-4`, 'create-time': ms('2024-05-12'), 'edit-time': ms('2024-05-12', '13:00:00'),
+      children: [{ string: 'The harbour walk is flat and takes an hour. The light on the water was good.', uid: `rc-${token}-4a`, 'create-time': ms('2024-05-12') }, { string: 42, uid: `rc-${token}-4b` }] },
+  ]);
+  return {
+    bytes: roamJsonZip(json),
+    expect: {
+      label: ROAM_LABEL,
+      citationLabel: ROAM_CITATION,
+      family: 'note',
+      messages: 4,
+      earliest: '2024-05-06',
+      latest: '2024-05-12',
+      gaps: [{ kind: 'note_content_unsupported', count: 1 }],
+      leftOut: [{ kind: 'note_empty', count: 1 }],
+    },
+  };
+}
+
+export const ROAM_FIXTURES: ArchiveFixtureSpec = {
+  format: ROAM_FORMAT,
+  label: ROAM_LABEL,
+  citationLabel: ROAM_CITATION,
+  extension: '.zip',
+  family: 'note',
+  provider: 'roam',
+  small: roamSmall,
+};
+
 /** Every format the leg imports by the agent path. A later format adds its entry here. */
-export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = { mbox: MBOX_FIXTURES, [TELEGRAM_FORMAT]: TELEGRAM_FIXTURES };
+export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = {
+  mbox: MBOX_FIXTURES,
+  [TELEGRAM_FORMAT]: TELEGRAM_FIXTURES,
+  [REFLECT_FORMAT]: REFLECT_FIXTURES,
+  [ROAM_FORMAT]: ROAM_FIXTURES,
+};
 
 /** The format the picker, model-off and changed-file stages use. */
 export const STRESS_FORMAT = 'mbox';

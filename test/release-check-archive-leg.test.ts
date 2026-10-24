@@ -76,6 +76,36 @@ describe('the words the leg expects', () => {
     expect(datesWord(tgFx.expect)).toBe('2024-03-04 to 2024-03-09');
   });
 
+  test('the notes exports are held to the dashboard\'s exact words: notes, not messages; what could not be read, then what was left out', () => {
+    const reflectFx = legFixture('agent', SEED, 'reflect-json');
+    const roamFx = legFixture('agent', SEED, 'roam-json');
+    expect(reflectFx.expect).toMatchObject({ label: 'Reflect notes (JSON)', citationLabel: 'Reflect', family: 'note', messages: 4, earliest: '2024-03-04', latest: '2024-03-09' });
+    expect(roamFx.expect).toMatchObject({ label: 'Roam notes (JSON)', citationLabel: 'Roam', family: 'note', messages: 4, earliest: '2024-05-06', latest: '2024-05-12' });
+    expect(expectedGapLines(reflectFx.expect)).toEqual(['1 note could not be read', '1 note with nothing written in it left out']);
+    expect(expectedGapLines(roamFx.expect)).toEqual(['1 note with a kind of content Olympus cannot read yet', '1 note with nothing written in it left out']);
+    for (const fx of [reflectFx, roamFx]) {
+      expect(messagesWord(fx.expect.messages, fx.expect.family)).toBe('4 notes');
+      // A row that counts them as messages is not the notes\' row.
+      expect(rowProblems(goodRow(fx), fx.expect)).toEqual([]);
+      expect(rowProblems(goodRow(fx, { text: goodRow(fx).text.replace('4 notes', '4 messages') }), fx.expect)).toEqual([`the row does not say "4 notes"`]);
+    }
+  });
+
+  test('a good notes import passes each of its checks: the export\'s own row, the agent\'s view of it, and a search cited by its own name', () => {
+    for (const [format, citation] of [['reflect-json', 'Reflect'], ['roam-json', 'Roam']] as const) {
+      const fx = legFixture('agent', SEED, format);
+      const search: SearchView = { ok: true, isError: false, evidence: [{ source: citation, hasToken: true }] };
+      const drain: DrainView = { drained: true, ms: 60_000, boundMs: 900_000, last: { messages: 4, judged: 4, waiting: 0 }, privateModel: 'ready', row: goodRow(fx) };
+      const checks = importChecks(goodImport(fx, 'request', { search, drain }), fx, 'macos');
+      expect(failing(checks)).toEqual([]);
+      expect(Object.keys(statuses(checks))).toEqual(expect.arrayContaining([
+        `archive.agent.${format}.requested`, `archive.agent.${format}.imported`, `archive.agent.${format}.dashboard`, `archive.agent.${format}.agent-view`, `archive.agent.${format}.drain`, `archive.agent.${format}.search`,
+      ]));
+      const asMail: SearchView = { ok: true, isError: false, evidence: [{ source: 'Imported mail', hasToken: true }] };
+      expect(failing(importChecks(goodImport(fx, 'request', { search: asMail }), fx, 'macos'))).toEqual([`archive.agent.${format}.search`]);
+    }
+  });
+
   test('the judged line and the reason messages wait are read back out of the product\'s own text', () => {
     expect(judgedLineOf(`Mail ${fill(A.judgedLine, { judged: '1,240', held: '10' })} more`)).toEqual({ judged: 1240, held: 10 });
     expect(judgedLineOf(fill(A.judgedLine, { judged: '0', held: '3' }))).toEqual({ judged: 0, held: 3 });

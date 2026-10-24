@@ -346,6 +346,29 @@ describe('importing an archive', () => {
     expect(failing(importChecks(wrong, chat, 'linux'))).toContain('archive.agent.telegram_json.search');
   });
 
+  test('the notes archives by the agent path: the same request, press, settle and drain, the search cited by each export\'s own name, and read in the notes stores', async () => {
+    for (const [format, citation, provider, fileName] of [
+      ['reflect-json', 'Reflect', 'reflect', 'rc-agent-reflect-json.json'],
+      ['roam-json', 'Roam', 'roam', 'rc-agent-roam-json.zip'],
+    ] as const) {
+      const { machine: fake, fx } = machine(`agent:${format}`);
+      const notes = fx[`agent-${format}`]!;
+      const observation = await importStage(fake, { role: 'agent', format, via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: 5, startS: 5 });
+      expect(observation.ok).toBe(true);
+      expect(observation.start).toMatchObject({ code: 'needs_approval', hasOpenTarget: true, carriesContent: false });
+      expect(observation.settled).toBe(true);
+      expect(observation.drain).toMatchObject({ drained: true });
+      expect(observation.search!.evidence).toEqual([{ source: citation, hasToken: true }]);
+      expect(existsSync(join(fake.home, FIXTURE_FOLDER, fileName))).toBe(true);
+      expect(fake.storeReads.length).toBeGreaterThan(0);
+      expect(fake.storeReads.every((read) => read.family === 'note' && read.provider === provider && read.token === notes.token)).toBe(true);
+      expect(failing(importChecks(observation, notes, 'linux'))).toEqual([]);
+      // A search that cites another source fails this archive's check, whatever the other formats call themselves.
+      const wrong = { ...observation, search: { ...observation.search!, evidence: [{ source: 'Imported mail', hasToken: true }] } };
+      expect(failing(importChecks(wrong, notes, 'linux'))).toContain(`archive.agent.${format}.search`);
+    }
+  });
+
   test('the picker path needs an empty Archives line: a leftover from an earlier attempt is removed first', async () => {
     const { machine: fake, fx } = machine('picker');
     const leftover = legFixture('agent', 'an-earlier-seed');
