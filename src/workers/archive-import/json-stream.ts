@@ -360,7 +360,7 @@ export class JsonStreamReader {
 
   // --- Bytes to tokens ----------------------------------------------------------
 
-  private startTokenizer(base: number): void {
+  private startTokenizer(base: number): Tokenizer {
     const tokenizer = new ExactNumberTokenizer({ emitPartialTokens: true });
     this.base = base;
     this.openToken = undefined;
@@ -384,6 +384,7 @@ export class JsonStreamReader {
         : invalid();
     };
     this.tokenizer = tokenizer;
+    return tokenizer;
   }
 
   private feed(chunk: Uint8Array): void {
@@ -428,14 +429,14 @@ export class JsonStreamReader {
         this.deliver(OVERSIZE, undefined, start);
         continue;
       }
-      if (!this.tokenizer) {
-        this.startTokenizer(at);
-        this.fed = at;
+      let tokenizer = this.tokenizer;
+      if (!tokenizer) {
+        tokenizer = this.startTokenizer(at);
         this.backslashParity = 0;
       }
       this.fed = at + data.length;
       try {
-        this.tokenizer.write(data);
+        tokenizer.write(data);
       } catch (error) {
         throw this.failure ?? (error instanceof JsonStreamError ? error : invalid());
       }

@@ -56,6 +56,11 @@ export const ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
  */
 export const ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
 /**
+ * What an inflater holds besides what waits in it: its window and working
+ * buffers, counted generously.
+ */
+export const ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+/**
  * The end record is searched for in this much of the file's end.
  */
 const MAX_END_SEARCH_BYTES = 22 + 0xffff + 20;
@@ -451,6 +456,11 @@ export interface ZipContinuation {
    * The offset in the member the next chunk starts at.
    */
   readonly position: number;
+  /**
+   * About how much memory keeping it costs, in bytes (the inflater's window
+   * and buffers, output waiting to be read, compressed bytes waiting).
+   */
+  readonly retainedBytes: number;
 }
 
 interface ContinuationState extends ZipContinuation {
@@ -653,8 +663,10 @@ export class ZipMemberReader implements ArchiveByteSource {
     if (this.entry.method !== 8 || !this.inflate || (this.inflateFinished && this.out.length === 0)) return undefined;
     const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
     if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES || this.pos < this.startAt) return undefined;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
     const state: ContinuationState = {
       position: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
       memberKey: memberKey(this.entry),
       crc: this.runningCrc,
       crcKnown: this.crcKnown,

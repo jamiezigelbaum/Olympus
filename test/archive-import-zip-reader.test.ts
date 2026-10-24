@@ -15,8 +15,8 @@ import {
 } from '../src/workers/archive-import/zip-reader.ts';
 import { buildZip, memoryRangeReader, referenceCrc32, type ZipFixtureEntry } from './helpers/zip-fixture.ts';
 
-function sample(size: number, seed = 1): Uint8Array {
-  const out = new Uint8Array(size);
+function sample(size: number, seed = 1): Uint8Array<ArrayBufferLike> {
+  const out: Uint8Array<ArrayBufferLike> = new Uint8Array(size);
   let state = seed;
   for (let index = 0; index < size; index += 1) {
     state = (state * 1103515245 + 12345) & 0x7fffffff;
@@ -32,7 +32,7 @@ function open(entries: readonly ZipFixtureEntry[], options: Parameters<typeof bu
   return { bytes, reads, reader, archive: ZipArchive.open(reader) };
 }
 
-function drain(member: ZipMemberReader): { bytes: Uint8Array; chunks: number; largest: number } {
+function drain(member: ZipMemberReader): { bytes: Uint8Array<ArrayBufferLike>; chunks: number; largest: number } {
   const parts: Uint8Array[] = [];
   let total = 0;
   let largest = 0;
@@ -278,7 +278,7 @@ describe('reading members', () => {
       member.unread(first.length - keep);
       expect(member.position).toBe(keep);
       const rest = drain(member);
-      expect(new Uint8Array([...first.subarray(0, keep), ...rest.bytes])).toEqual(data);
+      expect(Buffer.from([...first.subarray(0, keep), ...rest.bytes]).equals(data)).toBe(true);
       expect(member.end?.crcOk).toBe(true);
       expect(() => member.unread(10_000_000)).toThrow();
     }
@@ -336,7 +336,7 @@ describe('reading members', () => {
       all.set(part, at);
       at += part.length;
     }
-    expect(all).toEqual(data);
+    expect(Buffer.from(all).equals(data)).toBe(true);
     expect(second.end).toEqual({ bytes: data.length, sizeOk: true, crcOk: true });
     // The second pass read only compressed bytes after where the first one stopped.
     const later = reads.slice(readsOfFirstPass).filter(inMember);

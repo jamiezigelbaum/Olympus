@@ -239,6 +239,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   // format that arrives as a zip or as one large JSON file, so neither may
   // learn what one export's members or lists are called.
   'src/workers/archive-import/byte-source.ts',
+  'src/workers/archive-import/continuation-cache.ts',
   'src/workers/archive-import/dashboard.ts',
   'src/workers/archive-import/json-stream.ts',
   'src/workers/archive-import/lane.ts',
