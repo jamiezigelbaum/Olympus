@@ -24,6 +24,7 @@
  */
 import { closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { constants as osConstants } from 'node:os';
 import { dirname } from 'node:path';
 import { olympusDataRoot, olympusDataPath, type LayoutEnv } from './olympus-layout.ts';
 
@@ -105,33 +106,54 @@ export function holdDataOwnerLock(env: LayoutEnv = process.env, options: DataOwn
   }
 }
 
-/** One attempt: the descriptor holding the lock, or undefined when another holder has it. */
+/**
+ * One attempt: the descriptor holding the lock, or undefined when another
+ * holder has it. Only EWOULDBLOCK means busy; any other failure (ENOLCK, a
+ * filesystem without locks) throws, so it is never mistaken for a running
+ * Olympus and never passed over as a free one.
+ */
 function tryFlock(lockPath: string): number | undefined {
   const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT | O_CLOEXEC, 0o600);
+  let failure: number;
   try {
-    if (flockLibrary().flock(fd, LOCK_EX | LOCK_NB) === 0) return fd;
+    const kernel = flockLibrary();
+    do {
+      if (kernel.flock(fd, LOCK_EX | LOCK_NB) === 0) return fd;
+      failure = kernel.errno();
+    } while (failure === osConstants.errno.EINTR);
   } catch (error) {
     closeSync(fd);
     throw error;
   }
   // Closing this descriptor leaves the holder's lock alone: flock is per descriptor.
   closeSync(fd);
-  return undefined;
+  if (failure === osConstants.errno.EWOULDBLOCK || failure === osConstants.errno.EAGAIN) return undefined;
+  throw new Error(`The data owner lock ${lockPath} could not be taken (flock errno ${failure}).`);
 }
 
 interface FlockLibrary {
   flock(fd: number, operation: number): number;
+  /** errno of the last failed call on this thread. */
+  errno(): number;
 }
 
 let library: FlockLibrary | undefined;
 
 function flockLibrary(): FlockLibrary {
   if (library) return library;
-  const { dlopen, FFIType } = runtimeRequire('bun:ffi') as typeof import('bun:ffi');
-  const path = process.platform === 'darwin'
-    ? '/usr/lib/libSystem.B.dylib'
-    : ['/usr/lib/libc.so.6', '/lib/x86_64-linux-gnu/libc.so.6', '/lib/aarch64-linux-gnu/libc.so.6', '/lib64/libc.so.6'].find(existsSync) ?? 'libc.so.6';
-  library = dlopen(path, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } }).symbols as unknown as FlockLibrary;
+  const { dlopen, FFIType, read } = runtimeRequire('bun:ffi') as typeof import('bun:ffi');
+  const darwin = process.platform === 'darwin';
+  // By soname on Linux, so the loader picks this architecture's libc.
+  const errnoName = darwin ? '__error' : '__errno_location';
+  const symbols = dlopen(darwin ? '/usr/lib/libSystem.B.dylib' : 'libc.so.6', {
+    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    [errnoName]: { args: [], returns: FFIType.ptr },
+  }).symbols as unknown as Record<string, (...args: number[]) => number>;
+  const errnoLocation = symbols[errnoName]!;
+  library = {
+    flock: (fd, operation) => symbols.flock!(fd, operation),
+    errno: () => read.i32(errnoLocation() as never, 0),
+  };
   return library;
 }
 

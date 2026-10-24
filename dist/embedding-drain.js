@@ -5309,6 +5309,7 @@ var init_config = __esm(() => {
 // src/core/data-owner-lock.ts
 import { closeSync as closeSync5, constants, existsSync as existsSync8, mkdirSync as mkdirSync6, openSync as openSync5 } from "node:fs";
 import { createRequire as createRequire3 } from "node:module";
+import { constants as osConstants } from "node:os";
 import { dirname as dirname8 } from "node:path";
 function dataOwnerLockPath(env = process.env) {
   return olympusDataPath(env, OWNER_LOCK_NAME);
@@ -5341,22 +5342,38 @@ function holdDataOwnerLock(env = process.env, options = {}) {
 }
 function tryFlock(lockPath) {
   const fd = openSync5(lockPath, constants.O_RDWR | constants.O_CREAT | O_CLOEXEC, 384);
+  let failure;
   try {
-    if (flockLibrary().flock(fd, LOCK_EX | LOCK_NB) === 0)
-      return fd;
+    const kernel = flockLibrary();
+    do {
+      if (kernel.flock(fd, LOCK_EX | LOCK_NB) === 0)
+        return fd;
+      failure = kernel.errno();
+    } while (failure === osConstants.errno.EINTR);
   } catch (error) {
     closeSync5(fd);
     throw error;
   }
   closeSync5(fd);
-  return;
+  if (failure === osConstants.errno.EWOULDBLOCK || failure === osConstants.errno.EAGAIN)
+    return;
+  throw new Error(`The data owner lock ${lockPath} could not be taken (flock errno ${failure}).`);
 }
 function flockLibrary() {
   if (library)
     return library;
-  const { dlopen, FFIType } = runtimeRequire2("bun:ffi");
-  const path = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : ["/usr/lib/libc.so.6", "/lib/x86_64-linux-gnu/libc.so.6", "/lib/aarch64-linux-gnu/libc.so.6", "/lib64/libc.so.6"].find(existsSync8) ?? "libc.so.6";
-  library = dlopen(path, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } }).symbols;
+  const { dlopen, FFIType, read } = runtimeRequire2("bun:ffi");
+  const darwin = process.platform === "darwin";
+  const errnoName = darwin ? "__error" : "__errno_location";
+  const symbols = dlopen(darwin ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
+    [errnoName]: { args: [], returns: FFIType.ptr }
+  }).symbols;
+  const errnoLocation = symbols[errnoName];
+  library = {
+    flock: (fd, operation) => symbols.flock(fd, operation),
+    errno: () => read.i32(errnoLocation(), 0)
+  };
   return library;
 }
 function sleepSync2(ms) {
