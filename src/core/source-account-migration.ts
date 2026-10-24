@@ -441,7 +441,8 @@ function moveOne(ctx: Context, move: SourceRegistryMove, direction: 'forward' | 
   const source = look(from);
   const target = look(to);
   if (source.kind === 'absent') {
-    if (target.kind === 'absent' && !isCompanion(move.from)) {
+    // Going forward, a file in neither place is lost and the move stops. Going back there is nothing to put back.
+    if (target.kind === 'absent' && direction === 'forward' && !isCompanion(move.from)) {
       throw new MoveFault('failed', 'move_failed', `${basename(move.from)} is in neither place.`);
     }
     return; // Already there (an earlier boot got this far), or a companion that never was.
@@ -610,12 +611,25 @@ type Outcome =
   | { kind: 'stuck'; detail: string }
   | { kind: 'nothing' };
 
+/** Nothing the plan names is in either place: the account's files were deleted while the move was part way. */
+function planIsMoot(ctx: Context, migration: SourceRegistryMigration): boolean {
+  const moves = migration.moves ?? [];
+  return moves.length > 0 && moves.every((move) => look(absPath(ctx.root, move.from)).kind === 'absent' && look(absPath(ctx.root, move.to)).kind === 'absent');
+}
+
 /** Finishes or undoes a plan the registry holds. */
 function runPlan(ctx: Context, account: SourceRegistryAccount): Outcome {
   const migration = account.migration!;
   const { source_id: sourceId, slot } = account;
   if (!migratableSources().includes(sourceId) || !planIsCanonical(ctx, sourceId, slot, migration)) {
     return { kind: 'stuck', detail: 'Its move plan is not one this build wrote, so nothing was touched.' };
+  }
+  if (planIsMoot(ctx, migration)) {
+    updateAccount(ctx, sourceId, slot, (entry) => {
+      if (!entry.migration || !sourceAccountMovePending(entry)) throw new EntryChanged();
+      delete entry.migration;
+    });
+    return { kind: 'nothing' };
   }
   try {
     if (migration.state === 'reverting') {
@@ -732,12 +746,16 @@ export function migrateAccountFolders(env: LayoutEnv = process.env): AccountMigr
     }
   };
   // A plan that is part way comes first, switch or no: its account is closed until it is done.
+  // One that ended in a move back is not started again in this boot.
+  const handled = new Set<string>();
   for (const account of registry.accounts.filter(sourceAccountMovePending)) {
+    handled.add(account.source_id);
     run(account.source_id, () => runPlan(ctx, account), true);
   }
   if (!accountFolderMigrationEnabled(env)) return report;
   const deadline = ctx.now() + (__accountMigrationTestHooks.budgetMs ?? MIGRATION_BUDGET_MS);
   for (const sourceId of migratableSources()) {
+    if (handled.has(sourceId)) continue;
     const entry = findRegistryAccount(readSourceRegistry(env), sourceId, DEFAULT_ACCOUNT_SLOT);
     if (entry && (entry.state !== 'active' || entry.layout !== 'legacy' || sourceAccountMovePending(entry))) continue;
     if (ctx.now() >= deadline) {
