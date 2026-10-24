@@ -23,6 +23,7 @@
  * advisory; the rules are blocking.
  */
 import type { PageControlEntry, PageInventory } from './explore-pages-inventory.ts';
+import { BLANK_WINDOW } from './probe.ts';
 import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
 
@@ -632,7 +633,11 @@ export function judge(input: JudgeInput): Judged {
   if (!changed && !control.copy && !control.invalid) findings.push(`pressing "${control.name}" did nothing: nothing on the page changed`);
   for (const message of consoleErrors) findings.push(`console error: ${message.slice(0, 200)}`);
   for (const request of requests) findings.push(`failed request: ${request.text} -> ${request.status || 'failed'}`);
-  for (const url of opened) if (!OWN_HOSTS.test(url) && !/^https:\/\//.test(url)) findings.push(`a window was opened to a page that is not Olympus's own: ${url.slice(0, 80)}`);
+  for (const url of opened) {
+    // A kept tab that closed again is judged by the window count (a flash); one that went on to another site is a sign-in leaving, as an https link does.
+    if (url === BLANK_WINDOW.left) findings.push('a window was opened and left blank');
+    else if (url !== BLANK_WINDOW.closed && url !== BLANK_WINDOW.elsewhere && !OWN_HOSTS.test(url) && !/^https:\/\//.test(url)) findings.push(`a window was opened to a page that is not Olympus's own: ${url.slice(0, 80)}`);
+  }
   if (opened.length > 1) findings.push(`one press opened ${opened.length} windows`);
   if (input.pagesMax > input.pagesBefore && input.pagesAfter <= input.pagesBefore) findings.push('a window flashed up and vanished');
   const ok = findings.length === 0 && outcomes.every((outcome) => outcome.ok);
