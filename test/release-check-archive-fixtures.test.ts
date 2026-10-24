@@ -105,7 +105,8 @@ describe('the fixtures, read by the product', () => {
       const product = getArchiveFormat(spec.format);
       expect(product).toBeDefined();
       expect(spec.label).toBe(product!.label);
-      expect(spec.citationLabel).toBe(product!.citationLabel);
+      expect(product!.citationLabel).toBeDefined();
+      expect(spec.citationLabel).toBe(product!.citationLabel!);
       expect(spec.family).toBe(product!.family);
       expect(spec.provider).toBe(product!.provider);
     }
