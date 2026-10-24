@@ -80,6 +80,7 @@ import {
   ZipMemberError,
   ZipMemberReader,
   readZipMemberHead,
+  reportZipOverlap,
   stoppableZipSource,
   zipFindingOffset,
   type ZipEntry,
@@ -870,6 +871,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
           segment.next = startOfFile(cursor.file + 1);
           return segment;
         }
+        reportZipOverlap(archive, cursor.file, (finding) => input.report(finding));
         try {
           if (source.kind === 'json') readJsonZip(archive, file, cursor.file, cursor, limits, segment, savedAt);
           else readMarkdownZip(archive, cursor.file, cursor, limits, segment, savedAt);

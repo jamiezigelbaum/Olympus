@@ -70,6 +70,7 @@ import {
   ZIP_REPLAY_STEP_BYTES,
   ZipMemberReader,
   readZipMemberHead,
+  reportZipOverlap,
   stoppableZipSource,
   zipFindingOffset,
   type ZipEntry,
@@ -757,6 +758,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             };
             if (file.members) {
               const opened = openZip(reader, file, fileIndex);
+              reportZipOverlap(opened.zip, fileIndex, (finding) => input.report(finding));
               context.zip = opened.zip;
               context.units = opened.units;
               context.total = opened.total;
