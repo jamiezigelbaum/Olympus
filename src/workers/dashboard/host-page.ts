@@ -145,6 +145,8 @@ body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;backgrou
 .update p{margin:0 0 0.5rem}
 .update code{overflow-wrap:anywhere;white-space:pre-wrap}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
+main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
 .gate p{margin:0}
@@ -454,6 +456,9 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     `<style>${HOST_CSS}</style>`,
     '</head>',
     `<body data-olympus-host="computer" data-locked="${locked ? 'true' : 'false'}">`,
+    // The page's one landmark and level-one heading. The heading is visually hidden: the framed panel carries the visible title.
+    '<main>',
+    '<h1 class="sr-only">Olympus dashboard</h1>',
     ...(installer ? [
       `<section class="update" data-update-notice${update ? '' : ' hidden'}><p data-update-text>${update ? text(DASHBOARD_UPDATE_COPY.notice(update.version)) : ''}</p>`
       + `<p><code id="update-command">${text(installer.command)}</code> `
@@ -465,6 +470,7 @@ export function renderComputerHostPage(input: ComputerHostPageInput): string {
     // allow-scripts only: an opaque origin, so the panel can reach nothing of
     // this page's (cookies, storage, DOM) and talks only through postMessage.
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute(input.panelHtml)}"></iframe>`,
+    '</main>',
     `<script>${program}</script>`,
     '</body>',
     '</html>',

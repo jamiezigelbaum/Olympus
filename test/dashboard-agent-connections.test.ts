@@ -611,6 +611,33 @@ describe('the controller shows a secret once', () => {
     expect(claude.querySelector<HTMLElement>('[data-agent-secret-slot]')!.hidden).toBe(true);
   });
 
+  test('Create key or Get pairing code that comes back without a key or code says so, never "Revoked."', async () => {
+    const { root } = mount(async () => ({ status: 200, body: { ok: true } }));
+    const grokApi = root.querySelector<HTMLElement>('[data-agent="grok-api"]')!;
+    grokApi.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!.requestSubmit();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+    expect(grokApi.querySelector('[data-action-message]')!.textContent).toBe('Olympus did not return a key. Try again; if it keeps happening, restart Olympus.');
+    expect(grokApi.querySelector<HTMLElement>('[data-agent-secret-slot]')!.hidden).toBe(true);
+    const claude = root.querySelector<HTMLElement>('[data-agent="claude"]')!;
+    claude.querySelector<HTMLFormElement>('form[data-agent-kind="pair"]')!.requestSubmit();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+    expect(claude.querySelector('[data-action-message]')!.textContent).toContain('did not return a pairing code');
+  });
+
+  test('the Add it yourself summary is a plain details toggle: a click on it is left to the browser', () => {
+    const { root } = mount(async () => ({ status: 200, body: { ok: true } }));
+    const summary = root.querySelector<HTMLElement>('[data-agent="local"] details.agentprompt > summary')!;
+    expect(summary.textContent).toBe('Add it yourself instead');
+    let prevented: boolean | undefined;
+    root.ownerDocument.addEventListener('click', (event) => { prevented = event.defaultPrevented; });
+    summary.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(prevented).toBe(false);
+    // Opening it from a remembered poll keeps it open: the key is stable.
+    expect(summary.parentElement!.getAttribute('data-poll-key')).toBe('agent-local-manual');
+  });
+
   test('after Create key the list is refreshed while the key stays on screen', async () => {
     const root = document.createElement('div');
     root.innerHTML = renderDashboardAgentsSection({ platform: 'darwin', view: { remoteAccess: REMOTE_TUNNEL, connections: [] }, now: NOW });

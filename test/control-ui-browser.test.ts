@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
-import { mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
+import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
 import { connectSetupSheet } from '../src/workers/dashboard/components.ts';
 
 const GLOBALS = [
@@ -808,18 +808,88 @@ describe('dashboard controller DOM lifetime', () => {
   });
 });
 
-test('changed model settings reload their document so anonymous controls stay bound', async () => {
+test('changed model settings are swapped in place: no reload, the open sheet stays open, the card\'s own scripts run again', async () => {
+  const page = (card: string) => `<section data-outside-help>${card}</section><script data-dashboard-rerun>window.cardRuns = (window.cardRuns || 0) + 1;</script><script>window.otherRuns = 1;</script>`
+    + '<button data-sheet-toggle="#connect-dropbox-files" aria-expanded="false">Connect</button><div class="sheet" id="connect-dropbox-files" aria-hidden="true">sheet</div>';
   const root = document.createElement('div');
-  root.innerHTML = '<section data-outside-help><button>Turn on</button></section>';
+  root.innerHTML = page('card');
   document.body.append(root);
+  const created: HTMLScriptElement[] = [];
+  const make = document.createElement.bind(document);
+  document.createElement = ((tag: string) => {
+    const node = make(tag);
+    if (tag === 'script') created.push(node as HTMLScriptElement);
+    return node;
+  }) as typeof document.createElement;
   const navigations: string[] = [];
   const controller = mountDashboardController({
-    root, transport: { control: async () => ({ status: 200, body: {} }) },
-    navigate: href => navigations.push(href), returnUrl: '/dashboard?keys#anonymous', canWrite: true,
+    root, transport: { control: noControl },
+    navigate: (href) => navigations.push(href), returnUrl: '/dashboard?keys#anonymous', canWrite: true,
     signal: new AbortController().signal, signature: 'old', pollIntervalMs: -1,
-    refresh: async () => ({ status: 200, title: 'Models', body: '<section data-outside-help>Changed</section>', controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: -1 }),
+    refresh: async () => ({ status: 200, title: 'Keys', body: page('card changed'), controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: -1 }),
   });
+  root.querySelector<HTMLElement>('[data-sheet-toggle]')!.click();
   await controller.refresh(); controller.dispose();
-  expect(navigations).toEqual(['/dashboard?keys#anonymous']);
-  expect(root.querySelector('button')!.textContent).toBe('Turn on');
+  expect(navigations).toEqual([]);
+  expect(root.querySelector('[data-outside-help]')!.textContent).toBe('card changed');
+  expect(root.querySelector('#connect-dropbox-files')!.classList.contains('on')).toBe(true);
+  expect(root.querySelector('[data-sheet-toggle]')!.getAttribute('aria-expanded')).toBe('true');
+  // Only the marked script is made again (a fresh element runs; inserted markup does not), with its text and marker.
+  expect(created).toHaveLength(1);
+  expect(created[0]!.isConnected && root.contains(created[0]!)).toBe(true);
+  expect(created[0]!.hasAttribute('data-dashboard-rerun')).toBe(true);
+  expect(created[0]!.text).toBe('window.cardRuns = (window.cardRuns || 0) + 1;');
+});
+
+test('a part of the page that asks for a redraw is answered in place: claimed, and read now even with an unchanged signature', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = '<section data-outside-help><form data-outside-form="level"><input name="x" value="saved"></form></section>';
+  document.body.append(root);
+  root.querySelector<HTMLInputElement>('input')!.value = 'typed and saved';
+  let reads = 0;
+  const controller = mountDashboardController({
+    root, transport: { control: noControl }, navigate() {}, returnUrl: '/dashboard?keys', canWrite: true,
+    signal: new AbortController().signal, signature: 'same', pollIntervalMs: -1,
+    refresh: async () => { reads += 1; return { status: 200, title: 'Keys', body: '<section data-outside-help>Redrawn</section>', controller: 'dashboard', can_write: true, signature: 'same', poll_interval_ms: -1 }; },
+  });
+  const request = new happyWindow.CustomEvent(DASHBOARD_REDRAW_EVENT, { bubbles: true, cancelable: true }) as unknown as Event;
+  // The saved field is still "typed": a poll would leave the card alone; the redraw does not.
+  expect(root.querySelector('[data-outside-help]')!.dispatchEvent(request)).toBe(false);
+  await Bun.sleep(0);
+  expect(reads).toBe(1);
+  expect(root.querySelector('[data-outside-help]')!.textContent).toBe('Redrawn');
+  controller.dispose();
+  // Disposed: nobody claims it, and the part reloads on its own.
+  expect(root.querySelector('[data-outside-help]')!.dispatchEvent(new happyWindow.CustomEvent(DASHBOARD_REDRAW_EVENT, { bubbles: true, cancelable: true }) as unknown as Event)).toBe(true);
+});
+
+test('a redraw asked for while a Connect is pending runs once that Connect has answered', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = '<form data-connect-kind="api_key"><input type="hidden" name="source" value="readwise"><input name="api_key" value="k"><button type="submit">Connect</button><span data-action-message></span></form>'
+    + '<section data-outside-help><form data-outside-form="level"><input name="x" value="saved"></form></section>';
+  document.body.append(root);
+  root.querySelector<HTMLInputElement>('section input')!.value = 'typed and saved';
+  let answer: (value: OlympusDashboardControlResult) => void = () => undefined;
+  let reads = 0;
+  const controller = mountDashboardController({
+    root, transport: { control: () => new Promise((done) => { answer = done; }) }, navigate() {}, returnUrl: '/dashboard?keys', canWrite: true,
+    signal: new AbortController().signal, signature: 'same', pollIntervalMs: -1,
+    refresh: async () => { reads += 1; return { status: 200, title: 'Keys', body: '<section data-outside-help>Redrawn</section>', controller: 'dashboard', can_write: true, signature: 'same', poll_interval_ms: -1 }; },
+  });
+  root.querySelector<HTMLFormElement>('form[data-connect-kind]')!.requestSubmit();
+  await Bun.sleep(0);
+  expect(root.querySelector('section')!.dispatchEvent(new happyWindow.CustomEvent(DASHBOARD_REDRAW_EVENT, { bubbles: true, cancelable: true }) as unknown as Event)).toBe(false);
+  await Bun.sleep(0);
+  expect(reads).toBe(0);
+  answer({ status: 400, body: { ok: false, error: { message: 'Bad key.' } } });
+  // The owed redraw is scheduled after the control settles; wait for it, not for a fixed time.
+  for (let waited = 0; reads === 0 && waited < 2000; waited += 10) await Bun.sleep(10);
+  for (let waited = 0; root.querySelector('[data-outside-help]')!.textContent !== 'Redrawn' && waited < 2000; waited += 10) await Bun.sleep(10);
+  expect(reads).toBeGreaterThan(0);
+  expect(root.querySelector('[data-outside-help]')!.textContent).toBe('Redrawn');
+  controller.dispose();
+});
+
+test('the serialized controller listens for the exported redraw event name', () => {
+  expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
 });

@@ -51,6 +51,15 @@ export function consultAskLevelFromSettings(level: ConsultLevel): ConsultAskLeve
   return level === 'general' ? 'strict' : 'standard';
 }
 
+/**
+ * The level for a question asked on the dashboard's Ask page: the one picked
+ * for it, else the saved setting (owner decision 2026-10-24: Strict or
+ * Standard is chosen per question; the saved setting is the starting choice).
+ */
+export function consultAskLevelOrSaved(level: ConsultAskLevel | undefined, read: ConsultSettingsRead): ConsultAskLevel {
+  return level ?? consultAskLevelFromSettings(read.state === 'valid' ? read.settings.level : DEFAULT_CONSULT_SETTINGS.level);
+}
+
 export interface ConsultAskInput {
   readonly question: unknown;
   /** This question's level; absent means the remembered one. */

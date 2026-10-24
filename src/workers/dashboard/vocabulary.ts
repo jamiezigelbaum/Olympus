@@ -2896,6 +2896,13 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   veniceKnows: "Venice says it doesn’t keep them.",
   zkapiLeaves: "A top model that can’t see your files. It reads your question but isn’t told who’s asking. What you ask can still identify you.",
   zkapiKnows: "Takes 1 to 3 minutes.",
+  /** Strict or Standard for this one question (owner, 2026-10-24); the saved setting is the starting choice. */
+  levelLegend: "How this question leaves",
+  levelStrict: "Strict",
+  levelStrictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
+  levelStandard: "Standard",
+  levelStandardHint: "Your words, prepared the way you chose in {models}.",
+  levelModelsLink: "Models",
   askComputer: "Ask the local model",
   askVenice: "Ask a Venice model",
   askZkapi: "Ask a model through zkAPI",
@@ -2921,6 +2928,7 @@ export const DASHBOARD_PRIVATE_ANSWERS_COPY = {
   anonymousAsk: 'Ask anonymously',
   anonymousPlaceholder: 'Ask with outside help',
   anonymousNotSetUp: 'Anonymous answers are not set up.',
+  levelInvalid: 'Choose Strict or Standard.',
   anonymousPending: 'Anonymous question pending',
   inboxUnavailable: 'The inbox cannot keep another answer right now. Try again later.',
   inboxBeforeSend: 'The inbox cannot keep this answer right now. Nothing was sent.',
@@ -2998,8 +3006,8 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   experimental: 'Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.',
   /** What outside help is, before anything technical (owner, 2026-10-07). */
   intro: 'For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.',
-  /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'). */
-  levelTitle: 'What may zkAPI send?',
+  /** What zkAPI may send (owner titles 2026-10-08; internal ids 'unnamed' and 'general'); since 2026-10-24 only each question's starting choice. */
+  levelTitle: 'What may zkAPI send by default?',
   /** Who writes the outside question (owner decision 2026-10-10): the built-in model, or the owner's own. No gate on the model. */
   writer: {
     title: 'Who writes the question',

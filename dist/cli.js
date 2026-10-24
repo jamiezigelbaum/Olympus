@@ -42317,6 +42317,12 @@ var init_vocabulary = __esm(() => {
     veniceKnows: "Venice says it doesn’t keep them.",
     zkapiLeaves: "A top model that can’t see your files. It reads your question but isn’t told who’s asking. What you ask can still identify you.",
     zkapiKnows: "Takes 1 to 3 minutes.",
+    levelLegend: "How this question leaves",
+    levelStrict: "Strict",
+    levelStrictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
+    levelStandard: "Standard",
+    levelStandardHint: "Your words, prepared the way you chose in {models}.",
+    levelModelsLink: "Models",
     askComputer: "Ask the local model",
     askVenice: "Ask a Venice model",
     askZkapi: "Ask a model through zkAPI",
@@ -42341,6 +42347,7 @@ var init_vocabulary = __esm(() => {
     anonymousAsk: "Ask anonymously",
     anonymousPlaceholder: "Ask with outside help",
     anonymousNotSetUp: "Anonymous answers are not set up.",
+    levelInvalid: "Choose Strict or Standard.",
     anonymousPending: "Anonymous question pending",
     inboxUnavailable: "The inbox cannot keep another answer right now. Try again later.",
     inboxBeforeSend: "The inbox cannot keep this answer right now. Nothing was sent.",
@@ -42400,7 +42407,7 @@ var init_vocabulary = __esm(() => {
     },
     experimental: "Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.",
     intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
-    levelTitle: "What may zkAPI send?",
+    levelTitle: "What may zkAPI send by default?",
     writer: {
       title: "Who writes the question",
       builtInShort: "the model built into Olympus",
@@ -119453,7 +119460,9 @@ function createLocalPrivateAnswers(options) {
       if (action === "ask_anonymous") {
         if (!options.anonymousAsk)
           return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp);
-        const result = await options.anonymousAsk({ question: typeof body.question === "string" ? body.question : "" });
+        if (body.level !== undefined && body.level !== "strict" && body.level !== "standard")
+          return refused(400, "invalid_params", DASHBOARD_PRIVATE_ANSWERS_COPY.levelInvalid);
+        const result = await options.anonymousAsk({ question: typeof body.question === "string" ? body.question : "", ...body.level !== undefined ? { level: body.level } : {} });
         return result.ok ? { status: 200, body: { ok: true, status: "answered", answer: result.reply, sent: result.sent, citations: [] } } : refused(400, result.code, result.message);
       }
       if (action === "ask" || action === "ask_venice") {
@@ -130570,6 +130579,8 @@ function mountDashboardController(options) {
   const startedFromSheet = new WeakSet;
   const pendingForms = new WeakSet;
   let pendingFormCount = 0;
+  const redrawEvent = "olympus:redraw";
+  let redrawOwed = false;
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -130638,6 +130649,10 @@ function mountDashboardController(options) {
         pendingFormCount--;
       pendingForms.delete(form);
       form.removeAttribute("aria-busy");
+      if (pendingFormCount === 0 && redrawOwed)
+        setTimeout(() => {
+          refreshNow(false);
+        }, 0);
     }
     applyWriteCapability();
   }
@@ -131072,6 +131087,10 @@ function mountDashboardController(options) {
       await refreshAgentList();
       return;
     }
+    if (params.action === "mint_agent_pairing_code" || params.action === "create_agent_key") {
+      say(form, params.action === "create_agent_key" ? "Olympus did not return a key. Try again; if it keeps happening, restart Olympus." : "Olympus did not return a pairing code. Try again; if it keeps happening, restart Olympus.");
+      return;
+    }
     const statusMessage = result.body.status_message;
     say(form, typeof statusMessage === "string" ? statusMessage : "Revoked.");
     form.querySelectorAll("button").forEach((button) => {
@@ -131135,10 +131154,6 @@ function mountDashboardController(options) {
       applyWriteCapability();
       return;
     }
-    if (query("[data-outside-help]")) {
-      options.navigate(options.returnUrl);
-      return;
-    }
     const openSheets = queryAll(".sheet.on").map((sheet) => sheet.id);
     const open6 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
     const active = activeElement();
@@ -131155,13 +131170,26 @@ function mountDashboardController(options) {
       queryAll("[data-sheet-toggle]").filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute("aria-expanded", "true"));
     }
     findByFocusKey(focused)?.focus();
+    queryAll("script[data-dashboard-rerun]").forEach((inert) => {
+      const script2 = root.ownerDocument.createElement("script");
+      for (const attribute2 of Array.from(inert.attributes))
+        script2.setAttribute(attribute2.name, attribute2.value);
+      script2.text = inert.text;
+      inert.replaceWith(script2);
+    });
     signature = result.signature;
     pollIntervalMs = result.poll_interval_ms;
     deferredSince = 0;
     applyWriteCapability();
   }
   async function refreshNow(force, requested = false) {
-    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted || !force && !presented)
+    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted)
+      return;
+    if (redrawOwed) {
+      redrawOwed = false;
+      force = true;
+    }
+    if (!force && !presented)
       return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === "hidden")
@@ -131191,7 +131219,14 @@ function mountDashboardController(options) {
       replaceBody(result, force);
     } catch {} finally {
       inFlight = false;
+      if (redrawOwed && pendingFormCount === 0)
+        refreshNow(false);
     }
+  }
+  function onRedrawRequest(event) {
+    event.preventDefault();
+    redrawOwed = true;
+    refreshNow(false);
   }
   function restartPoll() {
     if (interval)
@@ -131404,6 +131439,7 @@ function mountDashboardController(options) {
   const view3 = root.ownerDocument.defaultView || window;
   view3.addEventListener("focus", refreshOnReturn);
   root.ownerDocument.addEventListener("visibilitychange", onVisibilityReturn);
+  root.addEventListener(redrawEvent, onRedrawRequest);
   applyWriteCapability();
   applyOpenTarget();
   restartPoll();
@@ -131417,6 +131453,7 @@ function mountDashboardController(options) {
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("click", onClick);
+    root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener("abort", dispose, { once: true });
   return {
@@ -131436,6 +131473,7 @@ function mountDashboardController(options) {
     dispose
   };
 }
+var DASHBOARD_REDRAW_EVENT = "olympus:redraw";
 
 // src/workers/dashboard/theme.ts
 function dashboardThemeVariable(token) {
@@ -132275,10 +132313,12 @@ function renderOutsideHelpToolsReplace(tools, tool, input) {
 function renderOutsideHelpToolsScript(tools, input) {
   if (!tools || !input.canEdit || input.csrfToken === undefined)
     return "";
-  return `<script>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
+  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
 }
 function outsideHelpToolsClientScript(config2) {
   return `(function () {
+  // The dashboard runs this again after it swaps in a fresh page: one instance binds the new forms, and one poll runs.
+  if (typeof window.__olympusOutsideHelpTools === 'function') { window.__olympusOutsideHelpTools(); return; }
   var config = ${escapeScriptJson(JSON.stringify(config2))};
   var timer = null;
   function sections() { return Array.prototype.slice.call(document.querySelectorAll('[data-outside-tools]')); }
@@ -132344,6 +132384,7 @@ function outsideHelpToolsClientScript(config2) {
     });
     if (sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; })) schedule();
   }
+  window.__olympusOutsideHelpTools = bind;
   bind();
 })();`;
 }
@@ -132446,7 +132487,7 @@ function renderOutsideHelpCard(status, input) {
     if (status.confinementInstallRequired)
       parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
     const toolsScript2 = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
-    const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+    const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
     return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
   }
   if (!missingRoute)
@@ -132469,7 +132510,7 @@ function renderOutsideHelpCard(status, input) {
   more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit }), outsideHelpDaemonCommand(status.tools)));
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
-  const script2 = canEdit || canUnlock ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
 }
@@ -132895,18 +132936,40 @@ function outsideHelpClientScript(config2) {
     if (kind === 'unlock') return {};
     return { confirm: true };
   }
-  // After a restart the worker is briefly away: wait for it to answer, then reload.
-  function reloadWhenBack(delay, form) {
+  // A save redraws the card: the dashboard swaps in the fresh page and runs this script again for it.
+  // A page without the dashboard's controller does not claim the request, and reloads.
+  function redraw() {
+    var live = document.querySelector('[data-outside-help]') || document.body;
+    if (live.dispatchEvent(new CustomEvent(${JSON.stringify(DASHBOARD_REDRAW_EVENT)}, { bubbles: true, cancelable: true }))) window.location.reload();
+  }
+  // After a restart the worker is briefly away: wait for it to answer, then redraw.
+  function redrawWhenBack(delay, form) {
     var tries = 0;
     function poll() {
       tries += 1;
       fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
         if (bridgeRestart(response)) { message(form, config.copy.restartRecovery, true); return; }
-        if (response.ok || tries > 40) window.location.reload(); else setTimeout(poll, 1500);
-      }, function () { if (tries > 40) window.location.reload(); else setTimeout(poll, 1500); });
+        if (response.ok || tries > 40) redraw(); else setTimeout(poll, 1500);
+      }, function () { if (tries > 40) redraw(); else setTimeout(poll, 1500); });
     }
     setTimeout(poll, delay);
   }
+  // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
+  // (in memory), which says it again in the same form, with its section open.
+  function formKey(form) {
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : '');
+  }
+  function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
+  (function showSaved() {
+    var saved = window.__olympusOutsideHelpSaved;
+    window.__olympusOutsideHelpSaved = null;
+    if (!saved || typeof saved.text !== 'string' || saved.text === '') return;
+    var target = Array.prototype.find.call(root.querySelectorAll('form[data-outside-form]'), function (form) { return formKey(form) === saved.key; });
+    if (!target) return;
+    var section = target.closest('details');
+    if (section) section.open = true;
+    message(target, saved.text, false);
+  })();
   var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard };
   // While the writer check runs (only after the owner's click), the page re-reads itself.
   if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
@@ -132960,11 +133023,12 @@ function outsideHelpClientScript(config2) {
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
         }
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+        if (kind !== 'enable' && kind !== 'unlock') keepSaved(form, text);
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
-          reloadWhenBack(4000, form);
+          redrawWhenBack(4000, form);
         } else {
-          reloadWhenBack(900, form);
+          redrawWhenBack(900, form);
         }
       } catch (error) {
         fail(config.copy.failed);
@@ -138528,12 +138592,15 @@ function renderComputerHostPage(input) {
     `<style>${HOST_CSS}</style>`,
     "</head>",
     `<body data-olympus-host="computer" data-locked="${locked2 ? "true" : "false"}">`,
+    "<main>",
+    '<h1 class="sr-only">Olympus dashboard</h1>',
     ...installer ? [
       `<section class="update" data-update-notice${update ? "" : " hidden"}><p data-update-text>${update ? text2(DASHBOARD_UPDATE_COPY.notice(update.version)) : ""}</p>` + `<p><code id="update-command">${text2(installer.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${text2(DASHBOARD_UPDATE_COPY.copy)}</button> ` + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`
     ] : [],
     lockedGate(!locked2),
     ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text2(model.name)} — ${text2(model.state)}</strong>: ${text2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute2(input.panelHtml)}"></iframe>`,
+    "</main>",
     `<script>${program}</script>`,
     "</body>",
     "</html>",
@@ -138565,6 +138632,8 @@ body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;backgrou
 .update p{margin:0 0 0.5rem}
 .update code{overflow-wrap:anywhere;white-space:pre-wrap}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
+main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
 .gate p{margin:0}
@@ -139868,8 +139937,13 @@ function renderDestinations(options, enabled) {
     const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
     const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, label, dot2]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot2}" aria-hidden="true"></span>${escapeHtml2(label)}</span>`).join("");
-    return (d.id === "anonymous" ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.leaves)}</b><span>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.order)}</span></div>` : "") + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote patag">${escapeHtml2(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p></div><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+    return (d.id === "anonymous" ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.leaves)}</b><span>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.order)}</span></div>` : "") + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote patag">${escapeHtml2(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p>${d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", models + "#anonymous") : ""}</div><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
   }).join("")}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
+}
+function renderLevelChoice(level, settingsHref) {
+  const option = (value2, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value2}"${value2 === level ? " checked" : ""}><span><b>${escapeHtml2(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
+  const standardHint = escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml2(settingsHref)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
+  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
 }
 function renderWaiting(waiting, now) {
   const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
@@ -140083,7 +140157,10 @@ function privateAnswersClientScript(input) {
       if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
       if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: button.getAttribute('data-pa-action'), question: question });
+      var body = { action: button.getAttribute('data-pa-action'), question: question };
+      var level = body.action === 'ask_anonymous' ? Array.from(ask.querySelectorAll('[data-pa-level] input[name="level"]')).find(function (input) { return input.checked; }) : null;
+      if (level) body.level = level.value;
+      var outcome = await send(body);
       if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
       if (reason) reason.textContent = '';
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
@@ -140291,6 +140368,13 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
 .pa .pazone b { color: var(--t2); font-weight: 600; }
 .pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .palevel { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; display: grid; gap: 6px; }
+.pa .palevel legend { padding: 0; margin: 0 0 2px; color: var(--t2); font-size: var(--fs-body); font-weight: 600; }
+.pa .palevelopt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; font-size: var(--fs-body); color: var(--t1); cursor: pointer; }
+.pa .palevelopt input { margin: 3px 0 0; accent-color: var(--link); }
+.pa .palevelopt b { font-weight: 600; }
+.pa .palevelhint { display: block; color: var(--t3); }
+.pa [data-pa-card="anonymous"]:not([data-pa-state="ready"]) .palevel { display: none; }
 .pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
 @media (max-width: 640px) {
   .pa .paasks { grid-template-columns: minmax(0, 1fr); }
@@ -166102,6 +166186,7 @@ __export(exports_consult_ask, {
   consultGateRetryFeedback: () => consultGateRetryFeedback,
   consultGateRefusedMessage: () => consultGateRefusedMessage,
   consultAskLevelToSettings: () => consultAskLevelToSettings,
+  consultAskLevelOrSaved: () => consultAskLevelOrSaved,
   consultAskLevelFromSettings: () => consultAskLevelFromSettings,
   askAnonymously: () => askAnonymously,
   CONSULT_ASK_MESSAGES: () => CONSULT_ASK_MESSAGES,
@@ -166114,6 +166199,9 @@ function consultAskLevelToSettings(level) {
 }
 function consultAskLevelFromSettings(level) {
   return level === "general" ? "strict" : "standard";
+}
+function consultAskLevelOrSaved(level, read) {
+  return level ?? consultAskLevelFromSettings(read.state === "valid" ? read.settings.level : DEFAULT_CONSULT_SETTINGS.level);
 }
 function consultGateRetryFeedback(reasons) {
   if (reasons.length === 0 || !reasons.every((reason) => CONSULT_GATE_RETRY_REASONS.has(reason)))
@@ -185601,7 +185689,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
   const { readConsultSettings: readConsultSettings2, DEFAULT_CONSULT_SETTINGS: DEFAULT_CONSULT_SETTINGS2, consultStandardBinding: consultStandardBinding2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { PrivateQuestionJobs: PrivateQuestionJobs2 } = await Promise.resolve().then(() => (init_private_question_jobs(), exports_private_question_jobs));
-  const { consultAskLevelFromSettings: consultAskLevelFromSettings2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
+  const { consultAskLevelFromSettings: consultAskLevelFromSettings2, consultAskLevelOrSaved: consultAskLevelOrSaved2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
   const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2, embeddingPanelRelevance: embeddingPanelRelevance2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
   const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
   const { createDropboxOpenTargets: createDropboxOpenTargets2, localDropboxRoots: localDropboxRoots2 } = await Promise.resolve().then(() => (init_open_target(), exports_open_target));
@@ -185629,11 +185717,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   let askAnonymouslyNow;
   const localAnonymousAsk = (input) => {
-    const read = readConsultSettings2();
-    return askWithAnonymousInbox({
-      ...input,
-      level: consultAskLevelFromSettings2(read.state === "valid" ? read.settings.level : DEFAULT_CONSULT_SETTINGS2.level)
-    }, {
+    return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved2(input.level, readConsultSettings2()) }, {
       store: waitingQuestionStore,
       connectionId: "@local:You",
       local: true,
