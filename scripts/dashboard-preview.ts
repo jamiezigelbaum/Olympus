@@ -708,6 +708,7 @@ function localFilesPreview(state: string) {
  *   archives-not-running an import waiting while background syncing is turned off: not running, Remove not pressable, See why names the setting
  *   archives-notes       a Roam export imported: its items are notes, with the kinds of gap a notes export or any format can report
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
+ *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not read, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
  * messages no private model can judge are each a Needs you line too.
@@ -717,6 +718,7 @@ const ARCHIVE_STATES = [
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty',
+  'archives-nothing-imported',
 ] as const;
 
 function archivesPreview(state: string): SourceDashboardViewModel {
@@ -867,6 +869,16 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
   } else if (state === 'archives-empty') {
     const { earliest: _earliest, latest: _latest, ...dated } = takeout;
     archives.push({ ...dated, name: 'Empty notes.json', format: 'Reflect notes (JSON)', family: 'note', items: 0, judged: 0, held: 0 });
+  } else if (state === 'archives-nothing-imported') {
+    archives.push({
+      ...takeout,
+      name: 'Spam and Trash only.mbox',
+      items: 0,
+      judged: 0,
+      held: 0,
+      gaps: [{ kind: 'message_too_large', count: 2 }],
+      skipped: [{ kind: 'spam_or_trash', count: 1_204 }],
+    });
   } else if (state === 'archives-uncounted') {
     archives.push({ ...takeout, items: 0, judged: 0, held: 0, countsUnavailable: true });
   } else if (state === 'archives-not-running') {

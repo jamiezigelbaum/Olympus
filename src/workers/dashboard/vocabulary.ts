@@ -2038,11 +2038,19 @@ export const DASHBOARD_ARCHIVE_COPY = {
   importedLine: '{items} · imported {when}',
   importedLineNoTime: '{items}',
   /**
-   * A finished import that found nothing: said as that, never as a count of
-   * nothing and never as an index that cannot be read. {none} is "no notes".
+   * A finished import that found nothing at all (no items, nothing left out,
+   * nothing it could not read): said as that, never as a count of nothing and
+   * never as an index that cannot be read. {none} is "no notes".
    */
   emptyImport: 'Imported: {none} found in this archive.',
   emptyImportWhen: 'Imported {when}: {none} found in this archive.',
+  /**
+   * A finished import that stored nothing although the archive held things it
+   * left out or could not read: never said as an empty archive, and the
+   * reasons stay under See what was not read. {None} is "No notes".
+   */
+  nothingImported: '{None} imported.',
+  nothingImportedWhen: '{None} imported {when}.',
   removingLine: 'Removing everything Olympus made from this archive. The file itself stays where it is.',
   /** An import or a removal this computer's settings keep from running: no progress bar, nothing moving. */
   notRunningLine: '{percent}% read · {items} so far. It goes on from there once imports can run.',

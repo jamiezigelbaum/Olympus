@@ -22,10 +22,19 @@
  *   offset and continues exactly there, with a new tokenizer, without reading
  *   what came before it.
  * - Bounds: an item longer than `maxItemBytes` is not built; it is handed out
- *   as `oversize` (the caller records a gap) and the reader moves on. A
- *   single piece of text longer than that is skipped in place, byte by byte,
- *   without ever being held. Nesting deeper than JSON_STREAM_MAX_DEPTH stops
- *   the read.
+ *   as `oversize` (the caller records a gap) and the reader moves on, still
+ *   checking the grammar of what it discards. A single piece of text longer
+ *   than that is skipped in place, byte by byte, without ever being held, and
+ *   checked as it goes (escapes, control characters, well-formed UTF-8). The
+ *   reader's own scan of the bytes decides this, whatever the tokenizer has
+ *   or has not reported, so no split of the input into chunks can get a long
+ *   text past it. Nesting deeper than JSON_STREAM_MAX_DEPTH stops the read.
+ * - Feeding: the tokenizer is given the bytes in slices of
+ *   JSON_STREAM_FEED_SLICE_BYTES, and no further slice while more than
+ *   JSON_STREAM_MAX_QUEUED_EVENTS finished items wait to be taken, so a huge
+ *   chunk of tiny items never turns into millions of waiting events.
+ * - Damage: the items that were whole before a syntax error are handed out
+ *   first, then the error is thrown, however the bytes were chunked.
  * - Numbers: a whole number too large to be exact in a JavaScript number is
  *   handed out as its digits in text, so an identifier is never rounded.
  */
@@ -45,6 +54,15 @@ export const JSON_STREAM_MAX_DEPTH = 512;
 export const JSON_STREAM_MAX_KEY_CHARS = 1024;
 export const JSON_STREAM_MAX_FRAME_VALUE_CHARS = 1024;
 export const JSON_STREAM_MAX_FRAME_KEYS = 64;
+/**
+ * Bytes given to the tokenizer at a time. An item is finished by the delimiter
+ * after it (two bytes at least), so one slice finishes at most half as many.
+ */
+export const JSON_STREAM_FEED_SLICE_BYTES = 1024;
+/**
+ * No further slice is fed while more finished items than this wait to be taken.
+ */
+export const JSON_STREAM_MAX_QUEUED_EVENTS = 64;
 
 export type JsonStreamErrorCode = 'invalid_json' | 'truncated' | 'empty' | 'resume_invalid' | 'too_deep';
 
@@ -134,7 +152,8 @@ interface BuildLevel {
   kind: 'object' | 'array';
   phase: Phase;
   key: string | undefined;
-  value: unknown[] | Record<string, unknown>;
+  // Undefined once the item is being discarded: the level then only keeps the grammar.
+  value: unknown[] | Record<string, unknown> | undefined;
 }
 
 interface Capture {
@@ -144,8 +163,32 @@ interface Capture {
   frame: JsonFrame;
   oversize: boolean;
   depth: number;
-  build: BuildLevel[] | undefined;
+  build: BuildLevel[];
   result: unknown;
+}
+
+const LEX_OUT = 0;
+const LEX_STRING = 1;
+const LEX_ESCAPE = 2;
+const LEX_HEX = 3;
+
+const STOP_END = 0;
+const STOP_OVERSIZE = 1;
+const STOP_BAD = 2;
+const STOP_CLOSED = 3;
+
+function isHexDigit(byte: number): boolean {
+  return (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x46) || (byte >= 0x61 && byte <= 0x66);
+}
+
+function isEscapeByte(byte: number): boolean {
+  return byte === 0x22 || byte === 0x5c || byte === 0x2f || byte === 0x62 || byte === 0x66
+    || byte === 0x6e || byte === 0x72 || byte === 0x74;
+}
+
+function isSpaceOrStructure(byte: number): boolean {
+  return byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09 || byte === 0x2c || byte === 0x3a
+    || byte === 0x5b || byte === 0x5d || byte === 0x7b || byte === 0x7d;
 }
 
 const EMPTY_FRAME: JsonFrame = Object.freeze({});
@@ -291,6 +334,7 @@ export class JsonStreamReader {
   private readonly maxItemBytes: number;
   private readonly queue: JsonStreamEvent[] = [];
   private queueAt = 0;
+  private peakQueued = 0;
   private levels: Level[] = [];
   private phase: Phase = 'root';
   private capture: Capture | undefined;
@@ -299,10 +343,21 @@ export class JsonStreamReader {
   private tokenizer: Tokenizer | undefined;
   // Absolute offset of the first byte the current tokenizer was given.
   private base = 0;
-  private fed = 0;
-  private openToken: { type: number; start: number } | undefined;
-  private backslashParity = 0;
-  private skipping: { start: number; escaped: boolean } | undefined;
+  // The chunk being fed, and where the next slice of it starts.
+  private inbox: Uint8Array | undefined;
+  private inboxAt = 0;
+  private inboxBase = 0;
+  // The reader's own scan of the bytes: where it is in a piece of text or a run of number or word characters.
+  private lex = LEX_OUT;
+  private hexLeft = 0;
+  private utfLeft = 0;
+  private utfLow = 0x80;
+  private utfHigh = 0xbf;
+  private stringStart = 0;
+  private stringLimit = 0;
+  private runStart = -1;
+  private stop = STOP_END;
+  private skipping = false;
   private failure: JsonStreamError | undefined;
   private resuming: boolean;
   private started = false;
@@ -333,11 +388,18 @@ export class JsonStreamReader {
   }
 
   /**
+   * The most finished items that ever waited to be taken at once (a diagnostic for the bound on feeding).
+   */
+  get peakQueuedEvents(): number {
+    return this.peakQueued;
+  }
+
+  /**
    * The next item, or undefined once the document has ended. Throws `JsonStreamError` for a document that is not whole.
+   * Items that were whole before a syntax error come out first; the error follows them, however the bytes were chunked.
    */
   next(): JsonStreamEvent | undefined {
     for (;;) {
-      if (this.failure) throw this.failure;
       if (this.queueAt < this.queue.length) {
         const event = this.queue[this.queueAt]!;
         this.queueAt += 1;
@@ -347,11 +409,25 @@ export class JsonStreamReader {
         }
         return event;
       }
+      if (this.failure) throw this.failure;
+      if (this.inbox) {
+        this.pump();
+        continue;
+      }
       if (this.finished) return undefined;
       const chunk = this.source.next();
       if (chunk === undefined) {
-        this.finish();
+        if (this.head) {
+          // Fewer than three bytes in all: a document still, such as an empty list.
+          this.inbox = this.head;
+          this.inboxAt = 0;
+          this.inboxBase = 0;
+          this.head = undefined;
+          this.started = true;
+          continue;
+        }
         this.finished = true;
+        this.finish();
         continue;
       }
       this.feed(chunk);
@@ -361,16 +437,10 @@ export class JsonStreamReader {
   // --- Bytes to tokens ----------------------------------------------------------
 
   private startTokenizer(base: number): Tokenizer {
-    const tokenizer = new ExactNumberTokenizer({ emitPartialTokens: true });
+    const tokenizer = new ExactNumberTokenizer();
     this.base = base;
-    this.openToken = undefined;
     tokenizer.onToken = (info) => {
       if (this.failure) return;
-      if (info.partial) {
-        this.openToken = { type: info.token, start: this.base + info.offset };
-        return;
-      }
-      this.openToken = undefined;
       try {
         this.handle(info.token, info.value, this.base + info.offset);
       } catch (error) {
@@ -406,94 +476,268 @@ export class JsonStreamReader {
         at += 3;
       }
     }
-    this.push(data, at);
+    if (data.length === 0) return;
+    this.inbox = data;
+    this.inboxAt = 0;
+    this.inboxBase = at;
   }
 
   /**
-   * `data` begins at absolute offset `at`.
+   * Feeds slices of the chunk until it is used up, an error is found, or enough finished items wait to be taken.
    */
-  private push(input: Uint8Array, atStart: number): void {
-    let data = input;
-    let at = atStart;
-    while (data.length > 0) {
+  private pump(): void {
+    const inbox = this.inbox!;
+    try {
+      while (this.inboxAt < inbox.length && !this.failure && this.queue.length <= JSON_STREAM_MAX_QUEUED_EVENTS) {
+        const begin = this.inboxAt;
+        const end = Math.min(inbox.length, begin + JSON_STREAM_FEED_SLICE_BYTES);
+        this.inboxAt = end;
+        this.consume(inbox, begin, end, this.inboxBase);
+        if (this.queue.length > this.peakQueued) this.peakQueued = this.queue.length;
+      }
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+    if (this.failure || this.inboxAt >= inbox.length) this.inbox = undefined;
+  }
+
+  /**
+   * The slice `data[begin, end)` of a chunk whose first byte is at absolute offset `base`: scanned by the reader
+   * itself, then given to the tokenizer except for the middle of a text longer than allowed, which is read past
+   * without being held.
+   */
+  private consume(data: Uint8Array, begin: number, end: number, base: number): void {
+    let index = begin;
+    // Everything before `fed` is with the tokenizer or part of a text being skipped.
+    let fed = begin;
+    while (index < end) {
       if (this.skipping) {
-        const found = this.skipText(data);
-        if (found < 0) return;
-        const start = this.skipping.start;
-        this.skipping = undefined;
-        at += found + 1;
-        data = data.subarray(found + 1);
-        this.startTokenizer(at);
-        this.fed = at;
-        this.backslashParity = 0;
+        const stopped = this.skipScan(data, index, end);
+        if (this.stop === STOP_END) {
+          index = end;
+          fed = end;
+          break;
+        }
+        if (this.stop === STOP_BAD) {
+          this.failure ??= invalid();
+          return;
+        }
+        const start = this.stringStart;
+        this.skipping = false;
+        index = stopped + 1;
+        fed = index;
         this.deliver(OVERSIZE, undefined, start);
         continue;
       }
-      let tokenizer = this.tokenizer;
-      if (!tokenizer) {
-        tokenizer = this.startTokenizer(at);
-        this.backslashParity = 0;
+      const stopped = this.scanNormal(data, index, end, base);
+      if (this.stop === STOP_END) {
+        index = end;
+        break;
       }
-      this.fed = at + data.length;
-      try {
-        tokenizer.write(data);
-      } catch (error) {
-        throw this.failure ?? (error instanceof JsonStreamError ? error : invalid());
+      if (this.stop === STOP_BAD) {
+        // What came before the bad byte is read as usual, so the items finished by then are not lost.
+        this.write(data.subarray(fed, stopped), base + fed);
+        this.failure ??= invalid();
+        return;
       }
-      if (this.failure) throw this.failure;
-      this.backslashParity = trailingBackslashParity(data, this.backslashParity);
-      const open = this.openToken;
-      if (open && this.fed - open.start > this.maxItemBytes) {
-        if (open.type !== TokenType.STRING) throw invalid();
-        // Text this long is never held: the tokenizer is dropped and the rest of the text read past.
-        this.skipping = { start: open.start, escaped: this.backslashParity === 1 };
-        this.tokenizer = undefined;
-        this.openToken = undefined;
-      }
-      return;
+      // A text longer than allowed: the tokenizer is given the bytes up to its opening quote (so everything
+      // before it is delivered), then dropped with whatever it held of the text.
+      const quote = this.stringStart - base;
+      if (quote >= fed) this.write(data.subarray(fed, quote + 1), base + fed);
+      if (this.failure) return;
+      this.tokenizer = undefined;
+      this.skipping = true;
+      fed = stopped;
+      index = stopped;
+    }
+    if (!this.skipping && fed < end && !this.failure) this.write(data.subarray(fed, end), base + fed);
+  }
+
+  private write(piece: Uint8Array, offset: number): void {
+    if (piece.length === 0) return;
+    const tokenizer = this.tokenizer ?? this.startTokenizer(offset);
+    try {
+      tokenizer.write(piece);
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
     }
   }
 
   /**
-   * Reads past the rest of a piece of text; the index of its closing quote in `data`, or -1 if it goes on.
+   * Scans `data[from, to)` outside skipped text, where `data[0]` is at absolute offset `at`: tracks where texts open and close, and the length of number and word
+   * runs. Stops at the end of `data`, at the byte that makes a text longer than allowed (not consumed), or at a
+   * run that is too long (`this.stop` says which).
    */
-  private skipText(data: Uint8Array): number {
-    const skipping = this.skipping!;
-    let escaped = skipping.escaped;
-    for (let index = 0; index < data.length; index += 1) {
+  private scanNormal(data: Uint8Array, from: number, to: number, at: number): number {
+    const max = this.maxItemBytes;
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let runStart = this.runStart;
+    let index = from;
+    this.stop = STOP_END;
+    for (; index < to; index += 1) {
       const byte = data[index]!;
-      if (escaped) escaped = false;
-      else if (byte === 0x5c) escaped = true;
-      else if (byte === 0x22) return index;
+      if (lex === LEX_OUT) {
+        if (byte === 0x22) {
+          lex = LEX_STRING;
+          this.stringStart = at + index;
+          this.stringLimit = at + index + max;
+          runStart = -1;
+          utfLeft = 0;
+        } else if (isSpaceOrStructure(byte)) {
+          runStart = -1;
+        } else if (runStart < 0) {
+          runStart = at + index;
+        } else if (at + index + 1 - runStart > max) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        continue;
+      }
+      if (at + index === this.stringLimit) {
+        this.stop = STOP_OVERSIZE;
+        break;
+      }
+      if (lex === LEX_STRING) {
+        if (byte < 0x80) {
+          utfLeft = 0;
+          if (byte === 0x22) lex = LEX_OUT;
+          else if (byte === 0x5c) lex = LEX_ESCAPE;
+        } else if (utfLeft > 0 && byte >= this.utfLow && byte <= this.utfHigh) {
+          utfLeft -= 1;
+          this.utfLow = 0x80;
+          this.utfHigh = 0xbf;
+        } else {
+          utfLeft = this.utfLead(byte);
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 0x75) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else {
+          lex = LEX_STRING;
+        }
+      } else {
+        hexLeft -= 1;
+        if (hexLeft === 0) lex = LEX_STRING;
+      }
     }
-    skipping.escaped = escaped;
-    return -1;
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = runStart;
+    return index;
+  }
+
+  /**
+   * How many continuation bytes follow a lead byte (0 for a byte that cannot lead), setting the range the first one may be in.
+   */
+  private utfLead(byte: number): number {
+    this.utfLow = 0x80;
+    this.utfHigh = 0xbf;
+    if (byte >= 0xc2 && byte <= 0xdf) return 1;
+    if (byte >= 0xe0 && byte <= 0xef) {
+      if (byte === 0xe0) this.utfLow = 0xa0;
+      else if (byte === 0xed) this.utfHigh = 0x9f;
+      return 2;
+    }
+    if (byte >= 0xf0 && byte <= 0xf4) {
+      if (byte === 0xf0) this.utfLow = 0x90;
+      else if (byte === 0xf4) this.utfHigh = 0x8f;
+      return 3;
+    }
+    return 0;
+  }
+
+  /**
+   * Reads past the rest of a text that is being skipped, checking every byte as the tokenizer would (escapes,
+   * control characters) and for well-formed UTF-8, holding none of it. Stops at the closing quote (`STOP_CLOSED`,
+   * its index returned), at the end of `data`, or at a byte the text may not contain.
+   */
+  private skipScan(data: Uint8Array, from: number, to: number): number {
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let index = from;
+    this.stop = STOP_END;
+    for (; index < to; index += 1) {
+      const byte = data[index]!;
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 0x80;
+        this.utfHigh = 0xbf;
+        continue;
+      }
+      if (lex === LEX_STRING) {
+        if (byte === 0x22) {
+          lex = LEX_OUT;
+          this.stop = STOP_CLOSED;
+          break;
+        }
+        if (byte === 0x5c) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 0x20) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 0x80) {
+          utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 0x75) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else if (isEscapeByte(byte)) {
+          lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
+        }
+      } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        hexLeft -= 1;
+        if (hexLeft === 0) lex = LEX_STRING;
+      }
+    }
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = -1;
+    return index;
   }
 
   private finish(): void {
-    if (this.head) {
-      // Fewer than three bytes in all: a document still, such as an empty list.
-      const head = this.head;
-      this.head = undefined;
-      this.started = true;
-      this.push(head, 0);
-    }
-    if (this.skipping || this.openToken?.type === TokenType.STRING) {
-      throw new JsonStreamError('truncated', 'This file ends inside a piece of text.');
-    }
-    if (this.tokenizer) {
-      try {
-        this.tokenizer.end();
-      } catch (error) {
-        throw this.failure ?? (error instanceof JsonStreamError ? error : invalid());
+    try {
+      if (this.lex !== LEX_OUT || this.skipping) {
+        throw new JsonStreamError('truncated', 'This file ends inside a piece of text.');
       }
-      if (this.failure) throw this.failure;
+      if (this.tokenizer) {
+        try {
+          this.tokenizer.end();
+        } catch (error) {
+          throw this.failure ?? (error instanceof JsonStreamError ? error : invalid());
+        }
+        if (this.failure) throw this.failure;
+      }
+      if (this.capture || this.pending || this.levels.length > 0 || this.phase === 'first' || this.phase === 'next'
+        || this.phase === 'colon' || this.phase === 'value') {
+        throw new JsonStreamError('truncated', 'This file ends before its last item does.');
+      }
+      if (this.phase === 'root') throw new JsonStreamError('empty', 'This file holds no JSON.');
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
     }
-    if (this.capture || this.pending || this.levels.length > 0 || this.phase === 'first' || this.phase === 'next'
-      || this.phase === 'colon' || this.phase === 'value') {
-      throw new JsonStreamError('truncated', 'This file ends before its last item does.');
-    }
-    if (this.phase === 'root') throw new JsonStreamError('empty', 'This file holds no JSON.');
   }
 
   // --- Tokens to items ----------------------------------------------------------
@@ -633,8 +877,10 @@ export class JsonStreamReader {
 
   private captureToken(capture: Capture, type: number, value: unknown, start: number): void {
     if (!capture.oversize && (type === OVERSIZE || start - capture.start > this.maxItemBytes)) {
+      // The item is not built any more, but its grammar is still checked to the end.
       capture.oversize = true;
-      capture.build = undefined;
+      capture.result = undefined;
+      for (const level of capture.build) level.value = undefined;
     }
     if (type === TokenType.LEFT_BRACE || type === TokenType.LEFT_BRACKET) {
       capture.depth += 1;
@@ -643,7 +889,7 @@ export class JsonStreamReader {
       capture.depth -= 1;
       if (capture.depth < 0) throw invalid();
     }
-    if (capture.build) this.build(capture, capture.build, type, value);
+    this.build(capture, capture.build, type, value);
     if (capture.depth === 0) {
       this.capture = undefined;
       this.pending = capture;
@@ -657,11 +903,13 @@ export class JsonStreamReader {
     const place = (placed: unknown): void => {
       const parent = stack[stack.length - 1];
       if (!parent) {
-        capture.result = placed;
+        capture.result = capture.oversize ? undefined : placed;
         return;
       }
-      if (parent.kind === 'array') (parent.value as unknown[]).push(placed);
-      else setOwn(parent.value, parent.key!, placed);
+      if (!capture.oversize) {
+        if (parent.kind === 'array') (parent.value as unknown[]).push(placed);
+        else setOwn(parent.value as object, parent.key!, placed);
+      }
       parent.phase = 'after';
     };
     switch (role) {
@@ -689,7 +937,7 @@ export class JsonStreamReader {
             kind: type === TokenType.LEFT_BRACE ? 'object' : 'array',
             phase: 'first',
             key: undefined,
-            value: type === TokenType.LEFT_BRACE ? {} : [],
+            value: capture.oversize ? undefined : type === TokenType.LEFT_BRACE ? {} : [],
           });
         } else {
           place(value);
@@ -724,14 +972,4 @@ function concat(first: Uint8Array, second: Uint8Array): Uint8Array {
   out.set(first);
   out.set(second, first.length);
   return out;
-}
-
-/**
- * Whether the bytes so far end in an unfinished backslash escape: 1 if so, else 0.
- */
-function trailingBackslashParity(data: Uint8Array, carried: number): number {
-  let index = data.length;
-  while (index > 0 && data[index - 1] === 0x5c) index -= 1;
-  const run = data.length - index;
-  return index === 0 ? (carried + run) % 2 : run % 2;
 }

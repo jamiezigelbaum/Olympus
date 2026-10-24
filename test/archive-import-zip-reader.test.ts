@@ -1,13 +1,17 @@
 import { describe, expect, test } from 'bun:test';
+import { deflateRawSync } from 'node:zlib';
+import { Inflate } from 'fflate/browser';
 import { ArchiveImportStoppedError } from '../src/core/archive-formats.ts';
 import { ScopeSafeError } from '../src/core/scope-safe-fs.ts';
 import { crc32Update, crc32UpdateByTable, fileByteSource } from '../src/workers/archive-import/byte-source.ts';
 import {
+  ZIP_COMPRESSED_BLOCK_BYTES,
   ZIP_READ_CHUNK_BYTES,
   ZipArchive,
   ZipFormatError,
   ZipMemberError,
   ZipMemberReader,
+  inflaterProgress,
   readZipMemberHead,
   stoppableZipSource,
   zipFindingOffset,
@@ -227,16 +231,13 @@ describe('reading members', () => {
     expect(total).toBe(size);
     expect(largest).toBeLessThan(size / 2);
     expect(member.end).toEqual({ bytes: size, sizeOk: true, crcOk: true });
-  });
+    // About 2.4 s alone; the shared build machine under load needs more than the default 5 s.
+  }, 30_000);
 
   test('a member that is shorter than the directory says is a size mismatch, not a crash', () => {
     const data = new TextEncoder().encode('0123456789'.repeat(20));
-    const bytes = buildZip([{ name: 'short.txt', data, method: 'deflate' }]);
-    const reader = memoryRangeReader(bytes);
-    const archive = ZipArchive.open(reader);
-    const entry = entryNamed(archive, 'short.txt');
-    const lying = { ...entry, uncompressedSize: data.length + 50 };
-    const member = ZipMemberReader.open(archive, lying);
+    const { archive } = open([{ name: 'short.txt', data, method: 'deflate', declaredSize: data.length + 50 }]);
+    const member = ZipMemberReader.open(archive, entryNamed(archive, 'short.txt'));
     drain(member);
     expect(member.end?.sizeOk).toBe(false);
   });
@@ -376,6 +377,274 @@ describe('reading members', () => {
     expect(head('empty.txt', 25)).toBe('');
     expect(head('odd.txt', 25)).toBeUndefined();
     expect(head('dir/', 25)).toBe('');
+  });
+});
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+function openError(archive: ZipArchive, name: string): ZipMemberError {
+  try {
+    ZipMemberReader.open(archive, entryNamed(archive, name)).close();
+  } catch (error) {
+    if (error instanceof ZipMemberError) return error;
+    throw error;
+  }
+  throw new Error(`${name} opened`);
+}
+
+/** The same zip with its directory records in another order (the members stay where they are). */
+function reorderDirectory(bytes: Uint8Array, order: readonly number[]): Uint8Array {
+  const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const endAt = bytes.length - 22;
+  const count = data.getUint16(endAt + 10, true);
+  const size = data.getUint32(endAt + 12, true);
+  const offset = data.getUint32(endAt + 16, true);
+  const records: Uint8Array[] = [];
+  for (let at = offset, index = 0; index < count; index += 1) {
+    const total = 46 + data.getUint16(at + 28, true) + data.getUint16(at + 30, true) + data.getUint16(at + 32, true);
+    records.push(bytes.slice(at, at + total));
+    at += total;
+  }
+  const out = bytes.slice();
+  let at = offset;
+  for (const index of order) {
+    out.set(records[index]!, at);
+    at += records[index]!.length;
+  }
+  expect(at).toBe(offset + size);
+  return out;
+}
+
+describe('a member whose stream and size disagree', () => {
+  test('padding after the end of the stream is refused at once, without reading it all', () => {
+    const data = new TextEncoder().encode('tiny');
+    const padding = new Uint8Array(3 * 1024 * 1024);
+    const { archive, reads } = open([{ name: 'm.txt', data, method: 'deflate', rawCompressed: concat(new Uint8Array(deflateRawSync(data)), padding) }]);
+    const entry = entryNamed(archive, 'm.txt');
+    const start = archive.dataStart(entry);
+    reads.length = 0;
+    const member = ZipMemberReader.open(archive, entry);
+    let error: unknown;
+    try {
+      drain(member);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ZipMemberError);
+    expect((error as ZipMemberError).code).toBe('damaged');
+    // The same error every time after, and no bytes handed out late.
+    expect(() => member.next()).toThrow(error as Error);
+    const inMember = reads.filter((read) => read.offset >= start && read.offset < start + entry.compressedSize);
+    expect(inMember.reduce((sum, read) => sum + read.length, 0)).toBeLessThanOrEqual(ZIP_COMPRESSED_BLOCK_BYTES);
+    // The probe's head read stops there too and gives nothing for it.
+    reads.length = 0;
+    expect(readZipMemberHead(archive, entry, 4096)).toBeUndefined();
+    expect(reads.filter((read) => read.offset >= start && read.offset < start + entry.compressedSize)
+      .reduce((sum, read) => sum + read.length, 0)).toBeLessThanOrEqual(ZIP_COMPRESSED_BLOCK_BYTES);
+  });
+
+  test('even a few bytes after the end of the stream make the member damaged', () => {
+    const data = new TextEncoder().encode('a short member '.repeat(40));
+    for (const extra of [1, 3, 17]) {
+      const { archive } = open([{ name: 'm.txt', data, method: 'deflate', rawCompressed: concat(new Uint8Array(deflateRawSync(data)), new Uint8Array(extra)) }]);
+      expect(() => drain(ZipMemberReader.open(archive, entryNamed(archive, 'm.txt')))).toThrow(ZipMemberError);
+    }
+    // The exact stream is fine.
+    const { archive } = open([{ name: 'm.txt', data, method: 'deflate' }]);
+    expect(drain(ZipMemberReader.open(archive, entryNamed(archive, 'm.txt'))).bytes).toEqual(data);
+  });
+
+  test('a stream that runs past the size the zip gives it is damaged', () => {
+    const data = sample(20_000, 31);
+    const whole = new Uint8Array(deflateRawSync(data));
+    const { archive } = open([{ name: 'm.bin', data, method: 'deflate', rawCompressed: whole, declaredCompressedSize: whole.length - 40 }]);
+    expect(() => drain(ZipMemberReader.open(archive, entryNamed(archive, 'm.bin')))).toThrow(ZipMemberError);
+  });
+
+  test('the inflater state read for this is pinned to what fflate does with real streams', () => {
+    const cases = [
+      new TextEncoder().encode('x'),
+      new TextEncoder().encode('fixed codes, ending inside a byte '.repeat(3)),
+      sample(70_000, 5),
+    ];
+    for (const data of cases) {
+      for (const stored of [false, true]) {
+        const stream = stored
+          ? new Uint8Array(deflateRawSync(data, { level: 0 }))
+          : new Uint8Array(deflateRawSync(data));
+        const inflate = new Inflate(() => undefined);
+        // Pushed in pieces: it ends exactly when the last byte of the stream is in.
+        let at = 0;
+        let ended = false;
+        while (at < stream.length) {
+          const piece = stream.subarray(at, Math.min(stream.length, at + 1000));
+          inflate.push(piece, false);
+          at += piece.length;
+          const progress = inflaterProgress(inflate);
+          ended = progress.ended;
+          if (at < stream.length) expect(progress.ended).toBe(false);
+          else expect(progress).toEqual({ ended: true, unconsumed: 0 });
+        }
+        expect(ended).toBe(true);
+        // Extra bytes pushed in the same call that ends the stream are counted as unused.
+        for (const extra of [1, 5, 40]) {
+          const again = new Inflate(() => undefined);
+          again.push(concat(stream, new Uint8Array(extra)), false);
+          expect(inflaterProgress(again)).toEqual({ ended: true, unconsumed: extra });
+        }
+      }
+    }
+    expect(() => inflaterProgress({} as unknown as Inflate)).toThrow('does not expose');
+  });
+});
+
+describe('members of no bytes', () => {
+  test('a deflated member that claims to be empty but holds a stream is not read as empty', () => {
+    const data = new TextEncoder().encode('there is content here, whatever the directory says');
+    const { archive } = open([{ name: 'm.txt', data, method: 'deflate', declaredSize: 0, badCrc: 0 }]);
+    const member = ZipMemberReader.open(archive, entryNamed(archive, 'm.txt'));
+    drain(member);
+    expect(member.end?.sizeOk).toBe(false);
+    expect(member.end?.crcOk).toBe(false);
+    expect(readZipMemberHead(archive, entryNamed(archive, 'm.txt'), 100)).toEqual(data);
+  });
+
+  test('padding after an empty stream is damage, like any other', () => {
+    const { archive } = open([{ name: 'm.txt', data: '', method: 'deflate', rawCompressed: Uint8Array.of(3, 0, 0, 0) }]);
+    expect(() => drain(ZipMemberReader.open(archive, entryNamed(archive, 'm.txt')))).toThrow(ZipMemberError);
+    expect(readZipMemberHead(archive, entryNamed(archive, 'm.txt'), 100)).toBeUndefined();
+  });
+
+  test('a real empty member still reads: stored, an empty deflate stream, and no stream at all', () => {
+    const { archive } = open([
+      { name: 'stored.txt', data: '' },
+      { name: 'stream.txt', data: '', method: 'deflate' },
+      { name: 'handwritten.txt', data: '', method: 'deflate', rawCompressed: Uint8Array.of(3, 0) },
+      { name: 'nothing.txt', data: '', method: 'deflate', rawCompressed: new Uint8Array(0) },
+      { name: 'folder/' },
+    ]);
+    for (const name of ['stored.txt', 'stream.txt', 'handwritten.txt', 'nothing.txt']) {
+      const member = ZipMemberReader.open(archive, entryNamed(archive, name));
+      expect(drain(member).bytes.length).toBe(0);
+      expect(member.end).toEqual({ bytes: 0, sizeOk: true, crcOk: true });
+      expect(readZipMemberHead(archive, entryNamed(archive, name), 100)).toEqual(new Uint8Array(0));
+    }
+    expect(readZipMemberHead(archive, entryNamed(archive, 'folder/'), 100)).toEqual(new Uint8Array(0));
+  });
+
+  test('an empty member still has its own header checked', () => {
+    const { archive } = open([
+      { name: 'where.txt', data: '', directoryOffset: 3 },
+      { name: 'name.txt', data: '', localHeader: { name: 'other.txt' } },
+      { name: 'method.txt', data: '', localHeader: { methodNumber: 8 } },
+      { name: 'fine.txt', data: '' },
+      { name: 'deflated.txt', data: '', method: 'deflate', directoryOffset: 5 },
+    ]);
+    for (const name of ['where.txt', 'name.txt', 'method.txt', 'deflated.txt']) {
+      expect(openError(archive, name).code).toBe('damaged');
+      expect(readZipMemberHead(archive, entryNamed(archive, name), 100)).toBeUndefined();
+    }
+    expect(drain(ZipMemberReader.open(archive, entryNamed(archive, 'fine.txt'))).bytes.length).toBe(0);
+  });
+});
+
+describe('a member and the directory must agree', () => {
+  test('method, encryption, name, checksum and sizes each make a disagreeing member damaged', () => {
+    const text = 'agree with the directory '.repeat(8);
+    const { archive } = open([
+      { name: 'ok.txt', data: text },
+      { name: 'method.txt', data: text, localHeader: { methodNumber: 8 } },
+      { name: 'flag.txt', data: text, localHeader: { encrypted: true } },
+      { name: 'name.txt', data: text, localHeader: { name: 'nome.txt' } },
+      { name: 'long-name.txt', data: text, localHeader: { name: 'long-name.txt.more' } },
+      { name: 'crc.txt', data: text, localHeader: { crc: 12345 } },
+      { name: 'csize.txt', data: text, localHeader: { compressedSize: 5 } },
+      { name: 'usize.txt', data: text, localHeader: { uncompressedSize: 5 } },
+    ]);
+    expect(new TextDecoder().decode(drain(ZipMemberReader.open(archive, entryNamed(archive, 'ok.txt'))).bytes)).toBe(text);
+    for (const name of ['method.txt', 'flag.txt', 'name.txt', 'long-name.txt', 'crc.txt', 'csize.txt', 'usize.txt']) {
+      const error = openError(archive, name);
+      expect(error.code).toBe('damaged');
+      expect(error.memberName).toBe(name);
+    }
+  });
+
+  test('sizes after the data (a descriptor) and zip64 placeholders in the header are not disagreements', () => {
+    const { archive } = open([
+      { name: 'desc.txt', data: 'with a descriptor', descriptor: true },
+      { name: 'big.txt', data: 'zip64 member', zip64: true },
+      { name: 'big-desc.txt', data: 'zip64 with descriptor', zip64: true, descriptor: true, method: 'deflate' },
+    ]);
+    for (const name of ['desc.txt', 'big.txt', 'big-desc.txt']) {
+      expect(drain(ZipMemberReader.open(archive, entryNamed(archive, name))).bytes.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('members that share bytes are damaged, in file order or not', () => {
+    const same = [
+      { name: 'a.txt', data: 'first member' },
+      { name: 'a.txt', data: 'first member', directoryOffset: 0 },
+      { name: 'z.txt', data: 'a third that stands alone' },
+    ];
+    const { archive } = open(same);
+    expect(new TextDecoder().decode(drain(ZipMemberReader.open(archive, entryNamed(archive, 'z.txt'))).bytes)).toBe('a third that stands alone');
+    for (const index of [0, 1]) {
+      const error = (() => {
+        try {
+          ZipMemberReader.open(archive, archive.entryAt(index)!);
+        } catch (caught) {
+          return caught as ZipMemberError;
+        }
+        return undefined;
+      })();
+      expect(error?.code).toBe('damaged');
+      expect(error?.message).toContain('share bytes');
+    }
+    // The same zip with its directory shuffled still finds them, and the lone member reads.
+    const shuffled = ZipArchive.open(memoryRangeReader(reorderDirectory(buildZip(same), [2, 1, 0])));
+    expect(shuffled.entryAt(0)!.name).toBe('z.txt');
+    expect(drain(ZipMemberReader.open(shuffled, shuffled.entryAt(0)!)).bytes.length).toBeGreaterThan(0);
+    expect(() => ZipMemberReader.open(shuffled, shuffled.entryAt(1)!)).toThrow(ZipMemberError);
+    expect(() => ZipMemberReader.open(shuffled, shuffled.entryAt(2)!)).toThrow(ZipMemberError);
+  });
+
+  test('a member that claims bytes belonging to the next one, or to the directory, is damaged', () => {
+    const { archive } = open([
+      { name: 'a.bin', data: sample(10, 1), declaredSize: 200, declaredCompressedSize: 200 },
+      { name: 'b.bin', data: sample(500, 2) },
+      { name: 'c.bin', data: sample(10, 3), declaredSize: 100_000, declaredCompressedSize: 100_000 },
+    ]);
+    expect(openError(archive, 'a.bin').message).toContain('share bytes');
+    expect(openError(archive, 'b.bin').message).toContain('share bytes');
+    expect(openError(archive, 'c.bin').code).toBe('damaged');
+  });
+
+  test('a directory in another order than the file, with nothing wrong, reads every member', () => {
+    const entries = Array.from({ length: 3000 }, (_, index) => ({ name: `m${index}.txt`, data: `member ${index}` }));
+    const order = entries.map((_, index) => index).reverse();
+    const archive = ZipArchive.open(memoryRangeReader(reorderDirectory(buildZip(entries), order)));
+    for (const index of [0, 1, 1500, 2999]) {
+      const entry = archive.entryAt(index)!;
+      expect(entry.name).toBe(`m${2999 - index}.txt`);
+      expect(new TextDecoder().decode(drain(ZipMemberReader.open(archive, entry)).bytes)).toBe(`member ${2999 - index}`);
+    }
+  });
+
+  test('a directory that claims more entries than it has room for is damaged when the zip is opened', () => {
+    const bytes = buildZip([{ name: 'a.txt', data: 'a' }]);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const endAt = bytes.length - 22;
+    view.setUint16(endAt + 8, 60_000, true);
+    view.setUint16(endAt + 10, 60_000, true);
+    expect(() => ZipArchive.open(memoryRangeReader(bytes))).toThrow(ZipFormatError);
   });
 });
 
