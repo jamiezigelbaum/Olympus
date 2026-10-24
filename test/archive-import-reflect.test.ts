@@ -130,7 +130,7 @@ describe('which files are Reflect exports', () => {
       expect(formatOf(detectFile('Reflect export.zip', reflectJsonZip(json, { method })))).toBe('reflect-json');
     }
     const junk = [
-      { name: '__MACOSX/', data: undefined },
+      { name: '__MACOSX/' },
       { name: '__MACOSX/._reflect-export.json', data: 'not json' },
       { name: '.DS_Store', data: 'x' },
     ];
@@ -513,7 +513,7 @@ describe('the Reflect JSON connector', () => {
 
   test('a zip\'s other files are counted, its macOS metadata is not, and JSON members are read in order', async () => {
     const zip = buildZip([
-      { name: 'images/', data: undefined },
+      { name: 'images/' },
       { name: 'images/a.png', data: 'png a' },
       { name: 'images/b.png', data: 'png b' },
       { name: '__MACOSX/._first.json', data: 'junk' },

@@ -23,7 +23,7 @@ import {
   type ArchiveDetection,
 } from '../src/core/archive-formats.ts';
 import { remoteOperationOutput } from '../src/core/remote-result.ts';
-import type { SourceIndexAnswerResult } from '../src/core/source-index/types.ts';
+import type { SourceIndexAnswerResult } from '../src/workers/source-index/answer-types.ts';
 import { createSourceCorpusRegistry } from '../src/core/source-corpus-registry.ts';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveContinuations } from '../src/workers/archive-import/continuation-cache.ts';
@@ -102,7 +102,7 @@ describe('which files are Roam exports', () => {
       expect(formatOf(detectFile('Roam-Export-1700000000000.zip', roamJsonZip(json, { method })))).toBe('roam-json');
     }
     const junk = [
-      { name: '__MACOSX/', data: undefined },
+      { name: '__MACOSX/' },
       { name: '__MACOSX/._roam-export.json', data: 'not json' },
       { name: '.DS_Store', data: 'x' },
     ];
@@ -422,7 +422,7 @@ describe('the Roam connector', () => {
 
   test('a zip\'s other files are counted, its macOS metadata is not, and JSON members are read in order', async () => {
     const zip = buildZip([
-      { name: 'assets/', data: undefined },
+      { name: 'assets/' },
       { name: 'assets/a.png', data: 'png a' },
       { name: '__MACOSX/._first.json', data: 'junk' },
       { name: 'first.json', data: roamJson(roamPages(2, 'first')), method: 'deflate' },
