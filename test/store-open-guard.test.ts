@@ -11,6 +11,7 @@ import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
+import { FORGET_STEPS, KEPT_SHARED_FILES, type ForgetStep, type KeptSharedFile } from '../src/core/source-forget-registry.ts';
 
 const ROOT = join(import.meta.dir, '..');
 
@@ -25,16 +26,6 @@ const ALLOWED: Record<string, string> = {
   'src/workers/classification/sniffer-store.ts': 'the sniffer store class opening its own database',
   'src/core/file-lease.ts': 'the lock databases themselves',
   'src/workers/apple-messages/connector.ts': 'reads the macOS Messages chat.db, never an Olympus store',
-  // Shared files: no account's store; their forget steps come in step 3.
-  'src/core/source-watch.ts': 'the shared source-watches database',
-  'src/core/waiting-private-questions.ts': 'the shared waiting private questions database',
-  'src/core/remote-connections.ts': 'the shared remote-connections database',
-  'src/workers/source-dashboard.ts': 'the shared dashboard history database',
-  'src/workers/source-ingestion-ledger.ts': 'the shared dashboard database the ingestion ledger reads and writes',
-  'src/workers/source-scheduler-state.ts': 'the shared scheduler database',
-  'src/workers/file-extraction/job-store.ts': 'the shared extraction job ledger',
-  'src/workers/file-extraction/job-names.ts': 'the shared extraction job ledger, opened to clear or restore captured names',
-  'src/workers/google-connectors/request-budget.ts': 'the shared Google request-budget ledger',
   // X's per-account state outside the stores.
   'src/workers/x-bookmarks/live-control.ts':
     'X\'s API usage ledger: per-account state, not a tier store; it joins the service when it moves into the account folder (step 4)',
@@ -71,6 +62,23 @@ const ALLOWED: Record<string, string> = {
     'an operator tool on the --db and --session-db its command line names; holds the owner lock for its run',
 };
 
+// The shared SQLite files, outside any account's store. Each module here must
+// own a forget step (FORGET_STEPS) or a kept entry (KEPT_SHARED_FILES) in
+// core/source-forget-registry.ts, and each module a step or entry names must
+// be here: a shared file's rows are forgotten with their source, or the file
+// is declared to hold none. The list only shrinks, like the one above.
+const SHARED_FILES: Record<string, string> = {
+  'src/core/source-watch.ts': 'the shared source-watches database',
+  'src/core/waiting-private-questions.ts': 'the shared waiting private questions database',
+  'src/core/remote-connections.ts': 'the shared remote-connections database',
+  'src/workers/source-dashboard.ts': 'the shared dashboard history database',
+  'src/workers/source-ingestion-ledger.ts': 'the shared dashboard database the ingestion ledger reads and writes',
+  'src/workers/source-scheduler-state.ts': 'the shared scheduler database',
+  'src/workers/file-extraction/job-store.ts': 'the shared extraction job ledger',
+  'src/workers/file-extraction/job-names.ts': 'the shared extraction job ledger, opened to clear or restore captured names',
+  'src/workers/google-connectors/request-budget.ts': 'the shared Google request-budget ledger',
+};
+
 const GUARDED_CLASSES = ['LocalConnectorStore', 'TierLedger', 'SecretLocationsIndex', 'TierSnifferStore'];
 // `Database`, `DatabaseSync`, `BunDatabase`: any class named like a database.
 const guarded = (name: string) => GUARDED_CLASSES.includes(name) || /Database/.test(name);
@@ -105,6 +113,24 @@ function constructsStore(source: string): boolean {
   };
   visit(file);
   return found;
+}
+
+/**
+ * The two ways the shared-file list and the forget registry can disagree: a
+ * shared module that neither owns a step nor is kept (its rows would outlive a
+ * delete unnoticed), and a step or kept entry that names a module that is not a
+ * shared module (a stale claim about who opens the file).
+ */
+function sharedFileDisagreements(
+  shared: readonly string[],
+  steps: ReadonlyArray<Pick<ForgetStep, 'modules'>>,
+  kept: ReadonlyArray<Pick<KeptSharedFile, 'modules'>>,
+): { unregistered: string[]; unknown: string[] } {
+  const registered = new Set([...steps, ...kept].flatMap((entry) => entry.modules));
+  return {
+    unregistered: shared.filter((path) => !registered.has(path)).sort(),
+    unknown: [...registered].filter((path) => !shared.includes(path)).sort(),
+  };
 }
 
 function sourceFiles(dir: string): string[] {
@@ -156,8 +182,41 @@ describe('store open guard', () => {
       .filter((path) => constructsStore(readFileSync(path, 'utf8')))
       .map((path) => relative(ROOT, path))
       .sort();
-    const unexpected = matching.filter((path) => !(path in ALLOWED));
-    const stale = Object.keys(ALLOWED).filter((path) => !matching.includes(path));
+    const allowed = { ...ALLOWED, ...SHARED_FILES };
+    const unexpected = matching.filter((path) => !(path in allowed));
+    const stale = Object.keys(allowed).filter((path) => !matching.includes(path));
     expect({ unexpected, stale }, 'open stores through openConnectorStore() and its sidecar twins in core/source-storage.ts').toEqual({ unexpected: [], stale: [] });
+  });
+
+  test('every shared module owns a forget step or is declared to hold no per-source data', () => {
+    expect(sharedFileDisagreements(Object.keys(SHARED_FILES), FORGET_STEPS, KEPT_SHARED_FILES))
+      .toEqual({ unregistered: [], unknown: [] });
+  });
+
+  test('a shared module with neither a step nor a kept entry fails', () => {
+    expect(sharedFileDisagreements(
+      ['src/core/a.ts', 'src/core/b.ts', 'src/core/c.ts'],
+      [{ modules: ['src/core/a.ts'] }],
+      [{ modules: ['src/core/b.ts'] }],
+    )).toEqual({ unregistered: ['src/core/c.ts'], unknown: [] });
+  });
+
+  test('a step or kept entry naming a module that is not a shared module fails', () => {
+    expect(sharedFileDisagreements(
+      ['src/core/a.ts'],
+      [{ modules: ['src/core/a.ts', 'src/core/gone.ts'] }],
+      [{ modules: ['src/core/also-gone.ts'] }],
+    )).toEqual({ unregistered: [], unknown: ['src/core/also-gone.ts', 'src/core/gone.ts'] });
+  });
+
+  test('a step and a kept entry never claim the same file', () => {
+    const claimed = [...FORGET_STEPS, ...KEPT_SHARED_FILES].flatMap((entry) => entry.modules);
+    expect(claimed.filter((path, index) => claimed.indexOf(path) !== index)).toEqual([]);
+  });
+
+  test('step ids are unique and every kept entry says why', () => {
+    const ids = FORGET_STEPS.map((step) => step.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const entry of KEPT_SHARED_FILES) expect(entry.reason.trim().length, entry.file).toBeGreaterThan(20);
   });
 });

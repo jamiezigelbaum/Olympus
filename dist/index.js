@@ -5091,6 +5091,54 @@ var init_operation_caller = __esm(() => {
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
+// src/core/source-watch.ts
+function sourceWatchAuthenticatedRouteHeaders(route) {
+  const headers = new Headers({
+    [SOURCE_WATCH_OWNER_HEADER]: route.ownerId,
+    [SOURCE_WATCH_ROUTE_KIND_HEADER]: route.routeKind,
+    [SOURCE_WATCH_ROUTE_TARGET_HEADER]: route.routeTargetId
+  });
+  if (route.routeAccountId)
+    headers.set(SOURCE_WATCH_ROUTE_ACCOUNT_HEADER, route.routeAccountId);
+  return headers;
+}
+var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
+var init_source_watch = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+  SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
+  SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
+  MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
+  MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
+  MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
+  OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
+  CREATE_WATCH_FIELDS = new Set([
+    "watchId",
+    "corpusId",
+    "queryText",
+    "mode",
+    "expiresAt",
+    "maxDeliveryAttempts"
+  ]);
+  CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
+  WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
+  OUTBOX_STATUS_VALUES = new Set([
+    "pending",
+    "leased",
+    "retry",
+    "delivered",
+    "dead_letter",
+    "cancelled"
+  ]);
+  ownedContexts = new WeakSet;
+  executorCapabilities = new WeakSet;
+  SYSTEM_CLOCK = Object.freeze({
+    now: () => new Date
+  });
+});
+
 // connect-relay/shared/directory-tools.ts
 var DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
 var init_directory_tools = __esm(() => {
@@ -12986,6 +13034,29 @@ var init_unpaired_sources = __esm(() => {
   UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
 });
 
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+});
+
+// src/core/source-account-binding.ts
+var ACCOUNT_BOUND_SOURCE_IDS;
+var init_source_account_binding = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_provider_account_identity();
+  ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
+});
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -18623,9 +18694,6 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  return olympusDataPath(env, "source-dashboard.sqlite");
-}
 var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
@@ -18819,6 +18887,88 @@ var init_remote_connections = __esm(() => {
   init_tokens();
   init_linux_engine_layout();
   init_olympus_layout();
+});
+
+// src/core/ingestion-health-state.ts
+import { existsSync as existsSync17, mkdirSync as mkdirSync15, readFileSync as readFileSync27, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname26 } from "node:path";
+function defaultIngestionHealthStatePath(env = process.env) {
+  return olympusDataPath(env, "source-ingestion-doctor-state.json");
+}
+function readIngestionHealthState(path) {
+  try {
+    if (!existsSync17(path))
+      return;
+    const parsed = JSON.parse(readFileSync27(path, "utf8"));
+    const record2 = asRecord16(parsed);
+    const sources = asRecord16(record2.sources);
+    const normalized = {};
+    for (const [sourceId, sourceValue] of Object.entries(sources)) {
+      const source = asRecord16(sourceValue);
+      const terminal = asRecord16(source.failed_terminal_by_class);
+      normalized[sourceId] = {
+        actionable_stuck: asCount(source.actionable_stuck),
+        failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
+      };
+    }
+    return {
+      generated_at: typeof record2.generated_at === "string" ? record2.generated_at : new Date(0).toISOString(),
+      sources: normalized
+    };
+  } catch {
+    return;
+  }
+}
+function writeIngestionHealthState(path, state) {
+  mkdirSync15(dirname26(path), { recursive: true, mode: 448 });
+  writeFileSync10(path, `${JSON.stringify(state, null, 2)}
+`);
+}
+function asRecord16(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function asCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+var init_ingestion_health_state = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/this-computer.ts
+var init_this_computer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_file_scope_sources();
+});
+
+// src/workers/source-scheduler-state.ts
+var init_source_scheduler_state = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+});
+
+// src/workers/classification/tier-migration-reports.ts
+var init_tier_migration_reports = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/source-forget-registry.ts
+var init_source_forget_registry = __esm(() => {
+  init_operation_error();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_watch();
+  init_ingestion_health_state();
+  init_source_scope_approval();
+  init_mail_source_scope();
+  init_source_account_binding();
+  init_this_computer();
+  init_source_dashboard();
+  init_source_scheduler_state();
+  init_job_names();
+  init_tier_migration_reports();
 });
 
 // src/workers/archive-import/state.ts
@@ -19817,6 +19967,8 @@ var init_data_lifecycle = __esm(() => {
   init_sqlite_migrations();
   init_remote_connections();
   init_waiting_private_questions();
+  init_source_forget_registry();
+  init_source_registry();
   init_source_ingestion_policy();
   init_dropbox_files();
   init_store();
@@ -22918,60 +23070,7 @@ init_http_timeout();
 init_operation_error();
 init_operation_caller();
 init_source_corpus_registry();
-
-// src/core/source-watch.ts
-init_olympus_layout();
-init_sqlite_migrations();
-var SOURCE_WATCH_MIN_LEASE_MS = 1000;
-var SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
-var SOURCE_WATCH_MIN_RETRY_MS = 1000;
-var SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
-var SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
-var SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
-var SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner";
-var SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind";
-var SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target";
-var SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account";
-var SOURCE_WATCH_MAX_QUERY_LENGTH = 4096;
-var MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
-var MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
-var MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
-var OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
-var CREATE_WATCH_FIELDS = new Set([
-  "watchId",
-  "corpusId",
-  "queryText",
-  "mode",
-  "expiresAt",
-  "maxDeliveryAttempts"
-]);
-var CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
-var WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
-var OUTBOX_STATUS_VALUES = new Set([
-  "pending",
-  "leased",
-  "retry",
-  "delivered",
-  "dead_letter",
-  "cancelled"
-]);
-var ownedContexts = new WeakSet;
-var executorCapabilities = new WeakSet;
-function sourceWatchAuthenticatedRouteHeaders(route) {
-  const headers = new Headers({
-    [SOURCE_WATCH_OWNER_HEADER]: route.ownerId,
-    [SOURCE_WATCH_ROUTE_KIND_HEADER]: route.routeKind,
-    [SOURCE_WATCH_ROUTE_TARGET_HEADER]: route.routeTargetId
-  });
-  if (route.routeAccountId)
-    headers.set(SOURCE_WATCH_ROUTE_ACCOUNT_HEADER, route.routeAccountId);
-  return headers;
-}
-var SYSTEM_CLOCK = Object.freeze({
-  now: () => new Date
-});
-
-// src/core/email.ts
+init_source_watch();
 init_worker_auth();
 var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512;
 var MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
@@ -25607,6 +25706,7 @@ function relayConfigRecord(value) {
 }
 
 // src/workers/source-watch-runtime.ts
+init_source_watch();
 init_openclaw_executable();
 init_http_timeout();
 init_worker_auth();
@@ -25650,6 +25750,9 @@ function humanUtcMinute(value) {
   const iso = new Date(deliveryTimestamp(value)).toISOString();
   return `${iso.slice(0, 16).replace("T", " ")} UTC`;
 }
+
+// src/native-plugin.ts
+init_source_watch();
 
 // src/workers/http.ts
 import { createHmac as createHmac2, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
@@ -26143,8 +26246,8 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync18, mkdirSync as mkdirSync15, readFileSync as readFileSync28, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname27, join as join39 } from "node:path";
+import { existsSync as existsSync19, readFileSync as readFileSync29 } from "node:fs";
+import { join as join39 } from "node:path";
 import { homedir as homedir15 } from "node:os";
 init_openclaw_executable();
 init_worker_service();
@@ -26485,24 +26588,8 @@ init_publisher_oauth_client();
 init_connected_handles();
 init_unpaired_sources();
 init_credential_broker();
-
-// src/core/provider-account-identity.ts
-init_http_timeout();
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-  x: "https://api.x.com/2/users/me",
-  google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-};
-var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-
-// src/core/source-account-binding.ts
-init_atomic_file();
-init_file_lease();
-var ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
-
-// src/core/connect.ts
+init_provider_account_identity();
+init_source_account_binding();
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
 var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -26603,7 +26690,7 @@ function isPidAlive(pid) {
 
 // src/core/doctor.ts
 init_source_ingestion_ledger();
-init_source_dashboard();
+init_ingestion_health_state();
 init_ingestion_throughput();
 init_public_source_capabilities();
 init_source_corpus_registry();
@@ -26613,9 +26700,9 @@ init_consult_transport_zkapi();
 // src/core/consult-gate.ts
 init_owner_config_read();
 import { createHash as createHash11 } from "node:crypto";
-import { existsSync as existsSync17, readFileSync as readFileSync27, statSync as statSync18 } from "node:fs";
+import { existsSync as existsSync18, readFileSync as readFileSync28, statSync as statSync18 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
-import { basename as basename6, dirname as dirname26, join as join37 } from "node:path";
+import { basename as basename6, dirname as dirname27, join as join37 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 init_opsec();
 init_types();
@@ -26856,20 +26943,20 @@ function consultUserVocabularyDir(env = process.env) {
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync17(path))
+    if (!existsSync18(path))
       return "missing";
     if (statSync18(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
-    const gz = readFileSync27(path);
+    const gz = readFileSync28(path);
     return createHash11("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname26(fileURLToPath7(moduleUrl));
-  const root = basename6(here) === "core" && basename6(dirname26(here)) === "src" ? dirname26(dirname26(here)) : basename6(here) === "dist" ? dirname26(here) : undefined;
-  return root !== undefined && existsSync17(join37(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname27(fileURLToPath7(moduleUrl));
+  const root = basename6(here) === "core" && basename6(dirname27(here)) === "src" ? dirname27(dirname27(here)) : basename6(here) === "dist" ? dirname27(here) : undefined;
+  return root !== undefined && existsSync18(join37(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -26894,9 +26981,9 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join37(userDir, "manifest.json");
-    if (!existsSync17(path) || statSync18(path).size > 1024 * 1024)
+    if (!existsSync18(path) || statSync18(path).size > 1024 * 1024)
       return [];
-    const manifest = JSON.parse(readFileSync27(path, "utf8"));
+    const manifest = JSON.parse(readFileSync28(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
       return [];
     const packs = manifest.packs;
@@ -28326,7 +28413,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const home = env.HOME?.trim() || homedir15();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync18(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync19(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -28395,7 +28482,7 @@ async function photoSearchCheck(deps) {
 }
 function defaultOsRelease() {
   try {
-    return readFileSync28("/etc/os-release", "utf8");
+    return readFileSync29("/etc/os-release", "utf8");
   } catch {
     return;
   }
@@ -28431,7 +28518,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync18(configPath))
+  if (configPath === undefined || !existsSync19(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -28821,14 +28908,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord16(await response.json());
-    const readiness = asRecord16(body.credential_readiness);
-    const policy = asRecord16(readiness.policy);
+    const body = asRecord17(await response.json());
+    const readiness = asRecord17(body.credential_readiness);
+    const policy = asRecord17(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord16(entry);
+      const profile = asRecord17(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -28882,8 +28969,8 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord16(await response.json());
-  const bridge = asRecord16(health.desktop_bridge);
+  const health = asRecord17(await response.json());
+  const bridge = asRecord17(health.desktop_bridge);
   if ((deps.platform ?? process.platform) === "linux" && ["port_in_use", "unavailable"].includes(String(bridge.state))) {
     return {
       name,
@@ -28944,7 +29031,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -28953,7 +29040,7 @@ async function sourceIndexStatusCheck(deps) {
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   const migration = approvedTierMigrationInProgress(status.tier_migration, deps.now?.() ?? new Date, tierMigrationStoppedGraceDays(deps.env ?? process.env));
   for (const entry of corpora) {
-    const corpus = asRecord16(entry);
+    const corpus = asRecord17(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (ON_DEMAND_TIER_CORPUS_IDS.has(corpusId) && corpus.configured !== true)
       continue;
@@ -28969,16 +29056,16 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord16(corpus.counts);
-    const embeddingParity = asRecord16(corpus.embedding_parity);
+    const counts = asRecord17(corpus.counts);
+    const embeddingParity = asRecord17(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
-    const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
-    const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
+    const chunks = typeof embeddingParity.chunks === "number" ? asCount2(embeddingParity.chunks) : asCount2(counts.chunks);
+    const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount2(embeddingParity.embedded_chunks) : asCount2(counts.embedded_chunks);
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
-      const items = typeof counts.indexed_items === "number" ? `, ${asCount(counts.indexed_items)} items indexed` : "";
-      const backlog = asRecord16(embeddingParity.backlog_estimate);
-      const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === "number" && asCount(backlog.missing_chunks) > 0 ? `, ${asCount(backlog.missing_chunks)} chunks waiting ≈ ${asCount(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === "default_unverified" ? ", unverified list price" : ""})` : "";
+      const items = typeof counts.indexed_items === "number" ? `, ${asCount2(counts.indexed_items)} items indexed` : "";
+      const backlog = asRecord17(embeddingParity.backlog_estimate);
+      const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === "number" && asCount2(backlog.missing_chunks) > 0 ? `, ${asCount2(backlog.missing_chunks)} chunks waiting ≈ ${asCount2(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === "default_unverified" ? ", unverified list price" : ""})` : "";
       summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})${backlogEstimate}` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
@@ -29024,7 +29111,7 @@ function tierMigrationStoppedGraceDays(env) {
 }
 var DAY_MS2 = 24 * 60 * 60 * 1000;
 function approvedTierMigrationInProgress(value, now, graceDays) {
-  const migration = asRecord16(value);
+  const migration = asRecord17(value);
   if (migration.in_progress !== true)
     return;
   const state = typeof migration.state === "string" ? migration.state : "";
@@ -29035,9 +29122,9 @@ function approvedTierMigrationInProgress(value, now, graceDays) {
     return;
   const destinations = new Map;
   for (const entry of Array.isArray(migration.destinations) ? migration.destinations : []) {
-    const destination = asRecord16(entry);
+    const destination = asRecord17(entry);
     if (typeof destination.corpus_id === "string")
-      destinations.set(destination.corpus_id, asCount(destination.chunks_to_embed));
+      destinations.set(destination.corpus_id, asCount2(destination.chunks_to_embed));
   }
   if (state === "stopped") {
     const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
@@ -29086,7 +29173,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -29131,7 +29218,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -29143,9 +29230,9 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord16(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord16(corpus?.counts);
-    const actionable = asCount(counts.extraction_jobs_queued_actionable);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord17(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord17(corpus?.counts);
+    const actionable = asCount2(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
         name,
@@ -29201,12 +29288,12 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record2 = asRecord16(value);
+  const record2 = asRecord17(value);
   if (!("actionable_queued" in record2) || !("actionable_retryable_due" in record2))
     return;
   return {
-    actionable_queued: asCount(record2.actionable_queued),
-    actionable_retryable_due: asCount(record2.actionable_retryable_due),
+    actionable_queued: asCount2(record2.actionable_queued),
+    actionable_retryable_due: asCount2(record2.actionable_retryable_due),
     ...typeof record2.oldest_actionable_at === "string" ? { oldest_actionable_at: record2.oldest_actionable_at } : {},
     ...typeof record2.newest_terminal_progress_at === "string" ? { newest_terminal_progress_at: record2.newest_terminal_progress_at } : {}
   };
@@ -29214,7 +29301,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record2, options = {}) {
   const credentials = Array.isArray(record2.degraded_credentials) ? record2.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord16(entry);
+    const credential = asRecord17(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -29266,7 +29353,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -29294,7 +29381,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord16(entry);
+    const source = asRecord17(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -29303,16 +29390,16 @@ async function sourceSchedulerStatusCheck(deps) {
     if (source.stale_sync_anomaly === true)
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
-    if (tasks.some((taskEntry) => asRecord16(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
+    if (tasks.some((taskEntry) => asRecord17(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
       problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
     }
-    if (tasks.some((taskEntry) => asRecord16(taskEntry).degraded_reason === "embedding_items_failed")) {
+    if (tasks.some((taskEntry) => asRecord17(taskEntry).degraded_reason === "embedding_items_failed")) {
       problems.push(`${sourceId} has items whose embedding failed; they are skipped (keyword search still finds them) and the rest keep embedding`);
     }
     for (const taskEntry of tasks) {
-      const task = asRecord16(taskEntry);
+      const task = asRecord17(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
-      const failures = asCount(task.consecutive_failures);
+      const failures = asCount2(task.consecutive_failures);
       if (task.stale_anomaly === true) {
         problems.push(`${sourceId}/${taskId} is past its task freshness threshold`);
       }
@@ -29446,7 +29533,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord16(await response.json());
+    return asRecord17(await response.json());
   } catch {
     return;
   }
@@ -29456,7 +29543,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord16(await response.json());
+    const status = asRecord17(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -29465,7 +29552,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord16(status.ingestion_ledger);
+  const ledger = asRecord17(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -29473,7 +29560,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join39(dirname27(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return defaultIngestionHealthStatePath(deps.env);
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -29492,35 +29579,6 @@ function ingestionHealthStateFromLedger(ledger) {
   }
   return { generated_at: ledger.generated_at, sources };
 }
-function readIngestionHealthState(path) {
-  try {
-    if (!existsSync18(path))
-      return;
-    const parsed = JSON.parse(readFileSync28(path, "utf8"));
-    const record2 = asRecord16(parsed);
-    const sources = asRecord16(record2.sources);
-    const normalized = {};
-    for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord16(sourceValue);
-      const terminal = asRecord16(source.failed_terminal_by_class);
-      normalized[sourceId] = {
-        actionable_stuck: asCount(source.actionable_stuck),
-        failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
-      };
-    }
-    return {
-      generated_at: typeof record2.generated_at === "string" ? record2.generated_at : new Date(0).toISOString(),
-      sources: normalized
-    };
-  } catch {
-    return;
-  }
-}
-function writeIngestionHealthState(path, state) {
-  mkdirSync15(dirname27(path), { recursive: true, mode: 448 });
-  writeFileSync10(path, `${JSON.stringify(state, null, 2)}
-`);
-}
 function ingestionHealthHint(ledger) {
   const hints = ledger.rows.map((row) => row.ingestion_health.drain.hint).filter((value) => typeof value === "string" && value.trim().length > 0);
   return hints[0];
@@ -29530,9 +29588,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord16(await response.json());
+    const status = asRecord17(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord16(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord17(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -29679,7 +29737,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord16(corpus.last_refresh);
+  const lastRefresh = asRecord17(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -29694,14 +29752,14 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord16(corpus.last_refresh);
+  const lastRefresh = asRecord17(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord16(corpus.last_sync);
+  const lastSync = asRecord17(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord16(corpus.counts);
-  return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
+  const counts = asRecord17(corpus.counts);
+  return asCount2(counts.items_indexed) > 0 || asCount2(counts.messages_indexed) > 0 || asCount2(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
   return corpora;
@@ -29731,16 +29789,16 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync18(join39(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync19(join39(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync7(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord16(value) {
+function asRecord17(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asCount(value) {
+function asCount2(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 function errorDetail(error) {
@@ -29748,10 +29806,10 @@ function errorDetail(error) {
 }
 
 // src/core/ocr-readiness.ts
-import { existsSync as existsSync20, readFileSync as readFileSync29 } from "node:fs";
+import { existsSync as existsSync21, readFileSync as readFileSync30 } from "node:fs";
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync19 } from "node:fs";
+import { existsSync as existsSync20 } from "node:fs";
 import { dirname as dirname28, join as join40 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 
@@ -29792,7 +29850,7 @@ init_command_runner();
 var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js";
 var APPLE_VISION_OSASCRIPT = "/usr/bin/osascript";
 var OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync19) {
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync20) {
   let directory = dirname28(fileURLToPath8(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
@@ -30120,7 +30178,7 @@ function linuxFamilyFromOsRelease2(text2) {
 function readOsRelease() {
   for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
     try {
-      return readFileSync29(path, "utf8");
+      return readFileSync30(path, "utf8");
     } catch {}
   }
   return;
@@ -30140,7 +30198,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync20(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync21(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -31747,7 +31805,7 @@ async function handleRemoteAccessConfigRequest(input) {
         remote.enabled = enabled;
       }
     });
-    const followUp = asRecord17(asRecord17(result)?.followUp);
+    const followUp = asRecord18(asRecord18(result)?.followUp);
     return {
       status: 200,
       body: {
@@ -31762,8 +31820,8 @@ async function handleRemoteAccessConfigRequest(input) {
 }
 function currentEnabled(writer) {
   try {
-    const root = asRecord17(writer.current?.());
-    const remote = asRecord17(asRecord17(asRecord17(asRecord17(asRecord17(root?.plugins)?.entries)?.olympus)?.config)?.remote);
+    const root = asRecord18(writer.current?.());
+    const remote = asRecord18(asRecord18(asRecord18(asRecord18(asRecord18(root?.plugins)?.entries)?.olympus)?.config)?.remote);
     return typeof remote?.enabled === "boolean" ? remote.enabled : undefined;
   } catch {
     return;
@@ -31776,12 +31834,12 @@ function objectAt(parent, key) {
     parent[key] = created;
     return created;
   }
-  const record2 = asRecord17(existing);
+  const record2 = asRecord18(existing);
   if (!record2)
     throw new TypeError(`config ${key} is not an object`);
   return record2;
 }
-function asRecord17(value) {
+function asRecord18(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function failed(status, errorKind, message) {
@@ -31819,14 +31877,14 @@ function contentTextForOperation(operation, payload2) {
   return JSON.stringify(payload2, null, 2);
 }
 function archiveImportContentText(payload2) {
-  const result = asRecord18(payload2);
+  const result = asRecord19(payload2);
   if (!result || result.ok !== false || typeof result.message !== "string")
     return;
   if (result.code === "needs_approval") {
     const lines = ["Waiting for the user to approve on their computer: " + result.message];
     if (typeof result.request_id === "string")
       lines.push("request_id: " + result.request_id);
-    const open2 = asRecord18(result.open);
+    const open2 = asRecord19(result.open);
     if (open2 && typeof open2.url === "string")
       lines.push("Opens the Archives page: " + open2.url);
     return lines.join(`
@@ -31835,7 +31893,7 @@ function archiveImportContentText(payload2) {
   return "Not done: " + result.message;
 }
 function askAnonymouslyContentText(payload2) {
-  const result = asRecord18(payload2);
+  const result = asRecord19(payload2);
   if (!result || typeof result.ok !== "boolean")
     return;
   if (result.ok) {
@@ -31863,13 +31921,13 @@ function askAnonymouslyContentText(payload2) {
   return "Not answered: " + result.message;
 }
 function sourceAnswerContentText(payload2) {
-  const result = asRecord18(payload2);
+  const result = asRecord19(payload2);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord18(result.audit);
-  const policy = asRecord18(result.policy);
-  const synthesis = asRecord18(audit?.answer_synthesis);
-  const timings = asRecord18(audit?.phase_timings);
+  const audit = asRecord19(result.audit);
+  const policy = asRecord19(result.policy);
+  const synthesis = asRecord19(audit?.answer_synthesis);
+  const timings = asRecord19(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -31879,7 +31937,7 @@ function sourceAnswerContentText(payload2) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record2 = asRecord18(item);
+    const record2 = asRecord19(item);
     if (!record2)
       return;
     const label = firstString(record2.source_label, record2.title, record2.corpus_id, "source");
@@ -31890,7 +31948,7 @@ function sourceAnswerContentText(payload2) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord18(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord19(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -31942,7 +32000,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord18(value) {
+function asRecord19(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -32232,7 +32290,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord2(value, allowed) {
-  const record2 = asRecord18(value);
+  const record2 = asRecord19(value);
   if (!record2 || Object.keys(record2).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }
