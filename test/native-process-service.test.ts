@@ -58,7 +58,7 @@ interface Harness {
 
 type Launch = string | { command: string; args: string[] };
 
-function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { descendantSettleMs?: number } = {}): Harness {
+function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { descendantSettleMs?: number; restartDelaysMs?: readonly number[]; stableUptimeMs?: number } = {}): Harness {
   const directory = mkdtempSync(join(tmpdir(), 'olympus-native-restart-'));
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const readyPath = join(directory, 'ready');
@@ -75,7 +75,8 @@ function harness(scriptForLaunch: (launchIndex: number) => Launch, options: { de
     reload: { configPrefixes: [] },
     readinessPollMs: 10,
     stopGraceMs: 200,
-    restartDelaysMs: [20, 40],
+    restartDelaysMs: options.restartDelaysMs ?? [20, 40],
+    ...(options.stableUptimeMs === undefined ? {} : { stableUptimeMs: options.stableUptimeMs }),
     ...(options.descendantSettleMs === undefined ? {} : { descendantSettleMs: options.descendantSettleMs }),
     spawn: ((command: string, args: readonly string[], spawnOptions: object) => {
       const child = spawnProcess(command, args as string[], spawnOptions as Parameters<typeof spawnProcess>[2]);
@@ -533,5 +534,32 @@ test('stop() never reports success while the child took every signal but has not
     expect(run.stopped).toContain(child.pid);
   } finally {
     await run.finish();
+  }
+}, 15_000);
+
+test('a deliberate self-restart (exit 75) never climbs the crash backoff: a second one inside the stable uptime restarts at the first delay', async () => {
+  // Delete indexed data restarts the worker. Pressed within the stable uptime
+  // of an earlier restart it used to wait out the climbed delay (up to 30 s in
+  // production) while the row kept offering the delete.
+  const run = harness((launch) => (launch < 2 ? SELF_RESTART_75 : STAY_ALIVE), { restartDelaysMs: [20, 4_000], stableUptimeMs: 60_000 });
+  try {
+    const startedAt = Date.now();
+    await run.service.start(run.context);
+    await waitUntil(() => readyCount(run) === 3, 'the third child to become ready', 3_000);
+    expect(Date.now() - startedAt).toBeLessThan(3_000);
+  } finally {
+    await run.service.stop();
+  }
+}, 15_000);
+
+test('a crash still climbs the backoff inside the stable uptime', async () => {
+  const run = harness((launch) => (launch < 2 ? SIGTERM_UNHANDLED : STAY_ALIVE), { restartDelaysMs: [20, 600], stableUptimeMs: 60_000 });
+  try {
+    const startedAt = Date.now();
+    await run.service.start(run.context);
+    await waitUntil(() => readyCount(run) === 3, 'the third child to become ready', 5_000);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(600);
+  } finally {
+    await run.service.stop();
   }
 }, 15_000);

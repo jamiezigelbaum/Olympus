@@ -4,6 +4,12 @@ const DEFAULT_READINESS_POLL_MS = 100;
 const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [250, 1_000, 5_000, 15_000, 30_000] as const;
 /**
+ * The exit code of a child's deliberate self-restart (EX_TEMPFAIL): the worker
+ * reloads itself after a model-key change or a Delete indexed data. It is a
+ * request, not a crash, so it must not climb the crash backoff.
+ */
+const SELF_RESTART_EXIT_CODE = 75;
+/**
  * How long a group whose leader has exited may stay unsignalable (EPERM) after
  * the forced kill before the supervisor stops waiting for it. On macOS a
  * process group left holding only exiting or zombie members answers every
@@ -321,11 +327,15 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     }
   };
 
-  const scheduleRestart = (lifetime: ServiceLifetime<TSettings>): void => {
+  const scheduleRestart = (lifetime: ServiceLifetime<TSettings>, deliberate = false): void => {
     if (!isCurrent(lifetime) || lifetime.restartTimer) return;
-    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    // A deliberate self-restart restarts at the first delay and leaves the
+    // crash counter alone: a Delete indexed data pressed within the stable
+    // uptime of an earlier restart used to wait out a climbed backoff (up to
+    // 30 s) before the worker came back. A child that crashes still climbs.
+    const index = deliberate ? 0 : Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
     const delay = restartDelaysMs[index] ?? 30_000;
-    lifetime.restartAttempt += 1;
+    if (!deliberate) lifetime.restartAttempt += 1;
     lifetime.restartTimer = setTimeout(() => {
       lifetime.restartTimer = undefined;
       if (!isCurrent(lifetime)) return;
@@ -473,7 +483,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       ).then(() => {
         // The leader is gone, so nothing is left to keep custody of. A host
         // left alive with no child is the failure this must never produce.
-        scheduleRestart(lifetime);
+        scheduleRestart(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null);
       });
     });
 
