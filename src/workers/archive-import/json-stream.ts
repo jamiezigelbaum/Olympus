@@ -40,7 +40,9 @@
  */
 import Tokenizer from '@streamparser/json/tokenizer.js';
 import TokenType from '@streamparser/json/utils/types/tokenType.js';
+import { ArchiveImportStoppedError } from '../../core/archive-formats.ts';
 import type { ArchiveByteSource } from './byte-source.ts';
+import { archiveStopFromScopeError } from './stop-errors.ts';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonPathSegment = string | number;
@@ -972,4 +974,22 @@ function concat(first: Uint8Array, second: Uint8Array): Uint8Array {
   out.set(first);
   out.set(second, first.length);
   return out;
+}
+
+/**
+ * Any failure of this reader on one file of an archive, as the import
+ * stopping: a JSON stream that was told to go on from a place that is not in
+ * the file is the resume point not belonging to it. A JSON file that is
+ * damaged or cut short could not be read to the end, so it is the file that
+ * could not be read. A format that would rather report such a file as a gap
+ * and go on catches `JsonStreamError` first. Any other failure is a scope error
+ * from the range reader (`archiveStopFromScopeError`), or is returned as it is.
+ */
+export function archiveStopFromReaderError(error: unknown, relPath: string): unknown {
+  if (error instanceof JsonStreamError) {
+    return error.code === 'resume_invalid'
+      ? new ArchiveImportStoppedError('resume_point_invalid', 'Nothing starts where this import was to resume.', relPath)
+      : new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', relPath);
+  }
+  return archiveStopFromScopeError(error, relPath);
 }

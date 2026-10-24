@@ -3,13 +3,13 @@ import Tokenizer from '@streamparser/json/tokenizer.js';
 import { ArchiveImportStoppedError } from '../src/core/archive-formats.ts';
 import { ScopeSafeError } from '../src/core/scope-safe-fs.ts';
 import { fileByteSource, type ArchiveByteSource } from '../src/workers/archive-import/byte-source.ts';
-import { archiveStopFromReaderError } from '../src/workers/archive-import/stop-errors.ts';
 import {
   JSON_STREAM_FEED_SLICE_BYTES,
   JSON_STREAM_MAX_DEPTH,
   JSON_STREAM_MAX_QUEUED_EVENTS,
   JsonStreamError,
   JsonStreamReader,
+  archiveStopFromReaderError,
   parseJsonResume,
   serializeJsonResume,
   type JsonResumePoint,

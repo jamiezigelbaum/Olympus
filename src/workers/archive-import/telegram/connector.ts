@@ -55,12 +55,12 @@ import { fileByteSource } from '../byte-source.ts';
 import {
   JsonStreamError,
   JsonStreamReader,
+  archiveStopFromReaderError,
   parseJsonResume,
   serializeJsonResume,
   type JsonResumePoint,
   type JsonStreamEvent,
 } from '../json-stream.ts';
-import { archiveStopFromReaderError } from '../stop-errors.ts';
 import { telegramJsonSource } from './json-repair.ts';
 import { cutText, telegramMessageContent, telegramScalar, telegramTime } from './message.ts';
 
@@ -71,11 +71,6 @@ export const TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 export const TELEGRAM_MAX_ITEM_TEXT_CHARS = 1_000_000;
 /** A message whose JSON is longer than this is not built (it is counted as too large to read). */
 export const TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
-/**
- * Bytes read at a time. A file that stops being JSON part-way loses the
- * messages of the chunk it stops in, so the chunk is kept small.
- */
-export const TELEGRAM_READ_CHUNK_BYTES = 128 * 1024;
 
 export const TELEGRAM_FINDINGS = {
   tooLarge: 'message_too_large',
@@ -330,10 +325,11 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
           const origin = start.resume?.offset ?? 0;
           let json: JsonStreamReader;
           try {
-            json = new JsonStreamReader(
-              telegramJsonSource(fileByteSource(reader, { start: origin, chunkBytes: TELEGRAM_READ_CHUNK_BYTES })),
-              { itemPaths: ITEM_PATHS, maxItemBytes: TELEGRAM_MAX_MESSAGE_BYTES, ...(start.resume ? { resume: start.resume } : {}) },
-            );
+            json = new JsonStreamReader(telegramJsonSource(fileByteSource(reader, { start: origin })), {
+              itemPaths: ITEM_PATHS,
+              maxItemBytes: TELEGRAM_MAX_MESSAGE_BYTES,
+              ...(start.resume ? { resume: start.resume } : {}),
+            });
           } catch (error) {
             throw archiveStopFromReaderError(error, file.relPath);
           }
@@ -362,7 +358,7 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
               event = json.next();
             } catch (error) {
               if (!isDamage(error)) throw archiveStopFromReaderError(error, file.relPath);
-              // Where the file stops being JSON depends on how it was read; the end of the file does not.
+              // The reader returns every message it had finished before the error; the file is counted as damaged at its end.
               report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', file.version.size);
               break;
             }

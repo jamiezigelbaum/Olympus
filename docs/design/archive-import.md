@@ -208,15 +208,17 @@ Both are in scope. They come after mail because they reuse the same spine
     length, so byte offsets in resume points stay file offsets.
   - *Left out, counted.* Service messages (joins, calls, pins) and messages
     with nothing to read are `skipped`; media files are named in the text
-    and counted as `media_not_imported` (never opened); each part of the
+    and counted as `media_not_imported` (never opened), and so is a file
+    the export itself left out, marked "not in the export"; each part of the
     account export that is not messages (personal information, contacts,
     sessions, other data and so on) is one `section_not_imported`, said once
     and never stored. A message over 1,000,000 characters keeps its start
     (`item_truncated`); one over 16 MiB is `message_too_large`; a file cut
     short imports what came before and counts `file_damaged`.
   - *Resume.* The cursor is the JSON reader's point after a message, bound to
-    the manifest; any other cursor stops the import. A bounded read keeps a
-    mid-file JSON error from costing more than one read of messages.
+    the manifest; any other cursor stops the import. The reader returns every
+    message it finished before a mid-file JSON error, so damage costs only
+    the messages from the damage on.
   - *HTML form.* `messages.html` is recognised and turned away with plain
     advice to export again as JSON (`unsupportedVariants` on the format).
   - *Limits of the finding shape.* A finding has no name or path field, so

@@ -338,10 +338,15 @@ describe('telegram message text', () => {
     const sticker = telegramMessageContent(telegramSticker(3));
     expect(sticker.text).toBe('[Sticker \u{1F600}: stickers/sticker_3.webp (not imported)]');
 
-    // A file the export left out is said so, and is not counted as one the import skipped.
+    // A file the export left out is said so; it is a file the import did not bring in, with no name to keep.
     const missing = telegramMessageContent(telegramFileLeftOut(4));
     expect(missing.text).toBe('[File (not in the export)]');
-    expect(missing).toMatchObject({ mediaFiles: 0, hasContent: true, attachments: [] });
+    expect(missing).toMatchObject({ mediaFiles: 1, hasContent: true, attachments: [] });
+    expect(telegramMessageContent({ photo: '(File not included. Change data exporting settings to download.)' })).toMatchObject({
+      text: '[Photo (not in the export)]',
+      mediaFiles: 1,
+      attachments: [],
+    });
 
     const document = telegramMessageContent({ file: 'files/report.pdf', file_name: 'Harbour report.pdf', duration_seconds: 75 });
     expect(document.text).toBe('[File: Harbour report.pdf, files/report.pdf, 1:15 (not imported)]');
@@ -624,9 +629,11 @@ describe('telegram connector: what is left out', () => {
     expect(textOf(items[0]!)).toContain('[Photo: photos/photo_0@05-01-2015_10-00-00.jpg (not imported)]');
     expect(items[0]!.metadata).toMatchObject({ attachmentsNotIngested: 1, attachments: ['Photo: photos/photo_0@05-01-2015_10-00-00.jpg'] });
     expect(textOf(items[3]!)).toBe('[File (not in the export)]');
+    expect(items[3]!.metadata.attachmentsNotIngested).toBe(1);
+    expect(items[3]!.metadata.attachments).toBeUndefined();
     expect(items[4]!.metadata.attachmentsNotIngested).toBe(2);
-    // One per message with its count, not one per file read: nothing was read.
-    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 + 1 + 1 + 2 });
+    // One per message with its count, not one per file read: nothing was read. A file the export left out counts like the rest.
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 + 1 + 1 + 1 + 2 });
   });
 
   test('each part of an account export that is not messages is one gap, said once, however long it is', async () => {
@@ -763,20 +770,29 @@ describe('telegram connector: Telegram escapes and damaged files', () => {
     expect(cursors.at(-1)).toEndWith(':done');
   });
 
-  test('a file that stops being JSON part-way is damaged too; the listing ends instead of throwing', async () => {
-    const messages = telegramTexts(2500);
-    const text = telegramJson(telegramSingleChatExport(telegramChat({ messages })));
-    const at = text.indexOf('"id": 3000,'); // message 2000
-    expect(at).toBeGreaterThan(0);
-    const broken = `${text.slice(0, at)}!!! not json ${text.slice(at)}`;
-    const file = exportFile(broken);
-    const { connector, findings } = connectorFor(file.dir, file.name, { pageSize: 50 });
-    const { items, done } = await listAll(connector);
-    expect(done).toBe(true);
-    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.fileDamaged]: 1 });
-    // The messages before the break come through, up to the read it was in.
-    expect(items.length).toBeLessThanOrEqual(1999);
-    expect(items.length).toBeGreaterThan(1999 - 600);
+  test('a file that stops being JSON part-way is damaged too; every message before the damage is imported and the listing ends instead of throwing', async () => {
+    // The second case puts the damage past several 1 MiB reads, in a read that also holds finished messages.
+    for (const { total, damaged, minBytes } of [
+      { total: 2500, damaged: 2000, minBytes: 0 },
+      { total: 7500, damaged: 7000, minBytes: 2 * 1024 * 1024 },
+    ]) {
+      const messages = telegramTexts(total);
+      const text = telegramJson(telegramSingleChatExport(telegramChat({ messages })));
+      const at = text.indexOf(`"id": ${1000 + damaged},`);
+      expect(at).toBeGreaterThan(0);
+      const broken = `${text.slice(0, at)}!!! not json ${text.slice(at)}`;
+      expect(Buffer.byteLength(broken.slice(0, at))).toBeGreaterThan(minBytes);
+      const file = exportFile(broken);
+      const { connector, findings } = connectorFor(file.dir, file.name, { pageSize: 50 });
+      const { items, done, cursors } = await listAll(connector);
+      expect(done).toBe(true);
+      expect(cursors.at(-1)).toEndWith(':done');
+      expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.fileDamaged]: 1 });
+      // Not one valid message before the damage is lost, and none after it is made up.
+      expect(items.map((item) => textOf(item).split('\n')[0])).toEqual(
+        Array.from({ length: damaged }, (_, index) => `The synthetic harbour log, entry ${index}.`),
+      );
+    }
   });
 
   test('an empty file and a file that is not JSON at all are damaged, not thrown', async () => {

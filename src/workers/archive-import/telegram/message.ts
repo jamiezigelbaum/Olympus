@@ -20,9 +20,9 @@
 export interface TelegramMessageContent {
   /** The text of the item: the message's words, then a line for each thing it carries that was not read. */
   text: string;
-  /** Media files the message names that are in the export (never read). */
+  /** Media files the message names that were not imported: those in the export (never read) and those the export left out. */
   mediaFiles: number;
-  /** Their kinds and names, for search context. */
+  /** The kinds and names of those in the export, for search context. */
   attachments: string[];
   /** Whether there is anything to keep. */
   hasContent: boolean;
@@ -95,6 +95,7 @@ function mediaLine(message: Record<string, unknown>, content: TelegramMessageCon
   if (photo) {
     if (fileLeftOut(photo)) {
       lines.push('[Photo (not in the export)]');
+      content.mediaFiles += 1;
     } else {
       lines.push(`[Photo: ${cut(photo)} (not imported)]`);
       content.mediaFiles += 1;
@@ -108,6 +109,7 @@ function mediaLine(message: Record<string, unknown>, content: TelegramMessageCon
     const label = emoji ? `${kind} ${emoji}` : kind ?? 'File';
     if (fileLeftOut(file)) {
       lines.push(`[${label} (not in the export)]`);
+      content.mediaFiles += 1;
     } else {
       const name = text(message.file_name);
       const track = [text(message.performer), text(message.title)].filter(Boolean).join(' - ');
