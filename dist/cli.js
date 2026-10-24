@@ -35539,6 +35539,181 @@ var init_local_index = __esm(() => {
   TRUST_RECONCILIATION_CURSOR_PATTERN = /^(complete:)?stricter-item-pk:(\d{1,15})$/;
 });
 
+// src/core/whatsapp-export-grammar.ts
+function normalizeWhatsAppLine(line) {
+  return line.replace(INVISIBLE, "").replace(NARROW_SPACES, " ");
+}
+function matchWhatsAppHeader(line) {
+  const found = HEADER.exec(line);
+  if (!found)
+    return;
+  const at = found[1] !== undefined ? 1 : 8;
+  const [g1, g2, g3, hourText, minuteText, secondText, meridiem] = found.slice(at, at + 7);
+  const rest = found[15] ?? "";
+  if (g1 === undefined || g2 === undefined || g3 === undefined || hourText === undefined || minuteText === undefined)
+    return;
+  if (g1.length === 3)
+    return;
+  const yearFirst = g1.length === 4;
+  if (yearFirst) {
+    if (g3.length > 2)
+      return;
+  } else if (g3.length !== 2 && g3.length !== 4) {
+    return;
+  }
+  let hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = secondText === undefined ? 0 : Number(secondText);
+  if (meridiem !== undefined) {
+    if (hour < 1 || hour > 12)
+      return;
+    const pm = meridiem.toLowerCase() === "p";
+    hour = hour === 12 ? pm ? 12 : 0 : pm ? hour + 12 : hour;
+  }
+  if (hour > 23 || minute > 59 || second > 59)
+    return;
+  const p1 = Number(g1);
+  const p2 = Number(g2);
+  const p3 = Number(g3);
+  const match = {
+    p1,
+    p2,
+    p3,
+    yearFirst,
+    lastYear: g3.length === 2 ? 2000 + p3 : p3,
+    hour,
+    minute,
+    second,
+    rest
+  };
+  return resolveWhatsAppHeader(match, "dmy") || resolveWhatsAppHeader(match, "mdy") ? match : undefined;
+}
+function daysIn(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+function two(value) {
+  return String(value).padStart(2, "0");
+}
+function dateOf(year, month, day) {
+  if (year < 1990 || year > 2199 || month < 1 || month > 12 || day < 1 || day > daysIn(year, month))
+    return;
+  return { year, month, day };
+}
+function whatsAppOrderEvidence(match) {
+  if (match.yearFirst)
+    return "ymd";
+  if (match.p1 > 12 && match.p2 <= 12)
+    return "dmy";
+  if (match.p2 > 12 && match.p1 <= 12)
+    return "mdy";
+  return;
+}
+function resolveWhatsAppHeader(match, order) {
+  let date;
+  if (match.yearFirst) {
+    date = dateOf(match.p1, match.p2, match.p3);
+  } else {
+    const dayFirst = dateOf(match.lastYear, match.p2, match.p1);
+    const monthFirst = dateOf(match.lastYear, match.p1, match.p2);
+    date = order === "mdy" ? monthFirst ?? dayFirst : dayFirst ?? monthFirst;
+  }
+  if (!date)
+    return;
+  return {
+    ...match,
+    ...date,
+    sentAt: `${String(date.year).padStart(4, "0")}-${two(date.month)}-${two(date.day)}T${two(match.hour)}:${two(match.minute)}:${two(match.second)}`
+  };
+}
+function splitWhatsAppSender(rest) {
+  for (let at = rest.indexOf(":");at >= 0; at = rest.indexOf(":", at + 1)) {
+    if (at > WHATSAPP_MAX_SENDER_CHARS)
+      break;
+    if (at + 1 < rest.length && rest[at + 1] !== " ")
+      continue;
+    const sender = rest.slice(0, at).trim();
+    if (!sender)
+      break;
+    return { sender, text: rest.slice(at + 1).trim() };
+  }
+  return { text: rest.trim() };
+}
+function whatsAppAttachedFileName(line) {
+  const text2 = normalizeWhatsAppLine(line).trim();
+  const angle = /^<[^<>:\uff1a\n]{1,40}[:\uff1a]\s*([^<>\n]+\.\w{1,8})>$/.exec(text2);
+  if (angle?.[1])
+    return angle[1].trim();
+  const paren = /^((?:IMG|VID|PTT|AUD|DOC|STK|PHOTO|VIDEO|AUDIO|GIF|DOCUMENT|STICKER)-[\w-]+\.\w{1,8}) \([^()\n]{3,40}\)$/.exec(text2);
+  return paren?.[1];
+}
+function isWhatsAppMediaOmitted(text2) {
+  const line = normalizeWhatsAppLine(text2).trim();
+  if (line.length < 4 || line.length > 48 || line.includes(`
+`))
+    return false;
+  if (/^<[^<>:\uff1a]{3,40}>$/.test(line))
+    return !/\b(?:edited|deleted)\b/i.test(line);
+  return /^[A-Za-z][A-Za-z ]{1,24} omitted$/.test(line);
+}
+function whatsAppMediaMarkerCount(text2) {
+  if (isWhatsAppMediaOmitted(text2))
+    return 1;
+  let count = 0;
+  for (const line of text2.split(`
+`)) {
+    if (line.length <= 400 && whatsAppAttachedFileName(line) !== undefined)
+      count += 1;
+  }
+  return count;
+}
+function isWhatsAppChatMemberName(name) {
+  if (isWhatsAppZipNoise(name))
+    return false;
+  const last = (name.split("/").pop() ?? name).toLowerCase();
+  return last === "_chat.txt" || last.endsWith(".txt") && last.includes("whatsapp");
+}
+function whatsAppChatNameFromStem(stem) {
+  const chat = EXPORT_FILENAME.exec(stem.trim())?.[1]?.trim();
+  return chat ? chat : undefined;
+}
+function whatsAppStem(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  const last = parts[parts.length - 1] ?? name;
+  return last.replace(/\.(?:txt|zip)$/i, "");
+}
+function isWhatsAppStatusChat(chat) {
+  return chat.trim().toLowerCase() === "status@broadcast";
+}
+function isWhatsAppZipNoise(name) {
+  if (name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/"))
+    return true;
+  const base = name.split("/").pop() ?? name;
+  return base.startsWith("._") || base === ".DS_Store";
+}
+function looksLikeWhatsAppChat(head) {
+  if (!head || head.length < 10)
+    return false;
+  if (head.includes(0))
+    return false;
+  const text2 = lenientUtf8.decode(head);
+  for (const raw of text2.split(`
+`).slice(0, 8)) {
+    const line = normalizeWhatsAppLine(raw.endsWith("\r") ? raw.slice(0, -1) : raw);
+    if (line.trim() === "")
+      continue;
+    return matchWhatsAppHeader(line) !== undefined;
+  }
+  return false;
+}
+var INVISIBLE, NARROW_SPACES, DATE = "(\\d{1,4})[./-]\\s?(\\d{1,2})[./-]\\s?(\\d{1,4})", TIME = "(\\d{1,2})[:.](\\d{2})(?:[:.](\\d{2}))?(?:\\s?([ap])\\.?\\s?m\\.?)?", HEADER, WHATSAPP_MAX_SENDER_CHARS = 128, EXPORT_FILENAME, lenientUtf8;
+var init_whatsapp_export_grammar = __esm(() => {
+  INVISIBLE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  HEADER = new RegExp(`^(?:\\[\\s?${DATE},?\\s+${TIME}\\s?\\]\\s?|${DATE},?\\s+${TIME}\\s[-\\u2013]\\s)(.*)$`, "is");
+  EXPORT_FILENAME = /^WhatsApp Chat (?:with|-)\s*(.+)$/i;
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
 // src/core/archive-formats.ts
 function startsWithFromLine(head) {
   if (!head || head.length < FROM_LINE.length)
@@ -35637,8 +35812,9 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
+  init_whatsapp_export_grammar();
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
     id: "mbox",
@@ -35656,7 +35832,37 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
+    id: "whatsapp_chat",
+    label: "WhatsApp chat export",
+    family: "chat",
+    provider: "whatsapp_export",
+    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
+    citationLabel: "WhatsApp",
+    probeNames: Object.freeze(["_chat.txt", "*whatsapp*.txt", "*whatsapp*.zip"]),
+    detect(probe) {
+      const isChat = (entry) => {
+        if (entry.kind !== "file")
+          return false;
+        if (entry.members) {
+          return entry.members.some((member) => member.kind === "file" && isWhatsAppChatMemberName(member.relPath) && looksLikeWhatsAppChat(member.head));
+        }
+        return entry.name.toLowerCase().endsWith(".txt") && looksLikeWhatsAppChat(entry.head);
+      };
+      if (probe.chosen.kind === "file")
+        return isChat(probe.chosen) ? [""] : undefined;
+      const found = probe.children.filter(isChat).map((entry) => entry.relPath).sort();
+      return found.length > 0 ? found : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, WHATSAPP_ARCHIVE_FORMAT]);
+  ARCHIVE_COMMON_FINDINGS = {
+    mediaNotImported: "media_not_imported",
+    itemTruncated: "item_truncated",
+    assumption: "assumption",
+    sectionNotImported: "section_not_imported",
+    fileDamaged: "file_damaged"
+  };
   ArchiveImportStoppedError = class ArchiveImportStoppedError extends Error {
     code;
     relPath;
@@ -50297,6 +50503,47 @@ function crc32Update(value, data2) {
     return value >>> 0;
   return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
 }
+function fileByteSource(reader, options = {}) {
+  const end = Math.min(reader.size, options.end ?? reader.size);
+  const chunkBytes = Math.max(1, options.chunkBytes ?? ARCHIVE_SOURCE_CHUNK_BYTES);
+  let readFrom = Math.max(0, options.start ?? 0);
+  let position = readFrom;
+  let pending;
+  let last = new Uint8Array(0);
+  let held = 0;
+  return {
+    get position() {
+      return position;
+    },
+    next() {
+      let chunk;
+      if (pending) {
+        chunk = pending;
+        pending = undefined;
+      } else {
+        if (readFrom >= end)
+          return;
+        chunk = reader.readAt(readFrom, Math.min(chunkBytes, end - readFrom));
+        readFrom += chunk.length;
+        if (chunk.length === 0)
+          return;
+      }
+      last = chunk;
+      held = chunk.length;
+      position += chunk.length;
+      return chunk;
+    },
+    unread(count) {
+      if (!Number.isInteger(count) || count < 0 || count > held)
+        throw new RangeError("unread past the last chunk");
+      if (count === 0)
+        return;
+      held -= count;
+      position -= count;
+      pending = last.subarray(held);
+    }
+  };
+}
 var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
 var init_byte_source = __esm(() => {
   ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
@@ -50319,11 +50566,11 @@ function isAscii(bytes) {
 }
 function decodeName(raw, flags, unicodePath) {
   if (unicodePath)
-    return lenientUtf8.decode(unicodePath);
+    return lenientUtf82.decode(unicodePath);
   if (isAscii(raw))
-    return lenientUtf8.decode(raw);
+    return lenientUtf82.decode(raw);
   if (flags & 2048)
-    return lenientUtf8.decode(raw);
+    return lenientUtf82.decode(raw);
   try {
     return strictUtf8.decode(raw);
   } catch {
@@ -50569,6 +50816,20 @@ class ZipArchive {
       throw error;
     }
   }
+}
+function stoppableZipSource(reader, relPath) {
+  return {
+    get size() {
+      return reader.size;
+    },
+    readAt(offset, length) {
+      try {
+        return reader.readAt(offset, length);
+      } catch (error) {
+        throw archiveStopFromScopeError(error, relPath);
+      }
+    }
+  };
 }
 function memberKey(entry) {
   return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
@@ -50833,7 +51094,10 @@ function readZipMemberHead(archive, entry, maxBytes) {
   }
   return out;
 }
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
+function zipFindingOffset(memberIndex, offsetInMember) {
+  return memberIndex * 8589934592 + Math.min(Math.max(0, offsetInMember), 8589934591);
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf82;
 var init_zip_reader = __esm(() => {
   init_browser();
   init_stop_errors();
@@ -50863,7 +51127,7 @@ var init_zip_reader = __esm(() => {
     }
   };
   strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-  lenientUtf8 = new TextDecoder("utf-8");
+  lenientUtf82 = new TextDecoder("utf-8");
 });
 
 // src/workers/archive-import/manifest.ts
@@ -50972,16 +51236,21 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   }
   const heads = new Map;
   const wanted = listed.map((entry, index) => index).filter((index) => kinds[index] === "file");
+  const asked = wanted.filter((index) => matchesAnyName(listed[index], probeNames));
   const ordered = [
-    ...wanted.filter((index) => matchesAnyName(listed[index], probeNames)),
+    ...asked,
     ...wanted.filter((index) => !matchesAnyName(listed[index], probeNames))
-  ].slice(0, PROBE_MAX_FILE_HEADS);
+  ].slice(0, Math.max(PROBE_MAX_FILE_HEADS, asked.length));
   for (const index of ordered) {
     const head = fileHead(root, joinRelative(chosenRelPath, listed[index].name));
     if (head)
       heads.set(index, head);
   }
-  const zips = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index))).slice(0, PROBE_MAX_ZIPS);
+  const zipsAmongHeads = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index)));
+  const zips = [
+    ...zipsAmongHeads.filter((index) => asked.includes(index)).slice(0, PROBE_MAX_NAMED_ZIPS),
+    ...zipsAmongHeads.filter((index) => !asked.includes(index)).slice(0, PROBE_MAX_ZIPS)
+  ];
   listed.forEach((entry, index) => {
     const kind = kinds[index];
     if (kind === "directory") {
@@ -51133,7 +51402,7 @@ function findProbableCopies(records, files) {
 function isCopyOf(record, digests) {
   return record.files.length === digests.length && record.files.every((file, index) => file.sha256 === digests[index]);
 }
-var ARCHIVE_FINGERPRINT_BYTES, PROBE_MAX_FILE_HEADS = 32, PROBE_MAX_ZIPS = 4, PROBE_MAX_MEMBER_HEADS = 32, ARCHIVE_DIGEST_RANGE_BYTES;
+var ARCHIVE_FINGERPRINT_BYTES, PROBE_MAX_FILE_HEADS = 32, PROBE_MAX_ZIPS = 4, PROBE_MAX_NAMED_ZIPS = 128, PROBE_MAX_MEMBER_HEADS = 32, ARCHIVE_DIGEST_RANGE_BYTES;
 var init_manifest2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
@@ -62913,9 +63182,6 @@ var init_tier_set3 = __esm(() => {
   init_connector3();
 });
 
-// src/workers/whatsapp/connector.ts
-var init_connector4 = () => {};
-
 // src/workers/whatsapp/reaction-index.ts
 function isWhatsAppReactionLine(line) {
   return line.mediaType === "reaction";
@@ -64081,7 +64347,6 @@ var init_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/index.ts
 var init_whatsapp = __esm(() => {
-  init_connector4();
   init_live_connector();
   init_store_sync2();
   init_extraction_source();
@@ -64181,12 +64446,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -70987,8 +71252,8 @@ function expiryEstimate(fundingDate, now) {
   const expiryDate = expiry.toISOString().slice(0, 10);
   if (daysLeft <= 0)
     return { state: "expired", fundingDate, expiryDate, daysLeft: 0, notice: "expired" };
-  const [ten, five, two] = ZKAPI_EXPIRY_NOTICE_DAYS;
-  const notice = daysLeft <= two ? "two_days" : daysLeft <= five ? "five_days" : daysLeft <= ten ? "ten_days" : "none";
+  const [ten, five, two2] = ZKAPI_EXPIRY_NOTICE_DAYS;
+  const notice = daysLeft <= two2 ? "two_days" : daysLeft <= five ? "five_days" : daysLeft <= ten ? "ten_days" : "none";
   return { state: "active", fundingDate, expiryDate, daysLeft, notice };
 }
 function settingsBlockers(money) {
@@ -77367,10 +77632,10 @@ var init_vocabulary = __esm(() => {
   };
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
-    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes" },
-    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items" }
+    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
+    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "Snapshot, not updated" },
+    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes", snapshot: "" },
+    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
@@ -77441,9 +77706,12 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+      message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone, or which part of a date is the day)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones, or which part of a date is the day)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
@@ -89110,7 +89378,7 @@ var init_operations = __esm(() => {
       enum: ["start", "status", "remove"],
       description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).'
     },
-    path: { type: "string", description: "start only: the full path of the export (an .mbox file, or an Apple Mail .mbox folder), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
+    path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, or a WhatsApp chat export: its .txt or .zip, or a folder of them), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
     archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
   };
   operations = [
@@ -89545,7 +89813,7 @@ var init_operations = __esm(() => {
     {
       name: "archive_import",
       description: [
-        "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
+        "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
         "Never open, read or copy the file yourself, and never retry to get around the approval.",
         `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
@@ -109679,10 +109947,10 @@ var require_formats = __commonJS((exports) => {
   function isLeapYear(year) {
     return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   }
-  var DATE = /^(\d\d\d\d)-(\d\d)-(\d\d)$/;
+  var DATE2 = /^(\d\d\d\d)-(\d\d)-(\d\d)$/;
   var DAYS = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   function date4(str) {
-    const matches2 = DATE.exec(str);
+    const matches2 = DATE2.exec(str);
     if (!matches2)
       return false;
     const year = +matches2[1];
@@ -109699,10 +109967,10 @@ var require_formats = __commonJS((exports) => {
       return -1;
     return 0;
   }
-  var TIME = /^(\d\d):(\d\d):(\d\d(?:\.\d+)?)(z|([+-])(\d\d)(?::?(\d\d))?)?$/i;
+  var TIME2 = /^(\d\d):(\d\d):(\d\d(?:\.\d+)?)(z|([+-])(\d\d)(?::?(\d\d))?)?$/i;
   function getTime(strictTimeZone) {
     return function time3(str) {
-      const matches2 = TIME.exec(str);
+      const matches2 = TIME2.exec(str);
       if (!matches2)
         return false;
       const hr = +matches2[1];
@@ -109733,8 +110001,8 @@ var require_formats = __commonJS((exports) => {
   function compareIsoTime(t1, t2) {
     if (!(t1 && t2))
       return;
-    const a1 = TIME.exec(t1);
-    const a2 = TIME.exec(t2);
+    const a1 = TIME2.exec(t1);
+    const a2 = TIME2.exec(t2);
     if (!(a1 && a2))
       return;
     t1 = a1[1] + a1[2] + a1[3];
@@ -130015,8 +130283,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
     const latest = typeof archive.latest === "string" ? archive.latest : "";
-    if (earliest && latest)
+    if (earliest && latest) {
       facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill2(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(archive).snapshot;
+      if (typeof snapshot === "string" && snapshot)
+        facts.push(el("span", "archive-snapshot", snapshot));
+    }
     if (facts.length) {
       const line = el("p", "muted archive-facts");
       facts.forEach((fact, index) => {
@@ -143043,7 +143315,7 @@ function createLocalFilesSourceConnector(options) {
   };
 }
 var LOCAL_FILES_CURSOR_PREFIX = "lf1:", LOCAL_FILES_POLL_CURSOR, DEFAULT_MAX_FETCH_BYTES2 = 64000000, DEFAULT_PAGE_SIZE2 = 500, DELETED_DESCENDANT_BATCH = 2000, DELETED_DESCENDANT_MAX_BATCHES = 200, MAX_FOLDER_KEYS = 32, MAX_EVENT_PATHS = 200000, ABSENCE_SCAN_LIMIT = 250000, LocalFilesRootMissingError, LocalFilesRootPermissionError, LocalFilesHistoryResetError;
-var init_connector5 = __esm(() => {
+var init_connector4 = __esm(() => {
   init_file_extraction_source();
   init_file_mime();
   init_scope_safe_fs();
@@ -143290,7 +143562,7 @@ var LOCAL_FILES_PROVIDER_STORE_RECEIPT_KIND = "local_files_provider_connector_st
 var init_provider_store_sync2 = __esm(() => {
   init_embeddings();
   init_tiered_store_set();
-  init_connector5();
+  init_connector4();
   init_paths();
   init_scope();
   init_store();
@@ -145561,7 +145833,7 @@ var init_scheduler_source = __esm(() => {
   init_embeddings();
   init_source_scheduler();
   init_mac_permissions();
-  init_connector5();
+  init_connector4();
   init_locations();
   init_paths();
   init_scope();
@@ -151042,7 +151314,7 @@ function registerMboxArchiveConnector() {
   registerArchiveFormatConnector("mbox", createMboxArchiveConnector);
 }
 var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MBOX_MAX_ITEM_TEXT_CHARS = 1e6, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS, SKIPPED_LABELS, decodableCharsets;
-var init_connector6 = __esm(() => {
+var init_connector5 = __esm(() => {
   init_postal_mime();
   init_archive_formats();
   init_stop_errors();
@@ -151061,11 +151333,873 @@ var init_connector6 = __esm(() => {
   decodableCharsets = new Map;
 });
 
+// src/workers/archive-import/continuation-cache.ts
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
+var init_continuation_cache = __esm(() => {
+  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+  archiveContinuations = new ContinuationCache;
+});
+
+// src/workers/archive-import/whatsapp/messages.ts
+class WhatsAppLineReader {
+  source;
+  chunk;
+  chunkStart = 0;
+  crcBeforeChunk;
+  at = 0;
+  carry = [];
+  carryBytes = 0;
+  carryCut = false;
+  inLine = false;
+  lineStart = 0;
+  ended = false;
+  constructor(source) {
+    this.source = source;
+  }
+  get atEnd() {
+    return this.ended;
+  }
+  get lastChunk() {
+    return this.chunk && !this.ended ? { start: this.chunkStart, end: this.chunkStart + this.chunk.length } : undefined;
+  }
+  crcAt(offset) {
+    const chunk = this.chunk;
+    if (!chunk || this.ended || this.crcBeforeChunk === undefined)
+      return;
+    if (offset < this.chunkStart || offset > this.chunkStart + chunk.length)
+      return;
+    return crc32Update(this.crcBeforeChunk, chunk.subarray(0, offset - this.chunkStart));
+  }
+  giveBackFrom(offset) {
+    const chunk = this.chunk;
+    if (!chunk || this.ended || offset < this.chunkStart || offset > this.chunkStart + chunk.length)
+      return false;
+    this.source.unread(this.chunkStart + chunk.length - offset);
+    this.ended = true;
+    return true;
+  }
+  next() {
+    for (;; ) {
+      if (this.ended)
+        return;
+      if (!this.chunk || this.at >= this.chunk.length) {
+        const crcBefore = this.source.crc32;
+        const chunk2 = this.source.next();
+        if (!chunk2) {
+          this.ended = true;
+          if (!this.inLine)
+            return;
+          this.inLine = false;
+          return this.take(new Uint8Array(0));
+        }
+        this.chunk = chunk2;
+        this.chunkStart = this.source.position - chunk2.length;
+        this.crcBeforeChunk = crcBefore;
+        this.at = 0;
+        continue;
+      }
+      const chunk = this.chunk;
+      if (!this.inLine) {
+        this.inLine = true;
+        this.lineStart = this.chunkStart + this.at;
+      }
+      const newline = chunk.indexOf(10, this.at);
+      if (newline < 0) {
+        this.keep(chunk.subarray(this.at));
+        this.at = chunk.length;
+        continue;
+      }
+      const segment = chunk.subarray(this.at, newline);
+      this.at = newline + 1;
+      this.inLine = false;
+      return this.take(segment);
+    }
+  }
+  keep(bytes) {
+    const room = WHATSAPP_LINE_BYTES_KEPT - this.carryBytes;
+    if (room <= 0) {
+      this.carryCut = true;
+      return;
+    }
+    const part = bytes.length > room ? bytes.subarray(0, room) : bytes;
+    if (bytes.length > room)
+      this.carryCut = true;
+    this.carry.push(part.slice());
+    this.carryBytes += part.length;
+  }
+  take(last) {
+    let bytes = last;
+    let cut = this.carryCut;
+    if (this.carry.length > 0 || this.carryCut) {
+      this.keep(last);
+      cut = this.carryCut;
+      bytes = new Uint8Array(this.carryBytes);
+      let at = 0;
+      for (const part of this.carry) {
+        bytes.set(part, at);
+        at += part.length;
+      }
+    }
+    this.carry = [];
+    this.carryBytes = 0;
+    this.carryCut = false;
+    if (bytes.length > 0 && bytes[bytes.length - 1] === 13)
+      bytes = bytes.subarray(0, bytes.length - 1);
+    return { bytes, offset: this.lineStart, cut };
+  }
+}
+function whatsAppLineText(line) {
+  return normalizeWhatsAppLine(utf83.decode(line.bytes));
+}
+
+class WhatsAppMessageReader {
+  source;
+  lines;
+  maxTextChars;
+  requireHeaderFirst;
+  ordinal;
+  building;
+  firstLine = true;
+  finished = false;
+  constructor(source, options = {}) {
+    this.source = source;
+    this.lines = new WhatsAppLineReader(source);
+    this.ordinal = options.startOrdinal ?? 0;
+    this.requireHeaderFirst = options.requireHeaderFirst === true;
+    this.maxTextChars = options.maxTextChars ?? WHATSAPP_MAX_ITEM_TEXT_CHARS;
+  }
+  get position() {
+    return this.source.position;
+  }
+  get pending() {
+    return this.building ? { offset: this.building.offset, ordinal: this.building.ordinal } : undefined;
+  }
+  canSettle() {
+    const building = this.building;
+    const chunk = this.lines.lastChunk;
+    return building !== undefined && chunk !== undefined && building.offset >= chunk.start;
+  }
+  pendingCrc() {
+    return this.building ? this.lines.crcAt(this.building.offset) : undefined;
+  }
+  settle() {
+    const building = this.building;
+    if (!building || !this.lines.giveBackFrom(building.offset))
+      return false;
+    this.finished = true;
+    this.building = undefined;
+    return true;
+  }
+  next() {
+    if (this.finished)
+      return;
+    for (;; ) {
+      const line = this.lines.next();
+      if (!line) {
+        this.finished = true;
+        const last = this.building;
+        this.building = undefined;
+        return last ? this.finish(last) : undefined;
+      }
+      const text3 = whatsAppLineText(line);
+      const header = matchWhatsAppHeader(text3);
+      if (this.firstLine) {
+        this.firstLine = false;
+        if (this.requireHeaderFirst && !header) {
+          throw new WhatsAppFormatError("No message starts where this import was to resume.");
+        }
+      }
+      if (header) {
+        const done = this.building;
+        const first = splitWhatsAppSender(header.rest);
+        this.building = {
+          offset: line.offset,
+          ordinal: this.ordinal,
+          header,
+          sender: first.sender,
+          parts: [],
+          chars: 0,
+          cut: line.cut
+        };
+        this.ordinal += 1;
+        this.append(this.building, first.text);
+        if (done)
+          return this.finish(done);
+        continue;
+      }
+      if (this.building) {
+        if (line.cut)
+          this.building.cut = true;
+        this.append(this.building, text3);
+      }
+    }
+  }
+  append(message2, text3) {
+    if (message2.chars >= this.maxTextChars) {
+      if (text3.length > 0)
+        message2.cut = true;
+      return;
+    }
+    const separator = message2.parts.length > 0 ? 1 : 0;
+    const room = this.maxTextChars - message2.chars - separator;
+    if (text3.length > room) {
+      message2.parts.push(text3.slice(0, Math.max(0, room)));
+      message2.chars = this.maxTextChars;
+      message2.cut = true;
+      return;
+    }
+    message2.parts.push(text3);
+    message2.chars += separator + text3.length;
+  }
+  finish(message2) {
+    return {
+      offset: message2.offset,
+      ordinal: message2.ordinal,
+      header: message2.header,
+      ...message2.sender !== undefined ? { sender: message2.sender } : {},
+      text: message2.parts.join(`
+`).replace(/\s+$/u, ""),
+      cut: message2.cut
+    };
+  }
+}
+function scanWhatsAppDateOrder(source, options = {}) {
+  const lines = new WhatsAppLineReader(source);
+  const maxBytes = options.maxBytes ?? WHATSAPP_ORDER_SCAN_MAX_BYTES;
+  let ambiguous = false;
+  let seen = 0;
+  for (;; ) {
+    const line = lines.next();
+    if (!line)
+      break;
+    seen += 1;
+    if (seen % 512 === 0 && options.shouldContinue && !options.shouldContinue())
+      return;
+    if (line.offset > maxBytes)
+      break;
+    const header = matchWhatsAppHeader(whatsAppLineText(line));
+    if (!header)
+      continue;
+    const evidence = whatsAppOrderEvidence(header);
+    if (evidence)
+      return { order: evidence, assumed: false };
+    if (header.p1 !== header.p2)
+      ambiguous = true;
+  }
+  return { order: "dmy", assumed: ambiguous };
+}
+var WHATSAPP_MAX_ITEM_TEXT_CHARS = 1048576, WHATSAPP_LINE_BYTES_KEPT, WHATSAPP_ORDER_SCAN_MAX_BYTES, utf83, WhatsAppFormatError;
+var init_messages = __esm(() => {
+  init_byte_source();
+  init_whatsapp_export_grammar();
+  WHATSAPP_LINE_BYTES_KEPT = 4 * 1024 * 1024;
+  WHATSAPP_ORDER_SCAN_MAX_BYTES = 256 * 1024 * 1024;
+  utf83 = new TextDecoder("utf-8");
+  WhatsAppFormatError = class WhatsAppFormatError extends Error {
+    constructor(message2) {
+      super(message2);
+      this.name = "WhatsAppFormatError";
+    }
+  };
+});
+
+// src/workers/archive-import/whatsapp/connector.ts
+import { createHash as createHash78 } from "node:crypto";
+function manifestTag2(input) {
+  return input.manifestSha256.slice(0, 16);
+}
+function cursorOf(input, place) {
+  const crc = place.crc !== undefined ? `:${place.crc >>> 0}` : "";
+  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag2(input)}:${place.fileIndex}:${place.memberIndex}:${place.offset}:${place.ordinal}:${place.order}${crc}`;
+}
+function doneCursor2(input) {
+  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag2(input)}:done`;
+}
+function parseCursor2(input, cursor) {
+  if (!cursor)
+    return;
+  const invalid3 = (message2) => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const prefix = `${WHATSAPP_CURSOR_PREFIX}${manifestTag2(input)}:`;
+  if (!cursor.startsWith(prefix)) {
+    throw invalid3("The resume point belongs to other files than this archive's.");
+  }
+  const rest = cursor.slice(prefix.length);
+  if (rest === "done")
+    return { done: true };
+  const parts = rest.split(":");
+  if (parts.length !== 5 && parts.length !== 6)
+    throw invalid3("The resume point is not a position in this archive.");
+  const [fileText, memberText, offsetText, ordinalText, order, crcText] = parts;
+  if (!WHOLE_NUMBER.test(fileText) || !WHOLE_NUMBER.test(memberText) || !WHOLE_NUMBER.test(offsetText) || !WHOLE_NUMBER.test(ordinalText) || !ORDER_MARKS.includes(order)) {
+    throw invalid3("The resume point is not a position in this archive.");
+  }
+  const fileIndex = Number(fileText);
+  const memberIndex = Number(memberText);
+  const offset = Number(offsetText);
+  const ordinal = Number(ordinalText);
+  const file = input.files[fileIndex];
+  if (!file || order === "?" && (offset !== 0 || ordinal !== 0 || crcText !== undefined) || !file.members && (memberIndex !== 0 || offset > file.version.size)) {
+    throw invalid3("The resume point is not a position in this archive.");
+  }
+  let crc;
+  if (crcText !== undefined) {
+    if (!WHOLE_NUMBER.test(crcText) || Number(crcText) > 4294967295 || !file.members) {
+      throw invalid3("The resume point is not a position in this archive.");
+    }
+    crc = Number(crcText);
+  }
+  return {
+    done: false,
+    place: { fileIndex, memberIndex, offset, ordinal, order, ...crc !== undefined ? { crc } : {} }
+  };
+}
+function sha2568(value2) {
+  return createHash78("sha256").update(value2).digest("hex");
+}
+function stoppedFrom2(error2, relPath) {
+  if (error2 instanceof WhatsAppFormatError) {
+    return new ArchiveImportStoppedError("resume_point_invalid", "No message starts where this import was to resume.", relPath);
+  }
+  return archiveStopFromReaderError(error2, relPath);
+}
+function localTimeIso(header) {
+  const time3 = new Date(header.year, header.month - 1, header.day, header.hour, header.minute, header.second).getTime();
+  return Number.isFinite(time3) ? new Date(time3).toISOString() : undefined;
+}
+function dateOrderOf(mark) {
+  return mark === "m" ? "mdy" : mark === "y" ? "ymd" : "dmy";
+}
+function orderMarkOf(order, assumed) {
+  if (assumed)
+    return "a";
+  return order === "mdy" ? "m" : order === "ymd" ? "y" : "d";
+}
+function parentFolderName(relPath) {
+  const parts = relPath.split("/").filter((part) => part !== "");
+  return parts.length >= 2 ? parts[parts.length - 2] : undefined;
+}
+function chatNameOf(file, entry) {
+  const fileStem = whatsAppStem(file.relPath);
+  let chat;
+  if (entry) {
+    const memberStem = whatsAppStem(entry.name);
+    chat = whatsAppChatNameFromStem(memberStem) ?? whatsAppChatNameFromStem(fileStem) ?? (memberStem.toLowerCase() === "_chat" ? fileStem : memberStem);
+  } else {
+    const parent = parentFolderName(file.relPath);
+    chat = whatsAppChatNameFromStem(fileStem) ?? (fileStem.toLowerCase() === "_chat" ? (parent ? whatsAppChatNameFromStem(parent) : undefined) ?? GENERIC_CHAT_NAME : fileStem);
+  }
+  const trimmed2 = chat.trim().slice(0, MAX_CHAT_NAME_CHARS).trim();
+  return trimmed2 || GENERIC_CHAT_NAME;
+}
+function unitSize(unit) {
+  return unit.entry ? unit.entry.uncompressedSize : unit.file.version.size;
+}
+function isStored(unit) {
+  return unit.entry !== undefined && unit.entry.method === 0;
+}
+function createWhatsAppArchiveConnector(input) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? WHATSAPP_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING);
+  const tag = manifestTag2(input);
+  const unitFor = (file, fileIndex, entry, base) => {
+    const chat = chatNameOf(file, entry);
+    return {
+      fileIndex,
+      file,
+      memberIndex: entry ? entry.index : 0,
+      ...entry ? { entry } : {},
+      chat,
+      conversationId: `chat:${sha2568(chat).slice(0, 24)}`,
+      sourceKey: sha2568(`${file.relPath}\x00${entry ? entry.name : ""}`).slice(0, 16),
+      statusUpdates: isWhatsAppStatusChat(chat),
+      base
+    };
+  };
+  const openZip = (reader, file, fileIndex) => {
+    let zip;
+    const chatEntries = [];
+    try {
+      zip = ZipArchive.open(stoppableZipSource(reader, file.relPath));
+      const table = zip.memberTable();
+      if (file.members && (table.count !== file.members.count || table.sha256 !== file.members.sha256)) {
+        throw new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", file.relPath);
+      }
+      for (const entry of zip.entries()) {
+        if (!entry.isDirectory && isWhatsAppChatMemberName(entry.name))
+          chatEntries.push(entry);
+      }
+    } catch (error2) {
+      if (error2 instanceof ZipFormatError) {
+        throw new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", file.relPath);
+      }
+      throw stoppedFrom2(error2, file.relPath);
+    }
+    let base = 0;
+    const units = chatEntries.map((entry) => {
+      const unit = unitFor(file, fileIndex, entry, base);
+      base += entry.uncompressedSize;
+      return unit;
+    });
+    return { zip, units, total: base };
+  };
+  const openSource = (context2, unit, options) => {
+    if (!context2.zip || !unit.entry) {
+      return { source: fileByteSource(context2.reader, { start: options.start }), close: () => {
+        return;
+      } };
+    }
+    const continuation = options.useParked && options.start > 0 && unit.entry.method === 8 ? archiveContinuations.take({ archiveId: input.archiveId, manifestTag: tag, fileIndex: unit.fileIndex, memberIndex: unit.memberIndex }, options.start) : undefined;
+    const reader = ZipMemberReader.open(context2.zip, unit.entry, {
+      start: options.start,
+      ...options.crc !== undefined ? { startCrc: options.crc } : {},
+      ...continuation ? { continuation } : {}
+    });
+    return { source: reader, zip: reader, close: () => reader.close() };
+  };
+  const findingOffsetOf = (context2, unit, offset) => context2.zip ? zipFindingOffset(unit.memberIndex, offset) : offset;
+  const progressOffset = (context2, unit, offset) => {
+    if (!context2.zip)
+      return Math.min(offset, context2.file.version.size);
+    const done = Math.min(unit.base + Math.min(offset, unitSize(unit)), context2.total);
+    return Math.floor(context2.file.version.size * done / Math.max(1, context2.total));
+  };
+  const itemOf = (unit, raw, header) => {
+    const sender = raw.sender;
+    const text3 = raw.text;
+    const textHash = sha2568(text3);
+    const providerItemId = sha2568([unit.sourceKey, unit.chat, header.sentAt, sender, String(raw.ordinal), textHash].join("\x00")).slice(0, 32);
+    const authoredAt = localTimeIso(header);
+    return {
+      identity: {
+        family: input.format.family,
+        provider: input.format.provider,
+        accountScope: input.accountScope,
+        providerItemId,
+        providerThreadId: unit.conversationId,
+        providerConversationId: unit.conversationId,
+        localItemId: `${input.accountScope}:${providerItemId}`,
+        sourceVersion: textHash.slice(0, 32)
+      },
+      mimeType: "text/plain",
+      content: { kind: "text", text: text3 },
+      metadata: Object.freeze({
+        chat: unit.chat,
+        sender,
+        senderLabel: sender,
+        ...authoredAt ? { authoredAt } : {},
+        contentHash: textHash
+      }),
+      fetchedAt: new Date().toISOString()
+    };
+  };
+  return {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        const parsed = parseCursor2(input, options?.cursor);
+        if (parsed?.done) {
+          yield { items: [], nextCursor: doneCursor2(input), done: true };
+          return;
+        }
+        const start = parsed?.place;
+        const run2 = {
+          page: [],
+          pending: false,
+          emitted: 0,
+          bytesRead: 0,
+          limit: options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY,
+          stopped: false,
+          finished: false
+        };
+        if (!start)
+          input.report({ kind: ARCHIVE_COMMON_FINDINGS.assumption, class: "gap", fileIndex: 0, offset: 0 });
+        const skips = new Map;
+        const noteSkip = (kind, offset) => {
+          const seen = skips.get(kind);
+          if (seen)
+            seen.count += 1;
+          else
+            skips.set(kind, { offset, count: 1 });
+        };
+        async function* readUnit(context2, index, place) {
+          const unit = context2.units[index];
+          const report = (kind, findingClass, offset, count) => {
+            input.report({
+              kind,
+              class: findingClass,
+              fileIndex: unit.fileIndex,
+              offset: findingOffsetOf(context2, unit, offset),
+              ...count !== undefined ? { count } : {}
+            });
+          };
+          const flushSkips = () => {
+            for (const [kind, seen] of skips)
+              report(kind, "skipped", seen.offset, seen.count);
+            skips.clear();
+          };
+          const isLastFile = unit.fileIndex === input.files.length - 1;
+          const isLastUnit = index === context2.units.length - 1;
+          const afterUnit = index + 1 < context2.units.length ? { fileIndex: unit.fileIndex, memberIndex: context2.units[index + 1].memberIndex, offset: 0, ordinal: 0, order: "?" } : { fileIndex: unit.fileIndex + 1, memberIndex: 0, offset: 0, ordinal: 0, order: "?" };
+          const progressAfterUnit = index + 1 < context2.units.length ? progressOffset(context2, context2.units[index + 1], 0) : context2.file.version.size;
+          const damaged = (error2, offset) => {
+            report(error2.code === "damaged" ? ARCHIVE_COMMON_FINDINGS.fileDamaged : ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", offset);
+          };
+          let unreadable = false;
+          let order = place.order;
+          if (order === "?") {
+            let scanned;
+            let scanSource;
+            try {
+              scanSource = openSource(context2, unit, { start: 0, useParked: false });
+              scanned = scanWhatsAppDateOrder(scanSource.source, { shouldContinue: input.shouldContinue });
+            } catch (error2) {
+              if (!(error2 instanceof ZipMemberError))
+                throw stoppedFrom2(error2, unit.file.relPath);
+              damaged(error2, 0);
+              unreadable = true;
+            } finally {
+              scanSource?.close();
+            }
+            if (!unreadable) {
+              if (!scanned) {
+                run2.stopped = true;
+                return;
+              }
+              order = orderMarkOf(scanned.order, scanned.assumed);
+              if (scanned.assumed)
+                report(ARCHIVE_COMMON_FINDINGS.assumption, "gap", 0);
+            }
+          }
+          let opened;
+          let messages;
+          if (!unreadable) {
+            try {
+              opened = openSource(context2, unit, {
+                start: place.offset,
+                ...place.crc !== undefined ? { crc: place.crc } : {},
+                useParked: true
+              });
+              messages = new WhatsAppMessageReader(opened.source, {
+                startOrdinal: place.ordinal,
+                requireHeaderFirst: place.offset > 0
+              });
+            } catch (error2) {
+              opened?.close();
+              opened = undefined;
+              if (!(error2 instanceof ZipMemberError))
+                throw stoppedFrom2(error2, unit.file.relPath);
+              damaged(error2, place.offset);
+            }
+          }
+          const dateOrder = dateOrderOf(order);
+          let yieldedAt;
+          let clean2 = true;
+          let ended = messages === undefined;
+          let mark = opened?.source.position ?? 0;
+          const placeOf = (pending, crc) => ({
+            fileIndex: unit.fileIndex,
+            memberIndex: unit.memberIndex,
+            offset: pending.offset,
+            ordinal: pending.ordinal,
+            order,
+            ...crc !== undefined ? { crc } : {}
+          });
+          try {
+            while (messages && opened && !ended) {
+              if (!input.shouldContinue()) {
+                run2.stopped = true;
+                const at2 = messages.pending;
+                if (run2.pending && at2) {
+                  flushSkips();
+                  context2.current();
+                  input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressOffset(context2, unit, at2.offset) });
+                  yieldedAt = at2.offset;
+                  yield {
+                    items: run2.page,
+                    nextCursor: cursorOf(input, placeOf(at2, isStored(unit) ? messages.pendingCrc() : undefined)),
+                    done: false
+                  };
+                  run2.emitted += run2.page.length;
+                  run2.page = [];
+                  run2.pending = false;
+                }
+                return;
+              }
+              let raw;
+              try {
+                raw = messages.next();
+              } catch (error2) {
+                if (error2 instanceof ZipMemberError) {
+                  clean2 = false;
+                  damaged(error2, messages.pending?.offset ?? mark);
+                  raw = undefined;
+                  ended = true;
+                  break;
+                }
+                clean2 = false;
+                throw stoppedFrom2(error2, unit.file.relPath);
+              }
+              run2.bytesRead += Math.max(0, opened.source.position - mark);
+              mark = opened.source.position;
+              if (!raw) {
+                ended = true;
+                break;
+              }
+              run2.pending = true;
+              if (unit.statusUpdates) {
+                noteSkip(WHATSAPP_FINDINGS.statusUpdates, raw.offset);
+              } else if (raw.sender === undefined) {
+                noteSkip(WHATSAPP_FINDINGS.systemMessage, raw.offset);
+              } else if (raw.text.trim() === "") {
+                noteSkip(WHATSAPP_FINDINGS.messageEmpty, raw.offset);
+              } else {
+                const header = resolveWhatsAppHeader(raw.header, dateOrder);
+                if (!header) {
+                  noteSkip(WHATSAPP_FINDINGS.messageEmpty, raw.offset);
+                } else {
+                  run2.page.push(itemOf(unit, raw, header));
+                  const media = whatsAppMediaMarkerCount(raw.text);
+                  if (media > 0)
+                    report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", raw.offset, media);
+                  if (raw.cut)
+                    report(ARCHIVE_COMMON_FINDINGS.itemTruncated, "gap", raw.offset);
+                }
+              }
+              const at = messages.pending;
+              if (!at)
+                continue;
+              const room = run2.limit - run2.emitted;
+              const full = run2.page.length >= Math.min(pageSizeDefault, room);
+              const spent = run2.bytesRead >= byteBudget;
+              if (!full && !spent)
+                continue;
+              const atLimit = run2.page.length >= room;
+              const last = spent || atLimit;
+              if (last && !atLimit && context2.zip && !messages.canSettle())
+                continue;
+              flushSkips();
+              context2.current();
+              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressOffset(context2, unit, at.offset) });
+              yieldedAt = at.offset;
+              yield {
+                items: run2.page,
+                nextCursor: cursorOf(input, placeOf(at, isStored(unit) ? messages.pendingCrc() : undefined)),
+                done: false
+              };
+              run2.emitted += run2.page.length;
+              run2.page = [];
+              run2.pending = false;
+              if (last) {
+                run2.stopped = true;
+                return;
+              }
+            }
+            if (messages && opened?.zip) {
+              const end = opened.zip.end;
+              if (end && (!end.sizeOk || end.crcOk === false)) {
+                report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", unitSize(unit));
+              }
+            }
+            flushSkips();
+            context2.current();
+            if (isLastFile && isLastUnit) {
+              yield { items: run2.page, nextCursor: doneCursor2(input), done: true };
+              run2.page = [];
+              run2.finished = true;
+              return;
+            }
+            if (run2.pending) {
+              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressAfterUnit });
+              yield { items: run2.page, nextCursor: cursorOf(input, afterUnit), done: false };
+              run2.emitted += run2.page.length;
+              run2.page = [];
+              run2.pending = false;
+              if (run2.emitted >= run2.limit || run2.bytesRead >= byteBudget)
+                run2.stopped = true;
+            }
+          } finally {
+            try {
+              if (clean2 && !ended && messages && opened?.zip && yieldedAt !== undefined) {
+                const pending = messages.pending;
+                if (pending && pending.offset === yieldedAt && messages.settle()) {
+                  const continuation = opened.zip.suspend();
+                  if (continuation) {
+                    archiveContinuations.put({ archiveId: input.archiveId, manifestTag: tag, fileIndex: unit.fileIndex, memberIndex: unit.memberIndex }, continuation);
+                  }
+                }
+              }
+            } finally {
+              opened?.close();
+            }
+          }
+        }
+        async function* readFile12(fileIndex, at) {
+          const file = input.files[fileIndex];
+          let reader;
+          try {
+            reader = input.root.openFile(file.relPath, { expected: file.version });
+          } catch (error2) {
+            throw stoppedFrom2(error2, file.relPath);
+          }
+          try {
+            const context2 = {
+              fileIndex,
+              file,
+              reader,
+              units: [],
+              total: 0,
+              current: () => {
+                try {
+                  reader.assertCurrent();
+                } catch (error2) {
+                  throw stoppedFrom2(error2, file.relPath);
+                }
+              }
+            };
+            if (file.members) {
+              const opened = openZip(reader, file, fileIndex);
+              context2.zip = opened.zip;
+              context2.units = opened.units;
+              context2.total = opened.total;
+            } else {
+              context2.units = [unitFor(file, fileIndex, undefined, 0)];
+              context2.total = file.version.size;
+            }
+            let first = 0;
+            if (at) {
+              const exact = at.order !== "?";
+              first = context2.units.findIndex((unit2) => exact ? unit2.memberIndex === at.memberIndex : unit2.memberIndex >= at.memberIndex);
+              if (first < 0) {
+                if (exact)
+                  throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.", file.relPath);
+                first = context2.units.length;
+              }
+              const unit = context2.units[first];
+              if (exact && unit && at.offset > unitSize(unit)) {
+                throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.", file.relPath);
+              }
+            }
+            for (let index = first;index < context2.units.length; index += 1) {
+              const place = at && index === first && at.order !== "?" ? at : { fileIndex, memberIndex: context2.units[index].memberIndex, offset: 0, ordinal: 0, order: "?" };
+              yield* readUnit(context2, index, place);
+              if (run2.stopped || run2.finished)
+                return;
+            }
+            context2.current();
+          } finally {
+            reader.close();
+          }
+        }
+        for (let fileIndex = start?.fileIndex ?? 0;fileIndex < input.files.length; fileIndex += 1) {
+          yield* readFile12(fileIndex, start && start.fileIndex === fileIndex ? start : undefined);
+          if (run2.stopped || run2.finished)
+            return;
+        }
+        yield { items: run2.page, nextCursor: doneCursor2(input), done: true };
+      }();
+    },
+    async fetchItem() {
+      throw new Error("An imported message is read only while its archive is listed.");
+    },
+    classificationSignals(item) {
+      const chat = typeof item.metadata.chat === "string" && item.metadata.chat ? item.metadata.chat : undefined;
+      const sender = typeof item.metadata.sender === "string" && item.metadata.sender ? item.metadata.sender : undefined;
+      return {
+        ...chat ? { title: chat } : {},
+        ...sender ? { sender } : {}
+      };
+    }
+  };
+}
+function registerWhatsAppArchiveConnector() {
+  registerArchiveFormatConnector(WHATSAPP_ARCHIVE_FORMAT_ID, createWhatsAppArchiveConnector);
+}
+var WHATSAPP_ARCHIVE_FORMAT_ID = "whatsapp_chat", WHATSAPP_CURSOR_PREFIX = "wa1:", WHATSAPP_DEFAULT_PAGE_SIZE = 100, WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING, MAX_CHAT_NAME_CHARS = 200, GENERIC_CHAT_NAME = "WhatsApp chat", WHATSAPP_FINDINGS, ORDER_MARKS, WHOLE_NUMBER;
+var init_connector6 = __esm(() => {
+  init_archive_formats();
+  init_whatsapp_export_grammar();
+  init_byte_source();
+  init_continuation_cache();
+  init_stop_errors();
+  init_zip_reader();
+  init_messages();
+  WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  WHATSAPP_FINDINGS = {
+    systemMessage: "system_message",
+    messageEmpty: "message_empty",
+    statusUpdates: "status_updates"
+  };
+  ORDER_MARKS = ["d", "m", "y", "a", "?"];
+  WHOLE_NUMBER = /^\d{1,16}$/;
+});
+
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
+  registerWhatsAppArchiveConnector();
 }
 var init_format_connectors = __esm(() => {
+  init_connector5();
   init_connector6();
 });
 
@@ -151274,6 +152408,10 @@ function kindLine(kinds, entry) {
     line: entry.file ? fill2(DASHBOARD_ARCHIVE_COPY.gapInFile, { file: entry.file, gap }) : gap
   };
 }
+function snapshotOf(entry) {
+  const snapshot = dashboardArchiveNouns(entry.family).snapshot;
+  return snapshot ? ` ${snapshot}.` : "";
+}
 function summaryOf2(entry, stopped) {
   const copy = DASHBOARD_ARCHIVE_COPY;
   if (entry.countsUnavailable && entry.status !== "stopped" && entry.status !== "removing") {
@@ -151288,7 +152426,7 @@ function summaryOf2(entry, stopped) {
     case "imported":
       if (entry.items === 0)
         return fill2(copy.emptyImport, { none: dashboardArchiveNouns(entry.family).none });
-      return `${fill2(copy.importedLineNoTime, { items })}.${held}`;
+      return `${fill2(copy.importedLineNoTime, { items })}.${snapshotOf(entry)}${held}`;
     case "stopped":
       return `Stopped: ${stopped?.why ?? ""} ${stopped?.fix ?? ""}`.trim();
     case "removing":
@@ -151551,71 +152689,6 @@ var init_agent = __esm(() => {
       failed: "It was not imported: {reason}"
     }
   };
-});
-
-// src/workers/archive-import/continuation-cache.ts
-function sameKey(a, b) {
-  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
-}
-
-class ContinuationCache {
-  entries = [];
-  maxEntries;
-  maxBytes;
-  maxIdleMs;
-  now;
-  constructor(options = {}) {
-    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
-    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
-    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
-    this.now = options.now ?? Date.now;
-  }
-  get size() {
-    this.expire();
-    return this.entries.length;
-  }
-  get retainedBytes() {
-    this.expire();
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  put(key2, continuation) {
-    this.expire();
-    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
-    if (continuation.retainedBytes > this.maxBytes)
-      return;
-    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
-    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
-      this.entries.shift();
-  }
-  take(key2, offset) {
-    this.expire();
-    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
-    if (index < 0)
-      return;
-    const [parked] = this.entries.splice(index, 1);
-    return parked.continuation.position === offset ? parked.continuation : undefined;
-  }
-  dropArchive(archiveId) {
-    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
-  }
-  clear() {
-    this.entries = [];
-  }
-  retainedTotal() {
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  expire() {
-    const cutoff = this.now() - this.maxIdleMs;
-    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
-      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
-    }
-  }
-}
-var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
-var init_continuation_cache = __esm(() => {
-  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
-  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
-  archiveContinuations = new ContinuationCache;
 });
 
 // src/workers/archive-import/removal.ts
@@ -152289,7 +153362,7 @@ var init_dashboard2 = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash78 } from "node:crypto";
+import { createHash as createHash79 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -152315,7 +153388,7 @@ function receiptOf(record5, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash78("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash79("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -152717,7 +153790,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash79 } from "node:crypto";
+import { createHash as createHash80 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { existsSync as existsSync73, lstatSync as lstatSync39, readFileSync as readFileSync73, readdirSync as readdirSync16, realpathSync as realpathSync20 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
@@ -152881,7 +153954,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash79("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash80("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -154263,7 +155336,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash80 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -154296,7 +155369,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash80("sha256").update(`${accessToken}
+    const key2 = createHash81("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -154327,7 +155400,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash80("sha256").update(session.token).digest("hex");
+    const key2 = createHash81("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -157472,7 +158545,7 @@ function chatgptPrivateAnswerProgram(config2) {
       render();
   }
   const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
-  const utf83 = (text3) => new TextEncoder().encode(text3);
+  const utf84 = (text3) => new TextEncoder().encode(text3);
   function fromB64url(text3) {
     if (typeof text3 !== "string" || !text3 || !/^[A-Za-z0-9_-]+$/.test(text3))
       return null;
@@ -157627,8 +158700,8 @@ function chatgptPrivateAnswerProgram(config2) {
     const macKey = await subtle.importKey("raw", macRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
     const shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
     const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    const key2 = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
+    const key2 = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf84(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
   function readOpen(value2) {
@@ -158853,7 +159926,7 @@ function chatgptPrivateQuestionProgram(config2) {
     }
   }
   const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
-  const utf83 = (text3) => new TextEncoder().encode(text3);
+  const utf84 = (text3) => new TextEncoder().encode(text3);
   function fromB64url(text3) {
     if (typeof text3 !== "string" || !text3 || !/^[A-Za-z0-9_-]+$/.test(text3))
       return null;
@@ -158891,7 +159964,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const peer = await subtle.importKey("raw", peerRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
     const shared = await subtle.deriveBits({ name: "ECDH", public: peer }, privateKey, 256);
     const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    return subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
+    return subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf84(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
   }
   async function seal(jobId, privateKey, askKey, plaintext) {
     const engineRaw = fromB64url(askKey);
@@ -158899,7 +159972,7 @@ function chatgptPrivateQuestionProgram(config2) {
       throw new Error("malformed");
     const key2 = await aesKey(privateKey, engineRaw, jobId, "encrypt");
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, utf83(plaintext));
+    const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, utf84(plaintext));
     return { iv: toB64url(iv), ciphertext: toB64url(new Uint8Array(ciphertext)) };
   }
   async function open6(jobId, privateKey, sealed) {
@@ -158909,7 +159982,7 @@ function chatgptPrivateQuestionProgram(config2) {
     if (!macRaw || macRaw.length !== 65 || !iv || iv.length !== 12 || !ciphertext)
       throw new Error("malformed");
     const key2 = await aesKey(privateKey, macRaw, jobId, "decrypt");
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
   const KS = config2.keyStore;
@@ -170106,7 +171179,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash81, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash82, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -170232,7 +171305,7 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
-    const transaction = sha2568(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    const transaction = sha2569(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
       if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
@@ -170278,7 +171351,7 @@ function createRemoteOAuthHandler(options) {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes27(32).toString("base64url");
-    codes.set(sha2568(code), {
+    codes.set(sha2569(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -170457,7 +171530,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha2568(code);
+      const hash2 = sha2569(code);
       const issued = codes.get(hash2);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash2);
@@ -170474,7 +171547,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash81("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash82("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -170740,8 +171813,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha2568(value2) {
-  return createHash81("sha256").update(value2).digest("hex");
+function sha2569(value2) {
+  return createHash82("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -170863,10 +171936,10 @@ async function importPanelPublicKey(value2) {
 async function aesKey(privateKey, peerPublicKey, jobId, usage) {
   const shared = await subtle().deriveBits({ name: "ECDH", public: peerPublicKey }, privateKey, 256);
   const ikm = await subtle().importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-  return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
+  return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf84(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
 }
 function padPrivateAnswerPlaintext(json2) {
-  const bytes = utf83(json2).byteLength;
+  const bytes = utf84(json2).byteLength;
   const largest = PRIVATE_ANSWER_PAD_BUCKETS[PRIVATE_ANSWER_PAD_BUCKETS.length - 1];
   const target = PRIVATE_ANSWER_PAD_BUCKETS.find((bucket) => bytes <= bucket) ?? Math.ceil(bytes / largest) * largest;
   return json2 + " ".repeat(target - bytes);
@@ -170875,7 +171948,7 @@ async function sealPrivateAnswer(jobId, panelPublicKey, plaintext) {
   const mac2 = await subtle().generateKey({ name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, ["deriveBits"]);
   const key2 = await aesKey(mac2.privateKey, panelPublicKey, jobId, "encrypt");
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
-  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, utf83(plaintext));
+  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, utf84(plaintext));
   const macPublicKey = new Uint8Array(await subtle().exportKey("raw", mac2.publicKey));
   return { macPublicKey: toBase64Url(macPublicKey), iv: toBase64Url(iv), ciphertext: toBase64Url(new Uint8Array(ciphertext)) };
 }
@@ -170892,10 +171965,10 @@ async function openPrivateQuestion(jobId, enginePrivateKey, panelKey, sealed) {
   if (!iv || !ciphertext || ciphertext.byteLength > 32768)
     throw new Error("malformed sealed question");
   const key2 = await aesKey(enginePrivateKey, panelKey, jobId, "decrypt");
-  const plaintext = await subtle().decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
+  const plaintext = await subtle().decrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, ciphertext);
   return new TextDecoder().decode(plaintext);
 }
-var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf83 = (value2) => new TextEncoder().encode(value2), PRIVATE_ANSWER_PAD_BUCKETS;
+var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf84 = (value2) => new TextEncoder().encode(value2), PRIVATE_ANSWER_PAD_BUCKETS;
 var init_private_answer_crypto = __esm(() => {
   PRIVATE_ANSWER_PAD_BUCKETS = [1024, 4096, 16384, 65536];
 });
@@ -172856,7 +173929,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash82 } from "node:crypto";
+import { createHash as createHash83 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -172873,7 +173946,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text5 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text5, etag: `"${createHash82("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text5, etag: `"${createHash83("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -173249,7 +174322,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash83 } from "node:crypto";
+import { createHash as createHash84 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -173273,7 +174346,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest3 = createHash83("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest3 = createHash84("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest3.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -179172,7 +180245,7 @@ var init_server5 = __esm(async () => {
   init_store2();
   init_state();
   init_scheduler_source2();
-  init_connector5();
+  init_connector4();
   init_approved_scope_filter2();
   init_open_target2();
   init_paths();

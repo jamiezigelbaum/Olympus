@@ -28828,6 +28828,118 @@ var init_file_ingestion_matcher = __esm(() => {
   });
 });
 
+// src/core/whatsapp-export-grammar.ts
+function normalizeWhatsAppLine(line) {
+  return line.replace(INVISIBLE, "").replace(NARROW_SPACES, " ");
+}
+function matchWhatsAppHeader(line) {
+  const found = HEADER.exec(line);
+  if (!found)
+    return;
+  const at = found[1] !== undefined ? 1 : 8;
+  const [g1, g2, g3, hourText, minuteText, secondText, meridiem] = found.slice(at, at + 7);
+  const rest = found[15] ?? "";
+  if (g1 === undefined || g2 === undefined || g3 === undefined || hourText === undefined || minuteText === undefined)
+    return;
+  if (g1.length === 3)
+    return;
+  const yearFirst = g1.length === 4;
+  if (yearFirst) {
+    if (g3.length > 2)
+      return;
+  } else if (g3.length !== 2 && g3.length !== 4) {
+    return;
+  }
+  let hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = secondText === undefined ? 0 : Number(secondText);
+  if (meridiem !== undefined) {
+    if (hour < 1 || hour > 12)
+      return;
+    const pm = meridiem.toLowerCase() === "p";
+    hour = hour === 12 ? pm ? 12 : 0 : pm ? hour + 12 : hour;
+  }
+  if (hour > 23 || minute > 59 || second > 59)
+    return;
+  const p1 = Number(g1);
+  const p2 = Number(g2);
+  const p3 = Number(g3);
+  const match = {
+    p1,
+    p2,
+    p3,
+    yearFirst,
+    lastYear: g3.length === 2 ? 2000 + p3 : p3,
+    hour,
+    minute,
+    second,
+    rest
+  };
+  return resolveWhatsAppHeader(match, "dmy") || resolveWhatsAppHeader(match, "mdy") ? match : undefined;
+}
+function daysIn(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+function two(value) {
+  return String(value).padStart(2, "0");
+}
+function dateOf(year, month, day) {
+  if (year < 1990 || year > 2199 || month < 1 || month > 12 || day < 1 || day > daysIn(year, month))
+    return;
+  return { year, month, day };
+}
+function resolveWhatsAppHeader(match, order) {
+  let date;
+  if (match.yearFirst) {
+    date = dateOf(match.p1, match.p2, match.p3);
+  } else {
+    const dayFirst = dateOf(match.lastYear, match.p2, match.p1);
+    const monthFirst = dateOf(match.lastYear, match.p1, match.p2);
+    date = order === "mdy" ? monthFirst ?? dayFirst : dayFirst ?? monthFirst;
+  }
+  if (!date)
+    return;
+  return {
+    ...match,
+    ...date,
+    sentAt: `${String(date.year).padStart(4, "0")}-${two(date.month)}-${two(date.day)}T${two(match.hour)}:${two(match.minute)}:${two(match.second)}`
+  };
+}
+function isWhatsAppChatMemberName(name) {
+  if (isWhatsAppZipNoise(name))
+    return false;
+  const last = (name.split("/").pop() ?? name).toLowerCase();
+  return last === "_chat.txt" || last.endsWith(".txt") && last.includes("whatsapp");
+}
+function isWhatsAppZipNoise(name) {
+  if (name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/"))
+    return true;
+  const base = name.split("/").pop() ?? name;
+  return base.startsWith("._") || base === ".DS_Store";
+}
+function looksLikeWhatsAppChat(head) {
+  if (!head || head.length < 10)
+    return false;
+  if (head.includes(0))
+    return false;
+  const text2 = lenientUtf8.decode(head);
+  for (const raw of text2.split(`
+`).slice(0, 8)) {
+    const line = normalizeWhatsAppLine(raw.endsWith("\r") ? raw.slice(0, -1) : raw);
+    if (line.trim() === "")
+      continue;
+    return matchWhatsAppHeader(line) !== undefined;
+  }
+  return false;
+}
+var INVISIBLE, NARROW_SPACES, DATE = "(\\d{1,4})[./-]\\s?(\\d{1,2})[./-]\\s?(\\d{1,4})", TIME = "(\\d{1,2})[:.](\\d{2})(?:[:.](\\d{2}))?(?:\\s?([ap])\\.?\\s?m\\.?)?", HEADER, lenientUtf8;
+var init_whatsapp_export_grammar = __esm(() => {
+  INVISIBLE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  HEADER = new RegExp(`^(?:\\[\\s?${DATE},?\\s+${TIME}\\s?\\]\\s?|${DATE},?\\s+${TIME}\\s[-\\u2013]\\s)(.*)$`, "is");
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
 // src/core/archive-formats.ts
 function startsWithFromLine(head) {
   if (!head || head.length < FROM_LINE.length)
@@ -28840,8 +28952,9 @@ function archiveCorpusId(trustDomain, family) {
 function isArchiveCorpusId(corpusId, trustDomain) {
   return corpusId.startsWith(`${trustDomain}.archive.`);
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
+  init_whatsapp_export_grammar();
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
     id: "mbox",
@@ -28859,7 +28972,30 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
+    id: "whatsapp_chat",
+    label: "WhatsApp chat export",
+    family: "chat",
+    provider: "whatsapp_export",
+    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
+    citationLabel: "WhatsApp",
+    probeNames: Object.freeze(["_chat.txt", "*whatsapp*.txt", "*whatsapp*.zip"]),
+    detect(probe) {
+      const isChat = (entry) => {
+        if (entry.kind !== "file")
+          return false;
+        if (entry.members) {
+          return entry.members.some((member) => member.kind === "file" && isWhatsAppChatMemberName(member.relPath) && looksLikeWhatsAppChat(member.head));
+        }
+        return entry.name.toLowerCase().endsWith(".txt") && looksLikeWhatsAppChat(entry.head);
+      };
+      if (probe.chosen.kind === "file")
+        return isChat(probe.chosen) ? [""] : undefined;
+      const found = probe.children.filter(isChat).map((entry) => entry.relPath).sort();
+      return found.length > 0 ? found : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, WHATSAPP_ARCHIVE_FORMAT]);
   CONNECTOR_FACTORIES = new Map;
 });
 
@@ -32019,12 +32155,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -32462,10 +32598,10 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
-    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes" },
-    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items" }
+    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
+    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "Snapshot, not updated" },
+    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes", snapshot: "" },
+    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
@@ -32536,9 +32672,12 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+      message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone, or which part of a date is the day)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones, or which part of a date is the day)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
@@ -35790,8 +35929,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
     const latest = typeof archive.latest === "string" ? archive.latest : "";
-    if (earliest && latest)
+    if (earliest && latest) {
       facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill2(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(archive).snapshot;
+      if (typeof snapshot === "string" && snapshot)
+        facts.push(el("span", "archive-snapshot", snapshot));
+    }
     if (facts.length) {
       const line = el("p", "muted archive-facts");
       facts.forEach((fact, index) => {
@@ -40639,7 +40782,7 @@ function readBlock(source, offset, length, name) {
     throw error;
   }
 }
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf82;
 var init_zip_reader = __esm(() => {
   init_browser();
   init_stop_errors();
@@ -40669,7 +40812,7 @@ var init_zip_reader = __esm(() => {
     }
   };
   strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-  lenientUtf8 = new TextDecoder("utf-8");
+  lenientUtf82 = new TextDecoder("utf-8");
 });
 
 // src/workers/archive-import/manifest.ts
@@ -40708,12 +40851,8 @@ var init_tier_set3 = __esm(() => {
   init_connector3();
 });
 
-// src/workers/whatsapp/connector.ts
-var init_connector4 = () => {};
-
 // src/workers/whatsapp/index.ts
 var init_whatsapp = __esm(() => {
-  init_connector4();
   init_live_connector();
   init_store_sync2();
   init_extraction_source();
@@ -45738,6 +45877,88 @@ var MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 var SKIPPED_LABELS = new Set(["spam", "trash"]);
 var decodableCharsets = new Map;
 
+// src/workers/archive-import/whatsapp/connector.ts
+init_archive_formats();
+init_whatsapp_export_grammar();
+init_byte_source();
+
+// src/workers/archive-import/continuation-cache.ts
+var CONTINUATION_CACHE_MAX_ENTRIES = 4;
+var CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+var CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var archiveContinuations = new ContinuationCache;
+
+// src/workers/archive-import/whatsapp/connector.ts
+init_stop_errors();
+init_zip_reader();
+
+// src/workers/archive-import/whatsapp/messages.ts
+init_byte_source();
+init_whatsapp_export_grammar();
+var WHATSAPP_LINE_BYTES_KEPT = 4 * 1024 * 1024;
+var WHATSAPP_ORDER_SCAN_MAX_BYTES = 256 * 1024 * 1024;
+var utf83 = new TextDecoder("utf-8");
+
+// src/workers/archive-import/whatsapp/connector.ts
+var WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+
 // src/workers/archive-import/lane.ts
 init_source_storage();
 init_tiered_store_set();
@@ -45803,71 +46024,6 @@ init_manifest3();
 
 // src/workers/archive-import/removal.ts
 init_source_storage();
-
-// src/workers/archive-import/continuation-cache.ts
-var CONTINUATION_CACHE_MAX_ENTRIES = 4;
-var CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
-var CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
-function sameKey(a, b) {
-  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
-}
-
-class ContinuationCache {
-  entries = [];
-  maxEntries;
-  maxBytes;
-  maxIdleMs;
-  now;
-  constructor(options = {}) {
-    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
-    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
-    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
-    this.now = options.now ?? Date.now;
-  }
-  get size() {
-    this.expire();
-    return this.entries.length;
-  }
-  get retainedBytes() {
-    this.expire();
-    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
-  }
-  put(key2, continuation) {
-    this.expire();
-    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
-    if (continuation.retainedBytes > this.maxBytes)
-      return;
-    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
-    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
-      this.entries.shift();
-  }
-  take(key2, offset) {
-    this.expire();
-    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
-    if (index < 0)
-      return;
-    const [parked] = this.entries.splice(index, 1);
-    return parked.continuation.position === offset ? parked.continuation : undefined;
-  }
-  dropArchive(archiveId) {
-    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
-  }
-  clear() {
-    this.entries = [];
-  }
-  retainedTotal() {
-    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
-  }
-  expire() {
-    const cutoff = this.now() - this.maxIdleMs;
-    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
-      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
-    }
-  }
-}
-var archiveContinuations = new ContinuationCache;
-
-// src/workers/archive-import/removal.ts
 init_state();
 init_store2();
 
