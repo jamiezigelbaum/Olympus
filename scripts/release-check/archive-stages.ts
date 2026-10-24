@@ -16,7 +16,7 @@ import {
 } from './archive-fixtures.ts';
 import {
   ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, approveRequestSteps, drainBoundS, panelArchivesOf, pickerImportJourney, removeJourney, rowNamed,
-  startViewOf, statusViewOf, stoppedJourney,
+  shownPath, startViewOf, statusViewOf, stoppedJourney,
   type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type PanelArchives, type RemoveObservation, type RowView,
   type SearchView, type StatusView, type StoreView,
 } from './archive-leg.ts';
@@ -117,6 +117,8 @@ export interface ImportArgs {
   watchEgress?: boolean;
   settleS?: number;
   startS?: number;
+  /** How long the dashboard may take to show what the first step waits for (the agent's request, the Import an archive button). */
+  openS?: number;
 }
 
 export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<ImportObservation> {
@@ -138,8 +140,12 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
           const waiting = host.cli(['status']);
           obs.waiting = statusViewOf(waiting.json, fx.token);
         }
-        const bounds = { ...(args.startS !== undefined ? { startS: args.startS } : {}), ...(args.settleS !== undefined ? { settleS: args.settleS } : {}) };
-        const journey = args.via === 'request' ? agentImportJourney(fx, path, bounds) : pickerImportJourney(fx, bounds);
+        const bounds = {
+          ...(args.startS !== undefined ? { startS: args.startS } : {}),
+          ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
+          ...(args.openS !== undefined ? { openS: args.openS } : {}),
+        };
+        const journey = args.via === 'request' ? agentImportJourney(fx, shownPath(host.home, path), bounds) : pickerImportJourney(fx, bounds);
         const trace = await runJourney(driver, journey);
         obs.traces.push(trace);
         const settle = stepMs(trace, 'The import settles');
@@ -332,7 +338,7 @@ export async function changedStage(host: ArchiveHost, args: { seed: string; size
           title: `The owner approves the large archive's import (${size} messages)`,
           source: 'archive import: a file that changes while it is imported',
           mutates: true,
-          steps: approveRequestSteps(fx, path, args.startS ?? ARCHIVE_BOUNDS.startS),
+          steps: approveRequestSteps(fx, shownPath(host.home, path), args.startS ?? ARCHIVE_BOUNDS.startS),
         };
         const approved = await runJourney(driver, approve);
         obs.traces.push(approved);

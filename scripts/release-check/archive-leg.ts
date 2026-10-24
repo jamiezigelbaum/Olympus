@@ -77,6 +77,12 @@ export function expectedGapLines(expect: ArchiveExpectation): string[] {
   return [...expect.gaps, ...expect.leftOut].map((entry) => gapSentence(entry.kind, entry.count));
 }
 
+/** A path as the dashboard shows it to the person approving: the home folder written as ~ (the same rule as archive-import/dashboard.ts). */
+export function shownPath(home: string, path: string): string {
+  if (path === home) return '~';
+  return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+
 /** The date range as the row writes it. */
 export function datesWord(expect: Pick<ArchiveExpectation, 'earliest' | 'latest'>): string {
   return expect.earliest === expect.latest ? expect.earliest : fill(A.dates, { earliest: expect.earliest, latest: expect.latest });
@@ -597,8 +603,12 @@ function importCoreChecks(obs: ImportObservation, fx: LegFixture): CheckResult[]
   return out;
 }
 
+/**
+ * The machine's agent prints just `{ ok: false, detail }` when it fails before it has anything to report, so a list the types say is
+ * there may not be: a missing list reads as an empty one, and the run fails on the detail.
+ */
 const notRun = (prefix: string, title: string, obs: { ok: boolean; detail?: string; traces: readonly unknown[] } | undefined): CheckResult | undefined =>
-  !obs || (!obs.ok && obs.traces.length === 0) ? check(`${prefix}.ran`, title, false, obs?.detail ?? 'no result from the machine') : undefined;
+  !obs || (!obs.ok && (obs.traces ?? []).length === 0) ? check(`${prefix}.ran`, title, false, obs?.detail ?? 'no result from the machine') : undefined;
 
 /** Checks for one archive imported on the agent path or the picker, with the private model on. */
 export function importChecks(obs: ImportObservation | undefined, fx: LegFixture, os: string): CheckResult[] {
@@ -685,7 +695,7 @@ function heldOffOnly(obs: ImportObservation, fx: LegFixture): CheckResult[] {
 
 export function removeChecks(obs: RemoveObservation | undefined, fixtures: ReadonlyArray<Pick<LegFixture, 'role' | 'format' | 'fileName' | 'token'>>): CheckResult[] {
   const out: CheckResult[] = [];
-  if (!obs || (!obs.ok && obs.removals.length === 0)) {
+  if (!obs || (!obs.ok && (obs.removals ?? []).length === 0)) {
     return [check('archive.remove.ran', 'Archives were removed from their rows', false, obs?.detail ?? 'no result from the machine')];
   }
   if (!obs.ok) out.push(check('archive.remove.ran', 'Archives were removed from their rows', false, obs.detail ?? 'the machine reported a problem'));
@@ -718,7 +728,7 @@ export function removeChecks(obs: RemoveObservation | undefined, fixtures: Reado
 
 export function changedChecks(obs: ChangedObservation | undefined): CheckResult[] {
   const title = 'A file changed while it was being imported stops the import, and the dashboard says so';
-  if (!obs || (!obs.ok && obs.attempts.length === 0)) return [check('archive.changed.stops', title, false, obs?.detail ?? 'no result from the machine')];
+  if (!obs || (!obs.ok && (obs.attempts ?? []).length === 0)) return [check('archive.changed.stops', title, false, obs?.detail ?? 'no result from the machine')];
   const out: CheckResult[] = [];
   if (!obs.ok) out.push(check('archive.changed.ran', 'The changed-file stage ran to its end', false, obs.detail ?? 'the machine reported a problem'));
   out.push(...journeyChecks(obs.traces));

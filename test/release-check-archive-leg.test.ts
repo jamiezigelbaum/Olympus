@@ -8,19 +8,15 @@
 // fails the journey that guards it. Every name and path here is invented.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { Window } from 'happy-dom';
 import {
   ARCHIVE_APPROVE_TOOL_NAME,
   ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
-  OLYMPUS_HOST_CONTEXT_KEY,
-  SCOPE_UI_META_KEY,
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
-import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { archivesOpenTarget, createArchiveImportAgent } from '../src/workers/archive-import/agent.ts';
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
@@ -33,8 +29,8 @@ import {
   type SearchView, type StatusView, type StoreView,
 } from '../scripts/release-check/archive-leg.ts';
 import { egressVerdict } from '../scripts/release-check/inbox.ts';
-import { runJourney, type ElementInfo, type Journey, type JourneyDriver, type JourneyTrace, type PageEvents } from '../scripts/release-check/journey.ts';
-import { PROBE_SOURCE, type WireTarget } from '../scripts/release-check/probe.ts';
+import { runJourney, type Journey, type JourneyTrace } from '../scripts/release-check/journey.ts';
+import { PANEL_IDS, PanelDriver, browseFixtures, closeWindows, dashboardAnswer, entryFor, evalIn, live, mountPanel, type Serve } from './helpers/release-check-panel.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../src/workers/dashboard/vocabulary.ts';
 
 const fill = (template: string, values: Record<string, string>): string => Object.entries(values).reduce((out, [key, value]) => out.split(`{${key}}`).join(value), template);
@@ -204,6 +200,22 @@ describe('an archive imported with the private model on', () => {
     expect(checks[0]!.detail).toContain('no result');
   });
 
+  test('what the machine\'s agent prints when it fails before it has anything to report (just ok and a detail) fails one check with that detail', () => {
+    const bare = { ok: false, detail: 'the dashboard did not open' } as unknown as ImportObservation;
+    const checks = importChecks(bare, agentFx, 'macos');
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toMatchObject({ id: 'archive.agent.mbox.ran', status: 'fail', detail: 'the dashboard did not open' });
+    const removed = removeChecks({ ok: false, detail: 'no panel' } as unknown as RemoveObservation, [agentFx, pickerFx, heldFx]);
+    expect(removed).toHaveLength(1);
+    expect(removed[0]).toMatchObject({ id: 'archive.remove.ran', status: 'fail', detail: 'no panel' });
+    const changed = changedChecks({ ok: false, detail: 'no panel' } as unknown as ChangedObservation);
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toMatchObject({ id: 'archive.changed.stops', status: 'fail', detail: 'no panel' });
+    const held = heldOffChecks({ ok: false, detail: 'no panel' } as unknown as ImportObservation, heldFx);
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ status: 'fail', detail: 'no panel' });
+  });
+
   test('a start that does not ask for approval, or imports before the owner approved, fails the request check', () => {
     const wrongCode = importChecks(goodImport(agentFx, 'request', { start: { ok: true, code: 'started', hasOpenTarget: false, carriesContent: false } }), agentFx, 'macos');
     expect(failing(wrongCode)).toContain('archive.agent.mbox.requested');
@@ -333,7 +345,9 @@ describe('an archive imported with the private model off', () => {
 
   test('a search that finds the content while it is held fails; so does a search that was not made', () => {
     expect(failing(heldOffChecks(held({ search: { ok: true, isError: false, evidence: [{ source: heldFx.expect.citationLabel, hasToken: true }] } }), heldFx))).toEqual(['archive.held.mbox.search']);
-    expect(failing(heldOffChecks(held({ search: undefined }), heldFx))).toEqual(['archive.held.mbox.search']);
+    const unsearched = held();
+    delete unsearched.search;
+    expect(failing(heldOffChecks(unsearched, heldFx))).toEqual(['archive.held.mbox.search']);
   });
 
   test('a new connection, a page request outside the machine, or no watch at all fails the stays-here check', () => {
@@ -341,10 +355,12 @@ describe('an archive imported with the private model off', () => {
       { ...GOOD_EGRESS, fresh: ['203.0.113.7:443'] },
       { ...GOOD_EGRESS, pageOutside: ['https://example.invalid/x'] },
       { ...GOOD_EGRESS, samples: 0 },
-      undefined,
     ]) {
       expect(failing(heldOffChecks(held({ egress }), heldFx))).toEqual(['archive.held.mbox.stays-here']);
     }
+    const unwatched = held();
+    delete unwatched.egress;
+    expect(failing(heldOffChecks(unwatched, heldFx))).toEqual(['archive.held.mbox.stays-here']);
     // The rule is the inbox leg's own.
     expect(egressVerdict(GOOD_EGRESS).ok).toBe(true);
   });
@@ -417,7 +433,11 @@ describe('a file that changes while it is imported', () => {
   });
 
   test('never catching an import in progress fails, naming each attempt', () => {
-    const none = changedChecks(good({ attempts: [{ messages: 8_000, outcome: 'finished-first', detail: 'finished' }, { messages: 40_000, outcome: 'finished-first', detail: 'finished' }], row: undefined, status: undefined, removed: undefined }));
+    const base = good({ attempts: [{ messages: 8_000, outcome: 'finished-first', detail: 'finished' }, { messages: 40_000, outcome: 'finished-first', detail: 'finished' }] });
+    delete base.row;
+    delete base.status;
+    delete base.removed;
+    const none = changedChecks(base);
     expect(failing(none)).toEqual(['archive.changed.stops']);
     expect(none.find((c) => c.id === 'archive.changed.stops')!.detail).toContain('8000 messages finished-first');
     expect(failing(changedChecks(undefined))).toEqual(['archive.changed.stops']);
@@ -456,127 +476,13 @@ describe('the private model switch', () => {
 // ---------------------------------------------------------------------------
 // The journeys, run on the product's real panel
 
-const windows: Window[] = [];
-afterEach(async () => {
-  while (windows.length) await windows.pop()!.happyDOM.close();
-});
-const settle = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
-
-type Message = { jsonrpc?: string; id?: number; method?: string; params?: any };
-type Serve = Record<string, (args: any) => unknown>;
-
-/** The product's dashboard panel in a DOM, on a host that answers its tool calls from `serve` (as archive-import-dashboard-ui.test.ts mounts it). */
-async function mountPanel(serve: Serve): Promise<{ win: Window; sent: Message[] }> {
-  const html = chatgptDashboardPageHtml({ resultTimeoutMs: 5_000 });
-  const start = html.indexOf('<script>') + '<script>'.length;
-  const script = html.slice(start, html.indexOf('</script>', start));
-  const win = new Window({ url: 'https://sandbox.test/' });
-  windows.push(win);
-  win.document.write(html.slice(0, start - '<script>'.length) + html.slice(html.indexOf('</script>', start) + '</script>'.length));
-  const sent: Message[] = [];
-  const dispatch = (data: unknown) => win.dispatchEvent(new win.MessageEvent('message', { data, source: parent as any }));
-  const reply = (id: number, result: unknown) => setTimeout(() => dispatch({ jsonrpc: '2.0', id, result }), 0);
-  const parent = {
-    postMessage: (message: Message) => {
-      sent.push(message);
-      if (message.id === undefined) return;
-      if (message.method === 'ui/initialize') {
-        reply(message.id, {
-          protocolVersion: '2026-01-26',
-          hostContext: { theme: 'light', displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'], [OLYMPUS_HOST_CONTEXT_KEY]: { kind: 'computer', readOnly: false, links: {} } },
-        });
-      } else if (message.method === 'tools/call') {
-        const handler = serve[message.params.name];
-        if (handler) reply(message.id, handler(message.params.arguments ?? {}));
-      } else if (message.method === 'ui/open-link') reply(message.id, {});
-    },
-  };
-  Object.defineProperty(win, 'parent', { value: parent, configurable: true });
-  new Function('window', 'document', script)(win, win.document);
-  await settle(30);
-  return { win, sent };
-}
-
-/** Runs page-side source in a happy-dom window the way Runtime.evaluate does in a browser. */
-function evalIn(window: Window, code: string): unknown {
-  const globals = window as unknown as { __rc?: unknown };
-  return new Function('window', 'document', 'getComputedStyle', 'NodeFilter', '__rc', `return (${code});`)(window, window.document, window.getComputedStyle.bind(window), (window as any).NodeFilter, globals.__rc);
-}
-
-/** The journey driver over the mounted panel: going to the dashboard mounts it afresh, as a page load would. */
-class PanelDriver implements JourneyDriver {
-  win!: Window;
-  /** The page around the panel, which holds only its frame. */
-  host = new Window({ url: 'http://127.0.0.1:8010/dashboard' });
-  events: PageEvents = { console: [], requests: [] };
-  constructor(private readonly mount: () => Promise<Window>) {}
-  private frameOf(frame: 'host' | 'panel'): Window { return frame === 'host' ? this.host : this.win; }
-  async hasPanel(): Promise<boolean> { return true; }
-  async probe(frame: 'host' | 'panel', call: string): Promise<unknown> { return evalIn(this.frameOf(frame), call); }
-  async click(frame: 'host' | 'panel', target: WireTarget): Promise<ElementInfo | null> {
-    const info = evalIn(this.frameOf(frame), `__rc.find(${JSON.stringify(target)})`) as ElementInfo | null;
-    if (!info) return null;
-    evalIn(this.frameOf(frame), `__rc.element(${JSON.stringify(target)}).click()`);
-    return info;
-  }
-  async type(): Promise<boolean> { return false; }
-  async open(): Promise<void> { await this.go('/dashboard'); }
-  async go(): Promise<void> {
-    this.win = await this.mount();
-    const place = function (this: any) {
-      const hidden = this.hasAttribute?.('hidden') || /display:\s*none/.test(this.getAttribute?.('style') ?? '');
-      return hidden ? { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 } : { left: 10, top: 10, width: 120, height: 24, right: 130, bottom: 34 };
-    };
-    for (const window of [this.win, this.host]) (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = place;
-    this.host.document.body.innerHTML = '<iframe id="olympus-panel"></iframe>';
-    evalIn(this.win, PROBE_SOURCE);
-    evalIn(this.host, PROBE_SOURCE);
-  }
-  async reload(): Promise<void> { await this.go(); }
-  async setViewport(): Promise<void> {}
-  async where(): Promise<string> { return '/dashboard'; }
-  async pages(): Promise<number> { return 1; }
-  async screenshot(): Promise<boolean> { return true; }
-  drainEvents(): PageEvents { return this.events; }
-}
-
-const ids = { agent: '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60', picker: '7b2a1f3e-5d4c-4b6a-9f8e-2c3d4e5f6a71', held: '8c3b2a1f-6e5d-4c7b-8a9f-3d4e5f6a7b82' };
-
-function entryFor(fx: LegFixture, over: Partial<ComputerArchiveEntry> = {}): ComputerArchiveEntry {
-  const expect = fx.expect;
-  return {
-    id: ids[fx.role as keyof typeof ids] ?? ids.agent, name: fx.fileName, format: expect.label, where: `~/${FIXTURE_FOLDER}`, status: 'imported',
-    items: expect.messages, judged: expect.messages, held: 0, earliest: expect.earliest, latest: expect.latest,
-    startedAt: '2026-10-22T08:00:00.000Z', importedAt: '2026-10-22T09:00:00.000Z', gaps: expect.gaps.map((g) => ({ ...g })), skipped: expect.leftOut.map((g) => ({ ...g })), ...over,
-  };
-}
-
-/** The dashboard tool's answer with this list in the computer's meta (the card around it is a preview state; the leg reads only the list). */
-function dashboardAnswer(archives: ComputerArchiveEntry[], requests: ComputerArchivesMeta['requests'] = [], privateModel: ComputerArchivesMeta['privateModel'] = 'ready') {
-  const result = previewDashboardToolResult('archives-imported', false) as { _meta: Record<string, any> };
-  const meta = { ...result._meta[COMPUTER_META_KEY], archives: { sourceId: 'archive.imports', archives, requests, privateModel } };
-  return { ...result, _meta: { ...result._meta, [COMPUTER_META_KEY]: meta } };
-}
-
-/** The picker as the machine's home shows it: the fixtures folder, with the fixture files in it. */
-function browseFixtures(files: string[]) {
-  const home = '/Users/you';
-  const nodes = (args: { parent_key?: unknown }): unknown[] => {
-    if (!args.parent_key) return [{ key: `${home}/${FIXTURE_FOLDER}`, name: FIXTURE_FOLDER, kind: 'folder', has_children: true, selectable: true }];
-    return files.map((name) => ({ key: `${home}/${FIXTURE_FOLDER}/${name}`, parent_key: `${home}/${FIXTURE_FOLDER}`, name, kind: 'file', has_children: false, selectable: true, size_bytes: 900 }));
-  };
-  return (args: { parent_key?: unknown }) => ({ content: [{ type: 'text', text: 'Listed.' }], structuredContent: { status: 'listed' }, _meta: { [SCOPE_UI_META_KEY]: { nodes: nodes(args) } } });
-}
-
-/** Real time, with a pause between looks so the panel's own messages are delivered; the journeys' bounds are set to a few seconds. */
-const live = { now: Date.now, sleep: (ms: number) => settle(Math.min(ms, 20)) };
-
 async function runOn(serve: Serve, journey: Journey): Promise<{ trace: JourneyTrace; driver: PanelDriver }> {
   const driver = new PanelDriver(async () => (await mountPanel(serve)).win);
-  windows.push(driver.host);
   await driver.go();
   return { trace: await runJourney(driver, journey, live), driver };
 }
+
+afterEach(closeWindows);
 
 describe('the leg\'s journeys on the product\'s real panel', () => {
   const requestFor = (fx: LegFixture, path: string): ComputerArchivesMeta['requests'] => [{ id: 'req-1', name: fx.fileName, where: `~/${FIXTURE_FOLDER}`, path, origin: 'agent', status: 'pending' }];
@@ -661,7 +567,7 @@ describe('the leg\'s journeys on the product\'s real panel', () => {
     };
     const { trace, driver } = await runOn(serve, removeJourney('agent', agentFx.fileName, 4, 4));
     expect(trace.steps.filter((step) => !step.ok).map((step) => `${step.name}: expected ${step.expected}; got ${step.actual}`).join(' || ')).toBe('');
-    expect(removals).toEqual([{ archive_id: ids.agent }]);
+    expect(removals).toEqual([{ archive_id: PANEL_IDS.agent }]);
     // Only that archive's row went.
     const rows = panelArchivesOf(evalIn(driver.win, ARCHIVE_PANEL_PROBE)).rows.map((row) => row.name);
     expect(rows).toEqual([pickerFx.fileName]);
