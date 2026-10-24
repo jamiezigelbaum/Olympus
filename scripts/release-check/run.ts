@@ -32,6 +32,16 @@
  * Inbox entry the local model answers, that the Ask page's local model answers a typed question with sources, that Venice and zkAPI
  * (not set up) show the way to fix that and send nothing, and that nothing left the machine (inbox.ts, egress.ts).
  *
+ * Archive-import leg (on by default; `--skip-archive` leaves it out for a candidate with no archive import): synthetic archives, written to
+ * a folder on the machine and never real data (archive-fixtures.ts), are imported the way their owner and her agents meet it. An agent's
+ * request is approved with a real press in the dashboard; the picker is walked once; the settled row and the agent's own status are held
+ * to what the fixture holds; a search is cited as the format's citation label (every format in ARCHIVE_FORMATS is imported this way, one
+ * after the other). With the private model switched off through the engine's
+ * settings, an import stays held Private, shows it, leaves its content out of the Personal and Public stores and out of a search, and
+ * sends nothing off the machine; switched back on, what was held drains to zero within the leg's own bound. Remove deletes only that
+ * archive, and a file changed during an import stops it visibly (archive-leg.ts, archive-stages.ts). Each later format adds one entry to
+ * ARCHIVE_FORMATS in archive-fixtures.ts and nothing here.
+ *
  * Exit status: 0 the report passed, 1 the report failed, 2 the run could not
  * start (arguments, config, bundle).
  */
@@ -70,6 +80,11 @@ import { buildPageInventory } from './explore-pages-inventory.ts';
 import { exploreChecks, type ExploreResult } from './explore.ts';
 import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type VisualResult } from './visual.ts';
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
+import { EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
+import {
+  ARCHIVE_BOUNDS, BULK_SIZES, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks,
+  type ChangedObservation, type ImportObservation, type ModelObservation, type RemoveObservation,
+} from './archive-leg.ts';
 
 export interface RunConfigFile {
   driver: string[];
@@ -117,6 +132,8 @@ export interface RunOptions {
   skipExplore?: boolean;
   /** Leave out the agent suite (the questions put to each agent), for a run that is after another leg; a partial run, like the other skips. */
   skipSuite?: boolean;
+  /** Leave out the archive-import leg. For a candidate that has no archive import. */
+  skipArchive?: boolean;
   /** Run only these journeys (by id); omitted runs them all. */
   onlyJourneys?: string[];
   /** Where the approved pictures are (one folder per platform, `<screen>-<width>-<theme>.png`). Omitted, the screens are not compared. */
@@ -963,6 +980,138 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   rmSync(scratch, { recursive: true, force: true });
 }
 
+/**
+ * The archive-import leg (archive-leg.ts, archive-stages.ts), on the machine. The order matters: the picker runs first because "Import an
+ * archive" is a top-level button only while no archive is listed; the agent path follows and waits for the private model to judge what it
+ * imported, so the search is cited; then the private model is switched off, an archive is imported with it off, and it is switched back
+ * on (always, in the end, whatever failed) so the held messages drain; Remove takes the archives away; the changed-file stage uses
+ * its own large archive. Each format besides the stress one (mail) is imported by the agent path right after the mail archive, judged
+ * and searched the same way, and removed with the others. Whatever happened, the machine's archives and fixtures are cleaned up last.
+ */
+async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promise<void> {
+  if (run.options.skipArchive) return;
+  const os = run.machine!.os;
+  const seed = randomBytes(6).toString('hex');
+  const fixture = (role: FixtureRole) => legFixture(role, seed, STRESS_FORMAT);
+  const [agentFx, pickerFx, heldFx] = [fixture('agent'), fixture('picker'), fixture('held')];
+  // Each other format's small archive: the same role as the mail one, told apart by its format.
+  const extraFxs = EXTRA_FORMATS.map((format) => legFixture('agent', seed, format));
+  const drainS = drainBoundS(os);
+  const traces: JourneyTrace[] = [];
+  const stepS = ARCHIVE_BOUNDS.startS + ARCHIVE_BOUNDS.settleS + 600;
+  const outOfTime = (what: string): boolean => {
+    if (Date.now() < deadline) return false;
+    run.errors.push(`the run exceeded its time budget before ${what}`);
+    return true;
+  };
+  /** One in-machine verb; its result, or undefined (the checks then say there was none) with the machine's last words in the log. */
+  const call = async <T extends object>(sub: string, args: string, timeoutS: number): Promise<T | undefined> => {
+    const done = await run.phase(sub, () => run.agent(sub, args, timeoutS * 1_000));
+    if (!done.result) run.log(`${sub}: no result from the machine (exit ${done.code}): ${done.stderr.slice(-300)}`);
+    const result = done.result as T | undefined;
+    const own = (result as { traces?: JourneyTrace[] } | undefined)?.traces;
+    if (Array.isArray(own)) traces.push(...own);
+    return result;
+  };
+  const addAll = (checks: CheckResult[]): void => { for (const check of checks) run.add(check); };
+  const flags = (fx: { role: string; format: string }): string => `--role ${fx.role} --format ${fx.format} --seed ${sh(seed)}`;
+
+  let modelTouched = false;
+  let modelOn: ModelObservation | undefined;
+  try {
+    // 1. The owner chooses a file in the picker (nothing is listed yet).
+    const picker = await call<ImportObservation>('archive-import', `${flags(pickerFx)} --via picker --reset-folder --clean`, stepS);
+    addAll(importChecks(picker, pickerFx, os));
+
+    // 2. An agent asks; the owner approves in the dashboard; the private model judges; a search is cited.
+    if (!outOfTime('the agent-path archive import')) {
+      const agent = await call<ImportObservation>('archive-import', `${flags(agentFx)} --via request --drain-s ${drainS} --search`, stepS + drainS);
+      addAll(importChecks(agent, agentFx, os));
+    }
+
+    // 2b. The same for each other format: a request, the owner's approval, the judge, a search cited with the format's own label.
+    for (const extraFx of extraFxs) {
+      if (outOfTime(`the ${extraFx.format} archive import`)) break;
+      const extra = await call<ImportObservation>('archive-import', `${flags(extraFx)} --via request --drain-s ${drainS} --search`, stepS + drainS);
+      addAll(importChecks(extra, extraFx, os));
+    }
+
+    // 3. The private model off: the archive stays held Private and nothing leaves the machine.
+    if (!outOfTime('the private-model-off archive import')) {
+      modelTouched = true;
+      const off = await call<ModelObservation>('archive-model', '--mode off', ARCHIVE_BOUNDS.engineS + 240);
+      addAll(modelChecks(off, 'off'));
+      if (off?.ok === true) {
+        const held = await call<ImportObservation>('archive-import', `${flags(heldFx)} --via request --search --watch-egress`, stepS);
+        addAll(heldOffChecks(held, heldFx));
+      } else {
+        run.add({ id: `archive.${heldFx.role}.${heldFx.format}.ran`, title: 'The archive was imported with the private model off', status: 'fail', detail: 'not run: the private model could not be turned off' });
+      }
+    }
+  } finally {
+    // 4. The private model back on, whatever happened above.
+    if (modelTouched) {
+      modelOn = await call<ModelObservation>('archive-model', '--mode on', ARCHIVE_BOUNDS.engineS + 240);
+      addAll(modelChecks(modelOn, 'on'));
+    }
+  }
+
+  try {
+    // 5. What was held drains to zero within the leg's own bound, and becomes searchable.
+    if (modelTouched && modelOn?.ok === true && !outOfTime('the held archive drain')) {
+      const drained = await call<ImportObservation>('archive-drain', `${flags(heldFx)} --search --bound-s ${drainS}`, drainS + 300);
+      const prefix = `archive.${heldFx.role}.${heldFx.format}.restored`;
+      addAll(drainChecks(`${prefix}.drain`, drained?.drain, heldFx, os, 'restored'));
+      addAll(searchChecks(prefix, drained?.search, heldFx, 'cited'));
+    } else if (modelTouched) {
+      run.add({ id: `archive.${heldFx.role}.${heldFx.format}.restored.drain`, title: 'With the private model back on, the messages that were held are judged: held reaches zero', status: 'fail', detail: 'not run: the private model was not switched back on' });
+    }
+
+    // 6. Remove takes each archive away, and only that archive.
+    if (!outOfTime('removing the archives')) {
+      const targets = [agentFx, ...extraFxs, pickerFx, heldFx];
+      const removed = await call<RemoveObservation>('archive-remove', `--targets ${sh(targets.map((fx) => `${fx.role}:${fx.format}`).join(','))} --seed ${sh(seed)}`, targets.length * (ARCHIVE_BOUNDS.removeS + 180) + 120);
+      traces.push(...(removed?.removals ?? []).flatMap((removal) => removal.traces));
+      addAll(removeChecks(removed, targets));
+    }
+
+    // 7. A file that changes while it is imported stops the import, visibly.
+    if (!outOfTime('the changed-file check')) {
+      const changed = await call<ChangedObservation>('archive-changed', `--seed ${sh(seed)} --sizes ${BULK_SIZES.join(',')}`, BULK_SIZES.length * (ARCHIVE_BOUNDS.startS + ARCHIVE_BOUNDS.removeS + 120) + ARCHIVE_BOUNDS.stopS + ARCHIVE_BOUNDS.removeS + 300);
+      addAll(changedChecks(changed));
+    }
+  } finally {
+    // 8. Nothing is left on the machine: every archive off the Archives line, the fixtures folder gone.
+    const cleaned = await call<{ ok?: boolean; removed?: string[]; detail?: string }>('archive-cleanup', '', ARCHIVE_BOUNDS.removeS + 300);
+    run.add({
+      id: 'archive.cleanup',
+      title: 'The test archives were removed from the machine at the end of the leg',
+      status: cleaned?.ok === true ? 'pass' : 'fail',
+      detail: cleaned?.ok === true ? `${cleaned.removed?.length ? `${cleaned.removed.length} left over archive(s) removed; ` : ''}fixtures folder deleted` : String(cleaned?.detail ?? 'no result from the machine'),
+    });
+  }
+
+  // The pictures and traces of every step.
+  (run.stage.traces ??= []).push(...traces);
+  const packed = await run.agent('archive-collect', '', 120_000);
+  if (packed.result?.ok !== true) {
+    run.add({ id: 'archive.fetch', title: 'The archive leg\'s traces were brought back', status: 'fail', detail: String(packed.result?.detail ?? `no result from the machine (exit ${packed.code})`) });
+    return;
+  }
+  const scratch = join(outDir, '_archive');
+  rmSync(scratch, { recursive: true, force: true });
+  mkdirSync(scratch, { recursive: true });
+  try {
+    await run.machine!.get(String(packed.result.archive), join(scratch, 'archive.tgz'));
+    const unpacked = spawnSync('tar', ['-xzf', join(scratch, 'archive.tgz'), '-C', scratch], { encoding: 'utf8' });
+    if (unpacked.status !== 0) throw new Error(`tar: ${unpacked.stderr.slice(0, 120)}`);
+    if (existsSync(join(scratch, 'traces'))) cpSync(join(scratch, 'traces'), join(outDir, 'traces'), { recursive: true });
+  } catch (error) {
+    run.add({ id: 'archive.fetch', title: 'The archive leg\'s traces were brought back', status: 'fail', detail: error instanceof Error ? error.message : String(error) });
+  }
+  rmSync(scratch, { recursive: true, force: true });
+}
+
 /** The agent suite against the engine: the connection, every model agent, then the ChatGPT-protocol pass. */
 async function runSuite(run: Run, workDir: string, judge: Judge | undefined, { mintToken }: { mintToken: boolean }): Promise<void> {
   const bridge = machineToolBridge(run);
@@ -1070,6 +1219,7 @@ async function runUpgradeLeg(run: Run, workDir: string, bundlePath: string, judg
   await captureScreenshots(run, options.outDir);
   if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
   if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
+  if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
   if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
   await collectEvidence(run, options.outDir);
 }
@@ -1084,7 +1234,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
   run = new Run(options, driver);
   const judge: Judge | undefined = options.config.judge ? commandJudge(options.config.judge) : undefined;
   const upgrading = options.upgradeFromDir !== undefined;
-  const deadline = Date.now() + (options.budgetMs ?? (upgrading ? 150 : 90) * 60_000);
+  const deadline = Date.now() + (options.budgetMs ?? (upgrading ? 195 : 135) * 60_000);
   const versions = { from: upgrading ? tarballVersion(options.upgradeFromDir!) : undefined, to: upgrading ? tarballVersion(options.candidateDir) : undefined };
   if (upgrading) {
     run.stages.clear();
@@ -1113,6 +1263,7 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
         await captureScreenshots(run, options.outDir);
         if (Date.now() < deadline) await runInboxLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the Ask page and Inbox leg');
         if (Date.now() < deadline) await runJourneyLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the journeys');
+        if (Date.now() < deadline) await runArchiveLeg(run, options.outDir, deadline); else run.errors.push('the run exceeded its time budget before the archive-import leg');
         if (Date.now() < deadline) await runExploreLeg(run, options.outDir); else run.errors.push('the run exceeded its time budget before the control exploration');
       }
       await collectEvidence(run, options.outDir);
@@ -1220,7 +1371,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1268,6 +1419,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     skipInbox: has('--skip-inbox'),
     skipJourneys: has('--skip-journeys'),
     skipExplore: has('--skip-explore'),
+    skipArchive: has('--skip-archive'),
     skipSuite: has('--skip-suite'),
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),

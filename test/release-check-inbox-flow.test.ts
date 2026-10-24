@@ -155,7 +155,7 @@ const agentLog = (): string[] => readFileSync(join(dir, 'agent.log'), 'utf8').sp
 function options(extra: Record<string, unknown> = {}) {
   const runId = newRunId();
   const config: RunConfigFile = { driver: [driverPath], agents: [], settleTimeoutS: 5 };
-  return { runId, candidateDir, candidateLabel: 'inbox test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipJourneys: true, skipExplore: true, ...extra };
+  return { runId, candidateDir, candidateLabel: 'inbox test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipJourneys: true, skipExplore: true, skipArchive: true, ...extra };
 }
 type Report = Awaited<ReturnType<typeof runReleaseCheck>>;
 const allChecks = (report: Report) => [...report.machines[0]!.checks, ...report.machines[0]!.agents.flatMap((agent) => agent.checks)];

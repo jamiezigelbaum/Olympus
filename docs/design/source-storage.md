@@ -215,7 +215,9 @@ store:
 | Opener | After this change |
 |---|---|
 | Embedding drain | `http` mode only; direct mode removed (2b-i) |
-| CLI `data`, `ingestion status`, `tier` | takes the lock when free; through the worker in 2b-ii |
+| CLI `data export`, `data delete --source`, `ingestion status`, `tier set`, `tier explain`, `tier migrate` | takes the lock and runs here when it is free; while Olympus runs, asks the worker over its local API (`POST /v1/cli/*`: worker bearer only, never forwarded by the relay) and prints what it returns; refuses as busy when no worker answers |
+| CLI `tier migrate run`, `rollback`, `purge --approve` | take the lock when free; refuse while Olympus runs, because they move items between the stores the worker's lanes write |
+| CLI `data delete --all`, `data verify` | `--all` runs under the lock when free; while Olympus runs, custody refuses it (or, if only a script holds the lock, it is refused as busy) and the worker is not asked; `verify` reads only the export folder |
 | `connector-store:embed`, `whatsapp-live-sync`, repair and backfill scripts | take the owner lock, so they refuse while Olympus runs |
 | Telegram reader, WhatsApp bridge | write only `raw/` and `session/` of their account; stopped by Disconnect |
 
@@ -394,7 +396,7 @@ touch the store path (`eval/`).
    Three PRs: 2a, registry, storage service and guard (done); 2b-i, the
    owner lock held by the worker and taken by scripts and, when free, by the
    CLI, with the drain's direct mode removed; 2b-ii, the CLI through the
-   worker's API.
+   worker's API while Olympus runs (`src/core/cli-via-worker.ts`).
 3. **Forget registry.** Forget steps for the shared files above, and the
    guard test.
 4. **Migration into account folders.** Behind the boot pass, with the

@@ -35,4 +35,14 @@ describe('release-check run command arguments', () => {
       expect(() => parseCli([...base, '--harness-commit', 'abc123'])).toThrow('40-character');
     });
   });
+
+  test('the archive-import leg is on unless --skip-archive leaves it out, and the usage names the flag', () => {
+    withConfig((base) => {
+      expect(parseCli(base).skipArchive).toBe(false);
+      expect(parseCli([...base, '--skip-archive']).skipArchive).toBe(true);
+      let usage = '';
+      try { parseCli([]); } catch (error) { usage = (error as Error).message; }
+      expect(usage).toContain('--skip-archive');
+    });
+  });
 });

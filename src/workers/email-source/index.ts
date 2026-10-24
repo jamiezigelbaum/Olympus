@@ -272,7 +272,10 @@ import {
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../../core/this-computer.ts';
-import { dataDeleteCustody, deleteOlympusDataWithCustody, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { dataDeleteCustody, deleteOlympusDataWithCustody, requireSource, type DataDeleteWithCustodyResult, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
+import { carriesRelayMarker } from '../../core/remote-access.ts';
+import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, tierForCli } from '../cli-operations.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -1110,6 +1113,28 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               throw error;
             }
           });
+        }
+
+        // The CLI's store-opening commands while this worker owns the data
+        // (core/cli-via-worker.ts). Behind the worker bearer, like every route
+        // the relay does not forward; a relayed request is refused outright.
+        if (request.method === 'POST' && url.pathname.startsWith(`${basePath}${WORKER_CLI_ROUTE_PREFIX}`)) {
+          if (carriesRelayMarker(request)) {
+            throw new EmailSourceWorkerError(403, 'cli_route_not_relayed', 'CLI routes are not served to relayed requests.');
+          }
+          const operation: WorkerCliOperation | undefined = WORKER_CLI_OPERATIONS
+            .find((name) => name === url.pathname.slice(`${basePath}${WORKER_CLI_ROUTE_PREFIX}`.length));
+          if (operation) {
+            const body = await parseObjectBody(request);
+            const mismatch = cliDataRootMismatch(body, sourceDashboard?.dataLifecyclePathContext ?? { env: process.env });
+            if (mismatch) throw new EmailSourceWorkerError(409, 'config_error', mismatch.message, mismatch.suggestion);
+            switch (operation) {
+              case 'ingestion-status': return json(await ingestionStatusForCli());
+              case 'data-export': return json(exportForCli(body));
+              case 'data-delete': return json(await deleteSourceDataForCli(body));
+              case 'tier': return json(await tierForCli(body));
+            }
+          }
         }
 
         if (request.method === 'POST' && url.pathname === `${basePath}/source/export`) {
@@ -2448,87 +2473,25 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               'Confirm that deleting indexed data cannot be undone and leaves the source\'s files and accounts untouched.',
             );
           }
-          const restart = sourceDashboard.workerRestart;
-          if (!restart || !restart.canRestart()) {
+          const outcome = await deleteSourceDataInWorker(sourceId, { dryRun: false });
+          if (!outcome.ok) {
             throw new EmailSourceWorkerError(
-              501,
-              'delete_reopen_unavailable',
-              'Olympus cannot restart its worker to reopen its stores here, so it will not delete indexed data while it is running. Nothing was deleted.',
+              500,
+              'delete_failed',
+              'Olympus could not finish deleting this source\'s indexed data. Retry; the worker is restarting to reopen its stores.',
             );
           }
-          const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
-          const pathContext: LifecyclePathContext = sourceDashboard.dataLifecyclePathContext ?? { env: process.env };
-          return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
-            const busy = () => dashboardManualSyncRuns.has(sourceId)
-              || (sourceScheduler !== undefined
-                && dashboardDisconnectHasRunningRead(sourceScheduler, new Set([sourceId] as V04PublicSourceId[])));
-            if (busy()) {
-              throw new EmailSourceWorkerError(
-                409,
-                'delete_source_busy',
-                'This source is finishing a read. Retry deleting its indexed data after the current read completes.',
-              );
-            }
-            const custodyInput = {
-              sourceId,
-              connectedRegistry: readConnectedHandleRegistry(registryPath),
-              thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
-              // A paired-session source (Telegram, WhatsApp) is disconnected
-              // only after a clean Unpair, which the durable record carries.
-              unpairedSources: readReconciledUnpairedSources(registryPath),
-            };
-            const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
-            if (!custody.ready) {
-              throw custody.observed === 'paired'
-                ? new EmailSourceWorkerError(409, 'delete_source_paired', 'Unpair this source before deleting its indexed data.')
-                : custody.observed === 'connected'
-                ? new EmailSourceWorkerError(409, 'delete_source_connected', 'Disconnect this source before deleting its indexed data.')
-                : custody.observed === 'unpair_incomplete' || custody.observed === 'unpair_state_unreadable'
-                  ? new EmailSourceWorkerError(409, 'delete_unavailable', 'Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.')
-                  : new EmailSourceWorkerError(409, 'delete_unavailable', 'Olympus cannot confirm this source is disconnected, so it did not delete anything.');
-            }
-            // A paired-session source's capture runs as a child of this worker.
-            // Unpair stopped it; confirm that again now rather than assume it,
-            // because a spool still being written while its store is deleted
-            // would bring the deleted messages straight back.
-            const captureKind = sourceId === 'telegram.messages' ? 'telegram' as const
-              : sourceId === 'whatsapp.personal.messages' ? 'whatsapp' as const
-              : undefined;
-            if (captureKind && sourceDashboard.stopMessagingCapture) {
-              try { await sourceDashboard.stopMessagingCapture(captureKind); }
-              catch {
-                throw new EmailSourceWorkerError(409, 'delete_unavailable', 'Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.');
-              }
-            }
-            let removedCount = 0;
-            let failed = false;
-            try {
-              removedCount = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext }).removed.length;
-            } catch {
-              failed = true;
-            }
-            // Whatever the delete did, some stores may already be gone: the
-            // worker reopens them either way.
-            const restarting = restart.request();
-            if (failed) {
-              throw new EmailSourceWorkerError(
-                500,
-                'delete_failed',
-                'Olympus could not finish deleting this source\'s indexed data. Retry; the worker is restarting to reopen its stores.',
-              );
-            }
-            return json({
-              ok: true,
-              source_id: sourceId,
-              removed_count: removedCount,
-              worker_restarting: restarting,
-              policy: {
-                indexed_data_deleted: true,
-                source_files_untouched: true,
-                provider_grant_revoked: false,
-                raw_runtime_secrets_exposed: false,
-              },
-            });
+          return json({
+            ok: true,
+            source_id: sourceId,
+            removed_count: outcome.result.removed.length,
+            worker_restarting: outcome.restarting,
+            policy: {
+              indexed_data_deleted: true,
+              source_files_untouched: true,
+              provider_grant_revoked: false,
+              raw_runtime_secrets_exposed: false,
+            },
           });
           });
         }
@@ -3702,6 +3665,123 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
     if (sourceDashboard?.modelSetup && !sourceDashboard.modelSetup().ready) {
       throw new EmailSourceWorkerError(409, 'model_setup_required', 'Finish model setup at the top of Setup before connecting sources or starting ingestion.');
     }
+  }
+
+  /**
+   * `olympus data delete --source` while this worker owns the data: the
+   * dashboard's delete (below), by id and with `--dry-run`.
+   */
+  async function deleteSourceDataForCli(body: Record<string, unknown>): Promise<unknown> {
+    const sourceId = requireSource(typeof body.source_id === 'string' ? body.source_id : undefined).sourceId;
+    const dryRun = body.dry_run === true;
+    const outcome = dryRun
+      ? await deleteSourceDataInWorker(sourceId, { dryRun })
+      : await withDashboardGrantMutation(() => deleteSourceDataInWorker(sourceId, { dryRun }));
+    if (!outcome.ok) {
+      // The delete's own refusal reads as it does at the command line.
+      if (outcome.error instanceof OperationError) throw outcome.error;
+      throw new EmailSourceWorkerError(
+        500,
+        'delete_failed',
+        'Olympus could not finish deleting this source\'s indexed data. Retry; the worker is restarting to reopen its stores.',
+      );
+    }
+    return { ...outcome.result, worker_restarting: outcome.restarting };
+  }
+
+  /**
+   * Delete one source's indexed data from inside the running worker, under the
+   * custody rule of the CLI's `data delete --source`: Disconnect (or Unpair)
+   * first. The one delete the dashboard's "Delete source data" and the CLI,
+   * while Olympus runs, both go through. The worker holds the source's SQLite
+   * files open, so after a real delete it is restarted to reopen them; with no
+   * supervisor to do that this refuses BEFORE deleting rather than leave stale
+   * handles serving deleted rows. A dry run changes nothing, so it needs
+   * neither the restart nor an idle source.
+   */
+  async function deleteSourceDataInWorker(
+    sourceId: string,
+    options: { dryRun: boolean },
+  ): Promise<
+    | { ok: true; result: DataDeleteWithCustodyResult; restarting: boolean }
+    | { ok: false; error: unknown; restarting: boolean }
+  > {
+    const registryPath = sourceDashboard?.registryPath ?? defaultHandleRegistryPath();
+    const pathContext: LifecyclePathContext = sourceDashboard?.dataLifecyclePathContext ?? { env: process.env };
+    const custodyInputFor = () => ({
+      sourceId,
+      connectedRegistry: readConnectedHandleRegistry(registryPath),
+      thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
+      // A paired-session source (Telegram, WhatsApp) is disconnected
+      // only after a clean Unpair, which the durable record carries.
+      unpairedSources: readReconciledUnpairedSources(registryPath),
+    });
+    if (options.dryRun) {
+      return {
+        ok: true,
+        result: deleteOlympusDataWithCustody({ ...custodyInputFor(), ...pathContext, dryRun: true }),
+        restarting: false,
+      };
+    }
+    const restart = sourceDashboard?.workerRestart;
+    if (!sourceDashboard || !restart || !restart.canRestart()) {
+      throw new EmailSourceWorkerError(
+        501,
+        'delete_reopen_unavailable',
+        'Olympus cannot restart its worker to reopen its stores here, so it will not delete indexed data while it is running. Nothing was deleted.',
+      );
+    }
+    return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+      const busy = () => dashboardManualSyncRuns.has(sourceId)
+        || (sourceScheduler !== undefined
+          && dashboardDisconnectHasRunningRead(sourceScheduler, new Set([sourceId] as V04PublicSourceId[])));
+      if (busy()) {
+        throw new EmailSourceWorkerError(
+          409,
+          'delete_source_busy',
+          'This source is finishing a read. Retry deleting its indexed data after the current read completes.',
+        );
+      }
+      const custodyInput = custodyInputFor();
+      const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
+      if (!custody.ready) {
+        // A source with no public capability is deleted only with Olympus stopped.
+        if (custody.requirement === 'worker_inactive') {
+          throw new EmailSourceWorkerError(409, 'delete_unavailable', 'This source can be deleted only while Olympus is stopped. Stop it first, then retry.');
+        }
+        throw custody.observed === 'paired'
+          ? new EmailSourceWorkerError(409, 'delete_source_paired', 'Unpair this source before deleting its indexed data.')
+          : custody.observed === 'connected'
+          ? new EmailSourceWorkerError(409, 'delete_source_connected', 'Disconnect this source before deleting its indexed data.')
+          : custody.observed === 'unpair_incomplete' || custody.observed === 'unpair_state_unreadable'
+            ? new EmailSourceWorkerError(409, 'delete_unavailable', 'Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.')
+            : new EmailSourceWorkerError(409, 'delete_unavailable', 'Olympus cannot confirm this source is disconnected, so it did not delete anything.');
+      }
+      // A paired-session source's capture runs as a child of this worker.
+      // Unpair stopped it; confirm that again now rather than assume it,
+      // because a spool still being written while its store is deleted
+      // would bring the deleted messages straight back.
+      const captureKind = sourceId === 'telegram.messages' ? 'telegram' as const
+        : sourceId === 'whatsapp.personal.messages' ? 'whatsapp' as const
+        : undefined;
+      if (captureKind && sourceDashboard.stopMessagingCapture) {
+        try { await sourceDashboard.stopMessagingCapture(captureKind); }
+        catch {
+          throw new EmailSourceWorkerError(409, 'delete_unavailable', 'Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.');
+        }
+      }
+      let deleted: DataDeleteWithCustodyResult | undefined;
+      let failure: unknown;
+      try {
+        deleted = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext });
+      } catch (error) {
+        failure = error;
+      }
+      // Whatever the delete did, some stores may already be gone: the
+      // worker reopens them either way.
+      const restarting = restart.request();
+      return deleted ? { ok: true as const, result: deleted, restarting } : { ok: false as const, error: failure, restarting };
+    });
   }
 
   async function withDashboardGrantMutation<T>(mutation: () => Promise<T>): Promise<T> {

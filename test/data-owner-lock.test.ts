@@ -16,7 +16,6 @@ import {
   takeWorkerDataOwnerLock,
   tryDataOwnerLock,
   withDataOwnerLock,
-  withDataOwnerLockIfFree,
 } from '../src/core/data-owner-lock.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { bindWorkerSocket, prepareWorkerSocket } from '../src/core/worker-transport.ts';
@@ -233,32 +232,6 @@ describe('two takers in one process', () => {
     } finally {
       worker.release();
     }
-  });
-
-  test('withDataOwnerLockIfFree runs the command whether or not it got the lock, and lets go after', async () => {
-    const env = isolatedEnv();
-    const ran: string[] = [];
-
-    // Free: the command holds the lock while it runs.
-    await withDataOwnerLockIfFree(() => {
-      ran.push('free');
-      expect(tryDataOwnerLock(env)).toBeUndefined();
-    }, env);
-    const freed = tryDataOwnerLock(env);
-    expect(freed).toBeDefined();
-
-    // Busy (the worker runs): the command still runs, as it did before the lock existed.
-    expect(await withDataOwnerLockIfFree(() => { ran.push('busy'); return 7; }, env)).toBe(7);
-    // The lock the command did not take is still the worker's.
-    expect(tryDataOwnerLock(env)).toBeUndefined();
-    freed!.release();
-
-    // A throwing command still releases what it took.
-    await expect(withDataOwnerLockIfFree(() => { throw new Error('command failed'); }, env)).rejects.toThrow('command failed');
-    const after = tryDataOwnerLock(env);
-    expect(after).toBeDefined();
-    after!.release();
-    expect(ran).toEqual(['free', 'busy']);
   });
 });
 
