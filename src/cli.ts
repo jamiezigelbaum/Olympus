@@ -23,6 +23,7 @@ export function olympusCommandHint(input: { env?: Record<string, string | undefi
 import { allOpenTargets, openTargetFromPath, openTargetPath, parseOlympusOpenUrl, type OpenTarget } from './core/open-targets.ts';
 import { installOpenHandler, openHandlerStatus, uninstallOpenHandler, type OpenHandlerResult } from './core/open-handler.ts';
 import {
+  dataDeleteCustody,
   deleteAllConfirmationPrompts,
   deleteOlympusDataWithCustody,
   exportOlympusData,
@@ -78,8 +79,10 @@ import {
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
-import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores } from './workers/classification/tier-cli.ts';
-import { withDataOwnerLockIfFree } from './core/data-owner-lock.ts';
+import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores, tierCommandRewritesStores } from './workers/classification/tier-cli.ts';
+import { DataOwnerBusyError } from './core/data-owner-lock.ts';
+import { callWorkerCli, runLocallyOrThroughWorker } from './core/cli-via-worker.ts';
+import { olympusDataRoot } from './core/olympus-layout.ts';
 import {
   runSetupWizard,
   type SetupCloudLane,
@@ -90,6 +93,7 @@ import {
   dashboardQueryTokenFromWorkerAuthToken,
   environmentWithWorkerSetupEnv,
   readWorkerSetupEnv,
+  resolveWorkerAuthToken,
   withWorkerAuthHeader,
   normalizeWorkerAuthToken,
   workerAuthTokenFromConfig,
@@ -98,6 +102,7 @@ import {
 import {
   collectLocalSourceIngestionLedger,
   formatSourceIngestionLedger,
+  type SourceIngestionLedgerSnapshot,
 } from './workers/source-ingestion-ledger.ts';
 import {
   LocalXBookmarksReconcileStateStore,
@@ -561,7 +566,10 @@ async function main(): Promise<void> {
 
   if (!PUBLIC_RUNTIME_BUILD && args[0] === 'ingestion' && args[1] === 'status') {
     const json = args.includes('--json');
-    const result = await withDataOwnerLockIfFree(() => collectLocalSourceIngestionLedger({ config: loadConfig() }));
+    const result = await runLocallyOrThroughWorker(
+      () => collectLocalSourceIngestionLedger({ config: loadConfig() }),
+      () => callWorkerCli<SourceIngestionLedgerSnapshot>('ingestion-status', {}),
+    );
     console.log(json ? JSON.stringify(result, null, 2) : formatSourceIngestionLedger(result));
     return;
   }
@@ -677,7 +685,16 @@ async function main(): Promise<void> {
     try {
       const tierArgs = args.slice(1);
       const run = () => runTierCommand(tierArgs);
-      console.log(JSON.stringify(await (tierCommandOpensStores(tierArgs) ? withDataOwnerLockIfFree(run) : run()), null, 2));
+      // A command that opens stores runs here when Olympus is stopped, and in
+      // the running worker otherwise; one that rewrites the stores the worker
+      // writes does not run beside it.
+      const result = tierCommandOpensStores(tierArgs)
+        ? await runLocallyOrThroughWorker(
+            run,
+            tierCommandRewritesStores(tierArgs) ? undefined : () => callWorkerCli<Record<string, unknown>>('tier', { args: tierArgs }),
+          )
+        : await run();
+      console.log(JSON.stringify(result, null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -2619,10 +2636,19 @@ async function runDataCommand(args: string[]): Promise<unknown> {
   const command = args[0];
   if (command === 'export') {
     const options = parseDataOptions(args.slice(1));
-    return withDataOwnerLockIfFree(() => exportOlympusData({
-      destination: options.output,
-      ...(options.sourceId ? { sourceId: options.sourceId } : {}),
-    }));
+    if (!options.output.trim()) throw new OperationError('invalid_params', '--output must be provided.');
+    // The running worker writes the export, and its working directory is not this one.
+    const destination = resolve(options.output.trim());
+    return runLocallyOrThroughWorker(
+      () => exportOlympusData({
+        destination,
+        ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+      }),
+      () => callWorkerCli('data-export', {
+        output: destination,
+        ...(options.sourceId ? { source_id: options.sourceId } : {}),
+      }),
+    );
   }
   if (command === 'verify') {
     const options = parseDataOptions(args.slice(1));
@@ -2634,8 +2660,8 @@ async function runDataCommand(args: string[]): Promise<unknown> {
       await confirmDeleteAll();
     }
     // Under the owner lock when it is free, taken before the worker state is
-    // read so the state cannot change under the delete (see withDataOwnerLockIfFree).
-    return withDataOwnerLockIfFree(async () => {
+    // read so the state cannot change under the delete.
+    const deleteLocally = async () => {
       // Custody decides the precondition; the CLI only reports what it observes.
       // A public source is gated on Disconnect and ignores this, but a source
       // with no public capability falls through to the worker-inactive
@@ -2665,6 +2691,28 @@ async function runDataCommand(args: string[]): Promise<unknown> {
         engineLoaded,
         relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
       });
+    };
+    // One source's data, while Olympus runs: the worker runs the same
+    // custody-checked delete the dashboard's "Delete source data" runs.
+    if (options.sourceId) {
+      return runLocallyOrThroughWorker(deleteLocally, () => callWorkerCli('data-delete', {
+        source_id: options.sourceId,
+        dry_run: options.dryRun,
+      }));
+    }
+    // Delete all never goes through the worker: custody refuses it while the
+    // worker or engine runs, with its own message. If the owner lock is held
+    // but custody sees nothing running (an operator script holds it), it is
+    // refused as busy rather than deleted from under the script.
+    return runLocallyOrThroughWorker(deleteLocally, async () => {
+      const custodyInput = {
+        all: options.all,
+        dryRun: options.dryRun,
+        ...observedWorkerServiceState(),
+        relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
+      };
+      if (!dataDeleteCustody(custodyInput).ready || options.dryRun) return deleteOlympusDataWithCustody(custodyInput);
+      throw new DataOwnerBusyError(olympusDataRoot(process.env));
     });
   }
   if (command === '--help' || command === '-h') {
@@ -2743,31 +2791,6 @@ function requireOptionValue(args: string[], index: number, optionName: string): 
   return value;
 }
 
-
-/**
- * The worker auth token this install actually authenticates with.
- *
- * The worker authenticates from ITS process environment, which the service
- * loads from worker.env — so that file outranks a token remembered in a legacy
- * config file, and an explicit environment variable outranks both. Handing over
- * the config's token when worker.env holds a newer one gives the reader a token
- * the worker refuses.
- *
- * `workerAuthTokenFromConfig` reads the same three places in the OPPOSITE
- * order, config first, because a caller holding a config is asking what that
- * config says. Anything the reader is meant to authenticate WITH must come
- * through here instead: `olympus dashboard` derived its dash_ query token from
- * the config-first lookup and so could print a URL a re-run setup had already
- * invalidated, while `olympus dashboard token` printed the working one.
- */
-function resolveWorkerAuthToken(
-  env: Record<string, string | undefined> = process.env,
-  config: OlympusConfig = loadConfig(env),
-): string | undefined {
-  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN)
-    ?? workerAuthTokenFromSetupEnv({ env })
-    ?? normalizeWorkerAuthToken(config.worker.authToken);
-}
 
 /** The worker auth token from worker.env or config, or a clear refusal. */
 /**
@@ -2926,7 +2949,7 @@ function remoteConnectionView(connection: RemoteConnectionRecord): Record<string
 }
 
 export function runDashboardTokenCommand(env: Record<string, string | undefined> = process.env): string {
-  const token = resolveWorkerAuthToken(env);
+  const token = resolveWorkerAuthToken(env, loadConfig(env));
   if (!token) {
     throw new OperationError(
       'config_error',
