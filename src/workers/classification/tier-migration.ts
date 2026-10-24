@@ -1,4 +1,4 @@
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { TIER_MIGRATION_DIR_ENV, tierMigrationReportDir, tierMigrationStatePath } from './tier-migration-reports.ts';
 // Tier migration for EXISTING installs (design
 // docs/design/per-item-four-tier-classification.md, section 4.6, steps M0-M6).
 //
@@ -83,7 +83,7 @@ import {
 } from './tier-ledger.ts';
 
 export const TIER_MIGRATION_STATE_SCHEMA_VERSION = 1;
-export const TIER_MIGRATION_DIR_ENV = 'OLYMPUS_TIER_MIGRATION_DIR';
+export { TIER_MIGRATION_DIR_ENV };
 
 /** Display names (TRUST_MODEL.md "Product tier names"). */
 const TIER_DISPLAY: Readonly<Record<TierKey, string>> = {
@@ -159,9 +159,7 @@ export function resolveTierMigrationPaths(
   env: Record<string, string | undefined>,
   embeddingLedgerPath: string,
 ): TierMigrationPaths {
-  const configured = env[TIER_MIGRATION_DIR_ENV]?.trim();
-  const dir = configured || olympusDataPath(env, 'tier-migration');
-  return { statePath: join(dir, 'state.json'), reportDir: join(dir, 'reports'), embeddingLedgerPath };
+  return { statePath: tierMigrationStatePath(env), reportDir: tierMigrationReportDir(env), embeddingLedgerPath };
 }
 
 // ---- Registry ------------------------------------------------------------------

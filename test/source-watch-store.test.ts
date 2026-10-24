@@ -30,6 +30,7 @@ import {
   type SourceWatchExecutorCapability,
   type TrustedSourceWatchOwnerContext,
 } from '../src/core/source-watch.ts';
+import { publishLinuxEngineReceipt, resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
 
 const START = '2026-07-18T12:00:00.000Z';
 const CORPUS = 'secure_local.whatsapp.messages';
@@ -56,6 +57,40 @@ const EXECUTOR = createSourceWatchExecutorCapability({ executorId: 'watch-execut
 const EXECUTOR_B = createSourceWatchExecutorCapability({ executorId: 'watch-executor-b' });
 
 describe('durable source watch store', () => {
+  test('refuses a relative data home when no installed receipt names the root', () => {
+    const home = mkdtempSync(join(tmpdir(), 'watch-home-'));
+    try {
+      expect(() => defaultSourceWatchDbPath({ HOME: home, XDG_DATA_HOME: 'relative/data' })).toThrow(/absolute/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // The receipt reader is Linux-only (standaloneLinuxDataDir), as in test/linux-engine-layout.
+  (process.platform === 'linux' ? test : test.skip)(
+    'a standalone Linux receipt picks the root over a relative ambient data home',
+    () => {
+      const home = mkdtempSync(join(tmpdir(), 'watch-receipt-'));
+      try {
+        const env = {
+          HOME: home,
+          XDG_CONFIG_HOME: join(home, 'cfg'),
+          XDG_DATA_HOME: join(home, 'data'),
+          XDG_STATE_HOME: join(home, 'state'),
+          XDG_CACHE_HOME: join(home, 'cache'),
+          XDG_RUNTIME_DIR: join(home, 'run'),
+        };
+        mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 });
+        const layout = resolveLinuxEngineLayout(env);
+        publishLinuxEngineReceipt(layout);
+        expect(defaultSourceWatchDbPath({ ...env, XDG_DATA_HOME: 'relative/data' }))
+          .toBe(join(layout.dataDir, 'source-watches.sqlite'));
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
   test('requires an absolute data root and hardens the leaf directory and SQLite files', () => {
     expect(defaultSourceWatchDbPath({ XDG_DATA_HOME: '/private/olympus-data' }))
       .toBe('/private/olympus-data/openclaw/olympus/source-watches.sqlite');

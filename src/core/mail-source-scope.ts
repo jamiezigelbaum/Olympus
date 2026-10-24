@@ -170,6 +170,38 @@ export function defaultMailSourceScopeStatePath(handleRegistryPath: string): str
   return join(dirname(handleRegistryPath), 'mail-source-scopes.json');
 }
 
+/**
+ * Gmail's forget step on the mail-scope file: the approval goes (it holds the
+ * owner's sender rules and skipped labels), and a reconnect chooses its scope
+ * again. A missing file, or one nothing can read, has nothing to forget.
+ * Returns how many approvals went (on a dry run, would go).
+ */
+export function forgetMailSourceScopeApproval(
+  statePath: string,
+  sourceIds: readonly string[],
+  options: { dryRun?: boolean } = {},
+): number {
+  if (!existsSync(statePath)) return 0;
+  const dropped = (state: PersistedMailSourceScopeState) =>
+    state.approvals.filter((approval) => sourceIds.includes(approval.source_id));
+  const first = readState(statePath);
+  const found = first.kind === 'valid' ? dropped(first.state).length : 0;
+  // Nothing to forget, or only asked how much: no lease, so no lock file.
+  if (found === 0 || options.dryRun === true) return found;
+  return withFileLeaseSync(statePath, (lease) => {
+    const read = readState(statePath);
+    if (read.kind !== 'valid') return 0;
+    const count = dropped(read.state).length;
+    if (count === 0) return 0;
+    const state: PersistedMailSourceScopeState = {
+      version: 1,
+      approvals: read.state.approvals.filter((approval) => !sourceIds.includes(approval.source_id)),
+    };
+    lease.commit(() => writePrivateFileAtomicSync(statePath, `${JSON.stringify(state, null, 2)}\n`));
+    return count;
+  });
+}
+
 /** The picker's opening state: 2 years in full, Promotions and Social skipped. */
 export function defaultMailScopeSelection(): Omit<MailScopeSelection, 'contentAfter'> {
   return {
