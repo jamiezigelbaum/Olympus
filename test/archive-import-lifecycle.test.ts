@@ -555,10 +555,16 @@ describe('archive corpora in the registry', () => {
       'secure_local.archive.email',
       'internal.archive.email',
       'public_safe.archive.email',
+      'secure_local.archive.note',
+      'internal.archive.note',
+      'public_safe.archive.note',
     ]);
-    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(['secure_local.archive.email']);
+    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(['secure_local.archive.email', 'secure_local.archive.note']);
+    // Mail has the one format, so its stores carry that format's name; notes have two (Reflect, Roam), so theirs carry the neutral one.
     for (const corpus of withArchives.list().filter((entry) => entry.sourceId === 'archive.imports')) {
-      expect(corpus).toMatchObject({ provider: 'mbox', family: 'email', createdOnDemand: true });
+      expect(corpus).toMatchObject(corpus.family === 'email'
+        ? { provider: 'mbox', family: 'email', createdOnDemand: true }
+        : { provider: 'archive', family: 'note', createdOnDemand: true });
     }
     // Added once, whatever the config already holds.
     expect(withArchiveImportCorpora(withArchiveImportCorpora()).corpora).toHaveLength(withArchives.list().length);
