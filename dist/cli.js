@@ -10531,14 +10531,69 @@ function saveMessagingCaptureGrant(input) {
 function revokeMessagingCaptureGrant(path) {
   rmSync5(path, { force: true });
 }
+function isPlainRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function readMessagingCaptureGrantFacts(source, grantPath = defaultMessagingCaptureGrantPath(source)) {
+  try {
+    const read = readGrant(grantPath);
+    if (read.kind !== "valid" || read.grant.source !== source)
+      return {};
+    const facts = {};
+    const grantedAt = typeof read.grant.grantedAt === "string" ? Date.parse(read.grant.grantedAt) : Number.NaN;
+    if (Number.isFinite(grantedAt))
+      facts.pairedAt = new Date(grantedAt).toISOString();
+    const env = read.grant.producer.env;
+    const raw = isPlainRecord(env) ? env[source === "telegram" ? "OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES" : "OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS"] : undefined;
+    if (typeof raw === "string") {
+      const scopes = raw.split(",").map((item) => item.trim()).filter(Boolean);
+      if (scopes.length > 0) {
+        facts.scope = scopes.includes("*") ? { kind: "whole_account" } : { kind: "chats", count: new Set(scopes).size };
+      }
+    }
+    return facts;
+  } catch {
+    return {};
+  }
+}
+function effectiveMessagingCaptureStatus(input) {
+  const { status } = input;
+  const source = status?.source;
+  if (input.reconcileFailed) {
+    return { ...source ? { source } : {}, state: "blocked", reason: "start_failed" };
+  }
+  if (status?.state === "running" && input.liveness && input.liveness.unexpectedExits >= MESSAGING_CAPTURE_REPEATED_EXITS) {
+    return { ...source ? { source } : {}, state: "blocked", reason: "helper_exited" };
+  }
+  return status;
+}
 
 class MessagingCaptureSupervisor {
   options;
   child;
   fingerprint;
   generation = 0;
+  startedAt;
+  expectedStops = new WeakSet;
+  unexpectedExitTimes = [];
   constructor(options) {
     this.options = options;
+  }
+  liveness() {
+    const now = (this.options.now ?? Date.now)();
+    if (this.child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS)
+      this.unexpectedExitTimes = [];
+    this.unexpectedExitTimes = this.unexpectedExitTimes.filter((at) => now - at < UNEXPECTED_EXIT_WINDOW_MS);
+    return { alive: this.child !== undefined, unexpectedExits: this.unexpectedExitTimes.length };
+  }
+  childExited(child) {
+    if (!this.expectedStops.has(child))
+      this.unexpectedExitTimes.push((this.options.now ?? Date.now)());
+    if (this.child === child) {
+      this.child = undefined;
+      this.fingerprint = undefined;
+      this.startedAt = undefined;
+    }
   }
   async reconcile() {
     const generation = ++this.generation;
@@ -10590,17 +10645,8 @@ class MessagingCaptureSupervisor {
     const child = spawn3({ executable: launch.executable, args: launch.args, env: childEnv });
     this.child = child;
     this.fingerprint = nextFingerprint;
-    child.exited.then(() => {
-      if (this.child === child) {
-        this.child = undefined;
-        this.fingerprint = undefined;
-      }
-    }, () => {
-      if (this.child === child) {
-        this.child = undefined;
-        this.fingerprint = undefined;
-      }
-    });
+    this.startedAt = (this.options.now ?? Date.now)();
+    child.exited.then(() => this.childExited(child), () => this.childExited(child));
     return { source: grant.source, state: "running" };
   }
   async stop() {
@@ -10608,6 +10654,7 @@ class MessagingCaptureSupervisor {
     const child = this.child;
     if (!child)
       return;
+    this.expectedStops.add(child);
     child.kill("SIGTERM");
     const timeoutMs = this.options.stopTimeoutMs ?? 5000;
     if (!await observeChildExit(child, timeoutMs)) {
@@ -10619,6 +10666,7 @@ class MessagingCaptureSupervisor {
     if (this.child === child) {
       this.child = undefined;
       this.fingerprint = undefined;
+      this.startedAt = undefined;
     }
   }
 }
@@ -10688,7 +10736,7 @@ function spawnCapture(input) {
   });
   return { exited: child.exited, kill: (signal) => child.kill(signal) };
 }
-var NativeMessagingCaptureOwnerError;
+var NativeMessagingCaptureOwnerError, MESSAGING_CAPTURE_REPEATED_EXITS = 3, UNEXPECTED_EXIT_WINDOW_MS, STABLE_RUN_MS = 60000;
 var init_messaging_capture = __esm(() => {
   init_messaging_runtime();
   init_atomic_file();
@@ -10706,6 +10754,7 @@ var init_messaging_capture = __esm(() => {
       this.configKey = configKey;
     }
   };
+  UNEXPECTED_EXIT_WINDOW_MS = 10 * 60000;
 });
 
 // src/core/source-index/types.ts
@@ -53605,6 +53654,39 @@ function readTelegramCaptureSpool(options) {
     exhausted
   };
 }
+function readTelegramCaptureSpoolNewestCapturedAt(spoolDir) {
+  let names;
+  try {
+    assertTelegramCaptureSpoolDirectory(spoolDir);
+    names = telegramCaptureSpoolFiles(spoolDir);
+  } catch {
+    return;
+  }
+  for (const name of names.reverse()) {
+    let payload2;
+    try {
+      const path = join50(spoolDir, name);
+      const stat2 = lstatSync20(path);
+      if (!stat2.isFile() || stat2.isSymbolicLink() || stat2.size > MAX_SPOOL_BYTES)
+        continue;
+      payload2 = readFileSync35(path, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = payload2.slice(0, payload2.lastIndexOf(`
+`) + 1).split(`
+`);
+    for (let index = lines.length - 1;index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line.trim())
+        continue;
+      try {
+        return parseTelegramCaptureSpoolRecord(line).capturedAt;
+      } catch {}
+    }
+  }
+  return;
+}
 function redactTelegramCaptureSpoolSecrets(options) {
   assertTelegramCaptureSpoolDirectory(options.spoolDir);
   const from = parseTelegramCaptureSpoolCursor(options.from);
@@ -53914,6 +53996,60 @@ var init_capture_spool_connector = __esm(() => {
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID = `${TELEGRAM_CAPTURE_CONNECTOR_ID}_trust_reconciliation`;
 });
 
+// src/workers/connector-store/capture-freshness.ts
+function captureFreshness(newestTimestamp, nowMs, thresholdSeconds) {
+  const newestMs = newestTimestamp ? Date.parse(newestTimestamp) : Number.NaN;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(newestMs)) {
+    return { status: "unavailable", threshold_seconds: thresholdSeconds };
+  }
+  const ageSeconds = Math.max(0, Math.floor((nowMs - newestMs) / 1000));
+  return {
+    status: ageSeconds > thresholdSeconds ? "stale" : "fresh",
+    threshold_seconds: thresholdSeconds,
+    age_seconds: ageSeconds
+  };
+}
+function captureFreshnessCounts(capture) {
+  return {
+    capture_fresh: capture.status === "fresh" ? 1 : 0,
+    capture_stale: capture.status === "stale" ? 1 : 0,
+    capture_unavailable: capture.status === "unavailable" ? 1 : 0,
+    capture_stale_threshold_seconds: capture.threshold_seconds,
+    ...capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {}
+  };
+}
+function captureFreshnessFromCounts(counts) {
+  const flagged = ["fresh", "stale", "unavailable"].filter((status2) => counts[CAPTURE_COUNT_KEYS[status2]] === 1);
+  const threshold = counts[CAPTURE_COUNT_KEYS.thresholdSeconds];
+  if (flagged.length !== 1 || typeof threshold !== "number" || !Number.isSafeInteger(threshold) || threshold <= 0) {
+    return;
+  }
+  const age = counts[CAPTURE_COUNT_KEYS.ageSeconds];
+  const status = flagged[0];
+  return {
+    status,
+    threshold_seconds: threshold,
+    ...status !== "unavailable" && typeof age === "number" && Number.isSafeInteger(age) && age >= 0 ? { age_seconds: age } : {}
+  };
+}
+function captureStaleThresholdSeconds(configured, environmentValue, label) {
+  const raw = configured ?? (environmentValue?.trim() ? Number(environmentValue) : DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS);
+  if (!Number.isSafeInteger(raw) || raw <= 0) {
+    throw new Error(`${label} capture stale threshold must be a positive integer.`);
+  }
+  return raw;
+}
+var DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS = 64800, CAPTURE_COUNT_KEYS;
+var init_capture_freshness = __esm(() => {
+  CAPTURE_COUNT_KEYS = {
+    fresh: "capture_fresh",
+    stale: "capture_stale",
+    unavailable: "capture_unavailable",
+    thresholdSeconds: "capture_stale_threshold_seconds",
+    ageSeconds: "capture_age_seconds"
+  };
+});
+
 // src/workers/telegram-messages/store-sync.ts
 function createTelegramConnectorStores(env = process.env) {
   return {
@@ -53949,6 +54085,8 @@ function reconcileTelegramTrustStores(stores, options = {}) {
 function createTelegramConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const spoolDir = options.spoolDir?.trim() || defaultTelegramCaptureSpoolDir(env);
+  const staleThresholdSeconds = captureStaleThresholdSeconds(options.spoolStaleThresholdSeconds, env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_STALE_THRESHOLD_SECONDS, "Telegram");
+  const now = options.now ?? (() => new Date);
   const tierSet = options.tierSet ?? createLaneTieredStoreSet({
     setId: TELEGRAM_MESSAGES_SOURCE_ID,
     internalStore: options.stores.internal,
@@ -54037,7 +54175,7 @@ function createTelegramConnectorStoreSyncHandler(options) {
         redactionFailed = true;
         console.error(`[olympus:telegram] spool_secret_redaction_failed reason=${error instanceof Error ? error.name : "unknown"}`);
       }
-      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed);
+      return telegramSyncReceipt(internal, secureLocal, preflight.malformedRecords, conflictedItemIds.size, eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished, redacted, redactionFailed, captureFreshness(readTelegramCaptureSpoolNewestCapturedAt(spoolDir), now().getTime(), staleThresholdSeconds));
     },
     lastStoreRunCompletedAt() {
       const internal = options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.completedAt;
@@ -54094,7 +54232,7 @@ function cursorParts(cursor) {
   const separator = cursor.lastIndexOf(":");
   return [cursor.slice(0, separator), Number(cursor.slice(separator + 1))];
 }
-function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed) {
+function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConflictItems, trustConflictEvictions, redacted, redactionFailed, capture) {
   const runs = [internal, secureLocal];
   const counts = {
     items_seen: sum(runs, "itemsSeen"),
@@ -54107,7 +54245,8 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
     malformed_spool_records: malformedRecords,
     trust_conflict_items: trustConflictItems,
     trust_conflict_evictions: trustConflictEvictions,
-    spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0)
+    spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
+    ...captureFreshnessCounts(capture)
   };
   const warnings = [
     ...malformedRecords > 0 ? [TELEGRAM_MALFORMED_SPOOL_WARNING] : [],
@@ -54117,6 +54256,7 @@ function telegramSyncReceipt(internal, secureLocal, malformedRecords, trustConfl
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? "progress" : "idle",
     counts,
+    capture,
     ...warnings.length > 0 ? { warnings } : {},
     policy: {
       counts_only: true,
@@ -54135,6 +54275,7 @@ var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_corpus_adapter2();
   init_capture_spool_connector();
 });
@@ -62220,7 +62361,7 @@ function clearWhatsAppSpoolSecrets(options) {
   });
 }
 function whatsappSyncReceipt(run, spool, nowMs, staleThresholdSeconds, tiered = {}, redacted, redactionFailed = false) {
-  const capture = whatsappCaptureFreshness(spool.newestMessageTimestamp, nowMs, staleThresholdSeconds);
+  const capture = captureFreshness(spool.newestMessageTimestamp, nowMs, staleThresholdSeconds);
   const warnings = [
     ...spool.malformedLines > 0 ? [WHATSAPP_MALFORMED_SPOOL_WARNING] : [],
     ...spool.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : [],
@@ -62241,11 +62382,7 @@ function whatsappSyncReceipt(run, spool, nowMs, staleThresholdSeconds, tiered = 
       chunks_indexed: run.chunksIndexed,
       malformed_spool_lines: spool.malformedLines,
       unresolved_reaction_targets: spool.unresolvedReactionTargets,
-      capture_fresh: capture.status === "fresh" ? 1 : 0,
-      capture_stale: capture.status === "stale" ? 1 : 0,
-      capture_unavailable: capture.status === "unavailable" ? 1 : 0,
-      capture_stale_threshold_seconds: capture.threshold_seconds,
-      ...capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {},
+      ...captureFreshnessCounts(capture),
       spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered
     },
@@ -62261,30 +62398,15 @@ function whatsappSyncReceipt(run, spool, nowMs, staleThresholdSeconds, tiered = 
   };
 }
 function whatsappCaptureStaleThresholdSeconds(configured, env) {
-  const raw = configured ?? (env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS?.trim() ? Number(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS) : DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS);
-  if (!Number.isSafeInteger(raw) || raw <= 0) {
-    throw new Error("WhatsApp capture stale threshold must be a positive integer.");
-  }
-  return raw;
+  return captureStaleThresholdSeconds(configured, env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS, "WhatsApp");
 }
-function whatsappCaptureFreshness(newestTimestamp, nowMs, thresholdSeconds) {
-  const newestMs = newestTimestamp ? Date.parse(newestTimestamp) : Number.NaN;
-  if (!Number.isFinite(nowMs) || !Number.isFinite(newestMs)) {
-    return { status: "unavailable", threshold_seconds: thresholdSeconds };
-  }
-  const ageSeconds = Math.max(0, Math.floor((nowMs - newestMs) / 1000));
-  return {
-    status: ageSeconds > thresholdSeconds ? "stale" : "fresh",
-    threshold_seconds: thresholdSeconds,
-    age_seconds: ageSeconds
-  };
-}
-var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_LIVE_CORPUS_ID = "secure_local.whatsapp.messages", WHATSAPP_PERSONAL_ACCOUNT_SCOPE = "personal", WHATSAPP_INTERNAL_CORPUS_ID = "internal.whatsapp.messages", WHATSAPP_PRODUCT_CONNECTOR_ID = "whatsapp_product_spool", WHATSAPP_STORE_PLACEMENT, WHATSAPP_EXTRACTION_SCOPE_KEY = "whatsapp.personal.messages", WHATSAPP_MALFORMED_SPOOL_WARNING = "whatsapp_malformed_spool_lines", WHATSAPP_UNRESOLVED_REACTIONS_WARNING = "whatsapp_unresolved_reaction_targets", WHATSAPP_CAPTURE_STALE_WARNING = "whatsapp_capture_spool_stale", WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = "whatsapp_capture_freshness_unavailable", WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = "whatsapp_spool_secret_redaction_failed", WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp", DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS = 64800;
+var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_LIVE_CORPUS_ID = "secure_local.whatsapp.messages", WHATSAPP_PERSONAL_ACCOUNT_SCOPE = "personal", WHATSAPP_INTERNAL_CORPUS_ID = "internal.whatsapp.messages", WHATSAPP_PRODUCT_CONNECTOR_ID = "whatsapp_product_spool", WHATSAPP_STORE_PLACEMENT, WHATSAPP_EXTRACTION_SCOPE_KEY = "whatsapp.personal.messages", WHATSAPP_MALFORMED_SPOOL_WARNING = "whatsapp_malformed_spool_lines", WHATSAPP_UNRESOLVED_REACTIONS_WARNING = "whatsapp_unresolved_reaction_targets", WHATSAPP_CAPTURE_STALE_WARNING = "whatsapp_capture_spool_stale", WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = "whatsapp_capture_freshness_unavailable", WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = "whatsapp_spool_secret_redaction_failed", WHATSAPP_SPOOL_REDACTION_STATE_KEY = "capture_spool_secret_redaction:whatsapp";
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
   init_connector_store();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
@@ -74855,8 +74977,13 @@ function dashboardStatusResolution(input) {
   if (readinessStatus === "Needs you" || queueStatus === "Needs you") {
     return { status: "Needs you", mappedUnknown: false };
   }
+  if (dashboardCaptureProblem(source) !== undefined)
+    return { status: "Needs you", mappedUnknown: false };
   if (dashboardScopePending(source))
     return { status: "Waiting", mappedUnknown: false };
+  if (connectionStatus === "Fresh" && source.freshness.capture?.state === "awaiting") {
+    return { status: "Waiting", mappedUnknown: false };
+  }
   return { status: connectionStatus, mappedUnknown: false };
 }
 function dashboardScopePending(source) {
@@ -74904,45 +75031,51 @@ function dashboardUnsettledWithData(source) {
   return source.coverage.indexed_items > 0 && dashboardIsUnconnectedState(source) && DASHBOARD_UNSETTLED_CUSTODY_LABELS.has(source.connection.label);
 }
 function dashboardAttentionLine(source, options) {
+  const { reason, capture } = dashboardAttentionParts(source, options);
+  return [reason, capture].filter((part) => !!part).join(" · ");
+}
+function dashboardAttentionParts(source, options) {
+  const capture = dashboardCaptureAttentionReason(source);
+  const withCapture = (reason) => capture ? { reason, capture } : { reason };
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
-    return clause ? `can't sign in · ${clause}` : `can't sign in`;
+    return withCapture(clause ? `can't sign in · ${clause}` : `can't sign in`);
   }
   if (source.connection.provider_refusal)
-    return dashboardProviderRefusalLine(source, options);
+    return withCapture(dashboardProviderRefusalLine(source, options));
   switch (source.connection.state) {
     case "reauth_required":
-      return DASHBOARD_SIGNED_OUT;
+      return withCapture(DASHBOARD_SIGNED_OUT);
     case "awaiting_consent": {
       const base = `finish signing in to ${source.label}`;
       const minutes = source.connection.pending?.expires_in_minutes;
-      return minutes !== undefined && minutes > 0 ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min` : base;
+      return withCapture(minutes !== undefined && minutes > 0 ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min` : base);
     }
     case "needs_setup":
     case "not_connected":
-      return source.connection.label;
+      return withCapture(source.connection.label);
     default:
       break;
   }
   if (source.connection.imports_attention?.length)
-    return source.connection.label;
+    return withCapture(source.connection.label);
   if (source.schedule?.degraded_reason === "scope_root_permission_needed")
-    return DASHBOARD_FOLDER_NEEDS_PERMISSION;
+    return withCapture(DASHBOARD_FOLDER_NEEDS_PERMISSION);
   if (source.schedule?.degraded_reason === "scope_root_helper_needed")
-    return DASHBOARD_FOLDER_NEEDS_HELPER;
+    return withCapture(DASHBOARD_FOLDER_NEEDS_HELPER);
   if (source.schedule?.degraded_reason === "scope_root_unreadable")
-    return DASHBOARD_FOLDER_UNREADABLE;
+    return withCapture(DASHBOARD_FOLDER_UNREADABLE);
   if (source.schedule?.degraded_reason === "scope_root_missing" || (source.schedule?.missing_folders?.length ?? 0) > 0)
-    return DASHBOARD_MISSING_FOLDER;
-  if (source.answer_readiness.state === "needs_attention") {
-    return dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source);
+    return withCapture(DASHBOARD_MISSING_FOLDER);
+  if (source.answer_readiness.state === "needs_attention" && !dashboardReadinessNamesCapture(source)) {
+    return withCapture(dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source));
   }
   if (source.queue_health.needs_attention > 0)
-    return "some items could not be read";
+    return withCapture("some items could not be read");
   if ((source.queue_health.retrying_tasks ?? 0) > 0)
-    return "a sync is retrying on its own";
-  return "";
+    return withCapture("a sync is retrying on its own");
+  return withCapture("");
 }
 function dashboardActionLabel(label) {
   return /^re-?auth/i.test(label.trim()) ? DASHBOARD_RECONNECT_LABEL : label;
@@ -74960,6 +75093,55 @@ function pausedReason(source) {
     return "some items could not be read";
   const relative9 = typeof source.freshness.hours === "number" ? dashboardRelativeFromHours(source.freshness.hours) : "";
   return relative9 ? `last synced ${relative9}, later than expected` : "it has not synced when expected";
+}
+function dashboardCaptureProblem(source) {
+  if (!CAPTURE_JUDGED_CONNECTION_STATES.has(source.connection.state))
+    return;
+  const supervisor = source.capture?.supervisor;
+  if (supervisor?.state === "blocked" || supervisor?.state === "stopped" && supervisor.reason !== undefined && CAPTURE_UNEXPECTED_STOP_REASONS.has(supervisor.reason)) {
+    return { cause: "helper", ...supervisor.reason ? { reason: supervisor.reason } : {} };
+  }
+  if (source.freshness.capture?.state === "stale")
+    return { cause: "stale" };
+  return;
+}
+function dashboardReadinessNamesCapture(source) {
+  return source.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL || source.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL;
+}
+function dashboardCaptureAttentionReason(source) {
+  const problem = dashboardCaptureProblem(source);
+  if (!problem)
+    return;
+  if (problem.cause === "helper") {
+    return problem.reason === undefined ? DASHBOARD_CAPTURE_COPY.helperUnknown : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
+  }
+  const age = source.freshness.capture?.age_seconds;
+  const relative9 = typeof age === "number" ? dashboardRelativeFromMs(age * 1000) : "";
+  const base = relative9 ? DASHBOARD_CAPTURE_COPY.stale(relative9) : DASHBOARD_CAPTURE_COPY.staleNoAge;
+  return source.capture?.supervisor?.state === "stopped" ? `${base} · ${DASHBOARD_CAPTURE_COPY.stopped}` : base;
+}
+function dashboardCaptureAwaitingClause(source) {
+  const capture = source.freshness.capture;
+  if (capture?.state !== "awaiting")
+    return "";
+  const relative9 = typeof capture.age_seconds === "number" ? dashboardRelativeFromMs(capture.age_seconds * 1000) : "";
+  return relative9 ? DASHBOARD_CAPTURE_COPY.awaitingWithHistory(relative9) : DASHBOARD_CAPTURE_COPY.awaiting;
+}
+function dashboardCaptureClause(source) {
+  const parts = [];
+  if (source.freshness.capture?.state === "unavailable")
+    parts.push(DASHBOARD_CAPTURE_COPY.unavailable);
+  const supervisor = source.capture?.supervisor?.state;
+  if (supervisor === "running")
+    parts.push(DASHBOARD_CAPTURE_COPY.running);
+  else if (supervisor === "stopped")
+    parts.push(DASHBOARD_CAPTURE_COPY.stopped);
+  const scope = source.capture?.scope;
+  if (scope?.kind === "whole_account")
+    parts.push(DASHBOARD_CAPTURE_COPY.wholeAccount);
+  else if (scope?.kind === "chats" && scope.count > 0)
+    parts.push(DASHBOARD_CAPTURE_COPY.chats(scope.count));
+  return parts.join(" · ");
 }
 function lowerFirst(value2) {
   return value2.length > 0 ? value2[0].toLowerCase() + value2.slice(1) : value2;
@@ -75093,16 +75275,18 @@ function freshLine(source, now) {
     return source.connection.label;
   const unreadable = dashboardUnreadablePhrase(source);
   const manual = dashboardManualSyncLine(source, now);
+  const capture = dashboardCaptureClause(source);
+  const tail = [unreadable, capture].filter((part) => !!part).join(" · ");
   if (manual)
-    return unreadable ? `${manual} · ${unreadable}` : manual;
+    return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
   if (typeof hours !== "number" || !Number.isFinite(hours))
-    return unreadable ?? "";
+    return tail;
   const relative9 = dashboardRelativeFromHours(hours);
   if (!relative9)
-    return unreadable ?? "";
+    return tail;
   const synced = dashboardOperatorPaused(source) ? `synced ${relative9} · sync paused` : `synced ${relative9}`;
-  return unreadable ? `${synced} · ${unreadable}` : synced;
+  return tail ? `${synced} · ${tail}` : synced;
 }
 function dashboardItemNoun(source) {
   switch (source.family) {
@@ -75224,6 +75408,11 @@ function workingLine(source) {
   return parts.join(" · ");
 }
 function waitingLine(source) {
+  const awaiting = dashboardCaptureAwaitingClause(source);
+  if (awaiting) {
+    const clause = dashboardCaptureClause(source);
+    return clause ? `${awaiting} · ${clause}` : awaiting;
+  }
   if (dashboardScopePending(source)) {
     return source.scope_selection?.kind === "mail" ? "choose which mail to include" : "choose which folders to include";
   }
@@ -75288,7 +75477,7 @@ function dashboardImportAttentionSentence(entry) {
       return words2.unreadable;
   }
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_answer_ready_coverage();
@@ -75341,6 +75530,40 @@ var init_vocabulary = __esm(() => {
     "Content extraction is stalled": "reading files has stalled",
     [DASHBOARD_MANY_UNREADABLE_LABEL]: "many files can't be read"
   };
+  DASHBOARD_CAPTURE_COPY = {
+    fixLabel: "Check capture",
+    stale: (age) => `capture stale: newest message ${age}`,
+    staleNoAge: "capture stale: nothing captured since linking",
+    unavailable: "no live messages captured yet",
+    awaiting: "waiting for the first live message",
+    awaitingWithHistory: (age) => `waiting for the first live message · newest kept message ${age}`,
+    helper: {
+      grant_invalid: "capture cannot start: its approval cannot be read",
+      session_missing: "capture cannot start: its linked session is missing",
+      secret_missing: "capture cannot start: its saved sign-in key is missing",
+      start_failed: "capture cannot start: its helper would not start",
+      helper_exited: "capture keeps stopping: its helper exits soon after it starts",
+      grant_missing: "capture stopped: its approval is missing",
+      handle_unavailable: "capture stopped: its sign-in is no longer available"
+    },
+    helperUnknown: "capture cannot start",
+    running: "capture running",
+    stopped: "capture stopped",
+    wholeAccount: "whole account",
+    chats: (count) => `${dashboardCount(count)} ${count === 1 ? "chat" : "chats"}`,
+    nextAction: {
+      stale: (label) => `Open ${label} on this computer to check the link and capture. Syncing again will not bring in messages that were never captured.`,
+      blocked: (label) => `Open ${label} on this computer and link it again so live capture can start.`,
+      awaiting: (label) => `Keep ${label} linked. The first live message since linking will end this wait; if none arrives within the day, this row says so.`
+    }
+  };
+  CAPTURE_JUDGED_CONNECTION_STATES = new Set([
+    "connected",
+    "waiting_for_first_sync",
+    "syncing",
+    "synced"
+  ]);
+  CAPTURE_UNEXPECTED_STOP_REASONS = new Set(["grant_missing", "handle_unavailable"]);
   REDIRECT_REFUSAL_CODES = new Set([
     "redirect_uri_mismatch",
     "invalid_redirect_uri",
@@ -77772,7 +77995,8 @@ function buildSourceDashboardViewModel(options) {
     const corpora = statusCorpora.filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora)
       claimedCorpusIds.add(corpus.corpus_id);
-    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, options.importedArchives);
+    const captureRuntime = options.captureRuntime?.[definition.source_id];
+    const built = sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, options.connectedHandleRegistry, credentialHealth, options.oauthClientIds ?? {}, options.oauthClientSecretAvailability ?? {}, options.googleCloudProjectId, options.googlePilotClientConfigured === true, options.publisherOAuthSources ?? [], options.oauthRedirectBaseUrl, options.apiKeyAvailability ?? {}, options.pendingConnects ?? [], now, ingestionRowForDefinition(definition, ingestionBySource), options.contentExtractionStallThresholdHours, options.connectedHandleRegistryUnreadable === true, unpairedSources.get(definition.source_id), options.fileSourceScopeStatus?.[definition.source_id], options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false, options.importedArchives, captureRuntime?.paired_at);
     const tierClassification = tierClassificationFromCorpora(corpora, options.sourceIndexStatus.tier_migration);
     const manualSync = dashboardLiveManualSync(options.manualSyncs?.[definition.source_id], built.last_sync_at, now);
     const unreadableFiles = unreadableFilesFor(built, corpora, options.unreadableFileNames);
@@ -77787,6 +78011,17 @@ function buildSourceDashboardViewModel(options) {
         next_action: `${card.label} is now connected to a different account than the items already stored, so nothing syncs. ` + `Reconnect the previous account to resume, or Disconnect ${card.label}, ask your agent to delete its stored data, and connect the new account.`
       };
       card.answer_readiness = { state: "needs_attention", label: "Connected to a different account" };
+      card.setup = dashboardSourceSetupStatus(card);
+    }
+    if (card.configured && captureRuntime && (captureRuntime.supervisor || captureRuntime.scope)) {
+      card.capture = {
+        ...captureRuntime.supervisor ? { supervisor: { ...captureRuntime.supervisor } } : {},
+        ...captureRuntime.scope ? { scope: { ...captureRuntime.scope } } : {}
+      };
+      const readiness = card.answer_readiness;
+      if (dashboardCaptureProblem(card)?.cause === "helper" && (readiness.state !== "needs_attention" || readiness.label === DASHBOARD_CAPTURE_STALE_LABEL) && !card.account_change) {
+        card.answer_readiness = { state: "needs_attention", label: DASHBOARD_CAPTURE_BLOCKED_LABEL };
+      }
       card.setup = dashboardSourceSetupStatus(card);
     }
     const syncSource = definition.connect_action.kind === "oauth" || definition.connect_action.kind === "api_key" || definition.connect_action.kind === "this_computer" ? definition.connect_action.source : undefined;
@@ -77931,7 +78166,7 @@ function unreadableFilesFor(card, corpora, names) {
   }
   return { names: listed.slice(0, CARD_UNREADABLE_NAMES), corpus_ids: corpusIds };
 }
-function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled, importedArchives) {
+function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedulerBySource, registry, credentialHealth, oauthClientIds, oauthClientSecretAvailability, googleCloudProjectId, googlePilotClientConfigured, publisherOAuthSources, oauthRedirectBaseUrl, apiKeyAvailability, pendingConnects, now, ingestionLedgerRow, contentExtractionStallThresholdHours, registryUnreadable, unpaired, fileSourceScopeStatus, fileSourceScopeIngestionEnabled, importedArchives, capturePairedAt) {
   const corpusCards = withoutCustodialDoubleCount(corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)), corpora);
   const schedulers = [
     ...corpora.map((corpus) => schedulerByCorpus.get(corpus.corpus_id)).filter((value2) => !!value2),
@@ -77945,7 +78180,9 @@ function sourceCardFromDefinition(definition, corpora, schedulerByCorpus, schedu
     ...contentExtractionStallThresholdHours !== undefined ? { thresholdHours: contentExtractionStallThresholdHours } : {}
   }) : undefined;
   const queue = throughput?.state === "stalled" ? { ...baseQueue, label: "Needs attention", needs_attention: baseQueue.needs_attention + 1 } : baseQueue;
-  const freshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
+  const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
+  const captureFreshness2 = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
+  const freshness = captureFreshness2 ? { ...refreshFreshness, capture: captureFreshness2 } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === "embedding_lane_disabled");
   const schedule = scheduleFromSchedulers(schedulers);
   const operatorPaused = schedule?.degraded_reason !== undefined && OPERATOR_PAUSED_SCHEDULER_MARKERS.has(schedule.degraded_reason);
@@ -78098,6 +78335,23 @@ function dashboardSourceSetupStatus(card) {
       dependencies
     };
   }
+  const captureProblem = dashboardCaptureProblem(card);
+  if (captureProblem && (card.answer_readiness.state !== "needs_attention" || card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL || card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL)) {
+    return {
+      stage: "source_health",
+      condition: "degraded",
+      next_action: captureProblem.cause === "helper" ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      dependencies
+    };
+  }
+  if (card.freshness.capture?.state === "awaiting" && card.answer_readiness.state !== "needs_attention") {
+    return {
+      stage: "initial_sync",
+      condition: "usable",
+      next_action: DASHBOARD_CAPTURE_COPY.nextAction.awaiting(card.label),
+      dependencies
+    };
+  }
   if (!synced || connection.state === "waiting_for_first_sync" || connection.state === "syncing") {
     return {
       stage: "initial_sync",
@@ -78110,7 +78364,7 @@ function dashboardSourceSetupStatus(card) {
     return {
       stage: "source_health",
       condition: "degraded",
-      next_action: connection.action.kind === "oauth" || connection.action.kind === "api_key" ? `${connection.action.label} ${card.label}, then run Sync now.` : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`,
+      next_action: (connection.action.kind === "oauth" || connection.action.kind === "api_key" ? `${connection.action.label} ${card.label}, then run Sync now.` : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`) + (captureProblem ? ` ${captureProblem.cause === "helper" ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label) : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label)}` : ""),
       dependencies
     };
   }
@@ -79138,6 +79392,44 @@ function liveQueueCount(counts, gaugeKeys, jobKeys) {
     return -1;
   return Math.max(gauge, 0) + Math.max(jobs, 0);
 }
+function schedulerCaptureFreshness(schedulers, now, pairedAt) {
+  const pairedAtMs = pairedAt === undefined ? Number.NaN : Date.parse(pairedAt);
+  let worst;
+  for (const scheduler of new Set(schedulers)) {
+    for (const task of scheduler.tasks) {
+      const counts = task.last_result?.counts;
+      if (task.kind !== "sync" || !counts || task.last_result?.status === "failed")
+        continue;
+      const reading = captureFreshnessFromCounts(counts);
+      if (!reading)
+        continue;
+      const pulledAt = Date.parse(task.last_success_at ?? "");
+      const sincePull = Number.isFinite(pulledAt) ? Math.max(0, Math.floor((now.getTime() - pulledAt) / 1000)) : 0;
+      const verdict = reading.status === "unavailable" || reading.age_seconds === undefined ? {
+        state: reading.status,
+        threshold_seconds: reading.threshold_seconds,
+        ...reading.age_seconds !== undefined ? { age_seconds: reading.age_seconds } : {}
+      } : {
+        state: reading.age_seconds + sincePull > reading.threshold_seconds ? "stale" : "fresh",
+        threshold_seconds: reading.threshold_seconds,
+        age_seconds: reading.age_seconds + sincePull
+      };
+      const judged = Number.isFinite(pairedAtMs) ? underCurrentPairing(verdict, now.getTime(), pairedAtMs) : verdict;
+      if (!worst || CAPTURE_STATE_RANK[judged.state] > CAPTURE_STATE_RANK[worst.state])
+        worst = judged;
+    }
+  }
+  return worst;
+}
+function underCurrentPairing(verdict, nowMs, pairedAtMs) {
+  const newestAtMs = verdict.age_seconds === undefined ? undefined : nowMs - verdict.age_seconds * 1000;
+  if (newestAtMs !== undefined && newestAtMs >= pairedAtMs)
+    return verdict;
+  const sincePairing = Math.max(0, (nowMs - pairedAtMs) / 1000);
+  if (sincePairing <= verdict.threshold_seconds)
+    return { ...verdict, state: "awaiting" };
+  return verdict.state === "unavailable" ? { ...verdict, state: "stale" } : verdict;
+}
 function schedulerTaskCounts(scheduler) {
   const output = {};
   for (const task of scheduler?.tasks ?? []) {
@@ -79212,6 +79504,9 @@ function answerReadinessFrom(configured, coverage, queue, freshness, operatorPau
   }
   if (unreadableShareTooHigh(coverage)) {
     return { state: "needs_attention", label: DASHBOARD_MANY_UNREADABLE_LABEL };
+  }
+  if (freshness.capture?.state === "stale") {
+    return { state: "needs_attention", label: DASHBOARD_CAPTURE_STALE_LABEL };
   }
   if (coverage.content_ready_items > 0 || coverage.embedded_items > 0) {
     return operatorPaused ? { state: "ready", label: "Ready for questions; sync paused" } : { state: "ready", label: "Ready for questions" };
@@ -79514,7 +79809,7 @@ function titleCase(value2) {
 function round12(value2) {
   return Math.round(value2 * 10) / 10;
 }
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIRED_LABEL = "unpaired", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL = "Waiting for the first sync", DASHBOARD_PERSISTENT_FAILURE_RUNS = 3, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_SAVED_SECRET_FIELD_VALUE = "olympus-saved-secret-unchanged", DASHBOARD_MANUAL_SYNC_SHOWN_MS, DASHBOARD_MANUAL_SYNC_MIN_INTERVAL_MS = 60000, DASHBOARD_SQLITE_STORE_ID = "source-dashboard", MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, MAX_SAMPLES_PER_CORPUS = 720, DASHBOARD_NEEDS_REVIEW_REASONS, DASHBOARD_SENSITIVITY_TIERS, DASHBOARD_SUPPORTED_SOURCES, VENICE_ANSWER_LANE, CARD_UNREADABLE_NAMES = 5, TIER_MIGRATION_STATE_LABELS, DASHBOARD_NO_ARCHIVES_LABEL = "no archives imported yet", DASHBOARD_ARCHIVES_IMPORTING_LABEL = "importing", DASHBOARD_ARCHIVES_NOT_RUNNING_LABEL = "imports can't run", DASHBOARD_ARCHIVES_UNREADABLE_LABEL = "can't read the list of imported archives", PUBLISHER_ADVANCED_BYO_SUMMARY = "Use my own app instead", CAPTURE_STATE_RANK, OPERATOR_PARK_EXPLAINS_STALENESS_HOURS = 24, DASHBOARD_UNREADABLE_ALARM_SHARE = 0.05, DASHBOARD_TRUST_DOMAINS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -79529,6 +79824,7 @@ var init_source_dashboard = __esm(() => {
   init_source_failure();
   init_answer_ready_coverage();
   init_vocabulary();
+  init_capture_freshness();
   init_phases();
   init_credential_health();
   init_status();
@@ -79805,6 +80101,12 @@ var init_source_dashboard = __esm(() => {
     running: "Tier migration running",
     stopped: "Tier migration paused — run it again to resume",
     done: "Tier migration done — previous copies kept, hidden, until you purge them"
+  };
+  CAPTURE_STATE_RANK = {
+    fresh: 0,
+    awaiting: 1,
+    unavailable: 2,
+    stale: 3
   };
   DASHBOARD_TRUST_DOMAINS = ["secure_local", "internal", "public_safe"];
 });
@@ -136304,6 +136606,7 @@ function createEmailSourceWorker(options = {}) {
               ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
               unpairedSources: dashboardUnpairedSourceStates(dashboardUnpairedSources, sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
+              ...sourceDashboard.captureRuntime ? { captureRuntime: sourceDashboard.captureRuntime() } : {},
               ...options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {},
               ...options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {},
               ...credentialHealth ? { credentialHealth } : {},
@@ -154586,10 +154889,17 @@ function sourceEntry(definition, card, status, actionKind, degraded, connecting,
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === "Needs you" || status === "Failing";
-  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
+  const capture = captureProblem(card);
+  const captureOnly = capture && dashboardAttentionParts(card, {
+    surface: "chatgpt",
+    ...degraded ? { degradedCredentials: degraded } : {}
+  }).reason === "";
+  const primary = connecting ? connecting.fix : status === "Off" ? actionKind === "none" ? undefined : connectFix(definition) : scopePending(card) || missingScope(card) ? scopeFix(definition, card) : reconnect ?? (late && captureOnly ? captureFix(definition) : late ? sync ?? (capture ? captureFix(definition) : undefined) : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu = [];
   if (sync)
     menu.push(sync);
+  if (capture && !connecting && status !== "Off")
+    menu.push(captureFix(definition));
   if (status !== "Off" && definition.connect_action.kind === "archive_import" && !card.connection.imports_attention?.some((entry) => entry.kind === "unreadable"))
     menu.push(connectFix(definition));
   if (status !== "Off" && card.scope_selection && !scopePending(card) && !missingScope(card)) {
@@ -154662,9 +154972,11 @@ function attentionItem(definition, card, actionKind, degraded, connecting, progr
   if (connecting) {
     return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
   }
-  const reason = dashboardAttentionLine(card, { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} });
+  const attentionOptions = { surface: "chatgpt", ...degraded ? { degradedCredentials: degraded } : {} };
+  const reason = dashboardAttentionLine(card, attentionOptions);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
-  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : sync ?? checkAgainFix();
+  const captureOnly = captureProblem(card) && dashboardAttentionParts(card, attentionOptions).reason === "";
+  const fix = scopePending(card) || missingScope(card) ? scopeFix(definition, card) ?? checkAgainFix() : wantsReconnect(card, "Needs you", actionKind, degraded, progress) ? reconnectFix(definition, card) : captureOnly ? captureFix(definition) : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 function importAttentionItem(entry) {
@@ -154692,6 +155004,12 @@ function importAttentionItem(entry) {
     case "unreadable":
       return { id: "archives:unreadable", sentence, fix: helpLinkFix(words2.seeWhy, archives) };
   }
+}
+function captureProblem(card) {
+  return dashboardCaptureProblem(card) !== undefined;
+}
+function captureFix(definition) {
+  return helpLinkFix(DASHBOARD_CAPTURE_COPY.fixLabel, openOnComputer(definition, "reconnect"));
 }
 function syncFix(definition, card, status, actionKind, degraded, progress) {
   if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card))
@@ -155091,8 +155409,10 @@ function scrubCard(definition, card) {
     freshness: {
       label: freshnessLabel2,
       ...finite(card.freshness.hours) ? { hours: card.freshness.hours } : {},
-      stale: card.freshness.stale === true
+      stale: card.freshness.stale === true,
+      ...scrubCaptureFreshness(card.freshness.capture)
     },
+    ...scrubCaptureRuntime(card.capture),
     coverage: {
       indexed_items: count(card.coverage.indexed_items),
       content_ready_items: count(card.coverage.content_ready_items),
@@ -155171,6 +155491,28 @@ function scrubCard(definition, card) {
     } : {}
   };
 }
+function scrubCaptureFreshness(input) {
+  if (!input || !CAPTURE_STATES.has(input.state) || !finite(input.threshold_seconds))
+    return {};
+  return {
+    capture: {
+      state: input.state,
+      threshold_seconds: count(input.threshold_seconds),
+      ...finite(input.age_seconds) ? { age_seconds: count(input.age_seconds) } : {}
+    }
+  };
+}
+function scrubCaptureRuntime(input) {
+  if (!input)
+    return {};
+  const supervisor = input.supervisor && CAPTURE_SUPERVISOR_STATES.has(input.supervisor.state) ? {
+    state: input.supervisor.state,
+    ...input.supervisor.reason && CAPTURE_SUPERVISOR_REASONS.has(input.supervisor.reason) ? { reason: input.supervisor.reason } : {}
+  } : undefined;
+  const scope = input.scope?.kind === "whole_account" ? { kind: "whole_account" } : input.scope?.kind === "chats" && finite(input.scope.count) ? { kind: "chats", count: count(input.scope.count) } : undefined;
+  const pairedAt = isoOrUndefined(input.paired_at);
+  return supervisor || scope || pairedAt ? { capture: { ...supervisor ? { supervisor } : {}, ...scope ? { scope } : {}, ...pairedAt ? { paired_at: pairedAt } : {} } } : {};
+}
 function scrubDegradations(input) {
   if (!input || input.length === 0)
     return;
@@ -155204,7 +155546,7 @@ function isoOrUndefined(value2) {
 function isoOrNow(value2, now) {
   return isoOrUndefined(value2) ?? now.toISOString();
 }
-var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, MANUAL_SYNC_OUTCOMES;
+var ANSWER_MODEL_LABELS, CONNECTING_DETAIL, CONNECTING_REASON, STAGE_DETAIL, CHATGPT_OAUTH_SOURCES, SCOPE_SOURCE_IDS, DISCONNECT_SOURCE_IDS, SYNC_SOURCE_IDS, KNOWN_CONNECTION_LABELS, SYNCED_RELATIVE, ARCHIVES_IMPORTED, KNOWN_READINESS_LABELS, KNOWN_REFUSAL_CODES, KNOWN_QUEUE_LABELS, CONNECTED_STATES, STAGE_FOR_PHASE, TRANSCRIPTION_DOWNLOADABLE, PRIVATE_MODEL_INSTALLING, IMPORT_UNREADABLE_REASONS, CAPTURE_STATES, CAPTURE_SUPERVISOR_STATES, CAPTURE_SUPERVISOR_REASONS, MANUAL_SYNC_OUTCOMES;
 var init_dashboard_view_model = __esm(() => {
   init_open_targets();
   init_shared_status();
@@ -155257,7 +155599,9 @@ var init_dashboard_view_model = __esm(() => {
     "Syncing now",
     "Preparing answer-ready text",
     "Waiting for the first sync",
-    DASHBOARD_MANY_UNREADABLE_LABEL
+    DASHBOARD_MANY_UNREADABLE_LABEL,
+    DASHBOARD_CAPTURE_STALE_LABEL,
+    DASHBOARD_CAPTURE_BLOCKED_LABEL
   ]);
   KNOWN_REFUSAL_CODES = new Set(["access_denied", "redirect_uri_mismatch", "invalid_redirect_uri", "redirect_uri_not_registered"]);
   KNOWN_QUEUE_LABELS = new Set(["Needs attention", "Working now", "Waiting to catch up", "Caught up"]);
@@ -155270,6 +155614,17 @@ var init_dashboard_view_model = __esm(() => {
   TRANSCRIPTION_DOWNLOADABLE = new Set(["not_needed", "not_downloaded", "interrupted", "failed"]);
   PRIVATE_MODEL_INSTALLING = new Set(["downloading", "verifying"]);
   IMPORT_UNREADABLE_REASONS = new Set(["damaged", "unknown_form", "permission", "other"]);
+  CAPTURE_STATES = new Set(["fresh", "stale", "unavailable", "awaiting"]);
+  CAPTURE_SUPERVISOR_STATES = new Set(["running", "stopped", "blocked"]);
+  CAPTURE_SUPERVISOR_REASONS = new Set([
+    "grant_missing",
+    "grant_invalid",
+    "handle_unavailable",
+    "session_missing",
+    "secret_missing",
+    "start_failed",
+    "helper_exited"
+  ]);
   MANUAL_SYNC_OUTCOMES = new Set(["checking", "checked", "failed", "busy"]);
 });
 
@@ -172662,6 +173017,7 @@ var init_dashboard_panel_tools = __esm(() => {
 // src/workers/email-source/server.ts
 var exports_server2 = {};
 __export(exports_server2, {
+  workerCaptureRuntime: () => workerCaptureRuntime,
   validateSecureVeniceAnalystProfileAtConstruction: () => validateSecureVeniceAnalystProfileAtConstruction,
   trustedAnalystAssistTimeoutMs: () => trustedAnalystAssistTimeoutMs,
   stopBuiltInModelOnShutdown: () => stopBuiltInModelOnShutdown,
@@ -172681,6 +173037,7 @@ __export(exports_server2, {
   secureLocalAnalystRouteStatus: () => secureLocalAnalystRouteStatus,
   resolveEmailSourceBindHostFromEnv: () => resolveEmailSourceBindHostFromEnv,
   registerConnectorStoreEmbeddingLane: () => registerConnectorStoreEmbeddingLane,
+  reconcileWorkerCaptures: () => reconcileWorkerCaptures,
   parseSecureDerivativeDefault: () => parseSecureDerivativeDefault,
   parseOptionalTimeoutSecondsOrNone: () => parseOptionalTimeoutSecondsOrNone,
   parseOptionalTimeoutSeconds: () => parseOptionalTimeoutSeconds,
@@ -172745,6 +173102,47 @@ function createWorkerMessagingCaptureOwnership(options) {
       revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
     }
   };
+}
+async function reconcileWorkerCaptures(input) {
+  const warn = input.warn ?? ((message2) => console.warn(message2));
+  const entries = Object.entries(input.captures);
+  if (input.stopAll) {
+    await Promise.all(entries.map(async ([source, capture]) => {
+      await capture.stop();
+      input.statuses[source] = { source, state: "stopped" };
+    }));
+    return;
+  }
+  await Promise.all(entries.map(async ([source, capture]) => {
+    try {
+      input.statuses[source] = await capture.reconcile();
+      delete input.failures[source];
+    } catch {
+      input.failures[source] = true;
+      warn("An Olympus messaging capture process needs attention. Check pairing and its approved scope.");
+    }
+  }));
+}
+function workerCaptureRuntime(input) {
+  const runtime = {};
+  for (const source of input.sources) {
+    try {
+      const status = effectiveMessagingCaptureStatus({
+        status: input.statuses[source],
+        liveness: input.liveness?.[source],
+        reconcileFailed: input.failures?.[source] === true
+      });
+      const facts = readMessagingCaptureGrantFacts(source, defaultMessagingCaptureGrantPath(source, input.registryPath));
+      if (!status && !facts.scope && !facts.pairedAt)
+        continue;
+      runtime[source === "telegram" ? "telegram.messages" : "whatsapp.personal.messages"] = {
+        ...status ? { supervisor: { state: status.state, ...status.reason ? { reason: status.reason } : {} } } : {},
+        ...facts.scope ? { scope: facts.scope } : {},
+        ...facts.pairedAt ? { paired_at: facts.pairedAt } : {}
+      };
+    } catch {}
+  }
+  return runtime;
 }
 function reportRehomedChatOverrides(lane, result) {
   if (result.rehomed === 0 && result.orphaned === 0)
@@ -173736,26 +174134,31 @@ async function main() {
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
   let capturesClosed = false;
+  const captureStatuses = {};
+  const captureFailures = {};
+  const captureEntries = () => Object.entries(captures);
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning)
       return;
     captureReconcileRunning = true;
-    if (sovereigntyEngine.config.routes.secure_local?.mode === "disabled" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap") {
-      try {
-        await Promise.all(Object.values(captures).map((capture) => capture.stop()));
-      } finally {
-        captureReconcileRunning = false;
-      }
-      return;
-    }
     try {
-      await Promise.all(Object.values(captures).map((capture) => capture.reconcile()));
-    } catch {
-      console.warn("An Olympus messaging capture process needs attention. Check pairing and its approved scope.");
+      await reconcileWorkerCaptures({
+        captures,
+        statuses: captureStatuses,
+        failures: captureFailures,
+        stopAll: sovereigntyEngine.config.routes.secure_local?.mode === "disabled" || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === "metadata_only_gap"
+      });
     } finally {
       captureReconcileRunning = false;
     }
   };
+  const dashboardCaptureRuntime = () => workerCaptureRuntime({
+    sources: captureEntries().map(([source]) => source),
+    statuses: captureStatuses,
+    registryPath: connectedHandleRegistryPath,
+    liveness: Object.fromEntries(captureEntries().map(([source, capture]) => [source, capture.liveness?.()])),
+    failures: captureFailures
+  });
   const stopMessagingCapture = async (source) => {
     await captureOwnership.stopForUnpair(source);
   };
@@ -175656,6 +176059,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
           saveStandard: (update) => dashboardConsult.saveStandard(update)
         },
         stopMessagingCapture,
+        captureRuntime: dashboardCaptureRuntime,
         workerRestart: {
           canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
           request: () => requestModelReload()
