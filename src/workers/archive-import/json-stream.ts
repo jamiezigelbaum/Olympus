@@ -25,10 +25,12 @@
  *   as `oversize` (the caller records a gap) and the reader moves on, still
  *   checking the grammar of what it discards. A single piece of text longer
  *   than that is skipped in place, byte by byte, without ever being held, and
- *   checked as it goes (escapes, control characters, well-formed UTF-8). The
- *   reader's own scan of the bytes decides this, whatever the tokenizer has
- *   or has not reported, so no split of the input into chunks can get a long
- *   text past it. Nesting deeper than JSON_STREAM_MAX_DEPTH stops the read.
+ *   checked as it goes (escapes, control characters, well-formed UTF-8); the
+ *   start of such a text, which the tokenizer did not finish, is checked by
+ *   the reader's own scan in the same way before it is dropped. The reader's
+ *   own scan of the bytes decides this, whatever the tokenizer has or has not
+ *   reported, so no split of the input into chunks can get a long text past
+ *   it. Nesting deeper than JSON_STREAM_MAX_DEPTH stops the read.
  * - Feeding: the tokenizer is given the bytes in slices of
  *   JSON_STREAM_FEED_SLICE_BYTES, and no further slice while more than
  *   JSON_STREAM_MAX_QUEUED_EVENTS finished items wait to be taken, so a huge
@@ -565,8 +567,10 @@ export class JsonStreamReader {
 
   /**
    * Scans `data[from, to)` outside skipped text, where `data[0]` is at absolute offset `at`: tracks where texts open and close, and the length of number and word
-   * runs. Stops at the end of `data`, at the byte that makes a text longer than allowed (not consumed), or at a
-   * run that is too long (`this.stop` says which).
+   * runs, and checks every byte of a text (escapes, control characters, well-formed UTF-8) as the tokenizer
+   * would, so that the start of a text that turns out too long and is dropped has been checked like the rest.
+   * Stops at the end of `data`, at the byte that makes a text longer than allowed (not consumed), at a byte a
+   * text may not contain, or at a run that is too long (`this.stop` says which).
    */
   private scanNormal(data: Uint8Array, from: number, to: number, at: number): number {
     const max = this.maxItemBytes;
@@ -599,26 +603,48 @@ export class JsonStreamReader {
         this.stop = STOP_OVERSIZE;
         break;
       }
+      // Every byte of a text is checked here, as the tokenizer checks it, so the start of a text that is later
+      // dropped has been checked too. The same rules as `skipScan`.
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 0x80;
+        this.utfHigh = 0xbf;
+        continue;
+      }
       if (lex === LEX_STRING) {
-        if (byte < 0x80) {
-          utfLeft = 0;
-          if (byte === 0x22) lex = LEX_OUT;
-          else if (byte === 0x5c) lex = LEX_ESCAPE;
-        } else if (utfLeft > 0 && byte >= this.utfLow && byte <= this.utfHigh) {
-          utfLeft -= 1;
-          this.utfLow = 0x80;
-          this.utfHigh = 0xbf;
-        } else {
+        if (byte === 0x22) {
+          lex = LEX_OUT;
+        } else if (byte === 0x5c) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 0x20) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 0x80) {
           utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
         }
       } else if (lex === LEX_ESCAPE) {
         if (byte === 0x75) {
           lex = LEX_HEX;
           hexLeft = 4;
-        } else {
+        } else if (isEscapeByte(byte)) {
           lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
         }
       } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
         hexLeft -= 1;
         if (hexLeft === 0) lex = LEX_STRING;
       }

@@ -464,6 +464,84 @@ describe('json stream keeps checking what it discards', () => {
   });
 });
 
+describe('json stream checks the start of a text it later drops', () => {
+  const bytes = (...values: number[]): Uint8Array => Uint8Array.from(values);
+  // A text of 400 bytes in a 100 byte bound: the bytes `inside` come early, well before the bound is reached.
+  const early = (inside: Uint8Array): Uint8Array => new Uint8Array([
+    ...encoder.encode(`{"skip":"${'z'.repeat(6)}`), ...inside, ...encoder.encode(`${'z'.repeat(400)}","list":[1,2]}`),
+  ]);
+
+  test('damage in the first bytes of a text longer than allowed is invalid JSON, however the input is chunked', () => {
+    const bad: Array<[string, Uint8Array]> = [
+      ['an escape that does not exist', encoder.encode('\\q')],
+      ['a short \\u escape', encoder.encode('\\u12g4')],
+      ['a raw line break', bytes(0x0a)],
+      ['a raw control character', bytes(0x01)],
+      ['a byte that can never be UTF-8', bytes(0xff)],
+      ['a continuation byte alone', bytes(0x80)],
+      ['an overlong character', bytes(0xc0, 0x80)],
+      ['a surrogate in UTF-8', bytes(0xed, 0xa0, 0x80)],
+      ['a character cut short by an ordinary byte', bytes(0xe2, 0x82, 0x41)],
+      ['a character past the last code point', bytes(0xf4, 0x90, 0x80, 0x80)],
+    ];
+    for (const [name, inside] of bad) {
+      for (const chunk of [1, 3, 64, 1 << 20]) {
+        expect([name, chunk, code(() => readAll(early(inside), { itemPaths: [['list']], maxItemBytes: 100 }, chunk))]).toEqual([name, chunk, 'invalid_json']);
+      }
+    }
+  });
+
+  test('the case in the 200 byte text: one chunk and byte by byte both refuse it', () => {
+    const doc = `["aa\\q${'a'.repeat(200)}",1]`;
+    for (const chunk of [1, 1 << 20]) {
+      expect([chunk, code(() => readAll(doc, { itemPaths: [[]], maxItemBytes: 100 }, chunk))]).toEqual([chunk, 'invalid_json']);
+    }
+  });
+
+  test('a text that begins in an earlier slice is checked in the later slice too (a raw line break between two long runs)', () => {
+    const doc = `["${'a'.repeat(1200)}\n${'a'.repeat(1200)}",1]`;
+    for (const chunk of [1, 1 << 20]) {
+      expect([chunk, code(() => readAll(doc, { itemPaths: [[]], maxItemBytes: 1500 }, chunk))]).toEqual([chunk, 'invalid_json']);
+    }
+    // The same text with the line break escaped is only large: an oversize item, then the next, whatever the chunking.
+    const fine = `[["${'a'.repeat(1200)}\\n${'a'.repeat(1200)}",1],[2]]`;
+    for (const chunk of [1, 7, 1 << 20]) {
+      expect(readAll(fine, { itemPaths: [[]], maxItemBytes: 1500 }, chunk).map((event) => [event.kind, event.value])).toEqual([['oversize', undefined], ['item', [2]]]);
+    }
+  });
+
+  test('well-formed starts of long texts are still skipped, wherever a character or escape meets the bound', () => {
+    const good: Array<[string, string]> = [
+      ['escapes', '\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9\\uD83D\\uDE00'],
+      ['two, three and four byte characters', 'é€😀'],
+    ];
+    for (const [name, inside] of good) {
+      // Shifting the text moves the bound across every part of the escape or character.
+      for (let shift = 0; shift < 12; shift += 1) {
+        const doc = `{"skip":"${'z'.repeat(shift)}${inside.repeat(30)}","list":[1,2]}`;
+        for (const chunk of [1, 3, 64, 1 << 20]) {
+          const events = readAll(doc, { itemPaths: [['list']], maxItemBytes: 100 }, chunk);
+          expect([name, shift, chunk, events.map((event) => event.value)]).toEqual([name, shift, chunk, [1, 2]]);
+        }
+      }
+    }
+  });
+
+  test('the same bytes in a text inside the bound were already invalid JSON, and still are', () => {
+    const short = (inside: Uint8Array): Uint8Array => new Uint8Array([
+      ...encoder.encode('[{"a":"x'), ...inside, ...encoder.encode('y"}]'),
+    ]);
+    for (const inside of [bytes(0xff), bytes(0x80), bytes(0xc0, 0x80), bytes(0xe2, 0x82), bytes(0x0a), encoder.encode('\\q')]) {
+      for (const chunk of [1, 1 << 20]) {
+        expect(code(() => readAll(short(inside), { itemPaths: [[]], maxItemBytes: 100 }, chunk))).toBe('invalid_json');
+      }
+    }
+    // And good text keeps its value.
+    const events = readAll(short(bytes(0xe2, 0x82, 0xac)), { itemPaths: [[]], maxItemBytes: 100 }, 1);
+    expect((events[0]!.value as { a: string }).a).toBe('x\u20acy');
+  });
+});
+
 describe('json stream errors come after the items before them', () => {
   const options = { itemPaths: [[]] as Array<Array<string | number>>, maxItemBytes: 1000 };
 
