@@ -251,10 +251,10 @@ const seededFile = (stepId: string): SeededFile => SEEDED_FILES.find((file) => f
 
 describe('steps the worker repeats before its restart', () => {
   test('only the steps its own background writers can write back are marked', () => {
-    // The dashboard history poll and the watch pass; no owner-choice step, and
-    // nothing a reconnect or a new private question could legitimately refill.
+    // The private answers (asked of the deleted stores' open handles), the
+    // dashboard history poll and the watch pass; no owner-choice step.
     expect(FORGET_STEPS.filter((step) => step.repeatBeforeRestart).map((step) => step.id))
-      .toEqual(['source-dashboard', 'source-watches']);
+      .toEqual(['waiting-private-questions', 'source-dashboard', 'source-watches']);
   });
 
   test('a repeat-only run forgets the marked steps\' rows and no others', () => {
@@ -265,9 +265,10 @@ describe('steps the worker repeats before its restart', () => {
 
     const lines = runForgetSteps(accountOf(MINE), contextOf(layout), { dryRun: false, repeatableOnly: true });
 
-    expect(lines).toHaveLength(2);
+    const repeated = FORGET_STEPS.filter((step) => step.repeatBeforeRestart).map((step) => step.id);
+    expect(lines).toHaveLength(repeated.length);
     for (const file of SEEDED_FILES) {
-      const marked = file.stepId === 'source-dashboard' || file.stepId === 'source-watches';
+      const marked = repeated.includes(file.stepId);
       expect(file.left(layout, MINE), file.stepId).toBe(marked ? 0 : before.get(file.stepId)!);
     }
   });

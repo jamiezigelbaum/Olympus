@@ -258,12 +258,10 @@ describe('dashboard Delete indexed data route: the shared files', () => {
       await reload.beforeExit!();
 
       expect(dashboard.left(f.layout, MINE)).toBe(0);
-      // Not repeated: a remote agent can ask a new private question of the
-      // source (reconnected, say) in that window, and the repeat is limited to
-      // the files the worker's own background writers refill.
-      expect(waiting.left(f.layout, MINE)).toBeGreaterThan(0);
-      expect({ dashboard: dashboard.left(f.layout, OTHER), waiting: waiting.left(f.layout, OTHER) })
-        .toEqual({ dashboard: otherBefore.dashboard, waiting: otherBefore.waiting });
+      // Repeated: a question asked in that window is answered from the
+      // deleted stores' handles, still open.
+      expect(waiting.left(f.layout, MINE)).toBe(0);
+      expect({ dashboard: dashboard.left(f.layout, OTHER), waiting: waiting.left(f.layout, OTHER) }).toEqual(otherBefore);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

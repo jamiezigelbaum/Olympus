@@ -70827,6 +70827,7 @@ var init_source_forget_registry = __esm(() => {
       id: "waiting-private-questions",
       file: "waiting-private-questions.sqlite",
       modules: ["src/core/waiting-private-questions.ts"],
+      repeatBeforeRestart: true,
       forget(account, context2, { dryRun }) {
         const path = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(context2.env));
         return line(path, "private answers", forgetWaitingPrivateQuestions(path, { corpusIds: account.corpus_ids, knownCorpusIds: context2.knownCorpusIds }, { dryRun }));

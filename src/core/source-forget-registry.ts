@@ -146,6 +146,9 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     id: 'waiting-private-questions',
     file: 'waiting-private-questions.sqlite',
     modules: ['src/core/waiting-private-questions.ts'],
+    // A question asked before the restart is answered from the deleted
+    // stores' handles, still open; an answer derived from them must not stay.
+    repeatBeforeRestart: true,
     forget(account, context, { dryRun }) {
       const path = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(context.env));
       return line(path, 'private answers', forgetWaitingPrivateQuestions(

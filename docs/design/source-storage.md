@@ -273,11 +273,12 @@ A per-source Delete runs the steps (`forgotten` in its result lists each file
 and count; a dry run lists what it would forget) after the account's state is
 reset and before any bytes are removed. A failing step fails the delete there.
 Disconnect runs none. The worker repeats the steps marked
-`repeatBeforeRestart` (`source-dashboard`, `source-watches`) once it has
-stopped, just before the restart a Delete asks for, because until then a
-dashboard poll can record counts it read through store handles still open and
-the watch pass can queue matches from them. No other step is repeated: the
-owner can reconnect in that window, and a repeat would erase the reconnect.
+`repeatBeforeRestart` (`waiting-private-questions`, `source-dashboard`,
+`source-watches`) once it has stopped, just before the restart a Delete asks
+for, because until then a private question can be answered, a dashboard poll
+can record counts and the watch pass can queue matches, all through store
+handles still open. No owner-choice step is repeated: the owner can reconnect
+in that window, and a repeat would erase the reconnect.
 
 ## Delete
 
