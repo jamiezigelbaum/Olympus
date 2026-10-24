@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -35,7 +35,12 @@ describe('isolated HOME preload', () => {
     const standIn = mkdtempSync(join(isolatedHome, 'stand-in-home-'));
     const alias = join(isolatedHome, 'alias-of-stand-in');
     symlinkSync(standIn, alias);
-    for (const spelling of [standIn, `${standIn}/`, alias]) {
+    // `<alias of stand-in/child>/..` is the stand-in itself, though a lexical
+    // resolve would say it is the isolated home.
+    mkdirSync(join(standIn, 'child'));
+    const childAlias = join(isolatedHome, 'alias-of-stand-in-child');
+    symlinkSync(join(standIn, 'child'), childAlias);
+    for (const spelling of [standIn, `${standIn}/`, alias, `${childAlias}/..`]) {
       const run = Bun.spawnSync([process.execPath, 'test', '--test-name-pattern', NO_TEST, 'test/isolated-home-preload.test.ts'], {
         cwd: repoRoot,
         env: { PATH: process.env.PATH ?? '', HOME: spelling, OLYMPUS_TEST_REFUSE_HOME: standIn },
@@ -74,6 +79,29 @@ describe('isolated HOME preload', () => {
   test('promisified execFile keeps its { stdout, stderr } result', async () => {
     const result = await promisify(execFile)('/bin/sh', printHome, { env: { PATH: process.env.PATH } });
     expect(result.stdout).toBe(isolatedHome);
+  });
+
+  test('a child given a relative HOME is refused: it would resolve against the child\'s own directory', () => {
+    for (const relativeHome of ['.', 'home']) {
+      const options = { cwd: isolatedHome, env: { PATH: process.env.PATH ?? '', HOME: relativeHome } };
+      expect(() => spawnSync('/bin/sh', printHome, options)).toThrow(/relative HOME/);
+      expect(() => Bun.spawnSync(['/bin/sh', ...printHome], options)).toThrow(/relative HOME/);
+    }
+  });
+
+  test('a child pointed at a refused home through a symlink and `..` is refused', () => {
+    const standIn = mkdtempSync(join(isolatedHome, 'child-stand-in-'));
+    mkdirSync(join(standIn, 'child'));
+    const childAlias = join(isolatedHome, 'alias-of-child-stand-in-child');
+    symlinkSync(join(standIn, 'child'), childAlias);
+    process.env.OLYMPUS_TEST_REFUSE_HOME = standIn;
+    try {
+      const env = { PATH: process.env.PATH ?? '', HOME: `${childAlias}/..` };
+      expect(() => spawnSync('/bin/sh', printHome, { env })).toThrow(/real HOME/);
+      expect(() => Bun.spawnSync(['/bin/sh', ...printHome], { env })).toThrow(/real HOME/);
+    } finally {
+      delete process.env.OLYMPUS_TEST_REFUSE_HOME;
+    }
   });
 
   test('a child asked to run with the real home is refused before it starts, under any spelling', () => {

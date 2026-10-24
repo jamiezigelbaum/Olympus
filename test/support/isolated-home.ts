@@ -8,9 +8,9 @@
  * Also clears OLYMPUS_* and XDG_* so an ambient engine/worker setting cannot steer a
  * test onto the real data. A test that needs a variable sets it itself.
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import * as osModule from 'node:os';
 import * as childProcessModule from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -18,10 +18,31 @@ import { promisify } from 'node:util';
 import { afterAll, mock } from 'bun:test';
 
 // One spelling per directory: a trailing slash, `..` or a symlink alias of a
-// directory compares equal to the directory itself.
+// directory compares equal to the directory itself. The kernel follows a
+// symlink before applying the `..` after it (`/tmp/alias/..` is the alias
+// target's parent), and Bun's realpathSync, even .native, collapses `..`
+// lexically first, so the walk is done here, one component at a time. A
+// component that does not exist ends the walk lexically: a path that does not
+// exist cannot be the real home.
 function canonical(path: string): string {
-  const absolute = resolve(path);
-  try { return realpathSync(absolute); } catch { return absolute; }
+  // Not resolve() or join(): both collapse `..` before the walk could see it.
+  const absolute = isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`;
+  const pending = absolute.split(sep).filter(Boolean).reverse();
+  let current: string = sep;
+  for (let hops = 0; pending.length > 0;) {
+    const part = pending.pop()!;
+    if (part === '.') continue;
+    if (part === '..') { current = dirname(current); continue; }
+    const next = join(current, part);
+    const info = lstatSync(next, { throwIfNoEntry: false });
+    if (!info) return resolve(next, ...pending.reverse());
+    if (!info.isSymbolicLink()) { current = next; continue; }
+    if (++hops > 40) return resolve(next, ...pending.reverse());
+    const target = readlinkSync(next);
+    if (isAbsolute(target)) current = sep;
+    pending.push(...target.split(sep).filter(Boolean).reverse());
+  }
+  return current;
 }
 function isInside(path: string, root: string): boolean {
   return path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
@@ -52,9 +73,13 @@ const realHome = (() => {
 // not it. OLYMPUS_TEST_REFUSE_HOME names one more home to refuse, so a test can
 // prove the refusal without ever starting a run in the real home; it can only
 // add refusals.
-const startHome = canonical(process.env.HOME || homedir());
+// A relative HOME names a different directory in every process that changes
+// its working directory, so it is refused too.
+const startValue = process.env.HOME || homedir();
+const startHome = canonical(startValue);
 const refusedHomes = [realHome, process.env.OLYMPUS_TEST_REFUSE_HOME?.trim() ?? ''].filter(Boolean).map(canonical);
-const startsInRealHome = refusedHomes.includes(startHome)
+const startsInRealHome = !isAbsolute(startValue)
+  || refusedHomes.includes(startHome)
   || (!realHome && !isInside(startHome, canonical(tmpdir())) && !isInside(startHome, canonical('/tmp')));
 if (startsInRealHome) {
   throw new Error(
@@ -92,8 +117,13 @@ try { (createRequire(import.meta.url)('node:os') as { homedir: () => string }).h
 type Env = Record<string, string | undefined>;
 function isolatedChildEnv(env: Env): Env {
   const requested = env.HOME;
-  if (requested && realHome && canonical(requested) === realHome) {
-    throw new Error(`a test asked a child process to run with the real HOME ${realHome}`);
+  // Relative to the child's own working directory, which may be the real home.
+  if (requested && !isAbsolute(requested)) {
+    throw new Error(`a test asked a child process to run with a relative HOME (${requested}); give it an absolute throwaway path`);
+  }
+  const refused = [realHome, process.env.OLYMPUS_TEST_REFUSE_HOME?.trim() ?? ''].filter(Boolean).map(canonical);
+  if (requested && refused.includes(canonical(requested))) {
+    throw new Error(`a test asked a child process to run with the real HOME (${canonical(requested)})`);
   }
   return requested ? env : { ...env, HOME: home };
 }
