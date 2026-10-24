@@ -51869,7 +51869,7 @@ function locateCentralDirectory(source) {
     throw new ZipFormatError("multi_disk", "This zip is split over several files.");
   if (offset + size > before)
     throw new ZipFormatError("damaged", "The zip's directory is outside the file.");
-  if (entries > 0 && size < 46)
+  if (entries * 46 > size)
     throw new ZipFormatError("damaged", "The zip's directory is shorter than its entries.");
   return { offset, size, entries };
 }
@@ -51889,6 +51889,7 @@ class ZipArchive {
   source;
   entryCount;
   directory;
+  overlaps;
   constructor(source, directory) {
     this.source = source;
     this.directory = directory;
@@ -51977,7 +51978,8 @@ class ZipArchive {
         compressedSize,
         uncompressedSize,
         localHeaderOffset,
-        isDirectory: name.endsWith("/")
+        isDirectory: name.endsWith("/"),
+        rawName: rawName.slice()
       };
       at += total;
     }
@@ -52020,9 +52022,36 @@ class ZipArchive {
       const data2 = view2(header);
       if (data2.getUint32(0, true) !== SIG_LOCAL)
         throw new ZipFormatError("damaged", "A member does not start where the directory says.");
-      const start = entry.localHeaderOffset + 30 + data2.getUint16(26, true) + data2.getUint16(28, true);
+      const flags = data2.getUint16(6, true);
+      const nameLength = data2.getUint16(26, true);
+      const extraLength = data2.getUint16(28, true);
+      if (data2.getUint16(8, true) !== entry.method)
+        throw new ZipFormatError("damaged", "A member's header and the directory disagree on how it is compressed.");
+      if ((flags & 1) !== 0 !== entry.encrypted)
+        throw new ZipFormatError("damaged", "A member's header and the directory disagree on whether it is encrypted.");
+      if (entry.rawName) {
+        const localName = nameLength === 0 ? new Uint8Array(0) : readExact(this.source, entry.localHeaderOffset + 30, nameLength);
+        if (!sameBytes(localName, entry.rawName))
+          throw new ZipFormatError("damaged", "A member's header and the directory disagree on its name.");
+      }
+      if ((flags & 8) === 0) {
+        const crc = data2.getUint32(14, true);
+        const compressed = data2.getUint32(18, true);
+        const uncompressed = data2.getUint32(22, true);
+        if (crc !== 0 || compressed !== 0 || uncompressed !== 0) {
+          if (crc !== entry.crc32 || compressed !== 4294967295 && compressed !== entry.compressedSize || uncompressed !== 4294967295 && uncompressed !== entry.uncompressedSize) {
+            throw new ZipFormatError("damaged", "A member's header and the directory disagree on its checksum or size.");
+          }
+        }
+      }
+      const start = entry.localHeaderOffset + 30 + nameLength + extraLength;
       if (start + entry.compressedSize > this.source.size)
         throw new ZipFormatError("damaged", "A member runs past the end of the file.");
+      if (start + entry.compressedSize > this.directory.offset)
+        throw new ZipFormatError("damaged", "A member runs into the zip's directory.");
+      const overlapping = this.overlappingMembers();
+      if (overlapping === "all" || overlapping.has(entry.index))
+        throw new ZipFormatError("damaged", "Members of this zip share bytes.");
       return start;
     } catch (error) {
       if (error instanceof ZipFormatError)
@@ -52030,6 +52059,73 @@ class ZipArchive {
       throw error;
     }
   }
+  overlappingMembers() {
+    if (this.overlaps)
+      return this.overlaps;
+    const found = new Set;
+    let all = false;
+    const mark = (index) => {
+      if (found.size >= ZIP_MAX_NAMED_OVERLAPS)
+        all = true;
+      else
+        found.add(index);
+    };
+    let sweepEnd = 0;
+    let sweepIndex = -1;
+    let previousOffset = -1;
+    const sweep = (index, offset, end) => {
+      if (end > this.directory.offset)
+        mark(index);
+      if (sweepIndex >= 0 && offset < sweepEnd) {
+        mark(sweepIndex);
+        mark(index);
+      }
+      previousOffset = offset;
+      if (end > sweepEnd) {
+        sweepEnd = end;
+        sweepIndex = index;
+      }
+    };
+    const extent = (entry) => entry.localHeaderOffset + 30 + (entry.rawName ? entry.rawName.length : new TextEncoder().encode(entry.name).length) + entry.compressedSize;
+    let ordered = true;
+    for (const entry of this.entries()) {
+      if (entry.localHeaderOffset < previousOffset) {
+        ordered = false;
+        break;
+      }
+      sweep(entry.index, entry.localHeaderOffset, extent(entry));
+    }
+    if (!ordered) {
+      found.clear();
+      all = false;
+      const count = this.directory.entries;
+      const offsets = new Float64Array(count);
+      const ends = new Float64Array(count);
+      for (const entry of this.entries()) {
+        offsets[entry.index] = entry.localHeaderOffset;
+        ends[entry.index] = extent(entry);
+      }
+      const order = new Uint32Array(count);
+      for (let index = 0;index < count; index += 1)
+        order[index] = index;
+      order.sort((a, b) => offsets[a] - offsets[b] || a - b);
+      sweepEnd = 0;
+      sweepIndex = -1;
+      previousOffset = -1;
+      for (const index of order)
+        sweep(index, offsets[index], ends[index]);
+    }
+    this.overlaps = all ? "all" : found;
+    return this.overlaps;
+  }
+}
+function sameBytes(a, b) {
+  if (a.length !== b.length)
+    return false;
+  for (let index = 0;index < a.length; index += 1)
+    if (a[index] !== b[index])
+      return false;
+  return true;
 }
 function memberKey(entry) {
   return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
@@ -52055,6 +52151,7 @@ class ZipMemberReader {
   compressedBlock = new Uint8Array(0);
   compressedOffset = 0;
   inflateFinished = false;
+  failure;
   constructor(archive, entry, dataStart, options) {
     this.archive = archive;
     this.entry = entry;
@@ -52065,7 +52162,7 @@ class ZipMemberReader {
     }
     this.startAt = start;
     this.crcKnown = start === 0;
-    if (entry.isDirectory || entry.uncompressedSize === 0) {
+    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
       this.inflateFinished = true;
       this.pos = start;
       this.crcKnown = true;
@@ -52114,8 +52211,7 @@ class ZipMemberReader {
     if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
       throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
     }
-    const empty = entry.isDirectory || entry.uncompressedSize === 0;
-    const dataStart = empty ? 0 : archive.dataStart(entry);
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
     return new ZipMemberReader(archive, entry, dataStart, options);
   }
   get position() {
@@ -52130,10 +52226,12 @@ class ZipMemberReader {
   next() {
     if (this.closed)
       throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
     for (;; ) {
       let chunk = this.out.shift();
       if (chunk === undefined) {
-        if (!this.fill()) {
+        if (!this.fillOrFail()) {
           this.conclude();
           return;
         }
@@ -52204,6 +52302,18 @@ class ZipMemberReader {
     this.inflate = undefined;
     this.out = [];
   }
+  fillOrFail() {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
   fill() {
     if (this.entry.method === 0) {
       if (this.storedNext >= this.entry.uncompressedSize)
@@ -52234,8 +52344,20 @@ class ZipMemberReader {
         throw error;
       throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
     }
-    if (final)
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
+      }
       this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
+    }
     return true;
   }
   conclude() {
@@ -52248,6 +52370,16 @@ class ZipMemberReader {
       crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
     };
   }
+}
+function inflaterProgress(inflate) {
+  const internal = inflate;
+  const state = internal.s;
+  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
+    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
 }
 function readBlock(source, offset, length, name) {
   try {
@@ -52269,6 +52401,7 @@ function readZipMemberHead(archive, entry, maxBytes) {
   }
   const parts = [];
   let have = 0;
+  let failed = false;
   try {
     while (have < maxBytes) {
       const chunk = reader.next();
@@ -52281,11 +52414,12 @@ function readZipMemberHead(archive, entry, maxBytes) {
   } catch (error) {
     if (!(error instanceof ZipMemberError))
       throw error;
+    failed = true;
   } finally {
     reader.close();
   }
   if (parts.length === 0)
-    return entry.uncompressedSize === 0 ? new Uint8Array(0) : undefined;
+    return entry.uncompressedSize === 0 && !failed ? new Uint8Array(0) : undefined;
   const out = new Uint8Array(have);
   let at = 0;
   for (const part of parts) {
@@ -52294,7 +52428,7 @@ function readZipMemberHead(archive, entry, maxBytes) {
   }
   return out;
 }
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
   init_browser();
   init_stop_errors();
@@ -78856,6 +78990,8 @@ var init_vocabulary = __esm(() => {
     importedLineNoTime: "{items}",
     emptyImport: "Imported: {none} found in this archive.",
     emptyImportWhen: "Imported {when}: {none} found in this archive.",
+    nothingImported: "{None} imported.",
+    nothingImportedWhen: "{None} imported {when}.",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
@@ -131505,7 +131641,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       const when = typeof archive.importedAt === "string" ? ago(archive.importedAt) : "";
       if (!uncounted && items === 0) {
         const none2 = archiveNouns(archive).none;
-        add(item, el("p", "muted", when ? fill2(A.emptyImportWhen, { none: none2, when }) : fill2(A.emptyImport, { none: none2 })));
+        if (archiveHasReasons(archive)) {
+          const None = none2.charAt(0).toUpperCase() + none2.slice(1);
+          add(item, el("p", "muted", when ? fill2(A.nothingImportedWhen, { None, when }) : fill2(A.nothingImported, { None })));
+        } else {
+          add(item, el("p", "muted", when ? fill2(A.emptyImportWhen, { none: none2, when }) : fill2(A.emptyImport, { none: none2 })));
+        }
       } else if (!uncounted) {
         add(item, el("p", "muted", when ? fill2(A.importedLine, { items: itemCount(archive, items), when }) : fill2(A.importedLineNoTime, { items: itemCount(archive, items) })));
       }
@@ -131554,6 +131695,9 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
       }, "plain")));
     }
     return block;
+  }
+  function archiveHasReasons(archive) {
+    return archive.gaps.concat(archive.skipped).some((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0);
   }
   function archiveWhy(archive) {
     const A = H.copy.archives;
@@ -153344,8 +153488,13 @@ function summaryOf2(entry, stopped) {
     case "importing":
       return `${fill2(copy.importingLine, { percent: String(entry.percent ?? 0), items })}.${held}`;
     case "imported":
-      if (entry.items === 0)
-        return fill2(copy.emptyImport, { none: dashboardArchiveNouns(entry.family).none });
+      if (entry.items === 0) {
+        const none2 = dashboardArchiveNouns(entry.family).none;
+        const reasons = [...entry.gaps, ...entry.skipped].filter((gap) => gap.count > 0).map((gap) => kindLine(copy.gaps, gap).line);
+        if (reasons.length > 0)
+          return `${fill2(copy.nothingImported, { None: none2.charAt(0).toUpperCase() + none2.slice(1) })} ${reasons.join("; ")}.`;
+        return fill2(copy.emptyImport, { none: none2 });
+      }
       return `${fill2(copy.importedLineNoTime, { items })}.${held}`;
     case "stopped":
       return `Stopped: ${stopped?.why ?? ""} ${stopped?.fix ?? ""}`.trim();

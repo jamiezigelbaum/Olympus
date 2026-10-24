@@ -13521,6 +13521,8 @@ var init_vocabulary = __esm(() => {
     importedLineNoTime: "{items}",
     emptyImport: "Imported: {none} found in this archive.",
     emptyImportWhen: "Imported {when}: {none} found in this archive.",
+    nothingImported: "{None} imported.",
+    nothingImportedWhen: "{None} imported {when}.",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
@@ -19192,6 +19194,7 @@ class ZipMemberReader {
   compressedBlock = new Uint8Array(0);
   compressedOffset = 0;
   inflateFinished = false;
+  failure;
   constructor(archive, entry, dataStart, options) {
     this.archive = archive;
     this.entry = entry;
@@ -19202,7 +19205,7 @@ class ZipMemberReader {
     }
     this.startAt = start;
     this.crcKnown = start === 0;
-    if (entry.isDirectory || entry.uncompressedSize === 0) {
+    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
       this.inflateFinished = true;
       this.pos = start;
       this.crcKnown = true;
@@ -19251,8 +19254,7 @@ class ZipMemberReader {
     if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
       throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
     }
-    const empty = entry.isDirectory || entry.uncompressedSize === 0;
-    const dataStart = empty ? 0 : archive.dataStart(entry);
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
     return new ZipMemberReader(archive, entry, dataStart, options);
   }
   get position() {
@@ -19267,10 +19269,12 @@ class ZipMemberReader {
   next() {
     if (this.closed)
       throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
     for (;; ) {
       let chunk = this.out.shift();
       if (chunk === undefined) {
-        if (!this.fill()) {
+        if (!this.fillOrFail()) {
           this.conclude();
           return;
         }
@@ -19341,6 +19345,18 @@ class ZipMemberReader {
     this.inflate = undefined;
     this.out = [];
   }
+  fillOrFail() {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
   fill() {
     if (this.entry.method === 0) {
       if (this.storedNext >= this.entry.uncompressedSize)
@@ -19371,8 +19387,20 @@ class ZipMemberReader {
         throw error;
       throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
     }
-    if (final)
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
+      }
       this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
+    }
     return true;
   }
   conclude() {
@@ -19385,6 +19413,16 @@ class ZipMemberReader {
       crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
     };
   }
+}
+function inflaterProgress(inflate) {
+  const internal = inflate;
+  const state = internal.s;
+  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
+    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
 }
 function readBlock(source, offset, length, name) {
   try {

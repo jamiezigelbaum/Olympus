@@ -61,6 +61,10 @@ export const ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
  */
 export const ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
 /**
+ * More members than this sharing bytes with others and the whole zip is damaged.
+ */
+const ZIP_MAX_NAMED_OVERLAPS = 4096;
+/**
  * The end record is searched for in this much of the file's end.
  */
 const MAX_END_SEARCH_BYTES = 22 + 0xffff + 20;
@@ -115,6 +119,11 @@ export interface ZipEntry {
   uncompressedSize: number;
   localHeaderOffset: number;
   isDirectory: boolean;
+  /**
+   * The name exactly as the directory spells it (before any decoding): what a
+   * member's own header must say too. Absent on an entry made by hand.
+   */
+  rawName?: Uint8Array;
 }
 
 /**
@@ -227,7 +236,7 @@ function locateCentralDirectory(source: ZipByteSource): CentralDirectory {
   }
   if (disk !== 0 || cdDisk !== 0) throw new ZipFormatError('multi_disk', 'This zip is split over several files.');
   if (offset + size > before) throw new ZipFormatError('damaged', 'The zip\'s directory is outside the file.');
-  if (entries > 0 && size < 46) throw new ZipFormatError('damaged', 'The zip\'s directory is shorter than its entries.');
+  if (entries * 46 > size) throw new ZipFormatError('damaged', 'The zip\'s directory is shorter than its entries.');
   return { offset, size, entries };
 }
 
@@ -249,6 +258,7 @@ export class ZipArchive {
   readonly source: ZipByteSource;
   readonly entryCount: number;
   private readonly directory: CentralDirectory;
+  private overlaps: ReadonlySet<number> | 'all' | undefined;
 
   private constructor(source: ZipByteSource, directory: CentralDirectory) {
     this.source = source;
@@ -344,6 +354,7 @@ export class ZipArchive {
         uncompressedSize,
         localHeaderOffset,
         isDirectory: name.endsWith('/'),
+        rawName: rawName.slice(),
       };
       at += total;
     }
@@ -390,21 +401,119 @@ export class ZipArchive {
   }
 
   /**
-   * Where the member's data starts in the file, after checking its local header.
+   * Where the member's data starts in the file, after checking its local
+   * header against the directory's entry: the same method, encryption flag
+   * and name, the same checksum and sizes when the header carries them, data
+   * that stays between the start of the file and the directory, and no other
+   * member sharing any of its bytes. The directory is the authority; a member
+   * that disagrees with it is damaged, not read as one or the other.
    */
   dataStart(entry: ZipEntry): number {
     try {
       const header = readExact(this.source, entry.localHeaderOffset, 30);
       const data = view(header);
       if (data.getUint32(0, true) !== SIG_LOCAL) throw new ZipFormatError('damaged', 'A member does not start where the directory says.');
-      const start = entry.localHeaderOffset + 30 + data.getUint16(26, true) + data.getUint16(28, true);
+      const flags = data.getUint16(6, true);
+      const nameLength = data.getUint16(26, true);
+      const extraLength = data.getUint16(28, true);
+      if (data.getUint16(8, true) !== entry.method) throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on how it is compressed.');
+      if (((flags & 0x1) !== 0) !== entry.encrypted) throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on whether it is encrypted.');
+      if (entry.rawName) {
+        const localName = nameLength === 0 ? new Uint8Array(0) : readExact(this.source, entry.localHeaderOffset + 30, nameLength);
+        if (!sameBytes(localName, entry.rawName)) throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on its name.');
+      }
+      if ((flags & 0x8) === 0) {
+        const crc = data.getUint32(14, true);
+        const compressed = data.getUint32(18, true);
+        const uncompressed = data.getUint32(22, true);
+        // A header with all three left at zero says nothing; one that says something must say what the directory says.
+        if (crc !== 0 || compressed !== 0 || uncompressed !== 0) {
+          if (crc !== entry.crc32
+            || (compressed !== 0xffffffff && compressed !== entry.compressedSize)
+            || (uncompressed !== 0xffffffff && uncompressed !== entry.uncompressedSize)) {
+            throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on its checksum or size.');
+          }
+        }
+      }
+      const start = entry.localHeaderOffset + 30 + nameLength + extraLength;
       if (start + entry.compressedSize > this.source.size) throw new ZipFormatError('damaged', 'A member runs past the end of the file.');
+      if (start + entry.compressedSize > this.directory.offset) throw new ZipFormatError('damaged', 'A member runs into the zip\'s directory.');
+      const overlapping = this.overlappingMembers();
+      if (overlapping === 'all' || overlapping.has(entry.index)) throw new ZipFormatError('damaged', 'Members of this zip share bytes.');
       return start;
     } catch (error) {
       if (error instanceof ZipFormatError) throw new ZipMemberError('damaged', entry.name, error.message);
       throw error;
     }
   }
+
+  /**
+   * The members whose bytes (from their header to the end of their data, at
+   * least) overlap another's, or `'all'` when too many do to name them. One
+   * pass over the directory, held only as long as it is in order; a directory
+   * out of file order is sorted first.
+   */
+  private overlappingMembers(): ReadonlySet<number> | 'all' {
+    if (this.overlaps) return this.overlaps;
+    const found = new Set<number>();
+    let all = false;
+    const mark = (index: number): void => {
+      if (found.size >= ZIP_MAX_NAMED_OVERLAPS) all = true;
+      else found.add(index);
+    };
+    let sweepEnd = 0;
+    let sweepIndex = -1;
+    let previousOffset = -1;
+    const sweep = (index: number, offset: number, end: number): void => {
+      if (end > this.directory.offset) mark(index);
+      if (sweepIndex >= 0 && offset < sweepEnd) {
+        mark(sweepIndex);
+        mark(index);
+      }
+      previousOffset = offset;
+      if (end > sweepEnd) {
+        sweepEnd = end;
+        sweepIndex = index;
+      }
+    };
+    const extent = (entry: ZipEntry): number => entry.localHeaderOffset + 30
+      + (entry.rawName ? entry.rawName.length : new TextEncoder().encode(entry.name).length) + entry.compressedSize;
+    let ordered = true;
+    for (const entry of this.entries()) {
+      if (entry.localHeaderOffset < previousOffset) {
+        ordered = false;
+        break;
+      }
+      sweep(entry.index, entry.localHeaderOffset, extent(entry));
+    }
+    if (!ordered) {
+      // Out of file order: sort positions held in typed arrays (about 20 bytes a member), then sweep again.
+      found.clear();
+      all = false;
+      const count = this.directory.entries;
+      const offsets = new Float64Array(count);
+      const ends = new Float64Array(count);
+      for (const entry of this.entries()) {
+        offsets[entry.index] = entry.localHeaderOffset;
+        ends[entry.index] = extent(entry);
+      }
+      const order = new Uint32Array(count);
+      for (let index = 0; index < count; index += 1) order[index] = index;
+      order.sort((a, b) => offsets[a]! - offsets[b]! || a - b);
+      sweepEnd = 0;
+      sweepIndex = -1;
+      previousOffset = -1;
+      for (const index of order) sweep(index, offsets[index]!, ends[index]!);
+    }
+    this.overlaps = all ? 'all' : found;
+    return this.overlaps;
+  }
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) return false;
+  return true;
 }
 
 /**
@@ -518,6 +627,7 @@ export class ZipMemberReader implements ArchiveByteSource {
   private compressedBlock: Uint8Array = new Uint8Array(0);
   private compressedOffset = 0;
   private inflateFinished = false;
+  private failure: ZipMemberError | undefined;
 
   private constructor(archive: ZipArchive, entry: ZipEntry, dataStart: number, options: ZipMemberOpenOptions) {
     this.archive = archive;
@@ -529,7 +639,9 @@ export class ZipMemberReader implements ArchiveByteSource {
     }
     this.startAt = start;
     this.crcKnown = start === 0;
-    if (entry.isDirectory || entry.uncompressedSize === 0) {
+    // Nothing to inflate: a directory, a stored member of no bytes, or a deflated one that holds no stream at all.
+    // A deflated member with a stream, even one that claims to expand to nothing, still runs its stream below.
+    if (entry.isDirectory || (entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0))) {
       this.inflateFinished = true;
       this.pos = start;
       this.crcKnown = true;
@@ -584,8 +696,8 @@ export class ZipMemberReader implements ArchiveByteSource {
     if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
       throw new ZipMemberError('damaged', entry.name, 'A stored member\'s sizes disagree.');
     }
-    const empty = entry.isDirectory || entry.uncompressedSize === 0;
-    const dataStart = empty ? 0 : archive.dataStart(entry);
+    // Every member that is read has its own header checked, whatever size the directory gives it.
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
     return new ZipMemberReader(archive, entry, dataStart, options);
   }
 
@@ -610,10 +722,11 @@ export class ZipMemberReader implements ArchiveByteSource {
 
   next(): Uint8Array | undefined {
     if (this.closed) throw new Error('This member reader was suspended or closed.');
+    if (this.failure) throw this.failure;
     for (;;) {
       let chunk = this.out.shift();
       if (chunk === undefined) {
-        if (!this.fill()) {
+        if (!this.fillOrFail()) {
           this.conclude();
           return undefined;
         }
@@ -688,6 +801,22 @@ export class ZipMemberReader implements ArchiveByteSource {
   }
 
   /**
+   * A member found damaged stays damaged: what was inflated since the last chunk is dropped and every later read throws the same error.
+   */
+  private fillOrFail(): boolean {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Produces more decoded bytes into `out`; false once the member has no more.
    */
   private fill(): boolean {
@@ -716,7 +845,21 @@ export class ZipMemberReader implements ArchiveByteSource {
       if (error instanceof ZipMemberError) throw error;
       throw new ZipMemberError('damaged', this.entry.name, 'This member\'s compressed data is damaged.');
     }
-    if (final) this.inflateFinished = true;
+    // The stream, not the directory's size, says where the member's data ends: both must say the same, at once.
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError('damaged', this.entry.name, 'This member\'s compressed data ends before the size the zip gives it.');
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError('damaged', this.entry.name, 'This member\'s compressed data runs past the size the zip gives it.');
+      }
+      this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError('damaged', this.entry.name, 'This member\'s compressed data ends without a complete stream.');
+    }
     return true;
   }
 
@@ -729,6 +872,26 @@ export class ZipMemberReader implements ArchiveByteSource {
       crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined,
     };
   }
+}
+
+/**
+ * Where a streaming inflater stands: whether its stream has ended, and how
+ * many bytes it was handed that it did not use. fflate offers no call for
+ * this, so it is read from the inflater's own state: `s.f` (the last block
+ * was seen) with `s.l` empty (that block is over) marks the end, and `p` holds
+ * the bytes not yet consumed from the byte `s.p` points into. A different
+ * fflate that lays this out otherwise is refused loudly, never guessed at.
+ */
+export function inflaterProgress(inflate: Inflate): { ended: boolean; unconsumed: number } {
+  const internal = inflate as unknown as { s?: { f?: unknown; l?: unknown; p?: unknown }; p?: unknown };
+  const state = internal.s;
+  if (typeof state !== 'object' || state === null || !(internal.p instanceof Uint8Array)
+    || (state.p !== undefined && typeof state.p !== 'number')) {
+    throw new Error('The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.');
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === 'number' && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
 }
 
 function readBlock(source: ZipByteSource, offset: number, length: number, name: string): Uint8Array {
@@ -755,6 +918,7 @@ export function readZipMemberHead(archive: ZipArchive, entry: ZipEntry, maxBytes
   }
   const parts: Uint8Array[] = [];
   let have = 0;
+  let failed = false;
   try {
     while (have < maxBytes) {
       const chunk = reader.next();
@@ -765,10 +929,11 @@ export function readZipMemberHead(archive: ZipArchive, entry: ZipEntry, maxBytes
     }
   } catch (error) {
     if (!(error instanceof ZipMemberError)) throw error;
+    failed = true;
   } finally {
     reader.close();
   }
-  if (parts.length === 0) return entry.uncompressedSize === 0 ? new Uint8Array(0) : undefined;
+  if (parts.length === 0) return entry.uncompressedSize === 0 && !failed ? new Uint8Array(0) : undefined;
   const out = new Uint8Array(have);
   let at = 0;
   for (const part of parts) {
