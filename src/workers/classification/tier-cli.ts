@@ -68,6 +68,17 @@ export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
     + 'rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status',
 };
 
+/**
+ * Whether a `tier` subcommand opens a store or sidecar: `set` and `explain`
+ * read the stores and write or read a ledger, and `migrate` opens every lane.
+ * `rules` and `classifier` read and write config and the classification
+ * ledger only. The CLI takes the data owner lock around the first kind
+ * (core/data-owner-lock.ts).
+ */
+export function tierCommandOpensStores(args: readonly string[]): boolean {
+  return args[0] === 'set' || args[0] === 'explain' || args[0] === 'migrate';
+}
+
 export async function runTierCommand(args: readonly string[], context: TierCliContext = {}): Promise<Record<string, unknown>> {
   const [command, ...rest] = args;
   switch (command) {
