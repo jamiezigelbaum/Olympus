@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   assertEmbeddingProviderForLane,
-  DirectSourceEmbeddingDrainClient,
   isEmbeddingLaneBusyError,
   optionsFromEnv,
   publishNativeEmbeddingDrainReadiness,
@@ -13,9 +12,7 @@ import {
   type CorpusEmbeddingRequest,
   type SourceEmbeddingDrainClient,
 } from '../scripts/source-embedding-drain.ts';
-import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 class FakeClient implements SourceEmbeddingDrainClient {
@@ -178,64 +175,28 @@ describe('canonical connector-store embedding drain', () => {
     expect(options.lanes).toEqual([]);
   });
 
-  test('direct mode refuses a retained file-family chunk before the cloud provider is invoked', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-direct-file-scope-'));
-    const dbPath = join(root, 'drive.sqlite');
-    const store = new LocalConnectorStore({
-      dbPath,
-      corpusId: 'internal.drive.docs',
-      family: 'file',
-      trustDomain: 'internal',
+  test('direct mode was removed: it is refused loudly, and anything but http is refused', () => {
+    const base = { OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true' };
+    expect(() => optionsFromEnv({ ...base, OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'direct' }))
+      .toThrow('OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE=direct was removed');
+    expect(() => optionsFromEnv({ ...base, OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: ' direct ' }))
+      .toThrow('Use http (the default)');
+    expect(() => optionsFromEnv({ ...base, OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'sideways' }))
+      .toThrow('must be http');
+    expect(optionsFromEnv({ ...base, OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'http' }).client).toBeDefined();
+    expect(optionsFromEnv(base).client).toBeDefined();
+  });
+
+  // The worker listens only on its owner Unix socket on Linux. The drain's
+  // requests go through the worker transport, which refuses a non-loopback
+  // origin rather than leave the socket for TCP.
+  test.if(process.platform === 'linux')('on Linux, embed requests go through the worker\'s owner-socket transport', async () => {
+    const options = optionsFromEnv({
+      OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
+      OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL: 'http://192.0.2.1:9/v1',
     });
-    const item: RawItem = {
-      identity: {
-        family: 'file',
-        provider: 'google_drive',
-        accountScope: 'personal',
-        providerItemId: 'retained-out-of-scope',
-        providerFileId: 'retained-out-of-scope',
-        localItemId: 'personal:retained-out-of-scope',
-        sourceVersion: 'r1',
-      },
-      mimeType: 'text/plain',
-      content: { kind: 'text', text: 'retained content from a superseded folder approval' },
-      metadata: Object.freeze({ name: 'retained.txt' }),
-      fetchedAt: '2026-09-10T10:00:00.000Z',
-    };
-    const connector: SourceConnector = {
-      id: 'direct-file-scope-fixture',
-      family: 'file',
-      async authenticate() {},
-      async *listItems() { yield { items: [item], done: true }; },
-      async fetchItem() { return item; },
-      classificationSignals() { return {}; },
-    };
-    await store.syncFromConnector(connector, { fetchContent: true });
-    store.close();
-    let providerCalls = 0;
-    const cloud = provider('google-gemini', 'cloud');
-    cloud.embed = async (inputs) => {
-      providerCalls += 1;
-      return inputs.map(() => Array(8).fill(0));
-    };
-    const client = new DirectSourceEmbeddingDrainClient({
-      connectorStores: [{
-        corpusId: 'internal.drive.docs',
-        dbPath,
-        family: 'file',
-        trustDomain: 'internal',
-      }],
-      secureLocalProvider: provider('local-openai-compatible', 'local'),
-      internalProvider: cloud,
-    });
-    try {
-      await expect(client.embedConnectorStore({ corpus_id: 'internal.drive.docs' }))
-        .rejects.toThrow('Use the default HTTP drain mode');
-      expect(providerCalls).toBe(0);
-    } finally {
-      client.close();
-      rmSync(root, { recursive: true, force: true });
-    }
+    await expect(options.client.embedConnectorStore({} as never))
+      .rejects.toThrow('Linux worker requests require a loopback HTTP origin over the owner socket.');
   });
 
   test('publishes a private content-free readiness receipt bound to the native nonce and pid', () => {

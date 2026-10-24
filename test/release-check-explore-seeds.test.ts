@@ -17,7 +17,7 @@ class FakeEngine {
   readonly home = temp();
   readonly env: Record<string, string | undefined> = { HOME: this.home };
   readonly calls: string[] = [];
-  local = { connected: false, approved: false, items: 0, missing: false, refuseList: false };
+  local = { connected: false, approved: false, items: 0, missing: false, refuseList: false, stickyMissing: false };
   ctx: SeedContext = {
     call: async (method, path, body) => this.route(method, path, body),
     cardOf: async (provider) => this.card(provider),
@@ -30,7 +30,8 @@ class FakeEngine {
   private tick(): void {
     if (this.local.connected && this.local.approved) {
       const folder = join(this.home, LOCAL_FILES_FOLDER);
-      this.local.missing = !existsSync(folder);
+      // A sticky miss is the real engine's: a folder that went missing stays listed until its next recovery check, although it is back.
+      this.local.missing = !existsSync(folder) || (this.local.stickyMissing && this.local.missing);
       if (!this.local.missing) this.local.items = readdirSync(folder).length;
     }
   }
@@ -82,6 +83,16 @@ describe('Files on this computer', () => {
     expect(engine.local.missing).toBe(true);
     expect((await driver.states.populated!()).ok).toBe(true);
     expect(engine.local.missing).toBe(false);
+  });
+
+  test('failed reached again while the card still lists the folder as missing moves it away again and passes', async () => {
+    const engine = new FakeEngine();
+    engine.local.stickyMissing = true;
+    const driver = localFilesDriver(engine.ctx);
+    expect((await driver.states.failed!()).ok).toBe(true);
+    const again = await driver.states.failed!();
+    expect(again).toMatchObject({ ok: true });
+    expect(existsSync(join(engine.home, LOCAL_FILES_FOLDER))).toBe(false);
   });
 
   test('disconnected keeps the data, and empty deletes it', async () => {

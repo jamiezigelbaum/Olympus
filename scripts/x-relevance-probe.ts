@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { Database } from 'bun:sqlite';
+import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import {
   connectorStoreCurrentEmbeddingModelId,
   connectorStoreCurrentEmbeddingRows,
@@ -146,5 +147,7 @@ function roundCosine(value: number): number {
 }
 
 if (import.meta.main) {
-  await runXRelevanceProbe(parseXRelevanceProbeArgs(process.argv.slice(2)));
+  const options = parseXRelevanceProbeArgs(process.argv.slice(2));
+  // Held for the run: it refuses while Olympus runs (core/data-owner-lock.ts).
+  await runUnderDataOwnerLock(() => runXRelevanceProbe(options));
 }

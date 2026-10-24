@@ -50,7 +50,7 @@ const ALLOWED: Record<string, string> = {
   'src/workers/classification/tier-migration-cli.ts':
     'opens the sniffer queue beside a set ledger the migration lanes opened through the service',
   'src/workers/classification/tier-cli.ts':
-    'the tier CLI\'s item lookup: reads every known store, its ledgers and sniffer queue by path; the CLI goes through the worker in step 2b',
+    'the tier CLI\'s item lookup: reads every known store, its ledgers and sniffer queue by path; cli.ts holds the owner lock for it when free, and it goes through the worker in step 2b-ii',
   'src/workers/connector-store/secrets-disposition.ts':
     'clears or reads a Secret\'s queued sniffer questions beside the ledger that judged it',
   'src/workers/connector-store/tiered-store-set.ts':
@@ -58,14 +58,17 @@ const ALLOWED: Record<string, string> = {
   'src/workers/source-index/status.ts': 'counts secret locations beside a mounted Private store, read-only',
   // Release testing, on a machine kept for it.
   'scripts/release-check/machine-agent.ts':
-    'the release check\'s agent on a test machine: reads its stand-in Readwise stores and ledger, read-only, to compare an upgrade',
-  // Operator scripts on a database named on their command line; they take
-  // the owner lock in step 2b.
-  'scripts/x-relevance-probe.ts': 'an operator tool on the --db its command line names',
-  'scripts/embedding-identity-repair.ts': 'an operator tool on the --db its command line names',
-  'scripts/connector-store-locator-index.ts': 'an operator tool on the --db its command line names (its schema-version read)',
-  'scripts/vector-scan-bench.ts': 'an operator tool on the --db its command line names',
-  'scripts/whatsapp-identity-backfill.ts': 'an operator tool on the --db and --session-db its command line names',
+    'the release check\'s agent on a test machine: reads its stand-in Readwise stores and ledger, read-only, to compare an upgrade; it runs beside the engine under test by design, so it takes no owner lock',
+  // Operator scripts on a database named on their command line; each holds
+  // the owner lock for its run (core/data-owner-lock.ts), so it refuses
+  // while Olympus runs.
+  'scripts/x-relevance-probe.ts': 'an operator tool on the --db its command line names; holds the owner lock for its run',
+  'scripts/embedding-identity-repair.ts': 'an operator tool on the --db its command line names; holds the owner lock for its run',
+  'scripts/connector-store-locator-index.ts':
+    'an operator tool on the --db its command line names (its schema-version read); holds the owner lock for its run',
+  'scripts/vector-scan-bench.ts': 'an operator tool on the --db its command line names; holds the owner lock for its run',
+  'scripts/whatsapp-identity-backfill.ts':
+    'an operator tool on the --db and --session-db its command line names; holds the owner lock for its run',
 };
 
 const GUARDED_CLASSES = ['LocalConnectorStore', 'TierLedger', 'SecretLocationsIndex', 'TierSnifferStore'];

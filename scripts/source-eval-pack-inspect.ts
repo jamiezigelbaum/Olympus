@@ -17,6 +17,7 @@ import {
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_FILES_SOURCE_ID,
 } from '../src/workers/dropbox-files/index.ts';
+import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 import type { EvalDataset, EvalQuestion } from '../eval/types.ts';
 
@@ -254,4 +255,5 @@ function parsePositiveIntegerEnv(value: string | undefined, fallback: number, na
   return parsed;
 }
 
-await main();
+// Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+await runUnderDataOwnerLock(main);

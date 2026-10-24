@@ -50,7 +50,7 @@ describe('native source embedding drain service', () => {
     ]);
     expect(starts[0]?.env).toMatchObject({
       OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
-      OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'direct',
+      OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'http',
       OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED: 'true',
       OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL: 'fixture-model',
       OLYMPUS_SOURCE_INDEX_GEMINI_API_KEY: 'native-gemini-key',
@@ -187,7 +187,7 @@ function embeddingFixture(options: { publishReadiness?: boolean } = {}) {
   chmodSync(runtimePath, 0o700);
   writeFileSync(workerEnvPath, [
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED=true',
-    'OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE=direct',
+    'OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE=http',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED=true',
     'OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL=fixture-model',
     'GEMINI_API_KEY=worker-env-key-must-not-pass',

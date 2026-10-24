@@ -2108,6 +2108,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
   gaps: {
     message_too_large: { one: '1 message too large to read', many: '{n} messages too large to read' },
     message_unreadable: { one: '1 message could not be read', many: '{n} messages could not be read' },
+    message_content_unsupported: { one: '1 message with a kind of content Olympus cannot read yet', many: '{n} messages with a kind of content Olympus cannot read yet' },
     charset_not_decoded: { one: '1 message in a character set Olympus could not read', many: '{n} messages in a character set Olympus could not read' },
     attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
@@ -2115,10 +2116,12 @@ export const DASHBOARD_ARCHIVE_COPY = {
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
     status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
+    service_message: { one: '1 service message (a join, a call or a pin) left out', many: '{n} service messages (joins, calls or pins) left out' },
+    message_without_text: { one: '1 message with nothing to read (no text, picture or file) left out', many: '{n} messages with nothing to read (no text, picture or file) left out' },
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
-    media_not_imported: { one: '1 picture, recording or other file in the archive was not imported', many: '{n} pictures, recordings or other files in the archive were not imported' },
+    media_not_imported: { one: '1 picture, recording or other file the archive refers to was not imported', many: '{n} pictures, recordings or other files the archive refers to were not imported' },
     item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },
-    assumption: { one: '1 thing Olympus had to assume because the archive does not say (such as a time zone, or which part of a date is the day)', many: '{n} things Olympus had to assume because the archive does not say (such as time zones, or which part of a date is the day)' },
+    assumption: { one: '1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, which part of a date is the day, or that no two files in a very large zip share the same bytes, which a damaged zip could break)', many: '{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, which parts of dates are the day, or that no two files in a very large zip share the same bytes, which a damaged zip could break)' },
     section_not_imported: { one: '1 part of the archive is not imported', many: '{n} parts of the archive are not imported' },
     file_damaged: { one: '1 file in the archive looks damaged, so what was read from it may be wrong', many: '{n} files in the archive look damaged, so what was read from them may be wrong' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },

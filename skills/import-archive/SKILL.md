@@ -21,6 +21,13 @@ file (Google Takeout, Thunderbird) or an Apple Mail export folder ending in
 WhatsApp shares, or a folder of them. A chat export is a snapshot: later
 messages are not added.
 
+A Telegram Desktop export works too: its `result.json` (or the folder that
+holds it), exported as Machine-readable JSON. Messages are imported as text;
+pictures and files are counted, not imported. If the user only has the HTML
+form (`messages.html`), tell them to export again from Telegram Desktop
+(Settings, Advanced, Export Telegram data) with the format set to
+Machine-readable JSON.
+
 ## The rule
 
 `archive_import` only asks. The user approves every import and every removal on

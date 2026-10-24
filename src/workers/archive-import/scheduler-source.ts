@@ -5,6 +5,14 @@
  * removal never runs beside its own archive's import (they are the same
  * task). An archive that finished importing, or stopped, has no task.
  *
+ * Because they are the same task, a removal asked for after the import ended
+ * would inherit the import's schedule (its last pass plus the sync interval,
+ * 30 minutes by default), and so would a removal resumed after a restart. So
+ * the source offers the scheduler a push wake (`subscribeChanges`): the
+ * dashboard wakes it when a removal is asked for, and it wakes when subscribed
+ * with a removal waiting. The scheduler then runs the removal within seconds;
+ * the import cadence is untouched.
+ *
  * Embedding: one task per tier store that exists, each with the identity its
  * trust domain allows (the Private store only with a local or approved
  * private embedder).
@@ -162,5 +170,8 @@ export function createArchiveImportsSchedulerSource(
     intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1_000,
     freshnessThresholdHours: input.config.worker.scheduler.freshnessThresholdHours,
     tasks,
+    // The runtime's own function, so the scheduler keeps one subscription
+    // across the source being rebuilt on every roster change.
+    subscribeChanges: input.runtime.subscribeWork,
   };
 }

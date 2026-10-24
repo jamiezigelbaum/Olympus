@@ -14,6 +14,7 @@
 // never message text).
 
 import { WHATSAPP_PERSONAL_SOURCE_ID, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
+import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -147,4 +148,5 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-await main();
+// Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+await runUnderDataOwnerLock(main);

@@ -42,12 +42,13 @@ describe('store sets belong to the family, not to its first format', () => {
       ['internal.archive.email', 'mbox', 'email'],
       ['public_safe.archive.email', 'mbox', 'email'],
     ]);
-    // The default is the registered formats: mail's stores, and the chat export's own.
-    expect(archiveImportCorpora().map((corpus) => corpus.corpusId)).toEqual(archiveImportCorpora(ARCHIVE_FORMATS).map((corpus) => corpus.corpusId));
+    // The default is the registered formats.
+    expect(archiveImportCorpora().filter((corpus) => corpus.family === 'email').map((corpus) => corpus.corpusId)).toEqual(corpora.map((corpus) => corpus.corpusId));
+    // Two chat formats share one family, so its stores carry the neutral provider.
     expect(archiveImportCorpora().filter((corpus) => corpus.family === 'chat').map((corpus) => [corpus.corpusId, corpus.provider])).toEqual([
-      ['secure_local.archive.chat', 'whatsapp_export'],
-      ['internal.archive.chat', 'whatsapp_export'],
-      ['public_safe.archive.chat', 'whatsapp_export'],
+      ['secure_local.archive.chat', ARCHIVE_NEUTRAL_PROVIDER],
+      ['internal.archive.chat', ARCHIVE_NEUTRAL_PROVIDER],
+      ['public_safe.archive.chat', ARCHIVE_NEUTRAL_PROVIDER],
     ]);
     expect(ARCHIVE_FORMATS).toContain(MBOX_ARCHIVE_FORMAT);
   });
@@ -127,11 +128,10 @@ describe('the Archives card holds every family\'s stores', () => {
 describe('the dashboard words come from the registry and the family', () => {
   test('the picker names each registered format in its own words, or its label', () => {
     const one = archivePickIntro([MBOX_ARCHIVE_FORMAT]);
-    expect(one).toContain('an .mbox file from Google Takeout or Thunderbird');
-    expect(one).not.toContain('WhatsApp');
-    // The dashboard offers every registered format in its own words.
+    expect(one).toContain(MBOX_ARCHIVE_FORMAT.chooseHint!);
+    // The words the dashboard ships name every registered format.
     expect(archivePickIntro(ARCHIVE_FORMATS)).toBe(DASHBOARD_ARCHIVE_COPY.pick.intro);
-    expect(DASHBOARD_ARCHIVE_COPY.pick.intro).toContain('a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)');
+    for (const format of ARCHIVE_FORMATS) expect(DASHBOARD_ARCHIVE_COPY.pick.intro).toContain(format.chooseHint ?? format.label);
     const two = archivePickIntro([MBOX_ARCHIVE_FORMAT, NOTES, SECOND_MAIL]);
     expect(two).toContain('a notes export (a .zip file)');
     expect(two).toContain('; or Fake fakemail');
