@@ -1659,7 +1659,14 @@ function collectLogs(outDir: string): never {
 // ---------------------------------------------------------------------------
 // Upgrade leg: state before and after the installer runs over an existing install
 
-/** Readwise's two stores (the second holds the Private items), where the engine keeps them. */
+/**
+ * Readwise's two stores (the second holds the Private items), where the engine
+ * keeps them: the paths come from the resolvers, which follow the account's
+ * layout, so a store the boot migration moved into its folder is found there.
+ * `store` is the row key the before/after comparison matches on (upgrade.ts), so
+ * it names the store and never follows the file; deriving it from the path would
+ * make every row of a migrated install look removed and added.
+ */
 function readwiseStorePaths(): Array<{ store: string; path: string }> {
   return [
     { store: 'readwise-connector-store', path: defaultReadwiseConnectorStoreDbPath() },

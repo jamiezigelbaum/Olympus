@@ -3,6 +3,7 @@ import { createReleaseManifestSink, runWithReleaseManifestSink, recordReleaseMan
 import type { UpdateAvailable } from '../../core/update-check.ts';
 import { isRetiredGoogleHandle } from '../../core/google-handle-compatibility.ts';
 import { readSourceAccountBindings, sourceAccountBindingsPath, type SourceAccountBindings } from '../../core/source-account-binding.ts';
+import { sourceStorageNotices, type SourceStorageNoticeKind } from '../../core/source-registry.ts';
 import { CONSENT_PAGE_STYLE } from '../remote-oauth/consent-page.ts';
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { runWithAnalystAbortSignal } from '../../core/analyst.ts';
@@ -1514,6 +1515,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               connectedHandleRegistry: registry,
               ...(registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {}),
               ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
+              ...dashboardStorageNotices(),
               unpairedSources: dashboardUnpairedSourceStates(
                 dashboardUnpairedSources,
                 sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
@@ -6606,6 +6608,12 @@ function dashboardSourceAccountBindings(
   } catch {
     return {};
   }
+}
+
+/** What the boot migration of files into account folders left for the owner; nothing when the registry says nothing. */
+function dashboardStorageNotices(): { storageNotices?: Record<string, SourceStorageNoticeKind> } {
+  const notices = sourceStorageNotices(process.env);
+  return notices.length > 0 ? { storageNotices: Object.fromEntries(notices.map((notice) => [notice.source_id, notice.kind])) } : {};
 }
 
 function dashboardGoogleCloudProjectId(): string | undefined {

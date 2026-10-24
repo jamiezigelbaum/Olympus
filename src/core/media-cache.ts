@@ -132,6 +132,82 @@ export function mediaHolderName(holder: string): string {
 }
 
 /**
+ * A path's real path whether or not the file is there: the real path of the
+ * nearest folder above it that exists, then the rest of the path. The same
+ * before and after the folders it will sit in are made.
+ */
+export function nearRealPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // Fall through: it is not there.
+  }
+  const rest: string[] = [];
+  let near = resolve(path);
+  for (;;) {
+    rest.unshift(basename(near));
+    const up = dirname(near);
+    if (up === near) return resolve(path);
+    near = up;
+    try {
+      return join(realpathSync(near), ...rest);
+    } catch {
+      // Keep climbing to a folder that is there.
+    }
+  }
+}
+
+/**
+ * The name a store's marker carries when the store is not (or not yet) where
+ * it will be. Same as `mediaHolderName` for a store that is there.
+ */
+function mediaHolderNameNear(holder: string): string {
+  return holder.startsWith('staging:') || holder.startsWith('memory:') ? holder : nearRealPath(holder);
+}
+
+/**
+ * The marker names (digests) the cache holds for a store: under its real path
+ * and under its path as spelled, which is how the first build of picture search
+ * named it. Taken before a store moves; `rekeyMediaCacheHolder` finds the
+ * markers by them.
+ */
+export function mediaHolderDigests(holder: string): string[] {
+  return [...new Set([holderDigest(mediaHolderNameNear(holder)), holderDigest(holder)])];
+}
+
+/**
+ * Hands the markers of a store that is moving to its new path (the boot
+ * migration, docs/design/source-storage.md, "Migration of existing installs"):
+ * for every cache file one of `fromDigests` holds, the marker under the new
+ * path's name is written first and the old one removed after, so the file is
+ * never without a holder. Without it the sweep would read the old path as a
+ * store that is gone and drop its pictures. Idempotent. Returns how many
+ * markers were handed over.
+ */
+export function rekeyMediaCacheHolder(dir: string, fromDigests: readonly string[], toHolder: string): number {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return 0;
+    throw error;
+  }
+  const name = mediaHolderNameNear(toHolder);
+  const target = holderDigest(name);
+  let handed = 0;
+  for (const entry of entries) {
+    if (!entry.endsWith('.jpg.refs')) continue;
+    const refs = join(dir, entry);
+    const old = fromDigests.filter((digest) => digest !== target && existsSync(join(refs, digest)));
+    if (old.length === 0) continue;
+    if (readMarker(join(refs, target)) !== name) writeFileSync(join(refs, target), name, { mode: 0o600 });
+    for (const digest of old) rmSync(join(refs, digest), { force: true });
+    handed += old.length;
+  }
+  return handed;
+}
+
+/**
  * Stores `bytes` under their digest and returns where, with a staging hold on
  * the file taken in the same step. Writing the same bytes twice reuses the
  * file; a partial write never takes the final name.

@@ -42,12 +42,7 @@ import { Database } from 'bun:sqlite';
 import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
-import {
-  readSqliteSchemaVersion,
-  runSqliteMigrations,
-  type SqliteMigration,
-  type SqliteMigrationResult,
-} from './core/sqlite-migrations.ts';
+import { readSqliteSchemaVersion } from './core/sqlite-migrations.ts';
 import {
   REMOTE_CONNECTIONS_STORE_ID,
   remoteConnectionsPreV2BackupPath,
@@ -130,12 +125,6 @@ export interface LifecycleSourceSpec {
   sourceAliases?: readonly string[];
   label: string;
   sqliteStoreId: string;
-  /**
-   * Declared only by a family this build still migrates. A legacy per-family
-   * index is a custody artifact, never a migration target, so declaring
-   * `sqlitePath` alone must not put a store back under a writing loop.
-   */
-  sqliteMigrations?: () => SqliteMigration[];
   /**
    * The grandfathered per-family index an install upgraded across the Slice 2
    * cut still holds on disk. Nothing reads it any more — that commit deleted
@@ -292,13 +281,6 @@ export interface DataDeleteCustody {
 
 export interface DataDeleteWithCustodyResult extends DataDeleteResult {
   custody: DataDeleteCustody;
-}
-
-export interface DataMigrationCheckResult {
-  ok: true;
-  dryRun: boolean;
-  stores: SqliteMigrationResult[];
-  skipped: string[];
 }
 
 interface DeleteTarget {
@@ -1159,49 +1141,6 @@ export function dataDeleteCustody(options: {
       ? { next_action: 'Run olympus worker stop (or olympus worker uninstall), verify status, then retry.' }
       : {}),
   };
-}
-
-export function runDataMigrations(options: {
-  dryRun: boolean;
-  sourceId?: string;
-} & LifecyclePathContext): DataMigrationCheckResult {
-  const stores: SqliteMigrationResult[] = [];
-  const skipped: string[] = [];
-  for (const source of selectSources(options.sourceId)) {
-    // Connector stores run their own migrations when the store opens; the
-    // registry this loop drives does not own them, so a connector-store-only
-    // family has nothing to migrate here.
-    //
-    // A declared `sqlitePath` is NOT an invitation into this loop either. The
-    // legacy per-family indexes are custody artifacts that export preserves
-    // and delete removes; the live ones sit at their own retired schema
-    // versions under retired store ids, so migrating them would write this
-    // build's migrations into a schema it does not own — or refuse outright
-    // on the version check — for files nothing reads. Only a family that
-    // declares its own migration set is migrated here.
-    const migrations = source.sqliteMigrations?.();
-    if (!migrations) continue;
-    const path = source.sqlitePath?.(options);
-    if (!path) continue;
-    if (!existsSync(path)) {
-      skipped.push(path);
-      continue;
-    }
-    // bun:sqlite requires SQLITE_OPEN_READONLY or SQLITE_OPEN_READWRITE, so
-    // `{ readwrite: false, create: false }` was rejected at open and every
-    // dry run threw before reading a single store. A dry run reads the
-    // schema_version table and nothing else, so open it readonly.
-    const db = options.dryRun === true
-      ? new Database(path, { readonly: true })
-      : new Database(path, { readwrite: true, create: false });
-    db.exec('PRAGMA busy_timeout = 10000;');
-    try {
-      stores.push(runSqliteMigrations(db, source.sqliteStoreId, migrations, { dryRun: options.dryRun }));
-    } finally {
-      closeSqliteStore(db);
-    }
-  }
-  return { ok: true, dryRun: options.dryRun, stores, skipped };
 }
 
 export function validateDeleteAllConfirmations(first: string, second: string): void {

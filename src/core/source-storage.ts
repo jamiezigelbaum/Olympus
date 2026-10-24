@@ -5,7 +5,9 @@
  * Every open reads the account registry first. An account whose state is not
  * `active` (being deleted, or deleted) is never opened: the caller gets
  * `SourceStorageUnavailableError`, the same answer as a lane that is not
- * mounted, and never a stand-in store. Paths are the caller's, resolved by the
+ * mounted, and never a stand-in store. So is an account whose files are part
+ * way through the boot migration (core/source-account-migration.ts): its plan,
+ * not its layout, says where they are. Paths are the caller's, resolved by the
  * account's layout (core/olympus-layout.ts, core/source-placement.ts); nothing
  * here moves a file.
  *
@@ -27,12 +29,19 @@
  *
  * No instance cache: callers share the objects they open, as before.
  */
+import { Database } from 'bun:sqlite';
 import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { closeSqliteStore } from './sqlite-store.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
-import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
+import {
+  LocalConnectorStore,
+  TIER_SET_BINDING_CONNECTOR_ID,
+  TIER_SET_BINDING_RUN_ID,
+  type LocalConnectorStoreOptions,
+} from '../workers/connector-store/local-index.ts';
 import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
 import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
 import {
@@ -40,6 +49,7 @@ import {
   findRegistryAccount,
   readSourceRegistry,
   SourceRegistryError,
+  sourceAccountMovePending,
   updateSourceRegistry,
   type SourceRegistry,
   type SourceRegistryAccountState,
@@ -55,13 +65,16 @@ export interface StorageAccount {
 
 export const DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
 
+/** Why an account may not be opened: it is being deleted or was, or its files are being moved. */
+export type SourceStorageUnavailableState = Exclude<SourceRegistryAccountState, 'active'> | 'moving';
+
 export class SourceStorageUnavailableError extends Error {
   readonly code = 'source_storage_unavailable';
   readonly sourceId: string;
   readonly slot: string;
-  readonly state: Exclude<SourceRegistryAccountState, 'active'>;
+  readonly state: SourceStorageUnavailableState;
 
-  constructor(sourceId: string, slot: string, state: Exclude<SourceRegistryAccountState, 'active'>) {
+  constructor(sourceId: string, slot: string, state: SourceStorageUnavailableState) {
     const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
     super(`${account} is not available: ${unavailableStateReason(state)}.`);
     this.name = 'SourceStorageUnavailableError';
@@ -238,9 +251,9 @@ export function sourceAccountUnavailableReason(account: StorageAccount, env: Lay
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  const state = findRegistryAccount(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT)?.state;
-  if (state === undefined || state === 'active') return undefined;
-  return unavailableStateReason(state);
+  const entry = findRegistryAccount(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  const state = unavailableState(entry);
+  return state === undefined ? undefined : unavailableStateReason(state);
 }
 
 /** Whether an account's stores may be opened now: the mount decision at worker boot. */
@@ -272,13 +285,20 @@ function storeFileKey(dbPath: string): string {
   }
 }
 
-function unavailableStateReason(state: Exclude<SourceRegistryAccountState, 'active'>): string {
+function unavailableStateReason(state: SourceStorageUnavailableState): string {
+  if (state === 'moving') return 'its files are being moved into its folder';
   return state === 'deleting' ? 'its data is being deleted' : 'its data was deleted';
 }
 
+function unavailableState(entry: SourceRegistry['accounts'][number] | undefined): SourceStorageUnavailableState | undefined {
+  if (entry === undefined) return undefined;
+  if (entry.state !== 'active') return entry.state;
+  return sourceAccountMovePending(entry) ? 'moving' : undefined;
+}
+
 function assertOpenable(registry: SourceRegistry, sourceId: string, slot: string): void {
-  const state = findRegistryAccount(registry, sourceId, slot)?.state;
-  if (state !== undefined && state !== 'active') throw new SourceStorageUnavailableError(sourceId, slot, state);
+  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
+  if (state !== undefined) throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
 
 /** Record the account (and the corpus, when a store's open names one) under the registry lease. */
@@ -311,6 +331,97 @@ function adopt(env: LayoutEnv, sourceId: string, slot: string, dbPath: string, c
 function adoptedLayout(env: LayoutEnv, sourceId: string, slot: string, dbPath: string): LayoutAccountLayout {
   if (decideAccountLayout(sourceId, env).layout !== 'folder') return 'legacy';
   return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? 'folder' : 'legacy';
+}
+
+// ---------------------------------------------------------------------------
+// What the boot migration (core/source-account-migration.ts) does to a store
+// file it has just moved. It holds the owner lock and nothing is mounted, so
+// these are the only opens, and they sit here because this is the only place
+// a store file is opened (test/store-open-guard.test.ts).
+
+/** Largest store `PRAGMA quick_check` is run on; a bigger one is not checked, since it cannot be interrupted. */
+export const QUICK_CHECK_MAX_BYTES = 512 * 1024 * 1024;
+
+/** Whether a store file opens read-only and its schema reads. Creates and changes nothing but SQLite's own `-shm`. */
+export function storeFileReads(path: string): boolean {
+  let db: Database | undefined;
+  try {
+    db = new Database(path, { readonly: true, create: false });
+    db.exec('PRAGMA busy_timeout = 10000;');
+    db.query('SELECT count(*) AS n FROM sqlite_master').get();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+/** `PRAGMA quick_check` on a store file, read-only: `ok`, or `damaged` for anything else, a file that will not open included. */
+export function storeFileQuickCheck(path: string): 'ok' | 'damaged' {
+  let db: Database | undefined;
+  try {
+    db = new Database(path, { readonly: true, create: false });
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const rows = db.query('PRAGMA quick_check').all() as Array<Record<string, unknown>>;
+    return rows.length === 1 && Object.values(rows[0]!)[0] === 'ok' ? 'ok' : 'damaged';
+  } catch {
+    return 'damaged';
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+/**
+ * A store bound to a tiered set keeps the set ledger's path in its binding
+ * (`sync_runs`, see `LocalConnectorStore.tierSetBinding`), and fails closed
+ * when the path leads nowhere. `map` is given that path and returns the one
+ * to record, or undefined to leave it. Returns whether the binding changed.
+ * The ledger's identity is kept. The store is opened for writing only when the
+ * binding has to change, so a store without one is not touched, its WAL not
+ * folded into the file.
+ */
+export function repointTierSetBinding(path: string, map: (ledgerPath: string) => string | undefined): boolean {
+  const readBinding = (db: Database): Record<string, unknown> | undefined => {
+    let row: { cursor: string | null } | null;
+    try {
+      row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+        .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
+    } catch (error) {
+      if (/no such table/i.test(String(error))) return undefined; // Not a connector store: it binds to nothing.
+      throw error;
+    }
+    if (!row?.cursor) return undefined;
+    try {
+      const binding = JSON.parse(row.cursor) as Record<string, unknown>;
+      return typeof binding.ledgerPath === 'string' ? binding : undefined;
+    } catch {
+      return undefined; // Unreadable already: the store fails closed on it, moved or not.
+    }
+  };
+  let next: string | undefined;
+  let reader: Database | undefined;
+  try {
+    reader = new Database(path, { readonly: true, create: false });
+    reader.exec('PRAGMA busy_timeout = 10000;');
+    const binding = readBinding(reader);
+    next = binding ? map(binding.ledgerPath as string) : undefined;
+    if (next === undefined || next === binding!.ledgerPath) return false;
+  } finally {
+    if (reader) closeSqliteStore(reader, { checkpoint: false });
+  }
+  let db: Database | undefined;
+  try {
+    db = new Database(path, { readwrite: true, create: false });
+    db.exec('PRAGMA busy_timeout = 10000;');
+    const binding = readBinding(db);
+    if (!binding) return false;
+    db.query('UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?')
+      .run(JSON.stringify({ ...binding, ledgerPath: next }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+    return true;
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
 }
 
 export const __sourceStorageTestHooks = {

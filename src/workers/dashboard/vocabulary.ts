@@ -215,6 +215,10 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // the person's to answer, whatever the imports' progress says (owner rule,
   // 2026-10-10: nothing wrong without a route to exactly what).
   if ((source.connection.imports_attention?.length ?? 0) > 0) return { status: 'Needs you', mappedUnknown: false };
+  // Its files were being moved into their folder and that did not finish or did
+  // not hold: the owner's, whatever the connection says, and the source may be
+  // disconnected with its data kept.
+  if (source.storage_notice) return { status: 'Needs you', mappedUnknown: false };
 
   const connectionStatus = DASHBOARD_CONNECTION_STATE_STATUS[source.connection.state];
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
@@ -455,6 +459,7 @@ export function dashboardAttentionParts(
   // explicitly rejected explains nothing the owner can act on. The provider's
   // own words stay in the sheet's How to fix disclosure.
   if (source.connection.provider_refusal) return withCapture(dashboardProviderRefusalLine(source, options));
+  if (source.storage_notice) return withCapture(DASHBOARD_STORAGE_NOTICE_COPY.reason[source.storage_notice.kind]);
   switch (source.connection.state) {
     case 'reauth_required':
       return withCapture(DASHBOARD_SIGNED_OUT);
@@ -537,6 +542,27 @@ function pausedReason(source: DashboardSourceCard): string {
  * past that, it is an extractor regression, not a few damaged files.
  */
 export const DASHBOARD_MANY_UNREADABLE_LABEL = 'Many files cannot be read';
+
+/**
+ * Files the boot migration could not finish moving into their account folder
+ * (core/source-account-migration.ts). `reason` is the clause after the source's
+ * name on its row; `nextAction` is the step on its sheet. A restart is named only
+ * where it can help: the migration finishes or undoes a half move at every boot.
+ */
+export const DASHBOARD_STORAGE_NOTICE_COPY = {
+  reason: {
+    moved_back: 'its files could not be moved, so they were put back',
+    stuck: 'its files are part way through a move',
+    unreadable: 'Olympus cannot open the folder its files are in',
+    in_the_way: 'its files are in two places',
+  },
+  nextAction: {
+    moved_back: (label: string) => `Olympus tried to move ${label}'s files into their own folder, a check failed, and it put everything back, so nothing was lost and ${label} works as before. Ask your agent to find out what failed before the move is tried again.`,
+    stuck: (label: string) => `${label}'s files are part way through a move and ${label} is closed until it ends. Restart Olympus to finish it; if this stays after a restart, ask your agent to look at it.`,
+    unreadable: (label: string) => `Olympus cannot open the folder where ${label}'s files are, so it cannot move them. Ask your agent to check that your user account may open Olympus's data folder.`,
+    in_the_way: (label: string) => `${label}'s files are where they have always been and in their own folder too, so Olympus moved nothing. Ask your agent to compare the two before anything is moved.`,
+  },
+} as const;
 
 /** The view model's readiness labels that name a cause, in the owner's words. */
 const READINESS_REASONS: Readonly<Record<string, string>> = {
