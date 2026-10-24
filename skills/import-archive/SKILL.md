@@ -19,7 +19,10 @@ Olympus to search it like any other source. Today that means mail: an `.mbox`
 file (Google Takeout, Thunderbird) or an Apple Mail export folder ending in
 `.mbox`; and WhatsApp chats exported with Export Chat: the `.txt`, the `.zip`
 WhatsApp shares, or a folder of them. A chat export is a snapshot: later
-messages are not added.
+messages are not added. In a folder, only files named the way WhatsApp names
+an export (or zips holding one) are taken; a chat saved under another name
+imports when the user chooses that file by itself. Messages that appear in two
+export files of the same chat are imported once.
 
 A Telegram Desktop export works too: its `result.json` (or the folder that
 holds it), exported as Machine-readable JSON. Messages are imported as text;

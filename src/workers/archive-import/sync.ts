@@ -18,7 +18,7 @@
  * twice (state.ts `recordFindings`).
  */
 import { createHash } from 'node:crypto';
-import type { SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../core/contracts.ts';
+import type { RawItem, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../core/contracts.ts';
 import {
   ArchiveImportStoppedError,
   archiveFormatConnector,
@@ -209,6 +209,22 @@ async function digestArchiveFiles(
 }
 
 /**
+ * How many of a page's items are ones the stores already hold from an earlier
+ * pass, or that an earlier item of this pass (`seen`: at most one pass of
+ * items, which the pass's item limit bounds) already is. A pass is stored only
+ * after its whole listing was read, so the stores cannot say what this pass has
+ * listed so far.
+ */
+function countRepeats(items: readonly RawItem[], holds: (identity: RawItem['identity']) => boolean, seen: Set<string>): number {
+  let repeated = 0;
+  for (const item of items) {
+    if (seen.has(item.identity.localItemId) || holds(item.identity)) repeated += 1;
+    seen.add(item.identity.localItemId);
+  }
+  return repeated;
+}
+
+/**
  * Watches the listing: counts findings page by page, notes the dates the
  * items carry, and whether the listing reached the end. The last page goes
  * on only once `complete` confirmed every file is unchanged.
@@ -218,8 +234,10 @@ function observeListing(
   pending: ArchiveImportFinding[],
   flush: () => void,
   complete: () => Promise<boolean>,
+  repeats?: { holds(identity: RawItem['identity']): boolean; add(count: number): void },
 ): { connector: SourceConnector; completed(): boolean; dates(): { earliest?: string; latest?: string } } {
   let completed = false;
+  const seenThisPass = new Set<string>();
   let earliest: string | undefined;
   let latest: string | undefined;
   const wrapped = Object.create(connector) as SourceConnector;
@@ -233,6 +251,9 @@ function observeListing(
           if (!earliest || authoredAt < earliest) earliest = authoredAt;
           if (!latest || authoredAt > latest) latest = authoredAt;
         }
+        // The same message in two files imports once, and is counted here: it is a repeat of an item
+        // an earlier pass stored, or of one this pass listed before this page.
+        if (repeats) repeats.add(countRepeats(page.items, repeats.holds, seenThisPass));
         flush();
         if (page.done) {
           if (!(await complete())) return;
@@ -298,12 +319,15 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
 
     const pending: ArchiveImportFinding[] = [];
     let position: { fileIndex: number; offset: number } | undefined;
+    let repeated = 0;
     const flush = (): void => {
       const moved = position;
       position = undefined;
+      const repeats = repeated;
+      repeated = 0;
       if (pending.length === 0 && !moved) return;
       const batch = pending.splice(0, pending.length);
-      options.state.recordFindings(record.archive_id, batch, moved);
+      options.state.recordFindings(record.archive_id, batch, moved, repeats);
     };
     const connectorId = archiveConnectorId(record.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
@@ -326,6 +350,9 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       const digests = await digestArchiveFiles(root, record.files, shouldContinue);
       if (digests) completion.digests = digests;
       return digests !== undefined;
+    }, {
+      holds: (identity) => options.lane.set.anyLegHasRow(identity),
+      add: (count) => { repeated += count; },
     });
 
     // The Private store first: with no store yet, the set would route nothing.

@@ -49,11 +49,6 @@ const PROBE_MAX_FILE_HEADS = 32;
  */
 const PROBE_MAX_ZIPS = 4;
 /**
- * More zips, past those, whose names a format asks for (`probeNames`): a folder
- * of exports can hold a zip for each of many chats, and each one is the export.
- */
-const PROBE_MAX_NAMED_ZIPS = 128;
-/**
  * Members of a zip whose first bytes the probe reads.
  */
 const PROBE_MAX_MEMBER_HEADS = 32;
@@ -196,10 +191,13 @@ export function probeArchivePath(
   }
   if (stat.kind !== 'directory') throw new ScopeSafeError('not_regular', 'neither a file nor a folder');
   const everything = root.list(chosenRelPath);
+  // Names a format asks for are looked at past the usual bound, up to a larger one; what is past that is counted.
+  const askedBeyond = everything.slice(ARCHIVE_PROBE_MAX_CHILDREN).filter((entry) => entry.kind !== 'directory' && matchesAnyName(entry, probeNames));
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
-    ...everything.slice(ARCHIVE_PROBE_MAX_CHILDREN).filter((entry) => matchesAnyName(entry, probeNames)).slice(0, ARCHIVE_PROBE_MAX_NAMED),
+    ...askedBeyond.slice(0, ARCHIVE_PROBE_MAX_NAMED),
   ];
+  const notLookedAt = Math.max(0, askedBeyond.length - ARCHIVE_PROBE_MAX_NAMED);
   const children: ArchiveProbeEntry[] = [];
   const kinds: Array<'file' | 'directory' | undefined> = [];
   for (const entry of listed) {
@@ -227,22 +225,24 @@ export function probeArchivePath(
     const head = fileHead(root, joinRelative(chosenRelPath, listed[index]!.name));
     if (head) heads.set(index, head);
   }
+  // Every zip a format asked for by name is opened (each is an export of its own); of the others, only the first few.
+  const askedSet = new Set(asked);
   const zipsAmongHeads = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index)));
-  const zips = [
-    ...zipsAmongHeads.filter((index) => asked.includes(index)).slice(0, PROBE_MAX_NAMED_ZIPS),
-    ...zipsAmongHeads.filter((index) => !asked.includes(index)).slice(0, PROBE_MAX_ZIPS),
-  ];
+  const zips = new Set([
+    ...zipsAmongHeads.filter((index) => askedSet.has(index)),
+    ...zipsAmongHeads.filter((index) => !askedSet.has(index)).slice(0, PROBE_MAX_ZIPS),
+  ]);
   listed.forEach((entry, index) => {
     const kind = kinds[index];
     if (kind === 'directory') {
       children.push({ relPath: entry.name, name: entry.name, kind: 'directory' });
     } else if (kind === 'file') {
       const head = heads.get(index);
-      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames) : undefined;
+      const members = zips.has(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames) : undefined;
       children.push({ relPath: entry.name, name: entry.name, kind: 'file', ...(head ? { head } : {}), ...(members ? { members } : {}) });
     }
   });
-  return { chosen: { relPath: '', name, kind: 'directory' }, children };
+  return { chosen: { relPath: '', name, kind: 'directory' }, children, ...(notLookedAt > 0 ? { notLookedAt } : {}) };
 }
 
 function sha256(bytes: Uint8Array): string {

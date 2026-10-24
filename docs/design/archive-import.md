@@ -44,7 +44,7 @@ same way, with the same privacy and the same status.
 | Format | Today |
 |---|---|
 | Mail (mbox) | Built in step 1 (2026-10-23): the shared spine in `workers/archive-import/`, and a thin mbox connector (`workers/archive-import/mbox/`) that splits the file itself and parses each message with `postal-mime`. Gmail items come from the Gmail API's JSON, so Gmail shares none of it. |
-| WhatsApp chat export | Built in step 3 (2026-10-24): one format (`whatsapp_chat`, family `chat`, provider `whatsapp_export`) over `_chat.txt`, `WhatsApp Chat with <name>.txt` and the zip WhatsApp shares, in `workers/archive-import/whatsapp/`, with the line grammar in `core/whatsapp-export-grammar.ts`. The old export connector (`workers/whatsapp/connector.ts`) is deleted. Live WhatsApp capture is wired separately and untouched. |
+| WhatsApp chat export | Built in step 3 (2026-10-24): one format (`whatsapp_chat`, family `chat`, provider `whatsapp_export`) over `_chat.txt`, `WhatsApp Chat with <name>.txt` and the zip WhatsApp shares, in `workers/archive-import/whatsapp/`, with the line grammar in `workers/archive-import/whatsapp/grammar.ts` (core keeps only the small detection signature). The old export connector (`workers/whatsapp/connector.ts`) is deleted. Live WhatsApp capture is wired separately and untouched. |
 | Telegram Desktop export | Built in step 4 (2026-10-24): a thin connector (`workers/archive-import/telegram/`) that streams a JSON `result.json`, whole-account or single-chat, as family `chat`, provider `telegram_export`. Live Telegram capture (`telegram-messages/`) is a different provider in different stores, and the import never opens it. |
 | Reflect export | Connector exists (`workers/reflect/connector.ts`), unwired, allowlisted. |
 | Roam export | Connector exists (`workers/roam/connector.ts`), unwired, allowlisted. |
@@ -61,7 +61,7 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Piece | What it is |
 |---|---|
 | Format registry | One registry of archive formats (`core/archive-formats.ts`, pure data like `core/file-scope-sources.ts`). Each entry: format id, label, a `detect(path)` probe, the source family, and a connector factory. Adding a format adds one entry and one thin connector. Nothing downstream branches on format. |
-| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect and Roam by their JSON shape (the connectors already parse liberally). No match: say so and list what is supported. Two matches: ask. |
+| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is a text file (or a zip holding one) that starts with a message line, and, in a chosen folder, is named as WhatsApp names it; Telegram Desktop is `result.json` with its export keys; Reflect and Roam by their JSON shape (the connectors already parse liberally). No match: say so and list what is supported. Two matches: ask. |
 | Connectors | Thin `SourceConnector`s (contracts.ts), one per format. Pages honour the `done` / `truncated` rule in contracts.ts. |
 | Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. Today Reflect uses one constant connector id (`reflect/connector.ts:87`) and the store keys resume on it (`connector-store/local-index.ts:11083`); that changes when Reflect moves onto the registry. |
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
@@ -167,28 +167,65 @@ Both are in scope. They come after mail because they reuse the same spine
 
 - **WhatsApp chat export** (built, step 3). One format reads the chat text
   file of "Export Chat" (`_chat.txt` from an iPhone, `WhatsApp Chat with
-  <name>.txt` from an Android phone, or any `.txt` that starts with a message
-  line) and the zip WhatsApp shares, which holds that file and the media. A
-  chosen folder imports each export in it and nothing else; only the approved
-  files are read, through the scope-safe reader. The text is read as a
-  stream (and a zip member by streaming inflate, resumable from a parked
-  inflater or by re-inflating to the resume point), never loaded whole.
+  <name>.txt` from an Android phone, or any `.txt` the person chooses that
+  starts with a message line) and the zip WhatsApp shares, which holds that
+  file and the media. Only the approved files are read, through the
+  scope-safe reader. The text is read as a stream (and a zip member by
+  streaming inflate), never loaded whole.
+- **What counts as an export.** It depends on who chose the file. A file the
+  person chose themselves is an export when it starts like a chat, whatever
+  its name. In a chosen folder a file needs more: a `.txt` named as WhatsApp
+  names it, or a zip holding such a file, and the start of a chat inside; a
+  header-shaped first line alone is not enough, because a build log or a debug
+  dump can start the same way. Files that start like a chat but are not named
+  like one are left alone and counted (`files_unconfirmed`, "choose it by
+  itself to import it"). Detection asks for every `.txt` and `.zip` in the
+  folder, past the usual 256-entry bound, up to 1,024 more; the
+  files past that are counted (`files_not_looked_at`) instead of vanishing.
+- **A pass is bounded in bytes, not only in items.** A pass reads at most
+  `maxBytesPerListing` (256 MiB) of the archive: the date-order scan, every
+  line read or dropped inside a long message, and the re-inflating of a
+  zip member to a resume point all count. When the budget is spent the pass
+  ends with a resume point, and the next pass goes on from it. A resume point
+  can sit inside a message that was cut (dropping lines until the next
+  header), so a message of any length costs bounded work per pass.
+- **Stored zip members keep their checksum.** The CRC-32 of everything before
+  each message header travels in the resume point, so a stored member resumed
+  at a header that straddled a read still verifies to its end. A member that
+  ends with a checksum that did not match, or that was not read to its end, is
+  reported as `file_damaged`, because what was read of it may be wrong. A deflated member resumes from a parked inflater when the resume
+  point is in the last chunk read, and otherwise by re-inflating from the
+  start of the member, which the byte budget counts.
 - **Dates.** The export writes wall time with no zone and in the phone's
-  locale order. The order is decided per file from its own headers (any day
-  above 12 settles it) and, when nothing does, read day first and reported as
-  an `assumption`. The time is read in this computer's zone and reported once
-  per archive. Dates with a weekday or month name, non-Latin digits and
-  non-UTF-8 files are not read.
+  locale order. The order is decided per file from its own headers: the order
+  most headers of the file's own style say wins (up to 25 votes, within the
+  first 16 MiB) (a day above
+  12 settles it for that header), so one header pasted into a message cannot
+  decide a file. When nothing says, or the votes tie, it is read day first and
+  reported as an `assumption`. The time is read in this computer's zone and
+  reported once per archive. Dates with a weekday or month name, non-Latin
+  digits and non-UTF-8 files are not read.
+- **Pasted headers.** A line inside a message body that looks like a header
+  starts a new message, in its own style, because the format cannot say
+  otherwise. Each one in a style other than the file's, or dated before the
+  header before it, is counted in an `assumption` finding, so the person is
+  told the import took it as a message.
 - **Items and identity.** One item per message; the chat is the thread, named
   from the export's file name (the zip's, or its folder's, for a `_chat.txt`).
-  The id hashes the source (file and member), the chat, the written time, the
-  sender, the message's number among the file's headers and a hash of its text,
-  so a `.txt` and a `.zip` of one chat keep every message of both.
+  The id hashes the chat, the written time, the sender and a hash of the text,
+  plus the number of the message among identical ones at that time. The file
+  and member are not in it, so a `.txt` and a `.zip` of one chat, or two
+  exports that overlap, give one item per message, imported once; the second
+  copy is counted (`item_repeated`, "in more than one export file"). Which
+  file a message came from is metadata (`sourceFile`, `sourceMember`). More
+  than 24 different messages in one written time are told apart by their
+  place in the file instead of a number.
 - **Left out, and counted.** Notices from WhatsApp itself (`system_message`),
   messages with no text (`message_empty`) and the status updates chat
   (`status_updates`) are skipped and counted. Media stays in the message text
-  as the phone's marker and is counted as `media_not_imported`; a message over
-  1,048,576 characters is cut and reported as `item_truncated`.
+  as the phone's marker and is counted as `media_not_imported` ("the archive
+  refers to" it); a message over 1,048,576 characters (or 8 MiB) is cut and
+  reported as `item_truncated`.
 - **Real exports.** The shapes above come from the open-source parsers of
   real exports and from the synthetic builders in
   `test/support/archive-fixtures-whatsapp.ts`; no real export was read here.

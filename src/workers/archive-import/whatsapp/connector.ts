@@ -11,27 +11,37 @@
  *   not read. Lines become messages in `messages.ts`.
  * - Chat: the chat's name comes from the export's own file name (the member's,
  *   else the zip's). A chat is the thread; two exports of one chat share it.
- * - Identity: the source (file and member), the chat, the written time, the
- *   sender, the message's number among the file's headers and a hash of its
- *   text. Two exports of one chat (a .txt and a .zip) therefore never
- *   overwrite each other's messages, whatever their text.
+ * - Identity: the chat, the written time, the sender, a hash of the text and
+ *   the message's number among the identical ones sent at that time. Not the
+ *   file it came from: a .txt and a .zip of one chat hold the same messages,
+ *   and each is imported once (the import counts the repeats it meets). The
+ *   file and member a message was last read from are in its metadata.
  * - Time: the export writes wall time with no zone, and in the order the
- *   phone's locale uses. The order is read from the file's own headers (any
- *   day above 12 settles it) and, when nothing does, taken as day first and
- *   said so. The time is read in this computer's zone, and that is said once
- *   per archive.
+ *   phone's locale uses. The order is read from the file's own headers (the
+ *   order most of them say; one pasted header does not decide) and, when
+ *   nothing does, taken as day first and said so. The time is read in this
+ *   computer's zone, and that is said once per archive. A header written in
+ *   another style than the file's, or dated before the one above it, may be a
+ *   header pasted into a message: it still starts a message (the format
+ *   cannot say otherwise) and is counted as an assumption.
  * - Left out, and counted: notices from WhatsApp itself, messages with no
  *   text, and the status updates chat. Media is named in the message's text
  *   and counted as not imported. A message longer than the bound is cut and
  *   counted.
+ * - Bounded reads: a pass reads at most its byte budget, plus at most one
+ *   message (MAX_MESSAGE_BYTES) or one scan (ORDER_SCAN_MAX_BYTES). The date
+ *   scan, entering a deflated member somewhere other than its start (the
+ *   inflater catches up), and every byte read and dropped after a message
+ *   was cut count toward the budget, and the last of these can stop at any
+ *   chunk: the resume point then says where, inside the lines being dropped.
  * - Changes: each page goes out only while its file is still the version
  *   opened, under the descriptor and at its name; a file changed, replaced or
  *   removed after the first page stops the import, whatever was buffered.
- * - Resume point: `wa1:<manifest>:<file>:<member>:<offset>:<ordinal>:<order>`
- *   (and the member's checksum so far for a stored member): where the next
- *   message's header line starts, how many headers came before it, and the
- *   date order already decided. Any other manifest, or an offset where no
- *   header starts, stops the import.
+ * - Resume point: see `place.ts`. Any other manifest, or a place where no
+ *   header starts, stops the import. A stored member carries the checksum of
+ *   everything before its place, so it is verified at its end however many
+ *   passes read it; a member whose checksum could not be verified is told as
+ *   damaged, never taken as good.
  */
 import { createHash } from 'node:crypto';
 import type {
@@ -49,42 +59,61 @@ import {
   type ArchiveFileEntry,
 } from '../../../core/archive-formats.ts';
 import type { ScopeFileReader } from '../../../core/scope-safe-fs.ts';
+import { fileByteSource, type ArchiveByteSource } from '../byte-source.ts';
+import { archiveContinuations } from '../continuation-cache.ts';
+import { archiveStopFromScopeError } from '../stop-errors.ts';
 import {
-  isWhatsAppChatMemberName,
+  ZipArchive,
+  ZipFormatError,
+  ZipMemberError,
+  ZipMemberReader,
+  readZipMemberHead,
+  stoppableZipSource,
+  zipFindingOffset,
+  type ZipEntry,
+} from '../zip-reader.ts';
+import {
+  WHATSAPP_HEAD_BYTES,
+  hasWhatsAppExportName,
   isWhatsAppStatusChat,
+  isWhatsAppZipNoise,
+  looksLikeWhatsAppChat,
   resolveWhatsAppHeader,
   whatsAppChatNameFromStem,
   whatsAppMediaMarkerCount,
   whatsAppStem,
   type WhatsAppDateOrder,
   type WhatsAppHeader,
-} from '../../../core/whatsapp-export-grammar.ts';
-import { fileByteSource, type ArchiveByteSource } from '../byte-source.ts';
-import { archiveContinuations } from '../continuation-cache.ts';
-import { archiveStopFromReaderError } from '../stop-errors.ts';
-import {
-  ZipArchive,
-  ZipFormatError,
-  ZipMemberError,
-  ZipMemberReader,
-  stoppableZipSource,
-  zipFindingOffset,
-  type ZipEntry,
-} from '../zip-reader.ts';
+} from './grammar.ts';
 import {
   WhatsAppFormatError,
   WhatsAppMessageReader,
   scanWhatsAppDateOrder,
-  type WhatsAppDateOrderScan,
+  type WhatsAppEntry,
+  type WhatsAppMessageStep,
   type WhatsAppRawMessage,
+  type WhatsAppResumePoint,
 } from './messages.ts';
+import {
+  IdentityWindow,
+  WHATSAPP_CURSOR_PREFIX,
+  cursorOf,
+  doneCursor,
+  manifestTag,
+  parseCursor,
+  type OrderMark,
+  type Place,
+  type PlaceMode,
+} from './place.ts';
 
+export { WHATSAPP_CURSOR_PREFIX };
 export const WHATSAPP_ARCHIVE_FORMAT_ID = 'whatsapp_chat';
-export const WHATSAPP_CURSOR_PREFIX = 'wa1:';
 export const WHATSAPP_DEFAULT_PAGE_SIZE = 100;
 export const WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 const MAX_CHAT_NAME_CHARS = 200;
 const GENERIC_CHAT_NAME = 'WhatsApp chat';
+/** Text members of a chosen zip looked at for a chat when none is named like one. */
+const MAX_UNNAMED_MEMBER_PROBES = 64;
 
 export const WHATSAPP_FINDINGS = {
   /** Skipped: a notice from WhatsApp itself (joins, subject changes, encryption). */
@@ -95,80 +124,6 @@ export const WHATSAPP_FINDINGS = {
   statusUpdates: 'status_updates',
 } as const;
 
-/** `d`, `m`, `y`: the order the file's headers show; `a`: day first, assumed; `?`: not read yet. */
-type OrderMark = 'd' | 'm' | 'y' | 'a' | '?';
-
-const ORDER_MARKS: readonly string[] = ['d', 'm', 'y', 'a', '?'];
-
-interface Place {
-  fileIndex: number;
-  /** The member's place in the zip's directory; 0 for a plain file. */
-  memberIndex: number;
-  /** Where the next message's header line starts in the member. */
-  offset: number;
-  /** How many header lines lie before it. */
-  ordinal: number;
-  order: OrderMark;
-  /** The stored member's CRC-32 before `offset`, when known. */
-  crc?: number;
-}
-
-type ParsedCursor = { done: true } | { done: false; place: Place };
-
-function manifestTag(input: ArchiveConnectorInput): string {
-  return input.manifestSha256.slice(0, 16);
-}
-
-function cursorOf(input: ArchiveConnectorInput, place: Place): string {
-  const crc = place.crc !== undefined ? `:${place.crc >>> 0}` : '';
-  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag(input)}:${place.fileIndex}:${place.memberIndex}:${place.offset}:${place.ordinal}:${place.order}${crc}`;
-}
-
-function doneCursor(input: ArchiveConnectorInput): string {
-  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag(input)}:done`;
-}
-
-const WHOLE_NUMBER = /^\d{1,16}$/;
-
-function parseCursor(input: ArchiveConnectorInput, cursor: string | undefined): ParsedCursor | undefined {
-  if (!cursor) return undefined;
-  const invalid = (message: string): ArchiveImportStoppedError =>
-    new ArchiveImportStoppedError('resume_point_invalid', message);
-  const prefix = `${WHATSAPP_CURSOR_PREFIX}${manifestTag(input)}:`;
-  if (!cursor.startsWith(prefix)) {
-    throw invalid('The resume point belongs to other files than this archive\'s.');
-  }
-  const rest = cursor.slice(prefix.length);
-  if (rest === 'done') return { done: true };
-  const parts = rest.split(':');
-  if (parts.length !== 5 && parts.length !== 6) throw invalid('The resume point is not a position in this archive.');
-  const [fileText, memberText, offsetText, ordinalText, order, crcText] = parts;
-  if (!WHOLE_NUMBER.test(fileText!) || !WHOLE_NUMBER.test(memberText!) || !WHOLE_NUMBER.test(offsetText!)
-    || !WHOLE_NUMBER.test(ordinalText!) || !ORDER_MARKS.includes(order!)) {
-    throw invalid('The resume point is not a position in this archive.');
-  }
-  const fileIndex = Number(fileText);
-  const memberIndex = Number(memberText);
-  const offset = Number(offsetText);
-  const ordinal = Number(ordinalText);
-  const file = input.files[fileIndex];
-  if (!file || (order === '?' && (offset !== 0 || ordinal !== 0 || crcText !== undefined))
-    || (!file.members && (memberIndex !== 0 || offset > file.version.size))) {
-    throw invalid('The resume point is not a position in this archive.');
-  }
-  let crc: number | undefined;
-  if (crcText !== undefined) {
-    if (!WHOLE_NUMBER.test(crcText) || Number(crcText) > 0xffffffff || !file.members) {
-      throw invalid('The resume point is not a position in this archive.');
-    }
-    crc = Number(crcText);
-  }
-  return {
-    done: false,
-    place: { fileIndex, memberIndex, offset, ordinal, order: order as OrderMark, ...(crc !== undefined ? { crc } : {}) },
-  };
-}
-
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -177,7 +132,7 @@ function stoppedFrom(error: unknown, relPath: string): unknown {
   if (error instanceof WhatsAppFormatError) {
     return new ArchiveImportStoppedError('resume_point_invalid', 'No message starts where this import was to resume.', relPath);
   }
-  return archiveStopFromReaderError(error, relPath);
+  return archiveStopFromScopeError(error, relPath);
 }
 
 /** The time the phone wrote, read in this computer's zone. */
@@ -228,7 +183,7 @@ interface Unit {
   entry?: ZipEntry;
   chat: string;
   conversationId: string;
-  /** Names the file and member in message identities. */
+  /** Names the file and member where a message is told apart by position. */
   sourceKey: string;
   statusUpdates: boolean;
   /** Uncompressed bytes of the chat text before this unit, in the zip's chat members. */
@@ -251,7 +206,10 @@ interface Run {
   /** Something was read since the last page went out: findings, or messages. */
   pending: boolean;
   emitted: number;
+  /** Everything read this pass: the date scan, an inflater catching up, messages, dropped bytes. */
   bytesRead: number;
+  /** A read, or a message, was done this pass: the budget may stop the pass only after this, so each pass moves on. */
+  progressed: boolean;
   limit: number;
   /** The listing stops after the page last given out (a budget, or the archive is being removed). */
   stopped: boolean;
@@ -271,6 +229,14 @@ function unitSize(unit: Unit): number {
 
 function isStored(unit: Unit): boolean {
   return unit.entry !== undefined && unit.entry.method === 0;
+}
+
+function isDeflated(unit: Unit): boolean {
+  return unit.entry !== undefined && unit.entry.method === 8;
+}
+
+function entryFor(mode: PlaceMode): WhatsAppEntry {
+  return mode === 'start' ? { kind: 'start' } : mode === 'message' ? { kind: 'message' } : { kind: 'skip', midLine: mode === 'mid' };
 }
 
 export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): SourceConnector {
@@ -293,19 +259,32 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
     };
   };
 
+  /**
+   * The chat members of a zip: those named the way WhatsApp names the text of
+   * an export. A zip with none (one the person chose, whose text file has
+   * another name) takes its text members that start like a chat.
+   */
+  const chatEntries = (zip: ZipArchive): ZipEntry[] => {
+    const all = [...zip.entries()].filter((entry) => !entry.isDirectory);
+    const named = all.filter((entry) => hasWhatsAppExportName(entry.name));
+    if (named.length > 0) return named;
+    return all
+      .filter((entry) => !isWhatsAppZipNoise(entry.name) && entry.name.toLowerCase().endsWith('.txt'))
+      .slice(0, MAX_UNNAMED_MEMBER_PROBES)
+      .filter((entry) => looksLikeWhatsAppChat(readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES)));
+  };
+
   /** The zip opened, checked against the table recorded at approval, and its chat members. */
   const openZip = (reader: ScopeFileReader, file: ArchiveFileEntry, fileIndex: number): { zip: ZipArchive; units: Unit[]; total: number } => {
     let zip: ZipArchive;
-    const chatEntries: ZipEntry[] = [];
+    let entries: ZipEntry[];
     try {
       zip = ZipArchive.open(stoppableZipSource(reader, file.relPath));
       const table = zip.memberTable();
       if (file.members && (table.count !== file.members.count || table.sha256 !== file.members.sha256)) {
         throw new ArchiveImportStoppedError('file_changed', 'A file of this archive changed since the import started.', file.relPath);
       }
-      for (const entry of zip.entries()) {
-        if (!entry.isDirectory && isWhatsAppChatMemberName(entry.name)) chatEntries.push(entry);
-      }
+      entries = chatEntries(zip);
     } catch (error) {
       if (error instanceof ZipFormatError) {
         throw new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', file.relPath);
@@ -313,7 +292,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
       throw stoppedFrom(error, file.relPath);
     }
     let base = 0;
-    const units = chatEntries.map((entry) => {
+    const units = entries.map((entry) => {
       const unit = unitFor(file, fileIndex, entry, base);
       base += entry.uncompressedSize;
       return unit;
@@ -353,11 +332,12 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
     return Math.floor((context.file.version.size * done) / Math.max(1, context.total));
   };
 
-  const itemOf = (unit: Unit, raw: WhatsAppRawMessage, header: WhatsAppHeader): RawItem => {
+  const itemOf = (unit: Unit, raw: WhatsAppRawMessage, header: WhatsAppHeader, textHash: string, sameAtTime: number | undefined): RawItem => {
     const sender = raw.sender!;
-    const text = raw.text;
-    const textHash = sha256(text);
-    const providerItemId = sha256([unit.sourceKey, unit.chat, header.sentAt, sender, String(raw.ordinal), textHash].join('\0')).slice(0, 32);
+    // Alike messages are told apart by their number among the alike at that time; a time too crowded
+    // for that is told apart by where the message is in its file (stable, but not shared by another file).
+    const apart = sameAtTime !== undefined ? `#${sameAtTime}` : `@${unit.sourceKey}:${raw.offset}`;
+    const providerItemId = sha256([unit.chat, header.sentAt, sender, textHash, apart].join('\0')).slice(0, 32);
     const authoredAt = localTimeIso(header);
     return {
       identity: {
@@ -371,13 +351,16 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
         sourceVersion: textHash.slice(0, 32),
       },
       mimeType: 'text/plain',
-      content: { kind: 'text', text },
+      content: { kind: 'text', text: raw.text },
       metadata: Object.freeze({
         chat: unit.chat,
         sender,
         senderLabel: sender,
         ...(authoredAt ? { authoredAt } : {}),
         contentHash: textHash,
+        // The export this copy of the message was read from.
+        sourceFile: unit.file.relPath,
+        ...(unit.entry ? { sourceMember: unit.entry.name } : {}),
       }),
       fetchedAt: new Date().toISOString(),
     };
@@ -402,21 +385,13 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
           pending: false,
           emitted: 0,
           bytesRead: 0,
+          progressed: false,
           limit: options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY,
           stopped: false,
           finished: false,
         };
         // Said once per archive, before anything else it reports.
         if (!start) input.report({ kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap', fileIndex: 0, offset: 0 });
-
-        // What was left out, by kind, and where the first of each was: told in
-        // one finding per kind at each page, so a file of notices stays small.
-        const skips = new Map<string, { offset: number; count: number }>();
-        const noteSkip = (kind: string, offset: number): void => {
-          const seen = skips.get(kind);
-          if (seen) seen.count += 1;
-          else skips.set(kind, { offset, count: 1 });
-        };
 
         async function* readUnit(context: FileContext, index: number, place: Place): AsyncGenerator<SourceConnectorListPage> {
           const unit = context.units[index]!;
@@ -429,15 +404,24 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
               ...(count !== undefined ? { count } : {}),
             });
           };
-          const flushSkips = (): void => {
-            for (const [kind, seen] of skips) report(kind, 'skipped', seen.offset, seen.count);
-            skips.clear();
+          // What was left out or assumed, by kind, and where the first of each was: told in one
+          // finding per kind at each page, so a file of notices stays small.
+          const tallies = new Map<string, { kind: string; findingClass: 'gap' | 'skipped'; offset: number; count: number }>();
+          const note = (kind: string, findingClass: 'gap' | 'skipped', offset: number): void => {
+            const key = `${findingClass}:${kind}`;
+            const seen = tallies.get(key);
+            if (seen) seen.count += 1;
+            else tallies.set(key, { kind, findingClass, offset, count: 1 });
+          };
+          const flushTallies = (): void => {
+            for (const seen of tallies.values()) report(seen.kind, seen.findingClass, seen.offset, seen.count);
+            tallies.clear();
           };
           const isLastFile = unit.fileIndex === input.files.length - 1;
           const isLastUnit = index === context.units.length - 1;
           const afterUnit: Place = index + 1 < context.units.length
-            ? { fileIndex: unit.fileIndex, memberIndex: context.units[index + 1]!.memberIndex, offset: 0, ordinal: 0, order: '?' }
-            : { fileIndex: unit.fileIndex + 1, memberIndex: 0, offset: 0, ordinal: 0, order: '?' };
+            ? { fileIndex: unit.fileIndex, memberIndex: context.units[index + 1]!.memberIndex, offset: 0, mode: 'start', order: '?', style: '', prev: '' }
+            : { fileIndex: unit.fileIndex + 1, memberIndex: 0, offset: 0, mode: 'start', order: '?', style: '', prev: '' };
           const progressAfterUnit = index + 1 < context.units.length
             ? progressOffset(context, context.units[index + 1]!, 0)
             : context.file.version.size;
@@ -445,15 +429,28 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             report(error.code === 'damaged' ? ARCHIVE_COMMON_FINDINGS.fileDamaged : ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', offset);
           };
 
-          // The date order: read from the headers where the unit begins, carried in the resume point after.
           let unreadable = false;
-          let order = place.order;
-          if (order === '?') {
-            let scanned: WhatsAppDateOrderScan | undefined;
+          let order: OrderMark = place.order;
+          let style = place.style;
+          let prev = place.prev;
+          const window = IdentityWindow.restore(place.window);
+
+          // The date order and the file's style: read from the headers where the unit begins,
+          // carried in the resume point after. A bounded read, and it counts toward the budget.
+          if (place.mode === 'start') {
+            if (!input.shouldContinue()) {
+              run.stopped = true;
+              return;
+            }
             let scanSource: OpenedSource | undefined;
             try {
               scanSource = openSource(context, unit, { start: 0, useParked: false });
-              scanned = scanWhatsAppDateOrder(scanSource.source, { shouldContinue: input.shouldContinue });
+              const scanned = scanWhatsAppDateOrder(scanSource.source);
+              run.bytesRead += scanned.bytesRead;
+              run.progressed = true;
+              order = orderMarkOf(scanned.order, scanned.assumed);
+              style = scanned.style ?? '';
+              if (scanned.assumed) report(ARCHIVE_COMMON_FINDINGS.assumption, 'gap', 0);
             } catch (error) {
               if (!(error instanceof ZipMemberError)) throw stoppedFrom(error, unit.file.relPath);
               damaged(error, 0);
@@ -461,30 +458,18 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             } finally {
               scanSource?.close();
             }
-            if (!unreadable) {
-              if (!scanned) {
-                // Asked to stop before anything of this unit was read.
-                run.stopped = true;
-                return;
-              }
-              order = orderMarkOf(scanned.order, scanned.assumed);
-              if (scanned.assumed) report(ARCHIVE_COMMON_FINDINGS.assumption, 'gap', 0);
-            }
           }
 
           let opened: OpenedSource | undefined;
-          let messages: WhatsAppMessageReader | undefined;
+          let reader: WhatsAppMessageReader | undefined;
           if (!unreadable) {
             try {
               opened = openSource(context, unit, {
                 start: place.offset,
                 ...(place.crc !== undefined ? { crc: place.crc } : {}),
-                useParked: true,
+                useParked: place.mode !== 'start',
               });
-              messages = new WhatsAppMessageReader(opened.source, {
-                startOrdinal: place.ordinal,
-                requireHeaderFirst: place.offset > 0,
-              });
+              reader = new WhatsAppMessageReader(opened.source, entryFor(place.mode));
             } catch (error) {
               opened?.close();
               opened = undefined;
@@ -493,109 +478,138 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             }
           }
 
+          // Bytes the source delivered, and an inflater's catching up, are spent as they are read.
+          const source = opened?.source;
+          let mark = source?.position ?? 0;
+          let replayCounted = 0;
+          const spend = (): void => {
+            if (!source) return;
+            run.bytesRead += Math.max(0, source.position - mark);
+            mark = source.position;
+            const replayed = opened?.zip?.replayedBytes ?? 0;
+            run.bytesRead += replayed - replayCounted;
+            replayCounted = replayed;
+          };
+          // Asked before each read of bytes that are only dropped (the rest of a message that was cut):
+          // the pass may end there, once it has moved on at all.
+          const mayRead = (): boolean => {
+            spend();
+            if (!input.shouldContinue()) return false;
+            if (run.bytesRead >= byteBudget && run.progressed) return false;
+            run.progressed = true;
+            return true;
+          };
+
           const dateOrder = dateOrderOf(order);
           let yieldedAt: number | undefined;
           let clean = true;
-          let ended = messages === undefined;
-          let mark = opened?.source.position ?? 0;
-          const placeOf = (pending: { offset: number; ordinal: number }, crc: number | undefined): Place => ({
-            fileIndex: unit.fileIndex,
-            memberIndex: unit.memberIndex,
-            offset: pending.offset,
-            ordinal: pending.ordinal,
-            order,
-            ...(crc !== undefined ? { crc } : {}),
-          });
+          let ended = reader === undefined;
+          const placeFrom = (point: WhatsAppResumePoint): Place => {
+            const crc = isStored(unit) ? point.crc : undefined;
+            if (isStored(unit) && crc === undefined) {
+              throw new ArchiveImportStoppedError('resume_point_invalid', 'The checksum of a stored file could not be followed to this place.', unit.file.relPath);
+            }
+            const state = window.state();
+            return {
+              fileIndex: unit.fileIndex,
+              memberIndex: unit.memberIndex,
+              offset: point.offset,
+              mode: point.kind === 'message' ? 'message' : point.midLine ? 'mid' : 'skip',
+              order,
+              style,
+              prev,
+              ...(state ? { window: state } : {}),
+              ...(crc !== undefined ? { crc } : {}),
+            };
+          };
+          const handOver = function* (at: WhatsAppResumePoint): Generator<SourceConnectorListPage> {
+            flushTallies();
+            context.current();
+            input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressOffset(context, unit, at.offset) });
+            yieldedAt = at.offset;
+            yield { items: run.page, nextCursor: cursorOf(input, placeFrom(at)), done: false };
+            run.emitted += run.page.length;
+            run.page = [];
+            run.pending = false;
+          };
+
           try {
-            while (messages && opened && !ended) {
+            while (reader && opened && !ended) {
               if (!input.shouldContinue()) {
                 run.stopped = true;
-                const at = messages.pending;
-                if (run.pending && at) {
-                  flushSkips();
-                  context.current();
-                  input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressOffset(context, unit, at.offset) });
-                  yieldedAt = at.offset;
-                  yield {
-                    items: run.page,
-                    nextCursor: cursorOf(input, placeOf(at, isStored(unit) ? messages.pendingCrc() : undefined)),
-                    done: false,
-                  };
-                  run.emitted += run.page.length;
-                  run.page = [];
-                  run.pending = false;
-                }
+                const at = reader.resume();
+                if (run.pending && at) yield* handOver(at);
                 return;
               }
-              let raw: WhatsAppRawMessage | undefined;
+              let step: WhatsAppMessageStep;
               try {
-                raw = messages.next();
+                step = reader.next(mayRead);
               } catch (error) {
                 if (error instanceof ZipMemberError) {
                   // What was read stays; the rest of this member cannot be.
                   clean = false;
-                  damaged(error, messages.pending?.offset ?? mark);
-                  raw = undefined;
+                  damaged(error, reader.resume()?.offset ?? mark);
                   ended = true;
                   break;
                 }
                 clean = false;
                 throw stoppedFrom(error, unit.file.relPath);
               }
-              run.bytesRead += Math.max(0, opened.source.position - mark);
-              mark = opened.source.position;
-              if (!raw) {
+              spend();
+              if (step.kind === 'end') {
                 ended = true;
                 break;
               }
+              if (step.kind === 'paused') {
+                // Only dropped bytes were being read and the budget is spent: end the pass here.
+                const at = reader.resume();
+                run.stopped = true;
+                if (at) yield* handOver(at);
+                return;
+              }
+              const raw = step.message;
+              run.progressed = true;
               run.pending = true;
+
+              // Does this header belong to this file's export? A header in another style than the
+              // file's, or dated before the one above it, may have been pasted into a message by hand.
+              const header = resolveWhatsAppHeader(raw.header, dateOrder);
+              const otherStyle = style !== '' && raw.header.style !== style;
+              if (otherStyle || (header && prev !== '' && header.sentAt < prev)) {
+                note(ARCHIVE_COMMON_FINDINGS.assumption, 'gap', raw.offset);
+              }
+              if (header && !otherStyle) prev = header.sentAt;
 
               // What this message is.
               if (unit.statusUpdates) {
-                noteSkip(WHATSAPP_FINDINGS.statusUpdates, raw.offset);
+                note(WHATSAPP_FINDINGS.statusUpdates, 'skipped', raw.offset);
               } else if (raw.sender === undefined) {
-                noteSkip(WHATSAPP_FINDINGS.systemMessage, raw.offset);
-              } else if (raw.text.trim() === '') {
-                noteSkip(WHATSAPP_FINDINGS.messageEmpty, raw.offset);
+                note(WHATSAPP_FINDINGS.systemMessage, 'skipped', raw.offset);
+              } else if (raw.text.trim() === '' || !header) {
+                note(WHATSAPP_FINDINGS.messageEmpty, 'skipped', raw.offset);
               } else {
-                const header = resolveWhatsAppHeader(raw.header, dateOrder);
-                if (!header) {
-                  noteSkip(WHATSAPP_FINDINGS.messageEmpty, raw.offset);
-                } else {
-                  run.page.push(itemOf(unit, raw, header));
-                  const media = whatsAppMediaMarkerCount(raw.text);
-                  if (media > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', raw.offset, media);
-                  if (raw.cut) report(ARCHIVE_COMMON_FINDINGS.itemTruncated, 'gap', raw.offset);
-                }
+                const textHash = sha256(raw.text);
+                const sameAtTime = window.ordinal(header.sentAt, sha256(`${raw.sender}\0${textHash}`).slice(0, 12));
+                run.page.push(itemOf(unit, raw, header, textHash, sameAtTime));
+                const media = whatsAppMediaMarkerCount(raw.text);
+                if (media > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', raw.offset, media);
+                if (raw.cut) report(ARCHIVE_COMMON_FINDINGS.itemTruncated, 'gap', raw.offset);
               }
 
               // A page goes out when it is full, or the budget is spent.
-              const at = messages.pending;
+              const at = reader.resume();
               if (!at) continue;
               const room = run.limit - run.emitted;
               const full = run.page.length >= Math.min(pageSizeDefault, room);
               const spent = run.bytesRead >= byteBudget;
               if (!full && !spent) continue;
               // The listing ends with this page: its budget is spent or it holds all the items it may.
-              const atLimit = run.page.length >= room;
-              const last = spent || atLimit;
-              // Ending here parks the member's inflater at the next message,
-              // which needs that message to start in the chunk just read; if
-              // it does not, read on to the one after (never past the item
-              // limit: a page may not hold more than it was asked for).
-              if (last && !atLimit && context.zip && !messages.canSettle()) continue;
-              flushSkips();
-              context.current();
-              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressOffset(context, unit, at.offset) });
-              yieldedAt = at.offset;
-              yield {
-                items: run.page,
-                nextCursor: cursorOf(input, placeOf(at, isStored(unit) ? messages.pendingCrc() : undefined)),
-                done: false,
-              };
-              run.emitted += run.page.length;
-              run.page = [];
-              run.pending = false;
+              // A deflated member's inflater is parked at the resume point when that point lies in the
+              // chunk just read (the usual case); when it does not (a line longer than a chunk), the next
+              // pass enters the member cold and pays for the replay out of its own budget. The pass never
+              // reads on to make the parking possible: its reads stay inside the budget.
+              const last = spent || run.page.length >= room;
+              yield* handOver(at);
               if (last) {
                 run.stopped = true;
                 return;
@@ -603,15 +617,17 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             }
 
             // The unit has been read to its end.
-            if (messages && opened?.zip) {
+            if (reader && opened?.zip) {
               const end = opened.zip.end;
-              if (end && (!end.sizeOk || end.crcOk === false)) {
+              // A member whose checksum was not verified is not a member that checked out.
+              if (!end || !end.sizeOk || end.crcOk !== true) {
                 report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', unitSize(unit));
               }
             }
-            flushSkips();
+            flushTallies();
             context.current();
             if (isLastFile && isLastUnit) {
+              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: context.file.version.size });
               yield { items: run.page, nextCursor: doneCursor(input), done: true };
               run.page = [];
               run.finished = true;
@@ -628,9 +644,9 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
           } finally {
             try {
               // The listing stopped at a page's resume point: keep the inflater exactly there.
-              if (clean && !ended && messages && opened?.zip && yieldedAt !== undefined) {
-                const pending = messages.pending;
-                if (pending && pending.offset === yieldedAt && messages.settle()) {
+              if (clean && !ended && reader && opened?.zip && yieldedAt !== undefined) {
+                const pending = reader.resume();
+                if (pending && pending.offset === yieldedAt && reader.settle()) {
                   const continuation = opened.zip.suspend();
                   if (continuation) {
                     archiveContinuations.put(
@@ -681,21 +697,21 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             // Where in the file to begin: an exact member for a position inside one, else the first from there.
             let first = 0;
             if (at) {
-              const exact = at.order !== '?';
+              const exact = at.mode !== 'start';
               first = context.units.findIndex((unit) => (exact ? unit.memberIndex === at.memberIndex : unit.memberIndex >= at.memberIndex));
               if (first < 0) {
                 if (exact) throw new ArchiveImportStoppedError('resume_point_invalid', 'The resume point is not a position in this archive.', file.relPath);
                 first = context.units.length;
               }
               const unit = context.units[first];
-              if (exact && unit && at.offset > unitSize(unit)) {
+              if (exact && unit && (at.offset > unitSize(unit) || (isStored(unit) && at.crc === undefined))) {
                 throw new ArchiveImportStoppedError('resume_point_invalid', 'The resume point is not a position in this archive.', file.relPath);
               }
             }
             for (let index = first; index < context.units.length; index += 1) {
-              const place: Place = at && index === first && at.order !== '?'
+              const place: Place = at && index === first && at.mode !== 'start'
                 ? at
-                : { fileIndex, memberIndex: context.units[index]!.memberIndex, offset: 0, ordinal: 0, order: '?' };
+                : { fileIndex, memberIndex: context.units[index]!.memberIndex, offset: 0, mode: 'start', order: '?', style: '', prev: '' };
               yield* readUnit(context, index, place);
               if (run.stopped || run.finished) return;
             }

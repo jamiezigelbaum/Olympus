@@ -915,6 +915,8 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
         { kind: 'system_message', count: 318 },
         { kind: 'message_empty', count: 6 },
         { kind: 'status_updates', count: 41 },
+        { kind: 'item_repeated', count: 112 },
+        { kind: 'files_unconfirmed', count: 1 },
       ],
     });
   } else if (state === 'archives-empty') {

@@ -381,6 +381,8 @@ describe('each archive under the Archives row', () => {
       fill(A.gaps.system_message.many, { n: '318' }),
       fill(A.gaps.message_empty.many, { n: '6' }),
       fill(A.gaps.status_updates.many, { n: '41' }),
+      fill(A.gaps.item_repeated.many, { n: '112' }),
+      A.gaps.files_unconfirmed.one,
     ]);
     // A mail archive is not a snapshot.
     const mail = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-imported') });

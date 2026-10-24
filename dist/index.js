@@ -13003,6 +13003,36 @@ function startsWithFromLine(head) {
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
 }
+function lastNameOf(name) {
+  return name.split("/").pop() ?? name;
+}
+function whatsAppNoiseName(name) {
+  const base = lastNameOf(name);
+  return name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/") || base.startsWith("._") || base === ".DS_Store";
+}
+function whatsAppNamed(name) {
+  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
+}
+function startsLikeWhatsAppChat(head) {
+  if (!head || head.length < 10 || head.includes(0))
+    return false;
+  for (const raw of new TextDecoder("utf-8").decode(head).split(`
+`).slice(0, 8)) {
+    const line = raw.replace(WHATSAPP_LINE_NOISE, "").replace(WHATSAPP_NARROW_SPACES, " ").replace(/\r$/, "");
+    if (line.trim() === "")
+      continue;
+    return WHATSAPP_FIRST_LINE.test(line);
+  }
+  return false;
+}
+function whatsAppIsExport(entry, needName) {
+  if (entry.kind !== "file")
+    return false;
+  if (entry.members) {
+    return entry.members.some((member) => member.kind === "file" && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
+  }
+  return entry.name.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -13012,7 +13042,7 @@ function isTelegramJsonHead(head) {
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -13029,6 +13059,32 @@ var init_archive_formats = __esm(() => {
         return;
       const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
       return inner ? [inner.relPath] : undefined;
+    }
+  });
+  WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
+  WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
+  WHATSAPP_FIRST_LINE = new RegExp(`^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`, "i");
+  WHATSAPP_LINE_NOISE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  WHATSAPP_NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
+  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
+    id: "whatsapp_chat",
+    label: "WhatsApp chat export",
+    family: "chat",
+    provider: "whatsapp_export",
+    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
+    citationLabel: "WhatsApp",
+    probeNames: Object.freeze(["*.txt", "*.zip"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
+      const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
+      return found.length > 0 ? found : undefined;
+    },
+    unconfirmed(probe) {
+      if (probe.chosen.kind === "file")
+        return 0;
+      return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
     }
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
@@ -13073,7 +13129,7 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, WHATSAPP_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
   CONNECTOR_FACTORIES = new Map;
 });
 
@@ -13493,10 +13549,10 @@ var init_vocabulary = __esm(() => {
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
-    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes" },
-    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items" }
+    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
+    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "Snapshot, not updated" },
+    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes", snapshot: "" },
+    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
@@ -13570,13 +13626,19 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+      message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
       media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, which part of a date is the day, that a line shaped like the start of a message is one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, which parts of dates are the day, that lines shaped like the start of a message are one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
+      item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      files_not_looked_at: { one: "1 file in the chosen folder was not looked at, so it was not imported if it is an export", many: "{n} files in the chosen folder were not looked at, so any of them that are exports were not imported" },
+      files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
@@ -18342,12 +18404,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -18611,6 +18673,7 @@ var init_remote_connections = __esm(() => {
 var init_state = __esm(() => {
   init_olympus_layout();
   init_atomic_file();
+  init_archive_formats();
   init_file_lease();
 });
 
@@ -19031,6 +19094,7 @@ class ZipMemberReader {
   compressedOffset = 0;
   inflateFinished = false;
   failure;
+  replayed = 0;
   constructor(archive, entry, dataStart, options) {
     this.archive = archive;
     this.entry = entry;
@@ -19099,6 +19163,9 @@ class ZipMemberReader {
   get crc32() {
     return this.crcKnown ? this.runningCrc : undefined;
   }
+  get replayedBytes() {
+    return this.replayed;
+  }
   get end() {
     return this.result;
   }
@@ -19121,11 +19188,13 @@ class ZipMemberReader {
         if (chunk.length <= skip) {
           this.runningCrc = crc32Update(this.runningCrc, chunk);
           this.pos += chunk.length;
+          this.replayed += chunk.length;
           continue;
         }
         const head = chunk.subarray(0, skip);
         this.runningCrc = crc32Update(this.runningCrc, head);
         this.pos += head.length;
+        this.replayed += head.length;
         chunk = chunk.subarray(skip);
       }
       this.crcBeforeLast = this.runningCrc;
@@ -19340,9 +19409,6 @@ var init_tier_set3 = __esm(() => {
   init_connector2();
 });
 
-// src/workers/whatsapp/connector.ts
-var init_connector4 = () => {};
-
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
   init_reactions();
@@ -19395,7 +19461,6 @@ var init_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/index.ts
 var init_whatsapp = __esm(() => {
-  init_connector4();
   init_live_connector();
   init_store_sync2();
   init_extraction_source();
@@ -29957,7 +30022,7 @@ var ARCHIVE_IMPORT_PARAMS = {
     enum: ["start", "status", "remove"],
     description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).'
   },
-  path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
+  path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, a WhatsApp chat export: its .txt or .zip, or a folder of them, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
   archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
 };
 var operations = [
@@ -30392,7 +30457,7 @@ var operations = [
   {
     name: "archive_import",
     description: [
-      "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
+      "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.",
       "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
       "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
       "Never open, read or copy the file yourself, and never retry to get around the approval.",

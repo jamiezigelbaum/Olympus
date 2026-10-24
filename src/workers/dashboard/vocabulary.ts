@@ -2121,9 +2121,12 @@ export const DASHBOARD_ARCHIVE_COPY = {
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
     media_not_imported: { one: '1 picture, recording or other file the archive refers to was not imported', many: '{n} pictures, recordings or other files the archive refers to were not imported' },
     item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },
-    assumption: { one: '1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, which part of a date is the day, or that no two files in a very large zip share the same bytes, which a damaged zip could break)', many: '{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, which parts of dates are the day, or that no two files in a very large zip share the same bytes, which a damaged zip could break)' },
+    assumption: { one: '1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, which part of a date is the day, that a line shaped like the start of a message is one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)', many: '{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, which parts of dates are the day, that lines shaped like the start of a message are one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)' },
     section_not_imported: { one: '1 part of the archive is not imported', many: '{n} parts of the archive are not imported' },
     file_damaged: { one: '1 file in the archive looks damaged, so what was read from it may be wrong', many: '{n} files in the archive look damaged, so what was read from them may be wrong' },
+    item_repeated: { one: '1 message was in more than one export file and was imported once', many: '{n} messages were in more than one export file and were imported once' },
+    files_not_looked_at: { one: '1 file in the chosen folder was not looked at, so it was not imported if it is an export', many: '{n} files in the chosen folder were not looked at, so any of them that are exports were not imported' },
+    files_unconfirmed: { one: '1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)', many: '{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },
   },
   seeWhy: 'See what was not read',

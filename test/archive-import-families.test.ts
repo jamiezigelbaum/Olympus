@@ -109,8 +109,8 @@ describe('the Archives card holds every family\'s stores', () => {
     expect(card.provider).toBe(ARCHIVE_NEUTRAL_PROVIDER);
   });
 
-  test('a chat archive\'s store set is counted on the card, not set aside as unassigned', () => {
-    const view = buildDashboardPreviewView('archives-chat');
+  test('a WhatsApp chat archive\'s store set is counted on the card, not set aside as unassigned', () => {
+    const view = buildDashboardPreviewView('archives-chat-whatsapp');
     const card = view.sources.find((source) => source.source_id === 'archive.imports')!;
     expect(card.coverage.indexed_items).toBe(12_644);
     expect(view.unassigned_corpora).toMatchObject({ corpus_count: 0, entries: [] });

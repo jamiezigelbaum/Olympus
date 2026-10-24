@@ -2,9 +2,9 @@
  * The line grammar of a WhatsApp chat export (`_chat.txt`, or the text file
  * of "WhatsApp Chat with <name>"), as pure functions over one line of text.
  *
- * It lives in core because format detection (core/archive-formats.ts) and the
- * archive connector (workers/archive-import/whatsapp/) must agree on what a
- * message header is, and detection imports no worker code.
+ * It belongs to the connector. Format detection (core/archive-formats.ts)
+ * carries its own, smaller signature of a first line, as every format's
+ * detection does, and a test holds the two in step.
  *
  * What is known about the exports, from the open-source parsers that read
  * them (not from WhatsApp's own documentation, which publishes no grammar):
@@ -43,6 +43,13 @@ export interface WhatsAppHeaderMatch {
   readonly second: number;
   /** Everything after the header: `Name: text`, or a notice. */
   readonly rest: string;
+  /**
+   * How the phone wrote this header, apart from the numbers: brackets or a
+   * dash, the date separator, a four-digit, two-digit or leading year, the
+   * time separator, seconds, AM/PM. One file keeps one style; a header in
+   * another style was not written by the same export.
+   */
+  readonly style: string;
 }
 
 /** A header whose date is resolved against a date order. */
@@ -68,24 +75,20 @@ export function normalizeWhatsAppLine(line: string): string {
   return line.replace(INVISIBLE, '').replace(NARROW_SPACES, ' ');
 }
 
-const DATE = '(\\d{1,4})[./-]\\s?(\\d{1,2})[./-]\\s?(\\d{1,4})';
-const TIME = '(\\d{1,2})[:.](\\d{2})(?:[:.](\\d{2}))?(?:\\s?([ap])\\.?\\s?m\\.?)?';
-const HEADER = new RegExp(
-  `^(?:\\[\\s?${DATE},?\\s+${TIME}\\s?\\]\\s?|${DATE},?\\s+${TIME}\\s[-\\u2013]\\s)(.*)$`,
-  'is',
-);
+const DATE = '(\\d{1,4})([./-])\\s?(\\d{1,2})[./-]\\s?(\\d{1,4})';
+const TIME = '(\\d{1,2})([:.])(\\d{2})(?:[:.](\\d{2}))?(?:\\s?([ap])\\.?\\s?m\\.?)?';
+const BRACKETED = new RegExp(`^\\[\\s?${DATE},?\\s+${TIME}\\s?\\]\\s?(.*)$`, 'is');
+const DASHED = new RegExp(`^${DATE},?\\s+${TIME}\\s[-\\u2013]\\s(.*)$`, 'is');
 
 /**
  * Reads a line as a message header, or undefined when it is not one. The line
  * is normalized first (`normalizeWhatsAppLine`).
  */
 export function matchWhatsAppHeader(line: string): WhatsAppHeaderMatch | undefined {
-  const found = HEADER.exec(line);
+  const bracketed = BRACKETED.exec(line);
+  const found = bracketed ?? DASHED.exec(line);
   if (!found) return undefined;
-  // The bracketed form fills groups 1 to 7, the dashed one groups 8 to 14; the rest is group 15.
-  const at = found[1] !== undefined ? 1 : 8;
-  const [g1, g2, g3, hourText, minuteText, secondText, meridiem] = found.slice(at, at + 7);
-  const rest = found[15] ?? '';
+  const [, g1, dateSep, g2, g3, hourText, timeSep, minuteText, secondText, meridiem, rest = ''] = found;
   if (g1 === undefined || g2 === undefined || g3 === undefined || hourText === undefined || minuteText === undefined) return undefined;
   if (g1.length === 3) return undefined;
   const yearFirst = g1.length === 4;
@@ -116,6 +119,7 @@ export function matchWhatsAppHeader(line: string): WhatsAppHeaderMatch | undefin
     minute,
     second,
     rest,
+    style: `${bracketed ? 'b' : 'd'}${dateSep}${yearFirst ? 'Y' : g3.length === 4 ? '4' : '2'}${timeSep}${secondText !== undefined ? 's' : 'n'}${meridiem !== undefined ? 'm' : 'h'}`,
   };
   // A line that names a date no calendar has (31/02) is text, not a header.
   return resolveWhatsAppHeader(match, 'dmy') || resolveWhatsAppHeader(match, 'mdy') ? match : undefined;
@@ -227,13 +231,17 @@ export function whatsAppMediaMarkerCount(text: string): number {
 }
 
 /**
- * Whether a zip member holds a chat: WhatsApp names it `_chat.txt` (iOS) or
- * `WhatsApp Chat with <name>.txt` (Android, in the phone's language).
+ * Whether a file or zip member is named the way WhatsApp names the text of a
+ * chat export: `_chat.txt` (iOS) or `WhatsApp Chat with <name>.txt` (Android;
+ * `WhatsApp Chat - <name>.txt` is the same in another phrasing). This is the
+ * evidence that lets a folder's file be taken without being chosen by name.
+ * A phone set to another language names the Android file in that language;
+ * such a file is imported when chosen itself, not found in a folder.
  */
-export function isWhatsAppChatMemberName(name: string): boolean {
+export function hasWhatsAppExportName(name: string): boolean {
   if (isWhatsAppZipNoise(name)) return false;
   const last = (name.split('/').pop() ?? name).toLowerCase();
-  return last === '_chat.txt' || (last.endsWith('.txt') && last.includes('whatsapp'));
+  return last === '_chat.txt' || /^whatsapp chat (?:with|-)\s+\S.*\.txt$/.test(last);
 }
 
 const EXPORT_FILENAME = /^WhatsApp Chat (?:with|-)\s*(.+)$/i;
@@ -286,4 +294,18 @@ export function looksLikeWhatsAppChat(head: Uint8Array | undefined): boolean {
 export function looksLikeZipHead(head: Uint8Array | undefined): boolean {
   return head !== undefined && head.length >= 4 && head[0] === 0x50 && head[1] === 0x4b
     && ((head[2] === 0x03 && head[3] === 0x04) || (head[2] === 0x05 && head[3] === 0x06));
+}
+
+/** Bytes at the start of a line that are enough to tell whether it is a message header. */
+export const WHATSAPP_HEADER_PREFIX_BYTES = 160;
+
+const prefixDecoder = new TextDecoder('utf-8');
+
+/**
+ * Whether a line starts a message, judged from its first bytes alone, so a
+ * line of megabytes costs no more to classify than a short one.
+ */
+export function startsWithWhatsAppHeader(lineStart: Uint8Array): boolean {
+  const prefix = lineStart.length > WHATSAPP_HEADER_PREFIX_BYTES ? lineStart.subarray(0, WHATSAPP_HEADER_PREFIX_BYTES) : lineStart;
+  return matchWhatsAppHeader(normalizeWhatsAppLine(prefixDecoder.decode(prefix))) !== undefined;
 }

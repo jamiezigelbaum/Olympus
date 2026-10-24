@@ -18,6 +18,7 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import { posix } from 'node:path';
 import {
+  ARCHIVE_COMMON_FINDINGS,
   archiveProbeNames,
   detectArchiveFormat,
   type ArchiveFormatDefinition,
@@ -101,6 +102,13 @@ export function prepareArchiveImport(input: {
     }
     if (detection.kind === 'ambiguous') return { kind: 'ambiguous', formats: detection.formats };
     const relPaths = detection.files.map((file) => (file === '' ? chosenRelPath : joinRelative(chosenRelPath, file)));
+    // A folder can hold more than the first look takes in, and files that look like exports
+    // without saying so: neither is silent, both are counted on the record.
+    const unconfirmed = detection.format.unconfirmed?.(probe) ?? 0;
+    const skipped: Record<string, number> = {
+      ...(probe.notLookedAt ? { [ARCHIVE_COMMON_FINDINGS.filesNotLookedAt]: probe.notLookedAt } : {}),
+      ...(unconfirmed > 0 ? { [ARCHIVE_COMMON_FINDINGS.filesUnconfirmed]: unconfirmed } : {}),
+    };
     const files = buildArchiveManifest(root, relPaths);
     const records = input.state.list();
     const same = findSameVersionImport(records, files);
@@ -120,6 +128,7 @@ export function prepareArchiveImport(input: {
         chosen_rel_path: chosenRelPath,
         files,
         manifest_sha256: archiveManifestSha256(files),
+        ...(Object.keys(skipped).length > 0 ? { skipped } : {}),
       },
     };
   } catch (error) {

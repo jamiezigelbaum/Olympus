@@ -1,19 +1,16 @@
 // The WhatsApp export grammar and its streaming readers: header lines in the
-// styles phones write, the date order read from the file, messages that span
-// lines, and the same messages whatever size the chunks come in. Synthetic
+// styles phones write, the date order read from the file's headers, messages
+// that span lines, the same messages whatever size the chunks come in, and
+// readers that stop at a byte read and start again exactly there. Synthetic
 // text only.
 
 import { describe, expect, test } from 'bun:test';
-import { fileByteSource } from '../src/workers/archive-import/byte-source.ts';
+import { WHATSAPP_ARCHIVE_FORMAT, type ArchiveProbe } from '../src/core/archive-formats.ts';
+import { crc32Update, fileByteSource, type ArchiveByteSource } from '../src/workers/archive-import/byte-source.ts';
+import { ZipArchive, ZipMemberReader } from '../src/workers/archive-import/zip-reader.ts';
 import {
-  WhatsAppFormatError,
-  WhatsAppLineReader,
-  WhatsAppMessageReader,
-  scanWhatsAppDateOrder,
-  type WhatsAppRawMessage,
-} from '../src/workers/archive-import/whatsapp/messages.ts';
-import {
-  isWhatsAppChatMemberName,
+  WHATSAPP_HEADER_PREFIX_BYTES,
+  hasWhatsAppExportName,
   isWhatsAppMediaOmitted,
   isWhatsAppZipNoise,
   looksLikeWhatsAppChat,
@@ -21,11 +18,21 @@ import {
   normalizeWhatsAppLine,
   resolveWhatsAppHeader,
   splitWhatsAppSender,
+  startsWithWhatsAppHeader,
   whatsAppAttachedFileName,
   whatsAppChatNameFromStem,
   whatsAppMediaMarkerCount,
   whatsAppOrderEvidence,
-} from '../src/core/whatsapp-export-grammar.ts';
+} from '../src/workers/archive-import/whatsapp/grammar.ts';
+import {
+  WhatsAppFormatError,
+  WhatsAppLineReader,
+  WhatsAppMessageReader,
+  scanWhatsAppDateOrder,
+  type WhatsAppEntry,
+  type WhatsAppRawMessage,
+} from '../src/workers/archive-import/whatsapp/messages.ts';
+import { buildZip, memoryRangeReader } from './helpers/zip-fixture.ts';
 import {
   BOM,
   LRM,
@@ -46,29 +53,52 @@ function memory(text: string | Uint8Array) {
   };
 }
 
-function readAll(text: string, options: { chunkBytes?: number; start?: number; startOrdinal?: number; requireHeaderFirst?: boolean; maxTextChars?: number } = {}): WhatsAppRawMessage[] {
+/** A source over text that keeps a CRC-32 of the bytes before its position, as a stored zip member does. */
+function checksummedSource(text: string, chunkBytes: number, start = 0): ArchiveByteSource {
+  const bytes = Buffer.from(text, 'utf8');
+  const inner = fileByteSource(memory(bytes), { chunkBytes, start });
+  return {
+    get position() { return inner.position; },
+    next: () => inner.next(),
+    unread: (count: number) => inner.unread(count),
+    get crc32() { return crc32Update(0, bytes.subarray(0, inner.position)); },
+  };
+}
+
+function crcBefore(text: string, offset: number): number {
+  return crc32Update(0, Buffer.from(text, 'utf8').subarray(0, offset));
+}
+
+interface ReadOptions {
+  chunkBytes?: number;
+  start?: number;
+  entry?: WhatsAppEntry;
+  maxTextChars?: number;
+  maxMessageBytes?: number;
+}
+
+function readAll(text: string, options: ReadOptions = {}): WhatsAppRawMessage[] {
   const source = fileByteSource(memory(text), { chunkBytes: options.chunkBytes ?? 1024 * 1024, start: options.start ?? 0 });
-  const reader = new WhatsAppMessageReader(source, {
-    ...(options.startOrdinal !== undefined ? { startOrdinal: options.startOrdinal } : {}),
-    ...(options.requireHeaderFirst !== undefined ? { requireHeaderFirst: options.requireHeaderFirst } : {}),
+  const reader = new WhatsAppMessageReader(source, options.entry ?? { kind: 'start' }, {
     ...(options.maxTextChars !== undefined ? { maxTextChars: options.maxTextChars } : {}),
+    ...(options.maxMessageBytes !== undefined ? { maxMessageBytes: options.maxMessageBytes } : {}),
   });
   const messages: WhatsAppRawMessage[] = [];
-  for (let message = reader.next(); message; message = reader.next()) messages.push(message);
+  for (let step = reader.next(); step.kind === 'message'; step = reader.next()) messages.push(step.message);
   return messages;
 }
 
-describe('whatsapp header grammar', () => {
-  const styles: Array<[SyntheticStyle, 'dmy' | 'mdy' | 'ymd']> = [
-    ['ios-24-dmy', 'dmy'],
-    ['ios-12-mdy', 'mdy'],
-    ['android-24-dmy', 'dmy'],
-    ['android-12-mdy', 'mdy'],
-    ['android-dot-dmy', 'dmy'],
-    ['iso', 'ymd'],
-  ];
+const STYLES: Array<[SyntheticStyle, 'dmy' | 'mdy' | 'ymd']> = [
+  ['ios-24-dmy', 'dmy'],
+  ['ios-12-mdy', 'mdy'],
+  ['android-24-dmy', 'dmy'],
+  ['android-12-mdy', 'mdy'],
+  ['android-dot-dmy', 'dmy'],
+  ['iso', 'ymd'],
+];
 
-  test.each(styles)('%s: a message line reads back to the time it was written with', (style, order) => {
+describe('whatsapp header grammar', () => {
+  test.each(STYLES)('%s: a message line reads back to the time it was written with', (style, order) => {
     for (const at of ['2026-05-14T21:08:07', '2026-05-14T00:05:00', '2026-05-14T12:30:00', '2025-12-31T23:59:58']) {
       const line = messageLine({ at, sender: 'Sam Example', text: 'Hello: there' }, { style });
       const match = matchWhatsAppHeader(normalizeWhatsAppLine(line));
@@ -78,6 +108,19 @@ describe('whatsapp header grammar', () => {
       expect(resolved.sentAt).toBe(`${at.slice(0, 17)}${seconds}`);
       expect(splitWhatsAppSender(match!.rest)).toEqual({ sender: 'Sam Example', text: 'Hello: there' });
     }
+  });
+
+  test('each header carries the style it was written in, and one export keeps one style', () => {
+    const styleOf = (style: SyntheticStyle) =>
+      matchWhatsAppHeader(normalizeWhatsAppLine(messageLine({ at: '2026-05-14T21:08:07', sender: 'A', text: 'x' }, { style })))!.style;
+    const all = STYLES.map(([style]) => styleOf(style));
+    expect(new Set(all).size).toBe(STYLES.length);
+    // Another message of the same export is in the same style, whatever its numbers.
+    const other = matchWhatsAppHeader(normalizeWhatsAppLine(messageLine({ at: '2025-01-02T03:04:05', sender: 'B', text: 'y' }, { style: 'ios-12-mdy' })))!.style;
+    expect(other).toBe(styleOf('ios-12-mdy'));
+    // A header typed by hand into a message differs from the export's style in a part or two.
+    expect(matchWhatsAppHeader('[1/2/23, 10:00] X: y')!.style).not.toBe(styleOf('ios-12-mdy'));
+    expect(matchWhatsAppHeader('1/2/23, 10:00 - X: y')!.style).not.toBe(styleOf('android-12-mdy'));
   });
 
   test('a day above 12 settles the order; two small numbers do not', () => {
@@ -136,18 +179,20 @@ describe('whatsapp header grammar', () => {
     expect(whatsAppMediaMarkerCount('plain words')).toBe(0);
   });
 
-  test('chat names come from the export file names; zip noise and chat members are told apart', () => {
+  test('chat names come from the export file names; zip noise and export names are told apart', () => {
     expect(whatsAppChatNameFromStem('WhatsApp Chat with Harbour crew')).toBe('Harbour crew');
     expect(whatsAppChatNameFromStem('WhatsApp Chat - Sam Example')).toBe('Sam Example');
     expect(whatsAppChatNameFromStem('_chat')).toBeUndefined();
     expect(isWhatsAppZipNoise('__MACOSX/._chat.txt')).toBe(true);
     expect(isWhatsAppZipNoise('folder/')).toBe(true);
     expect(isWhatsAppZipNoise('_chat.txt')).toBe(false);
-    expect(isWhatsAppChatMemberName('_chat.txt')).toBe(true);
-    expect(isWhatsAppChatMemberName('Export/WhatsApp Chat with Sam.txt')).toBe(true);
-    expect(isWhatsAppChatMemberName('__MACOSX/._WhatsApp Chat with Sam.txt')).toBe(false);
-    expect(isWhatsAppChatMemberName('notes.txt')).toBe(false);
-    expect(isWhatsAppChatMemberName('00000042-PHOTO.jpg')).toBe(false);
+    expect(hasWhatsAppExportName('_chat.txt')).toBe(true);
+    expect(hasWhatsAppExportName('Export/WhatsApp Chat with Sam.txt')).toBe(true);
+    expect(hasWhatsAppExportName('__MACOSX/._WhatsApp Chat with Sam.txt')).toBe(false);
+    expect(hasWhatsAppExportName('notes.txt')).toBe(false);
+    expect(hasWhatsAppExportName('build.txt')).toBe(false);
+    expect(hasWhatsAppExportName('whatsapp-debug.txt')).toBe(false);
+    expect(hasWhatsAppExportName('00000042-PHOTO.jpg')).toBe(false);
   });
 
   test('detection looks at the first bytes only: a header line, as text', () => {
@@ -158,6 +203,52 @@ describe('whatsapp header grammar', () => {
     expect(looksLikeWhatsAppChat(head('{"name": "Synthetic export", "chats": []}'))).toBe(false);
     expect(looksLikeWhatsAppChat(undefined)).toBe(false);
     expect(looksLikeWhatsAppChat(new Uint8Array([0x5b, 0x00, 0x31, 0x00, 0x2f, 0x00, 0x31, 0x00, 0x2f, 0x00, 0x32, 0x00]))).toBe(false);
+  });
+
+  test('a line is judged a header from its first bytes, so a line of megabytes costs no more than a short one', () => {
+    const header = `14/05/2026, 21:08 - Sam Example: ${'y'.repeat(1_000_000)}`;
+    expect(header.length).toBeGreaterThan(WHATSAPP_HEADER_PREFIX_BYTES);
+    expect(startsWithWhatsAppHeader(Buffer.from(header, 'utf8'))).toBe(true);
+    expect(startsWithWhatsAppHeader(Buffer.from(`${'y'.repeat(1_000_000)} 14/05/2026, 21:08 - Sam Example: x`, 'utf8'))).toBe(false);
+    expect(startsWithWhatsAppHeader(Buffer.from('plain', 'utf8'))).toBe(false);
+  });
+});
+
+describe('detection and the connector grammar agree', () => {
+  // The format definition carries its own smaller signature (core does not hold the grammar).
+  // Everything the grammar reads as a first line must be a first line the definition accepts, and
+  // text neither reads must be refused by both. The signature may be looser on impossible dates.
+  const probeOf = (text: string): ArchiveProbe => ({
+    chosen: { relPath: '', name: 'chat.txt', kind: 'file', head: new Uint8Array(Buffer.from(text, 'utf8')) },
+    children: [],
+  });
+  const detects = (text: string): boolean => WHATSAPP_ARCHIVE_FORMAT.detect(probeOf(text)) !== undefined;
+
+  test('every style the phones write, with their invisible marks, is detected', () => {
+    const times = ['2026-05-14T21:08:07', '2026-05-14T00:05:00', '2026-05-14T12:30:00', '2025-12-31T23:59:58'];
+    for (const [style] of STYLES) {
+      for (const at of times) {
+        for (const decorate of [(text: string) => text, (text: string) => `${BOM}${text}`, (text: string) => text.replace(/\n$/, '\r\n')]) {
+          const text = decorate(chatText([{ at, sender: 'Sam Example', text: 'hello there' }], { style }));
+          expect(looksLikeWhatsAppChat(Buffer.from(text, 'utf8'))).toBe(true);
+          expect(detects(text)).toBe(true);
+        }
+      }
+    }
+  });
+
+  test('prose, JSON, mail, binary and an empty file are refused by both', () => {
+    for (const text of [
+      'Dear diary, today was a long synthetic day.\nNothing happened.\n',
+      '{"name":"Synthetic","chats":{"list":[]}}',
+      'From sender@example.invalid Mon Jan  5 10:00:00 2015\nSubject: x\n',
+      '',
+      '\n\n   \n',
+      `${String.fromCharCode(0).repeat(40)}14/05/2026, 10:00 - A: x`,
+    ]) {
+      expect(looksLikeWhatsAppChat(Buffer.from(text, 'utf8'))).toBe(false);
+      expect(detects(text)).toBe(false);
+    }
   });
 });
 
@@ -174,14 +265,13 @@ describe('whatsapp message reader', () => {
     expect(messages.map((message) => message.sender)).toEqual(['Sam Example', 'Alex Example', 'Sam Example', undefined, 'Alex Example']);
     expect(messages[2]!.text).toBe('first line\nsecond line\n\nfourth line');
     expect(messages[3]!.text).toBe('Messages and calls are end-to-end encrypted.');
-    expect(messages.map((message) => message.ordinal)).toEqual([0, 1, 2, 3, 4]);
     expect(messages[0]!.offset).toBe(0);
     for (const message of messages) {
       expect(Buffer.from(sample, 'utf8').subarray(message.offset, message.offset + 10).toString('utf8')).toMatch(/^\d{2}\/\d{2}\/\d{4}/);
     }
   });
 
-  test('chunk size changes nothing: the same messages, offsets and ordinals, down to one byte', () => {
+  test('chunk size changes nothing: the same messages and offsets, down to one byte', () => {
     const whole = readAll(sample);
     for (const chunkBytes of [1, 2, 3, 7, 16, 64]) {
       expect(readAll(sample, { chunkBytes })).toEqual(whole);
@@ -191,14 +281,14 @@ describe('whatsapp message reader', () => {
     expect(readAll(crlf)[0]!.text).toBe('The synthetic harbour log, entry 0.');
   });
 
-  test('it resumes at a message offset with the ordinal that goes with it, and refuses a place inside a message', () => {
+  test('it enters at a message and refuses a place that is not one', () => {
     const whole = readAll(sample);
-    const rest = readAll(sample, { start: whole[2]!.offset, startOrdinal: 2, requireHeaderFirst: true });
+    const rest = readAll(sample, { start: whole[2]!.offset, entry: { kind: 'message' } });
     expect(rest).toEqual(whole.slice(2));
-    expect(() => readAll(sample, { start: whole[2]!.offset + 5, startOrdinal: 2, requireHeaderFirst: true })).toThrow(WhatsAppFormatError);
+    expect(() => readAll(sample, { start: whole[2]!.offset + 5, entry: { kind: 'message' } })).toThrow(WhatsAppFormatError);
     // A line of a multi-line message is not a place to resume at.
     const secondLine = Buffer.from(sample, 'utf8').indexOf('second line');
-    expect(() => readAll(sample, { start: secondLine, startOrdinal: 3, requireHeaderFirst: true })).toThrow(WhatsAppFormatError);
+    expect(() => readAll(sample, { start: secondLine, entry: { kind: 'message' } })).toThrow(WhatsAppFormatError);
   });
 
   test('lines before the first header are ignored; a file with no header has no message', () => {
@@ -208,7 +298,7 @@ describe('whatsapp message reader', () => {
     expect(readAll('')).toEqual([]);
   });
 
-  test('a message over the bound is cut and says so; the next message is not affected', () => {
+  test('a message over the text bound is cut and says so; the next message is not affected', () => {
     const long = 'x'.repeat(5000);
     const text = chatText([
       { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: `${long}\n${long}` },
@@ -238,60 +328,202 @@ describe('whatsapp message reader', () => {
     expect(messages[1]!.text).toBe('after');
   });
 
-  test('the message in progress can be given back to the source, so a stream resumes exactly there', () => {
-    const text = chatText(syntheticChat(40), { style: 'android-24-dmy' });
-    const source = fileByteSource(memory(text), { chunkBytes: 1024 * 1024 });
-    const reader = new WhatsAppMessageReader(source);
-    const first = [reader.next()!, reader.next()!, reader.next()!];
-    expect(reader.canSettle()).toBe(true);
-    const pending = reader.pending!;
-    expect(pending.ordinal).toBe(3);
-    expect(reader.settle()).toBe(true);
-    expect(source.position).toBe(pending.offset);
-    const resumed = readAll(text, { start: pending.offset, startOrdinal: pending.ordinal, requireHeaderFirst: true });
-    expect([...first, ...resumed]).toEqual(readAll(text));
+  test('a header pasted into a message body starts a message, in its own style: the format cannot say otherwise', () => {
+    const text = [
+      '14/05/2026, 10:00 - Sam Example: look at what Pat sent',
+      '[1/2/23, 10:00] Pat: pasted from another chat',
+      '14/05/2026, 10:05 - Alex Example: thanks',
+      '',
+    ].join('\n');
+    const messages = readAll(text);
+    expect(messages.map((message) => message.sender)).toEqual(['Sam Example', 'Pat', 'Alex Example']);
+    // The reader hands over each header as the file wrote it, with its style, so the caller can tell a stranger from the export's own.
+    expect(messages[1]!.header.style).not.toBe(messages[0]!.header.style);
+    expect(messages[2]!.header.style).toBe(messages[0]!.header.style);
+  });
+});
+
+describe('whatsapp message reader stops at byte reads and starts again exactly there', () => {
+  /** A chat whose middle message is far larger than the message bound the readers are given. */
+  const huge = chatText([
+    { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: 'before' },
+    { at: '2026-05-14T10:01:00', sender: 'Alex Example', text: Array.from({ length: 400 }, (_, index) => `line ${index} ${'z'.repeat(280)}`).join('\n') },
+    { at: '2026-05-14T10:02:00', sender: 'Sam Example', text: 'after' },
+    { at: '2026-05-14T10:03:00', sender: 'Alex Example', text: 'and last' },
+  ], { style: 'android-24-dmy' });
+  const hugeFile = memory(huge);
+  const MESSAGE_BOUND = 2000;
+
+  test('a message over the byte bound is cut after about that many bytes, not read to its end', () => {
+    const source = fileByteSource(hugeFile, { chunkBytes: 512 });
+    const reader = new WhatsAppMessageReader(source, { kind: 'start' }, { maxMessageBytes: MESSAGE_BOUND });
+    const first = reader.next();
+    expect(first.kind === 'message' && first.message.text).toBe('before');
+    const second = reader.next();
+    expect(second.kind).toBe('message');
+    if (second.kind !== 'message') return;
+    expect(second.message.cut).toBe(true);
+    const bigStart = Buffer.from(huge, 'utf8').indexOf('14/05/2026, 10:01');
+    // Nothing past the bound and the chunk it ended in was read: the other 100 KB were not.
+    expect(source.position).toBeLessThanOrEqual(bigStart + MESSAGE_BOUND + 512 * 3);
+    expect(hugeFile.size).toBeGreaterThan(100_000);
   });
 
-  test('a header that starts in an earlier chunk cannot be given back', () => {
-    const text = chatText(syntheticChat(3), { style: 'android-24-dmy' });
-    const source = fileByteSource(memory(text), { chunkBytes: 20 });
-    const reader = new WhatsAppMessageReader(source);
-    reader.next();
-    expect(reader.canSettle()).toBe(false);
-    expect(reader.settle()).toBe(false);
+  test('reading may stop while the rest of a cut message is dropped, and a new reader goes on from where it says', () => {
+    const whole = readAll(huge, { maxMessageBytes: MESSAGE_BOUND, chunkBytes: 512 });
+    expect(whole.map((message) => message.text.slice(0, 6))).toEqual(['before', 'line 0', 'after', 'and la']);
+    for (const chunkBytes of [64, 512]) {
+      // A line is judged from its first 160 bytes, so a stop inside one starts it again: enough reads to get past them.
+      for (const allowReads of [3, 5, 40]) {
+        const messages: WhatsAppRawMessage[] = [];
+        let entry: WhatsAppEntry = { kind: 'start' };
+        let start = 0;
+        let rounds = 0;
+        let pauses = 0;
+        for (; rounds < 50_000; rounds += 1) {
+          const source = fileByteSource(hugeFile, { chunkBytes, start });
+          const reader: WhatsAppMessageReader = new WhatsAppMessageReader(source, entry, { maxMessageBytes: MESSAGE_BOUND });
+          let paused = false;
+          for (;;) {
+            // Each step may take `allowReads` reads of dropped bytes before the reader has to stop.
+            let allowed = allowReads;
+            const step = reader.next(() => allowed-- > 0);
+            if (step.kind === 'message') { messages.push(step.message); continue; }
+            paused = step.kind === 'paused';
+            break;
+          }
+          if (!paused) break;
+          pauses += 1;
+          const at: NonNullable<ReturnType<WhatsAppMessageReader['resume']>> = reader.resume()!;
+          // A pause is always in the lines being dropped, never in the middle of a message.
+          expect(at.kind).toBe('skip');
+          start = at.offset;
+          entry = at.kind === 'skip' ? { kind: 'skip', midLine: at.midLine } : { kind: 'message' };
+        }
+        expect(rounds).toBeLessThan(50_000);
+        expect(messages).toEqual(whole);
+        // The reads were limited, so the stop happened: 100 KB of dropped bytes cannot be read in a few small chunks.
+        if (allowReads <= 5 && chunkBytes <= 64) expect(pauses).toBeGreaterThan(5);
+      }
+    }
+  });
+
+  test('the resume point of a message is its header line, with the checksum of everything before it', () => {
+    const text = chatText(syntheticChat(12), { style: 'android-24-dmy' });
+    for (const chunkBytes of [1, 5, 16, 64, 1024]) {
+      const source = checksummedSource(text, chunkBytes);
+      const reader = new WhatsAppMessageReader(source);
+      const seen: number[] = [];
+      for (let step = reader.next(); step.kind === 'message'; step = reader.next()) {
+        seen.push(step.message.offset);
+        const at = reader.resume();
+        if (!at) continue;
+        expect(at.kind).toBe('message');
+        // The header line that begins the next message may straddle chunks; its checksum is still known.
+        expect(at.crc).toBe(crcBefore(text, at.offset));
+        expect(Buffer.from(text, 'utf8').subarray(at.offset, at.offset + 2).toString('utf8')).toMatch(/^\d\d$/);
+      }
+      expect(seen).toHaveLength(12);
+    }
+  });
+
+  test('a stored zip member resumed at a header that straddled a read still verifies to its end', () => {
+    // Messages one read long less 20 bytes, so every header begins 20 bytes before a read ends.
+    const read = 1024 * 1024;
+    const prefix = messageLine({ at: '2026-05-14T10:00:00', sender: 'Sam Example', text: '' }, { style: 'android-24-dmy' });
+    const text = chatText(Array.from({ length: 4 }, (_, index) => ({
+      at: `2026-05-14T10:0${index}:00`,
+      sender: 'Sam Example',
+      text: 'x'.repeat(read - 20 - Buffer.byteLength(prefix, 'utf8') - 1),
+    })), { style: 'android-24-dmy' });
+    const archive = ZipArchive.open(memoryRangeReader(buildZip([{ name: '_chat.txt', data: Buffer.from(text, 'utf8'), method: 'stored' }])));
+    const entry = [...archive.entries()][0]!;
+    let offset = 0;
+    let crc: number | undefined;
+    let ends = 0;
+    const found: number[] = [];
+    for (let pass = 0; pass < 10; pass += 1) {
+      const member = ZipMemberReader.open(archive, entry, { start: offset, ...(crc !== undefined ? { startCrc: crc } : {}) });
+      const reader = new WhatsAppMessageReader(member, offset === 0 ? { kind: 'start' } : { kind: 'message' });
+      const step = reader.next();
+      if (step.kind !== 'message') throw new Error('expected a message');
+      found.push(step.message.offset);
+      const at = reader.resume();
+      if (!at) {
+        // The last message ends the member: its checksum must have been followed all the way.
+        for (let more = reader.next(); more.kind !== 'end'; more = reader.next());
+        expect(member.end?.crcOk).toBe(true);
+        ends += 1;
+        member.close();
+        break;
+      }
+      // The next header started inside the read this message ended in, and its checksum is known.
+      expect(at.crc).toBeDefined();
+      offset = at.offset;
+      crc = at.crc;
+      member.close();
+    }
+    expect(ends).toBe(1);
+    expect(found).toHaveLength(4);
   });
 });
 
 describe('whatsapp date order scan', () => {
-  const scan = (text: string, chunkBytes = 1024 * 1024) =>
-    scanWhatsAppDateOrder(fileByteSource(memory(text), { chunkBytes }));
+  const scan = (text: string, chunkBytes = 1024 * 1024, options: { maxBytes?: number; votesEnough?: number } = {}) =>
+    scanWhatsAppDateOrder(fileByteSource(memory(text), { chunkBytes }), options);
 
-  test('the first header that says wins, wherever it is', () => {
-    const early = chatText([{ at: '2026-05-14T10:00:00', sender: 'A', text: 'x' }], { style: 'android-24-dmy' });
-    expect(scan(early)).toEqual({ order: 'dmy', assumed: false });
-    const month = chatText([{ at: '2026-05-14T10:00:00', sender: 'A', text: 'x' }], { style: 'android-12-mdy' });
-    expect(scan(month)).toEqual({ order: 'mdy', assumed: false });
-    const late = [
-      ...Array.from({ length: 30 }, (_, index) => `03/04/2026, 10:${String(index).padStart(2, '0')} - A: ambiguous ${index}\n`),
-      '25/04/2026, 11:00 - A: settled\n',
-    ].join('');
-    expect(scan(late, 64)).toEqual({ order: 'dmy', assumed: false });
-    expect(scan(chatText([{ at: '2026-05-14T10:00:00', sender: 'A', text: 'x' }], { style: 'iso' }))).toEqual({ order: 'ymd', assumed: false });
+  test('a first part above 12 is a day, a second above 12 is a day, a leading year is a year', () => {
+    const one = (style: SyntheticStyle) => scan(chatText([{ at: '2026-05-14T10:00:00', sender: 'A', text: 'x' }], { style }));
+    expect(one('android-24-dmy')).toMatchObject({ order: 'dmy', assumed: false });
+    expect(one('android-12-mdy')).toMatchObject({ order: 'mdy', assumed: false });
+    expect(one('iso')).toMatchObject({ order: 'ymd', assumed: false });
   });
 
-  test('a file that never says is taken as day first, and says so', () => {
-    const text = '03/04/2026, 10:00 - A: one\n04/05/2026, 10:00 - A: two\n';
-    expect(scan(text)).toEqual({ order: 'dmy', assumed: true });
+  test('the order most headers say wins, not the first that says: one header pasted into a message cannot decide a file', () => {
+    const pasted = '25/03/2026, 10:01 - Pat: pasted from a day first chat';
+    const real = Array.from({ length: 6 }, (_, index) => `03/${20 + index}/2026, 11:0${index} - Sam: written by the month first phone`);
+    const text = `03/04/2026, 10:00 - Sam: opening\n${pasted}\n${real.join('\n')}\n`;
+    expect(scan(text)).toMatchObject({ order: 'mdy', assumed: false });
+    expect(scan(text, 16)).toMatchObject({ order: 'mdy', assumed: false });
+  });
+
+  test('a tie between orders, or headers that never say, is day first and says it was taken', () => {
+    expect(scan('03/25/2026, 10:00 - A: one\n25/03/2026, 10:01 - A: two\n')).toMatchObject({ order: 'dmy', assumed: true });
+    expect(scan('03/04/2026, 10:00 - A: one\n04/05/2026, 10:00 - A: two\n')).toMatchObject({ order: 'dmy', assumed: true });
   });
 
   test('a file whose dates read the same either way is not an assumption', () => {
-    expect(scan('05/05/2026, 10:00 - A: one\n06/06/2026, 10:00 - A: two\n')).toEqual({ order: 'dmy', assumed: false });
-    expect(scan('nothing\n')).toEqual({ order: 'dmy', assumed: false });
+    expect(scan('05/05/2026, 10:00 - A: one\n06/06/2026, 10:00 - A: two\n')).toMatchObject({ order: 'dmy', assumed: false });
+    const none = scan('nothing\n');
+    expect(none).toMatchObject({ order: 'dmy', assumed: false });
+    expect(none.style).toBeUndefined();
   });
 
-  test('a scan asked to stop says so', () => {
-    const lines = Array.from({ length: 2000 }, (_, index) => `03/04/2026, 10:00 - A: ambiguous ${index}\n`).join('');
-    expect(scanWhatsAppDateOrder(fileByteSource(memory(lines)), { shouldContinue: () => false })).toBeUndefined();
+  test('headers in another style than the first do not vote', () => {
+    const text = [
+      '03/04/2026, 10:00 - A: the first header fixes the style',
+      '[3/25/26, 11:00:00 AM] B: a bracketed stranger',
+      '[3/26/26, 11:01:00 AM] B: another',
+      '[3/27/26, 11:02:00 AM] B: and another',
+      '',
+    ].join('\n');
+    const found = scan(text);
+    expect(found).toMatchObject({ order: 'dmy', assumed: true });
+    expect(found.style).toBe(matchWhatsAppHeader('03/04/2026, 10:00 - A: x')!.style);
+  });
+
+  test('the scan reads a bounded amount and says how much, even through a file with no header at all', () => {
+    const lines = Array.from({ length: 4000 }, (_, index) => `03/04/2026, 10:00 - A: ambiguous ${index}\n`).join('');
+    expect(scan(lines, 64, { maxBytes: 1000 }).bytesRead).toBeLessThanOrEqual(1000 + 64 * 4);
+    const junk = `${'no header here, only filler text\n'.repeat(5000)}25/03/2026, 10:00 - A: late\n`;
+    const dropped = scan(junk, 64, { maxBytes: 1000 });
+    expect(dropped.bytesRead).toBeLessThanOrEqual(1000 + 64 * 4);
+    expect(dropped.style).toBeUndefined();
+    // Enough votes end it early.
+    const voting = Array.from({ length: 100 }, (_, index) => `25/03/2026, 10:${String(index % 60).padStart(2, '0')} - A: ${index}\n`).join('');
+    const early = scan(voting, 64, { votesEnough: 5 });
+    expect(early).toMatchObject({ order: 'dmy', assumed: false });
+    expect(early.bytesRead).toBeLessThan(voting.length / 2);
   });
 });
 
@@ -301,8 +533,23 @@ describe('whatsapp line reader', () => {
     const source = fileByteSource(memory(text), { chunkBytes: 4 });
     const reader = new WhatsAppLineReader(source);
     const lines: Array<[string, number]> = [];
-    for (let line = reader.next(); line; line = reader.next()) lines.push([Buffer.from(line.bytes).toString('utf8'), line.offset]);
+    for (let step = reader.next(); step.kind === 'line'; step = reader.next()) {
+      lines.push([Buffer.from(step.line.bytes).toString('utf8'), step.line.offset]);
+    }
     expect(lines).toEqual([['one', 0], ['two', 5], ['', 9], ['last without break', 10]]);
+  });
+
+  test('every line carries the checksum of the stream before it, whatever the chunk size and wherever a line straddles one', () => {
+    const text = chatText(syntheticChat(20), { style: 'ios-24-dmy', crlf: true });
+    for (const chunkBytes of [1, 2, 7, 33, 100, 4096]) {
+      const reader = new WhatsAppLineReader(checksummedSource(text, chunkBytes));
+      let count = 0;
+      for (let step = reader.next(); step.kind === 'line'; step = reader.next()) {
+        count += 1;
+        expect(step.line.crc).toBe(crcBefore(text, step.line.offset));
+      }
+      expect(count).toBe(20);
+    }
   });
 
   test('stamps for the fixture builders read the way the styles say', () => {

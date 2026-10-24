@@ -741,6 +741,8 @@ export class ZipMemberReader implements ArchiveByteSource {
   private compressedOffset = 0;
   private inflateFinished = false;
   private failure: ZipMemberError | undefined;
+  // Bytes inflated and thrown away to reach the offset the member was entered at.
+  private replayed = 0;
 
   private constructor(archive: ZipArchive, entry: ZipEntry, dataStart: number, options: ZipMemberOpenOptions) {
     this.archive = archive;
@@ -827,6 +829,16 @@ export class ZipMemberReader implements ArchiveByteSource {
   }
 
   /**
+   * How many bytes were inflated and thrown away to get to the offset this
+   * member was entered at: the cost of entering a deflated member somewhere
+   * other than its start with no continuation to take up. Zero otherwise.
+   * Only complete once the first `next()` has returned.
+   */
+  get replayedBytes(): number {
+    return this.replayed;
+  }
+
+  /**
    * How the member ended; only after `next()` returned undefined.
    */
   get end(): ZipMemberEnd | undefined {
@@ -850,11 +862,13 @@ export class ZipMemberReader implements ArchiveByteSource {
         if (chunk.length <= skip) {
           this.runningCrc = crc32Update(this.runningCrc, chunk);
           this.pos += chunk.length;
+          this.replayed += chunk.length;
           continue;
         }
         const head = chunk.subarray(0, skip);
         this.runningCrc = crc32Update(this.runningCrc, head);
         this.pos += head.length;
+        this.replayed += head.length;
         chunk = chunk.subarray(skip);
       }
       this.crcBeforeLast = this.runningCrc;

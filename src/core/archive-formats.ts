@@ -13,7 +13,6 @@
 import type { SourceConnector } from './contracts.ts';
 import type { ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
 import type { SourceFamily, SourceTrustDomain } from './source-index/types.ts';
-import { isWhatsAppChatMemberName, looksLikeWhatsAppChat } from './whatsapp-export-grammar.ts';
 
 /** How many first bytes the probe reads from a file. */
 export const ARCHIVE_PROBE_HEAD_BYTES = 4096;
@@ -53,6 +52,12 @@ export interface ArchiveProbe {
    * names a format asks for (`probeNames`).
    */
   children: readonly ArchiveProbeEntry[];
+  /**
+   * For a chosen folder: how many of its entries whose names a format asks for
+   * (`probeNames`) the probe did not look at because there were more than
+   * ARCHIVE_PROBE_MAX_NAMED of them. Zero when it looked at all.
+   */
+  notLookedAt?: number;
 }
 
 export interface ArchiveFormatDefinition {
@@ -89,6 +94,12 @@ export interface ArchiveFormatDefinition {
    * the probe is this format; undefined when it is not.
    */
   detect(probe: ArchiveProbe): readonly string[] | undefined;
+  /**
+   * For a chosen folder: how many of its files look like this format's
+   * exports but were not taken, because nothing besides their first bytes
+   * says so. They are counted and told, never silently left out.
+   */
+  unconfirmed?(probe: ArchiveProbe): number;
 }
 
 /**
@@ -133,13 +144,77 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   },
 });
 
+// --- WhatsApp chat export ------------------------------------------------------
+
+// The signature of a WhatsApp message line, as a first line: a date and a
+// time in brackets, or a date and a time and a dash. The connector's grammar
+// (workers/archive-import/whatsapp/grammar.ts) reads every style the phones
+// write and decides what a line means; detection only has to tell a chat
+// export from other text, so this stays a loose shape and a test holds it in
+// step with the grammar.
+const WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
+const WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
+const WHATSAPP_FIRST_LINE = new RegExp(
+  `^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`,
+  'i',
+);
+// Direction marks, a byte order mark and no-break spaces that phones put around a line.
+const WHATSAPP_LINE_NOISE = new RegExp('[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]', 'g');
+const WHATSAPP_NARROW_SPACES = new RegExp('[\\u00a0\\u202f\\u2007\\u2009]', 'g');
+// How WhatsApp names the text of an export: iOS `_chat.txt`, Android `WhatsApp Chat with <name>.txt`.
+const WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
+
+function lastNameOf(name: string): string {
+  return name.split('/').pop() ?? name;
+}
+
+function whatsAppNoiseName(name: string): boolean {
+  const base = lastNameOf(name);
+  return name.endsWith('/') || name.startsWith('__MACOSX/') || name.includes('/__MACOSX/')
+    || base.startsWith('._') || base === '.DS_Store';
+}
+
+/** Whether a name says it is the text of a WhatsApp export: the evidence a folder's file needs. */
+function whatsAppNamed(name: string): boolean {
+  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
+}
+
+function startsLikeWhatsAppChat(head: Uint8Array | undefined): boolean {
+  if (!head || head.length < 10 || head.includes(0)) return false;
+  for (const raw of new TextDecoder('utf-8').decode(head).split('\n').slice(0, 8)) {
+    const line = raw.replace(WHATSAPP_LINE_NOISE, '').replace(WHATSAPP_NARROW_SPACES, ' ').replace(/\r$/, '');
+    if (line.trim() === '') continue;
+    return WHATSAPP_FIRST_LINE.test(line);
+  }
+  return false;
+}
+
+/**
+ * Whether a file starts like a chat export. A zip is one when a text member of it
+ * does; with `needName`, the member (or the text file) must also be named as
+ * WhatsApp names an export. A header-shaped first line alone is the weaker evidence.
+ */
+function whatsAppIsExport(entry: ArchiveProbeEntry, needName: boolean): boolean {
+  if (entry.kind !== 'file') return false;
+  if (entry.members) {
+    return entry.members.some((member) =>
+      member.kind === 'file' && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith('.txt')
+      && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
+  }
+  return entry.name.toLowerCase().endsWith('.txt') && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
+}
+
 /**
  * A WhatsApp chat export: the text file of "Export Chat" (`_chat.txt` from an
- * iPhone, `WhatsApp Chat with <name>.txt` from an Android phone, or any .txt
- * that starts with a message line), or the zip WhatsApp shares, which holds
- * that text file and the chat's media. A chosen folder imports every export in
- * it. One format covers all of these, so a folder that mixes text files and zips
- * is not ambiguous.
+ * iPhone, `WhatsApp Chat with <name>.txt` from an Android phone), or the zip
+ * WhatsApp shares, which holds that text file and the chat's media. A chosen
+ * folder imports every export in it.
+ *
+ * What counts as an export depends on who chose it. A file the person chose
+ * themselves is one when it starts like a chat (any name). A file found in a
+ * chosen folder needs more: a text file named as WhatsApp names it, or a zip
+ * holding one, and the start of a chat inside. A header-shaped line alone is
+ * not enough there: a build log or a debug dump can start the same way.
  */
 export const WHATSAPP_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   id: 'whatsapp_chat',
@@ -148,19 +223,17 @@ export const WHATSAPP_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   provider: 'whatsapp_export',
   chooseHint: 'a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)',
   citationLabel: 'WhatsApp',
-  probeNames: Object.freeze(['_chat.txt', '*whatsapp*.txt', '*whatsapp*.zip']),
+  // Every text file and every zip is looked at, however it is named: the evidence is inside (see above).
+  probeNames: Object.freeze(['*.txt', '*.zip']),
   detect(probe: ArchiveProbe): readonly string[] | undefined {
-    const isChat = (entry: ArchiveProbeEntry): boolean => {
-      if (entry.kind !== 'file') return false;
-      if (entry.members) {
-        return entry.members.some((member) =>
-          member.kind === 'file' && isWhatsAppChatMemberName(member.relPath) && looksLikeWhatsAppChat(member.head));
-      }
-      return entry.name.toLowerCase().endsWith('.txt') && looksLikeWhatsAppChat(entry.head);
-    };
-    if (probe.chosen.kind === 'file') return isChat(probe.chosen) ? [''] : undefined;
-    const found = probe.children.filter(isChat).map((entry) => entry.relPath).sort();
+    if (probe.chosen.kind === 'file') return whatsAppIsExport(probe.chosen, false) ? [''] : undefined;
+    const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
     return found.length > 0 ? found : undefined;
+  },
+  unconfirmed(probe: ArchiveProbe): number {
+    if (probe.chosen.kind === 'file') return 0;
+    // Files that start like a chat but nothing else says they are an export: left alone, and counted.
+    return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
   },
 });
 
@@ -426,6 +499,12 @@ export const ARCHIVE_COMMON_FINDINGS = {
   sectionNotImported: 'section_not_imported',
   /** A file inside the archive whose bytes did not check out, so what was read of it may be wrong. */
   fileDamaged: 'file_damaged',
+  /** Skipped: items the listing produced that the archive's stores already held from an earlier file, so they were imported once. */
+  itemRepeated: 'item_repeated',
+  /** Skipped: files in a chosen folder the first look did not reach, so any export among them was not imported. */
+  filesNotLookedAt: 'files_not_looked_at',
+  /** Skipped: files in a chosen folder that look like exports but were not taken, because their names do not say so. */
+  filesUnconfirmed: 'files_unconfirmed',
 } as const;
 
 export interface ArchiveConnectorInput {

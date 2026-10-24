@@ -5,7 +5,7 @@
  * made up. Reusable by any test or release check that needs a chat export.
  *
  * Styles (what the open-source parsers of real exports show; see
- * core/whatsapp-export-grammar.ts for what each phone writes):
+ * workers/archive-import/whatsapp/grammar.ts for what each phone writes):
  * - `ios-24-dmy`     `[14/05/2026, 21:08:00] Name: text`
  * - `ios-12-mdy`     `[5/14/26, 9:08:00 PM] Name: text` (narrow no-break space before PM)
  * - `android-24-dmy` `14/05/2026, 21:08 - Name: text`

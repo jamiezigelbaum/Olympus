@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
-import type { ArchiveImportFinding } from '../../core/archive-formats.ts';
+import { ARCHIVE_COMMON_FINDINGS, type ArchiveImportFinding } from '../../core/archive-formats.ts';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
 import type { ArchiveManifestFile } from './manifest.ts';
 
@@ -194,6 +194,11 @@ export interface NewArchiveImportRecord {
   chosen_rel_path: string;
   files: ArchiveManifestFile[];
   manifest_sha256: string;
+  /**
+   * What was left out before any file was read, by kind (files of a chosen
+   * folder that were not taken or not looked at). Counted once, here.
+   */
+  skipped?: Record<string, number>;
 }
 
 export class ArchiveImportStateStore {
@@ -215,13 +220,14 @@ export class ArchiveImportStateStore {
 
   create(input: NewArchiveImportRecord): ArchiveImportRecord {
     const at = this.now().toISOString();
+    const { skipped, ...rest } = input;
     const record: ArchiveImportRecord = {
       archive_id: randomUUID(),
-      ...input,
+      ...rest,
       status: 'importing',
       created_at: at,
       updated_at: at,
-      findings: emptyArchiveFindings(),
+      findings: { ...emptyArchiveFindings(), skipped: { ...(skipped ?? {}) } },
     };
     this.mutate((state) => {
       state.archives.push(record);
@@ -261,6 +267,7 @@ export class ArchiveImportStateStore {
     archiveId: string,
     findings: readonly ArchiveImportFinding[],
     position?: { fileIndex: number; offset: number },
+    repeated = 0,
   ): void {
     if (findings.length === 0 && !position) return;
     this.update(archiveId, (record) => {
@@ -272,6 +279,12 @@ export class ArchiveImportStateStore {
       if (findings.length === 0 && !movesOn) return false;
       if (movesOn) record.read_position = { file_index: position!.fileIndex, offset: position!.offset };
       const tally = record.findings;
+      // Items the stores already held from earlier in the archive. Counted only when the import
+      // reads past where it had read: a page listed again after a restart finds its own items
+      // stored, and they are not repeats.
+      if (movesOn && repeated > 0) {
+        tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] = (tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] ?? 0) + repeated;
+      }
       // Positions counted by an earlier call. One call carries every finding
       // of the messages it covers, so several findings at one position count.
       const through = tally.through;
