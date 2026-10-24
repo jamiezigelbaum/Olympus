@@ -26,6 +26,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath } from './core/olympus-layout.ts';
 import { Database } from 'bun:sqlite';
+import { storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
 import {
@@ -283,6 +284,12 @@ interface DeleteTarget {
 
 const DELETE_CONFIRMATION_1 = 'DELETE OLYMPUS DATA';
 const DELETE_CONFIRMATION_2 = 'DELETE EVERYTHING';
+
+/** The source each store file in the lifecycle's inventory belongs to, by the file itself. */
+export function lifecycleStoreFileOwner(env: Record<string, string | undefined>): StoreFileOwner {
+  return storeFileOwnerLookup(lifecycleSourceSpecs().flatMap((spec) =>
+    (spec.connectorStorePaths?.({ env }) ?? []).map((path) => [path, spec.sourceId] as const)));
+}
 
 export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
   return [

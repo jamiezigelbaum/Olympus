@@ -319,8 +319,9 @@ import {
   sourceAccountUnavailableReason,
   storageAccountForCorpus,
   type StorageAccount,
+  type StoreFileOwner,
 } from '../../core/source-storage.ts';
-import { lifecycleSourceSpecs } from '../../data-lifecycle.ts';
+import { lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
@@ -3009,7 +3010,7 @@ export async function main(): Promise<void> {
     {
       collidingStores: laneConnectorStores,
       registeredCorpora: sourceCorpusRegistry.list(),
-      storeOwners: lifecycleStoreOwners(process.env),
+      storeOwner: lifecycleStoreFileOwner(process.env),
     },
   );
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
@@ -6292,15 +6293,6 @@ export function sourceIndexLaneStorageDecision(
   };
 }
 
-/** Each known store file's source, by path, from the data lifecycle's inventory. */
-function lifecycleStoreOwners(env: Record<string, string | undefined>): Map<string, string> {
-  const owners = new Map<string, string>();
-  for (const spec of lifecycleSourceSpecs()) {
-    for (const path of spec.connectorStorePaths?.({ env }) ?? []) owners.set(path, spec.sourceId);
-  }
-  return owners;
-}
-
 /**
  * Whether an account's stores may be mounted at worker boot. One that may not
  * (its data being deleted or deleted, or an unreadable registry) is left
@@ -7010,12 +7002,13 @@ export interface ConnectorStoreMountParsingOptions {
    */
   registeredCorpora?: ReadonlyArray<{ corpusId: string; sourceId: string }>;
   /**
-   * The source each known store file belongs to, by path (the data
-   * lifecycle's inventory). A declaration over another source's file opens
-   * under that source's account, so a lane withheld because its account is
-   * being deleted cannot be reopened under another corpus id.
+   * The source each known store file belongs to (the data lifecycle's
+   * inventory), found by the file rather than the path's spelling. A
+   * declaration over another source's file opens under that source's account,
+   * so a lane withheld because its account is being deleted cannot be
+   * reopened under another corpus id or another spelling of its path.
    */
-  storeOwners?: ReadonlyMap<string, string>;
+  storeOwner?: StoreFileOwner;
 }
 
 interface ValidatedConnectorStoreMountDeclaration {
@@ -7086,7 +7079,7 @@ export function parseConnectorStoreMountsFromEnv(
       }
       // An account that may not be opened throws here, and the declaration
       // is skipped and reported like any other that cannot mount.
-      const owner = options.storeOwners?.get(declaration.dbPath);
+      const owner = options.storeOwner?.(declaration.dbPath);
       const account = owner ? { sourceId: owner } : storageAccountForCorpus(declaration, options.registeredCorpora);
       const store = collidingStore ?? openConnectorStore(account, {
         dbPath: declaration.dbPath,

@@ -5063,6 +5063,30 @@ var init_release_manifest = __esm(() => {
   withheldAnswers = new WeakSet;
 });
 
+// src/core/operation-caller.ts
+function sanitizeCallerDisplayName(value) {
+  if (typeof value !== "string")
+    return;
+  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned)
+    return;
+  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
+}
+function operationCallerToWire(caller) {
+  const displayName = sanitizeCallerDisplayName(caller.displayName);
+  return {
+    surface: caller.surface,
+    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
+    ...displayName ? { display_name: displayName } : {},
+    ...caller.provider ? { provider: caller.provider } : {}
+  };
+}
+var OPERATION_CALLER_DISPLAY_NAME_MAX = 80, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  inProcessRemoteRequests = new WeakSet;
+});
+
 // src/core/sqlite-migrations.ts
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
@@ -6348,6 +6372,46 @@ var init_sovereignty = __esm(() => {
     encrypted_cloud: 2,
     standard_cloud: 1
   };
+});
+
+// src/core/worker-service.ts
+import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
+function workerServicePaths(platform2, homeDir, env = {}) {
+  homeDir = validatedAbsolutePath(homeDir, "home directory");
+  if (platform2 === "darwin") {
+    const logDir = join25(homeDir, "Library", "Logs", "Olympus");
+    return {
+      label: "com.openclaw.olympus.worker",
+      unitPath: join25(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join25(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join25(logDir, "worker.log"),
+      errorLogPath: join25(logDir, "worker.err")
+    };
+  }
+  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
+  const stateDir = join25(layout.stateHome, "olympus", "worker");
+  return {
+    label: "olympus-worker",
+    unitPath: join25(layout.configHome, "systemd", "user", "olympus-worker.service"),
+    envPath: layout.workerEnvPath,
+    logPath: join25(stateDir, "worker.log"),
+    errorLogPath: join25(stateDir, "worker.err")
+  };
+}
+function validatedAbsolutePath(value, label) {
+  const trimmed = value.trim();
+  if (trimmed && isAbsolute15(trimmed) && !/[\0\r\n]/.test(trimmed))
+    return trimmed;
+  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
+}
+var WORKER_LOG_TAIL_BYTES;
+var init_worker_service = __esm(() => {
+  init_linux_engine_layout();
+  init_atomic_file();
+  init_openclaw_executable();
+  init_operation_error();
+  init_worker_auth();
+  WORKER_LOG_TAIL_BYTES = 64 * 1024;
 });
 
 // src/core/managed-tools.ts
@@ -12914,6 +12978,14 @@ var init_connected_handles = __esm(() => {
 // src/core/google-handle-compatibility.ts
 var init_google_handle_compatibility = () => {};
 
+// src/workers/credential-broker/unpaired-sources.ts
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
+var init_unpaired_sources = __esm(() => {
+  init_atomic_file();
+  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+});
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -18379,6 +18451,128 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS;
+var init_waiting_private_questions = __esm(() => {
+  init_sqlite_migrations();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    perConnection: 20,
+    total: 50,
+    totalBytes: 256 * 1024,
+    answeredPerConnection: 50,
+    answeredBytesPerConnection: 1024 * 1024,
+    autoAnswersPerWindow: 5,
+    autoAnswerWindowMs: 60 * 60000,
+    answeredTotal: 500,
+    answeredBytes: 16 * 1024 * 1024,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000
+  });
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_olympus_layout();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_storage();
+  init_state();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire3 = createRequire4(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
+var init_manifest2 = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+  ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+});
+
+// src/workers/archive-import/requests.ts
+var STATUSES;
+var init_requests = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_manifest2();
+  init_state();
+  STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
+});
+
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_olympus_layout();
@@ -18394,6 +18588,9 @@ var init_tier_set3 = __esm(() => {
   init_tiered_store_set();
   init_connector2();
 });
+
+// src/workers/whatsapp/connector.ts
+var init_connector4 = () => {};
 
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
@@ -18421,26 +18618,75 @@ var init_store_sync2 = __esm(() => {
   });
 });
 
-// src/workers/archive-import/state.ts
-var init_state = __esm(() => {
-  init_olympus_layout();
-  init_atomic_file();
-  init_file_lease();
+// src/core/file-extraction-source.ts
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
+  });
 });
 
-// src/workers/archive-import/store.ts
-var ARCHIVE_STORE_PLACEMENT;
-var init_store2 = __esm(() => {
+// src/workers/whatsapp/extraction-source.ts
+var init_extraction_source = __esm(() => {
+  init_file_extraction_source();
+});
+
+// src/workers/whatsapp/index.ts
+var init_whatsapp = __esm(() => {
+  init_connector4();
+  init_live_connector();
+  init_store_sync2();
+  init_extraction_source();
+});
+
+// src/core/pairing-session-paths.ts
+var init_pairing_session_paths = __esm(() => {
   init_olympus_layout();
-  init_archive_formats();
-  init_source_corpus_registry();
+});
+
+// src/data-lifecycle.ts
+var init_data_lifecycle = __esm(() => {
+  init_olympus_layout();
   init_source_storage();
+  init_atomic_file();
+  init_operation_error();
+  init_sqlite_migrations();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_ingestion_policy();
+  init_dropbox_files();
+  init_store();
+  init_archive_formats();
+  init_store2();
   init_state();
-  ARCHIVE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    secretsInContent: true
-  });
+  init_requests();
+  init_google_connectors();
+  init_telegram_messages();
+  init_readwise();
+  init_tier_set2();
+  init_x_bookmarks();
+  init_tier_set3();
+  init_reconcile_state();
+  init_live_control2();
+  init_whatsapp();
+  init_sovereignty();
+  init_pairing_session_paths();
+  init_unpaired_sources();
+  init_source_corpus_registry();
+  init_public_source_capabilities();
+  init_worker_service();
+  init_media_cache();
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -18962,6 +19208,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_status();
   init_google_connectors();
   init_source_storage();
+  init_data_lifecycle();
   init_readwise();
   init_tier_set2();
   init_x_bookmarks();
@@ -21516,30 +21763,7 @@ function assertNoRawEmailFieldsAtPath(value, path) {
 // src/core/email.ts
 init_http_timeout();
 init_operation_error();
-
-// src/core/operation-caller.ts
-var OPERATION_CALLER_DISPLAY_NAME_MAX = 80;
-var UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
-function sanitizeCallerDisplayName(value) {
-  if (typeof value !== "string")
-    return;
-  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
-  if (!cleaned)
-    return;
-  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
-}
-function operationCallerToWire(caller) {
-  const displayName = sanitizeCallerDisplayName(caller.displayName);
-  return {
-    surface: caller.surface,
-    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
-    ...displayName ? { display_name: displayName } : {},
-    ...caller.provider ? { provider: caller.provider } : {}
-  };
-}
-var inProcessRemoteRequests = new WeakSet;
-
-// src/core/email.ts
+init_operation_caller();
 init_source_corpus_registry();
 
 // src/core/source-watch.ts
@@ -24401,45 +24625,7 @@ init_config();
 init_remote_access();
 init_sovereignty();
 init_worker_auth();
-
-// src/core/worker-service.ts
-init_linux_engine_layout();
-import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
-init_atomic_file();
-init_openclaw_executable();
-init_operation_error();
-init_worker_auth();
-var WORKER_LOG_TAIL_BYTES = 64 * 1024;
-function workerServicePaths(platform2, homeDir, env = {}) {
-  homeDir = validatedAbsolutePath(homeDir, "home directory");
-  if (platform2 === "darwin") {
-    const logDir = join25(homeDir, "Library", "Logs", "Olympus");
-    return {
-      label: "com.openclaw.olympus.worker",
-      unitPath: join25(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join25(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join25(logDir, "worker.log"),
-      errorLogPath: join25(logDir, "worker.err")
-    };
-  }
-  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
-  const stateDir = join25(layout.stateHome, "olympus", "worker");
-  return {
-    label: "olympus-worker",
-    unitPath: join25(layout.configHome, "systemd", "user", "olympus-worker.service"),
-    envPath: layout.workerEnvPath,
-    logPath: join25(stateDir, "worker.log"),
-    errorLogPath: join25(stateDir, "worker.err")
-  };
-}
-function validatedAbsolutePath(value, label) {
-  const trimmed = value.trim();
-  if (trimmed && isAbsolute15(trimmed) && !/[\0\r\n]/.test(trimmed))
-    return trimmed;
-  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
-}
-
-// src/core/engine-service.ts
+init_worker_service();
 init_consult_transport_zkapi();
 var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
@@ -24811,6 +24997,7 @@ import { existsSync as existsSync18, mkdirSync as mkdirSync15, readFileSync as r
 import { dirname as dirname27, join as join39 } from "node:path";
 import { homedir as homedir15 } from "node:os";
 init_openclaw_executable();
+init_worker_service();
 init_worker_auth();
 init_sovereignty();
 
@@ -25141,17 +25328,12 @@ import { mkdirSync as mkdirSync14, readFileSync as readFileSync26, rmSync as rmS
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname24, join as join33 } from "node:path";
 init_secret_store();
+init_worker_service();
 init_http_timeout();
 init_oauth_relay();
 init_publisher_oauth_client();
 init_connected_handles();
-
-// src/workers/credential-broker/unpaired-sources.ts
-init_atomic_file();
-var UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-
-// src/core/connect.ts
+init_unpaired_sources();
 init_credential_broker();
 
 // src/core/provider-account-identity.ts

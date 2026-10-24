@@ -3,7 +3,7 @@
 // account on its first writable open in the worker, and nowhere else.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -24,6 +24,7 @@ import {
   openTierSniffer,
   sourceAccountUnavailableReason,
   storageAccountForCorpus,
+  storeFileOwnerLookup,
 } from '../src/core/source-storage.ts';
 import type { LocalConnectorStoreOptions } from '../src/workers/connector-store/local-index.ts';
 import {
@@ -260,11 +261,40 @@ describe('worker mount decisions', () => {
         { dbPath: dropboxSecure, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' },
       ]), {
         reportFailure: (message) => failures.push(message),
-        storeOwners: new Map([[dropboxSecure, 'dropbox.files']]),
+        storeOwner: storeFileOwnerLookup([[dropboxSecure, 'dropbox.files']]),
       });
       expect(mounts).toEqual([]);
       expect(failures[0]).toContain('dropbox.files is not available: its data is being deleted.');
       expect(existsSync(dropboxSecure)).toBe(false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+  test('a JSON mount over a withheld source\'s file under another spelling of its path is refused too', () => {
+    const dropboxSecure = join(dir, 'dropbox-files-connector-store.sqlite');
+    writeFileSync(dropboxSecure, '');
+    symlinkSync(dropboxSecure, join(dir, 'alias.sqlite'));
+    linkSync(dropboxSecure, join(dir, 'hard-link.sqlite'));
+    markAccount('dropbox.files', 'deleting', ['secure_local.dropbox.files']);
+    const previous = { HOME: process.env.HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
+    process.env.HOME = env.HOME;
+    process.env.XDG_DATA_HOME = env.XDG_DATA_HOME;
+    try {
+      const failures: string[] = [];
+      const mounts = parseConnectorStoreMountsFromEnv(JSON.stringify([
+        join(dir, '.', 'dropbox-files-connector-store.sqlite'),
+        join(dir, 'alias.sqlite'),
+        join(dir, 'hard-link.sqlite'),
+      ].map((dbPath) => ({ dbPath, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' }))), {
+        reportFailure: (message) => failures.push(message),
+        storeOwner: storeFileOwnerLookup([[dropboxSecure, 'dropbox.files']]),
+      });
+      expect(mounts).toEqual([]);
+      expect(failures).toHaveLength(3);
+      for (const failure of failures) expect(failure).toContain('dropbox.files is not available: its data is being deleted.');
     } finally {
       for (const [key, value] of Object.entries(previous)) {
         if (value === undefined) delete process.env[key];

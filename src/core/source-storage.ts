@@ -16,6 +16,8 @@
  *
  * No instance cache: callers share the objects they open, as before.
  */
+import { statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
@@ -143,6 +145,30 @@ export function storageAccountForCorpus(
   const prefix = `${corpus.trustDomain}.`;
   const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : '';
   return { sourceId: unprefixed || corpus.corpusId };
+}
+
+/** The source that owns a store file, if any. */
+export type StoreFileOwner = (dbPath: string) => string | undefined;
+
+/**
+ * Finds a store file's owner by the file, not by how its path is spelled. A
+ * file that exists matches by device and inode, so a `./`, `..` or symlinked
+ * spelling of it finds the same owner; one not created yet matches by its
+ * resolved path.
+ */
+export function storeFileOwnerLookup(owned: Iterable<readonly [dbPath: string, sourceId: string]>): StoreFileOwner {
+  const owners = new Map<string, string>();
+  for (const [dbPath, sourceId] of owned) owners.set(storeFileKey(dbPath), sourceId);
+  return (dbPath) => owners.get(storeFileKey(dbPath));
+}
+
+function storeFileKey(dbPath: string): string {
+  try {
+    const stat = statSync(dbPath);
+    return `file:${stat.dev}:${stat.ino}`;
+  } catch {
+    return `path:${resolve(dbPath)}`;
+  }
 }
 
 function unavailableStateReason(state: Exclude<SourceRegistryAccountState, 'active'>): string {

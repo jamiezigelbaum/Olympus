@@ -72,10 +72,13 @@ const GUARDED_CLASSES = ['LocalConnectorStore', 'TierLedger', 'SecretLocationsIn
 // `Database`, `DatabaseSync`, `BunDatabase`: any class named like a database.
 const guarded = (name: string) => GUARDED_CLASSES.includes(name) || /Database/.test(name);
 
-/** The class a `new` names: `new X(`, `new ns.X(`, `new (X)(`. */
+/** The class a `new` names: `new X(`, `new ns.X(`, `new ns['X'](`, `new (X)(`. */
 function constructedName(expression: ts.Expression): string | undefined {
   if (ts.isIdentifier(expression)) return expression.text;
   if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+  if (ts.isElementAccessExpression(expression) && ts.isStringLiteralLike(expression.argumentExpression)) {
+    return expression.argumentExpression.text;
+  }
   if (ts.isParenthesizedExpression(expression)) return constructedName(expression.expression);
   return undefined;
 }
@@ -127,6 +130,8 @@ describe('store open guard', () => {
       "import * as tiers from './tier-ledger.ts';\nconst ledger = new tiers.TierLedger(options);",
       'const db = new sqlite.Database(path);',
       'const store = new (LocalConnectorStore)(options);',
+      "import * as tiers from './tier-ledger.ts';\nconst ledger = new tiers['TierLedger'](options);",
+      'const ledger = new tiers[`TierLedger`](options);',
     ]) expect(constructsStore(spelling), spelling).toBe(true);
   });
 

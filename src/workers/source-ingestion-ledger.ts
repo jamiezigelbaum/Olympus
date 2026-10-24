@@ -43,7 +43,8 @@ import {
 import type {
   LocalConnectorStore,
 } from './connector-store/index.ts';
-import { openConnectorStore, storageAccountForCorpus } from '../core/source-storage.ts';
+import { SourceStorageUnavailableError, openConnectorStore, storageAccountForCorpus } from '../core/source-storage.ts';
+import { lifecycleStoreFileOwner } from '../data-lifecycle.ts';
 import { defaultReadwiseConnectorStoreDbPath } from './readwise/index.ts';
 import { READWISE_SECURE_LIBRARY_CORPUS_ID, defaultReadwiseSecureConnectorStoreDbPath } from './readwise/tier-set.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from './x-bookmarks/index.ts';
@@ -752,6 +753,13 @@ export async function collectLocalSourceIngestionLedger(
     GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   ]);
   const exclusionSources: SourceIngestionLedgerExclusionSource[] = [];
+  // A declared store over another source's file is read under that source,
+  // as the worker mounts it.
+  const storeOwner = lifecycleStoreFileOwner(env);
+  const storeAccount = (store: { dbPath: string; corpusId: string; trustDomain: string }) => {
+    const owner = storeOwner(store.dbPath);
+    return owner ? { sourceId: owner } : storageAccountForCorpus(store, archiveImportCorpora());
+  };
   for (const store of localConnectorStores(env)) {
     if (!existsSync(store.dbPath)) continue;
     // A folder exclusion is a claim about file storage. Message and bookmark
@@ -761,27 +769,37 @@ export async function collectLocalSourceIngestionLedger(
     // the family keeps the section meaningful rather than merely loud.
     const gated = store.family === 'file';
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
-    const handle = store.corpusId === DROPBOX_FILES_CORPUS_ID
-      ? createDropboxConnectorStore(env, { readOnly: true })
-      : store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID || store.corpusId === DROPBOX_PUBLIC_FILES_CORPUS_ID
-        ? createDropboxTierConnectorStore(
-          store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID ? 'internal' : 'public_safe',
-          env,
-          { readOnly: true },
-        )
-        : store.corpusId === LOCAL_FILES_CORPUS_ID
-          ? createLocalFilesConnectorStore(env, { readOnly: true })
-          : store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID || store.corpusId === LOCAL_FILES_PUBLIC_CORPUS_ID
-            ? createLocalFilesTierConnectorStore(
-              store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID ? 'internal' : 'public_safe',
-              env,
-              { readOnly: true },
-            )
-            : openConnectorStore(
-              storageAccountForCorpus(store, archiveImportCorpora()),
-              { ...store, ...(gated ? { exclusions: matcher } : {}) },
-              env,
-            );
+    let handle: LocalConnectorStore;
+    try {
+      handle = store.corpusId === DROPBOX_FILES_CORPUS_ID
+        ? createDropboxConnectorStore(env, { readOnly: true })
+        : store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID || store.corpusId === DROPBOX_PUBLIC_FILES_CORPUS_ID
+          ? createDropboxTierConnectorStore(
+            store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID ? 'internal' : 'public_safe',
+            env,
+            { readOnly: true },
+          )
+          : store.corpusId === LOCAL_FILES_CORPUS_ID
+            ? createLocalFilesConnectorStore(env, { readOnly: true })
+            : store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID || store.corpusId === LOCAL_FILES_PUBLIC_CORPUS_ID
+              ? createLocalFilesTierConnectorStore(
+                store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID ? 'internal' : 'public_safe',
+                env,
+                { readOnly: true },
+              )
+              : openConnectorStore(
+                storeAccount(store),
+                { ...store, ...(gated ? { exclusions: matcher } : {}) },
+                env,
+              );
+    } catch (error) {
+      // An account being deleted is left out, as the worker leaves it
+      // unmounted. Anything else, an unreadable registry included, is loud,
+      // and the stores already opened are closed first.
+      if (error instanceof SourceStorageUnavailableError) continue;
+      for (const opened of handles.reverse()) opened.close();
+      throw error;
+    }
     handles.push(handle);
     connectorStores.push(handle);
     if (gated) {
