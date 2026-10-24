@@ -17,6 +17,7 @@ import type { ConsultDomainPacks, ConsultLanguage, ConsultLevel } from '../../co
 import type { ZkapiConsultErrorCode } from '../../core/consult-transport-zkapi.ts';
 import type { ConsultWriterCheckReport } from '../../core/consult-writer-check.ts';
 import { ZKAPI_RISK_ACKNOWLEDGEMENTS } from '../../core/zkapi-consult-settings.ts';
+import { DASHBOARD_REDRAW_EVENT } from '../../control-ui/browser-controller.ts';
 import { escapeHtml, escapeScriptJson } from './components.ts';
 import { DASHBOARD_OUTSIDE_HELP_COPY as W } from './vocabulary.ts';
 import { fill } from './vocabulary.ts';
@@ -277,7 +278,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   if (unavailable) {
     if (status.confinementInstallRequired) parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
     const toolsScript = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) }) : '';
-    const script = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
+    const script = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
     return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
   }
 
@@ -304,7 +305,7 @@ export function renderOutsideHelpCard(status: DashboardOutsideHelpStatus, input:
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join('')}</div>`);
 
-  const script = canEdit || canUnlock ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
+  const script = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : '';
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...(input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {}) });
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml(String(status.settings.revision))}">${parts.join('')}</div>${script}${toolsScript}`;
 }
@@ -959,29 +960,35 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     if (kind === 'unlock') return {};
     return { confirm: true };
   }
-  // After a restart the worker is briefly away: wait for it to answer, then reload.
-  function reloadWhenBack(delay, form) {
+  // A save redraws the card: the dashboard swaps in the fresh page and runs this script again for it.
+  // A page without the dashboard's controller does not claim the request, and reloads.
+  function redraw() {
+    var live = document.querySelector('[data-outside-help]') || document.body;
+    if (live.dispatchEvent(new CustomEvent(${JSON.stringify(DASHBOARD_REDRAW_EVENT)}, { bubbles: true, cancelable: true }))) window.location.reload();
+  }
+  // After a restart the worker is briefly away: wait for it to answer, then redraw.
+  function redrawWhenBack(delay, form) {
     var tries = 0;
     function poll() {
       tries += 1;
       fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
         if (bridgeRestart(response)) { message(form, config.copy.restartRecovery, true); return; }
-        if (response.ok || tries > 40) window.location.reload(); else setTimeout(poll, 1500);
-      }, function () { if (tries > 40) window.location.reload(); else setTimeout(poll, 1500); });
+        if (response.ok || tries > 40) redraw(); else setTimeout(poll, 1500);
+      }, function () { if (tries > 40) redraw(); else setTimeout(poll, 1500); });
     }
     setTimeout(poll, delay);
   }
-  // A save redraws the card with a reload, which would take the confirmation (and the section it sat in)
-  // with it. The confirmation is kept for the reload: the page shows it again, in the same section.
-  var savedKey = 'olympus-outside-help-saved';
-  function rememberSaved(form, text) {
-    try { sessionStorage.setItem(savedKey, JSON.stringify({ kind: form.getAttribute('data-outside-form'), text: text })); } catch (error) { /* no storage: the reload shows the new state only */ }
+  // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
+  // (in memory), which says it again in the same form, with its section open.
+  function formKey(form) {
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : '');
   }
+  function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
   (function showSaved() {
-    var saved = null;
-    try { saved = JSON.parse(sessionStorage.getItem(savedKey) || 'null'); sessionStorage.removeItem(savedKey); } catch (error) { saved = null; }
-    if (!saved || typeof saved.kind !== 'string' || typeof saved.text !== 'string' || saved.text === '') return;
-    var target = root.querySelector('form[data-outside-form="' + saved.kind + '"]');
+    var saved = window.__olympusOutsideHelpSaved;
+    window.__olympusOutsideHelpSaved = null;
+    if (!saved || typeof saved.text !== 'string' || saved.text === '') return;
+    var target = Array.prototype.find.call(root.querySelectorAll('form[data-outside-form]'), function (form) { return formKey(form) === saved.key; });
     if (!target) return;
     var section = target.closest('details');
     if (section) section.open = true;
@@ -1040,13 +1047,12 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
         }
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+        if (kind !== 'enable' && kind !== 'unlock') keepSaved(form, text);
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
-          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
-          reloadWhenBack(4000, form);
+          redrawWhenBack(4000, form);
         } else {
-          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
-          reloadWhenBack(900, form);
+          redrawWhenBack(900, form);
         }
       } catch (error) {
         fail(config.copy.failed);

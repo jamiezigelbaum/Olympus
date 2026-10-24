@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import type { OlympusDashboardControlResult } from '../src/control-ui-contract.ts';
-import { mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
+import { DASHBOARD_REDRAW_EVENT, mountDashboardController, type OlympusDashboardPageRead } from '../src/control-ui/browser-controller.ts';
 import { connectSetupSheet } from '../src/workers/dashboard/components.ts';
 
 const GLOBALS = [
@@ -836,51 +836,61 @@ describe('dashboard controller DOM lifetime', () => {
   });
 });
 
-test('a sheet open when the Keys page reloads itself is open again on the page that loads next', async () => {
-  const store = new Map<string, string>();
-  const storage = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); }, removeItem: (key: string) => { store.delete(key); } };
-  Object.defineProperty(happyWindow, 'sessionStorage', { configurable: true, value: storage });
-  const page = '<section data-outside-help>card</section><button data-sheet-toggle="#connect-dropbox-files" aria-expanded="false">Connect</button><div class="sheet" id="connect-dropbox-files" aria-hidden="true">sheet</div>';
-  const first = document.createElement('div');
-  first.innerHTML = page;
-  document.body.append(first);
+test('changed model settings are swapped in place: no reload, the open sheet stays open, the card\'s own scripts run again', async () => {
+  const page = (card: string) => `<section data-outside-help>${card}</section><script data-dashboard-rerun>window.cardRuns = (window.cardRuns || 0) + 1;</script><script>window.otherRuns = 1;</script>`
+    + '<button data-sheet-toggle="#connect-dropbox-files" aria-expanded="false">Connect</button><div class="sheet" id="connect-dropbox-files" aria-hidden="true">sheet</div>';
+  const root = document.createElement('div');
+  root.innerHTML = page('card');
+  document.body.append(root);
+  const created: HTMLScriptElement[] = [];
+  const make = document.createElement.bind(document);
+  document.createElement = ((tag: string) => {
+    const node = make(tag);
+    if (tag === 'script') created.push(node as HTMLScriptElement);
+    return node;
+  }) as typeof document.createElement;
   const navigations: string[] = [];
   const controller = mountDashboardController({
-    root: first, transport: { control: noControl },
-    navigate: (href) => navigations.push(href), returnUrl: '/dashboard?keys', canWrite: true,
+    root, transport: { control: noControl },
+    navigate: (href) => navigations.push(href), returnUrl: '/dashboard?keys#anonymous', canWrite: true,
     signal: new AbortController().signal, signature: 'old', pollIntervalMs: -1,
-    refresh: async () => ({ status: 200, title: 'Keys', body: page.replace('card', 'card changed'), controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: -1 }),
+    refresh: async () => ({ status: 200, title: 'Keys', body: page('card changed'), controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: -1 }),
   });
-  first.querySelector<HTMLElement>('[data-sheet-toggle]')!.click();
-  expect(first.querySelector('#connect-dropbox-files')!.classList.contains('on')).toBe(true);
+  root.querySelector<HTMLElement>('[data-sheet-toggle]')!.click();
   await controller.refresh(); controller.dispose();
-  expect(navigations).toEqual(['/dashboard?keys']);
-  // The reloaded page: a fresh document with the same markup, closed.
-  const second = document.createElement('div');
-  second.innerHTML = page;
-  document.body.append(second);
-  mountDashboardController({
-    root: second, transport: { control: noControl }, navigate() {}, returnUrl: '/dashboard?keys', canWrite: true,
-    signal: new AbortController().signal, signature: 'new', pollIntervalMs: -1, async refresh() { return undefined; },
-  });
-  const sheet = second.querySelector('#connect-dropbox-files')!;
-  expect(sheet.classList.contains('on')).toBe(true);
-  expect(second.querySelector('[data-sheet-toggle]')!.getAttribute('aria-expanded')).toBe('true');
-  expect(store.size).toBe(0);
+  expect(navigations).toEqual([]);
+  expect(root.querySelector('[data-outside-help]')!.textContent).toBe('card changed');
+  expect(root.querySelector('#connect-dropbox-files')!.classList.contains('on')).toBe(true);
+  expect(root.querySelector('[data-sheet-toggle]')!.getAttribute('aria-expanded')).toBe('true');
+  // Only the marked script is made again (a fresh element runs; inserted markup does not), with its text and marker.
+  expect(created).toHaveLength(1);
+  expect(created[0]!.isConnected && root.contains(created[0]!)).toBe(true);
+  expect(created[0]!.hasAttribute('data-dashboard-rerun')).toBe(true);
+  expect(created[0]!.text).toBe('window.cardRuns = (window.cardRuns || 0) + 1;');
 });
 
-test('changed model settings reload their document so anonymous controls stay bound', async () => {
+test('a part of the page that asks for a redraw is answered in place: claimed, and read now even with an unchanged signature', async () => {
   const root = document.createElement('div');
-  root.innerHTML = '<section data-outside-help><button>Turn on</button></section>';
+  root.innerHTML = '<section data-outside-help><form data-outside-form="level"><input name="x" value="saved"></form></section>';
   document.body.append(root);
-  const navigations: string[] = [];
+  root.querySelector<HTMLInputElement>('input')!.value = 'typed and saved';
+  let reads = 0;
   const controller = mountDashboardController({
-    root, transport: { control: async () => ({ status: 200, body: {} }) },
-    navigate: href => navigations.push(href), returnUrl: '/dashboard?keys#anonymous', canWrite: true,
-    signal: new AbortController().signal, signature: 'old', pollIntervalMs: -1,
-    refresh: async () => ({ status: 200, title: 'Models', body: '<section data-outside-help>Changed</section>', controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: -1 }),
+    root, transport: { control: noControl }, navigate() {}, returnUrl: '/dashboard?keys', canWrite: true,
+    signal: new AbortController().signal, signature: 'same', pollIntervalMs: -1,
+    refresh: async () => { reads += 1; return { status: 200, title: 'Keys', body: '<section data-outside-help>Redrawn</section>', controller: 'dashboard', can_write: true, signature: 'same', poll_interval_ms: -1 }; },
   });
-  await controller.refresh(); controller.dispose();
-  expect(navigations).toEqual(['/dashboard?keys#anonymous']);
-  expect(root.querySelector('button')!.textContent).toBe('Turn on');
+  const request = new happyWindow.CustomEvent(DASHBOARD_REDRAW_EVENT, { bubbles: true, cancelable: true }) as unknown as Event;
+  // The saved field is still "typed": a poll would leave the card alone; the redraw does not.
+  expect(root.querySelector('[data-outside-help]')!.dispatchEvent(request)).toBe(false);
+  await Bun.sleep(0);
+  expect(reads).toBe(1);
+  expect(root.querySelector('[data-outside-help]')!.textContent).toBe('Redrawn');
+  controller.dispose();
+  // Disposed: nobody claims it, and the part reloads on its own.
+  expect(root.querySelector('[data-outside-help]')!.dispatchEvent(new happyWindow.CustomEvent(DASHBOARD_REDRAW_EVENT, { bubbles: true, cancelable: true }) as unknown as Event)).toBe(true);
+});
+
+test('the serialized controller listens for the exported redraw event name', () => {
+  expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
 });

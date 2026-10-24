@@ -124586,6 +124586,8 @@ function mountDashboardController(options) {
   const startedFromSheet = new WeakSet;
   const pendingForms = new WeakSet;
   let pendingFormCount = 0;
+  const redrawEvent = "olympus:redraw";
+  let redrawOwed = false;
   function query(selector) {
     return root.querySelector(selector);
   }
@@ -125155,15 +125157,6 @@ function mountDashboardController(options) {
       applyWriteCapability();
       return;
     }
-    if (query("[data-outside-help]")) {
-      try {
-        const ids = queryAll(".sheet.on").map((sheet) => sheet.id).filter(Boolean);
-        if (ids.length > 0)
-          root.ownerDocument.defaultView?.sessionStorage.setItem("olympus-open-sheets", JSON.stringify(ids));
-      } catch {}
-      options.navigate(options.returnUrl);
-      return;
-    }
     const openSheets = queryAll(".sheet.on").map((sheet) => sheet.id);
     const open6 = new Set(queryAll("details[open]").map((node) => node.dataset.pollKey || node.querySelector("summary")?.textContent?.trim() || ""));
     const active = activeElement();
@@ -125180,6 +125173,13 @@ function mountDashboardController(options) {
       queryAll("[data-sheet-toggle]").filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute("aria-expanded", "true"));
     }
     findByFocusKey(focused)?.focus();
+    queryAll("script[data-dashboard-rerun]").forEach((inert) => {
+      const script2 = root.ownerDocument.createElement("script");
+      for (const attribute2 of Array.from(inert.attributes))
+        script2.setAttribute(attribute2.name, attribute2.value);
+      script2.text = inert.text;
+      inert.replaceWith(script2);
+    });
     signature = result.signature;
     pollIntervalMs = result.poll_interval_ms;
     deferredSince = 0;
@@ -125216,7 +125216,19 @@ function mountDashboardController(options) {
       replaceBody(result, force);
     } catch {} finally {
       inFlight = false;
+      if (redrawOwed) {
+        redrawOwed = false;
+        refreshNow(true);
+      }
     }
+  }
+  function onRedrawRequest(event) {
+    event.preventDefault();
+    if (inFlight) {
+      redrawOwed = true;
+      return;
+    }
+    refreshNow(true);
   }
   function restartPoll() {
     if (interval)
@@ -125440,20 +125452,9 @@ function mountDashboardController(options) {
   const view2 = root.ownerDocument.defaultView || window;
   view2.addEventListener("focus", refreshOnReturn);
   root.ownerDocument.addEventListener("visibilitychange", onVisibilityReturn);
+  root.addEventListener(redrawEvent, onRedrawRequest);
   applyWriteCapability();
   applyOpenTarget();
-  try {
-    const storage3 = view2.sessionStorage;
-    const kept = JSON.parse(storage3.getItem("olympus-open-sheets") || "[]");
-    storage3.removeItem("olympus-open-sheets");
-    if (Array.isArray(kept)) {
-      for (const id of kept) {
-        const sheet = typeof id === "string" ? queryAll(".sheet").find((candidate) => candidate.id === id) : undefined;
-        if (sheet)
-          setSheetOpen(sheet, true);
-      }
-    }
-  } catch {}
   restartPoll();
   const dispose = () => {
     if (disposed)
@@ -125466,6 +125467,7 @@ function mountDashboardController(options) {
     root.removeEventListener("submit", onSubmit);
     root.removeEventListener("invalid", onInvalid, true);
     root.removeEventListener("click", onClick);
+    root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener("abort", dispose, { once: true });
   return {
@@ -125485,6 +125487,7 @@ function mountDashboardController(options) {
     dispose
   };
 }
+var DASHBOARD_REDRAW_EVENT = "olympus:redraw";
 
 // src/workers/dashboard/theme.ts
 function dashboardThemeVariable(token) {
@@ -126324,10 +126327,12 @@ function renderOutsideHelpToolsReplace(tools, tool, input) {
 function renderOutsideHelpToolsScript(tools, input) {
   if (!tools || !input.canEdit || input.csrfToken === undefined)
     return "";
-  return `<script>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
+  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
 }
 function outsideHelpToolsClientScript(config2) {
   return `(function () {
+  // The dashboard runs this again after it swaps in a fresh page: one instance binds the new forms, and one poll runs.
+  if (typeof window.__olympusOutsideHelpTools === 'function') { window.__olympusOutsideHelpTools(); return; }
   var config = ${escapeScriptJson(JSON.stringify(config2))};
   var timer = null;
   function sections() { return Array.prototype.slice.call(document.querySelectorAll('[data-outside-tools]')); }
@@ -126393,6 +126398,7 @@ function outsideHelpToolsClientScript(config2) {
     });
     if (sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; })) schedule();
   }
+  window.__olympusOutsideHelpTools = bind;
   bind();
 })();`;
 }
@@ -126495,7 +126501,7 @@ function renderOutsideHelpCard(status, input) {
     if (status.confinementInstallRequired)
       parts.push(renderOutsideHelpTools(status.tools, { canEdit, requireLauncher: true }));
     const toolsScript2 = status.confinementInstallRequired ? renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} }) : "";
-    const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+    const script3 = (canEdit || canUnlock) && (on || status.confinementInstallRequired) ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
     return `<div class="privacy outside" data-outside-help data-outside-confinement="unavailable" data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script3}${toolsScript2}`;
   }
   if (!missingRoute)
@@ -126518,7 +126524,7 @@ function renderOutsideHelpCard(status, input) {
   more.push(renderSetupSteps(route.state === "configured" ? route.secretRef : `env:OLYMPUS_ZKAPI_API_KEY`, renderOutsideHelpTools(status.tools, { canEdit }), outsideHelpDaemonCommand(status.tools)));
   more.push(renderDetails(status));
   parts.push(`<div class="ohmore">${more.join("")}</div>`);
-  const script2 = canEdit || canUnlock ? `<script>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
+  const script2 = canEdit || canUnlock ? `<script data-dashboard-rerun>${outsideHelpClientScript(outsideHelpScriptConfig(input.csrfToken))}</script>` : "";
   const toolsScript = renderOutsideHelpToolsScript(status.tools, { canEdit, ...input.csrfToken !== undefined ? { csrfToken: input.csrfToken } : {} });
   return `<div class="privacy outside" data-outside-help data-revision="${escapeHtml2(String(status.settings.revision))}">${parts.join("")}</div>${script2}${toolsScript}`;
 }
@@ -126944,29 +126950,35 @@ function outsideHelpClientScript(config2) {
     if (kind === 'unlock') return {};
     return { confirm: true };
   }
-  // After a restart the worker is briefly away: wait for it to answer, then reload.
-  function reloadWhenBack(delay, form) {
+  // A save redraws the card: the dashboard swaps in the fresh page and runs this script again for it.
+  // A page without the dashboard's controller does not claim the request, and reloads.
+  function redraw() {
+    var live = document.querySelector('[data-outside-help]') || document.body;
+    if (live.dispatchEvent(new CustomEvent(${JSON.stringify(DASHBOARD_REDRAW_EVENT)}, { bubbles: true, cancelable: true }))) window.location.reload();
+  }
+  // After a restart the worker is briefly away: wait for it to answer, then redraw.
+  function redrawWhenBack(delay, form) {
     var tries = 0;
     function poll() {
       tries += 1;
       fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' }).then(function (response) {
         if (bridgeRestart(response)) { message(form, config.copy.restartRecovery, true); return; }
-        if (response.ok || tries > 40) window.location.reload(); else setTimeout(poll, 1500);
-      }, function () { if (tries > 40) window.location.reload(); else setTimeout(poll, 1500); });
+        if (response.ok || tries > 40) redraw(); else setTimeout(poll, 1500);
+      }, function () { if (tries > 40) redraw(); else setTimeout(poll, 1500); });
     }
     setTimeout(poll, delay);
   }
-  // A save redraws the card with a reload, which would take the confirmation (and the section it sat in)
-  // with it. The confirmation is kept for the reload: the page shows it again, in the same section.
-  var savedKey = 'olympus-outside-help-saved';
-  function rememberSaved(form, text) {
-    try { sessionStorage.setItem(savedKey, JSON.stringify({ kind: form.getAttribute('data-outside-form'), text: text })); } catch (error) { /* no storage: the reload shows the new state only */ }
+  // The redraw replaces the form that said a save worked. Its confirmation is handed to the next run
+  // (in memory), which says it again in the same form, with its section open.
+  function formKey(form) {
+    return form.getAttribute('data-outside-form') + (form.hasAttribute('data-outside-accept') ? ':accept' : form.hasAttribute('data-outside-nolimit') ? ':nolimit' : '');
   }
+  function keepSaved(form, text) { window.__olympusOutsideHelpSaved = { key: formKey(form), text: text }; }
   (function showSaved() {
-    var saved = null;
-    try { saved = JSON.parse(sessionStorage.getItem(savedKey) || 'null'); sessionStorage.removeItem(savedKey); } catch (error) { saved = null; }
-    if (!saved || typeof saved.kind !== 'string' || typeof saved.text !== 'string' || saved.text === '') return;
-    var target = root.querySelector('form[data-outside-form="' + saved.kind + '"]');
+    var saved = window.__olympusOutsideHelpSaved;
+    window.__olympusOutsideHelpSaved = null;
+    if (!saved || typeof saved.text !== 'string' || saved.text === '') return;
+    var target = Array.prototype.find.call(root.querySelectorAll('form[data-outside-form]'), function (form) { return formKey(form) === saved.key; });
     if (!target) return;
     var section = target.closest('details');
     if (section) section.open = true;
@@ -127025,13 +127037,12 @@ function outsideHelpClientScript(config2) {
           if (line) line.setAttribute('data-outside-state', body.enabled ? 'on' : 'off');
         }
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
+        if (kind !== 'enable' && kind !== 'unlock') keepSaved(form, text);
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
-          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
-          reloadWhenBack(4000, form);
+          redrawWhenBack(4000, form);
         } else {
-          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
-          reloadWhenBack(900, form);
+          redrawWhenBack(900, form);
         }
       } catch (error) {
         fail(config.copy.failed);

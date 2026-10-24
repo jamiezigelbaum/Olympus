@@ -128,9 +128,7 @@ const sleepFor = (ms: number): Promise<void> => new Promise((done) => setTimeout
 
 const ENUMERATE = String.raw`(() => {
   const clean = __rc.clean;
-  // Inside a closed <details> a control has a box in Chrome but cannot be pressed: only the details' own summary shows.
-  const closedAbove = (el) => { for (let d = el.parentElement ? el.parentElement.closest('details') : null; d; d = d.parentElement ? d.parentElement.closest('details') : null) { if (!d.open && !(el.tagName === 'SUMMARY' && el.parentElement === d)) return true; } return false; };
-  const vis = (el) => { const b = el.getBoundingClientRect(); if (!b.width || !b.height) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none' && !closedAbove(el); };
+  const vis = (el) => { const b = el.getBoundingClientRect(); if (!b.width || !b.height) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none'; };
   const nameOf = (el) => {
     const tag = el.tagName.toLowerCase();
     const aria = el.getAttribute('aria-label');
