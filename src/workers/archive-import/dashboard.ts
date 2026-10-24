@@ -430,7 +430,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     };
     const prepared = prepareArchiveImport({ state, path });
     if (prepared.kind === 'unsupported') {
-      return refusal('unsupported', fill(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(', ') }));
+      const said = fill(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(', ') });
+      return refusal('unsupported', prepared.advice ? `${said} ${prepared.advice}` : said);
     }
     if (prepared.kind === 'ambiguous') return refusal('ambiguous', ARCHIVE_APPROVE_COPY.ambiguous);
     if (prepared.kind === 'unreadable') {
@@ -545,6 +546,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       id: record.archive_id,
       name: named(record.label),
       format: getArchiveFormat(record.format)?.label ?? record.format,
+      family: record.family,
       where: where(posix.join(record.root_path, record.chosen_rel_path || '.')),
       status: record.status,
       items,

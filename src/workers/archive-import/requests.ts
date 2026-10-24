@@ -118,7 +118,9 @@ function validApprovedFile(value: unknown): boolean {
     && typeof value.dev === 'string' && typeof value.ino === 'string'
     && Number.isSafeInteger(value.size) && typeof value.mtime_ms === 'number' && Number.isFinite(value.mtime_ms)
     && isRecord(value.fingerprint)
-    && typeof value.fingerprint.head_sha256 === 'string' && typeof value.fingerprint.tail_sha256 === 'string';
+    && typeof value.fingerprint.head_sha256 === 'string' && typeof value.fingerprint.tail_sha256 === 'string'
+    && (value.members === undefined
+      || (isRecord(value.members) && Number.isSafeInteger(value.members.count) && typeof value.members.sha256 === 'string'));
 }
 
 function validApproval(value: unknown): value is ArchiveImportApproval {

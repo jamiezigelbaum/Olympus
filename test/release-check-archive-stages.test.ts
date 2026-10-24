@@ -79,6 +79,8 @@ class FakeMachine implements ArchiveHost {
   private readonly initialSize = new Map<string, number>();
   private readonly contentKept = new Set<string>();
   searches = 0;
+  /** The family and provider each store read asked for, with the word it looked for: an archive is read in its own format's stores. */
+  readonly storeReads: Array<{ family: string; provider: string; token: string }> = [];
 
   constructor() {
     cleanups.push(() => { rmSync(this.home, { recursive: true, force: true }); rmSync(this.workDir, { recursive: true, force: true }); });
@@ -193,7 +195,8 @@ class FakeMachine implements ArchiveHost {
   }
 
   /** The three stores by what the private model has cleared: held messages sit in Private, judged ones in Personal. */
-  readStores(_spec: { family: string; provider: string }, archiveId: string | undefined, token: string): StoreView[] {
+  readStores(spec: { family: string; provider: string }, archiveId: string | undefined, token: string): StoreView[] {
+    this.storeReads.push({ family: spec.family, provider: spec.provider, token });
     const entry = this.archives.find((candidate) => this.fixtureOf(candidate)?.token === token);
     const kept = [...this.contentKept].some((name) => this.fixtures.get(name)?.token === token);
     if (!entry) return ['private', 'personal', 'public'].map((tier) => ({ tier: tier as StoreView['tier'], exists: true, live: 0, tokenRows: tier === 'personal' && kept ? 2 : 0 }));
@@ -214,9 +217,13 @@ class FakeMachine implements ArchiveHost {
   }
 }
 
-const machine = (...roles: Array<Parameters<typeof legFixture>[0]>): { machine: FakeMachine; fx: Record<string, LegFixture> } => {
+/** A machine that knows these archives: a role is the mbox of that role, `role:format` is that role's archive in another format (keyed `role-format`). */
+const machine = (...kinds: string[]): { machine: FakeMachine; fx: Record<string, LegFixture> } => {
   const fake = new FakeMachine();
-  const fx = Object.fromEntries(roles.map((role) => [role, legFixture(role, SEED)]));
+  const fx = Object.fromEntries(kinds.map((kind) => {
+    const [role, format] = kind.split(':') as [Parameters<typeof legFixture>[0], string | undefined];
+    return [format ? `${role}-${format}` : role, format ? legFixture(role, SEED, format) : legFixture(role, SEED)];
+  }));
   fake.know(...Object.values(fx));
   return { machine: fake, fx };
 };
@@ -319,6 +326,24 @@ describe('importing an archive', () => {
     expect(existsSync(join(fake.home, FIXTURE_FOLDER, agent.fileName))).toBe(true);
     const checks = importChecks(observation, agent, 'linux');
     expect(failing(checks)).toEqual([]);
+  });
+
+  test('the Telegram archive by the agent path: the same request, press, settle and drain, and the search is cited "Telegram"', async () => {
+    const { machine: fake, fx } = machine('agent:telegram_json');
+    const chat = fx['agent-telegram_json']!;
+    const observation = await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, resetFolder: true, drainS: 900, search: true, settleS: 5, startS: 5 });
+    expect(observation.ok).toBe(true);
+    expect(observation.start).toMatchObject({ code: 'needs_approval', hasOpenTarget: true, carriesContent: false });
+    expect(observation.settled).toBe(true);
+    expect(observation.drain).toMatchObject({ drained: true });
+    expect(observation.search!.evidence).toEqual([{ source: 'Telegram', hasToken: true }]);
+    // The file the product was asked about is the Telegram one, written owner-only under the fixtures folder.
+    expect(existsSync(join(fake.home, FIXTURE_FOLDER, 'rc-agent-telegram_json.json'))).toBe(true);
+    expect(chat.format).toBe('telegram_json');
+    expect(failing(importChecks(observation, chat, 'linux'))).toEqual([]);
+    // A search that cites the wrong source fails this archive's check, whatever the other formats call themselves.
+    const wrong = { ...observation, search: { ...observation.search!, evidence: [{ source: 'Imported mail', hasToken: true }] } };
+    expect(failing(importChecks(wrong, chat, 'linux'))).toContain('archive.agent.telegram_json.search');
   });
 
   test('the picker path needs an empty Archives line: a leftover from an earlier attempt is removed first', async () => {
@@ -438,6 +463,46 @@ describe('Remove', () => {
     expect(observation.removals[0]!.others.map((other) => other.fileName)).toEqual([fx.picker!.fileName, fx.held!.fileName]);
     expect(observation.removals[0]!.others.every((other) => other.stores.some((store) => store.tokenRows > 0))).toBe(true);
     expect(failing(removeChecks(observation, Object.values(fx)))).toEqual([]);
+  });
+
+  test('with a Telegram archive among the mail ones, each is removed alone, the others are read in their own format\'s stores, and the checks pass for all', async () => {
+    const { machine: fake, fx } = machine('agent', 'agent:telegram_json', 'picker', 'held');
+    await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'held', format: 'mbox', via: 'request', seed: SEED, settleS: 5, startS: 5 });
+    expect(fake.archives).toHaveLength(4);
+    const chat = fx['agent-telegram_json']!;
+    const all = [fx.agent!, chat, fx.picker!, fx.held!];
+    const targets = all.map((one) => ({ role: one.role, format: one.format, fileName: one.fileName, token: one.token }));
+    fake.storeReads.length = 0;
+    const observation = await removeStage(fake, { targets, removeS: 5 });
+    expect(observation.ok).toBe(true);
+    expect(fake.archives).toEqual([]);
+    expect(observation.removals.map((removal) => `${removal.role}:${removal.format}`)).toEqual(['agent:mbox', 'agent:telegram_json', 'picker:mbox', 'held:mbox']);
+    expect(observation.removals.every((removal) => removal.gone && removal.unlisted)).toBe(true);
+    // While the mail archive was removed, the Telegram one still held its content, and was read as a chat archive; the mail ones as mail.
+    const first = observation.removals[0]!;
+    expect(first.others.map((other) => `${other.role}:${other.format}`)).toEqual(['agent:telegram_json', 'picker:mbox', 'held:mbox']);
+    expect(first.others.every((other) => other.stores.some((store) => store.tokenRows > 0))).toBe(true);
+    const reads = (token: string) => fake.storeReads.filter((read) => read.token === token);
+    expect(reads(chat.token).length).toBeGreaterThan(0);
+    for (const read of reads(chat.token)) expect(read).toMatchObject({ family: 'chat', provider: 'telegram_export' });
+    for (const read of reads(fx.agent!.token)) expect(read).toMatchObject({ family: 'email' });
+    // The Telegram archive's own removal is judged under its own key.
+    expect(failing(removeChecks(observation, all))).toEqual([]);
+    expect(removeChecks(observation, all).map((check) => check.id)).toContain('archive.agent.telegram_json.removed');
+  });
+
+  test('a Telegram removal that leaves its content behind fails that archive\'s removed check and none of the mail ones', async () => {
+    const { machine: fake, fx } = machine('agent', 'agent:telegram_json');
+    await importStage(fake, { role: 'agent', format: 'mbox', via: 'request', seed: SEED, resetFolder: true, settleS: 5, startS: 5 });
+    await importStage(fake, { role: 'agent', format: 'telegram_json', via: 'request', seed: SEED, settleS: 5, startS: 5 });
+    const chat = fx['agent-telegram_json']!;
+    const targets = [fx.agent!, chat].map((one) => ({ role: one.role, format: one.format, fileName: one.fileName, token: one.token }));
+    fake.world.removalLeavesContent = true;
+    const observation = await removeStage(fake, { targets: targets.slice(1), removeS: 5 });
+    expect(failing(removeChecks(observation, [chat]))).toEqual(['archive.agent.telegram_json.removed']);
   });
 
   test('a removal that leaves content behind fails the removed check for that archive', async () => {

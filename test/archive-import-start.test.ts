@@ -8,6 +8,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  ARCHIVE_FORMATS,
   MBOX_ARCHIVE_FORMAT,
   detectArchiveFormat,
   type ArchiveFormatDefinition,
@@ -88,7 +89,7 @@ describe('archive format detection', () => {
     const f = fixture();
     const notes = join(f.exports, 'notes.mbox');
     writeFileSync(notes, 'Just some synthetic notes, not mail.');
-    expect(startArchiveImport({ state: f.state, path: notes })).toEqual({ kind: 'unsupported', supported: ['Mail (mbox)'] });
+    expect(startArchiveImport({ state: f.state, path: notes })).toEqual({ kind: 'unsupported', supported: ARCHIVE_FORMATS.map((format) => format.label) });
     // A folder that is not an export folder, even with mail inside.
     const folder = join(f.exports, 'Mail');
     mkdirSync(folder);

@@ -23,7 +23,7 @@ import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import { FIXTURE_FOLDER, legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
   ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, agentViewProblems, changedChecks, datesWord, drainBoundS, drainChecks, expectedGapLines,
-  gapSentence, heldOffChecks, heldSentenceOf, importChecks, judgedLineOf, messagesWord, modelChecks, panelArchivesOf, pickerImportJourney, removeChecks,
+  gapSentence, heldOffChecks, heldSentenceOf, importChecks, judgedLineOf, messagesWord, modelChecks, panelArchivesOf, pickerImportJourney, removalLabel, removeChecks,
   removeJourney, rowNamed, rowProblems, searchChecks, startViewOf, statusViewOf, stoppedJourney,
   type AgentArchiveView, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type RemoveObservation, type RowView,
   type SearchView, type StatusView, type StoreView,
@@ -39,15 +39,20 @@ const SEED = 'seed-leg';
 const agentFx = legFixture('agent', SEED);
 const pickerFx = legFixture('picker', SEED);
 const heldFx = legFixture('held', SEED);
+const tgFx = legFixture('agent', SEED, 'telegram_json');
 
 // ---------------------------------------------------------------------------
 // Words, held to the product's own vocabulary
 
 describe('the words the leg expects', () => {
   test('counts, gap lines and days are the dashboard\'s own sentences', () => {
-    expect(messagesWord(1)).toBe(A.items.one);
-    expect(messagesWord(4)).toBe(fill(A.items.many, { n: '4' }));
-    expect(messagesWord(12_345)).toBe(fill(A.items.many, { n: '12,345' }));
+    expect(messagesWord(1)).toBe(A.nouns.email.one);
+    expect(messagesWord(4)).toBe(fill(A.nouns.email.many, { n: '4' }));
+    expect(messagesWord(12_345)).toBe(fill(A.nouns.email.many, { n: '12,345' }));
+    // What the items are called follows the format's family: chat items are messages too, a note family's are notes.
+    expect(messagesWord(5, 'chat')).toBe(fill(A.nouns.chat.many, { n: '5' }));
+    expect(messagesWord(1, 'chat')).toBe(A.nouns.chat.one);
+    expect(messagesWord(3, 'note')).toBe(fill(A.nouns.note.many, { n: '3' }));
     expect(gapSentence('attachments_not_read', 1)).toBe(A.gaps.attachments_not_read.one);
     expect(gapSentence('spam_or_trash', 30)).toBe(fill(A.gaps.spam_or_trash.many, { n: '30' }));
     expect(gapSentence('a_kind_nobody_wrote_words_for', 2)).toBe(fill(A.gaps.other.many, { n: '2' }));
@@ -56,6 +61,19 @@ describe('the words the leg expects', () => {
     // What was not read comes first, then what was left out, as the row lists them.
     expect(expectedGapLines(agentFx.expect)).toEqual([A.gaps.attachments_not_read.one, A.gaps.spam_or_trash.one]);
     expect(expectedGapLines(heldFx.expect)).toEqual([]);
+  });
+
+  test('a Telegram export is held to the dashboard\'s exact words: one file not imported, one part not imported, one service message left out', () => {
+    expect(tgFx.expect).toMatchObject({
+      label: 'Telegram Desktop export (JSON)', citationLabel: 'Telegram', family: 'chat', messages: 5, earliest: '2024-03-04', latest: '2024-03-09',
+    });
+    expect(expectedGapLines(tgFx.expect)).toEqual([
+      '1 picture, recording or other file the archive refers to was not imported',
+      '1 part of the archive is not imported',
+      '1 service message (a join, a call or a pin) left out',
+    ]);
+    expect(messagesWord(tgFx.expect.messages, tgFx.expect.family)).toBe('5 messages');
+    expect(datesWord(tgFx.expect)).toBe('2024-03-04 to 2024-03-09');
   });
 
   test('the judged line and the reason messages wait are read back out of the product\'s own text', () => {
@@ -79,7 +97,7 @@ describe('the words the leg expects', () => {
 
 describe('what the agent\'s tool says', () => {
   const entry = (over: Partial<ComputerArchiveEntry> = {}): ComputerArchiveEntry => ({
-    id: '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60', name: agentFx.fileName, format: agentFx.expect.label, where: `~/${FIXTURE_FOLDER}`, status: 'imported',
+    id: '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60', name: agentFx.fileName, format: agentFx.expect.label, family: 'email', where: `~/${FIXTURE_FOLDER}`, status: 'imported',
     items: 4, judged: 3, held: 1, earliest: '2024-03-04', latest: '2024-03-09', startedAt: '2026-10-22T08:00:00.000Z', importedAt: '2026-10-22T09:00:00.000Z',
     gaps: [{ kind: 'attachments_not_read', count: 1 }], skipped: [{ kind: 'spam_or_trash', count: 1 }], ...over,
   });
@@ -141,7 +159,7 @@ function goodRow(fx: LegFixture, over: Partial<RowView> = {}): RowView {
   const facts = `${fx.expect.label} · ~/${FIXTURE_FOLDER} · ${datesWord(fx.expect)}`;
   return {
     status: 'imported', name: fx.fileName, tag: A.status.imported, facts,
-    text: [fx.fileName, A.status.imported, facts, messagesWord(fx.expect.messages), fill(A.judgedLine, { judged: String(fx.expect.messages), held: '0' }), ...lines].join(' '),
+    text: [fx.fileName, A.status.imported, facts, messagesWord(fx.expect.messages, fx.expect.family), fill(A.judgedLine, { judged: String(fx.expect.messages), held: '0' }), ...lines].join(' '),
     gapLines: lines, whyOpen: lines.length > 0 ? true : null, buttons: [A.remove], ...over,
   };
 }
@@ -185,6 +203,43 @@ describe('an archive imported with the private model on', () => {
       'archive.agent.mbox.requested', 'journey.archive-agent-mbox-import', 'archive.agent.mbox.imported', 'archive.agent.mbox.dashboard',
       'archive.agent.mbox.agent-view', 'archive.agent.mbox.drain', 'archive.agent.mbox.search',
     ]));
+  });
+
+  test('a good Telegram import passes: its own row, the agent\'s view of it, and a search cited as "Telegram"', () => {
+    const search: SearchView = { ok: true, isError: false, evidence: [{ source: 'Telegram', hasToken: true }] };
+    const drain: DrainView = { drained: true, ms: 60_000, boundMs: 900_000, last: { messages: 5, judged: 5, waiting: 0 }, privateModel: 'ready', row: goodRow(tgFx) };
+    const checks = importChecks(goodImport(tgFx, 'request', { search, drain }), tgFx, 'macos');
+    expect(failing(checks)).toEqual([]);
+    expect(Object.keys(statuses(checks))).toEqual(expect.arrayContaining([
+      'archive.agent.telegram_json.requested', 'journey.archive-agent-telegram_json-import', 'archive.agent.telegram_json.imported',
+      'archive.agent.telegram_json.dashboard', 'archive.agent.telegram_json.agent-view', 'archive.agent.telegram_json.drain', 'archive.agent.telegram_json.search',
+    ]));
+    // The mail archive's label is not the Telegram archive's: a search that cites its items as mail does not pass.
+    const asMail: SearchView = { ok: true, isError: false, evidence: [{ source: 'Imported mail', hasToken: true }] };
+    expect(failing(importChecks(goodImport(tgFx, 'request', { search: asMail }), tgFx, 'macos'))).toEqual(['archive.agent.telegram_json.search']);
+  });
+
+  test('a Telegram row that is wrong in one thing fails the dashboard check naming it', () => {
+    const [mediaLine, partLine, serviceLine] = expectedGapLines(tgFx.expect);
+    const cases: Array<[Partial<RowView>, string]> = [
+      [{ gapLines: [partLine!, serviceLine!] }, 'left out'],
+      [{ gapLines: [mediaLine!, serviceLine!] }, 'left out'],
+      [{ gapLines: [mediaLine!, partLine!] }, 'left out'],
+      [{ gapLines: [gapSentence('media_not_imported', 2), partLine!, serviceLine!] }, 'left out'],
+      [{ facts: goodRow(tgFx).facts.replace('Telegram Desktop export (JSON)', 'Mail (mbox)') }, 'format'],
+      [{ facts: goodRow(tgFx).facts.replace('2024-03-04', '2023-12-30') }, 'days'],
+      [{ text: goodRow(tgFx).text.replace(messagesWord(5, 'chat'), messagesWord(6, 'chat')) }, messagesWord(5, 'chat')],
+    ];
+    for (const [over, mention] of cases) {
+      const problems = rowProblems(goodRow(tgFx, over), tgFx.expect);
+      expect(problems.join(' | ')).toContain(mention);
+      expect(failing(importChecks(goodImport(tgFx, 'request', { row: goodRow(tgFx, over) }), tgFx, 'macos'))).toContain('archive.agent.telegram_json.dashboard');
+    }
+    expect(rowProblems(goodRow(tgFx), tgFx.expect)).toEqual([]);
+    // The agent's status says the same in the same words: what was not read, and what was left out.
+    expect(agentViewProblems(goodStatus(tgFx).archives[0], tgFx.expect)).toEqual([]);
+    expect(agentViewProblems(goodStatus(tgFx, { leftOut: [] }).archives[0], tgFx.expect).join(' ')).toContain('left-out');
+    expect(agentViewProblems(goodStatus(tgFx, { notRead: [gapSentence('media_not_imported', 1)] }).archives[0], tgFx.expect).join(' ')).toContain('not-read');
   });
 
   test('a picker import has no request check and is held to the same row', () => {
@@ -379,37 +434,54 @@ describe('an archive imported with the private model off', () => {
 });
 
 describe('Remove', () => {
-  const fixtures = [agentFx, pickerFx, heldFx];
+  // Two archives of the agent role, of different formats, as the run has them; each is judged on its own format's stores.
+  const fixtures = [agentFx, tgFx, pickerFx, heldFx];
+  const sameOne = (a: LegFixture, b: LegFixture): boolean => a.role === b.role && a.format === b.format;
   const removal = (fx: LegFixture, over: Partial<RemoveObservation['removals'][number]> = {}): RemoveObservation['removals'][number] => ({
-    role: fx.role, fileName: fx.fileName, archiveId: 'a1', traces: [trace(`archive-${fx.role}-remove`)], gone: true, goneMs: 3_000, unlisted: true,
+    role: fx.role, format: fx.format, fileName: fx.fileName, archiveId: 'a1', traces: [trace(`archive-${removalLabel(fx)}-remove`)], gone: true, goneMs: 3_000, unlisted: true,
     stores: [store('private'), store('personal'), store('public')],
-    others: fixtures.filter((other) => other.role !== fx.role).map((other) => ({ role: other.role, fileName: other.fileName, stores: [store('private', { tokenRows: 4 })] })),
+    others: fixtures.filter((other) => !sameOne(other, fx)).map((other) => ({ role: other.role, format: other.format, fileName: other.fileName, stores: [store('private', { tokenRows: 4 })] })),
     ...over,
   });
-  const observation = (over: Partial<RemoveObservation['removals'][number]> = {}): RemoveObservation => ({ ok: true, removals: fixtures.map((fx) => removal(fx, fx.role === 'agent' ? over : {})) });
+  const observation = (over: Partial<RemoveObservation['removals'][number]> = {}, which: LegFixture = agentFx): RemoveObservation =>
+    ({ ok: true, removals: fixtures.map((fx) => removal(fx, sameOne(fx, which) ? over : {})) });
 
-  test('a good removal passes for every archive', () => {
+  test('a good removal passes for every archive, each under its own format', () => {
     const checks = removeChecks(observation(), fixtures);
     expect(failing(checks)).toEqual([]);
-    expect(checks.filter((c) => c.id.endsWith('.removed'))).toHaveLength(3);
+    expect(checks.filter((c) => c.id.endsWith('.removed')).map((c) => c.id)).toEqual([
+      'archive.agent.mbox.removed', 'archive.agent.telegram_json.removed', 'archive.picker.mbox.removed', 'archive.held.mbox.removed',
+    ]);
+    // The two archives of one role do not share a journey, so neither can pass for the other.
+    expect(removalLabel(agentFx)).toBe('agent');
+    expect(removalLabel(tgFx)).toBe('agent-telegram_json');
+    expect(checks.filter((c) => c.id.startsWith('journey.')).map((c) => c.id)).toContain('journey.archive-agent-telegram_json-remove');
+    expect(checks.find((c) => c.id === 'archive.agent.telegram_json.removed')!.detail).toContain(agentFx.fileName);
   });
 
   test('a row still on the page, an archive still listed, live items or content left in a store each fail it', () => {
-    for (const over of [
-      { gone: false },
-      { unlisted: false },
-      { stores: [store('private', { live: 2 }), store('personal'), store('public')] },
-      { stores: [store('private'), store('personal', { tokenRows: 1 }), store('public')] },
-      { stores: [] },
-      { stores: [store('private', { error: 'locked' }), store('personal'), store('public')] },
-    ]) {
-      expect(failing(removeChecks(observation(over), fixtures))).toEqual(['archive.agent.mbox.removed']);
+    for (const fx of [agentFx, tgFx]) {
+      for (const over of [
+        { gone: false },
+        { unlisted: false },
+        { stores: [store('private', { live: 2 }), store('personal'), store('public')] },
+        { stores: [store('private'), store('personal', { tokenRows: 1 }), store('public')] },
+        { stores: [] },
+        { stores: [store('private', { error: 'locked' }), store('personal'), store('public')] },
+      ]) {
+        // Only the archive that was wrong fails, even when another archive of the same role is fine.
+        expect(failing(removeChecks(observation(over, fx), fixtures))).toEqual([`archive.${fx.role}.${fx.format}.removed`]);
+      }
     }
   });
 
-  test('removing one archive must not take another\'s content', () => {
-    const took = observation({ others: [{ role: 'picker', fileName: pickerFx.fileName, stores: [store('private')] }] });
-    expect(failing(removeChecks(took, fixtures))).toEqual(['archive.agent.mbox.removed']);
+  test('removing one archive must not take another\'s content, whatever its format', () => {
+    for (const taken of [pickerFx, tgFx]) {
+      const took = observation({ others: [{ role: taken.role, format: taken.format, fileName: taken.fileName, stores: [store('private')] }] });
+      expect(failing(removeChecks(took, fixtures))).toEqual(['archive.agent.mbox.removed']);
+    }
+    const tgTook = observation({ others: [{ role: agentFx.role, format: agentFx.format, fileName: agentFx.fileName, stores: [store('private')] }] }, tgFx);
+    expect(failing(removeChecks(tgTook, fixtures))).toEqual(['archive.agent.telegram_json.removed']);
   });
 
   test('a failed removal journey fails with it, and an archive nobody tried to remove is named', () => {
@@ -419,6 +491,12 @@ describe('Remove', () => {
     const checks = removeChecks(partial, fixtures);
     expect(failing(checks)).toEqual(['archive.remove.ran']);
     expect(checks.find((c) => c.id === 'archive.remove.ran')!.detail).toContain(pickerFx.fileName);
+    // The Telegram archive was not removed, though another archive of its role was: it is named, not covered by the mail one.
+    const onlyMail: RemoveObservation = { ok: true, removals: [removal(agentFx), removal(pickerFx), removal(heldFx)] };
+    const missingTg = removeChecks(onlyMail, fixtures).find((c) => c.id === 'archive.remove.ran')!;
+    expect(missingTg.status).toBe('fail');
+    expect(missingTg.detail).toContain(tgFx.fileName);
+    expect(missingTg.detail).not.toContain(agentFx.fileName);
     expect(failing(removeChecks(undefined, fixtures))).toEqual(['archive.remove.ran']);
   });
 });
@@ -533,6 +611,60 @@ describe('the leg\'s journeys on the product\'s real panel', () => {
     expect(row).toBeDefined();
     expect(rowProblems(row, agentFx.expect)).toEqual([]);
     expect(path).toContain(agentFx.fileName);
+  });
+
+  test('the agent path for a Telegram export, with a mail archive already listed: its row has the exact gap lines, and the evaluators accept it as the page shows it', async () => {
+    const listed = entryFor(agentFx);
+    let archives: ComputerArchiveEntry[] = [listed];
+    let requests = requestFor(tgFx, `~/${FIXTURE_FOLDER}/${tgFx.fileName}`);
+    const approvals: unknown[] = [];
+    const serve: Serve = {
+      [DASHBOARD_TOOL_NAME]: () => dashboardAnswer(archives, requests),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => {
+        approvals.push(args);
+        requests = [];
+        archives = [listed, entryFor(tgFx)];
+        return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: tgFx.fileName } };
+      },
+    };
+    const journey = agentImportJourney(tgFx, `~/${FIXTURE_FOLDER}/${tgFx.fileName}`, { startS: 4, settleS: 4 });
+    const { trace, driver } = await runOn(serve, journey);
+    expect(trace.steps.filter((step) => !step.ok).map((step) => `${step.name}: expected ${step.expected}; got ${step.actual}`).join(' || ')).toBe('');
+    expect(trace.ok).toBe(true);
+    expect(approvals).toEqual([{ request_id: 'req-1' }]);
+    const panel = panelArchivesOf(evalIn(driver.win, ARCHIVE_PANEL_PROBE));
+    const row = rowNamed(panel, tgFx.fileName)!;
+    expect(row).toBeDefined();
+    expect(rowProblems(row, tgFx.expect)).toEqual([]);
+    expect([...row.gapLines].sort()).toEqual([
+      '1 picture, recording or other file the archive refers to was not imported',
+      '1 part of the archive is not imported',
+      '1 service message (a join, a call or a pin) left out',
+    ].sort());
+    expect(row.facts).toContain('Telegram Desktop export (JSON)');
+    // The mail archive beside it keeps its own row, with its own lines (its See what was not read was not pressed).
+    expect(rowNamed(panel, agentFx.fileName)!.gapLines).toEqual(expectedGapLines(agentFx.expect));
+  });
+
+  test('the Telegram removal journey presses Remove on its own row and leaves the mail archive listed', async () => {
+    const mail = entryFor(agentFx);
+    const chat = entryFor(tgFx);
+    let archives: ComputerArchiveEntry[] = [mail, chat];
+    const removals: unknown[] = [];
+    const serve: Serve = {
+      [DASHBOARD_TOOL_NAME]: () => dashboardAnswer(archives),
+      [ARCHIVE_REMOVE_TOOL_NAME]: (args: { archive_id: string }) => {
+        removals.push(args);
+        archives = archives.filter((entry) => entry.id !== args.archive_id);
+        return { content: [{ type: 'text', text: 'Removing.' }], structuredContent: { ok: true } };
+      },
+    };
+    const { trace, driver } = await runOn(serve, removeJourney(removalLabel(tgFx), tgFx.fileName, 4, 4));
+    expect(trace.id).toBe('archive-agent-telegram_json-remove');
+    expect(trace.ok).toBe(true);
+    expect(removals).toEqual([{ archive_id: chat.id }]);
+    expect(chat.id).not.toBe(mail.id);
+    expect(panelArchivesOf(evalIn(driver.win, ARCHIVE_PANEL_PROBE)).rows.map((row) => row.name)).toEqual([agentFx.fileName]);
   });
 
   test('the agent path fails when the request is not on the page, and when the row never reaches Imported', async () => {
