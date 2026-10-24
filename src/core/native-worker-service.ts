@@ -15,6 +15,7 @@ import {
   type NativeProcessStartInput,
   type NativeProcessStartSettings,
 } from './native-process-service.ts';
+import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from './olympus-layout.ts';
 import { applyWorkerSetupEnv, workerAuthTokenFromConfig } from './worker-auth.ts';
 
 const SERVICE_ID = 'olympus-worker';
@@ -29,10 +30,8 @@ const DEFAULT_WORKER_STARTUP_TIMEOUT_MS = 10_000;
  */
 const DEFAULT_WORKER_STABLE_UPTIME_MS = 30_000;
 
-export const NATIVE_CAPTURE_OWNER_ENV_NAMES = {
-  telegram: 'OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER',
-  whatsapp: 'OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER',
-} as const;
+// Defined with the layout, whose placement predicate pins a natively owned account.
+export { NATIVE_CAPTURE_OWNER_ENV_NAMES };
 
 /**
  * The lifecycle types now live in the shared process kernel; these aliases keep

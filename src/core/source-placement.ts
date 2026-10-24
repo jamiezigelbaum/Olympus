@@ -13,11 +13,15 @@
  * An account with no entry is placed in a folder only when nothing says it
  * already lives somewhere else:
  *
- * - its source has a folder layout at all (not messaging, Reflect or Roam,
- *   whose capture and mounts name their paths);
- * - no env override or connector-store mount pins a path for it;
+ * - its source has a folder layout at all (not Reflect or Roam, whose mounts
+ *   name their paths);
+ * - no env override or connector-store mount pins a path for it, and, for
+ *   messaging, the Gateway-run service does not own its capture (that
+ *   service reads its paths, plugin config included, and the account stays
+ *   where they are);
  * - no file of the source exists at any legacy location (stores, tier
- *   sidecars, `-wal`/`-shm`, raw state; lock files do not count);
+ *   sidecars, `-wal`/`-shm`, raw state, and for messaging the capture
+ *   session, spool and state; lock files do not count);
  * - every legacy location can be looked at: a folder the process may not
  *   search, or a dangling link, places it `legacy` rather than risk opening a
  *   second, empty set of stores beside data it cannot see.
@@ -39,6 +43,7 @@ import {
   accountStorePath,
   legacyAccountPaths,
   legacyOverrideEnvNames,
+  nativeCaptureOwnerPin,
   olympusDataRoot,
   type AccountRawName,
   type LayoutAccount,
@@ -73,11 +78,11 @@ export function decideAccountLayout(sourceId: string, env: LayoutEnv = process.e
   if (pin) return { layout: 'legacy', why: `${pin} pins its files` };
   const root = dataRootState(env);
   if (root === 'unreadable') return { layout: 'legacy', why: 'the data folder cannot be looked at' };
-  if (root === 'absent') return { layout: 'folder', why: 'nothing is stored yet' };
+  // Not skipped for a data folder that is not there: messaging keeps files outside it.
   const existing = legacyFilesState(sourceId, env);
   if (existing === 'present') return { layout: 'legacy', why: 'its files are already at the legacy paths' };
   if (existing === 'unreadable') return { layout: 'legacy', why: 'a legacy path cannot be looked at' };
-  return { layout: 'folder', why: 'new account with no legacy files' };
+  return { layout: 'folder', why: root === 'absent' ? 'nothing is stored yet' : 'new account with no legacy files' };
 }
 
 /**
@@ -205,6 +210,8 @@ function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim()) return name;
   }
+  const native = nativeCaptureOwnerPin(sourceId, env);
+  if (native) return native;
   const mounts = declaredConnectorStoreMounts(env);
   // The worker refuses a list it cannot read; until it is fixed nothing may move.
   if (mounts === 'unreadable') return `${MOUNTS_ENV} (unreadable)`;

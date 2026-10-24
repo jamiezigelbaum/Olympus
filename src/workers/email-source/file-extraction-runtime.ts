@@ -62,7 +62,7 @@ import {
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
   WHATSAPP_PRODUCT_CONNECTOR_ID,
-  defaultWhatsAppMediaDir,
+  defaultWhatsAppMediaRoots,
 } from '../whatsapp/store-sync.ts';
 import {
   LocalFileExtractionJobStore,
@@ -699,7 +699,7 @@ function defaultSourceFactories(
         approvedScopeKey: input.config.scopes[0]!,
         candidates: connectorStoreExtractionCandidateReader(input.store),
         locators: input.store,
-        mediaRoots: [defaultWhatsAppMediaDir(env)],
+        mediaRoots: defaultWhatsAppMediaRoots(env),
       });
     }],
   ]);

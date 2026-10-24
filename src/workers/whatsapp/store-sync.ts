@@ -3,8 +3,8 @@
 // records to the shared SourceConnector -> LocalConnectorStore spine.
 
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
-import { join } from 'node:path';
-import { legacyCaptureDataRoot } from '../../core/olympus-layout.ts';
+import { WHATSAPP_SOURCE_ID } from '../../core/olympus-layout.ts';
+import { resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
 import type {
   LocalConnectorStore,
   ConnectorStoreSyncSummary,
@@ -106,35 +106,38 @@ export interface WhatsAppConnectorStoreSyncHandler {
   lastStoreRunCompletedAt(): string | undefined;
 }
 
+// The account's paths: the registry's layout (core/source-placement.ts), and for a
+// `legacy` account what these resolvers always returned, overrides included
+// (core/olympus-layout.ts).
 export function defaultWhatsAppStateDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim()
-    || join(legacyCaptureDataRoot(env), 'whatsapp-live');
+  return resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp', env);
 }
 
 export function defaultWhatsAppSpoolDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim()
-    || join(defaultWhatsAppStateDir(env), 'spool');
+  return resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-spool', env);
 }
 
 export function defaultWhatsAppMediaDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  return env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim()
-    || join(transcribeStateDir || defaultWhatsAppStateDir(env), 'media', 'audio');
+  return resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media', env);
+}
+
+/** The folders a media extraction may read from: a folder account's whole media folder, else the audio folder. */
+export function defaultWhatsAppMediaRoots(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  return [resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env)];
 }
 
 export function defaultWhatsAppConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim()
-    || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim()
-    || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim()
-    || join(defaultWhatsAppStateDir(env), 'connector-store.db');
+  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env);
 }
 
 // The store may also contain archive-import runs. Only a cursor shaped like the
@@ -150,8 +153,7 @@ export function sanitizeWhatsAppLiveCursor(cursor: string | undefined): string |
 export function defaultWhatsAppInternalConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH?.trim()
-    || join(defaultWhatsAppStateDir(env), 'connector-store-internal.db');
+  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env);
 }
 
 /**
