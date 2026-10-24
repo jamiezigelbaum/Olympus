@@ -4,11 +4,11 @@
 // legacy paths themselves are pinned by test/account-layout-golden.test.ts.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { archiveImportFamilies } from '../src/core/archive-formats.ts';
-import { FOLDER_LAYOUT_SOURCES, accountFolder, legacyAccountPaths, legacyOverrideEnvNames, olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { FOLDER_LAYOUT_SOURCES, accountFolder, accountSessionPath, legacyAccountPaths, legacyOverrideEnvNames, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import {
   decideAccountLayout,
   hasFolderLayout,
@@ -79,14 +79,16 @@ describe('placement: a new account', () => {
       'readwise.library',
       'x.bookmarks',
       'archive.imports',
+      'telegram.messages',
+      'whatsapp.personal.messages',
     ]);
     for (const sourceId of FOLDER_LAYOUT_SOURCES) {
       expect(decideAccountLayout(sourceId, env).layout).toBe('folder');
       expect(placedAccount(sourceId, env)).toEqual({ source_id: sourceId, slot: '1', layout: 'folder' });
     }
-    // Messaging, Reflect and Roam stay where they are, whatever the disk looks like.
+    // Reflect and Roam stay where they are, whatever the disk looks like.
     const others = lifecycleSourceSpecs().map((spec) => spec.sourceId).filter((id) => !FOLDER_LAYOUT_SOURCES.includes(id));
-    expect(others).toEqual(['telegram.messages', 'whatsapp.personal.messages', 'reflect.notes', 'roam.notes']);
+    expect(others).toEqual(['reflect.notes', 'roam.notes']);
     for (const sourceId of others) {
       expect(hasFolderLayout(sourceId)).toBe(false);
       expect(decideAccountLayout(sourceId, env).layout).toBe('legacy');
@@ -110,6 +112,10 @@ describe('placement: a new account', () => {
       expect(decision.layout).toBe('legacy');
       expect(decision.why).toContain('legacy');
       rmSync(file, { recursive: true, force: true });
+      // A raw folder is itself a legacy location (WhatsApp's state folder holds its store): taking the file out leaves it.
+      for (const raw of legacyAccountPaths(sourceId, env, archiveImportFamilies()).raw) {
+        if (existsSync(raw) && statSync(raw).isDirectory() && readdirSync(raw).length === 0) rmSync(raw, { recursive: true, force: true });
+      }
       expect(decideAccountLayout(sourceId, env).layout).toBe('folder');
     }
   });
@@ -567,6 +573,10 @@ describe('every process reaches the same answer', () => {
     const here = join(import.meta.dir, '..', 'src');
     return `
       import { archiveImportFamilies } from '${here}/core/archive-formats.ts';
+      import { telegramPairingSessionPaths, telegramSessionBasePath, whatsappPairingSessionPaths, whatsappStateDir } from '${here}/core/pairing-session-paths.ts';
+      import { defaultProtectedTelegramConnectorStoreDbPath, defaultInternalTelegramConnectorStoreDbPath } from '${here}/workers/telegram-messages/corpus-adapter.ts';
+      import { defaultTelegramCaptureSpoolDir } from '${here}/workers/telegram-messages/capture-spool-connector.ts';
+      import { defaultWhatsAppConnectorStoreDbPath, defaultWhatsAppInternalConnectorStoreDbPath, defaultWhatsAppMediaDir, defaultWhatsAppSpoolDir, defaultWhatsAppStateDir } from '${here}/workers/whatsapp/store-sync.ts';
       import { archiveConnectorStoreDbPath } from '${here}/workers/archive-import/store.ts';
       import { defaultArchiveImportStatePath } from '${here}/workers/archive-import/state.ts';
       import { archiveImportRequestsPath } from '${here}/workers/archive-import/requests.ts';
@@ -591,6 +601,12 @@ describe('every process reaches the same answer', () => {
         defaultXBookmarksApiUsageDbPath(env), defaultXBookmarksReconcileStateDbPath(env),
         archiveImportFamilies().map((family) => ['secure_local', 'internal', 'public_safe'].map((tier) => archiveConnectorStoreDbPath(tier, family, env))),
         defaultArchiveImportStatePath(env), archiveImportRequestsPath(defaultArchiveImportStatePath(env)),
+        // What the CLI pairs and the scripts read, and what the worker and the capture children are given.
+        defaultInternalTelegramConnectorStoreDbPath(env), defaultProtectedTelegramConnectorStoreDbPath(env),
+        defaultTelegramCaptureSpoolDir(env), telegramSessionBasePath({ env }), telegramPairingSessionPaths({ env }),
+        defaultWhatsAppStateDir(env), defaultWhatsAppSpoolDir(env), defaultWhatsAppMediaDir(env),
+        defaultWhatsAppConnectorStoreDbPath(env), defaultWhatsAppInternalConnectorStoreDbPath(env),
+        whatsappStateDir({ env }), whatsappPairingSessionPaths({ env }),
       ]));
     `;
   };
@@ -621,6 +637,14 @@ describe('every process reaches the same answer', () => {
       join(olympusDataRoot(env), 'x-bookmarks-api-usage.sqlite'), resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env),
       families.map((family) => tiers.map((tier) => archiveConnectorStoreDbPath(tier, family, env))),
       resolvedRawPath('archive.imports', 'archive-imports.json', env), resolvedRawPath('archive.imports', 'archive-import-requests.json', env),
+      resolvedStorePath('telegram.messages', 'internal', env), resolvedStorePath('telegram.messages', 'secure_local', env),
+      resolvedRawPath('telegram.messages', 'telegram-spool', env), accountSessionPath(placedAccount('telegram.messages', env), env),
+      [`${accountSessionPath(placedAccount('telegram.messages', env), env)}.session`, `${accountSessionPath(placedAccount('telegram.messages', env), env)}.session-journal`],
+      resolvedRawPath('whatsapp.personal.messages', 'whatsapp', env), resolvedRawPath('whatsapp.personal.messages', 'whatsapp-spool', env),
+      resolvedRawPath('whatsapp.personal.messages', 'whatsapp-media', env),
+      resolvedStorePath('whatsapp.personal.messages', 'secure_local', env), resolvedStorePath('whatsapp.personal.messages', 'internal', env),
+      resolvedRawPath('whatsapp.personal.messages', 'whatsapp', env),
+      ['session.db', 'session.db-wal', 'session.db-shm', 'qr.txt', 'qr.png'].map((name) => join(resolvedRawPath('whatsapp.personal.messages', 'whatsapp', env), name)),
     ]));
   }
 
@@ -629,6 +653,8 @@ describe('every process reaches the same answer', () => {
     expect(await inAnotherProcess()).toEqual(before);
     // Every store path is in an account folder.
     expect(JSON.stringify(before)).toContain('/sources/x.bookmarks/1/stores/internal.sqlite');
+    expect(JSON.stringify(before)).toContain('/sources/telegram.messages/1/session/telegram.session');
+    expect(JSON.stringify(before)).toContain('/sources/whatsapp.personal.messages/1/raw/whatsapp/session.db');
 
     // The worker adopts: one writable open per account records its entry.
     enableSourceRegistryAdoption();
@@ -649,6 +675,8 @@ describe('every process reaches the same answer', () => {
       ['local.files', 'folder'],
       ['readwise.library', 'folder'],
       ['x.bookmarks', 'folder'],
+      ['telegram.messages', 'folder'],
+      ['whatsapp.personal.messages', 'folder'],
     ]);
     expect(inThisProcess()).toEqual(before);
     expect(await inAnotherProcess()).toEqual(before);

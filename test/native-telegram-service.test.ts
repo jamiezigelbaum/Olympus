@@ -1,17 +1,37 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
 import { createNativeTelegramService } from '../src/core/native-telegram-service.ts';
+import { accountFolder } from '../src/core/olympus-layout.ts';
+import { sourceRegistryPath } from '../src/core/source-registry.ts';
 
 const roots: string[] = [];
 const services: Array<ReturnType<typeof createNativeTelegramService>> = [];
+const savedEnv = { HOME: process.env.HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
 
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.stop()));
+  for (const [name, value] of Object.entries(savedEnv)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+/** A data folder whose registry lists Telegram with the given layout, the service's own environment pointed at it. */
+function registryWith(root: string, layout: 'folder' | 'legacy'): { folder: string } {
+  process.env.HOME = join(root, 'home');
+  process.env.XDG_DATA_HOME = join(root, 'data');
+  const env = { HOME: process.env.HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
+  mkdirSync(join(sourceRegistryPath(env), '..'), { recursive: true });
+  writeFileSync(sourceRegistryPath(env), `${JSON.stringify({
+    schema: layout === 'folder' ? 2 : 1,
+    accounts: [{ source_id: 'telegram.messages', slot: '1', state: 'active', layout, corpus_ids: [], created_at: '2026-10-01T00:00:00.000Z' }],
+  })}\n`);
+  return { folder: accountFolder({ source_id: 'telegram.messages', slot: '1' }, env) };
+}
 
 describe('native Telegram capture service', () => {
   test('refuses capture without native worker ownership and when worker supervision is disabled', async () => {
@@ -138,6 +158,69 @@ describe('native Telegram capture service', () => {
     expect(starts[1]!.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID)
       .not.toBe(first.env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID);
     expect(starts[1]!.pid).not.toBe(first.pid);
+  });
+
+  test('an account the registry keeps in a folder runs in the folder, whatever worker.env says', async () => {
+    const fixture = telegramFixture();
+    const { folder } = registryWith(fixture.root, 'folder');
+    const session = join(folder, 'session', 'telegram.session');
+    mkdirSync(join(folder, 'session'), { recursive: true });
+    writeFileSync(session, 'fixture-session');
+    const config = structuredClone(fixture.pluginConfig) as Record<string, any>;
+    for (const key of ['sessionPath', 'stateDir', 'spoolDir']) delete config.worker.telegramCapture[key];
+    const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
+      initialPluginConfig: config,
+      moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
+      workerEnvPath: fixture.workerEnvPath,
+      startupTimeoutMs: 10_000,
+      readinessPollMs: 10,
+      stopGraceMs: 100,
+    }));
+    await service.start({});
+    const [start] = readStarts(fixture.startsPath);
+    expect(start!.env).toMatchObject({
+      OLYMPUS_TELEGRAM_SESSION_PATH: session,
+      OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: join(folder, 'raw', 'telegram-gateway'),
+      OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: join(folder, 'raw', 'telegram-spool'),
+    });
+    expect(statSync(join(folder, 'raw', 'telegram-spool')).mode & 0o777).toBe(0o700);
+  });
+
+  test('plugin-config paths that are not the folder contradict the registry and are refused before anything starts', async () => {
+    const fixture = telegramFixture();
+    registryWith(fixture.root, 'folder');
+    const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
+      initialPluginConfig: fixture.pluginConfig,
+      moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
+      workerEnvPath: fixture.workerEnvPath,
+      startupTimeoutMs: 200,
+      readinessPollMs: 10,
+      stopGraceMs: 50,
+    }));
+    await expect(service.start({})).rejects.toThrow('keeps its files in its account folder');
+    expect(readStarts(fixture.startsPath)).toEqual([]);
+  });
+
+  test('an account the registry keeps at the legacy paths keeps the configured ones', async () => {
+    const fixture = telegramFixture();
+    registryWith(fixture.root, 'legacy');
+    const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
+      initialPluginConfig: fixture.pluginConfig,
+      moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
+      workerEnvPath: fixture.workerEnvPath,
+      startupTimeoutMs: 10_000,
+      readinessPollMs: 10,
+      stopGraceMs: 100,
+    }));
+    await service.start({});
+    expect(readStarts(fixture.startsPath)[0]!.env).toMatchObject({
+      OLYMPUS_TELEGRAM_SESSION_PATH: fixture.sessionPath,
+      OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: fixture.stateDir,
+      OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: fixture.spoolDir,
+    });
   });
 
   test('refuses stale readiness and reports initialization followed by categorical failure', async () => {
@@ -284,6 +367,7 @@ function telegramFixture(options: { publishReadiness?: boolean } = {}) {
     },
   };
   return {
+    root,
     pluginConfig,
     pythonPath,
     startsPath,

@@ -15,7 +15,7 @@ import {
   type LayoutAccount,
 } from './olympus-layout.ts';
 import { placedAccount } from './source-placement.ts';
-import { DEFAULT_ACCOUNT_SLOT } from './source-registry.ts';
+import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './source-registry.ts';
 import { recordAccountPlacement } from './source-storage.ts';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import type { MessagingPairingConnectedResult, MessagingProducerLaunch, MessagingPairingSource } from './messaging-pairing.ts';
@@ -428,7 +428,9 @@ const accountSourceId = (source: MessagingPairingSource): string => (source === 
  * The account the child is for, recorded in the registry first (the worker only:
  * recording is off elsewhere). A grant that names its session path is a
  * `legacy` account's, and recording it with that path keeps it at the paths it
- * was paired at; one without is a folder account's.
+ * was paired at; one without is a folder account's. Where nothing could record
+ * it, the grant still says so: the disk would give a new account a folder, but
+ * this one was paired at a path.
  */
 function placeAccount(grant: MessagingCaptureGrant, env: Record<string, string>): LayoutAccount {
   const sourceId = accountSourceId(grant.source);
@@ -438,7 +440,18 @@ function placeAccount(grant: MessagingCaptureGrant, env: Record<string, string>)
     grant.sessionPath ?? (grant.source === 'telegram' ? accountSessionPath(inFolder, env) : accountRawPath(inFolder, 'whatsapp', env)),
     env,
   );
-  return placedAccount(sourceId, env);
+  const placed = placedAccount(sourceId, env);
+  return grant.sessionPath !== undefined && placed.layout === 'folder' && !hasRegistryEntry(sourceId, env)
+    ? { ...placed, layout: 'legacy' }
+    : placed;
+}
+
+function hasRegistryEntry(sourceId: string, env: Record<string, string>): boolean {
+  try {
+    return findRegistryAccount(readSourceRegistry(env), sourceId, DEFAULT_ACCOUNT_SLOT) !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 function sessionExists(grant: MessagingCaptureGrant, account: LayoutAccount, env: Record<string, string>): boolean {

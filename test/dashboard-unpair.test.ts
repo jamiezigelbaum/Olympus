@@ -2540,7 +2540,7 @@ describe('validation happens before any deletion', () => {
 
 describe('pairing session paths', () => {
   test('name the session artifacts only, never the spool or media that carry message text', () => {
-    const context = { homeDir: '/home/fixture' };
+    const context = { homeDir: '/home/fixture', layout: 'legacy' as const };
     expect(whatsappPairingSessionPaths(context)).toEqual([
       '/home/fixture/.local/share/olympus/whatsapp-live/session.db',
       '/home/fixture/.local/share/olympus/whatsapp-live/session.db-wal',
@@ -2551,6 +2551,22 @@ describe('pairing session paths', () => {
     expect(telegramPairingSessionPaths(context)).toEqual([
       '/home/fixture/.local/share/olympus/telegram/telegram.personal.session',
       '/home/fixture/.local/share/olympus/telegram/telegram.personal.session-journal',
+    ]);
+  });
+
+  test('a folder account names the same artifacts in its own folder', () => {
+    const context = { homeDir: '/home/fixture', layout: 'folder' as const };
+    const folder = '/home/fixture/.local/share/openclaw/olympus/sources';
+    expect(whatsappPairingSessionPaths(context)).toEqual([
+      `${folder}/whatsapp.personal.messages/1/raw/whatsapp/session.db`,
+      `${folder}/whatsapp.personal.messages/1/raw/whatsapp/session.db-wal`,
+      `${folder}/whatsapp.personal.messages/1/raw/whatsapp/session.db-shm`,
+      `${folder}/whatsapp.personal.messages/1/raw/whatsapp/qr.txt`,
+      `${folder}/whatsapp.personal.messages/1/raw/whatsapp/qr.png`,
+    ]);
+    expect(telegramPairingSessionPaths(context)).toEqual([
+      `${folder}/telegram.messages/1/session/telegram.session`,
+      `${folder}/telegram.messages/1/session/telegram.session-journal`,
     ]);
   });
 
