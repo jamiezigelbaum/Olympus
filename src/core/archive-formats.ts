@@ -116,7 +116,154 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   },
 });
 
-export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+// --- Notes exports: Reflect and Roam --------------------------------------------
+
+const leniencyDecoder = new TextDecoder('utf-8');
+
+/** A probed head as text; a byte order mark is dropped and a cut at the end is forgiven. */
+export function archiveHeadText(head: Uint8Array | undefined): string {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : '';
+}
+
+/**
+ * A name that is not part of an export: the metadata macOS adds to a zip
+ * (`__MACOSX/`, `._name`) and hidden files such as `.DS_Store`.
+ */
+export function isJunkArchiveMember(name: string): boolean {
+  const parts = name.split('/').filter((part) => part !== '');
+  return parts.includes('__MACOSX') || (parts[parts.length - 1] ?? '').startsWith('.');
+}
+
+const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+/** "Tue, March 21st, 2023.md": how Reflect's Markdown export names a daily note. */
+const DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\.(?:md|markdown)$/i;
+
+/**
+ * The day a Reflect daily note's file name stands for ("2023-03-21T12:00:00.000Z",
+ * midday so no time zone moves it a day), or undefined for any other name.
+ */
+export function reflectDailyNoteDate(fileName: string): string | undefined {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match) return undefined;
+  const weekday = match[1]!.slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2]!.slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31) return undefined;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+
+function jsonKey(names: string): RegExp {
+  return new RegExp(`"(?:${names})"\\s*:`);
+}
+
+/** Keys a Reflect note has and a Roam page or block does not. */
+const REFLECT_JSON_KEYS = jsonKey('subject|document_json|documentJson|created_at|createdAt|updated_at|updatedAt|content|body');
+/** Keys a Roam page or block has and a Reflect note does not. */
+const ROAM_JSON_KEYS = jsonKey('children|create-time|edit-time|create-email|edit-email');
+const JSON_LIST_OF_OBJECTS = /^\s*\[\s*\{/;
+const JSON_NOTES_OBJECT = /^\s*\{\s*"notes"\s*:\s*\[/;
+
+/**
+ * Whether a file's first bytes are a Reflect JSON export: a list of notes (or
+ * an object holding a `notes` list) whose notes use Reflect's keys, and none
+ * of Roam's. Judged on the head alone, so a key inside a piece of text
+ * (written `\"key\":` in JSON) never counts.
+ */
+export function looksLikeReflectJson(head: Uint8Array | undefined): boolean {
+  const text = archiveHeadText(head);
+  const notesObject = JSON_NOTES_OBJECT.test(text);
+  if (!notesObject && !JSON_LIST_OF_OBJECTS.test(text)) return false;
+  if (ROAM_JSON_KEYS.test(text)) return false;
+  return notesObject || REFLECT_JSON_KEYS.test(text);
+}
+
+/** Whether a file's first bytes are a Roam JSON export: a list of pages whose blocks use Roam's keys. */
+export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
+  const text = archiveHeadText(head);
+  return JSON_LIST_OF_OBJECTS.test(text) && ROAM_JSON_KEYS.test(text) && !REFLECT_JSON_KEYS.test(text);
+}
+
+/**
+ * A file this format reads: the chosen file itself, or for a chosen folder the
+ * one file inside it that does. Two candidates in a folder is no match, never a guess.
+ */
+function detectFile(probe: ArchiveProbe, reads: (entry: ArchiveProbeEntry) => boolean): readonly string[] | undefined {
+  if (probe.chosen.kind === 'file') return reads(probe.chosen) ? [''] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === 'file' && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0]!.relPath] : undefined;
+}
+
+/** The JSON files inside a zip, as the probe lists them. */
+function zipJsonMembers(entry: ArchiveProbeEntry): ArchiveProbeEntry[] {
+  return (entry.members ?? []).filter((member) =>
+    member.kind === 'file' && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+
+/** A JSON export, as a .json file or as a zip holding one. */
+function readsJsonExport(entry: ArchiveProbeEntry, isThisFormat: (head: Uint8Array | undefined) => boolean): boolean {
+  if (entry.members) return zipJsonMembers(entry).some((member) => isThisFormat(member.head));
+  return isThisFormat(entry.head);
+}
+
+/** Reflect's export as one JSON file (or a zip holding it): the notes with their dates and tags. */
+export const REFLECT_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'reflect-json',
+  label: 'Reflect notes (JSON)',
+  family: 'note',
+  provider: 'reflect',
+  chooseHint: 'a Reflect export in JSON (the .json file, or the .zip that holds it)',
+  citationLabel: 'Reflect',
+  probeNames: Object.freeze(['*.json']),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeReflectJson)),
+});
+
+/**
+ * Reflect's export as a zip of Markdown files, one note each. Markdown alone
+ * says nothing about which app wrote it (Roam's Markdown export is a zip of
+ * .md files too), so it must show Reflect's hand: its name, the way it names
+ * a daily note, or a link to Reflect. A zip that does not is not guessed at.
+ */
+export const REFLECT_MARKDOWN_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'reflect-markdown',
+  label: 'Reflect notes (Markdown zip)',
+  family: 'note',
+  provider: 'reflect',
+  chooseHint: 'a Reflect export as Markdown (the .zip file)',
+  citationLabel: 'Reflect',
+  probeNames: Object.freeze(['*, *, ????.md']),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => {
+    if (!entry.members || /^roam/i.test(entry.name)) return false;
+    const files = entry.members.filter((member) => member.kind === 'file' && !isJunkArchiveMember(member.relPath));
+    if (files.some((member) => /\.json$/i.test(member.name))) return false;
+    const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+    if (notes.length === 0) return false;
+    return /reflect/i.test(entry.name)
+      || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined)
+      || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+  }),
+});
+
+/** Roam's "Export All" as JSON (or a zip holding the .json): a list of pages, each a tree of blocks. */
+export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'roam-json',
+  label: 'Roam notes (JSON)',
+  family: 'note',
+  provider: 'roam',
+  chooseHint: 'a Roam export in JSON (the .json file from Export All, or the .zip that holds it)',
+  citationLabel: 'Roam',
+  probeNames: Object.freeze(['*.json']),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson)),
+});
+
+export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([
+  MBOX_ARCHIVE_FORMAT,
+  REFLECT_JSON_ARCHIVE_FORMAT,
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+  ROAM_JSON_ARCHIVE_FORMAT,
+]);
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
