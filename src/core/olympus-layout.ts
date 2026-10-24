@@ -8,11 +8,12 @@
  * below as legacy, so the migration into account folders (step 4) has one
  * place to read them from.
  *
- * Deliberately free of SQLite and worker imports: the dashboard's Unpair path
- * and the CLI-side lifecycle module both resolve through it.
+ * Deliberately free of SQLite and worker imports, directly and through
+ * linux-engine-layout.ts: the dashboard's Unpair path and the CLI-side
+ * lifecycle module both resolve through it.
  */
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
 import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 
 export type LayoutEnv = Record<string, string | undefined>;
@@ -34,9 +35,9 @@ export function xdgDataHome(env: LayoutEnv = process.env): string {
 export function olympusDataRoot(env: LayoutEnv = process.env): string {
   const standalone = standaloneLinuxDataDir(env);
   if (standalone) return standalone;
-  const dataHome = xdgDataHome(env);
-  if (!isAbsolute(dataHome)) throw new TypeError('XDG_DATA_HOME must be an absolute private data root.');
-  return join(dataHome, 'openclaw', 'olympus');
+  // A relative XDG_DATA_HOME is returned as given, as each resolver did
+  // before; callers that refuse one (remote access) check for themselves.
+  return join(xdgDataHome(env), 'openclaw', 'olympus');
 }
 
 /** A path under the data root. */
@@ -51,6 +52,17 @@ export function olympusDataPath(env: LayoutEnv, ...segments: string[]): string {
  */
 export function legacyCaptureDataRoot(env: LayoutEnv = process.env): string {
   return join(xdgDataHome(env), 'olympus');
+}
+
+/**
+ * Legacy: the WhatsApp capture service's default state directory. It ignores
+ * `XDG_DATA_HOME`, while pairing and the worker's readers honor it
+ * (`legacyCaptureDataRoot`), so with a non-default `XDG_DATA_HOME` they
+ * disagree. Kept exactly, `HOME` untrimmed included; step 4 moves both into
+ * the account folder.
+ */
+export function legacyWhatsAppServiceStateDir(env: LayoutEnv = process.env): string {
+  return join(env.HOME ?? homedir(), '.local', 'share', 'olympus', 'whatsapp-live');
 }
 
 /**

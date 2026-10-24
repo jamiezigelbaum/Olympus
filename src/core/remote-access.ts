@@ -37,7 +37,7 @@ import {
   unlinkSync as raUnlinkSync,
   writeFileSync as raWriteFileSync,
 } from 'node:fs';
-import { join as raJoin } from 'node:path';
+import { isAbsolute as raIsAbsolute, join as raJoin } from 'node:path';
 import type { OlympusConfig } from './config.ts';
 import {
   parseRemotePublicBaseUrl,
@@ -120,7 +120,9 @@ export function resolveRemoteAccessMode(remote: OlympusConfig['remote']): Remote
 
 /** The worker's data root (core/olympus-layout.ts). */
 export function olympusDataDir(env: Record<string, string | undefined> = process.env): string {
-  return olympusDataRoot(env);
+  const root = olympusDataRoot(env);
+  if (!raIsAbsolute(root)) throw new TypeError('XDG_DATA_HOME must be an absolute private data root.');
+  return root;
 }
 
 export function remoteAccessDir(env: Record<string, string | undefined> = process.env): string {

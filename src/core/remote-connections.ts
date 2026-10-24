@@ -177,7 +177,11 @@ export function resolveRemoteConnectionsDbPathForCli(
 export function defaultRemoteConnectionsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return olympusDataPath(env, 'remote-connections.sqlite');
+  const path = olympusDataPath(env, 'remote-connections.sqlite');
+  if (!isAbsolute(path)) {
+    throw new TypeError('Remote connections XDG_DATA_HOME must be an absolute private data root.');
+  }
+  return path;
 }
 
 /** Shape check only; lets the endpoint refuse garbage without touching the store. */

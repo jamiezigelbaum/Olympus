@@ -10,6 +10,7 @@ import {
   legacyCaptureDataRoot,
   legacyTelegramGatewayStateDir,
   legacyTelegramStoreRoot,
+  legacyWhatsAppServiceStateDir,
   layoutHome,
   olympusDataPath,
   olympusDataRoot,
@@ -18,6 +19,8 @@ import {
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
 import { defaultXBookmarksReconcileStateDbPath } from '../src/workers/x-bookmarks/reconcile-state.ts';
 import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { olympusDataDir } from '../src/core/remote-access.ts';
+import { defaultRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const home = '/home/layout-test';
@@ -32,9 +35,12 @@ describe('olympus layout', () => {
     expect(xdgDataHome({ HOME: home, XDG_DATA_HOME: '  ' })).toBe(`${home}/.local/share`);
   });
 
-  test('a relative XDG_DATA_HOME is refused rather than resolved against the working directory', () => {
+  test('a relative XDG_DATA_HOME resolves as it always did; remote access still refuses it', () => {
     if (process.platform === 'linux') return;
-    expect(() => olympusDataRoot({ HOME: home, XDG_DATA_HOME: 'relative/data' })).toThrow(/absolute/);
+    expect(olympusDataPath({ HOME: home, XDG_DATA_HOME: 'relative/data' }, 'gmail-connector-store.sqlite'))
+      .toBe('relative/data/openclaw/olympus/gmail-connector-store.sqlite');
+    expect(() => olympusDataDir({ HOME: home, XDG_DATA_HOME: 'relative/data' })).toThrow(/absolute/);
+    expect(() => defaultRemoteConnectionsDbPath({ HOME: home, XDG_DATA_HOME: 'relative/data' })).toThrow(/absolute/);
   });
 
   test('legacy locations are named, unchanged', () => {
@@ -43,6 +49,8 @@ describe('olympus layout', () => {
     if (process.platform === 'linux') return;
     // Telegram's stores ignore XDG_DATA_HOME today; moving them is step 4's job.
     expect(legacyTelegramStoreRoot({ HOME: home, XDG_DATA_HOME: '/data' })).toBe(`${home}/.local/share/openclaw/olympus`);
+    // The WhatsApp capture service ignores it too, unlike pairing and the readers.
+    expect(legacyWhatsAppServiceStateDir({ HOME: home, XDG_DATA_HOME: '/data' })).toBe(`${home}/.local/share/olympus/whatsapp-live`);
   });
 
   test('the Telegram readiness probe reads gateway state where the reader writes it', () => {
@@ -73,10 +81,20 @@ const ALLOWED: Record<string, string> = {
   'src/core/remote-access.ts': 'forwards the worker\'s XDG_DATA_HOME from worker.env to a CLI lookup',
   'src/core/remote-connections.ts': 'forwards the worker\'s XDG_DATA_HOME from worker.env to a CLI lookup',
   'src/core/managed-tools.ts': 'the managed tools install root, not the data root',
+  'src/core/lifecycle.ts': 'the installed plugin versions folder (~/.local/share/olympus/versions), install layout',
+  'src/core/lifecycle-artifact.ts': 'the installed plugin versions folder (~/.local/share/olympus/versions), install layout',
   'src/data-lifecycle.ts': 'builds an environment for an explicit home directory',
   'src/core/pairing-session-paths.ts': 'names every root Olympus owns, for the delete fence',
 };
-const DATA_ROOT_EXPRESSION = /XDG_DATA_HOME|'openclaw',\s*'olympus'|openclaw\/olympus/;
+// The data root and the legacy capture root, in any quote style, with the
+// segments split across lines or written as one path.
+const DATA_ROOT_EXPRESSION = /XDG_DATA_HOME|(['"`])(?:openclaw|share)\1\s*,\s*(['"`])olympus\2|(?:openclaw|share)\/olympus\b/;
+
+/** Source text without comment lines, so a split `join(` still reads as one expression. */
+function buildsDataRoot(source: string): boolean {
+  const code = source.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
+  return DATA_ROOT_EXPRESSION.test(code);
+}
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -87,10 +105,23 @@ function sourceFiles(dir: string): string[] {
 }
 
 describe('data root guard', () => {
+  test('the guard sees every spelling of an inline root', () => {
+    for (const spelling of [
+      "join(home, '.local', 'share', 'openclaw', 'olympus')",
+      'join(home, ".local", "share", "openclaw", "olympus")',
+      "join(\n  dataHome,\n  'openclaw',\n  'olympus',\n)",
+      "join(home, '.local/share/openclaw/olympus')",
+      "join(home, '.local', 'share', 'olympus', 'whatsapp-live')",
+      "const DEFAULT = '.local/share/olympus/whatsapp-live';",
+      'env.XDG_DATA_HOME?.trim()',
+    ]) expect(buildsDataRoot(spelling), spelling).toBe(true);
+    expect(buildsDataRoot("// join(home, 'openclaw', 'olympus')")).toBe(false);
+    expect(buildsDataRoot("join(home, '.config', 'olympus')")).toBe(false);
+  });
+
   test('no module outside the allowlist builds the data root inline', () => {
     const matching = sourceFiles(join(ROOT, 'src'))
-      .filter((path) => readFileSync(path, 'utf8').split('\n')
-        .some((line) => !/^\s*(\/\/|\*|\/\*)/.test(line) && DATA_ROOT_EXPRESSION.test(line)))
+      .filter((path) => buildsDataRoot(readFileSync(path, 'utf8')))
       .map((path) => relative(ROOT, path))
       .sort();
     const unexpected = matching.filter((path) => !(path in ALLOWED));

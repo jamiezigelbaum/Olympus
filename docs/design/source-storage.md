@@ -341,9 +341,10 @@ touch the store path (`eval/`).
    the ingestion ledger's WhatsApp store, the Telegram readiness probe's
    state directory). A writer that drifts from the layout keeps its files
    where they are until step 4 moves them, named as legacy in the layout
-   module: Telegram's stores ignore `XDG_DATA_HOME`, and the WhatsApp bridge
-   and the Telegram capture spool sit in `<XDG data home>/olympus`, outside
-   the data root. `handles.json` ignores `XDG_CONFIG_HOME` in writer and
+   module: Telegram's stores ignore `XDG_DATA_HOME`; so does the WhatsApp
+   capture service's default state folder, while pairing and the worker's
+   readers honor it; and the WhatsApp bridge and the Telegram capture spool
+   sit in `<XDG data home>/olympus`, outside the data root. `handles.json` ignores `XDG_CONFIG_HOME` in writer and
    reader alike and also waits for step 4. Salvage #467's test isolation
    (refuse the real HOME, isolated HOME in every package test script, spawn
    patches). No behavior change beyond those reader fixes. Two PRs: test
