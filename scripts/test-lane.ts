@@ -12,7 +12,8 @@
  * conservative p95. Timeout budgets are never treated as runtime weights.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { partitionTestLanes } from '../test/helpers/test-lanes.ts';
 
@@ -148,6 +149,9 @@ export function runTestLane(args: string[]): number {
     cwd: ROOT,
     stdout: 'inherit',
     stderr: 'inherit',
+    // Bun reads HOME once at start, so the run begins with a throwaway one
+    // (test/support/isolated-home.ts then enforces it per process).
+    env: { ...process.env, HOME: mkdtempSync(join(tmpdir(), 'olympus-lane-home-')) },
   });
   return child.exitCode ?? 1;
 }
