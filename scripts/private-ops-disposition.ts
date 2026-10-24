@@ -51,6 +51,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/linux-zkapi-confinement.md',
   'docs/design/open-on-computer.md',
   'docs/design/remote-access.md',
+  'docs/design/source-storage.md',
   'docs/connector-templates/connector.test.ts.template',
   'docs/connector-templates/connector.ts.template',
   'docs/connector-templates/live-control.ts.template',
