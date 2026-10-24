@@ -128,7 +128,7 @@ const sleepFor = (ms: number): Promise<void> => new Promise((done) => setTimeout
 
 const ENUMERATE = String.raw`(() => {
   const clean = __rc.clean;
-  const vis = (el) => { const b = el.getBoundingClientRect(); if (!b.width || !b.height) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none'; };
+  const vis = __rc.visible;
   const nameOf = (el) => {
     const tag = el.tagName.toLowerCase();
     const aria = el.getAttribute('aria-label');
