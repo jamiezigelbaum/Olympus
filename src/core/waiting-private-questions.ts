@@ -198,8 +198,11 @@ export interface WaitingQuestionStore {
   saveAnswer(ref: WaitingQuestionRef, result: StoredPrivateAnswer, sent?: string): boolean;
   retry(ref: WaitingQuestionRef): boolean;
   invalidate(ref: WaitingQuestionRef): boolean;
-  /** Source deletion also clears pending questions, whose dependencies are not yet known. */
-  deleteForCorpora(corpusIds: readonly string[], knownCorpusIds?: readonly string[]): number;
+  /**
+   * Source deletion also clears pending questions, whose dependencies are not
+   * yet known; `answeredOnly` keeps them and takes only answers.
+   */
+  deleteForCorpora(corpusIds: readonly string[], knownCorpusIds?: readonly string[], options?: { answeredOnly?: boolean }): number;
   /**
    * One account scope's items going (an imported archive being removed):
    * only the answers that positively read one of them, from one of these
@@ -639,14 +642,14 @@ export function openWaitingPrivateQuestionStore(
       }).immediate();
     },
 
-    deleteForCorpora(corpusIds, knownCorpusIds) {
+    deleteForCorpora(corpusIds, knownCorpusIds, options = {}) {
       const ids = new Set(corpusIds);
       const known = knownCorpusIds ? new Set(knownCorpusIds) : undefined;
       return db.transaction(() => {
         const rows = db.query('SELECT * FROM waiting_questions').all() as QuestionRow[];
         let removed = 0;
         for (const row of rows) {
-          if (questionTakenWithCorpora(row, ids, known)) {
+          if (questionTakenWithCorpora(row, ids, known, options.answeredOnly === true)) {
             removed += db.query('DELETE FROM waiting_questions WHERE id = ?').run(row.id).changes;
           }
         }
@@ -682,30 +685,41 @@ export function openWaitingPrivateQuestionStore(
 
 /**
  * Whether deleting a source's corpora takes this record: a question still
- * waiting (nothing says yet what it will read), an answer that read one of the
- * corpora, or one that read something no corpus in `known` accounts for.
+ * waiting (nothing says yet what it will read), unless only answers are taken,
+ * an answer that read one of the corpora, or one that read something no corpus
+ * in `known` accounts for.
  */
-function questionTakenWithCorpora(row: QuestionRow, ids: ReadonlySet<string>, known: ReadonlySet<string> | undefined): boolean {
+function questionTakenWithCorpora(
+  row: QuestionRow,
+  ids: ReadonlySet<string>,
+  known: ReadonlySet<string> | undefined,
+  answeredOnly = false,
+): boolean {
   const result = toQuestion(row).result;
-  return !result || result.read.some(item => typeof item.corpusId !== 'string' || ids.has(item.corpusId) || (known !== undefined && !known.has(item.corpusId)));
+  if (!result) return !answeredOnly;
+  return result.read.some(item => typeof item.corpusId !== 'string' || ids.has(item.corpusId) || (known !== undefined && !known.has(item.corpusId)));
 }
 
 /**
  * One source's forget step: `deleteForCorpora` on the store beside the
  * remote-connections database, or on a dry run the count it would delete,
  * from a read-only connection (opening the store would migrate it and drop
- * expired records). A missing file has nothing to forget.
+ * expired records). A missing file has nothing to forget. `answeredOnly` is
+ * the worker's repeat before its restart: a question asked since the delete,
+ * still waiting, may be about another source and is answered after the
+ * restart; only answers, which may have read the deleted stores, go.
  */
 export function forgetWaitingPrivateQuestions(
   dbPath: string,
   input: { corpusIds: readonly string[]; knownCorpusIds?: readonly string[] | undefined },
-  options: { dryRun?: boolean } = {},
+  options: { dryRun?: boolean; answeredOnly?: boolean } = {},
 ): number {
   if (!existsSync(dbPath)) return 0;
+  const answeredOnly = options.answeredOnly === true;
   if (options.dryRun !== true) {
     const store = openWaitingPrivateQuestionStore(dbPath);
     try {
-      return store.deleteForCorpora(input.corpusIds, input.knownCorpusIds);
+      return store.deleteForCorpora(input.corpusIds, input.knownCorpusIds, { answeredOnly });
     } finally {
       store.close();
     }
@@ -717,7 +731,7 @@ export function forgetWaitingPrivateQuestions(
     const ids = new Set(input.corpusIds);
     const known = input.knownCorpusIds ? new Set(input.knownCorpusIds) : undefined;
     const rows = db.query('SELECT * FROM waiting_questions').all() as QuestionRow[];
-    return rows.filter((row) => questionTakenWithCorpora(row, ids, known)).length;
+    return rows.filter((row) => questionTakenWithCorpora(row, ids, known, answeredOnly)).length;
   } finally {
     closeSqliteStore(db);
   }

@@ -12,6 +12,7 @@ import {
   type ForgetStep,
 } from '../src/core/source-forget-registry.ts';
 import { defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
+import { openWaitingPrivateQuestionStore } from '../src/core/waiting-private-questions.ts';
 import {
   MINE,
   OTHER,
@@ -21,7 +22,9 @@ import {
   layoutUnder,
   migrationPlan,
   seedAllFiles,
+  storedAnswer,
   tierLedgerIdOf,
+  waitingPath,
   treeDigest,
   writeBackAfterDelete,
   type SeededFile,
@@ -271,6 +274,37 @@ describe('steps the worker repeats before its restart', () => {
       const marked = repeated.includes(file.stepId);
       expect(file.left(layout, MINE), file.stepId).toBe(marked ? 0 : before.get(file.stepId)!);
     }
+  });
+
+  test('the repeat takes the private answers that read the source, and keeps a question still waiting', () => {
+    const root = newRoot();
+    const layout = layoutUnder(root);
+    mkdirSync(dirname(waitingPath(layout)), { recursive: true });
+    const store = openWaitingPrivateQuestionStore(waitingPath(layout));
+    try {
+      // Asked after the delete: one answered from the deleted stores' open
+      // handles, one still waiting (it may be about another source).
+      const answered = store.record(store.ticket('synthetic-agent'), { question: 'Answered from stale handles?', state: 'waiting', surface: 'remote' });
+      store.saveAnswer(answered!, storedAnswer(MINE.corpus_id));
+      store.record(store.ticket('synthetic-agent'), { question: 'Still waiting?', state: 'waiting', surface: 'remote' });
+    } finally {
+      store.close();
+    }
+    const questions = () => {
+      const reopened = openWaitingPrivateQuestionStore(waitingPath(layout));
+      try {
+        return reopened.list().questions.map((question) => question.result ? 'answered' : 'waiting');
+      } finally {
+        reopened.close();
+      }
+    };
+
+    expect(runForgetSteps(accountOf(MINE), contextOf(layout), { dryRun: true, repeatableOnly: true }).join('\n')).toContain('private answers: 1');
+    runForgetSteps(accountOf(MINE), contextOf(layout), { dryRun: false, repeatableOnly: true });
+    expect(questions()).toEqual(['waiting']);
+    // The delete itself takes a waiting question too: nothing says yet what it will read.
+    runForgetSteps(accountOf(MINE), contextOf(layout), { dryRun: false });
+    expect(questions()).toEqual([]);
   });
 
   test('a reconnect after the delete survives the repeat, while a write-back does not', () => {

@@ -122,7 +122,7 @@ export interface SeededFile {
   left(layout: ForgetLayout, source: SeededSource): number;
 }
 
-const storedAnswer = (corpusId: string): StoredPrivateAnswer => ({
+export const storedAnswer = (corpusId: string): StoredPrivateAnswer => ({
   status: 'answered',
   answer: 'SYNTHETIC_FORGET_ANSWER',
   citations: [{ title: 'Synthetic item', url: 'https://example.invalid/item' }],
@@ -136,7 +136,7 @@ const storedAnswer = (corpusId: string): StoredPrivateAnswer => ({
   }],
 });
 
-const waitingPath = (layout: ForgetLayout): string =>
+export const waitingPath = (layout: ForgetLayout): string =>
   waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(layout.env));
 
 /** The dashboard database's rows for a source, however keyed. */

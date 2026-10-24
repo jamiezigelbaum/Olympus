@@ -148,13 +148,15 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     modules: ['src/core/waiting-private-questions.ts'],
     // A question asked before the restart is answered from the deleted
     // stores' handles, still open; an answer derived from them must not stay.
+    // The repeat takes answers only: a question still waiting is answered
+    // after the restart, and may be about another source.
     repeatBeforeRestart: true,
-    forget(account, context, { dryRun }) {
+    forget(account, context, { dryRun, repeatableOnly }) {
       const path = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(context.env));
       return line(path, 'private answers', forgetWaitingPrivateQuestions(
         path,
         { corpusIds: account.corpus_ids, knownCorpusIds: context.knownCorpusIds },
-        { dryRun },
+        { dryRun, answeredOnly: repeatableOnly === true },
       ));
     },
   },

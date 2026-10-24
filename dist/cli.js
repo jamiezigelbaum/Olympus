@@ -37031,14 +37031,14 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
         return db.query("UPDATE waiting_questions SET result = ?, seen = 0, generation = generation + 1, attempts = 0, next_attempt_at = 0 WHERE id = ? AND generation = ? AND connection_id = ?").run(disclosure, ref.id, ref.generation, ref.connectionId).changes > 0;
       }).immediate();
     },
-    deleteForCorpora(corpusIds, knownCorpusIds) {
+    deleteForCorpora(corpusIds, knownCorpusIds, options2 = {}) {
       const ids = new Set(corpusIds);
       const known = knownCorpusIds ? new Set(knownCorpusIds) : undefined;
       return db.transaction(() => {
         const rows = db.query("SELECT * FROM waiting_questions").all();
         let removed = 0;
         for (const row of rows) {
-          if (questionTakenWithCorpora(row, ids, known)) {
+          if (questionTakenWithCorpora(row, ids, known, options2.answeredOnly === true)) {
             removed += db.query("DELETE FROM waiting_questions WHERE id = ?").run(row.id).changes;
           }
         }
@@ -37070,17 +37070,20 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
     }
   };
 }
-function questionTakenWithCorpora(row, ids, known) {
+function questionTakenWithCorpora(row, ids, known, answeredOnly = false) {
   const result = toQuestion(row).result;
-  return !result || result.read.some((item) => typeof item.corpusId !== "string" || ids.has(item.corpusId) || known !== undefined && !known.has(item.corpusId));
+  if (!result)
+    return !answeredOnly;
+  return result.read.some((item) => typeof item.corpusId !== "string" || ids.has(item.corpusId) || known !== undefined && !known.has(item.corpusId));
 }
 function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
   if (!existsSync29(dbPath))
     return 0;
+  const answeredOnly = options.answeredOnly === true;
   if (options.dryRun !== true) {
     const store = openWaitingPrivateQuestionStore(dbPath);
     try {
-      return store.deleteForCorpora(input.corpusIds, input.knownCorpusIds);
+      return store.deleteForCorpora(input.corpusIds, input.knownCorpusIds, { answeredOnly });
     } finally {
       store.close();
     }
@@ -37093,7 +37096,7 @@ function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
     const ids = new Set(input.corpusIds);
     const known = input.knownCorpusIds ? new Set(input.knownCorpusIds) : undefined;
     const rows = db.query("SELECT * FROM waiting_questions").all();
-    return rows.filter((row) => questionTakenWithCorpora(row, ids, known)).length;
+    return rows.filter((row) => questionTakenWithCorpora(row, ids, known, answeredOnly)).length;
   } finally {
     closeSqliteStore(db);
   }
@@ -70980,9 +70983,9 @@ var init_source_forget_registry = __esm(() => {
       file: "waiting-private-questions.sqlite",
       modules: ["src/core/waiting-private-questions.ts"],
       repeatBeforeRestart: true,
-      forget(account, context2, { dryRun }) {
+      forget(account, context2, { dryRun, repeatableOnly }) {
         const path = waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(context2.env));
-        return line(path, "private answers", forgetWaitingPrivateQuestions(path, { corpusIds: account.corpus_ids, knownCorpusIds: context2.knownCorpusIds }, { dryRun }));
+        return line(path, "private answers", forgetWaitingPrivateQuestions(path, { corpusIds: account.corpus_ids, knownCorpusIds: context2.knownCorpusIds }, { dryRun, answeredOnly: repeatableOnly === true }));
       }
     },
     {
