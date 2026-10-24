@@ -1484,9 +1484,15 @@ export function chatgptDashboardClient(
     } else if (archive.status === 'imported') {
       const when = typeof archive.importedAt === 'string' ? ago(archive.importedAt) : '';
       if (!uncounted && items === 0) {
-        // Nothing found is said as that: the import finished, and this is what it found.
         const none = archiveNouns(archive).none;
-        add(item, el('p', 'muted', when ? fill(A.emptyImportWhen, { none, when }) : fill(A.emptyImport, { none })));
+        if (archiveHasReasons(archive)) {
+          // Messages were found and left out or not read: nothing was imported, which is not an empty archive.
+          const None = none.charAt(0).toUpperCase() + none.slice(1);
+          add(item, el('p', 'muted', when ? fill(A.nothingImportedWhen, { None, when }) : fill(A.nothingImported, { None })));
+        } else {
+          // Nothing found at all is said as that: the import finished, and this is what it found.
+          add(item, el('p', 'muted', when ? fill(A.emptyImportWhen, { none, when }) : fill(A.emptyImport, { none })));
+        }
       } else if (!uncounted) {
         add(item, el('p', 'muted', when ? fill(A.importedLine, { items: itemCount(archive, items), when }) : fill(A.importedLineNoTime, { items: itemCount(archive, items) })));
       }
@@ -1541,6 +1547,12 @@ export function chatgptDashboardClient(
    * What could not be read fully, per kind (for an archive of several files,
    * which file each is in), then what was left out on purpose.
    */
+  /** Whether the import has anything left out or not read to say (the lines under See what was not read). */
+  function archiveHasReasons(archive: Any): boolean {
+    return archive.gaps.concat(archive.skipped)
+      .some((entry: Any) => entry && typeof entry.kind === 'string' && wholeCount(entry.count) > 0);
+  }
+
   function archiveWhy(archive: Any): HTMLElement | null {
     const A = H.copy.archives;
     const kinds = A.gaps as Any;

@@ -403,6 +403,27 @@ describe('each archive under the Archives row', () => {
     const { importedAt: _at, ...untimed } = { ...ARCHIVE, family: 'note', items: 0, judged: 0, held: 0 };
     const bare = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([untimed])) });
     expect(archiveItem(bare, 'imported').textContent).toContain(fill(A.emptyImport, { none: A.nouns.note.none }));
+    // An archive found nothing at all only when it also left out and could not read nothing.
+    const { importedAt: _zeroAt, ...reasonsOfNothing } = { ...ARCHIVE, family: 'note', items: 0, judged: 0, held: 0, gaps: [{ kind: 'message_unreadable', count: 0 }], skipped: [] };
+    const zero = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([reasonsOfNothing])) });
+    expect(archiveItem(zero, 'imported').textContent).toContain(fill(A.emptyImport, { none: A.nouns.note.none }));
+  });
+
+  test('an archive whose messages were all left out or not read says no messages were imported, with the reasons', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-nothing-imported') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toMatch(/No messages imported .+ ago\./);
+    expect(item.textContent).not.toContain('found in this archive');
+    expect(item.textContent).not.toContain(A.countsUnavailable.why);
+    expect(item.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
+    // The reasons stay one press away, in plain words.
+    expect(item.textContent).toContain(A.seeWhy);
+    expect(item.textContent).toContain(fill(A.gaps.spam_or_trash.many, { n: '1,204' }));
+    expect(item.textContent).toContain(fill(A.gaps.message_too_large.many, { n: '2' }));
+    // The same for notes, and without a time to say.
+    const { importedAt: _at, ...untimed } = { ...ARCHIVE, family: 'note', items: 0, judged: 0, held: 0, gaps: [{ kind: 'file_damaged', count: 1 }], skipped: [] };
+    const notes = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([untimed])) });
+    expect(archiveItem(notes, 'imported').textContent).toContain('No notes imported.');
   });
 
   test('the picker names the formats the engine registers, from the registry', async () => {

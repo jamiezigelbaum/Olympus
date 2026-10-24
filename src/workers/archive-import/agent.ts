@@ -239,8 +239,14 @@ function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | u
     case 'importing':
       return `${fill(copy.importingLine, { percent: String(entry.percent ?? 0), items })}.${held}`;
     case 'imported':
-      // A finished import that found nothing says so, never "0 notes".
-      if (entry.items === 0) return fill(copy.emptyImport, { none: dashboardArchiveNouns(entry.family).none });
+      // A finished import that found nothing at all says so, never "0 notes".
+      if (entry.items === 0) {
+        const none = dashboardArchiveNouns(entry.family).none;
+        const reasons = [...entry.gaps, ...entry.skipped].filter((gap) => gap.count > 0).map((gap) => kindLine(copy.gaps, gap).line);
+        // Something was found and left out or not read: nothing was imported, and the reasons are said with it.
+        if (reasons.length > 0) return `${fill(copy.nothingImported, { None: none.charAt(0).toUpperCase() + none.slice(1) })} ${reasons.join('; ')}.`;
+        return fill(copy.emptyImport, { none });
+      }
       return `${fill(copy.importedLineNoTime, { items })}.${snapshotOf(entry)}${held}`;
     case 'stopped':
       return `Stopped: ${stopped?.why ?? ''} ${stopped?.fix ?? ''}`.trim();

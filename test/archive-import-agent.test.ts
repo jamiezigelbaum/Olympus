@@ -619,6 +619,11 @@ describe('status carries no content and tells the truth', () => {
       { ...base, id: 'c-chat', family: 'chat', items: 1 },
       { ...base, id: 'd-unknown' },
       { ...base, id: 'e-empty-notes', family: 'note', items: 0, judged: 0, held: 0 },
+      // Found but all left out or not read: nothing imported is not an empty archive.
+      { ...base, id: 'f-nothing-mail', family: 'email', items: 0, judged: 0, held: 0, skipped: [{ kind: 'spam_or_trash', count: 3 }], gaps: [{ kind: 'message_too_large', count: 1 }] },
+      { ...base, id: 'g-nothing-notes', family: 'note', items: 0, judged: 0, held: 0, gaps: [{ kind: 'file_damaged', count: 2, file: 'notes.json' }] },
+      // Reasons of a count of nothing do not count as reasons.
+      { ...base, id: 'h-zero-reasons', family: 'chat', items: 0, judged: 0, held: 0, gaps: [{ kind: 'message_unreadable', count: 0 }] },
     ];
     const agent = createArchiveImportAgent({
       state: f.runtime.state,
@@ -644,6 +649,14 @@ describe('status carries no content and tells the truth', () => {
     const empty = byId.get('e-empty-notes')!;
     expect(empty.summary).toBe('Imported: no notes found in this archive.');
     expect(empty).not.toHaveProperty('counts_unavailable');
+    // Nothing imported although messages were found: said so, with the reasons, never as an empty archive.
+    const nothing = byId.get('f-nothing-mail')!;
+    expect(nothing.summary).toBe('No messages imported. 1 message too large to read; 3 messages in Spam or Trash left out.');
+    expect(nothing.summary).not.toContain('found in this archive');
+    expect(nothing.left_out.map((line) => line.line)).toEqual(['3 messages in Spam or Trash left out']);
+    expect(nothing.not_read.map((line) => line.line)).toEqual(['1 message too large to read']);
+    expect(byId.get('g-nothing-notes')!.summary).toBe('No notes imported. notes.json: 2 files in the archive look damaged, so what was read from them may be wrong.');
+    expect(byId.get('h-zero-reasons')!.summary).toBe('Imported: no messages found in this archive.');
   });
 
   test('one archive can be asked for; an id that is not an imported archive is unknown', async () => {
