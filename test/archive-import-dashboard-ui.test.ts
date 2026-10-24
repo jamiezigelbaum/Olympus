@@ -368,6 +368,28 @@ describe('each archive under the Archives row', () => {
     }
   });
 
+  test('a Telegram archive counts messages, and what it leaves out or cannot carry has its own plain sentence', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.chat.many, { n: '18,460' }));
+    expect(item.textContent).not.toContain(fill(A.nouns.other.many, { n: '18,460' }));
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '2,318' }),
+      fill(A.gaps.section_not_imported.many, { n: '6' }),
+      fill(A.gaps.message_content_unsupported.many, { n: '12' }),
+      A.gaps.item_truncated.one,
+      A.gaps.assumption.one,
+      A.gaps.file_damaged.one,
+      fill(A.gaps.service_message.many, { n: '3,071' }),
+      fill(A.gaps.message_without_text.many, { n: '54' }),
+    ]);
+    for (const kind of ['service_message', 'message_without_text', 'message_content_unsupported'] as const) {
+      expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
+      expect(A.gaps[kind].many).toContain('{n}');
+    }
+  });
+
   test('an archive from an engine that sends no family says items, and an empty import says it found nothing', async () => {
     const { family: _family, ...old } = ARCHIVE;
     const unknown = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });

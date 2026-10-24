@@ -210,7 +210,7 @@ const ARCHIVE_IMPORT_PARAMS = {
     enum: ['start', 'status', 'remove'],
     description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).',
   },
-  path: { type: 'string', description: 'start only: the full path of the export (an .mbox file, or an Apple Mail .mbox folder), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves.' },
+  path: { type: 'string', description: 'start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves.' },
   archive_id: { type: 'string', description: 'remove: the archive_id status returned. status: show only this archive.' },
 } satisfies Record<string, ParamDef>;
 
@@ -674,6 +674,7 @@ export const operations: Operation[] = [
     name: 'archive_import',
     description: [
       'Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.',
+      'A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.',
       'Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.',
       'Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.',
       'Never open, read or copy the file yourself, and never retry to get around the approval.',

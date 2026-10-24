@@ -707,6 +707,7 @@ function localFilesPreview(state: string) {
  *   archives-uncounted   an imported archive whose index cannot be opened now: never "0 messages"
  *   archives-not-running an import waiting while background syncing is turned off: not running, Remove not pressable, See why names the setting
  *   archives-notes       a Roam export imported: its items are notes, with the kinds of gap a notes export or any format can report
+ *   archives-chat        a Telegram Desktop export imported: its items are messages, with what a chat export leaves out or cannot carry
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
  *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not read, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
@@ -717,7 +718,7 @@ const ARCHIVE_STATES = [
   'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
-  'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty',
+  'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
   'archives-nothing-imported',
 ] as const;
 
@@ -865,6 +866,30 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
         { kind: 'file_damaged', count: 1 },
       ],
       skipped: [{ kind: 'note_empty', count: 38 }],
+    });
+  } else if (state === 'archives-chat') {
+    // An invented Telegram Desktop export: messages kept, service messages left out, pictures and files counted not read, a kind of content not read said so.
+    archives.push({
+      ...takeout,
+      id: '6c2f8a41-9d3e-4b5a-a7c1-2e4f6a8b0c3d',
+      name: 'Telegram Desktop',
+      format: 'Telegram Desktop export (JSON)',
+      family: 'chat',
+      where: '~/Downloads',
+      items: 18_460,
+      judged: 18_400,
+      held: 60,
+      earliest: '2016-02-11',
+      latest: '2026-10-18',
+      gaps: [
+        { kind: 'media_not_imported', count: 2_318 },
+        { kind: 'section_not_imported', count: 6 },
+        { kind: 'message_content_unsupported', count: 12 },
+        { kind: 'item_truncated', count: 1 },
+        { kind: 'assumption', count: 1 },
+        { kind: 'file_damaged', count: 1 },
+      ],
+      skipped: [{ kind: 'service_message', count: 3_071 }, { kind: 'message_without_text', count: 54 }],
     });
   } else if (state === 'archives-empty') {
     const { earliest: _earliest, latest: _latest, ...dated } = takeout;

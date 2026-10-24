@@ -12,7 +12,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realp
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import type { ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
+import { archiveFamilyProvider, archiveImportFamilies, type ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { REMOTE_CONNECTIONS_DB_PATH_ENV } from '../src/core/remote-connections.ts';
 import {
@@ -550,22 +550,18 @@ describe('archive corpora in the registry', () => {
     const shipped = createSourceCorpusRegistry().list().map((corpus) => corpus.corpusId);
     expect(shipped.filter((corpusId) => corpusId.includes('.archive.'))).toEqual([]);
     const withArchives = createSourceCorpusRegistry(withArchiveImportCorpora());
+    // Three stores for each family a registered format imports into, mail first.
+    const families = archiveImportFamilies();
+    expect(families[0]).toBe('email');
     expect(withArchives.list().map((corpus) => corpus.corpusId)).toEqual([
       ...shipped,
-      'secure_local.archive.email',
-      'internal.archive.email',
-      'public_safe.archive.email',
-      'secure_local.archive.note',
-      'internal.archive.note',
-      'public_safe.archive.note',
+      ...families.flatMap((family) => ['secure_local', 'internal', 'public_safe'].map((domain) => `${domain}.archive.${family}`)),
     ]);
-    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(['secure_local.archive.email', 'secure_local.archive.note']);
-    // Mail has the one format, so its stores carry that format's name; notes have two (Reflect, Roam), so theirs carry the neutral one.
+    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(families.map((family) => `secure_local.archive.${family}`));
     for (const corpus of withArchives.list().filter((entry) => entry.sourceId === 'archive.imports')) {
-      expect(corpus).toMatchObject(corpus.family === 'email'
-        ? { provider: 'mbox', family: 'email', createdOnDemand: true }
-        : { provider: 'archive', family: 'note', createdOnDemand: true });
+      expect(corpus).toMatchObject({ provider: archiveFamilyProvider(corpus.family), family: corpus.family, createdOnDemand: true });
     }
+    expect(withArchives.list().find((corpus) => corpus.corpusId === 'secure_local.archive.email')?.provider).toBe('mbox');
     // Added once, whatever the config already holds.
     expect(withArchiveImportCorpora(withArchiveImportCorpora()).corpora).toHaveLength(withArchives.list().length);
   });

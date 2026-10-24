@@ -77,15 +77,31 @@ export interface ArchiveFormatDefinition {
    */
   probeNames?: readonly string[];
   /**
+   * Other forms of this format's export that cannot be read, recognised by the
+   * same cheap probe, with what the person can do instead. Only consulted when
+   * no format matched: the refusal then carries the advice beside the list of
+   * what is supported.
+   */
+  unsupportedVariants?: readonly ArchiveUnsupportedVariant[];
+  /**
    * The files to read, relative to the chosen path and in reading order, when
    * the probe is this format; undefined when it is not.
    */
   detect(probe: ArchiveProbe): readonly string[] | undefined;
 }
 
+/**
+ * An export Olympus recognises and cannot read: `advice` says, in plain words
+ * and without the person's file names, how to get one it can.
+ */
+export interface ArchiveUnsupportedVariant {
+  matches(probe: ArchiveProbe): boolean;
+  advice: string;
+}
+
 export type ArchiveDetection =
   | { kind: 'match'; format: ArchiveFormatDefinition; files: readonly string[] }
-  | { kind: 'none'; supported: readonly string[] }
+  | { kind: 'none'; supported: readonly string[]; advice?: string }
   | { kind: 'ambiguous'; formats: readonly string[] };
 
 const FROM_LINE = [0x46, 0x72, 0x6f, 0x6d, 0x20]; // "From "
@@ -258,11 +274,73 @@ export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson)),
 });
 
+// --- Telegram Desktop export -----------------------------------------------------
+
+const JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
+/**
+ * The top-level sections Telegram Desktop's "Export Telegram data" can write
+ * (export_output_json.cpp `JsonWriter`), besides `about`.
+ */
+export const TELEGRAM_EXPORT_SECTIONS = Object.freeze([
+  'personal_information', 'profile_pictures', 'stories', 'profile_music', 'contacts',
+  'frequent_contacts', 'sessions', 'web_sessions', 'other_data', 'chats', 'left_chats',
+] as const);
+// A whole-account export opens with `about` and then its first section; a
+// single-chat export opens with the chat's header (name, type, id) and then
+// `messages`. The writer is fixed, so the first keys decide, whatever follows;
+// every section is an object or a list.
+const TELEGRAM_FULL_HEAD = new RegExp(
+  String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join('|')})"\s*:\s*[\[{]`,
+);
+const TELEGRAM_CHAT_HEAD = new RegExp(
+  String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`,
+);
+const TELEGRAM_HTML_NAME = /^(?:messages\d*|export_results)\.html?$/i;
+
+function isTelegramJsonHead(head: Uint8Array | undefined): boolean {
+  if (!head || head.length === 0) return false;
+  const text = new TextDecoder('utf-8').decode(head);
+  return TELEGRAM_FULL_HEAD.test(text) || TELEGRAM_CHAT_HEAD.test(text);
+}
+
+/**
+ * Telegram Desktop's JSON export: `result.json`, as the whole-account export
+ * ("Export Telegram data") or one chat's ("Export chat history") writes it.
+ * Chosen directly as a file, or as the folder that holds it. Telegram's HTML
+ * form of the same export (`messages.html`) is recognised and turned away
+ * with what to do instead.
+ */
+export const TELEGRAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'telegram_json',
+  label: 'Telegram Desktop export (JSON)',
+  family: 'chat',
+  provider: 'telegram_export',
+  chooseHint: 'a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON)',
+  citationLabel: 'Telegram',
+  probeNames: ['result.json', 'messages.html', 'export_results.html'],
+  unsupportedVariants: Object.freeze([
+    Object.freeze({
+      matches(probe: ArchiveProbe): boolean {
+        if (probe.chosen.kind === 'file') return TELEGRAM_HTML_NAME.test(probe.chosen.name);
+        return probe.children.some((entry) => entry.kind === 'file' && TELEGRAM_HTML_NAME.test(entry.name));
+      },
+      advice: 'This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat\'s menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it.',
+    }),
+  ]),
+  detect(probe: ArchiveProbe): readonly string[] | undefined {
+    if (probe.chosen.kind === 'file') return isTelegramJsonHead(probe.chosen.head) ? [''] : undefined;
+    const inner = probe.children.find((entry) =>
+      entry.kind === 'file' && entry.name.toLowerCase() === 'result.json' && isTelegramJsonHead(entry.head));
+    return inner ? [inner.relPath] : undefined;
+  },
+});
+
 export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([
   MBOX_ARCHIVE_FORMAT,
   REFLECT_JSON_ARCHIVE_FORMAT,
   REFLECT_MARKDOWN_ARCHIVE_FORMAT,
   ROAM_JSON_ARCHIVE_FORMAT,
+  TELEGRAM_JSON_ARCHIVE_FORMAT,
 ]);
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
@@ -398,8 +476,25 @@ export function detectArchiveFormat(
     if (files && files.length > 0) matches.push({ format, files });
   }
   if (matches.length === 1) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
-  if (matches.length === 0) return { kind: 'none', supported: formats.map((format) => format.label) };
+  if (matches.length === 0) {
+    const supported = formats.map((format) => format.label);
+    const advice = unsupportedAdvice(probe, formats);
+    return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
+  }
   return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+}
+
+function unsupportedAdvice(probe: ArchiveProbe, formats: readonly ArchiveFormatDefinition[]): string | undefined {
+  for (const format of formats) {
+    for (const variant of format.unsupportedVariants ?? []) {
+      try {
+        if (variant.matches(probe)) return variant.advice;
+      } catch {
+        // A variant that cannot tell is no advice.
+      }
+    }
+  }
+  return undefined;
 }
 
 // --- Connector factories ------------------------------------------------------

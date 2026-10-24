@@ -46,6 +46,18 @@ export interface ArchiveImportRuntime {
    * Starts importing the canonical path the person approved (start.ts).
    */
   start(path: string): ArchiveImportStart;
+  /**
+   * The scheduler's push wake (`subscribeChanges`) for the archive tasks:
+   * `wake` runs them now, not at their cadence. One function for the life of
+   * the runtime, so the scheduler subscribes once. It also wakes at once when
+   * subscribed while a removal is waiting, which is a restart in the middle of
+   * one, or the archive source coming back to the roster for it.
+   */
+  readonly subscribeWork: (wake: () => void) => () => void;
+  /**
+   * Wakes every subscriber: there is work to run now (a removal was asked for).
+   */
+  notifyWork(): void;
 }
 
 export interface ArchiveImportRuntimeOptions {
@@ -98,6 +110,15 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
     return built;
   };
 
+  const subscribers = new Set<() => void>();
+  const removalWaiting = (): boolean => {
+    try {
+      return state.list().some((record) => record.status === 'removing');
+    } catch {
+      return false;
+    }
+  };
+
   const hasData = (family: SourceFamily): boolean => {
     if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync(path))) return true;
     try {
@@ -119,5 +140,19 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
       return existsSync(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
+    subscribeWork: (wake) => {
+      subscribers.add(wake);
+      if (removalWaiting()) wake();
+      return () => { subscribers.delete(wake); };
+    },
+    notifyWork: () => {
+      for (const wake of [...subscribers]) {
+        try {
+          wake();
+        } catch {
+          // One subscriber's failure never stops the others.
+        }
+      }
+    },
   };
 }

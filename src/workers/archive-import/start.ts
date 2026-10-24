@@ -38,7 +38,7 @@ import type { ArchiveImportRecord, ArchiveImportStateStore, NewArchiveImportReco
 export type ArchiveImportStart =
   | { kind: 'started'; archive: ArchiveImportRecord }
   | { kind: 'already_imported'; archive: ArchiveImportRecord }
-  | { kind: 'unsupported'; supported: readonly string[] }
+  | { kind: 'unsupported'; supported: readonly string[]; advice?: string }
   | { kind: 'ambiguous'; formats: readonly string[] }
   | { kind: 'unreadable'; code: string };
 
@@ -96,7 +96,9 @@ export function prepareArchiveImport(input: {
   try {
     const probe = probeArchivePath(root, chosenRelPath, { probeNames: archiveProbeNames(input.formats) });
     const detection = detectArchiveFormat(probe, input.formats);
-    if (detection.kind === 'none') return { kind: 'unsupported', supported: detection.supported };
+    if (detection.kind === 'none') {
+      return { kind: 'unsupported', supported: detection.supported, ...(detection.advice ? { advice: detection.advice } : {}) };
+    }
     if (detection.kind === 'ambiguous') return { kind: 'ambiguous', formats: detection.formats };
     const relPaths = detection.files.map((file) => (file === '' ? chosenRelPath : joinRelative(chosenRelPath, file)));
     const files = buildArchiveManifest(root, relPaths);

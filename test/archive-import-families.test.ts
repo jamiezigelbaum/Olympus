@@ -117,8 +117,10 @@ describe('the dashboard words come from the registry and the family', () => {
     expect(archivePickIntro()).toBe(DASHBOARD_ARCHIVE_COPY.pick.intro);
     for (const format of ARCHIVE_FORMATS) expect(DASHBOARD_ARCHIVE_COPY.pick.intro).toContain(format.chooseHint ?? format.label);
     const one = archivePickIntro([MBOX_ARCHIVE_FORMAT]);
-    expect(one).toContain(MBOX_ARCHIVE_FORMAT.chooseHint ?? MBOX_ARCHIVE_FORMAT.label);
-    expect(one).not.toContain('Reflect');
+    expect(one).toContain(MBOX_ARCHIVE_FORMAT.chooseHint!);
+    // The words the dashboard ships name every registered format.
+    expect(archivePickIntro(ARCHIVE_FORMATS)).toBe(DASHBOARD_ARCHIVE_COPY.pick.intro);
+    for (const format of ARCHIVE_FORMATS) expect(DASHBOARD_ARCHIVE_COPY.pick.intro).toContain(format.chooseHint ?? format.label);
     const two = archivePickIntro([MBOX_ARCHIVE_FORMAT, NOTES, SECOND_MAIL]);
     expect(two).toContain('a notes export (a .zip file)');
     expect(two).toContain('; or Fake fakemail');
