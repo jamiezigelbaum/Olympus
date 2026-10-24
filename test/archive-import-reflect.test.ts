@@ -1297,7 +1297,7 @@ describe('a second export that the first bytes do not tell is not left out of a 
     // A file that ran into its own allowance is one the look could not tell, as before; it is not the folder running out.
     expect(detectFolder({ 'a.json': settled(), 'b.json': filler(3) }, { document: 1 * MiB, folder: 64 * MiB })).toMatchObject({ kind: 'match', files: ['a.json'] });
     // The sentence is plain words with no file names, and leaves the person a way out.
-    expect(ARCHIVE_LOOK_INCOMPLETE_ADVICE).toContain('Choose the export file itself');
+    expect(ARCHIVE_LOOK_INCOMPLETE_ADVICE).toContain('Choose just the export file');
     expect(ARCHIVE_LOOK_INCOMPLETE_ADVICE).not.toMatch(/\.json|\.zip|\//);
   });
 
@@ -1329,5 +1329,110 @@ describe('a second export that the first bytes do not tell is not left out of a 
     // The first export alone is the import.
     unlinkSync(join(dir, 'b.json'));
     expect(startArchiveImport({ state, path: dir }).kind).toBe('started');
+  });
+});
+
+describe('a second export inside a zip that the first bytes do not tell is not left out of it', () => {
+  const MiB = 1024 * 1024;
+  const LONG = 'word '.repeat(40_000);
+  const note = (extra: Record<string, unknown> = {}) => ({ id: 'a', content: 'Hello from the harbour.', subject: 'Title', created_at: '2023-01-01T00:00:00Z', ...extra });
+  const page = { title: 'Page', uid: 'p0', 'create-time': 1, children: [{ string: 'A block.' }] };
+  const settledReflect = () => JSON.stringify([note(), note({ id: 'b' })]);
+  const settledRoam = () => JSON.stringify([page, { ...page, uid: 'p1' }]);
+  // The keys that say what each is come after more than the first 4 KB of text.
+  const lateReflect = (text = LONG) => JSON.stringify([{ id: 'late', content: text, subject: 'Late title', created_at: '2023-01-02T00:00:00Z' }]);
+  const lateRoam = () => JSON.stringify([{ children: [{ string: LONG }], title: 'Late page', uid: 'p1', 'create-time': 1 }]);
+  const blob = (mib: number) => JSON.stringify([{ blob: 'x'.repeat(mib * MiB), other: 1 }]);
+  const zipOf = (members: Array<[string, string]>) => buildZip(members.map(([name, data]) => ({ name, data, method: 'deflate' as const })));
+
+  type Allowance = { document?: number; folder?: number };
+  /** The zip, picked on its own (a file), or inside a folder that is picked. */
+  function detectZip(members: Array<[string, string]>, scanBytes?: Allowance, inFolder = false): ArchiveDetection {
+    const dir = tempFolder(cleanups);
+    writeFileSync(join(dir, 'export.zip'), zipOf(members));
+    const root = ScopeRoot.open(dir);
+    try {
+      return detectArchiveFormat(probeArchivePath(root, inFolder ? '' : 'export.zip', { probeNames: archiveProbeNames(), ...(scanBytes ? { scanBytes } : {}) }));
+    } finally {
+      root.close();
+    }
+  }
+
+  test('a Reflect member told by its first bytes and a Roam member told only further in are refused as the two kinds are when both are told at once', () => {
+    const bothSettled = detectZip([['reflect.json', settledReflect()], ['roam.json', settledRoam()]]);
+    expect(bothSettled.kind).toBe('none');
+    expect(detectZip([['reflect.json', settledReflect()], ['roam.json', lateRoam()]])).toEqual(bothSettled);
+    // Either one first in the zip, and the other way about.
+    expect(detectZip([['roam.json', lateRoam()], ['reflect.json', settledReflect()]])).toEqual(bothSettled);
+    expect(detectZip([['reflect.json', lateReflect()], ['roam.json', settledRoam()]])).toEqual(bothSettled);
+    // Inside a folder that is picked, the same.
+    expect(detectZip([['reflect.json', settledReflect()], ['roam.json', lateRoam()]], undefined, true)).toEqual(bothSettled);
+  });
+
+  test('a second member of the same kind, or one that is no export however long, leaves the zip the export it is', () => {
+    expect(detectZip([['a.json', settledReflect()], ['b.json', lateReflect()]])).toMatchObject({ kind: 'match', files: [''] });
+    expect(formatOf(detectZip([['a.json', settledReflect()], ['b.json', lateReflect()]]))).toBe('reflect-json');
+    expect(formatOf(detectZip([['a.json', settledReflect()], ['b.json', JSON.stringify([{ blob: LONG, other: 1 }])], ['c.txt', 'x']]))).toBe('reflect-json');
+    // A late member alone is found as before.
+    expect(formatOf(detectZip([['a.json', lateRoam()], ['readme.txt', 'x']]))).toBe('roam-json');
+  });
+
+  test('only the members the first bytes left open are read on through: a member they settled is never asked', () => {
+    const calls: string[] = [];
+    const member = (name: string, head: string): ArchiveProbe['children'][number] => ({
+      relPath: name,
+      name,
+      kind: 'file',
+      head: new TextEncoder().encode(head),
+      firstRecordKeys: () => { calls.push(`${name}:keys`); return undefined; },
+      listIsEmpty: () => { calls.push(`${name}:empty`); return false; },
+    });
+    const probe: ArchiveProbe = {
+      chosen: {
+        relPath: '',
+        name: 'export.zip',
+        kind: 'file',
+        head: new Uint8Array([0x50, 0x4b, 3, 4]),
+        members: [
+          member('reflect.json', '[{"subject":"a","content":"b"}]'),
+          member('open.json', `[{"content":"${'x'.repeat(5000)}`),
+          member('short.json', '[{"id":1,"x":2}]'),
+        ],
+      },
+      children: [],
+    };
+    // The zip is told by its settled member; the one that is open is still read on through, once.
+    expect(formatOf(detectArchiveFormat(probe, ARCHIVE_FORMATS))).toBe('reflect-json');
+    expect(calls).toEqual(['open.json:keys']);
+  });
+
+  test('a zip whose look ran out of allowance before every member was reached is refused in plain words', () => {
+    const settled: [string, string] = ['a.json', settledReflect()];
+    const members: Array<[string, string]> = [settled, ['b.json', blob(3)], ['c.json', lateReflect('x'.repeat(3 * MiB))]];
+    // Within the allowance every member is looked through: two Reflect members are one Reflect export.
+    expect(formatOf(detectZip(members, { document: 64 * MiB }))).toBe('reflect-json');
+    // The zip's members share one document's worth: too little and the last was not reached, so nothing is imported.
+    expect(detectZip(members, { document: 2 * MiB })).toMatchObject({ kind: 'none', advice: ARCHIVE_LOOK_INCOMPLETE_ADVICE });
+    // The same inside a folder that is picked, where the folder's allowance is the zip's share.
+    expect(detectZip(members, { folder: 2 * MiB }, true)).toMatchObject({ kind: 'none', advice: ARCHIVE_LOOK_INCOMPLETE_ADVICE });
+    expect(formatOf(detectZip(members, { folder: 64 * MiB }, true))).toBe('reflect-json');
+    // A member that ran into its own allowance is one the look could not tell, as before: not the zip running out.
+    expect(formatOf(detectZip([settled, ['b.json', blob(3)]], { document: 1 * MiB }))).toBe('reflect-json');
+    // And a member told by its first bytes costs the allowance nothing.
+    expect(formatOf(detectZip([settled, ['b.json', settledReflect()], ['c.json', settledReflect()]], { document: 1 }))).toBe('reflect-json');
+  });
+
+  test('a picked file or zip says whether its look ran out; a plain JSON file has no allowance to run out', () => {
+    const dir = tempFolder(cleanups);
+    writeFileSync(join(dir, 'plain.json'), settledReflect());
+    writeFileSync(join(dir, 'export.zip'), zipOf([['a.json', settledReflect()]]));
+    const root = ScopeRoot.open(dir);
+    try {
+      expect(probeArchivePath(root, 'plain.json', { probeNames: archiveProbeNames() }).readsRanOut).toBeUndefined();
+      const zip = probeArchivePath(root, 'export.zip', { probeNames: archiveProbeNames() });
+      expect(zip.readsRanOut?.()).toBe(false);
+    } finally {
+      root.close();
+    }
   });
 });

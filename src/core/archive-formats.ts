@@ -75,10 +75,11 @@ export interface ArchiveProbe {
    */
   children: readonly ArchiveProbeEntry[];
   /**
-   * For a chosen folder: whether a read on past a file's first bytes
-   * (`firstRecordKeys`, `listIsEmpty`) was refused because the allowance the
-   * folder's files share was spent, so some file was not looked through as
-   * far as it needed. Absent when the probe keeps no such allowance.
+   * For a chosen folder, or a chosen zip: whether a read on past a first
+   * bytes (`firstRecordKeys`, `listIsEmpty`) was refused because the
+   * allowance the folder's files, or the zip's members, share was spent, so
+   * some file or member was not looked through as far as it needed. Absent
+   * when the probe keeps no such allowance.
    */
   readsRanOut?(): boolean;
 }
@@ -678,24 +679,24 @@ export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[
 }
 
 /**
- * What the person is told when a folder had more to look through than the
- * probe may read: nothing is imported, because a file left unchecked could be
- * a second export that would be dropped without a word.
+ * What the person is told when a folder or a zip had more to look through
+ * than the probe may read: nothing is imported, because a file or member left
+ * unchecked could be a second export that would be dropped without a word.
  */
-export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through every file in this folder to see which ones are exports, because some are very large. Choose the export file itself, or a folder that holds only the export.';
+export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through everything you chose to see which parts are exports, because some parts are very large. Choose just the export file, or a folder or zip that holds only the export.';
 
 /**
  * Which format a probe is. No match says so and lists what is supported; two
  * matches are returned as such for the person to choose, never guessed.
  *
- * The first bytes decide when they can, and a file they settle is never read
- * further (the slower look reads on through a file, and a long export would
- * pay for it every time). Every other file of the pick gets that look, so a
- * second export whose first bytes do not say what it is cannot hide beside
- * one that does: both are found, and the formats' own rules for two exports
- * apply as they do when both are told by their first bytes. A pick whose
- * look ran out of allowance before it reached every file is refused, never
- * imported with a file left out.
+ * The first bytes decide when they can, and a file (or a zip's member) they
+ * settle is never read further (the slower look reads on through a file, and
+ * a long export would pay for it every time). Every other file or member of
+ * the pick gets that look, so a second export whose first bytes do not say
+ * what it is cannot hide beside one that does: both are found, and the
+ * formats' own rules for two exports apply as they do when both are told by
+ * their first bytes. A pick whose look ran out of allowance before it reached
+ * every file or member is refused, never imported with one left out.
  */
 export function detectArchiveFormat(
   probe: ArchiveProbe,
@@ -703,7 +704,7 @@ export function detectArchiveFormat(
 ): ArchiveDetection {
   const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
   const settled = new Set(onHeads.flatMap((match) => match.files));
-  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled), formats);
+  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled, formats), formats);
   const incomplete = probe.readsRanOut?.() === true;
   if (matches.length === 1 && !incomplete) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
   if (matches.length > 1) return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
@@ -741,10 +742,31 @@ function probeWithoutFurtherReads(probe: ArchiveProbe): ArchiveProbe {
   return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
 }
 
-/** The probe with the way on past the first bytes kept only for the entries not in `settled` (by their `relPath`). */
-function probeReadingPastHeadsExcept(probe: ArchiveProbe, settled: ReadonlySet<string>): ArchiveProbe {
-  const keep = (entry: ArchiveProbeEntry): ArchiveProbeEntry => (settled.has(entry.relPath) ? entryWithoutFurtherReads(entry) : entry);
+/**
+ * The probe with the way on past the first bytes kept only for what the first
+ * bytes did not settle: an entry not in `settled` (by its `relPath`), and a
+ * zip's member that no format takes for its own file on its first bytes (a
+ * zip settled as a whole still has members to look through).
+ */
+function probeReadingPastHeadsExcept(
+  probe: ArchiveProbe,
+  settled: ReadonlySet<string>,
+  formats: readonly ArchiveFormatDefinition[],
+): ArchiveProbe {
+  const keep = (entry: ArchiveProbeEntry): ArchiveProbeEntry => {
+    const members = entry.members?.map((member) => (toldOnItsFirstBytes(member, formats) ? entryWithoutFurtherReads(member) : member));
+    if (!settled.has(entry.relPath)) return members ? { ...entry, members } : entry;
+    const { firstRecordKeys: _keys, listIsEmpty: _empty, members: _members, ...rest } = entry;
+    return { ...rest, ...(members ? { members } : {}) };
+  };
   return { ...probe, chosen: keep(probe.chosen), children: probe.children.map(keep) };
+}
+
+/** Whether some format takes this member for its own file on its first bytes alone. */
+function toldOnItsFirstBytes(member: ArchiveProbeEntry, formats: readonly ArchiveFormatDefinition[]): boolean {
+  if (member.kind !== 'file') return false;
+  const alone: ArchiveProbeEntry = { ...entryWithoutFurtherReads(member), relPath: '' };
+  return matchesOf({ chosen: alone, children: [] }, formats).length > 0;
 }
 
 function unsupportedAdvice(probe: ArchiveProbe, formats: readonly ArchiveFormatDefinition[]): string | undefined {

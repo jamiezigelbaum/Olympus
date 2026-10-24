@@ -120,23 +120,25 @@ type FirstRecordKeys = NonNullable<ArchiveProbeEntry['firstRecordKeys']>;
 
 /**
  * How much the probe reads on past first bytes: each document has its own
- * allowance, and the files of one chosen folder share another between them,
- * so a folder of many large files costs a bounded read however many there
- * are. A chosen file has no folder.
+ * allowance, and the documents that belong together share another between
+ * them, so a folder of many large files, or a zip of many large members,
+ * costs a bounded read however many there are. A document read on its own
+ * shares nothing.
  */
 interface ScanAllowance {
   budgetsForDocument(): readonly RecordProbeBudget[];
   /**
-   * Whether a read was refused because the folder's allowance was spent.
+   * Whether a read was refused because the shared allowance was spent.
    */
-  folderRanOut(): boolean;
+  sharedRanOut(): boolean;
 }
 
-function scanAllowance(options: { document?: number; folder?: number } | undefined, inFolder: boolean): ScanAllowance {
-  const folder = inFolder ? recordProbeBudget(options?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES) : undefined;
+type ScanBytes = { document?: number; folder?: number };
+
+function scanAllowance(options: ScanBytes | undefined, shared?: RecordProbeBudget): ScanAllowance {
   return {
-    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...(folder ? [folder] : [])],
-    folderRanOut: () => folder?.ranOut === true,
+    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...(shared ? [shared] : [])],
+    sharedRanOut: () => shared?.ranOut === true,
   };
 }
 
@@ -272,19 +274,21 @@ export function probeArchivePath(
   options: {
     probeNames?: readonly string[];
     /**
-     * Test seam: the bytes one document, and one chosen folder's files
-     * together, may be read on through.
+     * Test seam: the bytes one document may be read on through, and the
+     * files of a chosen folder (or the members of a chosen zip: a document's
+     * worth) together.
      */
-    scanBytes?: { document?: number; folder?: number };
+    scanBytes?: ScanBytes;
   } = {},
 ): ArchiveProbe {
   const probeNames = options.probeNames ?? archiveProbeNames();
   const stat = chosenRelPath === '' ? root.statRelative('') : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat.kind === 'file') {
-    const alone = scanAllowance(options.scanBytes, false);
+    const alone = scanAllowance(options.scanBytes);
+    const zipShare = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.document ?? RECORD_PROBE_MAX_SCAN_BYTES));
     const head = fileHead(root, chosenRelPath);
-    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, alone) : undefined;
+    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, zipShare) : undefined;
     return {
       chosen: {
         relPath: '',
@@ -294,10 +298,11 @@ export function probeArchivePath(
         ...(members ? { members } : {}),
       },
       children: [],
+      ...(members ? { readsRanOut: zipShare.sharedRanOut } : {}),
     };
   }
   if (stat.kind !== 'directory') throw new ScopeSafeError('not_regular', 'neither a file nor a folder');
-  const folderAllowance = scanAllowance(options.scanBytes, true);
+  const folderAllowance = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES));
   const everything = root.list(chosenRelPath);
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
@@ -344,7 +349,7 @@ export function probeArchivePath(
       });
     }
   });
-  return { chosen: { relPath: '', name, kind: 'directory' }, children, readsRanOut: folderAllowance.folderRanOut };
+  return { chosen: { relPath: '', name, kind: 'directory' }, children, readsRanOut: folderAllowance.sharedRanOut };
 }
 
 function sha256(bytes: Uint8Array): string {

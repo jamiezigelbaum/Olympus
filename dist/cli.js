@@ -35988,7 +35988,7 @@ function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
 function detectArchiveFormat(probe, formats = ARCHIVE_FORMATS) {
   const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
   const settled = new Set(onHeads.flatMap((match) => match.files));
-  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled), formats);
+  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled, formats), formats);
   const incomplete = probe.readsRanOut?.() === true;
   if (matches.length === 1 && !incomplete)
     return { kind: "match", format: matches[0].format, files: matches[0].files };
@@ -36019,9 +36019,21 @@ function entryWithoutFurtherReads(entry) {
 function probeWithoutFurtherReads(probe) {
   return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
 }
-function probeReadingPastHeadsExcept(probe, settled) {
-  const keep = (entry) => settled.has(entry.relPath) ? entryWithoutFurtherReads(entry) : entry;
+function probeReadingPastHeadsExcept(probe, settled, formats) {
+  const keep = (entry) => {
+    const members = entry.members?.map((member) => toldOnItsFirstBytes(member, formats) ? entryWithoutFurtherReads(member) : member);
+    if (!settled.has(entry.relPath))
+      return members ? { ...entry, members } : entry;
+    const { firstRecordKeys: _keys, listIsEmpty: _empty, members: _members, ...rest } = entry;
+    return { ...rest, ...members ? { members } : {} };
+  };
   return { ...probe, chosen: keep(probe.chosen), children: probe.children.map(keep) };
+}
+function toldOnItsFirstBytes(member, formats) {
+  if (member.kind !== "file")
+    return false;
+  const alone = { ...entryWithoutFurtherReads(member), relPath: "" };
+  return matchesOf({ chosen: alone, children: [] }, formats).length > 0;
 }
 function unsupportedAdvice(probe, formats) {
   for (const format of formats) {
@@ -36042,7 +36054,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through every file in this folder to see which ones are exports, because some are very large. Choose the export file itself, or a folder that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -74919,11 +74931,10 @@ function fileHead(root, relPath) {
     throw error;
   }
 }
-function scanAllowance(options, inFolder) {
-  const folder = inFolder ? recordProbeBudget(options?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES) : undefined;
+function scanAllowance(options, shared) {
   return {
-    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...folder ? [folder] : []],
-    folderRanOut: () => folder?.ranOut === true
+    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...shared ? [shared] : []],
+    sharedRanOut: () => shared?.ranOut === true
   };
 }
 function fileFirstRecordKeys(root, relPath, allowance) {
@@ -75026,9 +75037,10 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   const stat2 = chosenRelPath === "" ? root.statRelative("") : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat2.kind === "file") {
-    const alone = scanAllowance(options.scanBytes, false);
+    const alone = scanAllowance(options.scanBytes);
+    const zipShare = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.document ?? RECORD_PROBE_MAX_SCAN_BYTES));
     const head = fileHead(root, chosenRelPath);
-    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, alone) : undefined;
+    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, zipShare) : undefined;
     return {
       chosen: {
         relPath: "",
@@ -75037,12 +75049,13 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
         ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath, alone) } : {},
         ...members ? { members } : {}
       },
-      children: []
+      children: [],
+      ...members ? { readsRanOut: zipShare.sharedRanOut } : {}
     };
   }
   if (stat2.kind !== "directory")
     throw new ScopeSafeError("not_regular", "neither a file nor a folder");
-  const folderAllowance = scanAllowance(options.scanBytes, true);
+  const folderAllowance = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES));
   const everything = root.list(chosenRelPath);
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
@@ -75089,7 +75102,7 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
       });
     }
   });
-  return { chosen: { relPath: "", name, kind: "directory" }, children, readsRanOut: folderAllowance.folderRanOut };
+  return { chosen: { relPath: "", name, kind: "directory" }, children, readsRanOut: folderAllowance.sharedRanOut };
 }
 function sha2563(bytes) {
   return createHash47("sha256").update(bytes).digest("hex");
