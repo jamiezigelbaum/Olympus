@@ -24,6 +24,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { legacyCaptureDataRoot, olympusDataPath } from './core/olympus-layout.ts';
 import { Database } from 'bun:sqlite';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
@@ -526,12 +527,7 @@ function legacySourceIndexPath(
 }
 
 function olympusSharedDataFile(env: Record<string, string | undefined>, fileName: string): string {
-  return join(
-    env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share'),
-    'openclaw',
-    'olympus',
-    fileName,
-  );
+  return olympusDataPath(env, fileName);
 }
 
 /**
@@ -577,11 +573,10 @@ function whatsappRawStatePaths(env: Record<string, string | undefined>): string[
 
 function telegramCaptureStatePaths(env: Record<string, string | undefined>): string[] {
   const home = env.HOME?.trim() || homedir();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(home, '.local', 'share');
   const stateHome = env.XDG_STATE_HOME?.trim() || join(home, '.local', 'state');
   const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
     || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim()
-    || join(dataHome, 'olympus', 'telegram-capture', 'spool');
+    || join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool');
   const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim()
     || join(stateHome, 'olympus', 'telegram-capture-gateway');
   const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim()

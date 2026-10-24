@@ -4,8 +4,8 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { legacyCaptureDataRoot } from '../../core/olympus-layout.ts';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -87,11 +87,9 @@ export interface TelegramCaptureSpoolReadResult {
 export function defaultTelegramCaptureSpoolDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const home = env.HOME?.trim() || homedir();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(home, '.local', 'share');
   return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
     || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim()
-    || join(dataHome, 'olympus', 'telegram-capture', 'spool');
+    || join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool');
 }
 
 export function createTelegramCaptureSpoolConnector(options: {

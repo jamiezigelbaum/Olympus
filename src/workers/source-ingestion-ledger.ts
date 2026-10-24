@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type { ContentExtractionThroughputSignal } from '../core/ingestion-throughput.ts';
@@ -48,7 +47,11 @@ import { defaultReadwiseConnectorStoreDbPath } from './readwise/index.ts';
 import { READWISE_SECURE_LIBRARY_CORPUS_ID, defaultReadwiseSecureConnectorStoreDbPath } from './readwise/tier-set.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from './x-bookmarks/index.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, defaultXBookmarksSecureConnectorStoreDbPath } from './x-bookmarks/tier-set.ts';
-import { WHATSAPP_INTERNAL_CORPUS_ID, defaultWhatsAppInternalConnectorStoreDbPath } from './whatsapp/store-sync.ts';
+import {
+  WHATSAPP_INTERNAL_CORPUS_ID,
+  defaultWhatsAppConnectorStoreDbPath,
+  defaultWhatsAppInternalConnectorStoreDbPath,
+} from './whatsapp/store-sync.ts';
 import {
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_INTERNAL_FILES_CORPUS_ID,
@@ -1639,7 +1642,8 @@ function localConnectorStores(env: Record<string, string | undefined>): Array<Co
     },
     {
       corpusId: 'secure_local.whatsapp.messages',
-      dbPath: whatsappConnectorStoreDbPath(env),
+      // The writer's own resolution, so OLYMPUS_WHATSAPP_STATE_DIR is honored here too.
+      dbPath: defaultWhatsAppConnectorStoreDbPath(env),
       family: 'chat',
       trustDomain: 'secure_local',
     },
@@ -1707,13 +1711,6 @@ function mergeConnectorStoreDefinitions(
     if (!byCorpusId.has(store.corpusId)) byCorpusId.set(store.corpusId, store);
   }
   return Array.from(byCorpusId.values());
-}
-
-function whatsappConnectorStoreDbPath(env: Record<string, string | undefined>): string {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim()
-    || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim()
-    || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim()
-    || join(env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share'), 'olympus', 'whatsapp-live', 'connector-store.db');
 }
 
 function number(value: number | undefined): number {

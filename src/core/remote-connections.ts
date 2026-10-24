@@ -40,6 +40,7 @@ import {
 import { revokeWaitingPrivateQuestions } from './waiting-private-questions.ts';
 import { credentialInstallId, mintCredential } from '../../connect-relay/shared/tokens.ts';
 import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
+import { olympusDataPath } from './olympus-layout.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
 export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 3;
@@ -176,14 +177,7 @@ export function resolveRemoteConnectionsDbPathForCli(
 export function defaultRemoteConnectionsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const standalone = standaloneLinuxDataDir(env);
-  if (standalone) return join(standalone, 'remote-connections.sqlite');
-  const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  if (!isAbsolute(dataRoot)) {
-    throw new TypeError('Remote connections XDG_DATA_HOME must be an absolute private data root.');
-  }
-  return join(dataRoot, 'openclaw', 'olympus', 'remote-connections.sqlite');
+  return olympusDataPath(env, 'remote-connections.sqlite');
 }
 
 /** Shape check only; lets the endpoint refuse garbage without touching the store. */
