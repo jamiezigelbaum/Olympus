@@ -25,10 +25,10 @@
  */
 import { existsSync } from 'node:fs';
 import type { WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
-import { TierSnifferStore } from '../classification/sniffer-store.ts';
+import { openTierSniffer } from '../../core/source-storage.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { archiveLaneLegs, archiveLaneStores, type ArchiveTierLane } from './lane.ts';
-import { archiveConnectorId, type ArchiveImportRecord, type ArchiveImportStateStore } from './state.ts';
+import { ARCHIVE_IMPORTS_SOURCE_ID, archiveConnectorId, type ArchiveImportRecord, type ArchiveImportStateStore } from './state.ts';
 import { archiveTierSetId } from './store.ts';
 
 /**
@@ -112,7 +112,7 @@ function deleteWaitingAnswers(
 function deleteJudgeQuestions(lane: ArchiveTierLane, provider: string, accountScope: string): number {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
   if (path !== ':memory:' && !existsSync(path)) return 0;
-  const sniffer = new TierSnifferStore({ dbPath: path });
+  const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, { dbPath: path });
   try {
     return sniffer.deleteAccountScopeQuestions(provider, accountScope);
   } finally {

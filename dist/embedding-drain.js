@@ -28815,94 +28815,6 @@ var init_tiered_store_set = __esm(() => {
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
-// src/workers/connector-store/principal.ts
-function isCanonicalConnectorStoreProvider(provider) {
-  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
-}
-function isCanonicalConnectorStoreAccountScope(accountScope) {
-  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
-}
-var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
-var init_principal = __esm(() => {
-  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
-  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
-});
-
-// src/workers/connector-store/filter-capabilities.ts
-function connectorStoreFilterCapabilityRegistry(entries) {
-  const familyEntries = new Map;
-  const providerEntries = new Map;
-  for (const [scope, capabilities] of entries) {
-    const provider = "provider" in scope ? scope.provider : undefined;
-    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
-      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
-    }
-    const registry = provider === undefined ? familyEntries : providerEntries;
-    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key2)) {
-      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
-      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
-    }
-    registry.set(key2, Object.freeze({ ...capabilities }));
-  }
-  return Object.freeze({
-    resolve(identity) {
-      const familyCapabilities = familyEntries.get(identity.family);
-      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
-      if (!familyCapabilities)
-        return providerCapabilities;
-      if (!providerCapabilities)
-        return familyCapabilities;
-      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
-    }
-  });
-}
-function providerScopeKey(family, provider) {
-  return `${family}\x00${provider}`;
-}
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
-});
-
 // src/workers/connector-store/file-ingestion-matcher.ts
 var POLICY_ADMITTED;
 var init_file_ingestion_matcher = __esm(() => {
@@ -28914,6 +28826,197 @@ var init_file_ingestion_matcher = __esm(() => {
     disposition: "admit",
     outcome: "admitted"
   });
+});
+
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+function isArchiveCorpusId(corpusId, trustDomain) {
+  return corpusId.startsWith(`${trustDomain}.archive.`);
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
+// src/core/source-registry.ts
+import { readFileSync as readFileSync17 } from "node:fs";
+function sourceRegistryPath(env = process.env) {
+  return olympusDataPath(env, "registry.json");
+}
+function readSourceRegistry(env = process.env) {
+  return readSourceRegistryAt(sourceRegistryPath(env));
+}
+function updateSourceRegistry(env, mutate) {
+  const path = sourceRegistryPath(env);
+  return withFileLeaseSync(path, (lease) => {
+    const current2 = readSourceRegistryAt(path);
+    const next = mutate(current2) ?? current2;
+    const text2 = `${JSON.stringify(validateRegistry(next, path), null, 2)}
+`;
+    lease.commit(() => writePrivateFileAtomicSync(path, text2));
+    return next;
+  });
+}
+function findRegistryAccount(registry, sourceId, slot) {
+  return registry.accounts.find((account) => account.source_id === sourceId && account.slot === slot);
+}
+function readSourceRegistryAt(path) {
+  let text2;
+  try {
+    text2 = readFileSync17(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+    throw new SourceRegistryError(path, "cannot be read");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text2);
+  } catch {
+    throw new SourceRegistryError(path, "not JSON");
+  }
+  return validateRegistry(parsed, path);
+}
+function validateRegistry(value, path) {
+  if (!isRecord(value))
+    throw new SourceRegistryError(path, "not an object");
+  if (value.schema !== SOURCE_REGISTRY_SCHEMA)
+    throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
+  if (!Array.isArray(value.accounts))
+    throw new SourceRegistryError(path, "accounts is not a list");
+  const seen = new Set;
+  for (const [index, account] of value.accounts.entries()) {
+    if (!isValidAccount(account))
+      throw new SourceRegistryError(path, `account #${index + 1} is malformed`);
+    const key2 = `${account.source_id}\x00${account.slot}`;
+    if (seen.has(key2))
+      throw new SourceRegistryError(path, `${account.source_id} slot ${account.slot} is listed twice`);
+    seen.add(key2);
+  }
+  return value;
+}
+function isValidAccount(value) {
+  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at);
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var SOURCE_REGISTRY_SCHEMA = 1, SourceRegistryError, STATES, LAYOUTS;
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+  SourceRegistryError = class SourceRegistryError extends Error {
+    code = "source_registry_unreadable";
+    path;
+    constructor(path, detail) {
+      super(`The source registry at ${path} is unreadable (${detail}); no source store opens until it is repaired.`);
+      this.name = "SourceRegistryError";
+      this.path = path;
+    }
+  };
+  STATES = ["active", "deleting", "deleted"];
+  LAYOUTS = ["legacy", "folder"];
+});
+
+// src/core/source-storage.ts
+function openConnectorStore(account, options, env = process.env) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, slot);
+  if (adoptionEnabled && options.readOnly !== true) {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry?.corpus_ids.includes(options.corpusId))
+      adopt(env, account.sourceId, slot, options.corpusId);
+  }
+  return new LocalConnectorStore(options);
+}
+function storageAccountForCorpus(corpus, registered2 = []) {
+  const known = [...registered2, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
+  if (known)
+    return { sourceId: known.sourceId };
+  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain))
+    return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
+  const prefix = `${corpus.trustDomain}.`;
+  const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
+  return { sourceId: unprefixed || corpus.corpusId };
+}
+function unavailableStateReason(state) {
+  return state === "deleting" ? "its data is being deleted" : "its data was deleted";
+}
+function assertOpenable(registry, sourceId, slot) {
+  const state = findRegistryAccount(registry, sourceId, slot)?.state;
+  if (state !== undefined && state !== "active")
+    throw new SourceStorageUnavailableError(sourceId, slot, state);
+}
+function adopt(env, sourceId, slot, corpusId) {
+  updateSourceRegistry(env, (registry) => {
+    assertOpenable(registry, sourceId, slot);
+    const entry = findRegistryAccount(registry, sourceId, slot);
+    if (!entry) {
+      registry.accounts.push({
+        source_id: sourceId,
+        slot,
+        state: "active",
+        layout: "legacy",
+        corpus_ids: [corpusId],
+        created_at: new Date().toISOString()
+      });
+    } else if (!entry.corpus_ids.includes(corpusId)) {
+      entry.corpus_ids.push(corpusId);
+    }
+  });
+}
+var DEFAULT_STORAGE_SLOT = "1", ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", SourceStorageUnavailableError, adoptionEnabled = false;
+var init_source_storage = __esm(() => {
+  init_secret_locations();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_local_index();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_registry();
+  SourceStorageUnavailableError = class SourceStorageUnavailableError extends Error {
+    code = "source_storage_unavailable";
+    sourceId;
+    slot;
+    state;
+    constructor(sourceId, slot, state) {
+      const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
+      super(`${account} is not available: ${unavailableStateReason(state)}.`);
+      this.name = "SourceStorageUnavailableError";
+      this.sourceId = sourceId;
+      this.slot = slot;
+      this.state = state;
+    }
+  };
 });
 
 // src/workers/dropbox-files/corpus-adapter.ts
@@ -28930,12 +29033,12 @@ function defaultDropboxConnectorStoreDbPath(env = process.env) {
   return olympusDataPath(env, "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT;
-var init_connector_store2 = __esm(() => {
+var init_connector_store = __esm(() => {
   init_olympus_layout();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_connector_store();
   init_file_ingestion_matcher();
+  init_source_storage();
   init_corpus_adapter();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -28953,7 +29056,7 @@ var init_connector_store2 = __esm(() => {
 var init_provider_store_sync = __esm(() => {
   init_embeddings();
   init_tiered_store_set();
-  init_connector_store2();
+  init_connector_store();
   init_connector();
   init_provider_client();
 });
@@ -29193,6 +29296,94 @@ var init_dropbox2 = __esm(() => {
   init_pdf_render();
   init_credential_broker();
   init_approved_scope_filter();
+});
+
+// src/workers/connector-store/principal.ts
+function isCanonicalConnectorStoreProvider(provider) {
+  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
+}
+function isCanonicalConnectorStoreAccountScope(accountScope) {
+  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
+}
+var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
+var init_principal = __esm(() => {
+  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
+  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+});
+
+// src/workers/connector-store/filter-capabilities.ts
+function connectorStoreFilterCapabilityRegistry(entries) {
+  const familyEntries = new Map;
+  const providerEntries = new Map;
+  for (const [scope, capabilities] of entries) {
+    const provider = "provider" in scope ? scope.provider : undefined;
+    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
+      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
+    }
+    const registry = provider === undefined ? familyEntries : providerEntries;
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
+      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
+      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
+    }
+    registry.set(key2, Object.freeze({ ...capabilities }));
+  }
+  return Object.freeze({
+    resolve(identity) {
+      const familyCapabilities = familyEntries.get(identity.family);
+      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
+      if (!familyCapabilities)
+        return providerCapabilities;
+      if (!providerCapabilities)
+        return familyCapabilities;
+      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
+    }
+  });
+}
+function providerScopeKey(family, provider) {
+  return `${family}\x00${provider}`;
+}
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store2 = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
@@ -29683,16 +29874,16 @@ var init_analyst_answer = __esm(() => {
 // src/workers/dropbox-files/qualification.ts
 var init_qualification = __esm(() => {
   init_corpus();
-  init_connector_store();
+  init_connector_store2();
   init_analyst_answer();
   init_corpus_adapter();
 });
 
 // src/workers/dropbox-files/tier-set.ts
 var init_tier_set = __esm(() => {
-  init_tier_ledger();
+  init_source_storage();
   init_tiered_store_set();
-  init_connector_store2();
+  init_connector_store();
   init_corpus_adapter();
 });
 
@@ -29710,7 +29901,7 @@ var init_dropbox_files = __esm(() => {
   init_corpus_adapter();
   init_qualification();
   init_tier_set();
-  init_connector_store2();
+  init_connector_store();
 });
 
 // src/core/google-handle-compatibility.ts
@@ -31277,7 +31468,7 @@ var init_connector2 = __esm(() => {
   init_olympus_layout();
   init_atomic_file();
   init_credential_broker();
-  init_connector_store();
+  init_source_storage();
   init_api();
   init_corpus_adapter2();
   READWISE_STORE_PLACEMENT = Object.freeze({
@@ -31297,7 +31488,7 @@ var init_live_control = __esm(() => {
 
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
-  init_connector_store();
+  init_connector_store2();
   init_tiered_store_set();
   init_api();
   init_connector2();
@@ -31321,7 +31512,7 @@ var init_corpus_adapter3 = __esm(() => {
 // src/workers/x-bookmarks/qualification.ts
 var init_qualification2 = __esm(() => {
   init_corpus();
-  init_connector_store();
+  init_connector_store2();
   init_analyst_answer();
   init_corpus_adapter3();
 });
@@ -31383,7 +31574,7 @@ function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_corpus_adapter3();
   init_folder_facets();
   X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
@@ -31448,7 +31639,7 @@ var init_window_diagnostic = __esm(() => {
 
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
-  init_connector_store();
+  init_connector_store2();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();
@@ -31461,7 +31652,7 @@ var init_live_sync2 = __esm(() => {
 // src/workers/x-bookmarks/content-recovery.ts
 var init_content_recovery = __esm(() => {
   init_types();
-  init_connector_store();
+  init_connector_store2();
   init_credential_broker();
   init_api2();
   init_connector3();
@@ -31676,8 +31867,7 @@ var init_store = __esm(() => {
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_tier_ledger();
-  init_connector_store();
+  init_source_storage();
   init_file_ingestion_matcher();
   init_tiered_store_set();
   init_scope();
@@ -31729,7 +31919,7 @@ var init_capture_spool_connector = __esm(() => {
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync = __esm(() => {
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -33872,7 +34062,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync8, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync8, readFileSync as readFileSync17 } from "node:fs";
+import { closeSync as closeSync8, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync8, readFileSync as readFileSync18 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -33911,7 +34101,7 @@ function readRecordText(path) {
     if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
       return { kind: "unreadable", reason: "record path changed between inspection and opening" };
     }
-    return { kind: "ok", text: readFileSync17(fd, "utf8") };
+    return { kind: "ok", text: readFileSync18(fd, "utf8") };
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
@@ -34088,11 +34278,66 @@ var init_connect = __esm(() => {
   ]);
 });
 
+// src/core/pairing-session-paths.ts
+var init_pairing_session_paths = __esm(() => {
+  init_olympus_layout();
+});
+
 // src/core/remote-open.ts
 var init_remote_open = __esm(() => {
   init_linux_desktop_opener();
   init_worker_transport();
   init_open_targets();
+});
+
+// src/core/file-extraction-source.ts
+import { createHash as createHash20 } from "node:crypto";
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
+  });
+  FileExtractionSourceError = class FileExtractionSourceError extends Error {
+    errorKind;
+    settleAs;
+    retryable;
+    errorHash;
+    constructor(errorKind, options = {}) {
+      super(errorKind);
+      this.name = "FileExtractionSourceError";
+      this.errorKind = errorKind;
+      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
+      this.retryable = this.settleAs === "failed_retryable";
+      const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      if (errorHash)
+        this.errorHash = errorHash;
+    }
+  };
+});
+
+// src/workers/whatsapp/extraction-source.ts
+var init_extraction_source = __esm(() => {
+  init_file_extraction_source();
 });
 
 // src/workers/whatsapp/reaction-index.ts
@@ -34117,7 +34362,7 @@ function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -36839,7 +37084,7 @@ function chatgptPickerProgram(kit) {
   const el = kit.el;
   const add = kit.add;
   const fill2 = kit.fill;
-  const STATES = ["ingest", "metadata_only", "exclude"];
+  const STATES2 = ["ingest", "metadata_only", "exclude"];
   const WINDOWS = ["6m", "1y", "2y", "5y", "all"];
   const CATEGORIES = ["primary", "updates", "forums", "social", "promotions"];
   let p = null;
@@ -37213,7 +37458,7 @@ function chatgptPickerProgram(kit) {
       p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page2.selections) ? page2.selections : [];
       for (const selection of saved) {
-        if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
+        if (!selection || typeof selection.key !== "string" || STATES2.indexOf(selection.state) < 0)
           continue;
         p.own.set(selection.key, selection.state);
         p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys) ? selection.ancestor_keys.filter((key2) => typeof key2 === "string") : []);
@@ -37405,7 +37650,7 @@ function chatgptPickerProgram(kit) {
         p.edited = true;
       }
     } else {
-      if (value && STATES.indexOf(value) < 0)
+      if (value && STATES2.indexOf(value) < 0)
         return;
       if (value && !allowed(key2, value))
         return;
@@ -37634,7 +37879,7 @@ function chatgptPickerProgram(kit) {
     group2.setAttribute("role", "group");
     group2.setAttribute("aria-label", fill2(Q.choiceGroup, { name }));
     const buttons = [];
-    for (const state of STATES) {
+    for (const state of STATES2) {
       const words2 = Q.segments[state];
       const pressed = model.pressed === state;
       const button = el("button", "seg-opt" + (pressed ? " on" : model.inherited === state ? " inherited" : ""));
@@ -39513,10 +39758,110 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_olympus_layout();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_storage();
+  init_state();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire2, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire2 = createRequire4(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
+var init_manifest3 = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+  ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+});
+
+// src/workers/archive-import/requests.ts
+var STATUSES;
+var init_requests = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_manifest3();
+  init_state();
+  STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
+});
+
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector2();
 });
@@ -39524,54 +39869,54 @@ var init_tier_set2 = __esm(() => {
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector3();
 });
 
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
-  CONNECTOR_FACTORIES = new Map;
+// src/workers/whatsapp/connector.ts
+var init_connector4 = () => {};
+
+// src/workers/whatsapp/index.ts
+var init_whatsapp = __esm(() => {
+  init_connector4();
+  init_live_connector();
+  init_store_sync2();
+  init_extraction_source();
 });
 
-// src/workers/archive-import/store.ts
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
-var ARCHIVE_STORE_PLACEMENT;
-var init_store2 = __esm(() => {
+// src/data-lifecycle.ts
+var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
+  init_source_storage();
+  init_atomic_file();
+  init_operation_error();
+  init_sqlite_migrations();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_ingestion_policy();
+  init_dropbox_files();
+  init_store();
   init_archive_formats();
+  init_store2();
+  init_state();
+  init_requests();
+  init_google_connectors();
+  init_telegram_messages();
+  init_readwise();
+  init_tier_set2();
+  init_x_bookmarks();
+  init_tier_set3();
+  init_reconcile_state();
+  init_live_control2();
+  init_whatsapp();
+  init_sovereignty();
+  init_pairing_session_paths();
+  init_unpaired_sources();
   init_source_corpus_registry();
-  init_connector_store();
-  ARCHIVE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    secretsInContent: true
-  });
+  init_public_source_capabilities();
+  init_worker_service();
+  init_media_cache();
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -39584,7 +39929,8 @@ var init_source_ingestion_ledger = __esm(() => {
   init_answer_ready_coverage();
   init_status();
   init_google_connectors();
-  init_connector_store();
+  init_source_storage();
+  init_data_lifecycle();
   init_readwise();
   init_tier_set2();
   init_x_bookmarks();
@@ -39655,57 +40001,6 @@ var init_source_ingestion_ledger = __esm(() => {
   corpusPopulations = new WeakMap;
 });
 
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
-var init_tokens = __esm(() => {
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
-var init_pinned_clients = __esm(() => {
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-  CURSOR_REDIRECT_URIS = Object.freeze([
-    CURSOR_REDIRECT_URI,
-    "https://www.cursor.com/bot/mcp/oauth/callback",
-    "https://grok.com/connectors-oauth-exchange-code/"
-  ]);
-});
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  init_pinned_clients();
-  init_operation_caller();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/remote-connections.ts
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-  init_waiting_private_questions();
-  init_tokens();
-  init_linux_engine_layout();
-  init_olympus_layout();
-});
-
 // src/core/delphi.ts
 var init_delphi = __esm(() => {
   init_operation_error();
@@ -39716,7 +40011,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync22, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync21 } from "node:fs";
+import { existsSync as existsSync22, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync22 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname25, join as join30 } from "node:path";
 function permissionHostKind(env) {
@@ -39922,7 +40217,7 @@ class MacPermissions {
     let loaded = {};
     if (this.memoryPath && existsSync22(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync21(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync22(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -40858,7 +41153,7 @@ init_atomic_file();
 init_secret_store();
 init_unpaired_sources();
 init_connected_handles();
-import { closeSync as closeSync9, constants as constants2, existsSync as existsSync19, fstatSync as fstatSync2, openSync as openSync9, readFileSync as readFileSync18, rmSync as rmSync6 } from "node:fs";
+import { closeSync as closeSync9, constants as constants2, existsSync as existsSync19, fstatSync as fstatSync2, openSync as openSync9, readFileSync as readFileSync19, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname22, join as join26 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -40995,7 +41290,7 @@ function readGrant(path) {
     if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
       return { kind: "invalid" };
     }
-    const value = JSON.parse(readFileSync18(descriptor, "utf8"));
+    const value = JSON.parse(readFileSync19(descriptor, "utf8"));
     if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle || !value.sessionPath)
       return { kind: "invalid" };
     if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
@@ -41043,9 +41338,7 @@ function spawnCapture(input) {
 init_atomic_file();
 init_secret_store();
 init_connect();
-
-// src/core/pairing-session-paths.ts
-init_olympus_layout();
+init_pairing_session_paths();
 
 // src/core/native-worker-service.ts
 init_worker_transport();
@@ -41071,59 +41364,15 @@ init_worker_auth();
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
 init_types();
-
-// src/core/file-extraction-source.ts
-import { createHash as createHash20 } from "node:crypto";
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-  source_item_not_found: "failed_terminal",
-  source_permission_denied: "failed_terminal",
-  source_version_gone: "failed_terminal",
-  source_content_unavailable: "skipped_unsupported",
-  source_request_rejected: "failed_terminal",
-  source_too_large: "skipped_too_large",
-  source_rate_limited: "failed_retryable",
-  source_unavailable: "failed_retryable",
-  source_auth_expired: "failed_retryable",
-  source_budget_exhausted: "failed_retryable",
-  network_unreachable: "failed_retryable",
-  network_socket_closed: "failed_retryable"
-});
-var ERROR_HASH_CHARS = 32;
-
-class FileExtractionSourceError extends Error {
-  errorKind;
-  settleAs;
-  retryable;
-  errorHash;
-  constructor(errorKind, options = {}) {
-    super(errorKind);
-    this.name = "FileExtractionSourceError";
-    this.errorKind = errorKind;
-    this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
-    this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
-    if (errorHash)
-      this.errorHash = errorHash;
-  }
-}
-function splitScopedLocalItemId(localItemId) {
-  const separator = localItemId.indexOf(":");
-  if (separator <= 0 || separator === localItemId.length - 1)
-    return;
-  return {
-    accountScope: localItemId.slice(0, separator),
-    providerItemId: localItemId.slice(separator + 1)
-  };
-}
-
-// src/workers/email-source/file-extraction-runtime.ts
+init_file_extraction_source();
 init_media_cache();
-init_connector_store2();
+init_connector_store();
 
 // src/workers/dropbox-files/extraction-source.ts
 init_dropbox_content_hash();
 init_provider_client();
 init_http_timeout();
+init_file_extraction_source();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
 import { relative as relative3, resolve as resolve7, sep as sep3 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
@@ -41487,6 +41736,7 @@ init_store();
 init_drive();
 
 // src/workers/google-connectors/drive-extraction-source.ts
+init_file_extraction_source();
 init_drive();
 init_request_budget();
 var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
@@ -41501,6 +41751,7 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
 ]);
 
 // src/workers/email-source/file-extraction-runtime.ts
+init_extraction_source();
 init_store_sync2();
 
 // src/workers/file-extraction/job-store.ts
@@ -41623,6 +41874,7 @@ init_media_cache();
 init_operation_error();
 init_model_transport();
 init_types();
+init_file_extraction_source();
 init_command_runner();
 init_tier_classifier();
 init_bounded_text();
@@ -41632,7 +41884,7 @@ init_engine();
 init_tier_classifier();
 init_secrets_disposition();
 init_source_ingestion_exclusions();
-init_connector_store();
+init_connector_store2();
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
 var EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible";
 var EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere";
@@ -41705,7 +41957,7 @@ init_venice_models();
 import {
   existsSync as existsSync20,
   mkdirSync as mkdirSync14,
-  readFileSync as readFileSync19,
+  readFileSync as readFileSync20,
   renameSync as renameSync5,
   rmSync as rmSync7,
   writeFileSync as writeFileSync6
@@ -41876,14 +42128,14 @@ async function fetchCatalog(input, fetchedAtMs) {
   return { status: "success", catalog };
 }
 function parseCatalogModels(payload2) {
-  if (!isRecord(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
+  if (!isRecord2(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
     return;
   }
   const models = {};
   for (const rawItem of payload2.data) {
-    if (!isRecord(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
+    if (!isRecord2(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
       continue;
-    if (!isRecord(rawItem.model_spec))
+    if (!isRecord2(rawItem.model_spec))
       continue;
     const category = parsePrivacyCategory(rawItem.model_spec.privacy);
     if (!category)
@@ -41897,17 +42149,17 @@ function readCatalogCache(path, type) {
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync19(path, "utf8"));
+    payload2 = JSON.parse(readFileSync20(path, "utf8"));
   } catch {
     return;
   }
-  if (!isRecord(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
+  if (!isRecord2(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
     return;
   if (payload2.catalog_type !== undefined && payload2.catalog_type !== type)
     return;
   if (type === "embedding" && payload2.catalog_type !== "embedding")
     return;
-  if (typeof payload2.fetched_at !== "string" || !isRecord(payload2.models))
+  if (typeof payload2.fetched_at !== "string" || !isRecord2(payload2.models))
     return;
   const fetchedAtMs = Date.parse(payload2.fetched_at);
   if (!Number.isFinite(fetchedAtMs))
@@ -41962,7 +42214,7 @@ function boundedPositiveMs(value, fallback, maximum) {
     return fallback;
   return Math.min(maximum, Math.max(1, Math.floor(value)));
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function throwIfAborted(signal) {
@@ -42053,6 +42305,7 @@ init_selected_item_safety();
 init_venice_models();
 init_public_surface();
 init_unpaired_sources();
+init_pairing_session_paths();
 
 // src/workers/source-index/answer-latency-log.ts
 init_olympus_layout();
@@ -42680,7 +42933,7 @@ init_source_ingestion_exclusions();
 init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
-init_connector_store();
+init_connector_store2();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
@@ -42807,65 +43060,9 @@ var CHAT_TITLE_STOPWORDS = new Set([
 init_atomic_file();
 init_file_lease();
 init_file_scope_sources();
-// src/data-lifecycle.ts
-init_olympus_layout();
-init_atomic_file();
-init_operation_error();
-init_sqlite_migrations();
-init_remote_connections();
-init_waiting_private_questions();
-init_source_ingestion_policy();
-init_dropbox_files();
-init_store();
-init_archive_formats();
-init_store2();
-
-// src/workers/archive-import/state.ts
-init_olympus_layout();
-init_atomic_file();
-init_file_lease();
-
-// src/workers/archive-import/requests.ts
-init_atomic_file();
-init_file_lease();
-
-// src/workers/archive-import/manifest.ts
-init_archive_formats();
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire2 = createRequire4(import.meta.url);
-var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
-
-// src/workers/archive-import/manifest.ts
-var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
-var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
-
-// src/workers/archive-import/requests.ts
-var STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
-
-// src/data-lifecycle.ts
-init_google_connectors();
-init_telegram_messages();
-init_readwise();
-init_tier_set2();
-init_x_bookmarks();
-init_tier_set3();
-init_reconcile_state();
-init_live_control2();
-// src/workers/whatsapp/index.ts
-init_live_connector();
-init_store_sync2();
-
-// src/data-lifecycle.ts
-init_sovereignty();
-init_unpaired_sources();
-init_source_corpus_registry();
-init_public_source_capabilities();
-init_worker_service();
-init_media_cache();
 
 // src/workers/email-source/index.ts
+init_data_lifecycle();
 init_corpora();
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
@@ -42956,6 +43153,10 @@ init_store();
 // src/workers/local-files/provider-store-sync.ts
 init_embeddings();
 init_tiered_store_set();
+
+// src/workers/local-files/connector.ts
+init_file_extraction_source();
+
 // src/core/file-mime.ts
 var MIME_BY_EXTENSION = Object.freeze({
   pdf: "application/pdf",
@@ -43045,6 +43246,9 @@ var SOURCE_CODE_EXTENSIONS = new Set([
   "env"
 ]);
 
+// src/workers/local-files/connector.ts
+init_scope_safe_fs();
+
 // src/workers/local-files/locations.ts
 init_paths();
 function realPathOfScopePath(volumes, scopePath) {
@@ -43070,7 +43274,7 @@ init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire5 } from "node:module";
-import { existsSync as existsSync21, readFileSync as readFileSync20 } from "node:fs";
+import { existsSync as existsSync21, readFileSync as readFileSync21 } from "node:fs";
 import { dirname as dirname24, join as join29 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
@@ -43243,7 +43447,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value = Number.parseInt(readFileSync20("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value = Number.parseInt(readFileSync21("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value) && value > 0 ? value : undefined;
   } catch {
     return;
@@ -43299,12 +43503,13 @@ init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
 import { createHash as createHash23 } from "node:crypto";
-init_connector_store();
+init_connector_store2();
 init_google_connectors();
 init_readwise();
 init_embeddings();
 init_x_bookmarks();
 init_live_control2();
+init_whatsapp();
 init_telegram_messages();
 
 // src/workers/source-scheduler-state.ts
@@ -44528,6 +44733,7 @@ var MAX_HEADERS_SIZE = 2 * 1024 * 1024;
 
 // src/workers/archive-import/mbox/connector.ts
 init_archive_formats();
+init_scope_safe_fs();
 init_sender_rules();
 
 // src/workers/archive-import/mbox/split.ts
@@ -44699,9 +44905,10 @@ var SKIPPED_LABELS = new Set(["spam", "trash"]);
 var decodableCharsets = new Map;
 
 // src/workers/archive-import/lane.ts
-init_tier_ledger();
+init_source_storage();
 init_tiered_store_set();
 init_archive_formats();
+init_state();
 init_store2();
 var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
   holdContentUntilJudged: true
@@ -44709,17 +44916,23 @@ var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
 
 // src/workers/archive-import/start.ts
 init_archive_formats();
+init_scope_safe_fs();
+init_manifest3();
 
 // src/workers/archive-import/runtime.ts
+init_state();
 init_store2();
 
 // src/workers/archive-import/dashboard.ts
 init_archive_formats();
+init_scope_safe_fs();
 
 // src/workers/archive-import/agent.ts
 init_open_targets();
 init_display_text();
 init_vocabulary();
+init_requests();
+init_state();
 var ARCHIVE_AGENT_COPY = {
   invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
   tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
@@ -44751,22 +44964,32 @@ var ARCHIVE_AGENT_COPY = {
   }
 };
 
+// src/workers/archive-import/dashboard.ts
+init_manifest3();
+
 // src/workers/archive-import/removal.ts
-init_sniffer_store();
+init_source_storage();
+init_state();
 init_store2();
 
 // src/workers/archive-import/dashboard.ts
 init_display_text();
+init_state();
+init_requests();
 
 // src/workers/email-source/server.ts
 init_store2();
+init_state();
 
 // src/workers/archive-import/scheduler-source.ts
 init_embeddings();
 
 // src/workers/archive-import/sync.ts
 init_archive_formats();
+init_scope_safe_fs();
 init_tiered_store_set();
+init_manifest3();
+init_state();
 init_store2();
 
 // src/workers/archive-import/scheduler-source.ts
@@ -44783,7 +45006,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync23, lstatSync as lstatSync10, readFileSync as readFileSync22, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync10, readFileSync as readFileSync23, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -44999,7 +45222,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync22("/proc/self/mountinfo", "utf8");
+  return readFileSync23("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -45066,6 +45289,9 @@ function plistString(plist, key2) {
 
 // src/workers/email-source/server.ts
 init_local_open();
+
+// src/workers/file-extraction/connector-source.ts
+init_file_extraction_source();
 
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
@@ -45541,12 +45767,12 @@ registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocal
 // src/workers/email-source/server.ts
 init_source_ingestion_exclusions();
 init_telegram_messages();
-init_connector_store();
+init_connector_store2();
 init_principal();
 
 // src/workers/email-source/source-answer-lanes.ts
 init_embeddings();
-init_connector_store();
+init_connector_store2();
 
 // src/workers/email-source/gmail-status-scope.ts
 init_google_connectors();
@@ -45561,6 +45787,8 @@ init_tier_ledger();
 
 // src/workers/email-source/server.ts
 init_secret_locations();
+init_source_storage();
+init_data_lifecycle();
 init_credential_broker();
 init_types();
 init_secret_store();
@@ -45571,6 +45799,7 @@ init_provider();
 init_assets();
 init_manifest();
 init_source_watch();
+init_whatsapp();
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
@@ -45818,7 +46047,7 @@ init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
-import { mkdirSync as mkdirSync16, readFileSync as readFileSync23 } from "node:fs";
+import { mkdirSync as mkdirSync16, readFileSync as readFileSync24 } from "node:fs";
 import { dirname as dirname27 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
@@ -45837,7 +46066,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync23(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync24(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -47298,7 +47527,7 @@ function optionalEnv(env, name) {
 if (false) {}
 
 // scripts/source-embedding-drain.ts
-init_connector_store();
+init_source_storage();
 init_x_bookmarks();
 init_readwise();
 
@@ -47444,6 +47673,7 @@ async function recordEmbeddingLedgerObservations(path, observations, context2) {
 init_embedding_ledger();
 init_google_connectors();
 init_telegram_messages();
+init_whatsapp();
 init_credential_degradation();
 var DROPBOX_CORPUS_ID = "secure_local.dropbox.files";
 var EMAIL_CORPUS_ID = GMAIL_SECURE_CONNECTOR_CORPUS_ID;
@@ -47554,7 +47784,7 @@ class DirectSourceEmbeddingDrainClient {
     }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
-      store = new LocalConnectorStore({
+      store = openConnectorStore(storageAccountForCorpus(config), {
         dbPath: config.dbPath,
         corpusId: config.corpusId,
         family: config.family,
@@ -47908,7 +48138,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   const corpora = configs.flatMap((config) => {
     if (!config.dbPath || !existsSync26(config.dbPath))
       return [];
-    const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
+    const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {
       const counts = store.status().counts;
       const chunksCurrent2 = Math.min(counts.chunks, counts.embeddedChunks);

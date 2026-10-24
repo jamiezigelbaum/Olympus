@@ -15,7 +15,8 @@ import type {
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
 import { buildSourceSensitivity, type SourceSensitivity } from '../../core/source-index/types.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import { X_BOOKMARKS_CORPUS_ID } from './corpus-adapter.ts';
 import type { XBookmarkPost } from './api.ts';
 import {
@@ -25,6 +26,7 @@ import {
 } from './folder-facets.ts';
 
 export const X_BOOKMARKS_LIVE_CONNECTOR_ID = 'x_bookmarks_live';
+export const X_BOOKMARKS_SOURCE_ID = 'x.bookmarks';
 export const X_BOOKMARKS_ARCHIVE_CONNECTOR_ID = 'x_bookmarks_archive';
 export const X_BOOKMARKS_PROVIDER = 'x';
 
@@ -93,13 +95,14 @@ export const X_BOOKMARKS_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.f
 
 export function createXBookmarksConnectorStore(
   dbPath = defaultXBookmarksConnectorStoreDbPath(),
+  env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: X_BOOKMARKS_SOURCE_ID }, {
     dbPath,
     corpusId: X_BOOKMARKS_CORPUS_ID,
     family: 'x',
     trustDomain: 'internal',
-  });
+  }, env);
 }
 
 export function defaultXBookmarksConnectorStoreDbPath(

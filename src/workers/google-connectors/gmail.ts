@@ -39,6 +39,7 @@ import {
   type GoogleRequestBudgetStatus,
 } from './request-budget.ts';
 
+export const GMAIL_SOURCE_ID = 'gmail.email';
 export const GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = 'internal.email';
 export const GMAIL_SECURE_CONNECTOR_CORPUS_ID = 'secure_local.email.private';
 /** The lane's Public store (P1b per-tier stores), created when its first message is routed there. */
