@@ -706,7 +706,7 @@ function localFilesPreview(state: string) {
  *   archives-unreadable  the list of imported archives cannot be read: See why, no Import
  *   archives-uncounted   an imported archive whose index cannot be opened now: never "0 messages"
  *   archives-not-running an import waiting while background syncing is turned off: not running, Remove not pressable, See why names the setting
- *   archives-notes       a notes archive imported: its items are notes, with the kinds of gap any format can report
+ *   archives-notes       a Roam export imported: its items are notes, with the kinds of gap a notes export or any format can report
  *   archives-chat        a Telegram Desktop export imported: its items are messages, with what a chat export leaves out or cannot carry
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
  *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not read, never an empty archive
@@ -844,12 +844,12 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
     archives.push(takeout);
     requests.push({ id: '7d1e2f30-4c5b-4a6d-9e7f-8b9c0d1e2f3a', kind: 'remove', name: takeout.name, where: takeout.where, path: `${takeout.where}/${takeout.name}`, origin: 'agent', status: 'pending', archiveId: takeout.id, archiveName: takeout.name });
   } else if (state === 'archives-notes') {
-    // An invented export of notes: a stand-in format name, since only mail is registered today.
+    // An invented Roam export: the registered format's own label, a zip that also held pictures.
     archives.push({
       ...takeout,
       id: '3a6c8e10-5b2d-4f7a-8c9e-1d2b3a4c5d6e',
-      name: 'Notes export 2026.zip',
-      format: 'Notes export',
+      name: 'Roam-Export-1760180000000.zip',
+      format: 'Roam notes (JSON)',
       family: 'note',
       items: 3_412,
       judged: 3_390,
@@ -859,10 +859,13 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       gaps: [
         { kind: 'media_not_imported', count: 287 },
         { kind: 'item_truncated', count: 4 },
+        { kind: 'note_date_assumed', count: 12 },
+        { kind: 'note_too_large', count: 1 },
         { kind: 'assumption', count: 1 },
         { kind: 'section_not_imported', count: 2 },
         { kind: 'file_damaged', count: 1 },
       ],
+      skipped: [{ kind: 'note_empty', count: 38 }],
     });
   } else if (state === 'archives-chat') {
     // An invented Telegram Desktop export: messages kept, service messages left out, pictures and files counted not read, a kind of content not read said so.
@@ -890,7 +893,7 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
     });
   } else if (state === 'archives-empty') {
     const { earliest: _earliest, latest: _latest, ...dated } = takeout;
-    archives.push({ ...dated, name: 'Empty notes.zip', format: 'Notes export', family: 'note', items: 0, judged: 0, held: 0 });
+    archives.push({ ...dated, name: 'Empty notes.json', format: 'Reflect notes (JSON)', family: 'note', items: 0, judged: 0, held: 0 });
   } else if (state === 'archives-nothing-imported') {
     archives.push({
       ...takeout,

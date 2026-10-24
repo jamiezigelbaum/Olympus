@@ -42,6 +42,28 @@ export interface ArchiveProbeEntry {
    * them), each with its first bytes where they could be read.
    */
   members?: readonly ArchiveProbeEntry[];
+  /**
+   * For a JSON file: reads on past `head` to the keys of the first record of
+   * the list at `list` (the keys from the document's root; `[]` is the root
+   * itself), skipping every value, so a first record that writes a long text
+   * before its identifying keys is still told by them. `enough` ends the read
+   * once the keys so far decide. Absent when the probe cannot read the file
+   * further; undefined when the file holds no such record. Asked only when
+   * `head` did not settle the question, so a conclusive head costs nothing.
+   */
+  firstRecordKeys?(
+    list: readonly string[],
+    enough?: (keys: ReadonlySet<string>) => boolean,
+  ): ReadonlySet<string> | undefined;
+  /**
+   * For a JSON file: whether the value at the keys `list` (from the document's
+   * root) is a list with nothing in it, read past `head` when that did not
+   * reach it. Asked only of a zip's JSON member whose notes list the first
+   * bytes did not reach and whose first record's keys found no record. Absent
+   * when the probe cannot read the file further. The reads of one entry share
+   * one allowance (`record-probe.ts`): past it, nothing is found.
+   */
+  listIsEmpty?(list: readonly string[]): boolean;
 }
 
 export interface ArchiveProbe {
@@ -52,6 +74,14 @@ export interface ArchiveProbe {
    * names a format asks for (`probeNames`).
    */
   children: readonly ArchiveProbeEntry[];
+  /**
+   * For a chosen folder, or a chosen zip: whether a read on past a first
+   * bytes (`firstRecordKeys`, `listIsEmpty`) was refused because the
+   * allowance the folder's files, or the zip's members, share was spent, so
+   * some file or member was not looked through as far as it needed. Absent
+   * when the probe keeps no such allowance.
+   */
+  readsRanOut?(): boolean;
 }
 
 export interface ArchiveFormatDefinition {
@@ -132,6 +162,339 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   },
 });
 
+// --- Notes exports: Reflect and Roam --------------------------------------------
+
+const leniencyDecoder = new TextDecoder('utf-8');
+
+/** A probed head as text; a byte order mark is dropped and a cut at the end is forgiven. */
+export function archiveHeadText(head: Uint8Array | undefined): string {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : '';
+}
+
+/**
+ * A name that is not part of an export: the metadata macOS adds to a zip
+ * (`__MACOSX/`, `._name`) and hidden files such as `.DS_Store`.
+ */
+export function isJunkArchiveMember(name: string): boolean {
+  const parts = name.split('/').filter((part) => part !== '');
+  return parts.includes('__MACOSX') || (parts[parts.length - 1] ?? '').startsWith('.');
+}
+
+const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+/** "Tue, March 21st, 2023.md": how Reflect's Markdown export names a daily note (its JSON export titles one the same way, without the extension). */
+const DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
+
+/**
+ * The day a Reflect daily note's file name or title stands for ("2023-03-21T12:00:00.000Z",
+ * midday so no time zone moves it a day), or undefined for any other name.
+ */
+export function reflectDailyNoteDate(fileName: string): string | undefined {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match) return undefined;
+  const weekday = match[1]!.slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2]!.slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31) return undefined;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+
+/**
+ * The key a Reflect JSON export keeps its list of notes under when the document
+ * is an object (`{"notes": [...]}`); Reflect's connector reads the same list.
+ */
+export const REFLECT_NOTES_LIST_KEY = 'notes';
+
+/** What the first bytes of a JSON document show of its list of records. */
+interface HeadRecords {
+  /** `list`: the document is the list; `notes`: it is an object whose `notes` key holds the list. */
+  shape: 'list' | 'notes';
+  /** The keys of every record that is a direct element of the list, each as far as the head shows it. */
+  records: ReadonlySet<string>[];
+  /** The list closed within the head with no element in it at all. */
+  empty: boolean;
+  /**
+   * The keys of the first record are not all shown: the head ended inside it,
+   * or (in an object) before the list's own key was reached.
+   */
+  firstRecordCut: boolean;
+  /** An object whose notes list the head did not reach. */
+  unreached: boolean;
+}
+
+/**
+ * The keys of the records at the head of a JSON document: every object that is
+ * a direct element of its top-level list, or of the list under the object's notes key.
+ * A record cut off by the end of the head keeps the keys seen so far. Only
+ * keys count: a word inside a piece of text never does.
+ */
+function headRecordKeys(head: Uint8Array | undefined): HeadRecords | undefined {
+  const text = archiveHeadText(head);
+  const n = text.length;
+  let i = 0;
+  const isSpace = (char: string | undefined): boolean => char === ' ' || char === '\t' || char === '\n' || char === '\r';
+  while (i < n && isSpace(text[i])) i += 1;
+  const stack: Array<'a' | 'o'> = [];
+  let shape: 'list' | 'notes' | undefined;
+  let listDepth = 0;
+  let closed = false;
+  let hasElements = false;
+  // The document is an object that goes on past the head without its notes key shown, or with the key's value cut off.
+  let objectRoot = false;
+  // The notes key is there and holds something that is not a list: nothing to read on for.
+  let notesNotAList = false;
+  if (text[i] === '[') {
+    shape = 'list';
+    listDepth = 1;
+    stack.push('a');
+  } else if (text[i] === '{') {
+    objectRoot = true;
+    stack.push('o');
+  } else {
+    return undefined;
+  }
+  i += 1;
+  const records: Set<string>[] = [];
+  let current: Set<string> | undefined;
+  while (i < n) {
+    const char = text[i]!;
+    // Anything directly in the list that is not a separator is an element, whatever its kind.
+    if (listDepth > 0 && stack.length === listDepth && !isSpace(char) && char !== ',' && char !== ']') hasElements = true;
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+      if (end >= n) break;
+      const raw = text.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text[after])) after += 1;
+      if (text[after] === ':' && stack[stack.length - 1] === 'o') {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
+          let value = after + 1;
+          while (value < n && isSpace(text[value])) value += 1;
+          if (text[value] === '[') {
+            shape = 'notes';
+            listDepth = 2;
+          } else if (value < n) {
+            notesNotAList = true;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === '[' || char === '{') {
+      stack.push(char === '[' ? 'a' : 'o');
+      if (char === '{' && listDepth > 0 && stack.length === listDepth + 1) {
+        current = new Set<string>();
+        records.push(current);
+      }
+    } else if (char === ']' || char === '}') {
+      stack.pop();
+      // The list itself has closed: nothing after it is one of its records.
+      if (listDepth > 0 && stack.length < listDepth) {
+        closed = true;
+        listDepth = 0;
+      }
+      if (stack.length === 0) break;
+      if (listDepth > 0 && stack.length === listDepth) current = undefined;
+    }
+    i += 1;
+  }
+  if (!shape) {
+    // An object still open at the end of the head, whose notes key has not shown: the list may follow further down.
+    if (objectRoot && !notesNotAList && stack.length > 0) {
+      return { shape: 'notes', records: [], empty: false, firstRecordCut: true, unreached: true };
+    }
+    return undefined;
+  }
+  const open = listDepth > 0;
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open && records.length === 1 && current !== undefined, unreached: false };
+}
+
+/** Keys that carry what a Reflect note says. */
+const REFLECT_BODY_KEYS = ['content', 'body', 'document_json', 'documentJson'] as const;
+/** Keys that carry a Reflect note's title or dates. */
+const REFLECT_NOTE_KEYS = ['subject', 'title', 'created_at', 'createdAt', 'updated_at', 'updatedAt'] as const;
+/** Keys only Roam's pages and blocks carry: their times and who made them. */
+const ROAM_TIME_KEYS = ['create-time', 'edit-time', 'create-email', 'edit-email'] as const;
+
+/** A record that says something and is titled or dated, in Reflect's keys. One key alone is any application's data. */
+function isReflectRecord(keys: ReadonlySet<string>): boolean {
+  return REFLECT_BODY_KEYS.some((key) => keys.has(key)) && REFLECT_NOTE_KEYS.some((key) => keys.has(key));
+}
+
+/** A titled record with Roam's keys: its times or authors, or its blocks with an id. Blocks alone are any outline. */
+function isRoamRecord(keys: ReadonlySet<string>): boolean {
+  return keys.has('title') && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || (keys.has('children') && keys.has('uid')));
+}
+
+/** Whether a record's keys say a note is Reflect's or a page is Roam's, or both. */
+function recordsFormat(records: readonly ReadonlySet<string>[], shape: 'list' | 'notes'): 'reflect' | 'roam' | undefined {
+  const reflect = records.some(isReflectRecord);
+  const roam = records.some(isRoamRecord);
+  if (reflect === roam) return undefined;
+  // Roam's export is a bare list of pages.
+  if (roam) return shape === 'list' ? 'roam' : undefined;
+  return 'reflect';
+}
+
+/** What a probe entry can say of a JSON file: its first bytes, and the way on to the keys they did not reach. */
+export interface ArchiveJsonProbe {
+  head?: Uint8Array | undefined;
+  firstRecordKeys?: ArchiveProbeEntry['firstRecordKeys'];
+  listIsEmpty?: ArchiveProbeEntry['listIsEmpty'];
+}
+
+/**
+ * Which notes export a JSON file is, if exactly one: judged on the keys of its
+ * first records (a Reflect note says something and is titled or dated; a Roam
+ * page is titled and has its times or blocks with an id), never on a word
+ * anywhere else. A file that shows both, or neither, is neither: the person
+ * is told what Olympus does import rather than have it guess.
+ *
+ * The first bytes decide when they can. When they end inside the first record,
+ * before the keys that would say, the probe reads on to the end of that record
+ * (skipping values, `firstRecordKeys`) and the decision is made on all of it.
+ */
+function notesJsonFormat(probe: ArchiveJsonProbe): 'reflect' | 'roam' | undefined {
+  const parsed = headRecordKeys(probe.head);
+  if (!parsed) return undefined;
+  const fromHead = recordsFormat(parsed.records, parsed.shape);
+  if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys) return fromHead;
+  // Every format asks about the same entry; the file is read on once.
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
+}
+
+/** What reading on past the first bytes found for an entry, so the formats that ask about it share one read. */
+const SCANNED = new WeakMap<object, { keys: ReadonlySet<string> | undefined }>();
+
+/** Whether the first bytes show a list that closes with nothing in it (`[]`, or `{"notes": []}` when `inNotes`). */
+function isEmptyRecordList(head: Uint8Array | undefined, inNotes: boolean): boolean {
+  const parsed = headRecordKeys(head);
+  return parsed !== undefined && parsed.empty && (inNotes || parsed.shape === 'list');
+}
+
+/** Whether a file's first bytes are a Reflect JSON export: a list of notes (or an object holding a `notes` list) in Reflect's keys. */
+export function looksLikeReflectJson(head: Uint8Array | undefined): boolean {
+  return notesJsonFormat({ head }) === 'reflect';
+}
+
+/** Whether a file's first bytes are a Roam JSON export: a list of titled pages with Roam's keys. */
+export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
+  return notesJsonFormat({ head }) === 'roam';
+}
+
+/**
+ * Whether a JSON file inside a zip may be read as a Reflect export: it is one
+ * (read on past its first bytes when they do not say), or it is an export's
+ * list with nothing in it, which reads as no notes and is not another thing.
+ */
+export function acceptsReflectJson(probe: ArchiveJsonProbe): boolean {
+  if (notesJsonFormat(probe) === 'reflect' || isEmptyRecordList(probe.head, true)) return true;
+  // An object whose notes list is further down than the first bytes reach may hold an empty one; a list with a record in it is not empty.
+  if (!probe.listIsEmpty || SCANNED.get(probe)?.keys) return false;
+  return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
+}
+
+/** Whether a JSON file inside a zip may be read as a Roam export: a list of pages, or an empty list. */
+export function acceptsRoamJson(probe: ArchiveJsonProbe): boolean {
+  return notesJsonFormat(probe) === 'roam' || isEmptyRecordList(probe.head, false);
+}
+
+/**
+ * A file this format reads: the chosen file itself, or for a chosen folder the
+ * one file inside it that does. Two candidates in a folder is no match, never a guess.
+ */
+function detectFile(probe: ArchiveProbe, reads: (entry: ArchiveProbeEntry) => boolean): readonly string[] | undefined {
+  if (probe.chosen.kind === 'file') return reads(probe.chosen) ? [''] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === 'file' && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0]!.relPath] : undefined;
+}
+
+/** The JSON files inside a zip, as the probe lists them. */
+function zipJsonMembers(entry: ArchiveProbeEntry): ArchiveProbeEntry[] {
+  return (entry.members ?? []).filter((member) =>
+    member.kind === 'file' && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+
+/**
+ * A JSON export, as a .json file or as a zip holding one. A zip is this
+ * format's when one of its JSON files is and none is the other notes
+ * format's: a zip of both is not guessed at. (Its other JSON files are not
+ * read as this format; the connector leaves them out and says so.)
+ */
+function readsJsonExport(
+  entry: ArchiveProbeEntry,
+  format: 'reflect' | 'roam',
+): boolean {
+  const other = format === 'reflect' ? 'roam' : 'reflect';
+  if (entry.members) {
+    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
+    return members.includes(format) && !members.includes(other);
+  }
+  return notesJsonFormat(entry) === format;
+}
+
+/** Reflect's export as one JSON file (or a zip holding it): the notes with their dates and tags. */
+export const REFLECT_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'reflect-json',
+  label: 'Reflect notes (JSON)',
+  family: 'note',
+  provider: 'reflect',
+  chooseHint: 'a Reflect export in JSON (the .json file, or the .zip that holds it)',
+  citationLabel: 'Reflect',
+  probeNames: Object.freeze(['*.json']),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'reflect')),
+});
+
+/**
+ * Reflect's export as a zip of Markdown files, one note each. Markdown alone
+ * says nothing about which app wrote it (Roam's Markdown export is a zip of
+ * .md files too), so it must show Reflect's hand: its name, the way it names
+ * a daily note, or a link to Reflect. A zip that does not is not guessed at.
+ */
+export const REFLECT_MARKDOWN_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'reflect-markdown',
+  label: 'Reflect notes (Markdown zip)',
+  family: 'note',
+  provider: 'reflect',
+  chooseHint: 'a Reflect export as Markdown (the .zip file)',
+  citationLabel: 'Reflect',
+  probeNames: Object.freeze(['*, *, ????.md']),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => {
+    if (!entry.members || /^roam/i.test(entry.name)) return false;
+    const files = entry.members.filter((member) => member.kind === 'file' && !isJunkArchiveMember(member.relPath));
+    if (files.some((member) => /\.json$/i.test(member.name))) return false;
+    const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+    if (notes.length === 0) return false;
+    return /reflect/i.test(entry.name)
+      || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined)
+      || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+  }),
+});
+
+/** Roam's "Export All" as JSON (or a zip holding the .json): a list of pages, each a tree of blocks. */
+export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'roam-json',
+  label: 'Roam notes (JSON)',
+  family: 'note',
+  provider: 'roam',
+  chooseHint: 'a Roam export in JSON (the .json file from Export All, or the .zip that holds it)',
+  citationLabel: 'Roam',
+  probeNames: Object.freeze(['*.json']),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'roam')),
+});
+
 // --- Telegram Desktop export -----------------------------------------------------
 
 const JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
@@ -193,7 +556,13 @@ export const TELEGRAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.free
   },
 });
 
-export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([MBOX_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
+export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([
+  MBOX_ARCHIVE_FORMAT,
+  REFLECT_JSON_ARCHIVE_FORMAT,
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+  ROAM_JSON_ARCHIVE_FORMAT,
+  TELEGRAM_JSON_ARCHIVE_FORMAT,
+]);
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
@@ -310,13 +679,46 @@ export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[
 }
 
 /**
+ * What the person is told when a folder or a zip had more to look through
+ * than the probe may read: nothing is imported, because a file or member left
+ * unchecked could be a second export that would be dropped without a word.
+ */
+export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through everything you chose to see which parts are exports, because some parts are very large. Choose just the export file, or a folder or zip that holds only the export.';
+
+/**
  * Which format a probe is. No match says so and lists what is supported; two
  * matches are returned as such for the person to choose, never guessed.
+ *
+ * The first bytes decide when they can, and a file (or a zip's member) they
+ * settle is never read further (the slower look reads on through a file, and
+ * a long export would pay for it every time). Every other file or member of
+ * the pick gets that look, so a second export whose first bytes do not say
+ * what it is cannot hide beside one that does: both are found, and the
+ * formats' own rules for two exports apply as they do when both are told by
+ * their first bytes. A pick whose look ran out of allowance before it reached
+ * every file or member is refused, never imported with one left out.
  */
 export function detectArchiveFormat(
   probe: ArchiveProbe,
   formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
 ): ArchiveDetection {
+  const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
+  const settled = new Set(onHeads.flatMap((match) => match.files));
+  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled, formats), formats);
+  const incomplete = probe.readsRanOut?.() === true;
+  if (matches.length === 1 && !incomplete) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
+  if (matches.length > 1) return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+  const supported = formats.map((format) => format.label);
+  const advice = [unsupportedAdvice(probe, formats), incomplete ? ARCHIVE_LOOK_INCOMPLETE_ADVICE : undefined]
+    .filter((said): said is string => said !== undefined)
+    .join(' ');
+  return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
+}
+
+function matchesOf(
+  probe: ArchiveProbe,
+  formats: readonly ArchiveFormatDefinition[],
+): Array<{ format: ArchiveFormatDefinition; files: readonly string[] }> {
   const matches: Array<{ format: ArchiveFormatDefinition; files: readonly string[] }> = [];
   for (const format of formats) {
     let files: readonly string[] | undefined;
@@ -327,13 +729,44 @@ export function detectArchiveFormat(
     }
     if (files && files.length > 0) matches.push({ format, files });
   }
-  if (matches.length === 1) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
-  if (matches.length === 0) {
-    const supported = formats.map((format) => format.label);
-    const advice = unsupportedAdvice(probe, formats);
-    return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
-  }
-  return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+  return matches;
+}
+
+/** An entry as the probe first saw it: its names and first bytes, with no way to read on. */
+function entryWithoutFurtherReads(entry: ArchiveProbeEntry): ArchiveProbeEntry {
+  const { firstRecordKeys: _keys, listIsEmpty: _empty, members, ...rest } = entry;
+  return { ...rest, ...(members ? { members: members.map(entryWithoutFurtherReads) } : {}) };
+}
+
+function probeWithoutFurtherReads(probe: ArchiveProbe): ArchiveProbe {
+  return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
+}
+
+/**
+ * The probe with the way on past the first bytes kept only for what the first
+ * bytes did not settle: an entry not in `settled` (by its `relPath`), and a
+ * zip's member that no format takes for its own file on its first bytes (a
+ * zip settled as a whole still has members to look through).
+ */
+function probeReadingPastHeadsExcept(
+  probe: ArchiveProbe,
+  settled: ReadonlySet<string>,
+  formats: readonly ArchiveFormatDefinition[],
+): ArchiveProbe {
+  const keep = (entry: ArchiveProbeEntry): ArchiveProbeEntry => {
+    const members = entry.members?.map((member) => (toldOnItsFirstBytes(member, formats) ? entryWithoutFurtherReads(member) : member));
+    if (!settled.has(entry.relPath)) return members ? { ...entry, members } : entry;
+    const { firstRecordKeys: _keys, listIsEmpty: _empty, members: _members, ...rest } = entry;
+    return { ...rest, ...(members ? { members } : {}) };
+  };
+  return { ...probe, chosen: keep(probe.chosen), children: probe.children.map(keep) };
+}
+
+/** Whether some format takes this member for its own file on its first bytes alone. */
+function toldOnItsFirstBytes(member: ArchiveProbeEntry, formats: readonly ArchiveFormatDefinition[]): boolean {
+  if (member.kind !== 'file') return false;
+  const alone: ArchiveProbeEntry = { ...entryWithoutFurtherReads(member), relPath: '' };
+  return matchesOf({ chosen: alone, children: [] }, formats).length > 0;
 }
 
 function unsupportedAdvice(probe: ArchiveProbe, formats: readonly ArchiveFormatDefinition[]): string | undefined {

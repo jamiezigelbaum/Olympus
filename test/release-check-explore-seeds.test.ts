@@ -17,7 +17,7 @@ class FakeEngine {
   readonly home = temp();
   readonly env: Record<string, string | undefined> = { HOME: this.home };
   readonly calls: string[] = [];
-  local = { connected: false, approved: false, items: 0, missing: false, refuseList: false, stickyMissing: false };
+  local = { connected: false, approved: false, items: 0, missing: false, refuseList: false, stickyMissing: false, reading: false };
   ctx: SeedContext = {
     call: async (method, path, body) => this.route(method, path, body),
     cardOf: async (provider) => this.card(provider),
@@ -39,7 +39,7 @@ class FakeEngine {
     this.tick();
     if (provider === 'local_files') {
       const l = this.local;
-      return { provider, connection: { state: l.connected ? 'synced' : 'not_connected', label: 'x' }, coverage: { indexed_items: l.items }, scope_selection: { connected: l.connected, status: l.approved ? 'approved' : 'scope_pending' }, schedule: { missing_folders: l.missing ? ['f'] : [], ...(l.missing ? { degraded_reason: 'scope_root_missing' } : {}) } };
+      return { provider, connection: { state: l.connected ? (l.reading ? 'syncing' : 'synced') : 'not_connected', label: 'x' }, coverage: { indexed_items: l.items }, scope_selection: { connected: l.connected, status: l.approved ? 'approved' : 'scope_pending' }, schedule: { missing_folders: l.missing ? ['f'] : [], ...(l.missing ? { degraded_reason: 'scope_root_missing' } : {}) } };
     }
     return { provider, connection: { state: 'not_connected' }, coverage: { indexed_items: 0 } };
   }
@@ -92,6 +92,15 @@ describe('Files on this computer', () => {
     expect((await driver.states.failed!()).ok).toBe(true);
     const again = await driver.states.failed!();
     expect(again).toMatchObject({ ok: true });
+    expect(existsSync(join(engine.home, LOCAL_FILES_FOLDER))).toBe(false);
+  });
+
+  test('failed reached while the source is still reading the folder moves it away without waiting for the read to finish', async () => {
+    const engine = new FakeEngine();
+    const driver = localFilesDriver(engine.ctx);
+    expect((await driver.states.populated!()).ok).toBe(true);
+    engine.local.reading = true;
+    expect(await driver.states.failed!()).toMatchObject({ ok: true });
     expect(existsSync(join(engine.home, LOCAL_FILES_FOLDER))).toBe(false);
   });
 
