@@ -30,10 +30,8 @@
  * guard's regex-literal heuristic reads a one-line block comment as a regex.
  */
 
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 
@@ -46,8 +44,7 @@ export function defaultFileExtractionJobsDbPath(
 ): string {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override) return override;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'file-extraction-jobs.sqlite');
+  return olympusDataPath(env, 'file-extraction-jobs.sqlite');
 }
 
 /**

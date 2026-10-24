@@ -1,4 +1,4 @@
-import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
+import { olympusDataPath } from './olympus-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -378,12 +378,7 @@ const SYSTEM_CLOCK: SourceWatchClock = Object.freeze({
 export function defaultSourceWatchDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env.XDG_DATA_HOME?.trim();
-  const dataRoot = configured || join(homedir(), '.local', 'share');
-  if (!isAbsolute(dataRoot)) {
-    throw new TypeError('Source watch XDG_DATA_HOME must be an absolute private data root.');
-  }
-  return join(standaloneLinuxDataDir(env) ?? join(dataRoot, 'openclaw', 'olympus'), 'source-watches.sqlite');
+  return olympusDataPath(env, 'source-watches.sqlite');
 }
 
 export function createTrustedSourceWatchOwnerContext(

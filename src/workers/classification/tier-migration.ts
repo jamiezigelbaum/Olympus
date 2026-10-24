@@ -1,4 +1,4 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 // Tier migration for EXISTING installs (design
 // docs/design/per-item-four-tier-classification.md, section 4.6, steps M0-M6).
 //
@@ -38,7 +38,6 @@ import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import { DEFAULT_EMBEDDING_MODEL_ESTIMATES, embeddingModelEstimate } from '../../core/embedding-cost-estimates.ts';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
 import { trustDomainPrior } from '../../core/classification-signals.ts';
@@ -161,8 +160,7 @@ export function resolveTierMigrationPaths(
   embeddingLedgerPath: string,
 ): TierMigrationPaths {
   const configured = env[TIER_MIGRATION_DIR_ENV]?.trim();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  const dir = configured || join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'tier-migration');
+  const dir = configured || olympusDataPath(env, 'tier-migration');
   return { statePath: join(dir, 'state.json'), reportDir: join(dir, 'reports'), embeddingLedgerPath };
 }
 

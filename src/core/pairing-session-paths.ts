@@ -1,6 +1,7 @@
 import { lstatSync, realpathSync, rmSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { legacyCaptureDataRoot, type LayoutEnv } from './olympus-layout.ts';
 
 /**
  * Where Telegram's and WhatsApp's pairing sessions live, and which roots
@@ -26,6 +27,13 @@ export interface OlympusPathContext {
 
 function resolveHomeDir(context: OlympusPathContext): string {
   return context.homeDir?.trim() || homedir();
+}
+
+/** The context as the layout module reads it: an explicit homeDir wins over HOME. */
+function layoutEnv(context: OlympusPathContext): LayoutEnv {
+  const env = context.env ?? {};
+  const home = context.homeDir?.trim();
+  return home ? { ...env, HOME: home } : env;
 }
 
 /**
@@ -58,11 +66,7 @@ export function whatsappStateDir(context: OlympusPathContext = {}): string {
   const configured = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
   return configured
     ? whatsappStateDirFromValue(configured)
-    : join(
-      env.XDG_DATA_HOME?.trim() || join(resolveHomeDir(context), '.local', 'share'),
-      'olympus',
-      'whatsapp-live',
-    );
+    : join(legacyCaptureDataRoot(layoutEnv(context)), 'whatsapp-live');
 }
 
 /**
@@ -104,12 +108,10 @@ function whatsappStateDirFromValue(value: string): string {
 /** The Telethon session file base path, without its extensions. */
 export function telegramSessionBasePath(context: OlympusPathContext = {}): string {
   const env = context.env ?? {};
-  const home = context.homeDir?.trim() || env.HOME?.trim() || homedir();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(home, '.local', 'share');
   const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
   return configured
     ? telegramSessionBase(configured)
-    : join(dataHome, 'olympus', 'telegram', 'telegram.personal');
+    : join(legacyCaptureDataRoot(layoutEnv(context)), 'telegram', 'telegram.personal');
 }
 
 /**
