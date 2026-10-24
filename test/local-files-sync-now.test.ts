@@ -62,6 +62,15 @@ describe('the Files on this computer row', () => {
     expect(row.menu?.[2]).toMatchObject({ tool: 'olympus_disconnect_source', args: { source_id: 'local.files' }, destructive: true });
   });
 
+  test('a missing chosen folder keeps Sync now in the menu, so a person can ask it to look again', () => {
+    const base = localView('local-files-reading', { sync_now_available: true }).sources.find((card) => card.source_id === 'local.files')!;
+    const row = localRow(localView('local-files-reading', {
+      sync_now_available: true,
+      schedule: { ...(base.schedule ?? {}), missing_folders: ['/home/u/notes'], degraded_reason: 'scope_root_missing' } as never,
+    }));
+    expect(row.menu).toContainEqual(SYNC_LOCAL);
+  });
+
   test('no Sync now where the worker has no lane, before folders are chosen, or when not connected', () => {
     expect(localRow(localView('local-files-reading', { sync_now_available: false })).menu?.map((fix) => fix.label))
       .toEqual(['Choose folders', 'Disconnect']);

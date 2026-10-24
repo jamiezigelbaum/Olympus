@@ -1129,7 +1129,14 @@ export function chatgptDashboardClient(
       const hidden = el('span', 'sr', fill(P.moreActions, { source: String(source.label || '') }));
       const box = details('menu:' + id, add(el('span'), glyph, hidden), 'menu');
       const panel = el('div', 'menu-panel');
-      menu.forEach((fix: Any, index: number) => add(panel, fixControl(fix, 'menu:' + id + ':' + index, 'plain', true, context)));
+      // Keyed by the action, not its place: the menu gains or loses an entry
+      // (Sync now while one checks), and a position would then name another action.
+      const taken: Record<string, number> = {};
+      menu.forEach((fix: Any) => {
+        const slug = String((fix && fix.label) || 'action').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'action';
+        taken[slug] = (taken[slug] || 0) + 1;
+        add(panel, fixControl(fix, 'menu:' + id + ':' + slug + (taken[slug] > 1 ? '-' + taken[slug] : ''), 'plain', true, context));
+      });
       menuBox = add(box, panel);
     }
     if (controls.childNodes.length) {
