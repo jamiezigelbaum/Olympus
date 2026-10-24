@@ -29749,6 +29749,9 @@ var init_source_failure = __esm(() => {
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
 
+// src/workers/connector-store/capture-freshness.ts
+var init_capture_freshness = () => {};
+
 // src/workers/dashboard/phases.ts
 var init_phases = __esm(() => {
   init_source_dashboard();
@@ -31717,6 +31720,7 @@ var init_store_sync = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -31894,6 +31898,7 @@ var init_source_dashboard = __esm(() => {
   init_source_failure();
   init_answer_ready_coverage();
   init_vocabulary();
+  init_capture_freshness();
   init_phases();
   init_credential_health();
   init_status();
@@ -33957,6 +33962,7 @@ var init_store_sync2 = __esm(() => {
   init_connector_store();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
