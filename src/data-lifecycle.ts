@@ -25,6 +25,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath } from './core/olympus-layout.ts';
+import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
 import { storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
@@ -746,6 +747,10 @@ export function deleteOlympusData(options: {
   const targets = options.all === true
     ? allDeleteTargets(options)
     : sourceDeleteTargets(selectedSource!, options);
+  // The owner lock to keep, resolved once with the targets: removing the
+  // config folder can change what the data root resolves to (on standalone
+  // Linux its receipt lives there), and the lock held is the one found now.
+  const ownerLockPath = dataOwnerLockPath(envForContext(options));
   const removed: string[] = [];
   const missing: string[] = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
@@ -792,7 +797,7 @@ export function deleteOlympusData(options: {
     }
     removed.push(target.path);
     if (options.dryRun !== true) {
-      rmSync(target.path, { recursive: target.allowRecursive, force: true });
+      rmTargetKeepingOwnerLock(target, ownerLockPath);
     }
   }
   removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
@@ -1099,6 +1104,38 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     ...globExisting(join(home, '.config', 'systemd', 'user'), /^olympus.*\.(service|timer)$/)
       .map(serviceUnitTarget),
   ];
+}
+
+/**
+ * `rmSync` of a delete target, except that the data owner lock stays: a
+ * process may hold it (the CLI under its interim lock, the worker deleting
+ * from the dashboard), and a new file under its name would be a different
+ * lock that a second process could take. When the lock file sits inside a recursive target, everything else in
+ * that target goes and the folders leading to the lock file stay; only
+ * uninstall removes it, after everything else (docs/design/source-storage.md).
+ */
+function rmTargetKeepingOwnerLock(target: DeleteTarget, lockPath: string): void {
+  const lock = canonicalPath(lockPath);
+  const root = canonicalPath(target.path);
+  if (!target.allowRecursive || !isStrictlyInside(lock, root) || !existsSync(lockPath)) {
+    rmSync(target.path, { recursive: target.allowRecursive, force: true });
+    return;
+  }
+  // The lock's path below the target: the folders to keep, then its own name.
+  const keep = relative(root, lock).split(sep);
+  const clear = (directory: string, depth: number): void => {
+    const inLockDirectory = depth === keep.length - 1;
+    for (const name of readdirSync(directory)) {
+      const child = join(directory, name);
+      if (inLockDirectory && isDataOwnerLockName(name)) continue;
+      if (!inLockDirectory && name === keep[depth] && lstatSync(child).isDirectory()) {
+        clear(child, depth + 1);
+        continue;
+      }
+      rmSync(child, { recursive: true, force: true });
+    }
+  };
+  clear(target.path, 0);
 }
 
 function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {

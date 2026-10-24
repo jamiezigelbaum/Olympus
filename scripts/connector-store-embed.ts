@@ -17,6 +17,7 @@ import type {
   ConnectorStoreEmbedSummary,
   LocalConnectorStoreOptions,
 } from '../src/workers/connector-store/index.ts';
+import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
 
@@ -164,22 +165,25 @@ async function runConnectorStoreEmbed(argv: readonly string[]): Promise<{
     );
   }
   const options = resolveConnectorStoreOptions(args);
-  const store = openConnectorStore(storageAccountForCorpus(options), options);
-  try {
-    const embed = await store.embedChunks({
-      provider,
-      ...(args.limit !== undefined ? { limit: args.limit } : {}),
-    });
-    const status = store.status();
-    return {
-      kind: 'connector_store_embed',
-      embed,
-      embedded_chunks_total: status.counts.embeddedChunks,
-      chunks_total: status.counts.chunks,
-    };
-  } finally {
-    store.close();
-  }
+  // Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+  return withDataOwnerLock(process.env, async () => {
+    const store = openConnectorStore(storageAccountForCorpus(options), options);
+    try {
+      const embed = await store.embedChunks({
+        provider,
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      });
+      const status = store.status();
+      return {
+        kind: 'connector_store_embed' as const,
+        embed,
+        embedded_chunks_total: status.counts.embeddedChunks,
+        chunks_total: status.counts.chunks,
+      };
+    } finally {
+      store.close();
+    }
+  });
 }
 
 if (import.meta.main) {

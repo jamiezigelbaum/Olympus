@@ -18053,6 +18053,15 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/core/data-owner-lock.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire3, O_CLOEXEC;
+var init_data_owner_lock = __esm(() => {
+  init_olympus_layout();
+  runtimeRequire3 = createRequire4(import.meta.url);
+  O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
+});
+
 // src/workers/local-files/paths.ts
 var UNSAFE_PATH_CHARACTERS, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES;
 var init_paths = __esm(() => {
@@ -18090,6 +18099,7 @@ var init_paths = __esm(() => {
 // src/workers/local-files/scope.ts
 var LOCAL_FILES_PROVIDER = "local_files", LOCAL_FILES_ACCOUNT_SCOPE = "this_computer", LOCAL_FILES_POLICY_SOURCE;
 var init_scope = __esm(() => {
+  init_data_owner_lock();
   init_paths();
   LOCAL_FILES_POLICY_SOURCE = `${LOCAL_FILES_PROVIDER}.${LOCAL_FILES_ACCOUNT_SCOPE}`;
 });
@@ -18547,10 +18557,10 @@ var init_store2 = __esm(() => {
 });
 
 // src/core/scope-safe-fs.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
+import { createRequire as createRequire5 } from "node:module";
+var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
 var init_scope_safe_fs = __esm(() => {
-  runtimeRequire3 = createRequire4(import.meta.url);
+  runtimeRequire4 = createRequire5(import.meta.url);
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
@@ -18658,6 +18668,7 @@ var init_pairing_session_paths = __esm(() => {
 // src/data-lifecycle.ts
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
+  init_data_owner_lock();
   init_source_storage();
   init_atomic_file();
   init_operation_error();
@@ -24054,7 +24065,6 @@ var EMBEDDING_SETTING_ENV_NAMES = new Set([
   "OLYMPUS_EMAIL_BASE_URL",
   "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON",
   "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH",
-  "OLYMPUS_EMBEDDING_LEDGER_PATH",
   "OLYMPUS_SOVEREIGNTY_CONFIG",
   "OLYMPUS_SOVEREIGNTY_CONFIG_PATH",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL",
@@ -24069,8 +24079,6 @@ var EMBEDDING_SETTING_ENV_NAMES = new Set([
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_IDLE_SLEEP_SECONDS",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED",
-  "OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVATION_INTERVAL_SECONDS",
-  "OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVER_ENABLED",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_CONSECUTIVE_FAILURES",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_PENDING_CHUNKS",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNS",

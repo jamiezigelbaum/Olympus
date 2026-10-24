@@ -6,6 +6,7 @@
 // content is emitted.
 
 import { lstatSync } from 'node:fs';
+import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -195,7 +196,9 @@ export function runTelegramTrustReconcile(
 
 if (import.meta.main) {
   try {
-    console.log(JSON.stringify(runTelegramTrustReconcile(process.argv.slice(2)), null, 2));
+    // Held for the run: it refuses while Olympus runs (core/data-owner-lock.ts).
+    const summary = withDataOwnerLock(process.env, () => runTelegramTrustReconcile(process.argv.slice(2)));
+    console.log(JSON.stringify(summary, null, 2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

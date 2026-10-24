@@ -70,6 +70,7 @@ import type {
   ConnectorStoreMetadataOnlyStripSummary,
   ConnectorStorePurgeSummary,
 } from '../src/workers/connector-store/index.ts';
+import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 
 export interface SourceExclusionPurgeArgs {
@@ -312,7 +313,8 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  main().catch((error: unknown) => {
+  // Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+  withDataOwnerLock(process.env, main).catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });

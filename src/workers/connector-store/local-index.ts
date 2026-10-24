@@ -8930,7 +8930,7 @@ export class LocalConnectorStore {
    *
    * ONE EMBEDDER PER STORE. Every embedding path (a sync's inline embed, the
    * scheduler's embedding sweep, a Dropbox embed task, the external drain's
-   * /source/index/embed call or its direct mode) runs under the same
+   * /source/index/embed call) runs under the same
    * cross-process file lease on this store, so two of them can never embed the
    * same chunks at once and pay twice. The chunks still pending are read under
    * the lease, so a caller that waited finds the other's work already done. A

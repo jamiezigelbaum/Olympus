@@ -199,18 +199,23 @@ that opens files inside an account folder:
 - Search keeps reading disconnected accounts' stores ("Disconnected ·
   indexed data kept"), because they stay `active` until deleted.
 
-**Owner lock.** The worker takes an exclusive kernel lock
-(`file-lease.ts`'s `BEGIN EXCLUSIVE`, released by the kernel on death) on
-`<data>/data-owner.lock` for its lifetime. The lock sits in the data root
+**Owner lock.** The worker takes an exclusive kernel lock (`flock(2)` on
+`<data>/data-owner.lock`, released by the kernel on death;
+`src/core/data-owner-lock.ts`) for its lifetime. The lock sits in the data root
 itself, not the state root, so any two processes that resolve the same data
 root contend on the same lock even with different `XDG_STATE_HOME` values;
 it is outside every directory that Delete or Delete all removes, so its
-inode never changes while held. Every other opener of a store:
+inode never changes while held. `flock` belongs to the descriptor that took
+it, so a walker or file probe that opens and closes the lock file in the
+holding process leaves it held (a POSIX `fcntl` lock, file-lease's, would be
+dropped); the descriptor is close-on-exec, so a child never keeps it. Walkers
+still leave the file alone (`isDataOwnerLockName`). Every other opener of a
+store:
 
 | Opener | After this change |
 |---|---|
-| Embedding drain | `http` mode only (default today); direct mode removed |
-| CLI `data`, `ingestion status`, `tier` | through the worker's API when it runs; otherwise take the owner lock |
+| Embedding drain | `http` mode only; direct mode removed (2b-i) |
+| CLI `data`, `ingestion status`, `tier` | takes the lock when free; through the worker in 2b-ii |
 | `connector-store:embed`, `whatsapp-live-sync`, repair and backfill scripts | take the owner lock, so they refuse while Olympus runs |
 | Telegram reader, WhatsApp bridge | write only `raw/` and `session/` of their account; stopped by Disconnect |
 
@@ -386,8 +391,10 @@ touch the store path (`eval/`).
 2. **Registry + storage service + owner lock + guard.** Registry adopted
    from legacy locations without moving files; all store opens through the
    service; drain direct mode removed; CLI and scripts take the owner lock.
-   Two PRs: registry, storage service and guard first; then the owner lock,
-   the CLI through the worker, and the drain's direct mode removed.
+   Three PRs: 2a, registry, storage service and guard (done); 2b-i, the
+   owner lock held by the worker and taken by scripts and, when free, by the
+   CLI, with the drain's direct mode removed; 2b-ii, the CLI through the
+   worker's API.
 3. **Forget registry.** Forget steps for the shared files above, and the
    guard test.
 4. **Migration into account folders.** Behind the boot pass, with the
