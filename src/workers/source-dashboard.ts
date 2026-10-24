@@ -47,6 +47,7 @@ import {
   DASHBOARD_CAPTURE_COPY,
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
+  dashboardCaptureProblem,
   dashboardNoneReadSentence,
 } from './dashboard/vocabulary.ts';
 // The receipt counts a live feed reports about its newest captured message.
@@ -800,9 +801,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * The newest captured message of a live feed, as a verdict. `age_seconds` is how
  * old that message is now (the last pull's reading plus the time since that
  * pull) and is absent when no captured message carries a readable time.
+ *
+ * `awaiting` is a pairing that has not yet captured a message of its own: the
+ * newest message (if any) predates the current pairing, which retains the
+ * history of earlier ones. It lasts at most one threshold from the pairing;
+ * after that the same silence reads `stale`. `age_seconds` stays the age of
+ * that older message.
  */
 export interface DashboardCaptureFreshness {
-  state: 'fresh' | 'stale' | 'unavailable';
+  state: 'fresh' | 'stale' | 'unavailable' | 'awaiting';
   age_seconds?: number;
   threshold_seconds: number;
 }
@@ -813,7 +820,11 @@ export type DashboardCaptureSupervisorReason =
   | 'grant_invalid'
   | 'handle_unavailable'
   | 'session_missing'
-  | 'secret_missing';
+  | 'secret_missing'
+  /** The helper process could not be started at all (no Python, the executable is gone). */
+  | 'start_failed'
+  /** The helper keeps exiting on its own shortly after it starts. */
+  | 'helper_exited';
 
 /** What this worker's capture supervisor last reported for one source. */
 export interface DashboardCaptureSupervisor {
@@ -831,6 +842,12 @@ export interface DashboardCaptureRuntime {
   supervisor?: DashboardCaptureSupervisor;
   /** Absent when no approval can be read. */
   scope?: DashboardCaptureScope;
+  /**
+   * When the current pairing granted capture (ISO). Messages captured before
+   * it belong to an earlier pairing, so they do not prove this one captures.
+   * Absent when no grant can be read.
+   */
+  paired_at?: string;
 }
 
 export interface DashboardSourceCard {
@@ -2332,6 +2349,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
     const corpora = statusCorpora
       .filter((corpus) => corpusMatchesDefinition(corpus, definition, sourceIdByCorpusId));
     for (const corpus of corpora) claimedCorpusIds.add(corpus.corpus_id);
+    const captureRuntime = options.captureRuntime?.[definition.source_id];
     const built = sourceCardFromDefinition(
       definition,
       corpora,
@@ -2355,6 +2373,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
       options.importedArchives,
+      captureRuntime?.paired_at,
     );
     // Four-tier facts, stamped like sync_now below: counts from the card's own
     // corpora, and the migration only when its plan touches one of them.
@@ -2376,19 +2395,19 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       card.setup = dashboardSourceSetupStatus(card);
     }
     // How live capture runs on this computer, for a connected chat source. A
-    // helper that cannot start is a fault whatever the pull says, but it never
-    // replaces a more specific reason the card already gives.
-    const captureRuntime = options.captureRuntime?.[definition.source_id];
+    // helper that is not running is a fault whatever the pull says. It never
+    // replaces a reason the card already gives: that reason stays the label,
+    // and the capture problem is read from the capture fields beside it
+    // (dashboardCaptureProblem), so neither hides the other.
     if (card.configured && captureRuntime && (captureRuntime.supervisor || captureRuntime.scope)) {
       card.capture = {
         ...(captureRuntime.supervisor ? { supervisor: { ...captureRuntime.supervisor } } : {}),
         ...(captureRuntime.scope ? { scope: { ...captureRuntime.scope } } : {}),
       };
       const readiness = card.answer_readiness;
-      const replaceable = readiness.state !== 'needs_attention'
-        || readiness.label === DASHBOARD_CAPTURE_STALE_LABEL
-        || readiness.label === 'Needs attention before answers';
-      if (captureRuntime.supervisor?.state === 'blocked' && replaceable && !card.account_change) {
+      if (dashboardCaptureProblem(card)?.cause === 'helper'
+        && (readiness.state !== 'needs_attention' || readiness.label === DASHBOARD_CAPTURE_STALE_LABEL)
+        && !card.account_change) {
         card.answer_readiness = { state: 'needs_attention', label: DASHBOARD_CAPTURE_BLOCKED_LABEL };
       }
       card.setup = dashboardSourceSetupStatus(card);
@@ -2620,6 +2639,7 @@ function sourceCardFromDefinition(
   fileSourceScopeStatus: 'scope_pending' | 'approved' | undefined,
   fileSourceScopeIngestionEnabled: boolean,
   importedArchives?: DashboardImportedArchives,
+  capturePairedAt?: string,
 ): DashboardSourceCard {
   const corpusCards = withoutCustodialDoubleCount(
     corpora.map((corpus) => sourceCardFromCorpus(corpus, schedulerByCorpus.get(corpus.corpus_id), undefined, now)),
@@ -2644,7 +2664,7 @@ function sourceCardFromDefinition(
     ? { ...baseQueue, label: 'Needs attention' as const, needs_attention: baseQueue.needs_attention + 1 }
     : baseQueue;
   const refreshFreshness = aggregateFreshness(corpusCards, schedulers, corpora, definition, now);
-  const captureFreshness = schedulerCaptureFreshness(schedulers, now);
+  const captureFreshness = schedulerCaptureFreshness(schedulers, now, capturePairedAt);
   const freshness = captureFreshness ? { ...refreshFreshness, capture: captureFreshness } : refreshFreshness;
   const embeddingLaneDisabled = corpora.some((corpus) => corpus.embedding_lane?.state === 'embedding_lane_disabled');
   const schedule = scheduleFromSchedulers(schedulers);
@@ -2937,14 +2957,24 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       dependencies,
     };
   }
-  if (card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL || card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL) {
+  const captureProblem = dashboardCaptureProblem(card);
+  if (captureProblem && (card.answer_readiness.state !== 'needs_attention' || card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL
+    || card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL)) {
     // Sync now reads what was captured; it cannot capture what was missed.
     return {
       stage: 'source_health',
       condition: 'degraded',
-      next_action: card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL
+      next_action: captureProblem.cause === 'helper'
         ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
         : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label),
+      dependencies,
+    };
+  }
+  if (card.freshness.capture?.state === 'awaiting' && card.answer_readiness.state !== 'needs_attention') {
+    return {
+      stage: 'initial_sync',
+      condition: 'usable',
+      next_action: DASHBOARD_CAPTURE_COPY.nextAction.awaiting(card.label),
       dependencies,
     };
   }
@@ -2969,9 +2999,15 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       // install, so "Run Olympus doctor" named a command the reader cannot run
       // from the page they are standing on (clean-install rehearsal,
       // 2026-09-05); the agent is the path this page already sends people down.
-      next_action: connection.action.kind === 'oauth' || connection.action.kind === 'api_key'
+      next_action: (connection.action.kind === 'oauth' || connection.action.kind === 'api_key'
         ? `${connection.action.label} ${card.label}, then run Sync now.`
-        : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`,
+        : `Ask your agent to repair the reported ${card.label} dependency or queue, then run Sync now.`)
+        // A live-feed problem beside this one keeps its own step, which Sync now does not do.
+        + (captureProblem
+          ? ` ${captureProblem.cause === 'helper'
+            ? DASHBOARD_CAPTURE_COPY.nextAction.blocked(card.label)
+            : DASHBOARD_CAPTURE_COPY.nextAction.stale(card.label)}`
+          : ''),
       dependencies,
     };
   }
@@ -4812,8 +4848,9 @@ function liveQueueCount(counts: Record<string, number>, gaugeKeys: string[], job
 
 const CAPTURE_STATE_RANK: Readonly<Record<DashboardCaptureFreshness['state'], number>> = {
   fresh: 0,
-  unavailable: 1,
-  stale: 2,
+  awaiting: 1,
+  unavailable: 2,
+  stale: 3,
 };
 
 /**
@@ -4822,17 +4859,27 @@ const CAPTURE_STATE_RANK: Readonly<Record<DashboardCaptureFreshness['state'], nu
  * capture-freshness.ts). Read per task rather than summed with
  * schedulerTaskCounts, because the verdict is three flags and a threshold, and
  * adding two tasks' flags would make a reading nothing measured. The worst
- * reading across tasks wins: stale, then unavailable, then fresh.
+ * reading across tasks wins: stale, then unavailable, then awaiting, then
+ * fresh.
  *
  * A failed run's counts are not a reading of the feed. The age the receipt
  * carries was true when the pull finished, so the time since then is added:
  * a pull that stopped running three days ago does not leave "newest message
  * 2 hours ago" on the card. Undefined when no task reports a verdict.
+ *
+ * `pairedAt` is when the current pairing granted capture. Unpairing keeps the
+ * captured messages, so after a re-pairing the receipt still reads the old
+ * history: a message older than the pairing says nothing about whether this
+ * pairing captures. Such a feed is `awaiting` for at most one threshold from
+ * the pairing, with the older message's age kept. When that wait is over the
+ * silence is stale, including a feed that never produced a message.
  */
 function schedulerCaptureFreshness(
   schedulers: readonly SourceSchedulerSourceStatus[],
   now: Date,
+  pairedAt?: string,
 ): DashboardCaptureFreshness | undefined {
+  const pairedAtMs = pairedAt === undefined ? Number.NaN : Date.parse(pairedAt);
   let worst: DashboardCaptureFreshness | undefined;
   for (const scheduler of new Set(schedulers)) {
     for (const task of scheduler.tasks) {
@@ -4853,10 +4900,20 @@ function schedulerCaptureFreshness(
             threshold_seconds: reading.threshold_seconds,
             age_seconds: reading.age_seconds + sincePull,
           };
-      if (!worst || CAPTURE_STATE_RANK[verdict.state] > CAPTURE_STATE_RANK[worst.state]) worst = verdict;
+      const judged = Number.isFinite(pairedAtMs) ? underCurrentPairing(verdict, now.getTime(), pairedAtMs) : verdict;
+      if (!worst || CAPTURE_STATE_RANK[judged.state] > CAPTURE_STATE_RANK[worst.state]) worst = judged;
     }
   }
   return worst;
+}
+
+/** A feed's verdict, read against when the current pairing began (see schedulerCaptureFreshness). */
+function underCurrentPairing(verdict: DashboardCaptureFreshness, nowMs: number, pairedAtMs: number): DashboardCaptureFreshness {
+  const newestAtMs = verdict.age_seconds === undefined ? undefined : nowMs - verdict.age_seconds * 1_000;
+  if (newestAtMs !== undefined && newestAtMs >= pairedAtMs) return verdict;
+  const sincePairing = Math.max(0, (nowMs - pairedAtMs) / 1_000);
+  if (sincePairing <= verdict.threshold_seconds) return { ...verdict, state: 'awaiting' };
+  return verdict.state === 'unavailable' ? { ...verdict, state: 'stale' } : verdict;
 }
 
 function schedulerTaskCounts(scheduler: SourceSchedulerSourceStatus | undefined): Record<string, number> {

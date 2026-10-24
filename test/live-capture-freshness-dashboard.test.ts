@@ -25,7 +25,6 @@ import {
 import type { ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import type { SourceSchedulerStatus } from '../src/workers/source-scheduler.ts';
-import { captureFreshnessCounts } from '../src/workers/connector-store/capture-freshness.ts';
 
 const NOW = new Date('2026-10-24T12:00:00.000Z');
 const PULLED_AT = '2026-10-24T11:55:00.000Z';
@@ -52,7 +51,7 @@ const SOURCES: Record<Which, { sourceId: string; corpusId: string; provider: str
   },
 };
 
-function handles(which: Which): ConnectedHandleRegistry {
+function handles(which: Which, reauth = false): ConnectedHandleRegistry {
   return which === 'telegram'
     ? {
         version: 1,
@@ -67,7 +66,7 @@ function handles(which: Which): ConnectedHandleRegistry {
           tokenSecretRefs: ['store:telegram.personal.session_path'],
           backendState: {
             kind: 'mtproto_session',
-            status: 'available',
+            status: reauth ? 'reauth_required' : 'available',
             mtprotoProfileId: 'telegram_personal',
             runtimeEndpointId: 'telegram_local_telethon_reader',
             library: 'telethon',
@@ -89,7 +88,7 @@ function handles(which: Which): ConnectedHandleRegistry {
           tokenSecretRefs: ['store:whatsapp.personal_local.session_path'],
           backendState: {
             kind: 'local_app_database',
-            status: 'available',
+            status: reauth ? 'reauth_required' : 'available',
             databaseSourceId: 'whatsapp_personal_local',
             readerWorker: 'whatsapp_local_reader',
             databaseRole: 'messages_readonly',
@@ -101,14 +100,15 @@ function handles(which: Which): ConnectedHandleRegistry {
       } as unknown as ConnectedHandleRegistry;
 }
 
-/** The counts a pull stores: ordinary receipt counts plus the capture verdict. */
-function receiptCounts(capture: Parameters<typeof captureFreshnessCounts>[0] | undefined): Record<string, number> {
-  return {
-    items_seen: 40,
-    items_indexed: 40,
-    items_changed: 0,
-    ...(capture ? captureFreshnessCounts(capture) : {}),
-  };
+/**
+ * The counts a pull stores, written out literally under the keys the receipts
+ * use (not produced by the production encoder, so a mistake shared by encoder
+ * and decoder cannot pass): ordinary receipt counts plus the capture verdict.
+ */
+type Reading = Record<string, number> | undefined;
+const ORDINARY_COUNTS = { items_seen: 40, items_indexed: 40, items_changed: 0 };
+function receiptCounts(capture: Reading): Record<string, number> {
+  return { ...ORDINARY_COUNTS, ...(capture ?? {}) };
 }
 
 function build(input: {
@@ -120,6 +120,10 @@ function build(input: {
   stale?: boolean;
   /** Default true. False: nothing is paired and nothing ever synced, as before Connect. */
   connected?: boolean;
+  /** The pairing's sign-in has lapsed. */
+  reauth?: boolean;
+  /** Replaces the single sync task with these (for several pulls that disagree). */
+  tasks?: Array<{ id: string; counts: Record<string, number> }>;
 }) {
   const spec = SOURCES[input.which];
   const status = {
@@ -173,16 +177,16 @@ function build(input: {
       freshness_threshold_hours: 26,
       ...(input.connected === false ? {} : { freshness_hours: 0.1 }),
       stale_sync_anomaly: input.stale === true,
-      tasks: [{
-        id: spec.task,
+      tasks: (input.tasks ?? [{ id: spec.task, counts: input.counts }]).map((entry) => ({
+        id: entry.id,
         kind: 'sync' as const,
         running: false,
         consecutive_failures: input.status === 'failed' ? 1 : 0,
         // Nothing has ever synced when nothing is paired: a chat source reads
         // as connected from its handle or from a sync that succeeded.
         ...(input.connected === false ? {} : { last_success_at: input.pulledAt ?? PULLED_AT, last_attempt_at: input.pulledAt ?? PULLED_AT }),
-        ...(input.counts ? { last_result: { status: input.status ?? 'idle', counts: input.counts } } : {}),
-      }],
+        ...(entry.counts ? { last_result: { status: input.status ?? 'idle', counts: entry.counts } } : {}),
+      })),
     }],
     policy: { raw_source_exposed: false, source_text_returned: false, source_scope_keys_exposed: false, counts_only: true },
   } as unknown as SourceSchedulerStatus;
@@ -190,7 +194,7 @@ function build(input: {
     sourceIndexStatus: status,
     schedulerStatus: scheduler,
     sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
-    ...(input.connected === false ? {} : { connectedHandleRegistry: handles(input.which) }),
+    ...(input.connected === false ? {} : { connectedHandleRegistry: handles(input.which, input.reauth === true) }),
     ...(input.captureRuntime ? { captureRuntime: input.captureRuntime } : {}),
     now: NOW,
   });
@@ -200,13 +204,22 @@ function build(input: {
     card,
     row: panel.sources.find((source) => source.label === spec.label)!,
     needsYou: panel.needsYou.filter((item) => item.id === `source:${spec.sourceId}`),
+    allNeedsYou: panel.needsYou,
   };
 }
 
 const DAY = 86_400;
-const stale = (ageSeconds: number) => ({ status: 'stale' as const, threshold_seconds: THRESHOLD, age_seconds: ageSeconds });
-const fresh = (ageSeconds: number) => ({ status: 'fresh' as const, threshold_seconds: THRESHOLD, age_seconds: ageSeconds });
-const unavailable = { status: 'unavailable' as const, threshold_seconds: THRESHOLD };
+// Literal receipt counts for each verdict, under the keys a pull stores them.
+const stale = (ageSeconds: number): Reading => ({
+  capture_fresh: 0, capture_stale: 1, capture_unavailable: 0, capture_stale_threshold_seconds: THRESHOLD, capture_age_seconds: ageSeconds,
+});
+const fresh = (ageSeconds: number): Reading => ({
+  capture_fresh: 1, capture_stale: 0, capture_unavailable: 0, capture_stale_threshold_seconds: THRESHOLD, capture_age_seconds: ageSeconds,
+});
+const unavailable: Reading = {
+  capture_fresh: 0, capture_stale: 0, capture_unavailable: 1, capture_stale_threshold_seconds: THRESHOLD,
+};
+const ago = (seconds: number) => new Date(NOW.getTime() - seconds * 1_000).toISOString();
 
 describe.each(['whatsapp', 'telegram'] as const)('%s live capture freshness', (which) => {
   const spec = SOURCES[which];
@@ -281,13 +294,22 @@ describe.each(['whatsapp', 'telegram'] as const)('%s live capture freshness', (w
     expect(row.detail).toBe('synced 6m ago · capture running · 3 chats');
   });
 
-  test('a stopped helper under a stale feed is named beside the age', () => {
+  test('a helper stopped on purpose under a stale feed is named beside the age', () => {
+    const { card } = build({
+      which,
+      counts: receiptCounts(stale(2 * DAY)),
+      captureRuntime: { [spec.sourceId]: { supervisor: { state: 'stopped' } } },
+    });
+    expect(dashboardAttentionLine(card)).toBe('capture stale: newest message 2d ago · capture stopped');
+  });
+
+  test('a helper whose sign-in is gone under a stale feed says so, not only that it is quiet', () => {
     const { card } = build({
       which,
       counts: receiptCounts(stale(2 * DAY)),
       captureRuntime: { [spec.sourceId]: { supervisor: { state: 'stopped', reason: 'handle_unavailable' } } },
     });
-    expect(dashboardAttentionLine(card)).toBe('capture stale: newest message 2d ago · capture stopped');
+    expect(dashboardAttentionLine(card)).toBe('capture stopped: its sign-in is no longer available');
   });
 
   test('a helper that cannot start is Needs you whatever the pull says, with its reason', () => {
@@ -344,24 +366,26 @@ describe('capture runtime on other cards', () => {
     expect(needsYou).toEqual([]);
   });
 
-  test('a blocked helper names itself over the generic late-refresh label, not over a specific one', () => {
-    const generic = build({
+  test('a blocked helper beside a late refresh keeps the refresh as the label and says both', () => {
+    const both = build({
       which: 'telegram',
       stale: true,
       counts: receiptCounts(fresh(600)),
       captureRuntime: { 'telegram.messages': { supervisor: { state: 'blocked', reason: 'grant_invalid' } } },
     });
-    expect(generic.card.answer_readiness.label).toBe(DASHBOARD_CAPTURE_BLOCKED_LABEL);
-    expect(dashboardAttentionLine(generic.card)).toBe('capture cannot start: its approval cannot be read');
+    expect(both.card.answer_readiness).toEqual({ state: 'needs_attention', label: 'Needs attention before answers' });
+    expect(dashboardAttentionLine(both.card)).toBe('last synced 6m ago, later than expected · capture cannot start: its approval cannot be read');
+    expect(both.row.detail).toBe(dashboardAttentionLine(both.card));
   });
 
-  test('a stopped helper is a clause on a quiet row, never a problem by itself', () => {
+  test('a helper stopped on purpose is a clause on a quiet row, never a problem by itself', () => {
     const { card, row, needsYou } = build({
       which: 'whatsapp',
       counts: receiptCounts(fresh(600)),
-      captureRuntime: { 'whatsapp.personal.messages': { supervisor: { state: 'stopped', reason: 'grant_missing' } } },
+      captureRuntime: { 'whatsapp.personal.messages': { supervisor: { state: 'stopped' } } },
     });
     expect(card.answer_readiness.state).toBe('ready');
+    expect(row.status).toBe('Fresh');
     expect(row.detail).toBe('synced 6m ago · capture stopped');
     expect(needsYou).toEqual([]);
   });
@@ -379,5 +403,212 @@ describe('capture runtime on other cards', () => {
     });
     expect(JSON.stringify({ row, needsYou })).not.toMatch(/someone|1555|s\.whatsapp/);
     expect(row.detail).toBe('synced 6m ago · capture running · 2 chats');
+  });
+});
+
+describe.each(['whatsapp', 'telegram'] as const)('%s: a helper that is not running on a connected source', (which) => {
+  const spec = SOURCES[which];
+  const runtime = (supervisor: DashboardCaptureRuntime['supervisor']) => ({ [spec.sourceId]: { supervisor } });
+
+  const unexpected: Array<[string, NonNullable<DashboardCaptureRuntime['supervisor']>, string]> = [
+    ['its approval is gone', { state: 'stopped', reason: 'grant_missing' }, 'capture stopped: its approval is missing'],
+    ['its sign-in is gone', { state: 'stopped', reason: 'handle_unavailable' }, 'capture stopped: its sign-in is no longer available'],
+    ['its helper would not start', { state: 'blocked', reason: 'start_failed' }, 'capture cannot start: its helper would not start'],
+    ['its helper keeps exiting', { state: 'blocked', reason: 'helper_exited' }, 'capture keeps stopping: its helper exits soon after it starts'],
+  ];
+
+  for (const [name, supervisor, words] of unexpected) {
+    test(`${name}: Needs you with its reason and a route, even while the last message is recent`, () => {
+      const { card, row, needsYou } = build({ which, counts: receiptCounts(fresh(600)), captureRuntime: runtime(supervisor) });
+      expect(card.freshness.capture?.state).toBe('fresh');
+      expect(card.answer_readiness).toEqual({ state: 'needs_attention', label: DASHBOARD_CAPTURE_BLOCKED_LABEL });
+      expect(dashboardStatus({ source: card })).toBe('Needs you');
+      expect(row.status).toBe('Needs you');
+      expect(row.detail).toBe(words);
+      expect(row.primary?.label).toBe('Check capture');
+      expect(needsYou).toHaveLength(1);
+      expect(needsYou[0]!.sentence).toBe(`${spec.label} — ${words}`);
+      expect(needsYou[0]!.fix.label).toBe('Check capture');
+    });
+  }
+
+  test('with no capture reading at all, a lost approval is still a problem, not a quiet row', () => {
+    const { row, needsYou } = build({
+      which,
+      counts: receiptCounts(undefined),
+      captureRuntime: runtime({ state: 'stopped', reason: 'grant_missing' }),
+    });
+    expect(row.status).toBe('Needs you');
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — capture stopped: its approval is missing`);
+  });
+
+  test('a reconnect the sign-in needs is the problem; the stopped helper is its consequence, not a second one', () => {
+    const { card, row } = build({
+      which,
+      counts: receiptCounts(fresh(600)),
+      reauth: true,
+      captureRuntime: runtime({ state: 'stopped', reason: 'handle_unavailable' }),
+    });
+    expect(card.connection.state).toBe('reauth_required');
+    expect(row.status).toBe('Needs you');
+    expect(dashboardAttentionLine(card)).toBe('signed out');
+  });
+});
+
+describe.each(['whatsapp', 'telegram'] as const)('%s: a pairing that has not captured its first message', (which) => {
+  const spec = SOURCES[which];
+  const pairedAgo = (seconds: number, extra: Partial<DashboardCaptureRuntime> = {}) => ({
+    [spec.sourceId]: { supervisor: { state: 'running' as const }, scope: { kind: 'chats' as const, count: 3 }, paired_at: ago(seconds), ...extra },
+  });
+
+  test('re-pairing a quiet account does not alarm from the history the old pairing left', () => {
+    // Three days of silence in the spool, but the account was linked again ten minutes ago.
+    const { card, row, needsYou } = build({ which, counts: receiptCounts(stale(3 * DAY)), captureRuntime: pairedAgo(600) });
+    expect(card.freshness.capture).toEqual({ state: 'awaiting', age_seconds: 3 * DAY + 300, threshold_seconds: THRESHOLD });
+    expect(card.answer_readiness.state).toBe('ready');
+    expect(dashboardStatus({ source: card })).toBe('Waiting');
+    expect(row.status).toBe('Waiting');
+    expect(row.detail).toBe('waiting for the first live message · newest kept message 3d ago · capture running · 3 chats');
+    expect(row.primary).toBeUndefined();
+    expect(needsYou).toEqual([]);
+    expect(card.setup?.next_action).toContain(`Keep ${spec.label} linked`);
+  });
+
+  test('a brand-new pairing that has captured nothing yet is waiting, with no age to show', () => {
+    const { card, row } = build({ which, counts: receiptCounts(unavailable), captureRuntime: pairedAgo(600) });
+    expect(card.freshness.capture).toEqual({ state: 'awaiting', threshold_seconds: THRESHOLD });
+    expect(row.status).toBe('Waiting');
+    expect(row.detail).toBe('waiting for the first live message · capture running · 3 chats');
+  });
+
+  test('the wait is bounded: one threshold after linking, the same silence is stale again', () => {
+    const atThreshold = build({ which, counts: receiptCounts(stale(3 * DAY)), captureRuntime: pairedAgo(THRESHOLD) });
+    expect(atThreshold.card.freshness.capture?.state).toBe('awaiting');
+    const past = build({ which, counts: receiptCounts(stale(3 * DAY)), captureRuntime: pairedAgo(THRESHOLD + 1) });
+    expect(past.card.freshness.capture).toEqual({ state: 'stale', age_seconds: 3 * DAY + 300, threshold_seconds: THRESHOLD });
+    expect(past.row.status).toBe('Needs you');
+    expect(past.needsYou[0]!.fix.label).toBe('Check capture');
+  });
+
+  test('a pairing that captured nothing in a whole threshold is stale, not quietly fine', () => {
+    const { card, row, needsYou } = build({ which, counts: receiptCounts(unavailable), captureRuntime: pairedAgo(2 * DAY) });
+    expect(card.freshness.capture).toEqual({ state: 'stale', threshold_seconds: THRESHOLD });
+    expect(row.status).toBe('Needs you');
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — capture stale: nothing captured since linking`);
+  });
+
+  test('a message captured under this pairing is the evidence, and it reads fresh', () => {
+    // The newest message is a minute older than the pull, which was ten minutes after the pairing.
+    const { card, row } = build({ which, counts: receiptCounts(fresh(60)), captureRuntime: pairedAgo(900) });
+    expect(card.freshness.capture).toEqual({ state: 'fresh', age_seconds: 360, threshold_seconds: THRESHOLD });
+    expect(row.status).toBe('Fresh');
+  });
+
+  test('a recent message from before the pairing is history, not proof the new pairing captures', () => {
+    const { card, row } = build({ which, counts: receiptCounts(fresh(3_600)), captureRuntime: pairedAgo(600) });
+    expect(card.freshness.capture?.state).toBe('awaiting');
+    expect(card.freshness.capture?.age_seconds).toBe(3_900);
+    expect(row.status).toBe('Waiting');
+  });
+
+  test('without a pairing time the receipt is judged as it always was', () => {
+    const { card } = build({ which, counts: receiptCounts(stale(3 * DAY)), captureRuntime: { [spec.sourceId]: { supervisor: { state: 'running' } } } });
+    expect(card.freshness.capture?.state).toBe('stale');
+  });
+
+  test('a helper that cannot run is a problem even during the wait', () => {
+    const { row, needsYou } = build({
+      which,
+      counts: receiptCounts(unavailable),
+      captureRuntime: pairedAgo(600, { supervisor: { state: 'blocked', reason: 'session_missing' } }),
+    });
+    expect(row.status).toBe('Needs you');
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — capture cannot start: its linked session is missing`);
+  });
+});
+
+describe.each(['whatsapp', 'telegram'] as const)('%s: a capture problem beside another problem', (which) => {
+  const spec = SOURCES[which];
+
+  test('stale capture and a late refresh: the row and the item say both, and Check capture is reachable', () => {
+    const { card, row, needsYou } = build({ which, counts: receiptCounts(stale(3 * DAY)), stale: true });
+    // The late refresh still owns the readiness label; the capture problem is read from its own fields.
+    expect(card.answer_readiness.label).toBe('Needs attention before answers');
+    const both = 'last synced 6m ago, later than expected · capture stale: newest message 3d ago';
+    expect(dashboardAttentionLine(card)).toBe(both);
+    expect(row.detail).toBe(both);
+    expect(needsYou).toHaveLength(1);
+    expect(needsYou[0]!.sentence).toBe(`${spec.label} — ${both}`);
+    // A chat source has no Sync now, so the route to the feed is the row's fix and the item's.
+    expect(row.primary?.label).toBe('Check capture');
+    expect(row.primary?.openHref).toBe(true);
+    expect(needsYou[0]!.fix.label).toBe('Check capture');
+    expect(row.menu?.map((entry) => entry.label)).toContain('Check capture');
+  });
+
+  test('a blocked helper and a late refresh: the sentence names both and the route is Check capture', () => {
+    const { card, row, needsYou } = build({
+      which,
+      counts: receiptCounts(fresh(600)),
+      stale: true,
+      captureRuntime: { [spec.sourceId]: { supervisor: { state: 'blocked', reason: 'session_missing' } } },
+    });
+    expect(card.answer_readiness.label).toBe('Needs attention before answers');
+    expect(needsYou[0]!.sentence).toBe(
+      `${spec.label} — last synced 6m ago, later than expected · capture cannot start: its linked session is missing`,
+    );
+    expect(needsYou[0]!.fix.label).toBe('Check capture');
+    expect(row.menu?.map((entry) => entry.label)).toContain('Check capture');
+  });
+
+  test('a late refresh alone offers no capture route', () => {
+    const { row, needsYou } = build({ which, counts: receiptCounts(fresh(600)), stale: true });
+    expect(row.menu?.map((entry) => entry.label) ?? []).not.toContain('Check capture');
+    expect(needsYou[0]!.sentence).not.toContain('capture');
+    expect(needsYou[0]!.fix.label).not.toBe('Check capture');
+  });
+
+  test('when capture is the only problem, Check capture is the fix', () => {
+    const { row, needsYou } = build({ which, counts: receiptCounts(stale(3 * DAY)) });
+    expect(row.primary?.label).toBe('Check capture');
+    expect(needsYou[0]!.fix.label).toBe('Check capture');
+  });
+});
+
+describe('the worst reading across a source\'s pulls', () => {
+  test('stale beats unavailable beats fresh, whichever task reports it first', () => {
+    const orders: Array<Array<{ id: string; counts: Record<string, number> }>> = [
+      [
+        { id: 'whatsapp.personal.messages_store_pull', counts: receiptCounts(fresh(60)) },
+        { id: 'whatsapp.personal.messages_second_pull', counts: receiptCounts(stale(3 * DAY)) },
+      ],
+      [
+        { id: 'whatsapp.personal.messages_store_pull', counts: receiptCounts(stale(3 * DAY)) },
+        { id: 'whatsapp.personal.messages_second_pull', counts: receiptCounts(fresh(60)) },
+      ],
+    ];
+    for (const tasks of orders) {
+      const { card } = build({ which: 'whatsapp', tasks });
+      expect(card.freshness.capture).toEqual({ state: 'stale', age_seconds: 3 * DAY + 300, threshold_seconds: THRESHOLD });
+    }
+    const mixed = build({
+      which: 'whatsapp',
+      tasks: [
+        { id: 'whatsapp.personal.messages_store_pull', counts: receiptCounts(fresh(60)) },
+        { id: 'whatsapp.personal.messages_second_pull', counts: receiptCounts(unavailable) },
+      ],
+    });
+    expect(mixed.card.freshness.capture).toEqual({ state: 'unavailable', threshold_seconds: THRESHOLD });
+  });
+
+  test('a task with no verdict is ignored, and a task\'s own failed run is not a reading', () => {
+    const { card } = build({
+      which: 'telegram',
+      tasks: [
+        { id: 'telegram.messages_store_pull', counts: receiptCounts(fresh(60)) },
+        { id: 'telegram.messages_other', counts: receiptCounts(undefined) },
+      ],
+    });
+    expect(card.freshness.capture).toEqual({ state: 'fresh', age_seconds: 360, threshold_seconds: THRESHOLD });
   });
 });

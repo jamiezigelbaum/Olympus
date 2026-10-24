@@ -57,6 +57,8 @@ import {
   DASHBOARD_CAPTURE_COPY,
   DASHBOARD_CAPTURE_STALE_LABEL,
   dashboardAttentionLine,
+  dashboardAttentionParts,
+  dashboardCaptureProblem,
   dashboardImportAttentionSentence,
   dashboardIsConnectedSource,
   dashboardManualSyncLine,
@@ -444,20 +446,34 @@ function sourceEntry(
   const lastSyncAt = isoOrUndefined(card.last_sync_at);
   const reconnect = wantsReconnect(card, status, actionKind, degraded, progress) ? reconnectFix(definition, card) : undefined;
   const late = status === 'Needs you' || status === 'Failing';
+  // The live feed's own problem (a helper that is not running, or a feed gone
+  // quiet), read from the card's capture fields rather than from whichever
+  // problem owns the readiness label. It is the row's fix when it is the only
+  // thing wrong; beside another problem it keeps its route in the ⋯ menu.
+  const capture = captureProblem(card);
+  const captureOnly = capture && dashboardAttentionParts(card, {
+    surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}),
+  }).reason === '';
   const primary = connecting
     ? connecting.fix
     : status === 'Off'
       ? (actionKind === 'none' ? undefined : connectFix(definition))
       : scopePending(card) || missingScope(card)
         ? scopeFix(definition, card)
-        : reconnect ?? (late && captureProblem(card)
+        : reconnect ?? (late && captureOnly
           ? captureFix(definition)
-          : late ? sync : signinMoved ? googleSigninMovedFix(definition) : undefined);
+          // Beside another problem the other problem's fix leads when it has
+          // one; a chat source has no Sync now, so Check capture is then the row's fix.
+          : late ? sync ?? (capture ? captureFix(definition) : undefined)
+            : signinMoved ? googleSigninMovedFix(definition) : undefined);
   const menu: DashboardFix[] = [];
   // Sync now sits first in the ⋯ menu of every connected source that can
   // sync; on a late or unresponsive source it is the row's button instead
   // (owner, 2026-10-09), and the panel keeps the menu free of the row's fix.
   if (sync) menu.push(sync);
+  // Check capture, for a live feed in trouble beside some other problem; the
+  // panel drops it from the menu when it is the row's own fix.
+  if (capture && !connecting && status !== 'Off') menu.push(captureFix(definition));
   // Another archive is imported the way the first was: from the dashboard on
   // the computer it is on. Never over a record that cannot be read, which an
   // import would write over.
@@ -574,17 +590,22 @@ function attentionItem(
   if (connecting) {
     return { id: `source:${definition.source_id}`, sentence: `${definition.label} — ${CONNECTING_REASON}`, fix: connecting.fix };
   }
-  const reason = dashboardAttentionLine(card, { surface: 'chatgpt', ...(degraded ? { degradedCredentials: degraded } : {}) });
+  const attentionOptions = { surface: 'chatgpt' as const, ...(degraded ? { degradedCredentials: degraded } : {}) };
+  const reason = dashboardAttentionLine(card, attentionOptions);
   const sentence = reason ? `${definition.label} — ${reason}` : definition.label;
+  // Only the feed is wrong: its route is the fix. Beside another problem the
+  // sentence names both; the fix is the other problem's when it has one
+  // (Sync now), with Check capture in the row's menu (sourceEntry).
+  const captureOnly = captureProblem(card) && dashboardAttentionParts(card, attentionOptions).reason === '';
   // A late or unresponsive source's fix is Sync now where this worker can
   // sync it: Check again only re-read the page (owner, 2026-10-09).
   const fix = scopePending(card) || missingScope(card)
     ? scopeFix(definition, card) ?? checkAgainFix()
     : wantsReconnect(card, 'Needs you', actionKind, degraded, progress)
       ? reconnectFix(definition, card)
-      : captureProblem(card)
+      : captureOnly
         ? captureFix(definition)
-        : sync ?? checkAgainFix();
+        : sync ?? (captureProblem(card) ? captureFix(definition) : checkAgainFix());
   return { id: `source:${definition.source_id}`, sentence, fix };
 }
 
@@ -622,13 +643,13 @@ function importAttentionItem(entry: DashboardImportAttention): DashboardItem {
 }
 
 /**
- * A live chat feed that has gone quiet, or whose capture helper cannot start.
- * Sync now reads what was captured and cannot capture what was missed, so the
- * route is the source's panel on the computer, where it is linked.
+ * A live chat feed that has gone quiet, or whose capture helper is not
+ * running. Sync now reads what was captured and cannot capture what was
+ * missed, so the route is the source's panel on the computer, where it is
+ * linked. Read from the capture fields, never from the readiness label.
  */
 function captureProblem(card: DashboardSourceCard): boolean {
-  return card.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL
-    || card.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL;
+  return dashboardCaptureProblem(card) !== undefined;
 }
 
 function captureFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
@@ -1393,7 +1414,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
   };
 }
 
-const CAPTURE_STATES: ReadonlySet<string> = new Set(['fresh', 'stale', 'unavailable']);
+const CAPTURE_STATES: ReadonlySet<string> = new Set(['fresh', 'stale', 'unavailable', 'awaiting']);
 const CAPTURE_SUPERVISOR_STATES: ReadonlySet<string> = new Set(['running', 'stopped', 'blocked']);
 const CAPTURE_SUPERVISOR_REASONS: ReadonlySet<string> = new Set([
   'grant_missing',
@@ -1401,6 +1422,8 @@ const CAPTURE_SUPERVISOR_REASONS: ReadonlySet<string> = new Set([
   'handle_unavailable',
   'session_missing',
   'secret_missing',
+  'start_failed',
+  'helper_exited',
 ]);
 
 /** A live feed's verdict from the closed state set and finite numbers only. */
@@ -1431,8 +1454,9 @@ function scrubCaptureRuntime(input: DashboardCaptureRuntime | undefined): { capt
     : input.scope?.kind === 'chats' && finite(input.scope.count)
       ? { kind: 'chats' as const, count: count(input.scope.count) }
       : undefined;
-  return supervisor || scope
-    ? { capture: { ...(supervisor ? { supervisor } : {}), ...(scope ? { scope } : {}) } }
+  const pairedAt = isoOrUndefined(input.paired_at);
+  return supervisor || scope || pairedAt
+    ? { capture: { ...(supervisor ? { supervisor } : {}), ...(scope ? { scope } : {}), ...(pairedAt ? { paired_at: pairedAt } : {}) } }
     : {};
 }
 
