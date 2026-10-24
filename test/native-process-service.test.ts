@@ -554,12 +554,14 @@ test('a deliberate self-restart (exit 75) never climbs the crash backoff: a seco
 
 test('a child that keeps restarting itself still backs off once its fast restarts are used up', async () => {
   // Three deliberate restarts skip the backoff; the fourth and fifth count as crashes, and the fifth waits the second delay.
-  const run = harness((launch) => (launch < 5 ? SELF_RESTART_75 : STAY_ALIVE), { restartDelaysMs: [20, 600], stableUptimeMs: 60_000 });
+  // Measured from the fifth child's start to the sixth's: without the bound that gap is the child's own 150 ms plus the 20 ms first delay.
+  const run = harness((launch) => (launch < 5 ? SELF_RESTART_75 : STAY_ALIVE), { restartDelaysMs: [20, 1_000], stableUptimeMs: 60_000 });
   try {
-    const startedAt = Date.now();
     await run.service.start(run.context);
+    await waitUntil(() => readyCount(run) === 5, 'the fifth child to become ready', 8_000);
+    const fifthAt = Date.now();
     await waitUntil(() => readyCount(run) === 6, 'the sixth child to become ready', 8_000);
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(600);
+    expect(Date.now() - fifthAt).toBeGreaterThanOrEqual(1_000);
   } finally {
     await run.service.stop();
   }
