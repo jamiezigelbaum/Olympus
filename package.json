@@ -99,7 +99,9 @@
     }
   },
   "dependencies": {
+    "@streamparser/json": "0.0.26",
     "entities": "7.0.1",
+    "fflate": "0.8.3",
     "franc-min": "6.2.0",
     "postal-mime": "4.1.4",
     "stemmer": "2.0.1",
