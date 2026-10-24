@@ -453,6 +453,15 @@ describe('a file that changes while it is imported', () => {
     expect(failing(changedChecks(good({ removed: { gone: false, unlisted: true, stores: [] } })))).toEqual(['archive.changed.removed']);
     expect(failing(changedChecks(good({ removed: { gone: true, unlisted: true, stores: [store('private', { live: 5 })] } })))).toEqual(['archive.changed.removed']);
   });
+
+  test('a removal check without evidence fails: no store read, or a store that could not be read', () => {
+    const unread = changedChecks(good({ removed: { gone: true, unlisted: true, stores: [] } }));
+    expect(failing(unread)).toEqual(['archive.changed.removed']);
+    expect(unread.find((c) => c.id === 'archive.changed.removed')!.detail).toContain('the stores were not read');
+    const broken = changedChecks(good({ removed: { gone: true, unlisted: true, stores: [store('private'), store('personal', { error: 'database is locked' })] } }));
+    expect(failing(broken)).toEqual(['archive.changed.removed']);
+    expect(broken.find((c) => c.id === 'archive.changed.removed')!.detail).toContain('the personal store could not be read: database is locked');
+  });
 });
 
 describe('the private model switch', () => {

@@ -747,7 +747,11 @@ export function changedChecks(obs: ChangedObservation | undefined): CheckResult[
     const cleanup: string[] = [];
     if (!obs.removed.gone) cleanup.push('the stopped archive\'s row is still on the page after Remove');
     if (!obs.removed.unlisted) cleanup.push('the agent still lists it');
-    for (const store of obs.removed.stores) if (store.live > 0 || store.tokenRows > 0) cleanup.push(`the ${store.tier} store still holds ${store.live} item(s) / ${store.tokenRows} row(s) of it`);
+    if (obs.removed.stores.length === 0) cleanup.push('the stores were not read');
+    for (const store of obs.removed.stores) {
+      if (store.error) cleanup.push(`the ${store.tier} store could not be read: ${store.error}`);
+      else if (store.live > 0 || store.tokenRows > 0) cleanup.push(`the ${store.tier} store still holds ${store.live} item(s) / ${store.tokenRows} row(s) of it`);
+    }
     out.push(check('archive.changed.removed', 'The stopped archive is removed from its row, with its rows', cleanup.length === 0, cleanup.length === 0 ? 'row gone, unlisted, no rows left in any store' : cleanup.join('; ')));
   }
   return out;
