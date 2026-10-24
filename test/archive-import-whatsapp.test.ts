@@ -1106,6 +1106,46 @@ describe('whatsapp connector over zips', () => {
     expect(cursors.length).toBeGreaterThan(1);
   });
 
+  test('a zip of iOS exports in their own folders: each _chat.txt is the chat its folder names, and alike messages in two chats are two items', async () => {
+    const dir = workDir();
+    // The same lines in both chats: one identity per chat, so neither chat's messages are taken for repeats of the other's.
+    const same = chatText(syntheticChat(3, { label: 'same' }), { style: 'ios-24-dmy' });
+    put(dir, 'chats.zip', buildZip([
+      { name: 'WhatsApp Chat - Alice Example/_chat.txt', data: same, method: 'deflate' },
+      { name: 'WhatsApp Chat - Bob Example/_chat.txt', data: same, method: 'stored' },
+      { name: 'Carol/_chat.txt', data: same, method: 'deflate' },
+      { name: 'Dan/_chat.txt', data: same, method: 'deflate' },
+    ]));
+    const { connector, findings } = connectorFor(dir, ['chats.zip']);
+    const { items } = await listAll(connector);
+    expect([...new Set(items.map((item) => item.metadata.chat))]).toEqual(['Alice Example', 'Bob Example', 'Carol', 'Dan']);
+    expect(items).toHaveLength(12);
+    expect(new Set(items.map((item) => item.identity.providerThreadId)).size).toBe(4);
+    expect(new Set(items.map((item) => item.identity.providerItemId)).size).toBe(12);
+    expect(kinds(findings, 'skipped')[ARCHIVE_COMMON_FINDINGS.itemRepeated]).toBeUndefined();
+  });
+
+  test('one iOS export in a folder of a zip named for its chat keeps the zip\'s chat name', async () => {
+    const dir = workDir();
+    put(dir, 'WhatsApp Chat - Harbour crew.zip', buildZip([{ name: 'Export/_chat.txt', data: chatText(syntheticChat(2), { style: 'ios-24-dmy' }), method: 'deflate' }]));
+    const { connector } = connectorFor(dir, ['WhatsApp Chat - Harbour crew.zip']);
+    const { items } = await listAll(connector);
+    expect(items.map((item) => item.metadata.chat)).toEqual(['Harbour crew', 'Harbour crew']);
+  });
+
+  test('a chosen zip whose _chat.txt is not a chat still reads the chat beside it that made it an export', async () => {
+    const dir = workDir();
+    put(dir, 'export.zip', buildZip([
+      { name: '_chat.txt', data: 'Shopping list\nmilk\neggs\n', method: 'deflate' },
+      { name: 'renamed.txt', data: chatText(syntheticChat(4), { style: 'ios-24-dmy' }), method: 'deflate' },
+    ]));
+    expect(detect(dir, 'export.zip').kind).toBe('match');
+    const { connector } = connectorFor(dir, ['export.zip']);
+    const { items } = await listAll(connector);
+    expect(items).toHaveLength(4);
+    expect(items.every((item) => item.metadata.sourceMember === 'renamed.txt')).toBe(true);
+  });
+
   test('a member that cannot be read is told as a gap and the others are read', async () => {
     const dir = workDir();
     const good = chatText(syntheticChat(3), { style: 'android-24-dmy' });
