@@ -1606,7 +1606,8 @@ async function archiveChangedCommand(seed: string, sizes: number[]): Promise<nev
 async function archiveCleanupCommand(): Promise<never> {
   const host = archiveHost();
   const removed = await removeAllStage(host);
-  rmSync(join(homedir(), FIXTURE_FOLDER), { recursive: true, force: true });
+  // The files go only once no archive is listed: an import still on the page would otherwise lose its file and stop on it.
+  if (removed.ok) rmSync(join(homedir(), FIXTURE_FOLDER), { recursive: true, force: true });
   emit({ ...removed });
 }
 

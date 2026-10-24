@@ -79,9 +79,12 @@ async function statusNow(host: ArchiveHost, token: string, waitMs = 60_000): Pro
   }, waitMs, 3_000);
 }
 
+/** The Archives rows on the page, or undefined when the page cannot be read: an unreadable page never reads as a page with no archives. */
 async function readPanel(driver: JourneyDriver): Promise<PanelArchives | undefined> {
   try {
-    return panelArchivesOf(await driver.probe('panel', ARCHIVE_PANEL_PROBE));
+    const raw = await driver.probe('panel', ARCHIVE_PANEL_PROBE);
+    const readable = raw !== null && typeof raw === 'object' && Array.isArray((raw as { rows?: unknown }).rows);
+    return readable ? panelArchivesOf(raw) : undefined;
   } catch {
     return undefined;
   }
@@ -119,6 +122,8 @@ export interface ImportArgs {
   startS?: number;
   /** How long the dashboard may take to show what the first step waits for (the agent's request, the Import an archive button). */
   openS?: number;
+  /** How long a Remove of a leftover archive may take. */
+  removeS?: number;
 }
 
 export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<ImportObservation> {
@@ -132,7 +137,7 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
       let browserPid = session.pid;
       const watch = args.watchEgress ? await host.watchEgress(() => browserPid) : undefined;
       try {
-        if (args.clean) await removeLeftovers(host, driver, fx.token);
+        if (args.clean) await removeLeftovers(host, driver, fx.token, { ...(args.openS !== undefined ? { openS: args.openS } : {}), ...(args.removeS !== undefined ? { removeS: args.removeS } : {}) });
         if (args.via === 'request') {
           const started = host.cli(['start', '--path', path]);
           obs.start = startViewOf(started.json, fx.token);
@@ -178,12 +183,9 @@ export async function importStage(host: ArchiveHost, args: ImportArgs): Promise<
 }
 
 /** Archives an earlier attempt left on the machine, removed from their rows, so a stage starts from an empty Archives line. */
-async function removeLeftovers(host: ArchiveHost, driver: JourneyDriver, token: string): Promise<void> {
-  const status = await statusNow(host, token, 20_000);
-  for (const archive of status?.archives ?? []) {
-    host.say(`removing leftover archive ${archive.name} (${archive.status})`);
-    await runJourney(driver, removeJourney('leftover', archive.name));
-  }
+async function removeLeftovers(host: ArchiveHost, driver: JourneyDriver, token: string, bounds: ClearBounds = {}): Promise<void> {
+  const cleared = await clearArchives(host, driver, token, 'leftover', bounds);
+  if (!clearedOk(cleared)) throw new Error(`archives an earlier attempt left could not be removed: ${clearedProblem(cleared)}`);
 }
 
 async function searchFor(host: ArchiveHost, fx: LegFixture): Promise<SearchView> {
@@ -298,21 +300,77 @@ export async function removeStage(host: ArchiveHost, args: { targets: readonly R
   return obs;
 }
 
-/** Every archive on the machine removed from its row; the best-effort clean-up after a leg that stopped early. */
-export async function removeAllStage(host: ArchiveHost): Promise<{ ok: boolean; removed: string[]; detail?: string }> {
-  const removed: string[] = [];
+/** How long each part of taking archives off may take: a Remove, the page showing the row, the engine and the page agreeing that none is left. */
+export interface ClearBounds {
+  removeS?: number;
+  openS?: number;
+  verifyS?: number;
+}
+
+/** What taking every archive off the machine came to: what went, what would not, and what was still listed at the end. */
+interface Cleared {
+  removed: string[];
+  /** Archives whose Remove journey did not end with the row gone. */
+  failed: string[];
+  /** Archives the agent's status or the dashboard still listed after every removal (empty only when both were read and listed none). */
+  remaining: string[];
+  /** Why what is listed could not be known (the status or the page could not be read). */
+  unreadable?: string;
+}
+
+const clearedOk = (cleared: Cleared): boolean => cleared.failed.length === 0 && cleared.remaining.length === 0 && cleared.unreadable === undefined;
+const clearedProblem = (cleared: Cleared): string => [
+  cleared.unreadable,
+  cleared.failed.length > 0 ? `Remove did not take ${cleared.failed.join(', ')} off the page` : undefined,
+  cleared.remaining.length > 0 ? `still listed after the removals: ${cleared.remaining.join(', ')}` : undefined,
+].filter(Boolean).join('; ');
+
+/** Every archive the agent's status or the dashboard lists, together; the reason when either cannot be read. */
+async function listedArchives(host: ArchiveHost, driver: JourneyDriver, token: string, waitMs: number): Promise<{ names: string[] } | { unreadable: string }> {
+  const status = await statusNow(host, token, waitMs);
+  if (!status) return { unreadable: 'the agent\'s status of the archives could not be read, so what is left is not known' };
+  const panel = await until(host, () => readPanel(driver), waitMs, 500);
+  if (!panel) return { unreadable: 'the dashboard could not be read, so what is left is not known' };
+  return { names: [...new Set([...status.archives.map((archive) => archive.name), ...panel.rows.map((row) => row.name)])] };
+}
+
+/**
+ * Takes every archive off the machine through its row, and says so only when the engine and the page both list none afterwards: a
+ * removal whose journey fails is counted as failed, a page or a status that cannot be read is a failure, not an empty list.
+ */
+async function clearArchives(host: ArchiveHost, driver: JourneyDriver, token: string, label: string, bounds: ClearBounds = {}): Promise<Cleared> {
+  const cleared: Cleared = { removed: [], failed: [], remaining: [] };
+  const first = await listedArchives(host, driver, token, 20_000);
+  if ('unreadable' in first) return { ...cleared, unreadable: first.unreadable };
+  for (const name of first.names) {
+    host.say(`removing ${label} archive ${name}`);
+    const trace = await runJourney(driver, removeJourney(label, name, bounds.removeS, bounds.openS));
+    host.say(`${label} ${name}: ${trace.ok ? 'removed' : 'FAILED'}`);
+    (trace.ok ? cleared.removed : cleared.failed).push(name);
+  }
+  // Nothing may be left: the page can redraw a row a journey saw go, and the engine is the one that knows what it holds.
+  const stop = host.now() + (bounds.verifyS ?? 60) * 1_000;
+  for (;;) {
+    const left = await listedArchives(host, driver, token, 5_000);
+    if ('unreadable' in left) { cleared.unreadable = left.unreadable; cleared.remaining = []; }
+    else { delete cleared.unreadable; cleared.remaining = left.names; }
+    if (clearedOk({ ...cleared, failed: [] })) break;
+    if (host.now() >= stop) break;
+    await host.sleep(3_000);
+  }
+  return cleared;
+}
+
+/** Every archive on the machine removed from its row; the clean-up after a leg, whatever happened in it. */
+export async function removeAllStage(host: ArchiveHost, bounds: ClearBounds = {}): Promise<{ ok: boolean; removed: string[]; failed: string[]; remaining: string[]; detail?: string }> {
+  const gone = { removed: [] as string[], failed: [] as string[], remaining: [] as string[] };
   try {
-    await host.withBrowser(async (session) => {
-      const panel = await readPanel(session.driver);
-      for (const row of panel?.rows ?? []) {
-        const trace = await runJourney(session.driver, removeJourney('cleanup', row.name));
-        host.say(`cleanup ${row.name}: ${trace.ok ? 'removed' : 'FAILED'}`);
-        if (trace.ok) removed.push(row.name);
-      }
-    });
-    return { ok: true, removed };
+    let cleared: Cleared = { ...gone };
+    await host.withBrowser(async (session) => { cleared = await clearArchives(host, session.driver, '', 'cleanup', bounds); });
+    const ok = clearedOk(cleared);
+    return { ok, removed: cleared.removed, failed: cleared.failed, remaining: cleared.remaining, ...(ok ? {} : { detail: clearedProblem(cleared).slice(0, 300) }) };
   } catch (error) {
-    return { ok: false, removed, detail: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) };
+    return { ok: false, ...gone, detail: (error instanceof Error ? error.message : String(error)).slice(0, 300) };
   }
 }
 

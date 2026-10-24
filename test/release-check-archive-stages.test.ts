@@ -51,6 +51,12 @@ interface World {
   removalLeavesContent: boolean;
   egressFresh: string[];
   engineFails: boolean;
+  /** The Remove tool answers and nothing is removed: the row stays on the page. */
+  removeIgnored: boolean;
+  /** The page's probe throws, as a page that is gone or not yet loaded does. */
+  panelUnreadable: boolean;
+  /** The page shows the archive gone but the engine still lists it. */
+  engineKeepsRemoved: boolean;
 }
 
 /** A stand-in machine: the product's state, the agent's CLI over it, the stores, the engine restart, the private model. */
@@ -65,7 +71,9 @@ class FakeMachine implements ArchiveHost {
   archives: ComputerArchiveEntry[] = [];
   requests: ComputerArchivesMeta['requests'] = [];
   privateModel: 'ready' | 'off' = 'ready';
-  world: World = { settle: 'at-once', finishesFirstUpTo: 0, removalLeavesContent: false, egressFresh: [], engineFails: false };
+  world: World = { settle: 'at-once', finishesFirstUpTo: 0, removalLeavesContent: false, egressFresh: [], engineFails: false, removeIgnored: false, panelUnreadable: false, engineKeepsRemoved: false };
+  /** Archives the engine still lists after the page lost them. */
+  ghosts: ComputerArchiveEntry[] = [];
   private clock = 0;
   private nextRequest = 1;
   private readonly initialSize = new Map<string, number>();
@@ -112,6 +120,11 @@ class FakeMachine implements ArchiveHost {
     return { sourceId: 'archive.imports', archives: this.archives, requests: this.requests, privateModel: this.privateModel };
   }
 
+  /** What the agent's status reads: the page's list, and the archives the engine still holds that the page lost. */
+  private statusMeta(): ComputerArchivesMeta {
+    return { ...this.meta(), archives: [...this.archives, ...this.ghosts] };
+  }
+
   cli(args: string[]) {
     if (args[0] === 'start') {
       const path = args[2] ?? '';
@@ -122,14 +135,21 @@ class FakeMachine implements ArchiveHost {
     }
     if (args[0] === 'status') {
       this.tick();
-      const json = createArchiveImportAgent({ state: {} as never, requests: {} as never, view: () => this.meta() }).status();
+      const json = createArchiveImportAgent({ state: {} as never, requests: {} as never, view: () => this.statusMeta() }).status();
       return { code: 0, json, stderr: '' };
     }
     return { code: 2, json: undefined, stderr: 'usage' };
   }
 
   async withBrowser<T>(work: (session: ArchiveBrowserSession) => Promise<T>): Promise<T> {
-    const driver = new PanelDriver(async () => (await mountPanel(this.serve())).win);
+    const world = this.world;
+    class Driver extends PanelDriver {
+      override async probe(frame: 'host' | 'panel', call: string): Promise<unknown> {
+        if (world.panelUnreadable) throw new Error('the page is not there');
+        return super.probe(frame, call);
+      }
+    }
+    const driver = new Driver(async () => (await mountPanel(this.serve())).win);
     await driver.go();
     return await work({ driver, pid: undefined, requests: [] });
   }
@@ -152,6 +172,8 @@ class FakeMachine implements ArchiveHost {
       },
       [ARCHIVE_REMOVE_TOOL_NAME]: (args: { archive_id: string }) => {
         const gone = this.archives.find((entry) => entry.id === args.archive_id);
+        if (this.world.removeIgnored) return { content: [{ type: 'text', text: 'Removing.' }], structuredContent: { ok: true } };
+        if (gone && this.world.engineKeepsRemoved) this.ghosts.push(gone);
         this.archives = this.archives.filter((entry) => entry.id !== args.archive_id);
         if (gone && this.world.removalLeavesContent) this.contentKept.add(gone.name);
         return { content: [{ type: 'text', text: 'Removing.' }], structuredContent: { ok: true } };
@@ -311,6 +333,20 @@ describe('importing an archive', () => {
     expect(failing(importChecks(observation, fx.picker!, 'linux'))).toEqual([]);
   });
 
+  test('a leftover that cannot be removed stops the picker import with the reason, rather than pressing a button that is not there', async () => {
+    const { machine: fake } = machine('picker');
+    const leftover = legFixture('agent', 'an-earlier-seed');
+    fake.know(leftover);
+    fake.archives = [entryFor(leftover)];
+    fake.world.removeIgnored = true;
+    const observation = await importStage(fake, { role: 'picker', format: 'mbox', via: 'picker', seed: SEED, resetFolder: true, clean: true, settleS: 2, startS: 2, openS: 2, removeS: 2 });
+    expect(observation.ok).toBe(false);
+    expect(observation.detail).toContain('archives an earlier attempt left could not be removed');
+    expect(observation.detail).toContain(leftover.fileName);
+    expect(observation.traces).toEqual([]);
+    expect(failing(importChecks(observation, legFixture('picker', SEED), 'linux'))).toEqual(['archive.picker.mbox.ran']);
+  });
+
   test('an import that never settles is reported by the journey and the imported check, not hidden', async () => {
     const { machine: fake, fx } = machine('agent');
     fake.world.settle = 'never';
@@ -416,8 +452,54 @@ describe('Remove', () => {
     const cleaned = await removeAllStage(fake);
     expect(cleaned.ok).toBe(true);
     expect(cleaned.removed).toHaveLength(3);
+    expect(cleaned.failed).toEqual([]);
+    expect(cleaned.remaining).toEqual([]);
     expect(fake.archives).toEqual([]);
     expect(await removeAllStage(fake)).toMatchObject({ ok: true, removed: [] });
+  });
+
+  test('cleaning up when a removal does not take the archive off the page is not ok: the archive is named as failed and as still listed', async () => {
+    const { fake } = await importedThree();
+    fake.world.removeIgnored = true;
+    const cleaned = await removeAllStage(fake, { removeS: 2, openS: 2, verifyS: 6 });
+    expect(cleaned.ok).toBe(false);
+    expect(cleaned.removed).toEqual([]);
+    expect(cleaned.failed).toHaveLength(3);
+    expect(cleaned.remaining).toHaveLength(3);
+    expect(cleaned.detail).toContain('Remove did not take');
+    expect(cleaned.detail).toContain('still listed');
+    expect(fake.archives).toHaveLength(3);
+  });
+
+  test('cleaning up when the engine still lists an archive the page lost is not ok, though every Remove journey passed', async () => {
+    const { fake, fx } = await importedThree();
+    fake.world.engineKeepsRemoved = true;
+    const cleaned = await removeAllStage(fake, { removeS: 5, verifyS: 6 });
+    expect(cleaned.ok).toBe(false);
+    expect(cleaned.failed).toEqual([]);
+    expect(cleaned.removed).toHaveLength(3);
+    expect([...cleaned.remaining].sort()).toEqual([fx.agent!.fileName, fx.held!.fileName, fx.picker!.fileName].sort());
+    expect(cleaned.detail).toContain('still listed after the removals');
+  });
+
+  test('cleaning up when the page cannot be read is not ok and removes nothing: an unreadable page is not an empty one', async () => {
+    const { fake } = await importedThree();
+    fake.world.panelUnreadable = true;
+    const cleaned = await removeAllStage(fake, { removeS: 2, openS: 2, verifyS: 6 });
+    expect(cleaned.ok).toBe(false);
+    expect(cleaned.removed).toEqual([]);
+    expect(cleaned.detail).toContain('the dashboard could not be read');
+    expect(fake.archives).toHaveLength(3);
+  });
+
+  test('cleaning up when the agent\'s status cannot be read is not ok either', async () => {
+    const { fake } = await importedThree();
+    fake.cli = () => ({ code: 1, json: undefined, stderr: 'engine down' });
+    const cleaned = await removeAllStage(fake, { removeS: 2, openS: 2, verifyS: 6 });
+    expect(cleaned.ok).toBe(false);
+    expect(cleaned.removed).toEqual([]);
+    expect(cleaned.detail).toContain('status of the archives could not be read');
+    expect(fake.archives).toHaveLength(3);
   });
 });
 
