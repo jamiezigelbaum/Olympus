@@ -42,23 +42,74 @@ export const RECORD_PROBE_MAX_KEYS = 256;
  * The most the reader builds of any one field; a longer one is skipped in place.
  */
 export const RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+/**
+ * The most bytes of one document the looks at it read in all (64 MiB). Reading
+ * is in whole chunks, so the last chunk may run past it by up to one.
+ */
+export const RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+
+/**
+ * What is left of a document's scan allowance; the looks at one document
+ * (its first record's keys, whether its list is empty) draw on one of these.
+ */
+export interface RecordProbeBudget {
+  left: number;
+}
+
+export function recordProbeBudget(bytes: number = RECORD_PROBE_MAX_SCAN_BYTES): RecordProbeBudget {
+  return { left: bytes };
+}
+
+interface CappedSource {
+  source: ArchiveByteSource;
+  /**
+   * The allowance ran out with more of the document still to read.
+   */
+  capped(): boolean;
+}
+
+function capped(inner: ArchiveByteSource, budget: RecordProbeBudget): CappedSource {
+  let refused = false;
+  return {
+    source: {
+      get position(): number {
+        return inner.position;
+      },
+      next(): Uint8Array | undefined {
+        const chunk = inner.next();
+        if (chunk === undefined) return undefined;
+        if (budget.left <= 0) {
+          refused = true;
+          return undefined;
+        }
+        budget.left -= chunk.length;
+        return chunk;
+      },
+      unread: (count) => inner.unread(count),
+    },
+    capped: () => refused,
+  };
+}
 
 /**
  * The keys of the first record of the list at `list` in a JSON document read
  * from its start, in the order they are written; undefined when the document
- * is not whole JSON or holds no such record. `enough` is asked after each new
- * key with the keys so far: true ends the scan there.
+ * is not whole JSON, holds no such record, or is not read to the point that
+ * says (the allowance ran out). `enough` is asked after each new key with the
+ * keys so far: true ends the scan there.
  */
 export function probeFirstRecordKeys(
   source: ArchiveByteSource,
   list: readonly string[],
   enough?: (keys: ReadonlySet<string>) => boolean,
+  budget: RecordProbeBudget = recordProbeBudget(),
 ): ReadonlySet<string> | undefined {
   const keys = new Set<string>();
   let found = false;
+  const limited = capped(source, budget);
   try {
     // Every field of every record in the list: the first record's come first, and the second's fields end the scan.
-    const reader = new JsonStreamReader(source, { itemPaths: [[...list, JSON_STREAM_ANY]], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
+    const reader = new JsonStreamReader(limited.source, { itemPaths: [[...list, JSON_STREAM_ANY]], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
     for (;;) {
       const event = reader.next();
       if (!event) break;
@@ -75,5 +126,34 @@ export function probeFirstRecordKeys(
     // Not whole JSON, or the source gave out: the keys read so far are all there is, and only if the record was reached.
     if (!(error instanceof JsonStreamError)) throw error;
   }
-  return found ? keys : undefined;
+  return found && !limited.capped() ? keys : undefined;
+}
+
+/**
+ * Whether the value at `list` (a path of keys from the document's root, at
+ * least one) is a list with nothing in it. False for anything else, for a
+ * list too long to be empty, and for a document not read to the point that
+ * says (the allowance ran out, or it is not whole JSON).
+ */
+export function probeListIsEmpty(
+  source: ArchiveByteSource,
+  list: readonly string[],
+  budget: RecordProbeBudget = recordProbeBudget(),
+): boolean {
+  if (list.length === 0) return false;
+  const limited = capped(source, budget);
+  try {
+    // The values under the list's parent are the items; the one at `list` is handed out whole when it is small.
+    const reader = new JsonStreamReader(limited.source, { itemPaths: [list.slice(0, -1)], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
+    for (;;) {
+      const event = reader.next();
+      if (!event) break;
+      if (event.path.length === list.length && event.path.every((part, at) => part === list[at])) {
+        return !limited.capped() && event.kind === 'item' && Array.isArray(event.value) && event.value.length === 0;
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof JsonStreamError)) throw error;
+  }
+  return false;
 }

@@ -35,7 +35,7 @@ import {
   type ScopeRoot,
 } from '../../core/scope-safe-fs.ts';
 import { fileByteSource } from './byte-source.ts';
-import { probeFirstRecordKeys } from './record-probe.ts';
+import { probeFirstRecordKeys, recordProbeBudget } from './record-probe.ts';
 import {
   ZipArchive,
   ZipFormatError,
@@ -119,11 +119,12 @@ type FirstRecordKeys = NonNullable<ArchiveProbeEntry['firstRecordKeys']>;
  * nothing; a file that changed or cannot be read has no keys.
  */
 function fileFirstRecordKeys(root: ScopeRoot, relPath: string): FirstRecordKeys {
+  const budget = recordProbeBudget();
   return (list, enough) => {
     try {
       const reader = root.openFile(relPath);
       try {
-        return probeFirstRecordKeys(fileByteSource(reader), list, enough);
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough, budget);
       } finally {
         reader.close();
       }
@@ -138,6 +139,7 @@ function fileFirstRecordKeys(root: ScopeRoot, relPath: string): FirstRecordKeys 
  * The same for a member of a zip, which is inflated from its start.
  */
 function zipMemberFirstRecordKeys(root: ScopeRoot, zipRelPath: string, memberIndex: number): FirstRecordKeys {
+  const budget = recordProbeBudget();
   return (list, enough) => {
     try {
       const file = root.openFile(zipRelPath);
@@ -147,7 +149,7 @@ function zipMemberFirstRecordKeys(root: ScopeRoot, zipRelPath: string, memberInd
         if (!entry) return undefined;
         const member = ZipMemberReader.open(archive, entry);
         try {
-          return probeFirstRecordKeys(member, list, enough);
+          return probeFirstRecordKeys(member, list, enough, budget);
         } finally {
           member.close();
         }

@@ -35762,12 +35762,12 @@ function headRecordKeys(head) {
   }
   if (!shape) {
     if (objectRoot && !notesNotAList && stack.length > 0) {
-      return { shape: "notes", records: [], empty: false, firstRecordCut: true };
+      return { shape: "notes", records: [], empty: false, firstRecordCut: true, unreached: true };
     }
     return;
   }
   const open2 = listDepth > 0;
-  return { shape, records, empty: closed && !hasElements, firstRecordCut: open2 && records.length === 1 && current2 !== undefined };
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open2 && records.length === 1 && current2 !== undefined, unreached: false };
 }
 function isReflectRecord(keys) {
   return REFLECT_BODY_KEYS.some((key2) => keys.has(key2)) && REFLECT_NOTE_KEYS.some((key2) => keys.has(key2));
@@ -35791,19 +35791,24 @@ function notesJsonFormat(probe) {
   const fromHead = recordsFormat(parsed.records, parsed.shape);
   if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
     return fromHead;
-  if (SCANNED.has(probe))
-    return SCANNED.get(probe);
-  const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
-  const found = keys ? recordsFormat([keys], parsed.shape) : undefined;
-  SCANNED.set(probe, found);
-  return found;
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
 }
 function isEmptyRecordList(head, inNotes) {
   const parsed = headRecordKeys(head);
   return parsed !== undefined && parsed.empty && (inNotes || parsed.shape === "list");
 }
 function acceptsReflectJson(probe) {
-  return notesJsonFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true);
+  if (notesJsonFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true))
+    return true;
+  if (!probe.listIsEmpty || SCANNED.get(probe)?.keys)
+    return false;
+  return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
 }
 function acceptsRoamJson(probe) {
   return notesJsonFormat(probe) === "roam" || isEmptyRecordList(probe.head, false);
@@ -35898,6 +35903,19 @@ function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
 function detectArchiveFormat(probe, formats = ARCHIVE_FORMATS) {
+  let matches = matchesOf(probeWithoutFurtherReads(probe), formats);
+  if (matches.length === 0)
+    matches = matchesOf(probe, formats);
+  if (matches.length === 1)
+    return { kind: "match", format: matches[0].format, files: matches[0].files };
+  if (matches.length === 0) {
+    const supported = formats.map((format) => format.label);
+    const advice = unsupportedAdvice(probe, formats);
+    return advice ? { kind: "none", supported, advice } : { kind: "none", supported };
+  }
+  return { kind: "ambiguous", formats: matches.map((match) => match.format.id) };
+}
+function matchesOf(probe, formats) {
   const matches = [];
   for (const format of formats) {
     let files;
@@ -35909,14 +35927,14 @@ function detectArchiveFormat(probe, formats = ARCHIVE_FORMATS) {
     if (files && files.length > 0)
       matches.push({ format, files });
   }
-  if (matches.length === 1)
-    return { kind: "match", format: matches[0].format, files: matches[0].files };
-  if (matches.length === 0) {
-    const supported = formats.map((format) => format.label);
-    const advice = unsupportedAdvice(probe, formats);
-    return advice ? { kind: "none", supported, advice } : { kind: "none", supported };
-  }
-  return { kind: "ambiguous", formats: matches.map((match) => match.format.id) };
+  return matches;
+}
+function entryWithoutFurtherReads(entry) {
+  const { firstRecordKeys: _keys, listIsEmpty: _empty, members, ...rest } = entry;
+  return { ...rest, ...members ? { members: members.map(entryWithoutFurtherReads) } : {} };
+}
+function probeWithoutFurtherReads(probe) {
+  return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
 }
 function unsupportedAdvice(probe, formats) {
   for (const format of formats) {
@@ -51994,11 +52012,38 @@ var init_json_stream = __esm(() => {
 });
 
 // src/workers/archive-import/record-probe.ts
-function probeFirstRecordKeys(source, list, enough) {
+function recordProbeBudget(bytes = RECORD_PROBE_MAX_SCAN_BYTES) {
+  return { left: bytes };
+}
+function capped(inner, budget) {
+  let refused = false;
+  return {
+    source: {
+      get position() {
+        return inner.position;
+      },
+      next() {
+        const chunk = inner.next();
+        if (chunk === undefined)
+          return;
+        if (budget.left <= 0) {
+          refused = true;
+          return;
+        }
+        budget.left -= chunk.length;
+        return chunk;
+      },
+      unread: (count) => inner.unread(count)
+    },
+    capped: () => refused
+  };
+}
+function probeFirstRecordKeys(source, list, enough, budget = recordProbeBudget()) {
   const keys = new Set;
   let found = false;
+  const limited = capped(source, budget);
   try {
-    const reader = new JsonStreamReader(source, { itemPaths: [[...list, JSON_STREAM_ANY]], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
+    const reader = new JsonStreamReader(limited.source, { itemPaths: [[...list, JSON_STREAM_ANY]], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
     for (;; ) {
       const event = reader.next();
       if (!event)
@@ -52019,12 +52064,33 @@ function probeFirstRecordKeys(source, list, enough) {
     if (!(error instanceof JsonStreamError))
       throw error;
   }
-  return found ? keys : undefined;
+  return found && !limited.capped() ? keys : undefined;
 }
-var RECORD_PROBE_MAX_KEYS = 256, RECORD_PROBE_MAX_VALUE_BYTES;
+function probeListIsEmpty(source, list, budget = recordProbeBudget()) {
+  if (list.length === 0)
+    return false;
+  const limited = capped(source, budget);
+  try {
+    const reader = new JsonStreamReader(limited.source, { itemPaths: [list.slice(0, -1)], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
+    for (;; ) {
+      const event = reader.next();
+      if (!event)
+        break;
+      if (event.path.length === list.length && event.path.every((part, at) => part === list[at])) {
+        return !limited.capped() && event.kind === "item" && Array.isArray(event.value) && event.value.length === 0;
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof JsonStreamError))
+      throw error;
+  }
+  return false;
+}
+var RECORD_PROBE_MAX_KEYS = 256, RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES;
 var init_record_probe = __esm(() => {
   init_json_stream();
   RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
 });
 
 // node_modules/fflate/esm/browser.js
@@ -53146,11 +53212,12 @@ function fileHead(root, relPath) {
   }
 }
 function fileFirstRecordKeys(root, relPath) {
+  const budget = recordProbeBudget();
   return (list, enough) => {
     try {
       const reader = root.openFile(relPath);
       try {
-        return probeFirstRecordKeys(fileByteSource(reader), list, enough);
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough, budget);
       } finally {
         reader.close();
       }
@@ -53162,6 +53229,7 @@ function fileFirstRecordKeys(root, relPath) {
   };
 }
 function zipMemberFirstRecordKeys(root, zipRelPath, memberIndex) {
+  const budget = recordProbeBudget();
   return (list, enough) => {
     try {
       const file = root.openFile(zipRelPath);
@@ -53172,7 +53240,7 @@ function zipMemberFirstRecordKeys(root, zipRelPath, memberIndex) {
           return;
         const member = ZipMemberReader.open(archive, entry);
         try {
-          return probeFirstRecordKeys(member, list, enough);
+          return probeFirstRecordKeys(member, list, enough, budget);
         } finally {
           member.close();
         }
@@ -90178,7 +90246,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
     confidence: weightedConfidence(read),
     warnings
   });
-  const capped = stopReason === "pages" || stopReason === "time";
+  const capped2 = stopReason === "pages" || stopReason === "time";
   return {
     status: "indexed",
     text: bounded.text,
@@ -90190,7 +90258,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
         ...totalPages !== undefined ? { totalPages } : {}
       }
     }],
-    ...capped || bounded.warnings.length > 0 ? {
+    ...capped2 || bounded.warnings.length > 0 ? {
       warnings: [
         ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
         ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
@@ -122864,7 +122932,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
     confidence: 0.5,
     warnings
   });
-  const capped = stopReason === "pages" || stopReason === "time";
+  const capped2 = stopReason === "pages" || stopReason === "time";
   return {
     status: "indexed",
     text: bounded.text,
@@ -122876,7 +122944,7 @@ ${normalizeExtractedText(page2.text)}`).join(`
         ...info.totalPages !== undefined ? { totalPages: info.totalPages } : {}
       }
     }],
-    ...capped || bounded.warnings.length > 0 ? {
+    ...capped2 || bounded.warnings.length > 0 ? {
       warnings: [
         ...stopReason === "pages" ? ["ocr_pdf_pages_capped"] : [],
         ...stopReason === "time" ? ["ocr_pdf_time_capped"] : [],
@@ -131400,13 +131468,13 @@ function renderSetupSteps(secretRef, toolsHtml, daemon) {
 }
 function renderLimits(route, canEdit) {
   const disabled2 = canEdit ? "" : ' disabled aria-disabled="true"';
-  const capped = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
-  const limit = capped ? [
+  const capped2 = route.dailyRequestCap !== undefined || route.dailySpendCapUsd !== undefined;
+  const limit = capped2 ? [
     ...route.dailyRequestCap !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsRequests, { n: String(route.dailyRequestCap) })] : [],
     ...route.dailySpendCapUsd !== undefined ? [fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsUsd, { usd: String(route.dailySpendCapUsd) })] : []
   ].join(", ") : DASHBOARD_OUTSIDE_HELP_COPY.limitsNone;
   const funded = route.fundingDate ? fill(DASHBOARD_OUTSIDE_HELP_COPY.fundedOn, { date: shortDate(route.fundingDate) }) : DASHBOARD_OUTSIDE_HELP_COPY.notFunded;
-  const noLimit = capped && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
+  const noLimit = capped2 && canEdit ? `<form class="ohform ohinline" data-outside-form="route" data-outside-nolimit>` + `<div class="pbuttons"><button type="submit" class="btn">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimits)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.removeLimitsHint)}</span></div>` + `<span class="actmsg" data-action-message role="status"></span></form>` : "";
   const today = route.readiness && route.readiness.requestsToday.count > 0 ? `<p class="pnote" data-outside-limits-today>${escapeHtml2(fill(DASHBOARD_OUTSIDE_HELP_COPY.limitsToday, { n: String(route.readiness.requestsToday.count), usd: route.readiness.spendToday.reservedUsd.toFixed(0) }))}</p>` : "";
   const body = `<p class="pnote" data-outside-cost-line>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.costLine)} ${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.noLimitIntro)}</p>` + today + noLimit + `<form class="ohform" data-outside-form="route">` + `<label class="plabel" for="outside-funding-date">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.fundingDate)}</label>` + `<input class="keyfield ptextline" id="outside-funding-date" name="funding_date" type="text" inputmode="numeric" autocomplete="off" placeholder="YYYY-MM-DD" value="${escapeHtml2(route.fundingDate ?? "")}"${disabled2}>` + `<label class="plabel" for="outside-cap-requests">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capRequests)}</label>` + `<input class="keyfield ptextline" id="outside-cap-requests" name="daily_request_cap" type="number" min="1" step="1" value="${route.dailyRequestCap !== undefined ? escapeHtml2(String(route.dailyRequestCap)) : ""}"${disabled2}>` + `<label class="plabel" for="outside-cap-usd">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.capUsd)}</label>` + `<input class="keyfield ptextline" id="outside-cap-usd" name="daily_spend_cap_usd" type="number" min="1" step="1" value="${route.dailySpendCapUsd !== undefined ? escapeHtml2(String(route.dailySpendCapUsd)) : ""}"${disabled2}>` + (canEdit ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-save-limits>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRoute)}</button><span class="hint">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.saveRestarts)}</span></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "limits", title: DASHBOARD_OUTSIDE_HELP_COPY.limitsTitle, summary: `${limit} · ${funded}`, body });
@@ -135091,7 +135159,7 @@ function chatgptPickerProgram(kit) {
     const from = inherited(key2);
     const now = effective(key2);
     const selectable = !node || node.selectable !== false;
-    const capped = !own3 && p.own.size >= MAX_RULES2;
+    const capped2 = !own3 && p.own.size >= MAX_RULES2;
     return segControl(name, "picker:seg:" + key2 + ":", {
       pressed: own3,
       inherited: own3 ? now !== own3 ? now : "" : from.state,
@@ -135100,7 +135168,7 @@ function chatgptPickerProgram(kit) {
           return Q.cannotChoose;
         if (!allowed(key2, state))
           return fill2(Q.notPossible, { parent: sourceName(from.from), state: Q.statesLower[from.state] });
-        if (capped)
+        if (capped2)
           return fill2(Q.capReached, { max: kit.count(MAX_RULES2) });
         return "";
       },
@@ -154821,28 +154889,31 @@ function createNoteArchiveConnector(input, spec) {
     segment.bytes += head?.length ?? 0;
     if (!head || head.length === 0)
       return true;
-    const firstRecordKeys = (list, enough) => {
+    const budget = recordProbeBudget();
+    const look = (read, none2) => {
       let member;
       try {
         member = ZipMemberReader.open(archive, entry);
       } catch (error2) {
         if (error2 instanceof ZipMemberError)
-          return;
+          return none2;
         throw error2;
       }
       try {
-        return probeFirstRecordKeys(watched(member), list, enough);
+        return read(watched(member));
       } catch (error2) {
         if (error2 instanceof ZipMemberError)
-          return;
+          return none2;
         throw error2;
       } finally {
         segment.bytes += member.position;
         member.close();
       }
     };
+    const firstRecordKeys = (list, enough) => look((bytes) => probeFirstRecordKeys(bytes, list, enough, budget), undefined);
+    const listIsEmpty = (list) => look((bytes) => probeListIsEmpty(bytes, list, budget), false);
     try {
-      return source.accepts({ head, firstRecordKeys });
+      return source.accepts({ head, firstRecordKeys, listIsEmpty });
     } catch (error2) {
       if (error2 instanceof ReadInterrupted)
         return "interrupted";

@@ -71,7 +71,7 @@ import {
   type JsonResumePoint,
   type JsonStreamEvent,
 } from '../json-stream.ts';
-import { probeFirstRecordKeys } from '../record-probe.ts';
+import { probeFirstRecordKeys, probeListIsEmpty, recordProbeBudget } from '../record-probe.ts';
 import { recoverZipMemberCrc, trackBoundaries, type BoundaryTrackedSource } from '../resume-crc.ts';
 import {
   ZipArchive,
@@ -682,26 +682,32 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     segment.bytes += head?.length ?? 0;
     // Nothing to judge it by: it is read, and said to be damaged there if it is.
     if (!head || head.length === 0) return true;
-    const firstRecordKeys: NonNullable<ArchiveJsonProbe['firstRecordKeys']> = (list, enough) => {
+    // The looks at one member draw on one allowance, and read the member again from its start.
+    const budget = recordProbeBudget();
+    const look = <T>(read: (bytes: ArchiveByteSource) => T, none: T): T => {
       let member: ZipMemberReader;
       try {
         member = ZipMemberReader.open(archive, entry);
       } catch (error) {
-        if (error instanceof ZipMemberError) return undefined;
+        if (error instanceof ZipMemberError) return none;
         throw error;
       }
       try {
-        return probeFirstRecordKeys(watched(member), list, enough);
+        return read(watched(member));
       } catch (error) {
-        if (error instanceof ZipMemberError) return undefined;
+        if (error instanceof ZipMemberError) return none;
         throw error;
       } finally {
         segment.bytes += member.position;
         member.close();
       }
     };
+    const firstRecordKeys: NonNullable<ArchiveJsonProbe['firstRecordKeys']> = (list, enough) =>
+      look<ReadonlySet<string> | undefined>((bytes) => probeFirstRecordKeys(bytes, list, enough, budget), undefined);
+    const listIsEmpty: NonNullable<ArchiveJsonProbe['listIsEmpty']> = (list) =>
+      look((bytes) => probeListIsEmpty(bytes, list, budget), false);
     try {
-      return source.accepts({ head, firstRecordKeys });
+      return source.accepts({ head, firstRecordKeys, listIsEmpty });
     } catch (error) {
       if (error instanceof ReadInterrupted) return 'interrupted';
       throw error;

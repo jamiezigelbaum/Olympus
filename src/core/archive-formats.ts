@@ -55,6 +55,15 @@ export interface ArchiveProbeEntry {
     list: readonly string[],
     enough?: (keys: ReadonlySet<string>) => boolean,
   ): ReadonlySet<string> | undefined;
+  /**
+   * For a JSON file: whether the value at the keys `list` (from the document's
+   * root) is a list with nothing in it, read past `head` when that did not
+   * reach it. Asked only of a zip's JSON member whose notes list the first
+   * bytes did not reach and whose first record's keys found no record. Absent
+   * when the probe cannot read the file further. The reads of one entry share
+   * one allowance (`record-probe.ts`): past it, nothing is found.
+   */
+  listIsEmpty?(list: readonly string[]): boolean;
 }
 
 export interface ArchiveProbe {
@@ -203,6 +212,8 @@ interface HeadRecords {
    * or (in an object) before the list's own key was reached.
    */
   firstRecordCut: boolean;
+  /** An object whose notes list the head did not reach. */
+  unreached: boolean;
 }
 
 /**
@@ -288,12 +299,12 @@ function headRecordKeys(head: Uint8Array | undefined): HeadRecords | undefined {
   if (!shape) {
     // An object still open at the end of the head, whose notes key has not shown: the list may follow further down.
     if (objectRoot && !notesNotAList && stack.length > 0) {
-      return { shape: 'notes', records: [], empty: false, firstRecordCut: true };
+      return { shape: 'notes', records: [], empty: false, firstRecordCut: true, unreached: true };
     }
     return undefined;
   }
   const open = listDepth > 0;
-  return { shape, records, empty: closed && !hasElements, firstRecordCut: open && records.length === 1 && current !== undefined };
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open && records.length === 1 && current !== undefined, unreached: false };
 }
 
 /** Keys that carry what a Reflect note says. */
@@ -327,6 +338,7 @@ function recordsFormat(records: readonly ReadonlySet<string>[], shape: 'list' | 
 export interface ArchiveJsonProbe {
   head?: Uint8Array | undefined;
   firstRecordKeys?: ArchiveProbeEntry['firstRecordKeys'];
+  listIsEmpty?: ArchiveProbeEntry['listIsEmpty'];
 }
 
 /**
@@ -346,15 +358,17 @@ function notesJsonFormat(probe: ArchiveJsonProbe): 'reflect' | 'roam' | undefine
   const fromHead = recordsFormat(parsed.records, parsed.shape);
   if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys) return fromHead;
   // Every format asks about the same entry; the file is read on once.
-  if (SCANNED.has(probe)) return SCANNED.get(probe);
-  const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
-  const found = keys ? recordsFormat([keys], parsed.shape) : undefined;
-  SCANNED.set(probe, found);
-  return found;
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === 'list' ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
 }
 
 /** What reading on past the first bytes found for an entry, so the formats that ask about it share one read. */
-const SCANNED = new WeakMap<object, 'reflect' | 'roam' | undefined>();
+const SCANNED = new WeakMap<object, { keys: ReadonlySet<string> | undefined }>();
 
 /** Whether the first bytes show a list that closes with nothing in it (`[]`, or `{"notes": []}` when `inNotes`). */
 function isEmptyRecordList(head: Uint8Array | undefined, inNotes: boolean): boolean {
@@ -378,7 +392,10 @@ export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
  * list with nothing in it, which reads as no notes and is not another thing.
  */
 export function acceptsReflectJson(probe: ArchiveJsonProbe): boolean {
-  return notesJsonFormat(probe) === 'reflect' || isEmptyRecordList(probe.head, true);
+  if (notesJsonFormat(probe) === 'reflect' || isEmptyRecordList(probe.head, true)) return true;
+  // An object whose notes list is further down than the first bytes reach may hold an empty one; a list with a record in it is not empty.
+  if (!probe.listIsEmpty || SCANNED.get(probe)?.keys) return false;
+  return headRecordKeys(probe.head)?.unreached === true && probe.listIsEmpty([REFLECT_NOTES_LIST_KEY]);
 }
 
 /** Whether a JSON file inside a zip may be read as a Roam export: a list of pages, or an empty list. */
@@ -661,6 +678,22 @@ export function detectArchiveFormat(
   probe: ArchiveProbe,
   formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
 ): ArchiveDetection {
+  // First on the first bytes alone: a format they settle leaves the slower look (reading on through a file) to no other.
+  let matches = matchesOf(probeWithoutFurtherReads(probe), formats);
+  if (matches.length === 0) matches = matchesOf(probe, formats);
+  if (matches.length === 1) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
+  if (matches.length === 0) {
+    const supported = formats.map((format) => format.label);
+    const advice = unsupportedAdvice(probe, formats);
+    return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
+  }
+  return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+}
+
+function matchesOf(
+  probe: ArchiveProbe,
+  formats: readonly ArchiveFormatDefinition[],
+): Array<{ format: ArchiveFormatDefinition; files: readonly string[] }> {
   const matches: Array<{ format: ArchiveFormatDefinition; files: readonly string[] }> = [];
   for (const format of formats) {
     let files: readonly string[] | undefined;
@@ -671,13 +704,17 @@ export function detectArchiveFormat(
     }
     if (files && files.length > 0) matches.push({ format, files });
   }
-  if (matches.length === 1) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
-  if (matches.length === 0) {
-    const supported = formats.map((format) => format.label);
-    const advice = unsupportedAdvice(probe, formats);
-    return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
-  }
-  return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+  return matches;
+}
+
+/** An entry as the probe first saw it: its names and first bytes, with no way to read on. */
+function entryWithoutFurtherReads(entry: ArchiveProbeEntry): ArchiveProbeEntry {
+  const { firstRecordKeys: _keys, listIsEmpty: _empty, members, ...rest } = entry;
+  return { ...rest, ...(members ? { members: members.map(entryWithoutFurtherReads) } : {}) };
+}
+
+function probeWithoutFurtherReads(probe: ArchiveProbe): ArchiveProbe {
+  return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
 }
 
 function unsupportedAdvice(probe: ArchiveProbe, formats: readonly ArchiveFormatDefinition[]): string | undefined {

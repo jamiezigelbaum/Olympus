@@ -72,6 +72,25 @@ describe('an empty list of notes in a zip is an export with no notes, not anothe
   });
 });
 
+describe('an empty list of notes further down than the first bytes reach is empty too', () => {
+  test('a member whose notes list follows long values reads as empty; one that is not a list of nothing is reported', async () => {
+    const settings = 'x'.repeat(1_000_000);
+    const zip = buildZip([
+      { name: 'notes.json', data: reflectJson(reflectNotes(2)), method: 'deflate' },
+      { name: 'empty.json', data: JSON.stringify({ settings, notes: [] }), method: 'deflate' },
+      { name: 'stored-empty.json', data: JSON.stringify({ settings, version: 2, notes: [ ] }) },
+      { name: 'numbers.json', data: JSON.stringify({ settings, notes: [1, 2] }), method: 'deflate' },
+      { name: 'object.json', data: JSON.stringify({ settings, notes: {} }), method: 'deflate' },
+      { name: 'other.json', data: JSON.stringify({ settings, other: [] }), method: 'deflate' },
+    ]);
+    const { connector, findings } = reflectZip('Reflect.zip', zip);
+    const { items, done } = await listAll(connector);
+    expect(done).toBe(true);
+    expect(items).toHaveLength(2);
+    expect(kinds(findings)).toEqual(['gap:section_not_imported', 'gap:section_not_imported', 'gap:section_not_imported']);
+  });
+});
+
 describe('a zip member that is asked about is charged to the listing', () => {
   test('rejected members stop at the unit limit, like records do', async () => {
     const junk = Array.from({ length: NOTES_MAX_UNITS_PER_PAGE + 200 }, (_, index) => ({ name: `junk-${index}.json`, data: '{"name":"x"}' }));

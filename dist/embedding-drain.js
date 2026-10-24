@@ -28224,12 +28224,12 @@ function headRecordKeys(head) {
   }
   if (!shape) {
     if (objectRoot && !notesNotAList && stack.length > 0) {
-      return { shape: "notes", records: [], empty: false, firstRecordCut: true };
+      return { shape: "notes", records: [], empty: false, firstRecordCut: true, unreached: true };
     }
     return;
   }
   const open3 = listDepth > 0;
-  return { shape, records, empty: closed && !hasElements, firstRecordCut: open3 && records.length === 1 && current2 !== undefined };
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open3 && records.length === 1 && current2 !== undefined, unreached: false };
 }
 function isReflectRecord(keys) {
   return REFLECT_BODY_KEYS.some((key2) => keys.has(key2)) && REFLECT_NOTE_KEYS.some((key2) => keys.has(key2));
@@ -28253,12 +28253,13 @@ function notesJsonFormat(probe) {
   const fromHead = recordsFormat(parsed.records, parsed.shape);
   if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
     return fromHead;
-  if (SCANNED.has(probe))
-    return SCANNED.get(probe);
-  const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
-  const found = keys ? recordsFormat([keys], parsed.shape) : undefined;
-  SCANNED.set(probe, found);
-  return found;
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
 }
 function detectFile(probe, reads) {
   if (probe.chosen.kind === "file")
@@ -39548,10 +39549,11 @@ var init_json_stream = __esm(() => {
 });
 
 // src/workers/archive-import/record-probe.ts
-var RECORD_PROBE_MAX_VALUE_BYTES;
+var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES;
 var init_record_probe = __esm(() => {
   init_json_stream();
   RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
 });
 
 // node_modules/fflate/esm/browser.js

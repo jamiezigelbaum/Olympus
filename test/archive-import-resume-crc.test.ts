@@ -5,7 +5,13 @@
 
 import { describe, expect, test } from 'bun:test';
 import { crc32Update, fileByteSource, type ArchiveByteSource } from '../src/workers/archive-import/byte-source.ts';
-import { RECORD_PROBE_MAX_KEYS, probeFirstRecordKeys } from '../src/workers/archive-import/record-probe.ts';
+import {
+  RECORD_PROBE_MAX_KEYS,
+  RECORD_PROBE_MAX_SCAN_BYTES,
+  probeFirstRecordKeys,
+  probeListIsEmpty,
+  recordProbeBudget,
+} from '../src/workers/archive-import/record-probe.ts';
 import { recoverZipMemberCrc, trackBoundaries } from '../src/workers/archive-import/resume-crc.ts';
 import { ZipArchive } from '../src/workers/archive-import/zip-reader.ts';
 import { buildZip, referenceCrc32 } from './helpers/zip-fixture.ts';
@@ -188,5 +194,84 @@ describe('the keys of the first record of a list', () => {
     expect(probeFirstRecordKeys(source('not json at all'), [])).toBeUndefined();
     // Cut short after the keys: what was read is what there is.
     expect([...probeFirstRecordKeys(source('[{"a":1,"b":"unfinished'), [])!]).toEqual(['a']);
+  });
+});
+
+/** A document of `head`, then `megabytes` MiB of one long text, then `tail`: nothing of it exists in memory but one chunk. */
+function longDocument(head: string, megabytes: number, tail: string) {
+  const opening = bytes(head);
+  const closing = bytes(tail);
+  const filler = new Uint8Array(1024 * 1024).fill(0x78);
+  let position = 0;
+  let stage = 0;
+  let handed = 0;
+  const source: ArchiveByteSource = {
+    get position() { return position; },
+    next() {
+      if (stage === 0) { stage = 1; position += opening.length; return opening; }
+      if (stage === 1) {
+        if (handed < megabytes) { handed += 1; position += filler.length; return filler; }
+        stage = 2;
+        position += closing.length;
+        return closing;
+      }
+      return undefined;
+    },
+    unread() { throw new RangeError('not used'); },
+  };
+  return { source, megabytes: () => handed };
+}
+
+describe('how much of a document the looks at it read', () => {
+  const CAP_MIB = RECORD_PROBE_MAX_SCAN_BYTES / (1024 * 1024);
+
+  test('a list found within the allowance is read', () => {
+    const doc = longDocument('{"settings":"', CAP_MIB - 24, '","notes":[{"a":1,"title":"T"}]}');
+    expect([...probeFirstRecordKeys(doc.source, ['notes'])!]).toEqual(['a', 'title']);
+  });
+
+  test('past the allowance the answer is "nothing found", without reading to the end', () => {
+    const doc = longDocument('{"settings":"', 300, '","notes":[{"a":1,"title":"T"}]}');
+    expect(probeFirstRecordKeys(doc.source, ['notes'])).toBeUndefined();
+    // Chunks are read whole, so the last one may run past the allowance by one.
+    expect(doc.megabytes()).toBeLessThanOrEqual(CAP_MIB + 1);
+    expect(doc.megabytes()).toBeGreaterThanOrEqual(CAP_MIB);
+    const empty = longDocument('{"settings":"', 300, '","notes":[]}');
+    expect(probeListIsEmpty(empty.source, ['notes'])).toBe(false);
+    expect(empty.megabytes()).toBeLessThanOrEqual(CAP_MIB + 1);
+  });
+
+  test('the looks at one document share the allowance', () => {
+    const budget = recordProbeBudget();
+    const first = longDocument('{"settings":"', 40, '","other":1}');
+    expect(probeFirstRecordKeys(first.source, ['notes'], undefined, budget)).toBeUndefined();
+    const second = longDocument('{"settings":"', 40, '","notes":[]}');
+    expect(probeListIsEmpty(second.source, ['notes'], budget)).toBe(false);
+    expect(second.megabytes()).toBeLessThan(40);
+    expect(budget.left).toBeLessThanOrEqual(0);
+  });
+});
+
+describe('whether a list is empty', () => {
+  const source = (text: string) => fileByteSource({ size: bytes(text).length, readAt: (offset, length) => bytes(text).subarray(offset, offset + length) }, { chunkBytes: 61 });
+
+  test('is told past long values before it, and only for a list with nothing in it', () => {
+    const long = 'x'.repeat(30_000);
+    expect(probeListIsEmpty(source(JSON.stringify({ settings: long, notes: [] })), ['notes'])).toBe(true);
+    expect(probeListIsEmpty(source(`{"settings": {"a": [${'1,'.repeat(3_000)}2]}, "notes": [ \n ]}`), ['notes'])).toBe(true);
+    for (const text of [
+      JSON.stringify({ settings: long, notes: [1] }),
+      JSON.stringify({ settings: long, notes: [{}] }),
+      JSON.stringify({ settings: long, notes: {} }),
+      JSON.stringify({ settings: long, notes: 'none yet' }),
+      JSON.stringify({ settings: long, other: [] }),
+      JSON.stringify({ settings: long, notes: Array.from({ length: 20_000 }, () => 0) }),
+      '[]',
+      'not json',
+      '{"settings": "unfinished',
+    ]) {
+      expect({ text: text.slice(0, 40), empty: probeListIsEmpty(source(text), ['notes']) }).toEqual({ text: text.slice(0, 40), empty: false });
+    }
+    expect(probeListIsEmpty(source('{"notes": []}'), [])).toBe(false);
   });
 });

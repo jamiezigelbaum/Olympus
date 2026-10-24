@@ -13,6 +13,7 @@ import {
   REFLECT_JSON_ARCHIVE_FORMAT,
   REFLECT_MARKDOWN_ARCHIVE_FORMAT,
   ROAM_JSON_ARCHIVE_FORMAT,
+  ARCHIVE_FORMATS,
   archiveFormatConnector,
   archiveProbeNames,
   detectArchiveFormat,
@@ -1175,5 +1176,36 @@ describe('a long value before the list of notes does not hide what a Reflect fil
     expect(idOf(probeOf(`{"notes":"none yet","pad":"${long}`))).toBe('none');
     expect(idOf(probeOf('{}'))).toBe('none');
     expect(calls).toEqual([]);
+  });
+});
+
+describe('the slower look at a file runs only when the first bytes settled nothing', () => {
+  const probeOf = (head: string, calls: string[]): ArchiveProbe => {
+    const spy = (list: readonly string[]) => {
+      calls.push(`keys:${list.join('/')}`);
+      return undefined;
+    };
+    return {
+      chosen: {
+        relPath: '',
+        name: 'result.json',
+        kind: 'file',
+        head: new TextEncoder().encode(head),
+        firstRecordKeys: spy,
+        listIsEmpty: (list) => { calls.push(`empty:${list.join('/')}`); return false; },
+      },
+      children: [],
+    };
+  };
+
+  test('a format the first bytes settle leaves the others no reading on', () => {
+    const calls: string[] = [];
+    const telegram = `{"about":"Here is the data you requested.","personal_information":{"user_id":1,"pad":"${'x'.repeat(5000)}`;
+    const detection = detectArchiveFormat(probeOf(telegram, calls), ARCHIVE_FORMATS);
+    expect(formatOf(detection)).toBe('telegram_json');
+    expect(calls).toEqual([]);
+    // With nothing settled by the first bytes the look is made, once for the file.
+    expect(formatOf(detectArchiveFormat(probeOf(`{"settings":"${'x'.repeat(5000)}`, calls), ARCHIVE_FORMATS))).toBe('none');
+    expect(calls).toEqual(['keys:notes']);
   });
 });
