@@ -4,6 +4,18 @@ const DEFAULT_READINESS_POLL_MS = 100;
 const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [250, 1_000, 5_000, 15_000, 30_000] as const;
 /**
+ * The exit code of a child's deliberate self-restart (EX_TEMPFAIL): the worker
+ * reloads itself after a model-key change or a Delete indexed data. It is a
+ * request, not a crash, so it must not climb the crash backoff.
+ */
+const SELF_RESTART_EXIT_CODE = 75;
+/**
+ * How many deliberate self-restarts in a row skip the backoff before the
+ * stable uptime resets the allowance. Past it they count as crashes, so a
+ * child stuck reloading itself still backs off instead of looping at 250 ms.
+ */
+const FAST_SELF_RESTARTS = 3;
+/**
  * How long a group whose leader has exited may stay unsignalable (EPERM) after
  * the forced kill before the supervisor stops waiting for it. On macOS a
  * process group left holding only exiting or zombie members answers every
@@ -186,6 +198,8 @@ interface ServiceLifetime<TSettings extends NativeProcessStartSettings> {
   childReady: boolean;
   stopping: boolean;
   restartAttempt: number;
+  /** Deliberate self-restarts that skipped the backoff since the last stable uptime. */
+  fastRestarts: number;
   restartTimer: ReturnType<typeof setTimeout> | undefined;
   /** Resets backoff once a ready child has stayed up for `stableUptimeMs`. */
   stableTimer: ReturnType<typeof setTimeout> | undefined;
@@ -321,11 +335,17 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
     }
   };
 
-  const scheduleRestart = (lifetime: ServiceLifetime<TSettings>): void => {
+  const scheduleRestart = (lifetime: ServiceLifetime<TSettings>, deliberate = false): void => {
     if (!isCurrent(lifetime) || lifetime.restartTimer) return;
-    const index = Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
+    // A deliberate self-restart restarts at the first delay and leaves the
+    // crash counter alone: a Delete indexed data pressed within the stable
+    // uptime of an earlier restart used to wait out a climbed backoff (up to
+    // 30 s) before the worker came back. A child that crashes still climbs.
+    const fast = deliberate && lifetime.fastRestarts < FAST_SELF_RESTARTS;
+    if (fast) lifetime.fastRestarts += 1;
+    const index = fast ? 0 : Math.min(lifetime.restartAttempt, Math.max(restartDelaysMs.length - 1, 0));
     const delay = restartDelaysMs[index] ?? 30_000;
-    lifetime.restartAttempt += 1;
+    if (!fast) lifetime.restartAttempt += 1;
     lifetime.restartTimer = setTimeout(() => {
       lifetime.restartTimer = undefined;
       if (!isCurrent(lifetime)) return;
@@ -473,7 +493,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       ).then(() => {
         // The leader is gone, so nothing is left to keep custody of. A host
         // left alive with no child is the failure this must never produce.
-        scheduleRestart(lifetime);
+        scheduleRestart(lifetime, code === SELF_RESTART_EXIT_CODE && signal === null);
       });
     });
 
@@ -504,11 +524,12 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
       if (lifetime.stableTimer) clearTimeout(lifetime.stableTimer);
       lifetime.stableTimer = setTimeout(() => {
         lifetime.stableTimer = undefined;
-        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady) lifetime.restartAttempt = 0;
+        if (isCurrent(lifetime) && lifetime.child === child && lifetime.childReady) { lifetime.restartAttempt = 0; lifetime.fastRestarts = 0; }
       }, stableUptimeMs);
       lifetime.stableTimer.unref?.();
     } else {
       lifetime.restartAttempt = 0;
+      lifetime.fastRestarts = 0;
     }
     clearFailure(lifetime);
     lifetime.context.logger?.info?.(`Olympus ${options.label} is ready.`);
@@ -529,6 +550,7 @@ export function createNativeProcessService<TSettings extends NativeProcessStartS
         childReady: false,
         stopping: false,
         restartAttempt: 0,
+        fastRestarts: 0,
         restartTimer: undefined,
         stableTimer: undefined,
         cleanupPromise: undefined,
