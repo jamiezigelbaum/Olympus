@@ -12,7 +12,7 @@
  */
 import type { SourceConnector } from './contracts.ts';
 import type { ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
-import type { SourceFamily } from './source-index/types.ts';
+import type { SourceFamily, SourceTrustDomain } from './source-index/types.ts';
 
 /** How many first bytes the probe reads from a file. */
 export const ARCHIVE_PROBE_HEAD_BYTES = 4096;
@@ -218,6 +218,16 @@ function wildcardMatches(pattern: string, text: string): boolean {
 }
 
 /** The source families archive imports store, one store set per family. */
+/** The corpus id of one tier store of one family's archives. */
+export function archiveCorpusId(trustDomain: SourceTrustDomain, family: SourceFamily): string {
+  return `${trustDomain}.archive.${family}`;
+}
+
+/** Whether a corpus id is an imported archive's, of any family: the prefix `archiveCorpusId` writes. */
+export function isArchiveCorpusId(corpusId: string, trustDomain: string): boolean {
+  return corpusId.startsWith(`${trustDomain}.archive.`);
+}
+
 export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): SourceFamily[] {
   return [...new Set(formats.map((format) => format.family))];
 }

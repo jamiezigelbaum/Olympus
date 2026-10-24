@@ -6,11 +6,12 @@
 // content is emitted.
 
 import { lstatSync } from 'node:fs';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { openConnectorStore } from '../src/core/source-storage.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
+  TELEGRAM_MESSAGES_SOURCE_ID,
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID,
   defaultInternalTelegramConnectorStoreDbPath,
   defaultProtectedTelegramConnectorStoreDbPath,
@@ -105,15 +106,16 @@ export function runTelegramTrustReconcile(
   if (files[0]!.dev === files[1]!.dev && files[0]!.ino === files[1]!.ino) {
     throw new Error('Telegram trust reconciliation refuses one database as both stores.');
   }
+  const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
   const stores: TelegramConnectorStores = {
-    internal: new LocalConnectorStore({
+    internal: openConnectorStore(account, {
       dbPath: args.internalDb,
       corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'internal',
       readOnly: !args.execute,
     }),
-    secureLocal: new LocalConnectorStore({
+    secureLocal: openConnectorStore(account, {
       dbPath: args.protectedDb,
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',

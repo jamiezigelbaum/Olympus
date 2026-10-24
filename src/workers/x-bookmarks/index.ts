@@ -25,6 +25,7 @@ export {
 export {
   X_BOOKMARKS_ARCHIVE_CONNECTOR_ID,
   X_BOOKMARKS_LIVE_CONNECTOR_ID,
+  X_BOOKMARKS_SOURCE_ID,
   X_BOOKMARKS_PROVIDER,
   canonicalXBookmarkUrl,
   createXBookmarksConnectorStore,

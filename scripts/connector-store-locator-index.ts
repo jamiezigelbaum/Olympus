@@ -6,10 +6,8 @@
 
 import { Database } from 'bun:sqlite';
 import { lstatSync } from 'node:fs';
-import {
-  LocalConnectorStore,
-  type ConnectorStoreLocatorIdentityIndexStatus,
-} from '../src/workers/connector-store/index.ts';
+import type { ConnectorStoreLocatorIdentityIndexStatus } from '../src/workers/connector-store/index.ts';
+import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import { resolveConnectorStoreOptions } from './connector-store-embed.ts';
 
 const STORE_ID = 'connector-store';
@@ -112,7 +110,7 @@ export function runConnectorStoreLocatorIndex(
     });
   }
 
-  const store = new LocalConnectorStore({ ...options, readOnly: !args.execute });
+  const store = openConnectorStore(storageAccountForCorpus(options), { ...options, readOnly: !args.execute }, env);
   try {
     const before = store.locatorIdentityIndexStatus();
     if (!args.execute) {

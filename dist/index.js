@@ -5063,6 +5063,30 @@ var init_release_manifest = __esm(() => {
   withheldAnswers = new WeakSet;
 });
 
+// src/core/operation-caller.ts
+function sanitizeCallerDisplayName(value) {
+  if (typeof value !== "string")
+    return;
+  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned)
+    return;
+  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
+}
+function operationCallerToWire(caller) {
+  const displayName = sanitizeCallerDisplayName(caller.displayName);
+  return {
+    surface: caller.surface,
+    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
+    ...displayName ? { display_name: displayName } : {},
+    ...caller.provider ? { provider: caller.provider } : {}
+  };
+}
+var OPERATION_CALLER_DISPLAY_NAME_MAX = 80, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  inProcessRemoteRequests = new WeakSet;
+});
+
 // src/core/sqlite-migrations.ts
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
@@ -6348,6 +6372,46 @@ var init_sovereignty = __esm(() => {
     encrypted_cloud: 2,
     standard_cloud: 1
   };
+});
+
+// src/core/worker-service.ts
+import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
+function workerServicePaths(platform2, homeDir, env = {}) {
+  homeDir = validatedAbsolutePath(homeDir, "home directory");
+  if (platform2 === "darwin") {
+    const logDir = join25(homeDir, "Library", "Logs", "Olympus");
+    return {
+      label: "com.openclaw.olympus.worker",
+      unitPath: join25(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join25(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join25(logDir, "worker.log"),
+      errorLogPath: join25(logDir, "worker.err")
+    };
+  }
+  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
+  const stateDir = join25(layout.stateHome, "olympus", "worker");
+  return {
+    label: "olympus-worker",
+    unitPath: join25(layout.configHome, "systemd", "user", "olympus-worker.service"),
+    envPath: layout.workerEnvPath,
+    logPath: join25(stateDir, "worker.log"),
+    errorLogPath: join25(stateDir, "worker.err")
+  };
+}
+function validatedAbsolutePath(value, label) {
+  const trimmed = value.trim();
+  if (trimmed && isAbsolute15(trimmed) && !/[\0\r\n]/.test(trimmed))
+    return trimmed;
+  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
+}
+var WORKER_LOG_TAIL_BYTES;
+var init_worker_service = __esm(() => {
+  init_linux_engine_layout();
+  init_atomic_file();
+  init_openclaw_executable();
+  init_operation_error();
+  init_worker_auth();
+  WORKER_LOG_TAIL_BYTES = 64 * 1024;
 });
 
 // src/core/managed-tools.ts
@@ -12914,6 +12978,14 @@ var init_connected_handles = __esm(() => {
 // src/core/google-handle-compatibility.ts
 var init_google_handle_compatibility = () => {};
 
+// src/workers/credential-broker/unpaired-sources.ts
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
+var init_unpaired_sources = __esm(() => {
+  init_atomic_file();
+  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+});
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -12923,35 +12995,6 @@ var init_privacy_language = __esm(() => {
     secure: "Private",
     secrets: "Secrets"
   };
-});
-
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
-  CONNECTOR_FACTORIES = new Map;
 });
 
 // src/core/ingestion-throughput.ts
@@ -13126,13 +13169,9 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-function archivePickIntro(formats = ARCHIVE_FORMATS) {
-  return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
-}
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
-  init_archive_formats();
   init_answer_ready_coverage();
   init_display_text();
   init_scheduler_markers();
@@ -13368,19 +13407,12 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
-  ARCHIVE_PICK_INTRO = archivePickIntro();
-  DASHBOARD_ARCHIVE_NOUNS = {
-    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes" },
-    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items" }
-  };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
     pick: {
       back: "Back to Olympus",
       title: "Import an archive",
-      intro: ARCHIVE_PICK_INTRO,
+      intro: "Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.",
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -13391,13 +13423,11 @@ var init_vocabulary = __esm(() => {
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
     dates: "{earliest} to {latest}",
-    nouns: DASHBOARD_ARCHIVE_NOUNS,
+    items: { one: "1 message", many: "{n} messages" },
     importingLine: "{percent}% read · {items} so far",
     importingLineUncounted: "{percent}% read",
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
-    emptyImport: "Imported: {none} found in this archive.",
-    emptyImportWhen: "Imported {when}: {none} found in this archive.",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
@@ -13410,7 +13440,7 @@ var init_vocabulary = __esm(() => {
     },
     setUpPrivateModel: "Set up the private model",
     countsUnavailable: {
-      why: "Olympus can't count what this archive holds right now: its index could not be opened.",
+      why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
       fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
     },
     notRunning: {
@@ -13444,11 +13474,6 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
-      media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
-      item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones)" },
-      section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
-      file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
@@ -13490,12 +13515,12 @@ var init_vocabulary = __esm(() => {
       request: "An agent asked to import {name}",
       removal: "An agent asked to remove {name}",
       failed: "An import did not start: {name}",
-      counts: "Olympus can't count what is in {name}",
+      counts: "Olympus can't count the messages in {name}",
       scheduler: {
         disabled: "Imports can't run: background syncing is turned off",
         not_selected: "Imports can't run: background syncing leaves out archives"
       },
-      held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
+      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
       seeWhy: "See why",
       review: "Review",
@@ -15478,6 +15503,287 @@ var init_corpus_adapter = __esm(() => {
   init_source_corpus_registry();
 });
 
+// src/core/secret-patterns.ts
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "again",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "retry",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_ -]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+});
+
+// src/workers/dropbox-files/content-policy.ts
+var init_content_policy = __esm(() => {
+  init_secret_patterns();
+});
+
+// src/workers/classification/engine.ts
+var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
+var init_engine = __esm(() => {
+  init_content_policy();
+  SECRET_FINDING_TYPES = new Set([
+    "private_key_material",
+    "aws_access_key_id",
+    "slack_token",
+    "api_secret_token",
+    "credential_assignment"
+  ]);
+  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
+});
+// src/workers/classification/tier-classifier.ts
+var UNDECIDED_TIER_SNIFFER;
+var init_tier_classifier = __esm(() => {
+  init_secret_patterns();
+  init_secret_patterns();
+  init_engine();
+  init_sender_rules();
+  UNDECIDED_TIER_SNIFFER = Object.freeze({
+    id: "undecided",
+    judge: () => ({ verdict: "undecided" })
+  });
+});
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  init_tier_classifier();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
+// src/workers/classification/sniffer-store.ts
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
+
+// src/workers/classification/tier-ledger.ts
+var init_tier_ledger = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
+
 // src/core/source-index/keyword-languages.ts
 var profiles;
 var init_keyword_languages = __esm(() => {
@@ -15709,281 +16015,6 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
-
-// src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
-var init_secret_patterns = __esm(() => {
-  PROSE_WORDS = new Set([
-    "above",
-    "again",
-    "below",
-    "cannot",
-    "change",
-    "changed",
-    "characters",
-    "choose",
-    "click",
-    "contact",
-    "enter",
-    "expired",
-    "expires",
-    "forgot",
-    "forgotten",
-    "guideline",
-    "guidelines",
-    "hidden",
-    "incorrect",
-    "information",
-    "instruction",
-    "instructions",
-    "invalid",
-    "least",
-    "letters",
-    "link",
-    "manager",
-    "maximum",
-    "min",
-    "minimum",
-    "must",
-    "need",
-    "needed",
-    "needs",
-    "number",
-    "numbers",
-    "optional",
-    "please",
-    "policies",
-    "policy",
-    "protected",
-    "provide",
-    "provided",
-    "required",
-    "requirements",
-    "reset",
-    "retry",
-    "see",
-    "send",
-    "sent",
-    "setting",
-    "settings",
-    "shared",
-    "should",
-    "shown",
-    "sign",
-    "strength",
-    "symbols",
-    "unchanged",
-    "use",
-    "used",
-    "using",
-    "via"
-  ]);
-  CREDENTIAL_KEYS = [
-    { pattern: String.raw`api[_ -]?key`, legacy: true },
-    { pattern: String.raw`access[_ -]?token`, legacy: true },
-    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
-    { pattern: String.raw`client[_ -]?secret`, legacy: true },
-    { pattern: "password", legacy: true },
-    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
-    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
-    { pattern: String.raw`private[_ -]?key` },
-    { pattern: "secret" },
-    { pattern: String.raw`token(?!s)` },
-    { pattern: "sig", urlOnly: true }
-  ];
-  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
-  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
-  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
-  PLACEHOLDER_WORDS = new RegExp([
-    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
-    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
-    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
-    "placeholder",
-    "redacted",
-    "changeme",
-    "change[_-]me",
-    "replace[_-]?me",
-    "insert[_-]?(?:your|here|key|token)",
-    "[_-]here$",
-    "^n/a$",
-    "not[_ -]?set",
-    "^unset$"
-  ].join("|"), "i");
-  BARE_LITERALS = new Set([
-    "password",
-    "passwd",
-    "passphrase",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "string",
-    "null",
-    "none",
-    "nil",
-    "undefined",
-    "true",
-    "false",
-    "empty",
-    "hidden",
-    "masked",
-    "required",
-    "optional",
-    "changeme",
-    "enabled",
-    "disabled",
-    "encrypted",
-    "hashed",
-    "unknown",
-    "tbd",
-    "pending",
-    "missing"
-  ]);
-  COMMON_OBJECTS = new Set([
-    "user",
-    "users",
-    "body",
-    "data",
-    "form",
-    "state",
-    "props",
-    "creds",
-    "credentials",
-    "account",
-    "profile",
-    "session",
-    "auth",
-    "db",
-    "app",
-    "json",
-    "response",
-    "res",
-    "row",
-    "record",
-    "item",
-    "model"
-  ]);
-  STRONG_QUALIFIERS = new Set([
-    "client",
-    "app",
-    "api",
-    "access",
-    "refresh",
-    "auth",
-    "bearer",
-    "id",
-    "session",
-    "bot",
-    "oauth",
-    "webhook",
-    "signing",
-    "jwt",
-    "service",
-    "personal",
-    "consumer",
-    "shared",
-    "encryption",
-    "master",
-    "admin",
-    "root",
-    "user",
-    "db",
-    "database",
-    "wifi",
-    "email",
-    "login"
-  ]);
-  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
-  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
-  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
-  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
-  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
-  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
-  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
-});
-
-// src/workers/dropbox-files/content-policy.ts
-var init_content_policy = __esm(() => {
-  init_secret_patterns();
-});
-
-// src/workers/classification/engine.ts
-var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
-var init_engine = __esm(() => {
-  init_content_policy();
-  SECRET_FINDING_TYPES = new Set([
-    "private_key_material",
-    "aws_access_key_id",
-    "slack_token",
-    "api_secret_token",
-    "credential_assignment"
-  ]);
-  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
-});
-// src/workers/classification/tier-classifier.ts
-var UNDECIDED_TIER_SNIFFER;
-var init_tier_classifier = __esm(() => {
-  init_secret_patterns();
-  init_secret_patterns();
-  init_engine();
-  init_sender_rules();
-  UNDECIDED_TIER_SNIFFER = Object.freeze({
-    id: "undecided",
-    judge: () => ({ verdict: "undecided" })
-  });
-});
-// src/workers/classification/tier-ledger.ts
-var init_tier_ledger = __esm(() => {
-  init_sqlite_migrations();
-  init_tier_classifier();
-});
-
-// src/workers/classification/secret-locations.ts
-var STOP_WORDS;
-var init_secret_locations = __esm(() => {
-  init_sqlite_migrations();
-  init_engine();
-  init_tier_classifier();
-  STOP_WORDS = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "put",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
-});
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
   init_types();
@@ -16016,12 +16047,6 @@ var init_delphi_scorer = __esm(() => {
     '{"tier":"internal"|"secure","category":"financial"|"health"|"legal"|"identity"|"personal"|"work"|"other","confidence":<number between 0 and 1>}'
   ].join(`
 `);
-});
-
-// src/workers/classification/sniffer-store.ts
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-  init_tier_classifier();
 });
 
 // src/workers/classification/sniffer.ts
@@ -16434,6 +16459,79 @@ var init_local_index = __esm(() => {
   ]);
 });
 
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
+// src/core/source-registry.ts
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+});
+
+// src/core/source-storage.ts
+var init_source_storage = __esm(() => {
+  init_secret_locations();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_local_index();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_registry();
+});
+
+// src/workers/readwise/connector.ts
+var READWISE_STORE_PLACEMENT;
+var init_connector = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_credential_broker();
+  init_source_storage();
+  init_api();
+  init_corpus_adapter();
+  READWISE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S1",
+    trustDomain: "internal"
+  });
+});
+
+// src/workers/readwise/live-control.ts
+var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
+var init_live_control = __esm(() => {
+  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
+  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
+  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+});
+
 // src/workers/connector-store/principal.ts
 var init_principal = () => {};
 
@@ -16479,30 +16577,6 @@ var init_filter_capabilities = __esm(() => {
 var init_connector_store = __esm(() => {
   init_local_index();
   init_filter_capabilities();
-});
-
-// src/workers/readwise/connector.ts
-var READWISE_STORE_PLACEMENT;
-var init_connector = __esm(() => {
-  init_olympus_layout();
-  init_atomic_file();
-  init_credential_broker();
-  init_connector_store();
-  init_api();
-  init_corpus_adapter();
-  READWISE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S1",
-    trustDomain: "internal"
-  });
-});
-
-// src/workers/readwise/live-control.ts
-var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
-var init_live_control = __esm(() => {
-  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
-  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
-  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
@@ -17450,7 +17524,7 @@ var init_folder_facets = __esm(() => {
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_corpus_adapter2();
   init_folder_facets();
   X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
@@ -17589,8 +17663,8 @@ var init_connector_store2 = __esm(() => {
   init_olympus_layout();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_connector_store();
   init_file_ingestion_matcher();
+  init_source_storage();
   init_corpus_adapter3();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -17956,7 +18030,7 @@ var init_qualification2 = __esm(() => {
 
 // src/workers/dropbox-files/tier-set.ts
 var init_tier_set = __esm(() => {
-  init_tier_ledger();
+  init_source_storage();
   init_tiered_store_set();
   init_connector_store2();
   init_corpus_adapter3();
@@ -18027,8 +18101,7 @@ var init_store = __esm(() => {
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_tier_ledger();
-  init_connector_store();
+  init_source_storage();
   init_file_ingestion_matcher();
   init_tiered_store_set();
   init_scope();
@@ -18072,7 +18145,7 @@ var init_capture_spool_connector = __esm(() => {
 
 // src/workers/telegram-messages/store-sync.ts
 var init_store_sync = __esm(() => {
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -18263,7 +18336,6 @@ var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
   init_publisher_oauth_client();
   init_privacy_language();
-  init_archive_formats();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -18379,10 +18451,132 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS;
+var init_waiting_private_questions = __esm(() => {
+  init_sqlite_migrations();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    perConnection: 20,
+    total: 50,
+    totalBytes: 256 * 1024,
+    answeredPerConnection: 50,
+    answeredBytesPerConnection: 1024 * 1024,
+    autoAnswersPerWindow: 5,
+    autoAnswerWindowMs: 60 * 60000,
+    answeredTotal: 500,
+    answeredBytes: 16 * 1024 * 1024,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000
+  });
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_olympus_layout();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_storage();
+  init_state();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire3 = createRequire4(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
+var init_manifest2 = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+  ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+});
+
+// src/workers/archive-import/requests.ts
+var STATUSES;
+var init_requests = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_manifest2();
+  init_state();
+  STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
+});
+
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector();
 });
@@ -18390,10 +18584,13 @@ var init_tier_set2 = __esm(() => {
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector2();
 });
+
+// src/workers/whatsapp/connector.ts
+var init_connector4 = () => {};
 
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
@@ -18410,7 +18607,7 @@ var init_live_connector = __esm(() => {
 var WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -18421,21 +18618,75 @@ var init_store_sync2 = __esm(() => {
   });
 });
 
-// src/workers/archive-import/store.ts
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
-var ARCHIVE_STORE_PLACEMENT;
-var init_store2 = __esm(() => {
-  init_olympus_layout();
-  init_archive_formats();
-  init_source_corpus_registry();
-  init_connector_store();
-  ARCHIVE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    secretsInContent: true
+// src/core/file-extraction-source.ts
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
   });
+});
+
+// src/workers/whatsapp/extraction-source.ts
+var init_extraction_source = __esm(() => {
+  init_file_extraction_source();
+});
+
+// src/workers/whatsapp/index.ts
+var init_whatsapp = __esm(() => {
+  init_connector4();
+  init_live_connector();
+  init_store_sync2();
+  init_extraction_source();
+});
+
+// src/core/pairing-session-paths.ts
+var init_pairing_session_paths = __esm(() => {
+  init_olympus_layout();
+});
+
+// src/data-lifecycle.ts
+var init_data_lifecycle = __esm(() => {
+  init_olympus_layout();
+  init_source_storage();
+  init_atomic_file();
+  init_operation_error();
+  init_sqlite_migrations();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_ingestion_policy();
+  init_dropbox_files();
+  init_store();
+  init_archive_formats();
+  init_store2();
+  init_state();
+  init_requests();
+  init_google_connectors();
+  init_telegram_messages();
+  init_readwise();
+  init_tier_set2();
+  init_x_bookmarks();
+  init_tier_set3();
+  init_reconcile_state();
+  init_live_control2();
+  init_whatsapp();
+  init_sovereignty();
+  init_pairing_session_paths();
+  init_unpaired_sources();
+  init_source_corpus_registry();
+  init_public_source_capabilities();
+  init_worker_service();
+  init_media_cache();
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -18956,7 +19207,8 @@ var init_source_ingestion_ledger = __esm(() => {
   init_answer_ready_coverage();
   init_status();
   init_google_connectors();
-  init_connector_store();
+  init_source_storage();
+  init_data_lifecycle();
   init_readwise();
   init_tier_set2();
   init_x_bookmarks();
@@ -21511,30 +21763,7 @@ function assertNoRawEmailFieldsAtPath(value, path) {
 // src/core/email.ts
 init_http_timeout();
 init_operation_error();
-
-// src/core/operation-caller.ts
-var OPERATION_CALLER_DISPLAY_NAME_MAX = 80;
-var UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
-function sanitizeCallerDisplayName(value) {
-  if (typeof value !== "string")
-    return;
-  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
-  if (!cleaned)
-    return;
-  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
-}
-function operationCallerToWire(caller) {
-  const displayName = sanitizeCallerDisplayName(caller.displayName);
-  return {
-    surface: caller.surface,
-    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
-    ...displayName ? { display_name: displayName } : {},
-    ...caller.provider ? { provider: caller.provider } : {}
-  };
-}
-var inProcessRemoteRequests = new WeakSet;
-
-// src/core/email.ts
+init_operation_caller();
 init_source_corpus_registry();
 
 // src/core/source-watch.ts
@@ -24396,45 +24625,7 @@ init_config();
 init_remote_access();
 init_sovereignty();
 init_worker_auth();
-
-// src/core/worker-service.ts
-init_linux_engine_layout();
-import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
-init_atomic_file();
-init_openclaw_executable();
-init_operation_error();
-init_worker_auth();
-var WORKER_LOG_TAIL_BYTES = 64 * 1024;
-function workerServicePaths(platform2, homeDir, env = {}) {
-  homeDir = validatedAbsolutePath(homeDir, "home directory");
-  if (platform2 === "darwin") {
-    const logDir = join25(homeDir, "Library", "Logs", "Olympus");
-    return {
-      label: "com.openclaw.olympus.worker",
-      unitPath: join25(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join25(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join25(logDir, "worker.log"),
-      errorLogPath: join25(logDir, "worker.err")
-    };
-  }
-  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
-  const stateDir = join25(layout.stateHome, "olympus", "worker");
-  return {
-    label: "olympus-worker",
-    unitPath: join25(layout.configHome, "systemd", "user", "olympus-worker.service"),
-    envPath: layout.workerEnvPath,
-    logPath: join25(stateDir, "worker.log"),
-    errorLogPath: join25(stateDir, "worker.err")
-  };
-}
-function validatedAbsolutePath(value, label) {
-  const trimmed = value.trim();
-  if (trimmed && isAbsolute15(trimmed) && !/[\0\r\n]/.test(trimmed))
-    return trimmed;
-  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
-}
-
-// src/core/engine-service.ts
+init_worker_service();
 init_consult_transport_zkapi();
 var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
@@ -24806,6 +24997,7 @@ import { existsSync as existsSync18, mkdirSync as mkdirSync15, readFileSync as r
 import { dirname as dirname27, join as join39 } from "node:path";
 import { homedir as homedir15 } from "node:os";
 init_openclaw_executable();
+init_worker_service();
 init_worker_auth();
 init_sovereignty();
 
@@ -25136,17 +25328,12 @@ import { mkdirSync as mkdirSync14, readFileSync as readFileSync26, rmSync as rmS
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname24, join as join33 } from "node:path";
 init_secret_store();
+init_worker_service();
 init_http_timeout();
 init_oauth_relay();
 init_publisher_oauth_client();
 init_connected_handles();
-
-// src/workers/credential-broker/unpaired-sources.ts
-init_atomic_file();
-var UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-
-// src/core/connect.ts
+init_unpaired_sources();
 init_credential_broker();
 
 // src/core/provider-account-identity.ts

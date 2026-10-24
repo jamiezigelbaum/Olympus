@@ -13,11 +13,12 @@
 
 import { olympusDataPath } from '../../core/olympus-layout.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import { createExistingStoreTierLane, type ExistingStoreTierLane } from '../connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import { READWISE_STORE_PLACEMENT } from './connector.ts';
+import { READWISE_SOURCE_ID, READWISE_STORE_PLACEMENT } from './connector.ts';
 
 export const READWISE_SECURE_LIBRARY_CORPUS_ID = 'secure_local.readwise.library';
 export const READWISE_TIER_SET_ID = 'readwise.library';
@@ -52,13 +53,13 @@ export function createReadwiseTierLane(options: {
       secure_local: {
         corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
         dbPath: secureDbPath,
-        create: (ledger) => new LocalConnectorStore({
+        create: (ledger) => openConnectorStore({ sourceId: READWISE_SOURCE_ID }, {
           dbPath: secureDbPath,
           corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
           family: 'readwise',
           trustDomain: 'secure_local',
           tierLedger: ledger,
-        }),
+        }, env),
         ...(options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}),
       },
     },

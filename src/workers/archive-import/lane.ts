@@ -14,8 +14,9 @@
  */
 import type { SourceFamily, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { TierLedger } from '../classification/tier-ledger.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openTierLedger } from '../../core/source-storage.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import {
   createTieredLaneSet,
@@ -74,7 +75,7 @@ export function createArchiveTierLane(options: {
   const env = options.env ?? process.env;
   const family = options.family;
   const secureDbPath = archiveConnectorStoreDbPath('secure_local', family, env);
-  const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(secureDbPath) });
+  const ledger = openTierLedger({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, { dbPath: tieredStoreSetLedgerPath(secureDbPath) }, env);
   const leg = (domain: SourceTrustDomain): OnDemandTierStore => onDemandTierStore({
     corpusId: archiveCorpusId(domain, family),
     dbPath: archiveConnectorStoreDbPath(domain, family, env),
