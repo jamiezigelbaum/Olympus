@@ -634,6 +634,33 @@ describe('the Outside help page: states and copy', () => {
     });
   }
 
+  test('a save keeps its confirmation through the reload that redraws the card, in the section it sat in', async () => {
+    const store = new Map<string, string>();
+    const stub = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); }, removeItem: (key: string) => { store.delete(key); } };
+    const had = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+    Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, writable: true, value: stub });
+    try {
+      const html = page(status({ settings: { level: 'general' } }));
+      const first = runCardScript(html, () => ({ status: 200, body: { ok: true, status_message: 'Saved what may be sent.', revision: 3 } }));
+      const form = first.document.querySelector('form[data-outside-form="level"]')!;
+      form.dispatchEvent(new first.window.Event('submit', { cancelable: true }));
+      await first.settle();
+      expect(form.querySelector('[data-action-message]')!.textContent).toBe('Saved what may be sent.');
+      // The reload redraws the card from the server: a fresh page, as the browser makes it.
+      const second = runCardScript(html, () => ({ status: 500, body: {} }));
+      const again = second.document.querySelector('form[data-outside-form="level"]')!;
+      const out = again.querySelector('[data-action-message]')!;
+      expect(out.textContent).toBe('Saved what may be sent.');
+      expect(out.getAttribute('data-state')).toBe('ok');
+      expect((again.closest('details') as unknown as { open: boolean }).open).toBe(true);
+      // Shown once: the next load of the card starts clean.
+      const third = runCardScript(html, () => ({ status: 500, body: {} }));
+      expect(third.document.querySelector('form[data-outside-form="level"] [data-action-message]')!.textContent).toBe('');
+    } finally {
+      if (had) Object.defineProperty(globalThis, 'sessionStorage', had); else delete (globalThis as Record<string, unknown>).sessionStorage;
+    }
+  });
+
   test('Tor off: the route is said to be direct with the network address visible, whether or not a tor binary exists', () => {
     const off = readiness({ tor: 'off', torPort: 'not_used' });
     const html = page(status({ route: configuredRoute({ ready: off }) }));

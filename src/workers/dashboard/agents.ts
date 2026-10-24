@@ -285,7 +285,7 @@ function needsOwnTunnel(agent: AgentChoice, access: DashboardRemoteAccess): bool
 function agentBody(agent: AgentChoice, access: DashboardRemoteAccess, host: AgentConnectHost): string {
   if (agent.method === 'local') return localBody(agent, host);
   if (needsOwnTunnel(agent, access)) return tunnelNeeded(host) + instructionsStep(agent, false);
-  if (access.state !== 'on') return remoteUnavailable(access) + instructionsStep(agent, false);
+  if (access.state !== 'on') return remoteUnavailable(access, host) + instructionsStep(agent, false);
   if (agent.method === 'oauth' && !ownTunnel(access) && agent.approveViaRelay) {
     return `<ol class="steps">`
       + `<li>${escapeHtml(agent.add ?? '')}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, 'Copy address')}</li>`
@@ -358,13 +358,20 @@ function tunnelNeeded(host: AgentConnectHost): string {
   return `<p class="why" data-agent-needs-tunnel>${escapeHtml(text)}</p>`;
 }
 
-function remoteUnavailable(access: DashboardRemoteAccess): string {
+function remoteUnavailable(access: DashboardRemoteAccess, host: AgentConnectHost): string {
   const text = access.state === 'not_connected'
     ? 'Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why.'
     : access.state === 'invalid'
       ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}`
       : 'This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.';
-  return `<p class="why" data-remote-unavailable>${escapeHtml(text)}</p>`;
+  // Off, on Linux (the Mac text is frozen byte for byte): the way to fix it is right here, the same control as on the Remote access line above.
+  const fix = access.state === 'off' && host.platform === 'linux'
+    ? `<form class="rowform" data-agent-kind="remote-on" data-remote-unavailable-fix>`
+      + `<button class="btn primary" type="submit">Turn on remote access</button>`
+      + `<span class="actmsg" data-action-message role="status"></span>`
+      + `</form>`
+    : '';
+  return `<p class="why" data-remote-unavailable>${escapeHtml(text)}</p>${fix}`;
 }
 
 /** The when-to-ask text, for pasting. `inStep` renders it as a numbered step's content. */

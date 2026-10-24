@@ -971,6 +971,22 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
     }
     setTimeout(poll, delay);
   }
+  // A save redraws the card with a reload, which would take the confirmation (and the section it sat in)
+  // with it. The confirmation is kept for the reload: the page shows it again, in the same section.
+  var savedKey = 'olympus-outside-help-saved';
+  function rememberSaved(form, text) {
+    try { sessionStorage.setItem(savedKey, JSON.stringify({ kind: form.getAttribute('data-outside-form'), text: text })); } catch (error) { /* no storage: the reload shows the new state only */ }
+  }
+  (function showSaved() {
+    var saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(savedKey) || 'null'); sessionStorage.removeItem(savedKey); } catch (error) { saved = null; }
+    if (!saved || typeof saved.kind !== 'string' || typeof saved.text !== 'string' || saved.text === '') return;
+    var target = root.querySelector('form[data-outside-form="' + saved.kind + '"]');
+    if (!target) return;
+    var section = target.closest('details');
+    if (section) section.open = true;
+    message(target, saved.text, false);
+  })();
   var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard };
   // While the writer check runs (only after the owner's click), the page re-reads itself.
   if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
@@ -1026,8 +1042,10 @@ export function outsideHelpClientScript(config: { csrfToken: string; paths: type
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
+          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
           reloadWhenBack(4000, form);
         } else {
+          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
           reloadWhenBack(900, form);
         }
       } catch (error) {

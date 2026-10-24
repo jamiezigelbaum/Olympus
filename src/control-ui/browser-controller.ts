@@ -654,6 +654,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       await refreshAgentList();
       return;
     }
+    // A pairing code or a key that did not come back is a failure to say, never a revoke.
+    if (params.action === 'mint_agent_pairing_code' || params.action === 'create_agent_key') {
+      say(form, params.action === 'create_agent_key'
+        ? 'Olympus did not return a key. Try again; if it keeps happening, restart Olympus.'
+        : 'Olympus did not return a pairing code. Try again; if it keeps happening, restart Olympus.');
+      return;
+    }
     const statusMessage = result.body.status_message;
     say(form, typeof statusMessage === 'string' ? statusMessage : 'Revoked.');
     form.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
@@ -804,6 +811,20 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     submittedFormValues.set(form, submittedValues);
     const tab = form.dataset.connectKind === 'oauth' ? openAuthorizationTab() : null;
     void submitControl(form, tab, submittedValues);
+  }
+
+  /**
+   * The browser stops a submit with a required field empty and shows its own
+   * bubble, which nothing on the page records. Say it on the page as well, in
+   * the form's message slot: the first field that is missing, by its name.
+   */
+  function onInvalid(event: Event): void {
+    const field = event.target instanceof HTMLInputElement ? event.target : null;
+    const form = field ? field.form : null;
+    if (!field || !form || !root.contains(form) || !form.hasAttribute('data-connect-kind')) return;
+    const first = Array.from(form.elements).find((element) => element instanceof HTMLInputElement && !element.validity.valid);
+    if (first !== field) return;
+    say(form, `${field.getAttribute('aria-label') || field.getAttribute('placeholder') || 'A value'} is needed.`);
   }
 
   function onClick(event: Event): void {
@@ -984,6 +1005,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   root.addEventListener('submit', onSubmit);
+  root.addEventListener('invalid', onInvalid, true);
   root.addEventListener('click', onClick);
   // Coming back from the approval browser or tab is the moment the exchange
   // may have just landed: one authoritative read, and only while this
@@ -1011,6 +1033,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     view.removeEventListener('focus', refreshOnReturn);
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
+    root.removeEventListener('invalid', onInvalid, true);
     root.removeEventListener('click', onClick);
   };
   options.signal.addEventListener('abort', dispose, { once: true });

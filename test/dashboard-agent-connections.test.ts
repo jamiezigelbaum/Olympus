@@ -469,6 +469,25 @@ describe('the panel', () => {
     expect(render({ state: 'off' })).toContain('Off. Only agents on this computer can ask Olympus.');
   });
 
+  test('with remote access off, a cloud agent says why it cannot connect and offers the fix on the spot', () => {
+    for (const platform of ['darwin', 'linux'] as const) {
+      const doc = new Window({ url: ORIGIN }).document;
+      doc.body.innerHTML = renderDashboardAgentsSection({ platform, view: { remoteAccess: { state: 'off' }, connections: [] }, now: NOW });
+      const grokApi = doc.querySelector('[data-agent="grok-api"]')!;
+      // No Create key that would make a key nothing can use; the reason, and the fix, instead.
+      expect(grokApi.querySelector('form[data-agent-kind="key"]')).toBeNull();
+      expect(grokApi.textContent).toMatch(/needs a tunnel you run yourself|remote access is off/);
+      if (platform === 'linux') {
+        expect(grokApi.querySelector('[data-remote-unavailable]')!.textContent).toContain('Turn on remote access above first');
+        expect(grokApi.querySelector('form[data-agent-kind="remote-on"] button')!.textContent).toBe('Turn on remote access');
+      }
+    }
+    // Not connected and invalid have their own explanation, and no second switch.
+    for (const access of [{ state: 'not_connected' }, { state: 'invalid', detail: 'OLYMPUS_PUBLIC_BASE_URL must use https.' }] as DashboardRemoteAccess[]) {
+      expect(render(access)).not.toContain('data-remote-unavailable-fix');
+    }
+  });
+
   test('lists active connections with dates and a Revoke control', () => {
     const store = fixtureStore();
     const muse = store.create('Muse');
@@ -609,6 +628,33 @@ describe('the controller shows a secret once', () => {
     await Bun.sleep(0);
     expect(claude.querySelector('[data-action-message]')!.textContent).toBe('Remote access is off.');
     expect(claude.querySelector<HTMLElement>('[data-agent-secret-slot]')!.hidden).toBe(true);
+  });
+
+  test('Create key or Get pairing code that comes back without a key or code says so, never "Revoked."', async () => {
+    const { root } = mount(async () => ({ status: 200, body: { ok: true } }));
+    const grokApi = root.querySelector<HTMLElement>('[data-agent="grok-api"]')!;
+    grokApi.querySelector<HTMLFormElement>('form[data-agent-kind="key"]')!.requestSubmit();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+    expect(grokApi.querySelector('[data-action-message]')!.textContent).toBe('Olympus did not return a key. Try again; if it keeps happening, restart Olympus.');
+    expect(grokApi.querySelector<HTMLElement>('[data-agent-secret-slot]')!.hidden).toBe(true);
+    const claude = root.querySelector<HTMLElement>('[data-agent="claude"]')!;
+    claude.querySelector<HTMLFormElement>('form[data-agent-kind="pair"]')!.requestSubmit();
+    await Bun.sleep(0);
+    await Bun.sleep(0);
+    expect(claude.querySelector('[data-action-message]')!.textContent).toContain('did not return a pairing code');
+  });
+
+  test('the Add it yourself summary is a plain details toggle: a click on it is left to the browser', () => {
+    const { root } = mount(async () => ({ status: 200, body: { ok: true } }));
+    const summary = root.querySelector<HTMLElement>('[data-agent="local"] details.agentprompt > summary')!;
+    expect(summary.textContent).toBe('Add it yourself instead');
+    let prevented: boolean | undefined;
+    root.ownerDocument.addEventListener('click', (event) => { prevented = event.defaultPrevented; });
+    summary.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    expect(prevented).toBe(false);
+    // Opening it from a remembered poll keeps it open: the key is stable.
+    expect(summary.parentElement!.getAttribute('data-poll-key')).toBe('agent-local-manual');
   });
 
   test('after Create key the list is refreshed while the key stays on screen', async () => {
