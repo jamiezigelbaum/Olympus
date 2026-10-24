@@ -221,7 +221,7 @@ export function renderOutsideHelpToolsReplace(tools: DashboardOutsideHelpTools |
 /** The one controller for every install button on the page; '' without the controls. */
 export function renderOutsideHelpToolsScript(tools: DashboardOutsideHelpTools | undefined, input: { canEdit: boolean; csrfToken?: string }): string {
   if (!tools || !input.canEdit || input.csrfToken === undefined) return '';
-  return `<script>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
+  return `<script data-dashboard-rerun>${outsideHelpToolsClientScript({ csrfToken: input.csrfToken, path: DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH, pollMs: DASHBOARD_OUTSIDE_HELP_TOOLS_POLL_MS, copy: { starting: C.starting, failed: C.failed } })}</script>`;
 }
 
 /**
@@ -233,6 +233,8 @@ export function renderOutsideHelpToolsScript(tools: DashboardOutsideHelpTools | 
  */
 export function outsideHelpToolsClientScript(config: { csrfToken: string; path: string; pollMs: number; copy: { starting: string; failed: string } }): string {
   return `(function () {
+  // The dashboard runs this again after it swaps in a fresh page: one instance binds the new forms, and one poll runs.
+  if (typeof window.__olympusOutsideHelpTools === 'function') { window.__olympusOutsideHelpTools(); return; }
   var config = ${escapeScriptJson(JSON.stringify(config))};
   var timer = null;
   function sections() { return Array.prototype.slice.call(document.querySelectorAll('[data-outside-tools]')); }
@@ -298,6 +300,7 @@ export function outsideHelpToolsClientScript(config: { csrfToken: string; path: 
     });
     if (sections().some(function (node) { return node.getAttribute('data-install-state') === 'running'; })) schedule();
   }
+  window.__olympusOutsideHelpTools = bind;
   bind();
 })();`;
 }

@@ -58,6 +58,8 @@ export interface OlympusBrowserController {
  */
 /** How long the accent outline stays on the place an open link landed (theme.ts `.landed` fades it first). */
 export const LANDED_HIGHLIGHT_MS = 4000;
+/** The event a part of the page dispatches to have the dashboard read and redraw the page now. */
+export const DASHBOARD_REDRAW_EVENT = 'olympus:redraw';
 
 export function mountDashboardController(options: OlympusBrowserControllerOptions): OlympusBrowserController {
   // The page serializes this function, so module constants are not in scope
@@ -84,6 +86,10 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const startedFromSheet = new WeakSet<HTMLFormElement>();
   const pendingForms = new WeakSet<HTMLFormElement>();
   let pendingFormCount = 0;
+  // Keep equal to the exported redraw event constant above (serialized, as above).
+  const redrawEvent = 'olympus:redraw';
+  /** A redraw was asked for while a read or a control was in flight: the next read is forced. */
+  let redrawOwed = false;
 
   function query<T extends Element = Element>(selector: string): T | null {
     return root.querySelector(selector) as T | null;
@@ -162,6 +168,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (pendingForms.has(form)) pendingFormCount--;
       pendingForms.delete(form);
       form.removeAttribute('aria-busy');
+      // A redraw that waited on this control runs once the control's own answer is on the page.
+      if (pendingFormCount === 0 && redrawOwed) setTimeout(() => { void refreshNow(false); }, 0);
     }
     applyWriteCapability();
   }
@@ -654,6 +662,13 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       await refreshAgentList();
       return;
     }
+    // A pairing code or a key that did not come back is a failure to say, never a revoke.
+    if (params.action === 'mint_agent_pairing_code' || params.action === 'create_agent_key') {
+      say(form, params.action === 'create_agent_key'
+        ? 'Olympus did not return a key. Try again; if it keeps happening, restart Olympus.'
+        : 'Olympus did not return a pairing code. Try again; if it keeps happening, restart Olympus.');
+      return;
+    }
     const statusMessage = result.body.status_message;
     say(form, typeof statusMessage === 'string' ? statusMessage : 'Revoked.');
     form.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true; });
@@ -717,9 +732,6 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       applyWriteCapability();
       return;
     }
-    // Anonymous model settings have their own controller. A refreshed document
-    // rebinds it; inert body replacement would leave those controls disconnected.
-    if (query('[data-outside-help]')) { options.navigate(options.returnUrl); return; }
     const openSheets = queryAll<HTMLElement>('.sheet.on').map((sheet) => sheet.id);
     const open = new Set(queryAll<HTMLDetailsElement>('details[open]').map((node) =>
       node.dataset.pollKey || node.querySelector('summary')?.textContent?.trim() || ''));
@@ -736,6 +748,15 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       queryAll<HTMLElement>('[data-sheet-toggle]').filter((toggle) => toggle.dataset.sheetToggle === `#${id}`).forEach((toggle) => toggle.setAttribute('aria-expanded', 'true'));
     }
     findByFocusKey(focused)?.focus();
+    // A part that binds its own controls (the anonymous answers card) marks its
+    // scripts to run again: inserted markup leaves them inert, and without them
+    // its controls would be disconnected.
+    queryAll<HTMLScriptElement>('script[data-dashboard-rerun]').forEach((inert) => {
+      const script = root.ownerDocument.createElement('script');
+      for (const attribute of Array.from(inert.attributes)) script.setAttribute(attribute.name, attribute.value);
+      script.text = inert.text;
+      inert.replaceWith(script);
+    });
     signature = result.signature;
     pollIntervalMs = result.poll_interval_ms;
     deferredSince = 0;
@@ -743,7 +764,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   async function refreshNow(force: boolean, requested = false): Promise<void> {
-    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted || (!force && !presented)) return;
+    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted) return;
+    if (redrawOwed) { redrawOwed = false; force = true; }
+    if (!force && !presented) return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === 'hidden') return;
     if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')) return;
@@ -770,7 +793,20 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // Polling is quiet. A directly submitted control reports its own failure.
     } finally {
       inFlight = false;
+      if (redrawOwed && pendingFormCount === 0) void refreshNow(false);
     }
+  }
+
+  /**
+   * A part of the page that saved its own settings (the anonymous answers
+   * card) asks for the page to be read again now. Claiming the event tells it
+   * no reload is needed: the fresh page is swapped in place, open sections and
+   * sheets kept, and the part's own scripts run again.
+   */
+  function onRedrawRequest(event: Event): void {
+    event.preventDefault();
+    redrawOwed = true;
+    void refreshNow(false);
   }
 
   function restartPoll(): void {
@@ -1000,6 +1036,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   const view = root.ownerDocument.defaultView || window;
   view.addEventListener('focus', refreshOnReturn);
   root.ownerDocument.addEventListener('visibilitychange', onVisibilityReturn);
+  root.addEventListener(redrawEvent, onRedrawRequest);
   applyWriteCapability();
   applyOpenTarget();
   restartPoll();
@@ -1012,6 +1049,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     root.ownerDocument.removeEventListener('visibilitychange', onVisibilityReturn);
     root.removeEventListener('submit', onSubmit);
     root.removeEventListener('click', onClick);
+    root.removeEventListener(redrawEvent, onRedrawRequest);
   };
   options.signal.addEventListener('abort', dispose, { once: true });
 
