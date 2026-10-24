@@ -1,4 +1,3 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Placement of the Dropbox connector stores on the shared spine.
 //
 // Per-tier stores (design docs/design/per-item-four-tier-classification.md,
@@ -12,11 +11,10 @@ import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // filter; the secure store's co-located tier ledger governs visibility for
 // all three.
 
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import {
   createSourceExclusionMatcher,
   loadSourceIngestionExclusions,
@@ -92,8 +90,7 @@ export function defaultDropboxConnectorStoreDbPath(
 ): string {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'dropbox-files-connector-store.sqlite');
+  return olympusDataPath(env, 'dropbox-files-connector-store.sqlite');
 }
 
 export function defaultDropboxInternalConnectorStoreDbPath(
@@ -101,8 +98,7 @@ export function defaultDropboxInternalConnectorStoreDbPath(
 ): string {
   const configured = env[DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'dropbox-files-internal-connector-store.sqlite');
+  return olympusDataPath(env, 'dropbox-files-internal-connector-store.sqlite');
 }
 
 export function defaultDropboxPublicConnectorStoreDbPath(
@@ -110,8 +106,7 @@ export function defaultDropboxPublicConnectorStoreDbPath(
 ): string {
   const configured = env[DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'dropbox-files-public-connector-store.sqlite');
+  return olympusDataPath(env, 'dropbox-files-public-connector-store.sqlite');
 }
 
 /** Every Dropbox tier store's path: the lifecycle deletes all of them with the source. */

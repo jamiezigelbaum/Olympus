@@ -1,5 +1,5 @@
 import { downloadPinnedFile } from '../pinned-download.ts';
-import { standaloneLinuxDataDir } from '../../../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../../../core/olympus-layout.ts';
 // Fetches, verifies and installs the built-in embedding model and its runtime
 // into the Olympus data directory, once. Every file is checked against the
 // pinned manifest before it is used; a file that does not match is deleted,
@@ -20,7 +20,6 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
   BUILT_IN_EMBEDDING_MODEL,
@@ -115,7 +114,7 @@ export class BuiltInEmbeddingInstallError extends Error {
   }
 }
 
-/** `<XDG_DATA_HOME or ~/.local/share>/openclaw/olympus/models/built-in-embedding`. */
+/** `<data root>/models/built-in-embedding` (core/olympus-layout.ts). */
 export function builtInEmbeddingPaths(
   env: Record<string, string | undefined> = process.env,
   model: BuiltInEmbeddingModelSpec = BUILT_IN_EMBEDDING_MODEL,
@@ -124,8 +123,7 @@ export function builtInEmbeddingPaths(
   liteRtRuntime: LiteRtRuntimePackSpec = LITERT_RUNTIME_PACK,
 ): BuiltInEmbeddingPaths {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
-  const dataRoot = env.XDG_DATA_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.local', 'share');
-  const root = configured || join(standaloneLinuxDataDir(env) ?? join(dataRoot, 'openclaw', 'olympus'), 'models', 'built-in-embedding');
+  const root = configured || olympusDataPath(env, 'models', 'built-in-embedding');
   if (!isAbsolute(root)) throw new TypeError('The built-in embedding directory must be an absolute path.');
   return {
     root,
