@@ -1,0 +1,135 @@
+/**
+ * Every store and tier sidecar in src/ and scripts/ is constructed by the
+ * storage service (core/source-storage.ts), which refuses an account whose
+ * registry state is not active (docs/design/source-storage.md, "Storage
+ * service"). A construction outside it is a store a Delete in progress could
+ * find open, so a new one fails here; the allowlist names each exception and
+ * why it is safe. Adapted from #467's guard: the idea and the allowlist
+ * shape, not its custody code.
+ */
+import { describe, expect, test } from 'bun:test';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import ts from 'typescript';
+
+const ROOT = join(import.meta.dir, '..');
+
+// Each reason was checked against the code. The list only shrinks: an entry
+// that no longer constructs anything fails too.
+const ALLOWED: Record<string, string> = {
+  'src/core/source-storage.ts': 'the storage service itself',
+  'src/workers/connector-store/local-index.ts':
+    'the store\'s own connections: the main one, the read-only vector-scan snapshot and the qualification fingerprint, plus its own and its bound set ledger',
+  'src/workers/classification/tier-ledger.ts': 'the tier ledger class opening its own database',
+  'src/workers/classification/secret-locations.ts': 'the secret-locations class opening its own database',
+  'src/workers/classification/sniffer-store.ts': 'the sniffer store class opening its own database',
+  'src/core/file-lease.ts': 'the lock databases themselves',
+  'src/workers/apple-messages/connector.ts': 'reads the macOS Messages chat.db, never an Olympus store',
+  // Shared files: no account's store; their forget steps come in step 3.
+  'src/core/source-watch.ts': 'the shared source-watches database',
+  'src/core/waiting-private-questions.ts': 'the shared waiting private questions database',
+  'src/core/remote-connections.ts': 'the shared remote-connections database',
+  'src/workers/source-dashboard.ts': 'the shared dashboard history database',
+  'src/workers/source-ingestion-ledger.ts': 'the shared dashboard database the ingestion ledger reads and writes',
+  'src/workers/source-scheduler-state.ts': 'the shared scheduler database',
+  'src/workers/file-extraction/job-store.ts': 'the shared extraction job ledger',
+  'src/workers/file-extraction/job-names.ts': 'the shared extraction job ledger, opened to clear or restore captured names',
+  'src/workers/google-connectors/request-budget.ts': 'the shared Google request-budget ledger',
+  // X's per-account state outside the stores.
+  'src/workers/x-bookmarks/live-control.ts':
+    'X\'s API usage ledger: per-account state, not a tier store; it joins the service when it moves into the account folder (step 4)',
+  'src/workers/x-bookmarks/reconcile-state.ts':
+    'X\'s reconcile state: per-account state, not a tier store; it joins the service when it moves into the account folder (step 4)',
+  'src/data-lifecycle.ts': 'the deleter and exporter, which step 5 rebuilds on the registry',
+  // Generic code that reopens sidecars of stores already opened through the
+  // service, found by path: no source is in scope there.
+  'src/workers/classification/sniffer-service.ts':
+    'the worker\'s sniffer: reopens the ledgers, queues and secret-locations beside the stores the worker mounted',
+  'src/workers/classification/installed-tier-classification.ts':
+    'opens the sniffer cache and queue beside the tier ledger a store hands it',
+  'src/workers/classification/tier-migration-cli.ts':
+    'opens the sniffer queue beside a set ledger the migration lanes opened through the service',
+  'src/workers/classification/tier-cli.ts':
+    'the tier CLI\'s item lookup: reads every known store, its ledgers and sniffer queue by path; the CLI goes through the worker in step 2b',
+  'src/workers/connector-store/secrets-disposition.ts':
+    'clears or reads a Secret\'s queued sniffer questions beside the ledger that judged it',
+  'src/workers/connector-store/tiered-store-set.ts':
+    'the shared tier-set factory: opens a lane\'s set ledger by path beside its secure store when the caller hands none; the lane\'s stores come from the service, and the factory knows only a set id',
+  'src/workers/source-index/status.ts': 'counts secret locations beside a mounted Private store, read-only',
+  // Release testing, on a machine kept for it.
+  'scripts/release-check/machine-agent.ts':
+    'the release check\'s agent on a test machine: reads its stand-in Readwise stores and ledger, read-only, to compare an upgrade',
+  // Operator scripts on a database named on their command line; they take
+  // the owner lock in step 2b.
+  'scripts/x-relevance-probe.ts': 'an operator tool on the --db its command line names',
+  'scripts/embedding-identity-repair.ts': 'an operator tool on the --db its command line names',
+  'scripts/connector-store-locator-index.ts': 'an operator tool on the --db its command line names (its schema-version read)',
+  'scripts/vector-scan-bench.ts': 'an operator tool on the --db its command line names',
+  'scripts/whatsapp-identity-backfill.ts': 'an operator tool on the --db and --session-db its command line names',
+};
+
+const GUARDED_CLASSES = ['LocalConnectorStore', 'TierLedger', 'SecretLocationsIndex', 'TierSnifferStore'];
+const CONSTRUCTIONS: readonly RegExp[] = [
+  ...GUARDED_CLASSES.map((name) => new RegExp(`\\bnew\\s+${name}\\s*\\(`)),
+  // `new Database(`, `new DatabaseSync(`, `new BunDatabase(`: any constructor named like a database.
+  /\bnew\s+\w*Database\w*\s*\(/,
+  // A guarded class or a database class imported under another name.
+  new RegExp(`import\\s*\\{[^}]*(?<!type\\s)\\b(?:${GUARDED_CLASSES.join('|')}|\\w*Database\\w*)\\s+as\\s+\\w+`),
+];
+
+// Parsed and printed without comments, so a comment neither counts as a
+// construction nor hides one.
+const printer = ts.createPrinter({ removeComments: true });
+function constructsStore(source: string): boolean {
+  const file = ts.createSourceFile('guard.ts', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const printed = printer.printFile(file);
+  return CONSTRUCTIONS.some((pattern) => pattern.test(printed));
+}
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : sourceFiles(path);
+    return /\.(?:ts|tsx|mts)$/.test(entry.name) ? [path] : [];
+  });
+}
+
+describe('store open guard', () => {
+  test('the guard sees every spelling of a construction', () => {
+    for (const spelling of [
+      'const store = new LocalConnectorStore({ dbPath, corpusId, family, trustDomain });',
+      'const ledger = new TierLedger({ dbPath });',
+      'const index = new SecretLocationsIndex({ dbPath, readOnly: true });',
+      'const sniffer = new TierSnifferStore({ dbPath });',
+      "const db = new Database(path, { readonly: true });",
+      'const db = new DatabaseSync(path);',
+      'const db = new BunDatabase(path);',
+      'const store = new\n  LocalConnectorStore(\n  options,\n);',
+      'const store = new /* reopened */ LocalConnectorStore(options);',
+      "import { Database as Db } from 'bun:sqlite';",
+      "import { type SourceTrustDomain, TierLedger as LedgerClass } from './tier-ledger.ts';",
+      "import {\n  LocalConnectorStore as Store,\n} from './local-index.ts';",
+    ]) expect(constructsStore(spelling), spelling).toBe(true);
+  });
+
+  test('the guard ignores comments, the service and type-only names', () => {
+    for (const spelling of [
+      '// const store = new LocalConnectorStore(options);',
+      '/* new Database(path) */ const x = 1;',
+      '/**\n * Never `new TierLedger(` here.\n */\nexport const y = 2;',
+      'const store = openConnectorStore({ sourceId }, options);',
+      'let store: LocalConnectorStore | undefined;',
+      "import { type TierLedger as Ledger } from './tier-ledger.ts';",
+    ]) expect(constructsStore(spelling), spelling).toBe(false);
+  });
+
+  test('no store or sidecar is constructed outside the service and the allowlist', () => {
+    const matching = [...sourceFiles(join(ROOT, 'src')), ...sourceFiles(join(ROOT, 'scripts'))]
+      .filter((path) => constructsStore(readFileSync(path, 'utf8')))
+      .map((path) => relative(ROOT, path))
+      .sort();
+    const unexpected = matching.filter((path) => !(path in ALLOWED));
+    const stale = Object.keys(ALLOWED).filter((path) => !matching.includes(path));
+    expect({ unexpected, stale }, 'open stores through openConnectorStore() and its sidecar twins in core/source-storage.ts').toEqual({ unexpected: [], stale: [] });
+  });
+});

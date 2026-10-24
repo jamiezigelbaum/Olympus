@@ -40,9 +40,10 @@ import {
   defaultGoogleDriveConnectorStoreDbPath,
   defaultGoogleDriveSecureConnectorStoreDbPath,
 } from './google-connectors/index.ts';
-import {
+import type {
   LocalConnectorStore,
 } from './connector-store/index.ts';
+import { openConnectorStore, storageAccountForCorpus } from '../core/source-storage.ts';
 import { defaultReadwiseConnectorStoreDbPath } from './readwise/index.ts';
 import { READWISE_SECURE_LIBRARY_CORPUS_ID, defaultReadwiseSecureConnectorStoreDbPath } from './readwise/tier-set.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from './x-bookmarks/index.ts';
@@ -82,7 +83,7 @@ import {
 } from './local-files/store.ts';
 import { closeSqliteStore } from '../core/sqlite-store.ts';
 import { archiveImportFamilies } from '../core/archive-formats.ts';
-import { ARCHIVE_TIER_DOMAINS, archiveConnectorStoreDbPath, archiveCorpusId } from './archive-import/store.ts';
+import { ARCHIVE_TIER_DOMAINS, archiveConnectorStoreDbPath, archiveCorpusId, archiveImportCorpora } from './archive-import/store.ts';
 
 export interface SourceIngestionLedgerSnapshot {
   kind: 'source_ingestion_ledger';
@@ -776,7 +777,11 @@ export async function collectLocalSourceIngestionLedger(
               env,
               { readOnly: true },
             )
-            : new LocalConnectorStore({ ...store, ...(gated ? { exclusions: matcher } : {}) });
+            : openConnectorStore(
+              storageAccountForCorpus(store, archiveImportCorpora()),
+              { ...store, ...(gated ? { exclusions: matcher } : {}) },
+              env,
+            );
     handles.push(handle);
     connectorStores.push(handle);
     if (gated) {

@@ -13,11 +13,11 @@
 // trust rule is enforced by the store, not this script).
 
 import { SOURCE_FAMILIES, SOURCE_TRUST_DOMAINS } from '../src/core/source-index/types.ts';
-import {
-  LocalConnectorStore,
-  type ConnectorStoreEmbedSummary,
-  type LocalConnectorStoreOptions,
+import type {
+  ConnectorStoreEmbedSummary,
+  LocalConnectorStoreOptions,
 } from '../src/workers/connector-store/index.ts';
+import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
 
 interface ConnectorStoreEmbedCliArgs {
@@ -163,7 +163,8 @@ async function runConnectorStoreEmbed(argv: readonly string[]): Promise<{
       + 'and OLYMPUS_SOURCE_INDEX_EMBEDDING_MODEL.',
     );
   }
-  const store = new LocalConnectorStore(resolveConnectorStoreOptions(args));
+  const options = resolveConnectorStoreOptions(args);
+  const store = openConnectorStore(storageAccountForCorpus(options), options);
   try {
     const embed = await store.embedChunks({
       provider,

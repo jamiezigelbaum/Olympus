@@ -25,9 +25,10 @@ import {
   loadDropboxIngestionPolicy,
   type SourceIngestionPolicy,
 } from '../../core/source-ingestion-policy.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { fileLaneIngestionMatcher } from '../connector-store/file-ingestion-matcher.ts';
-import { DROPBOX_FILES_CORPUS_ID } from './corpus-adapter.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
+import { DROPBOX_FILES_CORPUS_ID, DROPBOX_FILES_SOURCE_ID } from './corpus-adapter.ts';
 
 export const DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID = DROPBOX_FILES_CORPUS_ID;
 
@@ -159,14 +160,14 @@ export function createDropboxConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? loadDropboxIngestionPolicy({ env });
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {
     dbPath: defaultDropboxConnectorStoreDbPath(env),
     corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
     family: 'file',
     trustDomain: 'secure_local',
     exclusions: dropboxCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
-  });
+  }, env);
 }
 
 /**
@@ -180,7 +181,7 @@ export function createDropboxTierConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy; tierLedger?: TierLedger } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? loadDropboxIngestionPolicy({ env });
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {
     dbPath: trustDomain === 'internal'
       ? defaultDropboxInternalConnectorStoreDbPath(env)
       : defaultDropboxPublicConnectorStoreDbPath(env),
@@ -190,5 +191,5 @@ export function createDropboxTierConnectorStore(
     exclusions: dropboxCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
     ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
-  });
+  }, env);
 }

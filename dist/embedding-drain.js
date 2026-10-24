@@ -28815,94 +28815,6 @@ var init_tiered_store_set = __esm(() => {
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
-// src/workers/connector-store/principal.ts
-function isCanonicalConnectorStoreProvider(provider) {
-  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
-}
-function isCanonicalConnectorStoreAccountScope(accountScope) {
-  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
-}
-var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
-var init_principal = __esm(() => {
-  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
-  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
-});
-
-// src/workers/connector-store/filter-capabilities.ts
-function connectorStoreFilterCapabilityRegistry(entries) {
-  const familyEntries = new Map;
-  const providerEntries = new Map;
-  for (const [scope, capabilities] of entries) {
-    const provider = "provider" in scope ? scope.provider : undefined;
-    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
-      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
-    }
-    const registry = provider === undefined ? familyEntries : providerEntries;
-    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key2)) {
-      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
-      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
-    }
-    registry.set(key2, Object.freeze({ ...capabilities }));
-  }
-  return Object.freeze({
-    resolve(identity) {
-      const familyCapabilities = familyEntries.get(identity.family);
-      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
-      if (!familyCapabilities)
-        return providerCapabilities;
-      if (!providerCapabilities)
-        return familyCapabilities;
-      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
-    }
-  });
-}
-function providerScopeKey(family, provider) {
-  return `${family}\x00${provider}`;
-}
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
-});
-
 // src/workers/connector-store/file-ingestion-matcher.ts
 var POLICY_ADMITTED;
 var init_file_ingestion_matcher = __esm(() => {
@@ -28914,6 +28826,154 @@ var init_file_ingestion_matcher = __esm(() => {
     disposition: "admit",
     outcome: "admitted"
   });
+});
+
+// src/core/source-registry.ts
+import { existsSync as existsSync18, readFileSync as readFileSync17 } from "node:fs";
+function sourceRegistryPath(env = process.env) {
+  return olympusDataPath(env, "registry.json");
+}
+function readSourceRegistry(env = process.env) {
+  return readSourceRegistryAt(sourceRegistryPath(env));
+}
+function updateSourceRegistry(env, mutate) {
+  const path = sourceRegistryPath(env);
+  return withFileLeaseSync(path, (lease) => {
+    const current2 = readSourceRegistryAt(path);
+    const next = mutate(current2) ?? current2;
+    const text2 = `${JSON.stringify(validateRegistry(next, path), null, 2)}
+`;
+    lease.commit(() => writePrivateFileAtomicSync(path, text2));
+    return next;
+  });
+}
+function findRegistryAccount(registry, sourceId, slot) {
+  return registry.accounts.find((account) => account.source_id === sourceId && account.slot === slot);
+}
+function readSourceRegistryAt(path) {
+  if (!existsSync18(path))
+    return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync17(path, "utf8"));
+  } catch (error) {
+    throw new SourceRegistryError(path, error instanceof SyntaxError ? "not JSON" : "cannot be read");
+  }
+  return validateRegistry(parsed, path);
+}
+function validateRegistry(value, path) {
+  if (!isRecord(value))
+    throw new SourceRegistryError(path, "not an object");
+  if (value.schema !== SOURCE_REGISTRY_SCHEMA)
+    throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
+  if (!Array.isArray(value.accounts))
+    throw new SourceRegistryError(path, "accounts is not a list");
+  const seen = new Set;
+  for (const [index, account] of value.accounts.entries()) {
+    if (!isValidAccount(account))
+      throw new SourceRegistryError(path, `account #${index + 1} is malformed`);
+    const key2 = `${account.source_id}\x00${account.slot}`;
+    if (seen.has(key2))
+      throw new SourceRegistryError(path, `${account.source_id} slot ${account.slot} is listed twice`);
+    seen.add(key2);
+  }
+  return value;
+}
+function isValidAccount(value) {
+  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at);
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var SOURCE_REGISTRY_SCHEMA = 1, SourceRegistryError, STATES, LAYOUTS;
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+  SourceRegistryError = class SourceRegistryError extends Error {
+    code = "source_registry_unreadable";
+    path;
+    constructor(path, detail) {
+      super(`The source registry at ${path} is unreadable (${detail}); no source store opens until it is repaired.`);
+      this.name = "SourceRegistryError";
+      this.path = path;
+    }
+  };
+  STATES = ["active", "deleting", "deleted"];
+  LAYOUTS = ["legacy", "folder"];
+});
+
+// src/core/source-storage.ts
+function openConnectorStore(account, options, env = process.env) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, slot);
+  if (adoptionEnabled && options.readOnly !== true) {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry?.corpus_ids.includes(options.corpusId))
+      adopt(env, account.sourceId, slot, options.corpusId);
+  }
+  return new LocalConnectorStore(options);
+}
+function storageAccountForCorpus(corpus, registered2 = []) {
+  const known = [...registered2, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
+  if (known)
+    return { sourceId: known.sourceId };
+  const prefix = `${corpus.trustDomain}.`;
+  const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
+  return { sourceId: unprefixed || corpus.corpusId };
+}
+function unavailableStateReason(state) {
+  return state === "deleting" ? "its data is being deleted" : "its data was deleted";
+}
+function assertOpenable(registry, sourceId, slot) {
+  const state = findRegistryAccount(registry, sourceId, slot)?.state;
+  if (state !== undefined && state !== "active")
+    throw new SourceStorageUnavailableError(sourceId, slot, state);
+}
+function adopt(env, sourceId, slot, corpusId) {
+  updateSourceRegistry(env, (registry) => {
+    assertOpenable(registry, sourceId, slot);
+    const entry = findRegistryAccount(registry, sourceId, slot);
+    if (!entry) {
+      registry.accounts.push({
+        source_id: sourceId,
+        slot,
+        state: "active",
+        layout: "legacy",
+        corpus_ids: [corpusId],
+        created_at: new Date().toISOString()
+      });
+    } else if (!entry.corpus_ids.includes(corpusId)) {
+      entry.corpus_ids.push(corpusId);
+    }
+  });
+}
+var DEFAULT_STORAGE_SLOT = "1", SourceStorageUnavailableError, adoptionEnabled = false;
+var init_source_storage = __esm(() => {
+  init_secret_locations();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_local_index();
+  init_source_corpus_registry();
+  init_source_registry();
+  SourceStorageUnavailableError = class SourceStorageUnavailableError extends Error {
+    code = "source_storage_unavailable";
+    sourceId;
+    slot;
+    state;
+    constructor(sourceId, slot, state) {
+      const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
+      super(`${account} is not available: ${unavailableStateReason(state)}.`);
+      this.name = "SourceStorageUnavailableError";
+      this.sourceId = sourceId;
+      this.slot = slot;
+      this.state = state;
+    }
+  };
 });
 
 // src/workers/dropbox-files/corpus-adapter.ts
@@ -28930,12 +28990,12 @@ function defaultDropboxConnectorStoreDbPath(env = process.env) {
   return olympusDataPath(env, "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT;
-var init_connector_store2 = __esm(() => {
+var init_connector_store = __esm(() => {
   init_olympus_layout();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_connector_store();
   init_file_ingestion_matcher();
+  init_source_storage();
   init_corpus_adapter();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -28953,7 +29013,7 @@ var init_connector_store2 = __esm(() => {
 var init_provider_store_sync = __esm(() => {
   init_embeddings();
   init_tiered_store_set();
-  init_connector_store2();
+  init_connector_store();
   init_connector();
   init_provider_client();
 });
@@ -29193,6 +29253,94 @@ var init_dropbox2 = __esm(() => {
   init_pdf_render();
   init_credential_broker();
   init_approved_scope_filter();
+});
+
+// src/workers/connector-store/principal.ts
+function isCanonicalConnectorStoreProvider(provider) {
+  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
+}
+function isCanonicalConnectorStoreAccountScope(accountScope) {
+  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
+}
+var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
+var init_principal = __esm(() => {
+  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
+  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+});
+
+// src/workers/connector-store/filter-capabilities.ts
+function connectorStoreFilterCapabilityRegistry(entries) {
+  const familyEntries = new Map;
+  const providerEntries = new Map;
+  for (const [scope, capabilities] of entries) {
+    const provider = "provider" in scope ? scope.provider : undefined;
+    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
+      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
+    }
+    const registry = provider === undefined ? familyEntries : providerEntries;
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
+      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
+      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
+    }
+    registry.set(key2, Object.freeze({ ...capabilities }));
+  }
+  return Object.freeze({
+    resolve(identity) {
+      const familyCapabilities = familyEntries.get(identity.family);
+      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
+      if (!familyCapabilities)
+        return providerCapabilities;
+      if (!providerCapabilities)
+        return familyCapabilities;
+      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
+    }
+  });
+}
+function providerScopeKey(family, provider) {
+  return `${family}\x00${provider}`;
+}
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store2 = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
@@ -29683,16 +29831,16 @@ var init_analyst_answer = __esm(() => {
 // src/workers/dropbox-files/qualification.ts
 var init_qualification = __esm(() => {
   init_corpus();
-  init_connector_store();
+  init_connector_store2();
   init_analyst_answer();
   init_corpus_adapter();
 });
 
 // src/workers/dropbox-files/tier-set.ts
 var init_tier_set = __esm(() => {
-  init_tier_ledger();
+  init_source_storage();
   init_tiered_store_set();
-  init_connector_store2();
+  init_connector_store();
   init_corpus_adapter();
 });
 
@@ -29710,7 +29858,7 @@ var init_dropbox_files = __esm(() => {
   init_corpus_adapter();
   init_qualification();
   init_tier_set();
-  init_connector_store2();
+  init_connector_store();
 });
 
 // src/core/google-handle-compatibility.ts
@@ -31277,7 +31425,7 @@ var init_connector2 = __esm(() => {
   init_olympus_layout();
   init_atomic_file();
   init_credential_broker();
-  init_connector_store();
+  init_source_storage();
   init_api();
   init_corpus_adapter2();
   READWISE_STORE_PLACEMENT = Object.freeze({
@@ -31297,7 +31445,7 @@ var init_live_control = __esm(() => {
 
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
-  init_connector_store();
+  init_connector_store2();
   init_tiered_store_set();
   init_api();
   init_connector2();
@@ -31321,7 +31469,7 @@ var init_corpus_adapter3 = __esm(() => {
 // src/workers/x-bookmarks/qualification.ts
 var init_qualification2 = __esm(() => {
   init_corpus();
-  init_connector_store();
+  init_connector_store2();
   init_analyst_answer();
   init_corpus_adapter3();
 });
@@ -31383,7 +31531,7 @@ function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_corpus_adapter3();
   init_folder_facets();
   X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
@@ -31448,7 +31596,7 @@ var init_window_diagnostic = __esm(() => {
 
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
-  init_connector_store();
+  init_connector_store2();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();
@@ -31461,7 +31609,7 @@ var init_live_sync2 = __esm(() => {
 // src/workers/x-bookmarks/content-recovery.ts
 var init_content_recovery = __esm(() => {
   init_types();
-  init_connector_store();
+  init_connector_store2();
   init_credential_broker();
   init_api2();
   init_connector3();
@@ -31676,8 +31824,7 @@ var init_store = __esm(() => {
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_tier_ledger();
-  init_connector_store();
+  init_source_storage();
   init_file_ingestion_matcher();
   init_tiered_store_set();
   init_scope();
@@ -31729,7 +31876,7 @@ var init_capture_spool_connector = __esm(() => {
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync = __esm(() => {
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -33872,7 +34019,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync8, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync8, readFileSync as readFileSync17 } from "node:fs";
+import { closeSync as closeSync8, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync8, readFileSync as readFileSync18 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -33911,7 +34058,7 @@ function readRecordText(path) {
     if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
       return { kind: "unreadable", reason: "record path changed between inspection and opening" };
     }
-    return { kind: "ok", text: readFileSync17(fd, "utf8") };
+    return { kind: "ok", text: readFileSync18(fd, "utf8") };
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
@@ -34117,7 +34264,7 @@ function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -36839,7 +36986,7 @@ function chatgptPickerProgram(kit) {
   const el = kit.el;
   const add = kit.add;
   const fill2 = kit.fill;
-  const STATES = ["ingest", "metadata_only", "exclude"];
+  const STATES2 = ["ingest", "metadata_only", "exclude"];
   const WINDOWS = ["6m", "1y", "2y", "5y", "all"];
   const CATEGORIES = ["primary", "updates", "forums", "social", "promotions"];
   let p = null;
@@ -37213,7 +37360,7 @@ function chatgptPickerProgram(kit) {
       p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page2.selections) ? page2.selections : [];
       for (const selection of saved) {
-        if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
+        if (!selection || typeof selection.key !== "string" || STATES2.indexOf(selection.state) < 0)
           continue;
         p.own.set(selection.key, selection.state);
         p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys) ? selection.ancestor_keys.filter((key2) => typeof key2 === "string") : []);
@@ -37405,7 +37552,7 @@ function chatgptPickerProgram(kit) {
         p.edited = true;
       }
     } else {
-      if (value && STATES.indexOf(value) < 0)
+      if (value && STATES2.indexOf(value) < 0)
         return;
       if (value && !allowed(key2, value))
         return;
@@ -37634,7 +37781,7 @@ function chatgptPickerProgram(kit) {
     group2.setAttribute("role", "group");
     group2.setAttribute("aria-label", fill2(Q.choiceGroup, { name }));
     const buttons = [];
-    for (const state of STATES) {
+    for (const state of STATES2) {
       const words2 = Q.segments[state];
       const pressed = model.pressed === state;
       const button = el("button", "seg-opt" + (pressed ? " on" : model.inherited === state ? " inherited" : ""));
@@ -39516,7 +39663,7 @@ var init_google_connectors = __esm(() => {
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector2();
 });
@@ -39524,7 +39671,7 @@ var init_tier_set2 = __esm(() => {
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector3();
 });
@@ -39557,6 +39704,13 @@ var init_archive_formats = __esm(() => {
   CONNECTOR_FACTORIES = new Map;
 });
 
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
 // src/workers/archive-import/store.ts
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
@@ -39566,7 +39720,8 @@ var init_store2 = __esm(() => {
   init_olympus_layout();
   init_archive_formats();
   init_source_corpus_registry();
-  init_connector_store();
+  init_source_storage();
+  init_state();
   ARCHIVE_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local",
@@ -39584,7 +39739,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_answer_ready_coverage();
   init_status();
   init_google_connectors();
-  init_connector_store();
+  init_source_storage();
   init_readwise();
   init_tier_set2();
   init_x_bookmarks();
@@ -39716,7 +39871,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync22, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync21 } from "node:fs";
+import { existsSync as existsSync23, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync22 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname25, join as join30 } from "node:path";
 function permissionHostKind(env) {
@@ -39920,9 +40075,9 @@ class MacPermissions {
     if (this.memory)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync22(this.memoryPath)) {
+    if (this.memoryPath && existsSync23(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync21(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync22(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -40319,7 +40474,7 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash26 } from "node:crypto";
-import { existsSync as existsSync26, lstatSync as lstatSync12, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync27, lstatSync as lstatSync12, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname28, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -40841,7 +40996,7 @@ init_worker_transport();
 init_package_root();
 
 // src/core/messaging-runtime.ts
-import { existsSync as existsSync18 } from "node:fs";
+import { existsSync as existsSync19 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { join as join25 } from "node:path";
 function telegramPythonExecutable(options = {}) {
@@ -40850,7 +41005,7 @@ function telegramPythonExecutable(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir11();
   const isolated = join25(env.XDG_CACHE_HOME ?? join25(home, ".cache"), "olympus", "telegram-python", "bin", "python");
-  return existsSync18(isolated) ? isolated : Bun.which("python3") ?? undefined;
+  return existsSync19(isolated) ? isolated : Bun.which("python3") ?? undefined;
 }
 
 // src/core/messaging-capture.ts
@@ -40858,7 +41013,7 @@ init_atomic_file();
 init_secret_store();
 init_unpaired_sources();
 init_connected_handles();
-import { closeSync as closeSync9, constants as constants2, existsSync as existsSync19, fstatSync as fstatSync2, openSync as openSync9, readFileSync as readFileSync18, rmSync as rmSync6 } from "node:fs";
+import { closeSync as closeSync9, constants as constants2, existsSync as existsSync20, fstatSync as fstatSync2, openSync as openSync9, readFileSync as readFileSync19, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname22, join as join26 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -40985,7 +41140,7 @@ async function observeChildExit(child, timeoutMs) {
   return observed;
 }
 function readGrant(path) {
-  if (!existsSync19(path))
+  if (!existsSync20(path))
     return { kind: "missing" };
   let descriptor;
   try {
@@ -40995,7 +41150,7 @@ function readGrant(path) {
     if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
       return { kind: "invalid" };
     }
-    const value = JSON.parse(readFileSync18(descriptor, "utf8"));
+    const value = JSON.parse(readFileSync19(descriptor, "utf8"));
     if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle || !value.sessionPath)
       return { kind: "invalid" };
     if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
@@ -41027,7 +41182,7 @@ function handleAllowsCapture(handle, source) {
   return source === "telegram" ? handle.provider === "telegram" && handle.allowedCapabilities.includes("telegram.messages.sync") : handle.provider === "whatsapp_personal" && handle.allowedCapabilities.includes("whatsapp.personal.messages.sync");
 }
 function sessionExists(grant) {
-  return grant.source === "telegram" ? existsSync19(`${grant.sessionPath.replace(/\.session$/, "")}.session`) : existsSync19(join26(grant.sessionPath, "session.db"));
+  return grant.source === "telegram" ? existsSync20(`${grant.sessionPath.replace(/\.session$/, "")}.session`) : existsSync20(join26(grant.sessionPath, "session.db"));
 }
 function spawnCapture(input) {
   const child = Bun.spawn([input.executable, ...input.args], {
@@ -41118,7 +41273,7 @@ function splitScopedLocalItemId(localItemId) {
 
 // src/workers/email-source/file-extraction-runtime.ts
 init_media_cache();
-init_connector_store2();
+init_connector_store();
 
 // src/workers/dropbox-files/extraction-source.ts
 init_dropbox_content_hash();
@@ -41632,7 +41787,7 @@ init_engine();
 init_tier_classifier();
 init_secrets_disposition();
 init_source_ingestion_exclusions();
-init_connector_store();
+init_connector_store2();
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
 var EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible";
 var EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere";
@@ -41703,9 +41858,9 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync20,
+  existsSync as existsSync21,
   mkdirSync as mkdirSync14,
-  readFileSync as readFileSync19,
+  readFileSync as readFileSync20,
   renameSync as renameSync5,
   rmSync as rmSync7,
   writeFileSync as writeFileSync6
@@ -41876,14 +42031,14 @@ async function fetchCatalog(input, fetchedAtMs) {
   return { status: "success", catalog };
 }
 function parseCatalogModels(payload2) {
-  if (!isRecord(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
+  if (!isRecord2(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
     return;
   }
   const models = {};
   for (const rawItem of payload2.data) {
-    if (!isRecord(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
+    if (!isRecord2(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
       continue;
-    if (!isRecord(rawItem.model_spec))
+    if (!isRecord2(rawItem.model_spec))
       continue;
     const category = parsePrivacyCategory(rawItem.model_spec.privacy);
     if (!category)
@@ -41893,21 +42048,21 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync20(path))
+  if (!existsSync21(path))
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync19(path, "utf8"));
+    payload2 = JSON.parse(readFileSync20(path, "utf8"));
   } catch {
     return;
   }
-  if (!isRecord(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
+  if (!isRecord2(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
     return;
   if (payload2.catalog_type !== undefined && payload2.catalog_type !== type)
     return;
   if (type === "embedding" && payload2.catalog_type !== "embedding")
     return;
-  if (typeof payload2.fetched_at !== "string" || !isRecord(payload2.models))
+  if (typeof payload2.fetched_at !== "string" || !isRecord2(payload2.models))
     return;
   const fetchedAtMs = Date.parse(payload2.fetched_at);
   if (!Number.isFinite(fetchedAtMs))
@@ -41962,7 +42117,7 @@ function boundedPositiveMs(value, fallback, maximum) {
     return fallback;
   return Math.min(maximum, Math.max(1, Math.floor(value)));
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function throwIfAborted(signal) {
@@ -42680,7 +42835,7 @@ init_source_ingestion_exclusions();
 init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
-init_connector_store();
+init_connector_store2();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
@@ -42819,11 +42974,7 @@ init_dropbox_files();
 init_store();
 init_archive_formats();
 init_store2();
-
-// src/workers/archive-import/state.ts
-init_olympus_layout();
-init_atomic_file();
-init_file_lease();
+init_state();
 
 // src/workers/archive-import/requests.ts
 init_atomic_file();
@@ -42842,6 +42993,7 @@ var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
 var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
 
 // src/workers/archive-import/requests.ts
+init_state();
 var STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
 
 // src/data-lifecycle.ts
@@ -43070,7 +43222,7 @@ init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire5 } from "node:module";
-import { existsSync as existsSync21, readFileSync as readFileSync20 } from "node:fs";
+import { existsSync as existsSync22, readFileSync as readFileSync21 } from "node:fs";
 import { dirname as dirname24, join as join29 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
@@ -43130,7 +43282,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync21(snapshotPath))
+    if (!existsSync22(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -43243,7 +43395,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value = Number.parseInt(readFileSync20("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value = Number.parseInt(readFileSync21("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value) && value > 0 ? value : undefined;
   } catch {
     return;
@@ -43260,7 +43412,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join29(dir, "node_modules");
-    if (!existsSync21(join29(candidate, "@parcel", "watcher")))
+    if (!existsSync22(join29(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire5(join29(dirname24(candidate), "package.json"));
@@ -43299,7 +43451,7 @@ init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
 import { createHash as createHash23 } from "node:crypto";
-init_connector_store();
+init_connector_store2();
 init_google_connectors();
 init_readwise();
 init_embeddings();
@@ -44699,9 +44851,10 @@ var SKIPPED_LABELS = new Set(["spam", "trash"]);
 var decodableCharsets = new Map;
 
 // src/workers/archive-import/lane.ts
-init_tier_ledger();
+init_source_storage();
 init_tiered_store_set();
 init_archive_formats();
+init_state();
 init_store2();
 var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
   holdContentUntilJudged: true
@@ -44711,6 +44864,7 @@ var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
 init_archive_formats();
 
 // src/workers/archive-import/runtime.ts
+init_state();
 init_store2();
 
 // src/workers/archive-import/dashboard.ts
@@ -44720,6 +44874,7 @@ init_archive_formats();
 init_open_targets();
 init_display_text();
 init_vocabulary();
+init_state();
 var ARCHIVE_AGENT_COPY = {
   invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
   tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
@@ -44752,14 +44907,17 @@ var ARCHIVE_AGENT_COPY = {
 };
 
 // src/workers/archive-import/removal.ts
-init_sniffer_store();
+init_source_storage();
+init_state();
 init_store2();
 
 // src/workers/archive-import/dashboard.ts
 init_display_text();
+init_state();
 
 // src/workers/email-source/server.ts
 init_store2();
+init_state();
 
 // src/workers/archive-import/scheduler-source.ts
 init_embeddings();
@@ -44767,6 +44925,7 @@ init_embeddings();
 // src/workers/archive-import/sync.ts
 init_archive_formats();
 init_tiered_store_set();
+init_state();
 init_store2();
 
 // src/workers/archive-import/scheduler-source.ts
@@ -44783,7 +44942,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync23, lstatSync as lstatSync10, readFileSync as readFileSync22, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync24, lstatSync as lstatSync10, readFileSync as readFileSync23, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -44999,7 +45158,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync22("/proc/self/mountinfo", "utf8");
+  return readFileSync23("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -45016,7 +45175,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync23(dir))
+    if (!existsSync24(dir))
       return result;
     for (const name of readdirSync3(dir)) {
       try {
@@ -45302,7 +45461,7 @@ init_scope();
 // src/workers/local-files/mac-settings.ts
 init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync24 } from "node:fs";
+import { existsSync as existsSync25 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { join as join31 } from "node:path";
 function helperAppPathForHome(home = homedir15()) {
@@ -45313,7 +45472,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn3(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync24)(helper))
+  if ((deps.exists ?? existsSync25)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -45541,12 +45700,12 @@ registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocal
 // src/workers/email-source/server.ts
 init_source_ingestion_exclusions();
 init_telegram_messages();
-init_connector_store();
+init_connector_store2();
 init_principal();
 
 // src/workers/email-source/source-answer-lanes.ts
 init_embeddings();
-init_connector_store();
+init_connector_store2();
 
 // src/workers/email-source/gmail-status-scope.ts
 init_google_connectors();
@@ -45561,6 +45720,7 @@ init_tier_ledger();
 
 // src/workers/email-source/server.ts
 init_secret_locations();
+init_source_storage();
 init_credential_broker();
 init_types();
 init_secret_store();
@@ -45818,7 +45978,7 @@ init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
-import { mkdirSync as mkdirSync16, readFileSync as readFileSync23 } from "node:fs";
+import { mkdirSync as mkdirSync16, readFileSync as readFileSync24 } from "node:fs";
 import { dirname as dirname27 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
@@ -45837,7 +45997,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync23(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync24(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -46197,7 +46357,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync25 } from "node:fs";
+import { existsSync as existsSync26 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
@@ -46281,7 +46441,7 @@ class TierSnifferService {
         db = new Database6(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync25(path);
+        const hasQueue = existsSync26(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -46482,11 +46642,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync25(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync26(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync25(own3))
+      if (existsSync26(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -47298,7 +47458,7 @@ function optionalEnv(env, name) {
 if (false) {}
 
 // scripts/source-embedding-drain.ts
-init_connector_store();
+init_source_storage();
 init_x_bookmarks();
 init_readwise();
 
@@ -47554,7 +47714,7 @@ class DirectSourceEmbeddingDrainClient {
     }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
-      store = new LocalConnectorStore({
+      store = openConnectorStore(storageAccountForCorpus(config), {
         dbPath: config.dbPath,
         corpusId: config.corpusId,
         family: config.family,
@@ -47906,9 +48066,9 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync26(config.dbPath))
+    if (!config.dbPath || !existsSync27(config.dbPath))
       return [];
-    const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
+    const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {
       const counts = store.status().counts;
       const chunksCurrent2 = Math.min(counts.chunks, counts.embeddedChunks);

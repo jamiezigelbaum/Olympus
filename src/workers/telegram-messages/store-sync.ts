@@ -3,10 +3,11 @@
 // advances two trust-separated stores through the shared connector spine.
 
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
-import {
+import { openConnectorStore } from '../../core/source-storage.ts';
+import type {
   LocalConnectorStore,
-  type ConnectorStoreSyncSummary,
-  type ConnectorStoreTrustReconciliationSummary,
+  ConnectorStoreSyncSummary,
+  ConnectorStoreTrustReconciliationSummary,
 } from '../connector-store/index.ts';
 import { createLaneTieredStoreSet, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
@@ -114,19 +115,20 @@ export interface TelegramConnectorStoreSyncHandler {
 export function createTelegramConnectorStores(
   env: Record<string, string | undefined> = process.env,
 ): TelegramConnectorStores {
+  const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
   return {
-    internal: new LocalConnectorStore({
+    internal: openConnectorStore(account, {
       dbPath: defaultInternalTelegramConnectorStoreDbPath(env),
       corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'internal',
-    }),
-    secureLocal: new LocalConnectorStore({
+    }, env),
+    secureLocal: openConnectorStore(account, {
       dbPath: defaultProtectedTelegramConnectorStoreDbPath(env),
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'secure_local',
-    }),
+    }, env),
   };
 }
 

@@ -15431,6 +15431,287 @@ var init_corpus_adapter = __esm(() => {
   init_source_corpus_registry();
 });
 
+// src/core/secret-patterns.ts
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "again",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "retry",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_ -]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+});
+
+// src/workers/dropbox-files/content-policy.ts
+var init_content_policy = __esm(() => {
+  init_secret_patterns();
+});
+
+// src/workers/classification/engine.ts
+var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
+var init_engine = __esm(() => {
+  init_content_policy();
+  SECRET_FINDING_TYPES = new Set([
+    "private_key_material",
+    "aws_access_key_id",
+    "slack_token",
+    "api_secret_token",
+    "credential_assignment"
+  ]);
+  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
+});
+// src/workers/classification/tier-classifier.ts
+var UNDECIDED_TIER_SNIFFER;
+var init_tier_classifier = __esm(() => {
+  init_secret_patterns();
+  init_secret_patterns();
+  init_engine();
+  init_sender_rules();
+  UNDECIDED_TIER_SNIFFER = Object.freeze({
+    id: "undecided",
+    judge: () => ({ verdict: "undecided" })
+  });
+});
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  init_tier_classifier();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
+// src/workers/classification/sniffer-store.ts
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
+
+// src/workers/classification/tier-ledger.ts
+var init_tier_ledger = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
+
 // src/core/source-index/keyword-languages.ts
 var profiles;
 var init_keyword_languages = __esm(() => {
@@ -15662,281 +15943,6 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
-
-// src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
-var init_secret_patterns = __esm(() => {
-  PROSE_WORDS = new Set([
-    "above",
-    "again",
-    "below",
-    "cannot",
-    "change",
-    "changed",
-    "characters",
-    "choose",
-    "click",
-    "contact",
-    "enter",
-    "expired",
-    "expires",
-    "forgot",
-    "forgotten",
-    "guideline",
-    "guidelines",
-    "hidden",
-    "incorrect",
-    "information",
-    "instruction",
-    "instructions",
-    "invalid",
-    "least",
-    "letters",
-    "link",
-    "manager",
-    "maximum",
-    "min",
-    "minimum",
-    "must",
-    "need",
-    "needed",
-    "needs",
-    "number",
-    "numbers",
-    "optional",
-    "please",
-    "policies",
-    "policy",
-    "protected",
-    "provide",
-    "provided",
-    "required",
-    "requirements",
-    "reset",
-    "retry",
-    "see",
-    "send",
-    "sent",
-    "setting",
-    "settings",
-    "shared",
-    "should",
-    "shown",
-    "sign",
-    "strength",
-    "symbols",
-    "unchanged",
-    "use",
-    "used",
-    "using",
-    "via"
-  ]);
-  CREDENTIAL_KEYS = [
-    { pattern: String.raw`api[_ -]?key`, legacy: true },
-    { pattern: String.raw`access[_ -]?token`, legacy: true },
-    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
-    { pattern: String.raw`client[_ -]?secret`, legacy: true },
-    { pattern: "password", legacy: true },
-    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
-    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
-    { pattern: String.raw`private[_ -]?key` },
-    { pattern: "secret" },
-    { pattern: String.raw`token(?!s)` },
-    { pattern: "sig", urlOnly: true }
-  ];
-  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
-  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
-  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
-  PLACEHOLDER_WORDS = new RegExp([
-    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
-    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
-    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
-    "placeholder",
-    "redacted",
-    "changeme",
-    "change[_-]me",
-    "replace[_-]?me",
-    "insert[_-]?(?:your|here|key|token)",
-    "[_-]here$",
-    "^n/a$",
-    "not[_ -]?set",
-    "^unset$"
-  ].join("|"), "i");
-  BARE_LITERALS = new Set([
-    "password",
-    "passwd",
-    "passphrase",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "string",
-    "null",
-    "none",
-    "nil",
-    "undefined",
-    "true",
-    "false",
-    "empty",
-    "hidden",
-    "masked",
-    "required",
-    "optional",
-    "changeme",
-    "enabled",
-    "disabled",
-    "encrypted",
-    "hashed",
-    "unknown",
-    "tbd",
-    "pending",
-    "missing"
-  ]);
-  COMMON_OBJECTS = new Set([
-    "user",
-    "users",
-    "body",
-    "data",
-    "form",
-    "state",
-    "props",
-    "creds",
-    "credentials",
-    "account",
-    "profile",
-    "session",
-    "auth",
-    "db",
-    "app",
-    "json",
-    "response",
-    "res",
-    "row",
-    "record",
-    "item",
-    "model"
-  ]);
-  STRONG_QUALIFIERS = new Set([
-    "client",
-    "app",
-    "api",
-    "access",
-    "refresh",
-    "auth",
-    "bearer",
-    "id",
-    "session",
-    "bot",
-    "oauth",
-    "webhook",
-    "signing",
-    "jwt",
-    "service",
-    "personal",
-    "consumer",
-    "shared",
-    "encryption",
-    "master",
-    "admin",
-    "root",
-    "user",
-    "db",
-    "database",
-    "wifi",
-    "email",
-    "login"
-  ]);
-  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
-  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
-  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
-  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
-  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
-  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
-  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
-});
-
-// src/workers/dropbox-files/content-policy.ts
-var init_content_policy = __esm(() => {
-  init_secret_patterns();
-});
-
-// src/workers/classification/engine.ts
-var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
-var init_engine = __esm(() => {
-  init_content_policy();
-  SECRET_FINDING_TYPES = new Set([
-    "private_key_material",
-    "aws_access_key_id",
-    "slack_token",
-    "api_secret_token",
-    "credential_assignment"
-  ]);
-  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
-});
-// src/workers/classification/tier-classifier.ts
-var UNDECIDED_TIER_SNIFFER;
-var init_tier_classifier = __esm(() => {
-  init_secret_patterns();
-  init_secret_patterns();
-  init_engine();
-  init_sender_rules();
-  UNDECIDED_TIER_SNIFFER = Object.freeze({
-    id: "undecided",
-    judge: () => ({ verdict: "undecided" })
-  });
-});
-// src/workers/classification/tier-ledger.ts
-var init_tier_ledger = __esm(() => {
-  init_sqlite_migrations();
-  init_tier_classifier();
-});
-
-// src/workers/classification/secret-locations.ts
-var STOP_WORDS;
-var init_secret_locations = __esm(() => {
-  init_sqlite_migrations();
-  init_engine();
-  init_tier_classifier();
-  STOP_WORDS = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "put",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
-});
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
   init_types();
@@ -15969,12 +15975,6 @@ var init_delphi_scorer = __esm(() => {
     '{"tier":"internal"|"secure","category":"financial"|"health"|"legal"|"identity"|"personal"|"work"|"other","confidence":<number between 0 and 1>}'
   ].join(`
 `);
-});
-
-// src/workers/classification/sniffer-store.ts
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-  init_tier_classifier();
 });
 
 // src/workers/classification/sniffer.ts
@@ -16387,6 +16387,47 @@ var init_local_index = __esm(() => {
   ]);
 });
 
+// src/core/source-registry.ts
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+});
+
+// src/core/source-storage.ts
+var init_source_storage = __esm(() => {
+  init_secret_locations();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_local_index();
+  init_source_corpus_registry();
+  init_source_registry();
+});
+
+// src/workers/readwise/connector.ts
+var READWISE_STORE_PLACEMENT;
+var init_connector = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_credential_broker();
+  init_source_storage();
+  init_api();
+  init_corpus_adapter();
+  READWISE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S1",
+    trustDomain: "internal"
+  });
+});
+
+// src/workers/readwise/live-control.ts
+var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
+var init_live_control = __esm(() => {
+  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
+  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
+  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+});
+
 // src/workers/connector-store/principal.ts
 var init_principal = () => {};
 
@@ -16432,30 +16473,6 @@ var init_filter_capabilities = __esm(() => {
 var init_connector_store = __esm(() => {
   init_local_index();
   init_filter_capabilities();
-});
-
-// src/workers/readwise/connector.ts
-var READWISE_STORE_PLACEMENT;
-var init_connector = __esm(() => {
-  init_olympus_layout();
-  init_atomic_file();
-  init_credential_broker();
-  init_connector_store();
-  init_api();
-  init_corpus_adapter();
-  READWISE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S1",
-    trustDomain: "internal"
-  });
-});
-
-// src/workers/readwise/live-control.ts
-var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
-var init_live_control = __esm(() => {
-  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
-  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
-  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
@@ -17403,7 +17420,7 @@ var init_folder_facets = __esm(() => {
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_corpus_adapter2();
   init_folder_facets();
   X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
@@ -17542,8 +17559,8 @@ var init_connector_store2 = __esm(() => {
   init_olympus_layout();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_connector_store();
   init_file_ingestion_matcher();
+  init_source_storage();
   init_corpus_adapter3();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -17909,7 +17926,7 @@ var init_qualification2 = __esm(() => {
 
 // src/workers/dropbox-files/tier-set.ts
 var init_tier_set = __esm(() => {
-  init_tier_ledger();
+  init_source_storage();
   init_tiered_store_set();
   init_connector_store2();
   init_corpus_adapter3();
@@ -17980,8 +17997,7 @@ var init_store = __esm(() => {
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_tier_ledger();
-  init_connector_store();
+  init_source_storage();
   init_file_ingestion_matcher();
   init_tiered_store_set();
   init_scope();
@@ -18025,7 +18041,7 @@ var init_capture_spool_connector = __esm(() => {
 
 // src/workers/telegram-messages/store-sync.ts
 var init_store_sync = __esm(() => {
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -18334,7 +18350,7 @@ var init_google_connectors = __esm(() => {
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector();
 });
@@ -18342,7 +18358,7 @@ var init_tier_set2 = __esm(() => {
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector2();
 });
@@ -18362,7 +18378,7 @@ var init_live_connector = __esm(() => {
 var WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
   init_capture_freshness();
@@ -18401,6 +18417,13 @@ var init_archive_formats = __esm(() => {
   CONNECTOR_FACTORIES = new Map;
 });
 
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
 // src/workers/archive-import/store.ts
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
@@ -18410,7 +18433,8 @@ var init_store2 = __esm(() => {
   init_olympus_layout();
   init_archive_formats();
   init_source_corpus_registry();
-  init_connector_store();
+  init_source_storage();
+  init_state();
   ARCHIVE_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
     trustDomain: "secure_local",
@@ -18936,7 +18960,7 @@ var init_source_ingestion_ledger = __esm(() => {
   init_answer_ready_coverage();
   init_status();
   init_google_connectors();
-  init_connector_store();
+  init_source_storage();
   init_readwise();
   init_tier_set2();
   init_x_bookmarks();

@@ -149,6 +149,8 @@ import {
 import {
   GOOGLE_DRIVE_DOCS_CORPUS_ID,
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+  GMAIL_SOURCE_ID,
+  GOOGLE_DRIVE_SOURCE_ID,
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
   GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
@@ -175,6 +177,7 @@ import {
 } from '../google-connectors/index.ts';
 import {
   READWISE_LIBRARY_CORPUS_ID,
+  READWISE_SOURCE_ID,
   ReadwiseDailyRequestBudget,
   createReadwiseConnectorStore,
   createReadwiseConnectorStoreSyncHandler,
@@ -187,6 +190,7 @@ import {
   LocalXBookmarksApiUsageStore,
   LocalXBookmarksReconcileStateStore,
   X_BOOKMARKS_CORPUS_ID,
+  X_BOOKMARKS_SOURCE_ID,
   createXBookmarksConnectorStore,
   createXBookmarksConnectorStoreSyncHandler,
   createXBookmarksContentRecoveryHandler,
@@ -202,6 +206,7 @@ import {
   DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
   DROPBOX_INGESTION_EXCLUSION_SOURCE,
   DROPBOX_FILES_CORPUS_ID,
+  DROPBOX_FILES_SOURCE_ID,
   defaultDropboxConnectorStoreDbPath,
   createDropboxEvalShardExportHandler,
   createDropboxSourceExportHandler,
@@ -242,6 +247,7 @@ import {
 } from '../archive-import/dashboard.ts';
 import { archiveLaneLegs } from '../archive-import/lane.ts';
 import { withArchiveImportCorpora } from '../archive-import/store.ts';
+import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
 import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
@@ -266,6 +272,7 @@ import type { SourceDispositionItem } from '../../core/source-disposition-tree.t
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+  TELEGRAM_MESSAGES_SOURCE_ID,
   TELEGRAM_PERSONAL_ACCOUNT_SCOPE,
   createTelegramConnectorStores,
   createTelegramConnectorStoreSyncHandler,
@@ -275,7 +282,7 @@ import {
 } from '../telegram-messages/index.ts';
 import {
   DEFAULT_SEMANTIC_RELEVANCE_BAR,
-  LocalConnectorStore,
+  type LocalConnectorStore,
   connectorStoreFilterCapabilityRegistry,
   defineConnectorCorpus,
   type ConnectorStoreConversationTitleCandidates,
@@ -304,7 +311,15 @@ import {
   defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
-import { SecretLocationsIndex, secretLocationsPathForStore } from '../classification/secret-locations.ts';
+import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
+import {
+  enableSourceRegistryAdoption,
+  openConnectorStore,
+  openSecretLocations,
+  sourceAccountUnavailableReason,
+  storageAccountForCorpus,
+  type StorageAccount,
+} from '../../core/source-storage.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
@@ -377,6 +392,7 @@ import {
 import {
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_PERSONAL_ACCOUNT_SCOPE,
+  WHATSAPP_PERSONAL_SOURCE_ID,
   createWhatsAppConnectorStore,
   createWhatsAppTierLane,
   createWhatsAppConnectorStoreSyncHandler,
@@ -1058,6 +1074,8 @@ export function createCloudSourceIndexEmbeddingProviderFromEnv(
  */
 const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
   sourceId: string;
+  /** The source whose stores these are (`sourceId` is its exclusion key). */
+  account: StorageAccount;
   label: string;
   enforceable: readonly SourceExclusionCriterionKind[];
   matcher: (env: Record<string, string | undefined>) => SourceExclusionMatcher;
@@ -1069,6 +1087,7 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
 }> = [
   {
     sourceId: DROPBOX_INGESTION_EXCLUSION_SOURCE,
+    account: { sourceId: DROPBOX_FILES_SOURCE_ID },
     label: 'Dropbox',
     enforceable: DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
     matcher: (env) => dropboxIngestionExclusionMatcher(env),
@@ -1080,6 +1099,7 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
   },
   {
     sourceId: LOCAL_FILES_INGESTION_EXCLUSION_SOURCE,
+    account: { sourceId: LOCAL_FILES_SOURCE_ID },
     label: 'Files on this computer',
     enforceable: LOCAL_FILES_ENFORCEABLE_EXCLUSION_CRITERIA,
     matcher: (env) => localFilesIngestionExclusionMatcher(env),
@@ -1091,6 +1111,7 @@ const INGESTION_DISPOSITION_SOURCES: ReadonlyArray<{
   },
   {
     sourceId: GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE,
+    account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
     label: 'Google Drive',
     enforceable: GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA,
     matcher: (env) => googleDriveIngestionExclusionMatcher(env),
@@ -1168,14 +1189,14 @@ export function openIngestionDispositionsRuntime(
       const matcher = definition.matcher(env);
       for (const store of stores) {
         if (!existsSync(store.dbPath)) continue;
-        const handle = new LocalConnectorStore({
+        const handle = openConnectorStore(definition.account, {
           dbPath: store.dbPath,
           corpusId: store.corpusId,
           family: 'file',
           trustDomain: store.trustDomain,
           exclusions: matcher,
           readOnly: true,
-        });
+        }, env);
         handles.push(handle);
         opened.push(handle);
       }
@@ -2046,6 +2067,9 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 }
 
 export async function main(): Promise<void> {
+  // From here on, a writable store open records its account in the registry
+  // (core/source-storage.ts). Before any lane mounts.
+  enableSourceRegistryAdoption();
   // Startup signals can close only this instance's listener/client. A second
   // foreground worker never revokes the engine host's epoch or runtime path.
   let closeDesktopBridge = () => {};
@@ -2414,9 +2438,9 @@ export async function main(): Promise<void> {
   ) => void = () => {
     throw new Error('A tier store opened before the source runtime finished wiring its stores.');
   };
-  const openTierSecretLocations = (secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
+  const openTierSecretLocations = (account: StorageAccount, secureDbPath: string, label: string): SecretLocationsIndex | undefined => {
     try {
-      return new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(secureDbPath) });
+      return openSecretLocations(account, { dbPath: secretLocationsPathForStore(secureDbPath) });
     } catch (error) {
       console.warn(`[tier] secret-locations index unavailable for ${label}: ${error instanceof Error ? error.name : 'error'}`);
       return undefined;
@@ -2441,6 +2465,7 @@ export async function main(): Promise<void> {
     });
   };
   const tierLane = (input: {
+    account: StorageAccount;
     internal: LocalConnectorStore;
     secure: LocalConnectorStore;
     publicStore?: OnDemandTierStore;
@@ -2450,7 +2475,7 @@ export async function main(): Promise<void> {
     input.internal.useTierLedger(ledger);
     let secrets: SecretLocationsIndex | undefined;
     try {
-      secrets = new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(input.secure.dbPath) });
+      secrets = openSecretLocations(input.account, { dbPath: secretLocationsPathForStore(input.secure.dbPath) });
     } catch (error) {
       console.warn(`[tier] secret-locations index unavailable for ${input.secure.corpusId}: ${error instanceof Error ? error.name : 'error'}`);
     }
@@ -2501,11 +2526,11 @@ export async function main(): Promise<void> {
   };
   const telegramMessagesAccount = sourceIndexTelegramAccountFromEnv(process.env);
   const telegramConnectorAccountScope = telegramMessagesAccount ?? TELEGRAM_PERSONAL_ACCOUNT_SCOPE;
-  const readwiseConnectorStoreLane = sourceIndexLaneStorageDecision(
+  const readwiseConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(
     process.env,
     'OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_ENABLED',
     sourceIndexReadEnabled,
-  );
+  ), { sourceId: READWISE_SOURCE_ID });
   // A Private store for a lane whose own store is not Private embeds with the
   // approved private identity, or not at all (keyword only).
   const tierSecureEmbeddingProvider = secureLocalPolicyEmbeddingProvider
@@ -2535,6 +2560,7 @@ export async function main(): Promise<void> {
     env: process.env,
     tierSetFor: (store) => {
       const secrets = openTierSecretLocations(
+        { sourceId: READWISE_SOURCE_ID },
         defaultReadwiseSecureConnectorStoreDbPath(process.env),
         READWISE_SECURE_LIBRARY_CORPUS_ID,
       );
@@ -2549,11 +2575,11 @@ export async function main(): Promise<void> {
     },
   });
   const readwiseConnectorStore = refreshableReadwiseRuntime?.store;
-  const xBookmarksConnectorStoreLane = sourceIndexLaneStorageDecision(
+  const xBookmarksConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(
     process.env,
     'OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_ENABLED',
     sourceIndexReadEnabled,
-  );
+  ), { sourceId: X_BOOKMARKS_SOURCE_ID });
   // The X lane's tier stores beyond its own, for the account guard's
   // "does this source hold items" check.
   let xBookmarksTierStores: OnDemandTierStore[] = [];
@@ -2564,6 +2590,7 @@ export async function main(): Promise<void> {
     env: process.env,
     tierSetFor: (store) => {
       const secrets = openTierSecretLocations(
+        { sourceId: X_BOOKMARKS_SOURCE_ID },
         defaultXBookmarksSecureConnectorStoreDbPath(process.env),
         X_BOOKMARKS_SECURE_CORPUS_ID,
       );
@@ -2580,8 +2607,14 @@ export async function main(): Promise<void> {
     },
   });
   const xBookmarksConnectorStore = refreshableXBookmarksRuntime?.store;
-  const gmailConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
-  const googleDriveConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
+  const gmailConnectorStoreLane = sourceIndexLaneAccountDecision(
+    sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled),
+    { sourceId: GMAIL_SOURCE_ID },
+  );
+  const googleDriveConnectorStoreLane = sourceIndexLaneAccountDecision(
+    sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled),
+    { sourceId: GOOGLE_DRIVE_SOURCE_ID },
+  );
   // Exactly one Gmail day counter per runtime, durable across restart.
   // Constructing it before the stores also keeps an invalid budget env from
   // creating the store files at all.
@@ -2589,7 +2622,7 @@ export async function main(): Promise<void> {
     ? createGmailDailyRequestBudget({ env: process.env })
     : undefined;
   const gmailInternalConnectorStore = gmailConnectorStoreLane.enabled
-    ? new LocalConnectorStore({
+    ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
       dbPath: defaultGmailConnectorStoreDbPath(process.env),
       corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
       family: 'email',
@@ -2597,7 +2630,7 @@ export async function main(): Promise<void> {
     })
     : undefined;
   const gmailSecureConnectorStore = gmailInternalConnectorStore
-    ? new LocalConnectorStore({
+    ? openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
       dbPath: defaultGmailSecureConnectorStoreDbPath(process.env),
       corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
       family: 'email',
@@ -2609,12 +2642,13 @@ export async function main(): Promise<void> {
   // routed there, all governed by ONE ledger — the secure store's own.
   const gmailTierLane = gmailInternalConnectorStore && gmailSecureConnectorStore
     ? tierLane({
+        account: { sourceId: GMAIL_SOURCE_ID },
         internal: gmailInternalConnectorStore,
         secure: gmailSecureConnectorStore,
         publicStore: onDemandTierStore({
           corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
           dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
-          create: () => new LocalConnectorStore({
+          create: () => openConnectorStore({ sourceId: GMAIL_SOURCE_ID }, {
             dbPath: defaultGmailPublicConnectorStoreDbPath(process.env),
             corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
             family: 'email',
@@ -2639,7 +2673,7 @@ export async function main(): Promise<void> {
     ? googleDriveIngestionExclusionMatcher(process.env)
     : undefined;
   const googleDriveInternalConnectorStore = googleDriveConnectorStoreLane.enabled
-    ? new LocalConnectorStore({
+    ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
       dbPath: defaultGoogleDriveConnectorStoreDbPath(process.env),
       corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
       family: 'file',
@@ -2648,7 +2682,7 @@ export async function main(): Promise<void> {
     })
     : undefined;
   const googleDriveSecureConnectorStore = googleDriveInternalConnectorStore
-    ? new LocalConnectorStore({
+    ? openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
       dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(process.env),
       corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
       family: 'file',
@@ -2660,12 +2694,13 @@ export async function main(): Promise<void> {
   // approved-scope read filter as its siblings (connectorStoreReadScope).
   const googleDriveTierLane = googleDriveInternalConnectorStore && googleDriveSecureConnectorStore
     ? tierLane({
+        account: { sourceId: GOOGLE_DRIVE_SOURCE_ID },
         internal: googleDriveInternalConnectorStore,
         secure: googleDriveSecureConnectorStore,
         publicStore: onDemandTierStore({
           corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
           dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
-          create: () => new LocalConnectorStore({
+          create: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
             dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(process.env),
             corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
             family: 'file',
@@ -2679,7 +2714,10 @@ export async function main(): Promise<void> {
   // Dropbox product state: the lane's original store, secure_local. Every
   // file stored before per-item routing stays here; the lane's tier set
   // (below) adds Personal and Public stores on first need.
-  const dropboxConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
+  const dropboxConnectorStoreLane = sourceIndexLaneAccountDecision(
+    sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled),
+    { sourceId: DROPBOX_FILES_SOURCE_ID },
+  );
   const dropboxConnectorStore = dropboxConnectorStoreLane.enabled
     ? createDropboxConnectorStore(process.env, { policy: dropboxIngestionPolicy })
     : undefined;
@@ -2692,7 +2730,7 @@ export async function main(): Promise<void> {
   // its text to the store its content tier decides once extraction reads it.
   // The Personal and Public stores are created on first need.
   const dropboxSecretLocations = dropboxConnectorStore
-    ? openTierSecretLocations(dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
+    ? openTierSecretLocations({ sourceId: DROPBOX_FILES_SOURCE_ID }, dropboxConnectorStore.dbPath, DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID)
     : undefined;
   const dropboxTierLane = dropboxConnectorStore
     ? createDropboxTierLane({
@@ -2750,13 +2788,16 @@ export async function main(): Promise<void> {
   // Local files: the folders the owner chose on this computer. No credential;
   // the lane exists once the owner connects it and approves folders. Same three
   // per-tier stores, exclusion gate and tier set as Dropbox.
-  const localFilesConnectorStoreLane = sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled);
+  const localFilesConnectorStoreLane = sourceIndexLaneAccountDecision(
+    sourceIndexLaneStorageDecision(process.env, 'OLYMPUS_SOURCE_INDEX_LOCAL_FILES_CONNECTOR_STORE_ENABLED', sourceIndexReadEnabled),
+    { sourceId: LOCAL_FILES_SOURCE_ID },
+  );
   const localFilesIngestionPolicy = defaultLocalFilesIngestionPolicy();
   const localFilesConnectorStore = localFilesConnectorStoreLane.enabled
     ? createLocalFilesConnectorStore(process.env, { policy: localFilesIngestionPolicy })
     : undefined;
   const localFilesSecretLocations = localFilesConnectorStore
-    ? openTierSecretLocations(localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID)
+    ? openTierSecretLocations({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesConnectorStore.dbPath, LOCAL_FILES_CORPUS_ID)
     : undefined;
   const localFilesTierLane = localFilesConnectorStore
     ? createLocalFilesTierLane({
@@ -2862,11 +2903,11 @@ export async function main(): Promise<void> {
   // WhatsApp's store is product state, not a private deployment mount. Opening
   // the long-standing default path preserves captured history; the scheduler
   // below advances its connector cursor without replaying or replacing it.
-  const whatsappConnectorStoreLane = sourceIndexLaneStorageDecision(
+  const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(
     process.env,
     'OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED',
     sourceIndexReadEnabled,
-  );
+  ), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
   const whatsappConnectorStore = whatsappConnectorStoreLane.enabled
     ? createWhatsAppConnectorStore(process.env)
     : undefined;
@@ -2875,7 +2916,7 @@ export async function main(): Promise<void> {
   // loading is phase P2, so none does yet), and then only a message its own
   // text keeps Personal goes to the Personal store.
   const whatsappSecretLocations = whatsappConnectorStore
-    ? openTierSecretLocations(whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
+    ? openTierSecretLocations({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, whatsappConnectorStore.dbPath, WHATSAPP_LIVE_CORPUS_ID)
     : undefined;
   const whatsappTierSet = whatsappConnectorStore
     ? existingStoreTierSet(createWhatsAppTierLane({
@@ -2908,16 +2949,20 @@ export async function main(): Promise<void> {
   // Product-owned canonical Telegram stores at the paths already populated by
   // convergence. The scheduler advances their existing connector cursors; it
   // never replaces the databases or requires a private mount declaration.
-  const telegramConnectorStoreLane = sourceIndexLaneStorageDecision(
+  const telegramConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(
     process.env,
     'OLYMPUS_SOURCE_INDEX_TELEGRAM_CONNECTOR_STORES_ENABLED',
     sourceIndexReadEnabled,
-  );
+  ), { sourceId: TELEGRAM_MESSAGES_SOURCE_ID });
   const telegramConnectorStores = telegramConnectorStoreLane.enabled
     ? createTelegramConnectorStores(process.env)
     : undefined;
   const telegramTierLane = telegramConnectorStores
-    ? tierLane({ internal: telegramConnectorStores.internal, secure: telegramConnectorStores.secureLocal })
+    ? tierLane({
+        account: { sourceId: TELEGRAM_MESSAGES_SOURCE_ID },
+        internal: telegramConnectorStores.internal,
+        secure: telegramConnectorStores.secureLocal,
+      })
     : undefined;
   if (telegramTierLane && telegramConnectorStores) {
     reportRehomedChatOverrides('telegram', rehomeChatLaneOverrides(
@@ -2960,7 +3005,7 @@ export async function main(): Promise<void> {
   // second time.
   const configuredConnectorStoreMounts = parseConnectorStoreMountsFromEnv(
     process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON,
-    { collidingStores: laneConnectorStores },
+    { collidingStores: laneConnectorStores, registeredCorpora: sourceCorpusRegistry.list() },
   );
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   const connectorStores = mergeConnectorStores([
@@ -3428,7 +3473,7 @@ export async function main(): Promise<void> {
   // first need and served under its own trust domain's embedding identity.
   const archiveImports = createArchiveImportRuntime({
     env: process.env,
-    openSecretLocations: (secureDbPath) => openTierSecretLocations(secureDbPath, 'imported archives'),
+    openSecretLocations: (secureDbPath) => openTierSecretLocations({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, secureDbPath, 'imported archives'),
     onLane: (lane) => {
       if (tierSecureEmbeddingProvider) lane.set.declarePrivateEmbedder(tierSecureEmbeddingProvider);
       adoptTierLane({
@@ -3446,7 +3491,7 @@ export async function main(): Promise<void> {
     ),
   });
   try {
-    archiveImports.existingLanes();
+    if (sourceAccountMountable({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID })) archiveImports.existingLanes();
   } catch (error) {
     console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.name : 'error'}`);
   }
@@ -6242,6 +6287,35 @@ export function sourceIndexLaneStorageDecision(
   };
 }
 
+/**
+ * Whether an account's stores may be mounted at worker boot. One that may not
+ * (its data being deleted or deleted, or an unreadable registry) is left
+ * unmounted exactly like a lane that is switched off, with one line saying
+ * so; every other source mounts as usual. The throw in `openConnectorStore`
+ * is the backstop.
+ */
+export function sourceAccountMountable(
+  account: StorageAccount,
+  env: Record<string, string | undefined> = process.env,
+  log: (line: string) => void = console.warn,
+): boolean {
+  const reason = sourceAccountUnavailableReason(account, env);
+  if (reason === undefined) return true;
+  log(`[storage] ${account.sourceId} is not mounted: ${reason.endsWith('.') ? reason.slice(0, -1) : reason}.`);
+  return false;
+}
+
+/** A lane's storage decision, switched off when its account may not be mounted. */
+export function sourceIndexLaneAccountDecision(
+  decision: SourceIndexLaneDecision,
+  account: StorageAccount,
+  env: Record<string, string | undefined> = process.env,
+  log: (line: string) => void = console.warn,
+): SourceIndexLaneDecision {
+  if (!decision.enabled || sourceAccountMountable(account, env, log)) return decision;
+  return { ...decision, enabled: false, decidedBy: 'the source registry' };
+}
+
 export function sourceIndexLaneStartupLog(label: string, decision: SourceIndexLaneDecision): string {
   return `${label}: ${decision.enabled ? 'enabled' : 'disabled'} (decided by ${decision.decidedBy}).`;
 }
@@ -6506,6 +6580,7 @@ export function createRefreshableReadwiseConnectorStoreRuntime(options: {
     });
   const store = createReadwiseConnectorStore(
     options.dbPath ?? defaultReadwiseConnectorStoreDbPath(env),
+    env,
   );
   const tierSet = options.tierSetFor?.(store);
   const buildSync = (handle: ConnectedCredentialHandle | undefined): ReadwiseConnectorStoreSyncHandler =>
@@ -6591,6 +6666,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
   const env = options.env ?? process.env;
   const store = createXBookmarksConnectorStore(
     options.dbPath ?? defaultXBookmarksConnectorStoreDbPath(env),
+    env,
   );
   const tierSet = options.tierSetFor?.(store);
   let usageStore = options.usageStore;
@@ -6914,6 +6990,11 @@ export interface ConnectorStoreMount {
 export interface ConnectorStoreMountParsingOptions {
   reportFailure?: (message: string) => void;
   collidingStores?: readonly LocalConnectorStore[];
+  /**
+   * The corpus registry's corpora: a declaration names no source, so its
+   * account is the source registered for its corpus (`storageAccountForCorpus`).
+   */
+  registeredCorpora?: ReadonlyArray<{ corpusId: string; sourceId: string }>;
 }
 
 interface ValidatedConnectorStoreMountDeclaration {
@@ -6982,7 +7063,9 @@ export function parseConnectorStoreMountsFromEnv(
           `dbPath ${JSON.stringify(declaration.dbPath)} is already mounted as corpus ${JSON.stringify(pathOwnerCorpusId)}.`,
         );
       }
-      const store = collidingStore ?? new LocalConnectorStore({
+      // An account that may not be opened throws here, and the declaration
+      // is skipped and reported like any other that cannot mount.
+      const store = collidingStore ?? openConnectorStore(storageAccountForCorpus(declaration, options.registeredCorpora), {
         dbPath: declaration.dbPath,
         corpusId: declaration.corpusId,
         family: declaration.family,

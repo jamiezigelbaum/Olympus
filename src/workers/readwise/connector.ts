@@ -22,7 +22,8 @@ import {
   requireBearerTokenCredentialSession,
   type CredentialBroker,
 } from '../credential-broker/index.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import {
   ReadwiseApiClient,
   type ReadwiseApiClientOptions,
@@ -32,6 +33,7 @@ import {
 import { READWISE_LIBRARY_CORPUS_ID } from './corpus-adapter.ts';
 
 export const READWISE_CONNECTOR_ID = 'readwise_live';
+export const READWISE_SOURCE_ID = 'readwise.library';
 export const READWISE_PROVIDER = 'readwise';
 export const READWISE_DAILY_REQUEST_BUDGET_ENV =
   'OLYMPUS_SOURCE_INDEX_READWISE_DAILY_API_REQUEST_BUDGET';
@@ -477,13 +479,14 @@ export const READWISE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.free
 
 export function createReadwiseConnectorStore(
   dbPath = defaultReadwiseConnectorStoreDbPath(),
+  env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: READWISE_SOURCE_ID }, {
     dbPath,
     corpusId: READWISE_LIBRARY_CORPUS_ID,
     family: 'readwise',
     trustDomain: 'internal',
-  });
+  }, env);
 }
 
 export function defaultReadwiseConnectorStoreDbPath(

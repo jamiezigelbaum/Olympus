@@ -5,10 +5,11 @@
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { join } from 'node:path';
 import { legacyCaptureDataRoot } from '../../core/olympus-layout.ts';
-import {
+import type {
   LocalConnectorStore,
-  type ConnectorStoreSyncSummary,
+  ConnectorStoreSyncSummary,
 } from '../connector-store/index.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import {
@@ -192,13 +193,13 @@ export function createWhatsAppTierLane(options: {
       internal: {
         corpusId: WHATSAPP_INTERNAL_CORPUS_ID,
         dbPath: internalDbPath,
-        create: (ledger) => new LocalConnectorStore({
+        create: (ledger) => openConnectorStore({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, {
           dbPath: internalDbPath,
           corpusId: WHATSAPP_INTERNAL_CORPUS_ID,
           family: 'chat',
           trustDomain: 'internal',
           tierLedger: ledger,
-        }),
+        }, env),
         ...(options.internalEmbeddingProvider ? { embeddingProvider: options.internalEmbeddingProvider } : {}),
       },
     },
@@ -211,12 +212,12 @@ export function createWhatsAppTierLane(options: {
 export function createWhatsAppConnectorStore(
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, {
     dbPath: defaultWhatsAppConnectorStoreDbPath(env),
     corpusId: WHATSAPP_LIVE_CORPUS_ID,
     family: 'chat',
     trustDomain: 'secure_local',
-  });
+  }, env);
 }
 
 export function createWhatsAppConnectorStoreSyncHandler(options: {

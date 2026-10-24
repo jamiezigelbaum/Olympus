@@ -8,14 +8,16 @@ import {
   defineSourceIndexCorpus,
 } from '../src/core/source-index/corpus.ts';
 import {
-  LocalConnectorStore,
+  type LocalConnectorStore,
   createConnectorStoreContentProvider,
   createConnectorStoreCorpusAdapter,
 } from '../src/workers/connector-store/index.ts';
 import {
   DROPBOX_APPROVED_SCOPE_FILTER_CODEC,
   DROPBOX_FILES_CORPUS_ID,
+  DROPBOX_FILES_SOURCE_ID,
 } from '../src/workers/dropbox-files/index.ts';
+import { openConnectorStore } from '../src/core/source-storage.ts';
 import type { EvalDataset, EvalQuestion } from '../eval/types.ts';
 
 const DEFAULT_DATASET_PATH = 'eval/private/held-out.real.json';
@@ -76,7 +78,7 @@ async function main(): Promise<void> {
     'OLYMPUS_EVAL_MAX_CHARS_PER_CANDIDATE',
   );
 
-  const store = new LocalConnectorStore({
+  const store = openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {
     dbPath,
     corpusId: DROPBOX_FILES_CORPUS_ID,
     family: 'file',
