@@ -4209,6 +4209,7 @@ __export(exports_worker_auth, {
   workerAuthTokenFromConfig: () => workerAuthTokenFromConfig,
   withWorkerAuthHeader: () => withWorkerAuthHeader,
   unquoteEnvValue: () => unquoteEnvValue,
+  resolveWorkerAuthToken: () => resolveWorkerAuthToken,
   readWorkerSetupEnv: () => readWorkerSetupEnv,
   normalizeWorkerAuthToken: () => normalizeWorkerAuthToken,
   isWorkerAuthTokenPlaceholder: () => isWorkerAuthTokenPlaceholder,
@@ -4244,6 +4245,9 @@ function dashboardQueryTokenFromWorkerAuthToken(authToken) {
   if (!token)
     return;
   return `dash_${createHmac2("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
+}
+function resolveWorkerAuthToken(env, config) {
+  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv({ env }) ?? normalizeWorkerAuthToken(config.worker.authToken);
 }
 function workerAuthTokenFromSetupEnv(options = {}) {
   return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
@@ -15752,14 +15756,6 @@ function tryDataOwnerLock(env = process.env) {
     if (error instanceof DataOwnerBusyError)
       return;
     throw error;
-  }
-}
-async function withDataOwnerLockIfFree(run, env = process.env) {
-  const lock = tryDataOwnerLock(env);
-  try {
-    return await run();
-  } finally {
-    lock?.release();
   }
 }
 function takeWorkerDataOwnerLock(env = process.env, options = {}) {
@@ -63580,6 +63576,9 @@ function validateDeleteAllConfirmations(first, second) {
 function deleteAllConfirmationPrompts() {
   return { first: DELETE_CONFIRMATION_1, second: DELETE_CONFIRMATION_2 };
 }
+function lifecycleDataRoot(context2 = {}) {
+  return olympusDataRoot(envForContext(context2));
+}
 function knownOlympusDataRoots(context2 = {}) {
   return olympusDataRoots({ homeDir: resolveHome(context2.homeDir) });
 }
@@ -91038,6 +91037,571 @@ var init_tier_migration_cli = __esm(() => {
   TIER_MIGRATE_USAGE = "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status";
 });
 
+// src/workers/classification/tier-cli.ts
+import { Database as Database15 } from "bun:sqlite";
+import { existsSync as existsSync60 } from "node:fs";
+function tierCommandOpensStores(args) {
+  return args[0] === "set" || args[0] === "explain" || args[0] === "migrate";
+}
+function tierCommandRewritesStores(args) {
+  if (args[0] !== "migrate")
+    return false;
+  const command = args[1];
+  return command === "run" || command === "rollback" || command === "purge" && args.includes("--approve");
+}
+async function runTierCommand(args, context2 = {}) {
+  const [command, ...rest] = args;
+  switch (command) {
+    case "set":
+      return runTierSet(rest, context2);
+    case "explain":
+      return runTierExplain(rest, context2);
+    case "rules":
+      return runTierRules(rest, context2);
+    case "classifier":
+      return runTierClassifier(rest, context2);
+    case "migrate": {
+      const { runTierMigrateCommand: runTierMigrateCommand2 } = await Promise.resolve().then(() => (init_tier_migration_cli(), exports_tier_migration_cli));
+      return runTierMigrateCommand2(rest);
+    }
+    default:
+      throw new OperationError("invalid_params", `Unknown tier command: ${command ?? "(none)"}.`, "Run olympus tier --help.");
+  }
+}
+function knownStorePaths(context2) {
+  const paths = context2.storePaths ?? lifecycleSourceSpecs().flatMap((spec) => spec.connectorStorePaths?.(context2) ?? []);
+  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync60(path));
+}
+function matchStore(dbPath, needle) {
+  const db = new Database15(dbPath, { readonly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 10000;");
+    const rows = db.query(`
+      SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
+      WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
+      LIMIT 5
+    `).all(needle, needle);
+    if (rows.length === 0)
+      return [];
+    let boundLedgerPath;
+    try {
+      const binding = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
+      const parsed = binding?.cursor ? JSON.parse(binding.cursor) : undefined;
+      if (typeof parsed?.ledgerPath === "string")
+        boundLedgerPath = parsed.ledgerPath;
+    } catch {}
+    return rows.map((row) => ({
+      identity: {
+        provider: row.provider,
+        family: row.family,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+      },
+      localItemId: row.local_item_id,
+      ...boundLedgerPath ? { boundLedgerPath } : {},
+      ownLedgerPath: tierLedgerPathForStore(dbPath)
+    }));
+  } catch {
+    return [];
+  } finally {
+    closeSqliteStore(db, { checkpoint: false });
+  }
+}
+function locateTierItem(locator, context2 = {}) {
+  const needle = locator.trim();
+  if (!needle)
+    throw new OperationError("invalid_params", "A locator is required.");
+  const stores = knownStorePaths(context2);
+  const matches2 = stores.flatMap((dbPath) => matchStore(dbPath, needle));
+  const identities = new Map(matches2.map((match) => [identityKey2(match.identity), match.identity]));
+  if (identities.size === 0) {
+    throw new OperationError("invalid_params", "No stored item matches that locator.", "Use the locator an answer cited, or the provider item id.");
+  }
+  if (identities.size > 1) {
+    throw new OperationError("invalid_params", `That locator matches ${identities.size} different items.`, "Use the full locator URI an answer cited.");
+  }
+  const identity2 = [...identities.values()][0];
+  const localItemId = matches2[0].localItemId;
+  const ledgerPaths = new Set;
+  for (const dbPath of stores) {
+    const path = tierLedgerPathForStore(dbPath);
+    if (existsSync60(path))
+      ledgerPaths.add(path);
+  }
+  for (const match of matches2)
+    if (match.boundLedgerPath && existsSync60(match.boundLedgerPath))
+      ledgerPaths.add(match.boundLedgerPath);
+  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity2) !== undefined));
+  if (deciding.length > 0)
+    return deciding.map((ledgerPath) => ({ ledgerPath, identity: identity2, localItemId }));
+  const fallback = matches2[0];
+  return [{ ledgerPath: fallback.boundLedgerPath ?? fallback.ownLedgerPath, identity: identity2, localItemId }];
+}
+function identityKey2(identity2) {
+  return tierLedgerIdentityKey(identity2);
+}
+function withLedgerAt(ledgerPath, now, run) {
+  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {} });
+  try {
+    return run(ledger);
+  } finally {
+    ledger.close();
+  }
+}
+function orphanedOverride(ledger, identity2) {
+  if (!identity2.providerConversationId)
+    return;
+  const { providerConversationId: _conversation, ...withoutConversation } = identity2;
+  return ledger.getOverride(withoutConversation);
+}
+function runTierSet(args, context2 = {}) {
+  const [locator, word] = args;
+  if (!locator || !word || args.length > 2) {
+    throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier set"]}`);
+  }
+  const normalized = word.trim().toLowerCase();
+  let override;
+  if (normalized === "clear")
+    override = "clear";
+  else if (normalized === "not-secret" || normalized === "not_secret")
+    override = { kind: "not_secret" };
+  else {
+    const tier = tierKeyFromDisplayName(normalized);
+    if (!tier) {
+      throw new OperationError("invalid_params", `Unknown tier "${word}".`, "Use public, personal, private, secrets, not-secret or clear.");
+    }
+    override = { kind: "tier", tier };
+  }
+  const items = locateTierItem(locator, context2);
+  const results = items.map((item) => withLedgerAt(item.ledgerPath, context2.now, (ledger) => {
+    if (override === "clear") {
+      const cleared = ledger.clearOverride(item.identity);
+      return { cleared, note: "The next sync re-decides this item without the override." };
+    }
+    ledger.setOverride(item.identity, override);
+    if (override.kind === "tier" && override.tier === "secrets") {
+      const current3 = ledger.getCurrent(item.identity);
+      const outcome2 = current3?.routed ? ledger.recordRoutedPlacement(item.identity, classifyItemTiers({ signals: {} }, { override }), { copies: [], embedHold: false }).outcome : undefined;
+      forgetSecretInSideStores({
+        ledger,
+        identity: { ...item.identity, ...item.localItemId ? { localItemId: item.localItemId } : {} },
+        confirmInWorker: true
+      });
+      if (current3?.routed) {
+        return { override: tierDisplayName(override.tier), outcome: outcome2 === "secrets" ? "hidden_now" : "set_applies_next_pass" };
+      }
+    }
+    if (override.kind === "not_secret") {
+      return { override: "not_secret", note: "The next sync sends this item back through normal classification." };
+    }
+    const current2 = ledger.getCurrent(item.identity);
+    if (current2?.routed) {
+      const decision2 = classifyItemTiers({ signals: {} }, { override });
+      if (decision2.contentTier === "secrets") {
+        const { outcome: outcome2 } = ledger.recordRoutedPlacement(item.identity, decision2, { copies: [], embedHold: false });
+        return { override: tierDisplayName(override.tier), outcome: outcome2 === "secrets" ? "hidden_now" : "set_applies_next_pass" };
+      }
+      const raised = ledger.queueOwnerRaise(item.identity, decision2, TIER_KEY_TRUST_DOMAIN[override.tier]);
+      if (raised === "hidden")
+        return { override: tierDisplayName(override.tier), outcome: "hidden_now_move_queued" };
+      if (raised === "retargeted")
+        return { override: tierDisplayName(override.tier), outcome: "move_retargeted" };
+      if (current2.state === "moving") {
+        return {
+          override: tierDisplayName(override.tier),
+          outcome: "set_applies_after_move",
+          note: "A tier move to tiers at least as private is in flight; the override applies once it lands."
+        };
+      }
+      return { override: tierDisplayName(override.tier), outcome: "set_applies_next_pass" };
+    }
+    const decision = classifyItemTiers({ signals: {} }, { override });
+    const { outcome, record: record2 } = ledger.recordDecision(item.identity, decision);
+    return {
+      override: tierDisplayName(override.tier),
+      outcome,
+      metadataTier: tierDisplayName(record2.metadataTier),
+      contentTier: tierDisplayName(record2.contentTier),
+      generation: record2.generation
+    };
+  }));
+  return {
+    locator,
+    item: publicIdentity(items[0].identity),
+    stores: items.length,
+    results
+  };
+}
+function runTierExplain(args, context2 = {}) {
+  const [locator] = args;
+  if (!locator || args.length > 1)
+    throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier explain"]}`);
+  const items = locateTierItem(locator, context2);
+  const records = items.map((item) => {
+    const recorded = withLedgerAt(item.ledgerPath, context2.now, (ledger) => ({
+      record: ledger.getCurrent(item.identity),
+      override: ledger.getOverride(item.identity),
+      orphaned: orphanedOverride(ledger, item.identity),
+      history: ledger.history(item.identity),
+      copies: ledger.copies(item.identity)
+    }));
+    const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
+    let waitingOn = [];
+    if (existsSync60(snifferPath)) {
+      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
+      try {
+        waitingOn = ["metadata", "content"].filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
+      } finally {
+        sniffer.close();
+      }
+    }
+    const { record: record2 } = recorded;
+    const orphanedNote = recorded.orphaned ? {
+      orphanedOverride: recorded.orphaned.kind === "tier" ? tierDisplayName(recorded.orphaned.tier) : "not_secret",
+      orphanedOverrideNote: "Set before the ledger keyed chat items by conversation; it no longer applies. Set it again with olympus tier set."
+    } : {};
+    if (!record2)
+      return { recorded: false, ...orphanedNote, note: "No decision is recorded for this item yet; the next sync records one." };
+    return {
+      recorded: true,
+      metadataTier: tierDisplayName(record2.metadataTier),
+      contentTier: tierDisplayName(record2.contentTier),
+      state: record2.state,
+      decidedBy: record2.decidedBy,
+      reasons: record2.reasons,
+      generation: record2.generation,
+      previousTiers: record2.previousContentTier ? { metadata: tierDisplayName(record2.previousMetadataTier ?? record2.previousContentTier), content: tierDisplayName(record2.previousContentTier) } : null,
+      override: recorded.override ? recorded.override.kind === "tier" ? tierDisplayName(recorded.override.tier) : "not_secret" : null,
+      classifierVersion: record2.engineVersion,
+      mapRevision: record2.mapRevision,
+      snifferModel: record2.modelId,
+      waitingOnSniffer: waitingOn,
+      routed: record2.routed,
+      copies: recorded.copies.map((copy) => ({ corpusId: copy.corpusId, layers: copy.layers, state: copy.state, embedHold: copy.embedHold })),
+      ...orphanedNote,
+      decidedAt: record2.decidedAt,
+      history: recorded.history.map((entry) => ({
+        generation: entry.generation,
+        metadataTier: tierDisplayName(entry.metadataTier),
+        contentTier: tierDisplayName(entry.contentTier),
+        decidedBy: entry.decidedBy,
+        state: entry.state,
+        decidedAt: entry.decidedAt
+      }))
+    };
+  });
+  return { locator, item: publicIdentity(items[0].identity), stores: records };
+}
+function publicIdentity(identity2) {
+  return {
+    provider: identity2.provider,
+    family: identity2.family,
+    accountScope: identity2.accountScope,
+    providerItemId: identity2.providerItemId
+  };
+}
+function runTierRules(args, context2 = {}) {
+  const env = context2.env ?? process.env;
+  const [command, ...rest] = args;
+  if (command === "list") {
+    const path = resolveTierRulesPath({ env });
+    const mailScopeRules = mailScopeTierRules(env);
+    if (!existsSync60(path)) {
+      return { path, rules: [], mailScopeRules, note: "No tier rules file yet; add one with olympus tier rules add." };
+    }
+    const validation = validateTierRulesFile({ env });
+    return { ...validation, rules: loadOwnerTierRules({ env }).map(describeRule), mailScopeRules };
+  }
+  if (command === "add") {
+    const options = parseFlags2(rest, ["id", "match", "tier", "source", "strength"]);
+    const matchText = options.get("match");
+    const separator = matchText?.indexOf("=") ?? -1;
+    if (!matchText || separator <= 0) {
+      throw new OperationError("invalid_params", `--match must be <kind>=<value>, with kind one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
+    }
+    const tierWord = options.get("tier") ?? "";
+    const tier = tierKeyFromDisplayName(tierWord);
+    if (!tier)
+      throw new OperationError("invalid_params", "--tier must be public, personal, private or secrets.");
+    const rule = parseOwnerTierRule({
+      id: options.get("id"),
+      ...options.get("source") ? { source: options.get("source") } : {},
+      match: { [matchText.slice(0, separator)]: matchText.slice(separator + 1) },
+      tier,
+      strength: options.get("strength") ?? "prior"
+    }, "tier rule");
+    const { path, rules } = addOwnerTierRule(rule, { env });
+    return { path, added: describeRule(rule), rules: rules.length };
+  }
+  if (command === "remove") {
+    const [id, ...extra] = rest;
+    if (!id || extra.length > 0)
+      throw new OperationError("invalid_params", "Usage: olympus tier rules remove <id>");
+    const { path, removed, rules } = removeOwnerTierRule(id, { env });
+    if (!removed)
+      throw new OperationError("invalid_params", `No tier rule has id "${id}".`);
+    return { path, removed: id, rules: rules.length };
+  }
+  throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier rules"]}`);
+}
+function mailScopeTierRules(env) {
+  try {
+    const registryPath = handleRegistryPathFromEnv(env, true);
+    if (!registryPath)
+      return [];
+    const approval = readMailSourceScopeApproval({
+      registry: readConnectedHandleRegistry(registryPath),
+      statePath: defaultMailSourceScopeStatePath(registryPath)
+    });
+    if (approval.status !== "approved")
+      return [];
+    return (approval.ownerTierRules ?? []).map((rule) => ({
+      ...describeRule(rule),
+      origin: "mail_scope_picker",
+      readOnly: true
+    }));
+  } catch {
+    return [];
+  }
+}
+function describeRule(rule) {
+  return {
+    id: rule.id,
+    ...rule.source ? { source: rule.source } : {},
+    match: { [rule.match.kind]: rule.match.value },
+    tier: tierDisplayName(rule.tier),
+    strength: rule.strength
+  };
+}
+async function runTierClassifier(args, context2 = {}) {
+  const env = context2.env ?? process.env;
+  const [command, ...rest] = args;
+  const ledgerPath = resolveClassificationLedgerPath(env);
+  const lane = (() => {
+    try {
+      return resolveSnifferLane(loadSovereigntyEngine({ env }));
+    } catch (error) {
+      if (error instanceof SnifferLaneRefusedError)
+        return { refused: error.reason };
+      throw error;
+    }
+  })();
+  const promptVersion = snifferPromptVersions(privacyOwnerContext({ env: context2.env ?? process.env })).approval;
+  const laneSummary = "refused" in lane ? { lane: null, refused: lane.refused } : { lane: lane.kind, profile: lane.profileId, modelId: lane.modelId };
+  if (command === "status") {
+    const ledger = await readClassificationLedger(ledgerPath);
+    const decision = "refused" in lane ? lane.refused === "no_private_lane" ? "not_applicable" : "refused" : classifierDecision(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion });
+    return {
+      ...laneSummary,
+      promptVersion,
+      approved: decision === "approved",
+      decision,
+      ledger: ledgerPath,
+      recent: ledger.entries.slice(0, 5),
+      skippedLines: ledger.skipped
+    };
+  }
+  if (command === "approve") {
+    const options = parseFlags2(rest, ["why"]);
+    const why = options.get("why")?.trim();
+    if (!why)
+      throw new OperationError("invalid_params", "--why is required: say what is approved and why.");
+    if ("refused" in lane) {
+      throw new OperationError("invalid_params", `No private sniffer lane is configured (${lane.refused}); there is nothing to approve.`);
+    }
+    const modelId = lane.modelId;
+    const entry = {
+      recorded_at: (context2.now?.() ?? new Date).toISOString(),
+      kind: "classifier_model_decision",
+      what: `The owner approved ${lane.kind} classifier model ${modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer.`,
+      model_id: modelId,
+      prompt_version: promptVersion,
+      lane: lane.kind,
+      profile_id: lane.profileId,
+      why,
+      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    };
+    await appendClassificationLedgerEntry(ledgerPath, entry);
+    return { ledger: ledgerPath, recorded: entry };
+  }
+  if (command === "decline") {
+    const options = parseFlags2(rest, ["why"]);
+    const why = options.get("why")?.trim();
+    if ("refused" in lane) {
+      throw new OperationError("invalid_params", `No private sniffer lane is configured (${lane.refused}); there is nothing to decline.`);
+    }
+    const entry = {
+      recorded_at: (context2.now?.() ?? new Date).toISOString(),
+      kind: "classifier_model_revoked",
+      what: `The owner declined ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer; possibly-private items stay held as Private.`,
+      model_id: lane.modelId,
+      prompt_version: promptVersion,
+      lane: lane.kind,
+      profile_id: lane.profileId,
+      ...why ? { why } : {},
+      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
+      status: "complete"
+    };
+    await appendClassificationLedgerEntry(ledgerPath, entry);
+    return { ledger: ledgerPath, recorded: entry };
+  }
+  throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier classifier"]}`);
+}
+function classifierDecision(entries, key2) {
+  if (isClassifierApproved(entries, key2))
+    return "approved";
+  for (const entry of entries) {
+    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
+      continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
+      continue;
+    if (entry.kind === "classifier_model_revoked")
+      return "declined";
+  }
+  return "not_asked";
+}
+function parseFlags2(args, allowed) {
+  const values = new Map;
+  for (let index = 0;index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("--"))
+      throw new OperationError("invalid_params", `Unexpected argument: ${arg}`);
+    const equals = arg.indexOf("=");
+    const key2 = arg.slice(2, equals === -1 ? undefined : equals);
+    if (!allowed.includes(key2))
+      throw new OperationError("invalid_params", `Unknown option: --${key2}`);
+    const value2 = equals === -1 ? args[index += 1] : arg.slice(equals + 1);
+    if (value2 === undefined)
+      throw new OperationError("invalid_params", `--${key2} needs a value.`);
+    values.set(key2, value2);
+  }
+  return values;
+}
+var TIER_CLI_USAGE;
+var init_tier_cli = __esm(() => {
+  init_data_lifecycle();
+  init_mail_source_scope();
+  init_connected_handles();
+  init_operation_error();
+  init_sovereignty();
+  init_classification_ledger();
+  init_sniffer();
+  init_privacy_profile();
+  init_sniffer_lane();
+  init_sniffer_store();
+  init_tier_classifier();
+  init_tier_ledger();
+  init_local_index();
+  init_secrets_disposition();
+  init_tiered_store_set();
+  init_tier_rules();
+  TIER_CLI_USAGE = {
+    "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
+    "tier explain": "olympus tier explain <locator>",
+    "tier rules": "olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>",
+    "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
+    "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
+  };
+});
+
+// src/core/cli-via-worker.ts
+import { realpathSync as realpathSync16 } from "node:fs";
+import { resolve as resolve14 } from "node:path";
+async function runLocallyOrThroughWorker(local, viaWorker, env = process.env) {
+  const lock = tryDataOwnerLock(env);
+  if (lock) {
+    try {
+      return await local();
+    } finally {
+      lock.release();
+    }
+  }
+  if (!viaWorker)
+    throw new DataOwnerBusyError(olympusDataRoot(env));
+  try {
+    return await viaWorker();
+  } catch (error) {
+    if (error instanceof WorkerUnreachableError)
+      throw new DataOwnerBusyError(olympusDataRoot(env));
+    throw error;
+  }
+}
+function canonicalDataRoot(root) {
+  try {
+    return realpathSync16(root);
+  } catch {
+    return resolve14(root);
+  }
+}
+async function callWorkerCli(operation, body, options = {}) {
+  const env = options.env ?? process.env;
+  const config = loadConfig(env);
+  const authToken = resolveWorkerAuthToken(env, config);
+  if (!authToken)
+    throw new WorkerUnreachableError("this command has no worker token to present");
+  const baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
+  const fetchImpl = options.fetchImpl ?? createWorkerFetch({ env });
+  try {
+    const probe = await fetchImpl(`${baseUrl}/health`, {
+      signal: AbortSignal.timeout(options.connectTimeoutMs ?? WORKER_CONNECT_TIMEOUT_MS)
+    });
+    await probe.body?.cancel().catch(() => {});
+  } catch (error) {
+    throw new WorkerUnreachableError(error instanceof Error ? error.message : String(error));
+  }
+  let response;
+  try {
+    response = await fetchImpl(`${baseUrl}${WORKER_CLI_ROUTE_PREFIX}${operation}`, withWorkerAuthHeader({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, data_root: canonicalDataRoot(olympusDataRoot(env)) })
+    }, authToken));
+  } catch (error) {
+    throw new OperationError("source_index_error", `The running Olympus stopped answering while it ran this command (${error instanceof Error ? error.message : String(error)}).`, "Check olympus engine status, then look at the result before running the command again.");
+  }
+  const text2 = await response.text();
+  let parsed;
+  try {
+    parsed = text2 ? JSON.parse(text2) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (response.ok) {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      return parsed;
+    throw new OperationError("source_index_error", "The running Olympus answered this command with something unreadable.");
+  }
+  const failure2 = parsed?.error;
+  if (response.status === 401) {
+    throw new OperationError("config_error", "The running Olympus did not accept this command's worker token.", `Run it with the configuration the running Olympus uses, or stop Olympus first (${STOP_OLYMPUS_HINT}).`);
+  }
+  if (response.status === 404) {
+    throw new OperationError("config_error", "The running Olympus is older than this command and cannot run it.", `Update and restart Olympus, or stop it first (${STOP_OLYMPUS_HINT}).`);
+  }
+  if (typeof failure2?.code === "string" && typeof failure2.message === "string") {
+    throw new OperationError(failure2.code, failure2.message, typeof failure2.suggestion === "string" ? failure2.suggestion : undefined);
+  }
+  throw new OperationError("source_index_error", `The running Olympus could not run this command (HTTP ${response.status}).`);
+}
+var WORKER_CLI_ROUTE_PREFIX = "/cli/", WORKER_CLI_OPERATIONS, WORKER_CONNECT_TIMEOUT_MS = 5000, WorkerUnreachableError;
+var init_cli_via_worker = __esm(() => {
+  init_config();
+  init_data_owner_lock();
+  init_olympus_layout();
+  init_operation_error();
+  init_worker_auth();
+  init_worker_transport();
+  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier"];
+  WorkerUnreachableError = class WorkerUnreachableError extends Error {
+    constructor(detail) {
+      super(`No Olympus worker answered (${detail}).`);
+      this.name = "WorkerUnreachableError";
+    }
+  };
+});
+
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync24, mkdirSync as mkdirSync42 } from "node:fs";
 import { dirname as dirname62 } from "node:path";
@@ -92496,20 +93060,20 @@ function isCleanExit(child) {
 async function waitForChildExit(child, timeoutMs) {
   if (childExited(child))
     return;
-  await new Promise((resolve14) => {
+  await new Promise((resolve15) => {
     const timeout = setTimeout(done, timeoutMs);
     timeout.unref?.();
     child.once("exit", done);
     function done() {
       clearTimeout(timeout);
       child.removeListener("exit", done);
-      resolve14();
+      resolve15();
     }
   });
 }
 function delay(ms) {
-  return new Promise((resolve14) => {
-    const timeout = setTimeout(resolve14, ms);
+  return new Promise((resolve15) => {
+    const timeout = setTimeout(resolve15, ms);
     timeout.unref?.();
   });
 }
@@ -93665,7 +94229,7 @@ async function startEngineHost(options) {
       status.state = "stopping";
       writeStatus();
       log("engine: stopping.");
-      const deadline = new Promise((resolve14) => setTimeout(resolve14, STOP_DEADLINE_MS).unref?.());
+      const deadline = new Promise((resolve15) => setTimeout(resolve15, STOP_DEADLINE_MS).unref?.());
       await Promise.race([
         Promise.allSettled([...services].reverse().map((service) => service.stop())),
         deadline
@@ -94002,7 +94566,7 @@ function createLlamaServerHandle(launch, options = {}) {
       if (Date.now() > deadline) {
         fail(new LlamaServerStartError(`The built-in model server did not load within ${Math.round(launch.startupTimeoutMs / 1000)}s.`));
       }
-      await new Promise((resolve15) => setTimeout(resolve15, HEALTH_POLL_MS));
+      await new Promise((resolve16) => setTimeout(resolve16, HEALTH_POLL_MS));
     }
     if (current2 !== spawned || spawned.exited) {
       throw new LlamaServerStartError(STOPPED_WHILE_STARTING);
@@ -94113,11 +94677,11 @@ function trackServerProcess(child, tokenDir, onExit) {
     waitExit(timeoutMs) {
       if (exited)
         return Promise.resolve(true);
-      return new Promise((resolve15) => {
+      return new Promise((resolve16) => {
         const settle = (value2) => {
           clearTimeout(timer);
           exitWaiters.delete(onExited);
-          resolve15(value2);
+          resolve16(value2);
         };
         const onExited = () => settle(true);
         const timer = setTimeout(() => settle(false), timeoutMs);
@@ -94160,12 +94724,12 @@ function abortable(promise, signal) {
     return promise;
   if (signal.aborted)
     return Promise.reject(signal.reason);
-  return new Promise((resolve15, reject) => {
+  return new Promise((resolve16, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then((value2) => {
       signal.removeEventListener("abort", onAbort);
-      resolve15(value2);
+      resolve16(value2);
     }, (error) => {
       signal.removeEventListener("abort", onAbort);
       reject(error);
@@ -94202,14 +94766,14 @@ async function servesAlias(fetchImpl, baseUrl, token, alias) {
   }
 }
 function freeLoopbackPort() {
-  return new Promise((resolve15, reject) => {
+  return new Promise((resolve16, reject) => {
     const server = createServer4();
     server.unref();
     server.on("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : 0;
-      server.close(() => port > 0 ? resolve15(port) : reject(new LlamaServerStartError("No free loopback port.")));
+      server.close(() => port > 0 ? resolve16(port) : reject(new LlamaServerStartError("No free loopback port.")));
     });
   });
 }
@@ -101895,7 +102459,7 @@ class Protocol {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1000;
-        await new Promise((resolve15) => setTimeout(resolve15, pollInterval));
+        await new Promise((resolve16) => setTimeout(resolve16, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -101907,7 +102471,7 @@ class Protocol {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve15, reject) => {
+    return new Promise((resolve16, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -101985,7 +102549,7 @@ class Protocol {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve15(parseResult.data);
+            resolve16(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -102176,12 +102740,12 @@ class Protocol {
         interval = task.pollInterval;
       }
     } catch {}
-    return new Promise((resolve15, reject) => {
+    return new Promise((resolve16, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve15, interval);
+      const timeoutId = setTimeout(resolve16, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -105166,7 +105730,7 @@ var require_compile = __commonJS((exports) => {
     const schOrFunc = root.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve15.call(this, root, ref);
+    let _sch = resolve16.call(this, root, ref);
     if (_sch === undefined) {
       const schema = (_a4 = root.localRefs) === null || _a4 === undefined ? undefined : _a4[ref];
       const { schemaId } = this.opts;
@@ -105193,7 +105757,7 @@ var require_compile = __commonJS((exports) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve15(root, ref) {
+  function resolve16(root, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -105723,7 +106287,7 @@ var require_fast_uri = __commonJS((exports, module) => {
     }
     return uri;
   }
-  function resolve15(baseURI, relativeURI, options) {
+  function resolve16(baseURI, relativeURI, options) {
     const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
     const resolved = resolveComponent(parse7(baseURI, schemelessOptions), parse7(relativeURI, schemelessOptions), schemelessOptions, true);
     schemelessOptions.skipEscape = true;
@@ -105951,7 +106515,7 @@ var require_fast_uri = __commonJS((exports, module) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize5,
-    resolve: resolve15,
+    resolve: resolve16,
     resolveComponent,
     equal: equal2,
     serialize,
@@ -109334,12 +109898,12 @@ class StdioServerTransport {
     this.onclose?.();
   }
   send(message2) {
-    return new Promise((resolve15) => {
+    return new Promise((resolve16) => {
       const json = serializeMessage(message2);
       if (this._stdout.write(json)) {
-        resolve15();
+        resolve16();
       } else {
-        this._stdout.once("drain", resolve15);
+        this._stdout.once("drain", resolve16);
       }
     });
   }
@@ -110158,8 +110722,8 @@ class SourceAnswerJobRegistry {
     }
     const outcome = pending.then((value2) => ({ ok: true, value: value2 }), (error2) => ({ ok: false, error: error2 }));
     let timer;
-    const handoff = new Promise((resolve15) => {
-      timer = setTimeout(() => resolve15("handoff"), this.limits.handoffMs);
+    const handoff = new Promise((resolve16) => {
+      timer = setTimeout(() => resolve16("handoff"), this.limits.handoffMs);
     });
     const first = await Promise.race([outcome, handoff]);
     clearTimeout(timer);
@@ -110178,8 +110742,8 @@ class SourceAnswerJobRegistry {
       id: newJobId(),
       owner: scope.owner,
       startedAt,
-      done: new Promise((resolve15) => {
-        wake = resolve15;
+      done: new Promise((resolve16) => {
+        wake = resolve16;
       }),
       finish: (result) => {
         if (job.outcome)
@@ -110211,12 +110775,12 @@ class SourceAnswerJobRegistry {
     if (!job.outcome && this.limits.resultWaitMs > 0) {
       let timer;
       let onAbort;
-      const stop = new Promise((resolve15) => {
-        timer = setTimeout(resolve15, this.limits.resultWaitMs);
+      const stop = new Promise((resolve16) => {
+        timer = setTimeout(resolve16, this.limits.resultWaitMs);
         if (signal) {
-          onAbort = () => resolve15();
+          onAbort = () => resolve16();
           if (signal.aborted)
-            resolve15();
+            resolve16();
           else
             signal.addEventListener("abort", onAbort, { once: true });
         }
@@ -110322,10 +110886,10 @@ class SourceAnswerJobRegistry {
     }
     let state = "queued";
     let detached = false;
-    let resolve15;
+    let resolve16;
     let reject;
     const ready = new Promise((ok, fail) => {
-      resolve15 = ok;
+      resolve16 = ok;
       reject = fail;
     });
     ready.catch(() => {
@@ -110360,7 +110924,7 @@ class SourceAnswerJobRegistry {
         this.runningTotal += 1;
         priority.lastGrant = kind;
         this.unqueue(waiter);
-        resolve15();
+        resolve16();
       },
       cancel: (reason, wake = true) => {
         if (state !== "queued")
@@ -110957,7 +111521,7 @@ async function solveRegistrationPow(bits, nonce, installId, relayHost, signal) {
   for (let counter = 0;; counter += 1) {
     if (counter % 4096 === 0) {
       if (counter > 0)
-        await new Promise((resolve15) => setTimeout(resolve15, 0));
+        await new Promise((resolve16) => setTimeout(resolve16, 0));
       if (signal?.aborted)
         throw new PowCancelledError;
     }
@@ -111626,7 +112190,7 @@ class RelayClient {
   }
   async drained() {
     while (this.socket && this.socket.readyState === WebSocket.OPEN && this.socket.bufferedAmount > SEND_HIGH_WATER_BYTES) {
-      await new Promise((resolve15) => setTimeout(resolve15, 10));
+      await new Promise((resolve16) => setTimeout(resolve16, 10));
     }
   }
 }
@@ -111748,9 +112312,9 @@ async function startRelayRuntime(options) {
 }
 async function runRelayRuntimeProcess(instanceId, overrides = {}) {
   const runtime = await startRelayRuntime({ ...overrides, env: process.env, instanceId });
-  await new Promise((resolve15) => {
+  await new Promise((resolve16) => {
     const shutdown = () => {
-      runtime.stop().finally(resolve15);
+      runtime.stop().finally(resolve16);
     };
     process.once("SIGTERM", shutdown);
     process.once("SIGINT", shutdown);
@@ -112254,7 +112818,7 @@ async function downloadVerified2(fetchImpl, url, target, expectedBytes, expected
   });
 }
 function hashInto(path, hash, timeoutMs, onProgress) {
-  return new Promise((resolve15, reject) => {
+  return new Promise((resolve16, reject) => {
     let done = 0;
     let settled = false;
     const stream = createReadStream3(path);
@@ -112267,7 +112831,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
         stream.destroy();
         reject(error2);
       } else {
-        resolve15();
+        resolve16();
       }
     };
     const timer = setTimeout(() => finish(new BuiltInReasoningInstallError("checksum_mismatch", `Checking ${path} did not finish within ${Math.round(timeoutMs / 60000)} min.`)), timeoutMs);
@@ -112292,7 +112856,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run2) {
     if (Date.now() > deadline) {
       throw new BuiltInReasoningInstallError("download_failed", `Another Olympus process is still installing the ${noun}.`);
     }
-    await new Promise((resolve15) => setTimeout(resolve15, LOCK_POLL_MS2));
+    await new Promise((resolve16) => setTimeout(resolve16, LOCK_POLL_MS2));
   }
   const refresh = setInterval(() => refreshLock(lockPath, token), refreshMs);
   refresh.unref?.();
@@ -115124,7 +115688,7 @@ var init_dashboard_session_secret = __esm(() => {
 
 // src/workers/dropbox-files/extraction-source.ts
 import { readFile as readFile8, realpath as realpath2, stat as stat4 } from "node:fs/promises";
-import { relative as relative9, resolve as resolve15, sep as sep11 } from "node:path";
+import { relative as relative9, resolve as resolve16, sep as sep11 } from "node:path";
 
 class DropboxExtractionSource {
   id;
@@ -115266,7 +115830,7 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve15(rootRealPath, relativePath);
+    const candidatePath = resolve16(rootRealPath, relativePath);
     const relativeToRoot = relative9(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep11}`)) {
       return;
@@ -119772,7 +120336,7 @@ function createBuiltInTranscriber(options = {}) {
       if (state === "pending" && installing && filesOnDisk()) {
         const pending = installing;
         const waitMs = Math.max(0, Math.min(verifyWaitMs, deadline - now()));
-        await Promise.race([pending, new Promise((resolve16) => setTimeout(resolve16, waitMs).unref?.())]);
+        await Promise.race([pending, new Promise((resolve17) => setTimeout(resolve17, waitMs).unref?.())]);
         state = prepare();
       }
       if (state === "unavailable")
@@ -120339,7 +120903,7 @@ function createVlmPdfExtractor(options = {}) {
             lastError = error2;
           }
           if (attempt < pageRetries && pageRetryDelayMs > 0) {
-            await new Promise((resolve16) => setTimeout(resolve16, pageRetryDelayMs));
+            await new Promise((resolve17) => setTimeout(resolve17, pageRetryDelayMs));
           }
         }
         if (!pageText) {
@@ -125094,7 +125658,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve16, reject) => {
+  return new Promise((resolve17, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -125117,7 +125681,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve16(response);
+      resolve17(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -127767,12 +128331,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve16, reject) => {
+    return new Promise((resolve17, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve16, reject, timer };
+      pending[id] = { resolve: resolve17, reject, timer };
     });
   }
   function notify(method, params) {
@@ -136348,6 +136912,72 @@ var init_chat_scope_filter = __esm(() => {
   ]);
 });
 
+// src/workers/cli-operations.ts
+import { isAbsolute as isAbsolute28 } from "node:path";
+function cliDataRootMismatch(body, context2) {
+  const owned = canonicalDataRoot(lifecycleDataRoot(context2));
+  const asked = typeof body.data_root === "string" && body.data_root ? canonicalDataRoot(body.data_root) : undefined;
+  if (asked === owned)
+    return;
+  if (!asked) {
+    return {
+      message: "This command did not say which Olympus data it is for.",
+      suggestion: "Run it with the olympus command that matches the running Olympus."
+    };
+  }
+  return {
+    message: `The running Olympus owns its data at ${owned}, not ${asked}, which another process holds.`,
+    suggestion: `Wait for or stop whatever holds ${asked} (an operator script, or another Olympus), then run the command again.`
+  };
+}
+function ingestionStatusForCli() {
+  return collectLocalSourceIngestionLedger({ config: loadConfig() });
+}
+function exportForCli(body) {
+  const output = typeof body.output === "string" ? body.output : "";
+  if (!isAbsolute28(output))
+    throw new OperationError("invalid_params", "The export folder must be an absolute path.");
+  const sourceId = typeof body.source_id === "string" && body.source_id.trim() ? body.source_id : undefined;
+  try {
+    return exportOlympusData({ destination: output, ...sourceId ? { sourceId } : {} });
+  } catch (error2) {
+    throw explainExportFailure(error2, output);
+  }
+}
+function explainExportFailure(error2, output) {
+  const code = error2?.code;
+  if (typeof code !== "string" || !/^E[A-Z0-9]+$/.test(code))
+    return error2;
+  const message2 = error2 instanceof Error ? error2.message : code;
+  if (code !== "EPERM" && code !== "EACCES") {
+    return new OperationError("source_index_error", `The running Olympus could not write the export to ${output}: ${message2}`);
+  }
+  return new OperationError("source_index_error", `The running Olympus could not write the export to ${output} (${code === "EPERM" ? "not permitted" : "permission denied"}).`, process.platform === "darwin" ? "The running Olympus writes the export itself, as Olympus Engine, and macOS limits what it may write: " + "Desktop, Documents, Downloads, iCloud Drive and removable or network disks need its permission " + "(System Settings > Privacy & Security > Files & Folders). Choose another folder, " + `or stop Olympus first (${STOP_OLYMPUS_HINT}) to export as yourself.` : "The running Olympus writes the export itself, as the user it runs as. " + `Choose a folder it may write to, or stop Olympus first (${STOP_OLYMPUS_HINT}).`);
+}
+async function tierForCli(body) {
+  const args = body.args;
+  if (!Array.isArray(args) || args.length > TIER_ARGS_MAX || !args.every((arg) => typeof arg === "string" && arg.length <= TIER_ARG_MAX_LENGTH)) {
+    throw new OperationError("invalid_params", "args must be a short list of strings.");
+  }
+  if (!tierCommandOpensStores(args)) {
+    throw new OperationError("invalid_params", "This tier command does not need the running Olympus; run it from the command line.");
+  }
+  if (tierCommandRewritesStores(args)) {
+    throw new OperationError("invalid_params", "This tier command rewrites stores Olympus is writing, so it cannot run while Olympus runs.", `Stop Olympus first (${STOP_OLYMPUS_HINT}), then run it again.`);
+  }
+  return runTierCommand(args);
+}
+var TIER_ARGS_MAX = 64, TIER_ARG_MAX_LENGTH = 4096;
+var init_cli_operations = __esm(() => {
+  init_cli_via_worker();
+  init_config();
+  init_data_owner_lock();
+  init_operation_error();
+  init_data_lifecycle();
+  init_tier_cli();
+  init_source_ingestion_ledger();
+});
+
 // src/workers/email-source/gogcli.ts
 class GogcliEmailConnector {
   name = "gogcli";
@@ -136431,12 +137061,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve16) => {
+        new Promise((resolve17) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve16({
+              resolve17({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -136463,7 +137093,7 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 import { createHash as createHash72, randomBytes as randomBytes26, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
 import { readFileSync as readFileSync70, statSync as statSync29 } from "node:fs";
 import { homedir as homedir40 } from "node:os";
-import { join as join102, resolve as resolve16 } from "node:path";
+import { join as join102, resolve as resolve17 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -136688,6 +137318,28 @@ function createEmailSourceWorker(options = {}) {
               throw error2;
             }
           });
+        }
+        if (request.method === "POST" && url.pathname.startsWith(`${basePath}${WORKER_CLI_ROUTE_PREFIX}`)) {
+          if (carriesRelayMarker(request)) {
+            throw new EmailSourceWorkerError(403, "cli_route_not_relayed", "CLI routes are not served to relayed requests.");
+          }
+          const operation = WORKER_CLI_OPERATIONS.find((name) => name === url.pathname.slice(`${basePath}${WORKER_CLI_ROUTE_PREFIX}`.length));
+          if (operation) {
+            const body = await parseObjectBody(request);
+            const mismatch = cliDataRootMismatch(body, sourceDashboard?.dataLifecyclePathContext ?? { env: process.env });
+            if (mismatch)
+              throw new EmailSourceWorkerError(409, "config_error", mismatch.message, mismatch.suggestion);
+            switch (operation) {
+              case "ingestion-status":
+                return json(await ingestionStatusForCli());
+              case "data-export":
+                return json(exportForCli(body));
+              case "data-delete":
+                return json(await deleteSourceDataForCli(body));
+              case "tier":
+                return json(await tierForCli(body));
+            }
+          }
         }
         if (request.method === "POST" && url.pathname === `${basePath}/source/export`) {
           if (!dropboxSourceExport) {
@@ -137590,58 +138242,21 @@ function createEmailSourceWorker(options = {}) {
             if (record5.acknowledge !== true) {
               throw new EmailSourceWorkerError(400, "delete_confirmation_required", "Confirm that deleting indexed data cannot be undone and leaves the source's files and accounts untouched.");
             }
-            const restart = sourceDashboard.workerRestart;
-            if (!restart || !restart.canRestart()) {
-              throw new EmailSourceWorkerError(501, "delete_reopen_unavailable", "Olympus cannot restart its worker to reopen its stores here, so it will not delete indexed data while it is running. Nothing was deleted.");
+            const outcome = await deleteSourceDataInWorker(sourceId, { dryRun: false });
+            if (!outcome.ok) {
+              throw new EmailSourceWorkerError(500, "delete_failed", "Olympus could not finish deleting this source's indexed data. Retry; the worker is restarting to reopen its stores.");
             }
-            const registryPath = sourceDashboard.registryPath ?? defaultHandleRegistryPath();
-            const pathContext = sourceDashboard.dataLifecyclePathContext ?? { env: process.env };
-            return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
-              const busy = () => dashboardManualSyncRuns.has(sourceId) || sourceScheduler !== undefined && dashboardDisconnectHasRunningRead(sourceScheduler, new Set([sourceId]));
-              if (busy()) {
-                throw new EmailSourceWorkerError(409, "delete_source_busy", "This source is finishing a read. Retry deleting its indexed data after the current read completes.");
+            return json({
+              ok: true,
+              source_id: sourceId,
+              removed_count: outcome.result.removed.length,
+              worker_restarting: outcome.restarting,
+              policy: {
+                indexed_data_deleted: true,
+                source_files_untouched: true,
+                provider_grant_revoked: false,
+                raw_runtime_secrets_exposed: false
               }
-              const custodyInput = {
-                sourceId,
-                connectedRegistry: readConnectedHandleRegistry(registryPath),
-                thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, "")),
-                unpairedSources: readReconciledUnpairedSources(registryPath)
-              };
-              const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
-              if (!custody.ready) {
-                throw custody.observed === "paired" ? new EmailSourceWorkerError(409, "delete_source_paired", "Unpair this source before deleting its indexed data.") : custody.observed === "connected" ? new EmailSourceWorkerError(409, "delete_source_connected", "Disconnect this source before deleting its indexed data.") : custody.observed === "unpair_incomplete" || custody.observed === "unpair_state_unreadable" ? new EmailSourceWorkerError(409, "delete_unavailable", "Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.") : new EmailSourceWorkerError(409, "delete_unavailable", "Olympus cannot confirm this source is disconnected, so it did not delete anything.");
-              }
-              const captureKind = sourceId === "telegram.messages" ? "telegram" : sourceId === "whatsapp.personal.messages" ? "whatsapp" : undefined;
-              if (captureKind && sourceDashboard.stopMessagingCapture) {
-                try {
-                  await sourceDashboard.stopMessagingCapture(captureKind);
-                } catch {
-                  throw new EmailSourceWorkerError(409, "delete_unavailable", "Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.");
-                }
-              }
-              let removedCount = 0;
-              let failed = false;
-              try {
-                removedCount = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext }).removed.length;
-              } catch {
-                failed = true;
-              }
-              const restarting2 = restart.request();
-              if (failed) {
-                throw new EmailSourceWorkerError(500, "delete_failed", "Olympus could not finish deleting this source's indexed data. Retry; the worker is restarting to reopen its stores.");
-              }
-              return json({
-                ok: true,
-                source_id: sourceId,
-                removed_count: removedCount,
-                worker_restarting: restarting2,
-                policy: {
-                  indexed_data_deleted: true,
-                  source_files_untouched: true,
-                  provider_grant_revoked: false,
-                  raw_runtime_secrets_exposed: false
-                }
-              });
             });
           });
         }
@@ -138405,11 +139020,74 @@ function createEmailSourceWorker(options = {}) {
       throw new EmailSourceWorkerError(409, "model_setup_required", "Finish model setup at the top of Setup before connecting sources or starting ingestion.");
     }
   }
+  async function deleteSourceDataForCli(body) {
+    const sourceId = requireSource(typeof body.source_id === "string" ? body.source_id : undefined).sourceId;
+    const dryRun = body.dry_run === true;
+    const outcome = dryRun ? await deleteSourceDataInWorker(sourceId, { dryRun }) : await withDashboardGrantMutation(() => deleteSourceDataInWorker(sourceId, { dryRun }));
+    if (!outcome.ok) {
+      if (outcome.error instanceof OperationError)
+        throw outcome.error;
+      throw new EmailSourceWorkerError(500, "delete_failed", "Olympus could not finish deleting this source's indexed data. Retry; the worker is restarting to reopen its stores.");
+    }
+    return { ...outcome.result, worker_restarting: outcome.restarting };
+  }
+  async function deleteSourceDataInWorker(sourceId, options2) {
+    const registryPath = sourceDashboard?.registryPath ?? defaultHandleRegistryPath();
+    const pathContext = sourceDashboard?.dataLifecyclePathContext ?? { env: process.env };
+    const custodyInputFor = () => ({
+      sourceId,
+      connectedRegistry: readConnectedHandleRegistry(registryPath),
+      thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, "")),
+      unpairedSources: readReconciledUnpairedSources(registryPath)
+    });
+    if (options2.dryRun) {
+      return {
+        ok: true,
+        result: deleteOlympusDataWithCustody({ ...custodyInputFor(), ...pathContext, dryRun: true }),
+        restarting: false
+      };
+    }
+    const restart = sourceDashboard?.workerRestart;
+    if (!sourceDashboard || !restart || !restart.canRestart()) {
+      throw new EmailSourceWorkerError(501, "delete_reopen_unavailable", "Olympus cannot restart its worker to reopen its stores here, so it will not delete indexed data while it is running. Nothing was deleted.");
+    }
+    return await withConnectedHandleGrantCustody(registryPath, {}, async () => {
+      const busy = () => dashboardManualSyncRuns.has(sourceId) || sourceScheduler !== undefined && dashboardDisconnectHasRunningRead(sourceScheduler, new Set([sourceId]));
+      if (busy()) {
+        throw new EmailSourceWorkerError(409, "delete_source_busy", "This source is finishing a read. Retry deleting its indexed data after the current read completes.");
+      }
+      const custodyInput = custodyInputFor();
+      const custody = dataDeleteCustody({ ...custodyInput, ...pathContext });
+      if (!custody.ready) {
+        if (custody.requirement === "worker_inactive") {
+          throw new EmailSourceWorkerError(409, "delete_unavailable", "This source can be deleted only while Olympus is stopped. Stop it first, then retry.");
+        }
+        throw custody.observed === "paired" ? new EmailSourceWorkerError(409, "delete_source_paired", "Unpair this source before deleting its indexed data.") : custody.observed === "connected" ? new EmailSourceWorkerError(409, "delete_source_connected", "Disconnect this source before deleting its indexed data.") : custody.observed === "unpair_incomplete" || custody.observed === "unpair_state_unreadable" ? new EmailSourceWorkerError(409, "delete_unavailable", "Unpair for this source did not finish cleanly, so Olympus did not delete anything. Finish Unpair first.") : new EmailSourceWorkerError(409, "delete_unavailable", "Olympus cannot confirm this source is disconnected, so it did not delete anything.");
+      }
+      const captureKind = sourceId === "telegram.messages" ? "telegram" : sourceId === "whatsapp.personal.messages" ? "whatsapp" : undefined;
+      if (captureKind && sourceDashboard.stopMessagingCapture) {
+        try {
+          await sourceDashboard.stopMessagingCapture(captureKind);
+        } catch {
+          throw new EmailSourceWorkerError(409, "delete_unavailable", "Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.");
+        }
+      }
+      let deleted;
+      let failure2;
+      try {
+        deleted = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext });
+      } catch (error2) {
+        failure2 = error2;
+      }
+      const restarting2 = restart.request();
+      return deleted ? { ok: true, result: deleted, restarting: restarting2 } : { ok: false, error: failure2, restarting: restarting2 };
+    });
+  }
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve17) => {
-      release = resolve17;
+    dashboardGrantMutationTail = new Promise((resolve18) => {
+      release = resolve18;
     });
     await previous;
     try {
@@ -138725,7 +139403,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve17) => setTimeout(resolve17, ms));
+  return new Promise((resolve18) => setTimeout(resolve18, ms));
 }
 async function parseConsultAskRequest(request) {
   const record5 = await parseObjectBody(request);
@@ -139752,10 +140430,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve16(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve17(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve16(path)))].sort();
+  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve17(path)))].sort();
   const a = normalize5(left);
   const b = normalize5(right);
   return a.length === b.length && a.every((value2, index) => value2 === b[index]);
@@ -140705,6 +141383,9 @@ var init_email_source = __esm(() => {
   init_chat_scope_filter();
   init_this_computer();
   init_data_lifecycle();
+  init_cli_via_worker();
+  init_remote_access();
+  init_cli_operations();
   init_corpora();
   CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
     [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
@@ -141340,7 +142021,7 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash73, randomUUID as randomUUID29 } from "node:crypto";
-import { realpathSync as realpathSync16, rmSync as rmSync24, readdirSync as readdirSync15 } from "node:fs";
+import { realpathSync as realpathSync17, rmSync as rmSync24, readdirSync as readdirSync15 } from "node:fs";
 import { join as join104, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -141402,7 +142083,7 @@ function createLocalFilesSourceConnector(options) {
       throw new LocalFilesRootMissingError(root);
     let real;
     try {
-      real = realpathSync16.native(configured);
+      real = realpathSync17.native(configured);
     } catch {
       throw new LocalFilesRootMissingError(root);
     }
@@ -141815,7 +142496,7 @@ function createLocalFilesSourceConnector(options) {
         throw new FileExtractionSourceError("source_unavailable");
       let scopeRoot;
       try {
-        scopeRoot = ScopeRoot.open(realpathSync16.native(rootReal));
+        scopeRoot = ScopeRoot.open(realpathSync17.native(rootReal));
       } catch {
         throw new FileExtractionSourceError("source_unavailable");
       }
@@ -142207,7 +142888,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve17) => setTimeout(resolve17, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve18) => setTimeout(resolve18, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -144158,8 +144839,8 @@ class MacPermissions {
       });
       this.inFlight.set(guard.root, pending);
     }
-    const waiting = new Promise((resolve17) => {
-      const timer = setTimeout(() => resolve17("waiting"), this.askTimeoutMs);
+    const waiting = new Promise((resolve18) => {
+      const timer = setTimeout(() => resolve18("waiting"), this.askTimeoutMs);
       timer.unref?.();
       pending.finally(() => clearTimeout(timer)).catch(() => {
         return;
@@ -144238,7 +144919,7 @@ var init_mac_permissions = __esm(() => {
 });
 
 // src/workers/local-files/scheduler-source.ts
-import { realpathSync as realpathSync17 } from "node:fs";
+import { realpathSync as realpathSync18 } from "node:fs";
 import { homedir as homedir41 } from "node:os";
 function retryTomorrow(context2, reason, afterMs = DAY_MS3) {
   const attempted = Date.parse(context2?.attemptedAt ?? new Date().toISOString());
@@ -144252,7 +144933,7 @@ function createLocalFilesSchedulerSource(input) {
   }
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync17(homedir41()) });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync18(homedir41()) });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -144557,9 +145238,9 @@ async function blobToArrayBuffer(blob) {
     return await blob.arrayBuffer();
   }
   const fr = new FileReader;
-  return new Promise((resolve17, reject) => {
+  return new Promise((resolve18, reject) => {
     fr.onload = () => {
-      resolve17(fr.result);
+      resolve18(fr.result);
     };
     fr.onerror = () => {
       reject(fr.error);
@@ -149908,7 +150589,7 @@ var init_format_connectors = __esm(() => {
 });
 
 // src/workers/archive-import/start.ts
-import { lstatSync as lstatSync38, realpathSync as realpathSync18 } from "node:fs";
+import { lstatSync as lstatSync38, realpathSync as realpathSync19 } from "node:fs";
 import { posix as posix4 } from "node:path";
 function prepareArchiveImport(input) {
   const path = input.path;
@@ -149916,7 +150597,7 @@ function prepareArchiveImport(input) {
     return { kind: "unreadable", code: "escape" };
   let kind;
   try {
-    if (realpathSync18.native(path) !== path)
+    if (realpathSync19.native(path) !== path)
       return { kind: "unreadable", code: "escape" };
     const stat6 = lstatSync38(path);
     if (stat6.isFile())
@@ -150549,7 +151230,7 @@ function createArchiveImportDashboard(options) {
     path: options.requestsPath ?? archiveImportRequestsPath(state.path),
     ...options.now ? { now: options.now } : {}
   });
-  const pause = options.pause ?? (() => new Promise((resolve17) => setImmediate(resolve17)));
+  const pause = options.pause ?? (() => new Promise((resolve18) => setImmediate(resolve18)));
   const home2 = options.home ?? homedir42();
   let closed = false;
   let checks4 = Promise.resolve();
@@ -151154,7 +151835,7 @@ async function digestArchiveFiles(root, files, shouldContinue) {
           steps.return("");
           return;
         }
-        await new Promise((resolve17) => setImmediate(resolve17));
+        await new Promise((resolve18) => setImmediate(resolve18));
       }
     } catch (error2) {
       throw fileStop(error2, file.rel_path);
@@ -151467,7 +152148,7 @@ var init_scheduler_source2 = __esm(() => {
 });
 
 // src/workers/local-files/open-target.ts
-import { realpathSync as realpathSync19, statSync as statSync30 } from "node:fs";
+import { realpathSync as realpathSync20, statSync as statSync30 } from "node:fs";
 function localFilesOpenRoots(volumes, approvedScopePaths) {
   const roots = [];
   for (const scopePath of approvedScopePaths()) {
@@ -151475,7 +152156,7 @@ function localFilesOpenRoots(volumes, approvedScopePaths) {
     if (!resolved)
       continue;
     try {
-      const real = realpathSync19.native(resolved);
+      const real = realpathSync20.native(resolved);
       if (statSync30(real).isDirectory() && !roots.includes(real))
         roots.push(real);
     } catch {}
@@ -151497,7 +152178,7 @@ function createLocalFilesOpenTargets(options) {
     if (!resolved)
       return;
     try {
-      const real = realpathSync19.native(resolved);
+      const real = realpathSync20.native(resolved);
       return statSync30(real).isFile() ? { localPath: real } : undefined;
     } catch {
       return;
@@ -151512,7 +152193,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash78 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync74, lstatSync as lstatSync39, readFileSync as readFileSync73, readdirSync as readdirSync16, realpathSync as realpathSync20 } from "node:fs";
+import { existsSync as existsSync74, lstatSync as lstatSync39, readFileSync as readFileSync73, readdirSync as readdirSync16, realpathSync as realpathSync21 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
 
 class VolumeResolver {
@@ -151703,7 +152384,7 @@ function defaultUuidsByDevice() {
       return result;
     for (const name of readdirSync16(dir)) {
       try {
-        result.set(realpathSync20(`${dir}/${name}`), name);
+        result.set(realpathSync21(`${dir}/${name}`), name);
       } catch {}
     }
   } catch {}
@@ -152153,12 +152834,12 @@ var init_mac_settings = __esm(() => {
 });
 
 // src/workers/local-files/scope-browser.ts
-import { lstatSync as lstatSync40, readdirSync as readdirSync17, realpathSync as realpathSync21 } from "node:fs";
+import { lstatSync as lstatSync40, readdirSync as readdirSync17, realpathSync as realpathSync22 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 import { join as join107 } from "node:path";
 function safeRealpath(path) {
   try {
-    return realpathSync21.native(path);
+    return realpathSync22.native(path);
   } catch {
     return path;
   }
@@ -152346,7 +153027,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
         }
         if (!isFolder)
           throw new Error("A selected folder could not be verified. It may have moved.");
-        const canonical2 = realpathSync21.native(real);
+        const canonical2 = realpathSync22.native(real);
         if (canonical2 !== real) {
           if (canonical2.normalize("NFC").toLowerCase() !== real.normalize("NFC").toLowerCase()) {
             throw new Error("A selected folder is reached through a link. Choose the folder itself.");
@@ -152404,7 +153085,7 @@ function createLocalFilesArchiveBrowser(options = {}) {
         return refuse3("not_regular", ARCHIVE_PATH_COPY.not_regular);
       let canonical2;
       try {
-        canonical2 = realpathSync21.native(real);
+        canonical2 = realpathSync22.native(real);
       } catch {
         return refuse3("not_found", ARCHIVE_PATH_COPY.not_found);
       }
@@ -154945,9 +155626,9 @@ data:
       const initRequest = messages2.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve17) => {
+        return new Promise((resolve18) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve17,
+            resolveJson: resolve18,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -156301,7 +156982,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve17) => {
+    return new Promise((resolve18) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -156312,7 +156993,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve17(db);
+        resolve18(db);
       };
       try {
         const factory = window.indexedDB;
@@ -156339,7 +157020,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve17) => {
+    return new Promise((resolve18) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -156348,7 +157029,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve17(value2);
+        resolve18(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -156483,10 +157164,10 @@ function chatgptPrivateAnswerProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve17) => setTimeout(resolve17, ms));
+    return new Promise((resolve18) => setTimeout(resolve18, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve17, reject) => {
+    return new Promise((resolve18, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -156496,7 +157177,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve17(value2);
+        resolve18(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -157707,7 +158388,7 @@ function chatgptPrivateQuestionProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve17) => {
+    return new Promise((resolve18) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -157718,7 +158399,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return;
         }
         settled = true;
-        resolve17(db);
+        resolve18(db);
       };
       try {
         const factory = window.indexedDB;
@@ -157745,7 +158426,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve17) => {
+    return new Promise((resolve18) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -157754,7 +158435,7 @@ function chatgptPrivateQuestionProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve17(value2);
+        resolve18(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -157818,10 +158499,10 @@ function chatgptPrivateQuestionProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve17) => setTimeout(resolve17, ms));
+    return new Promise((resolve18) => setTimeout(resolve18, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve17, reject) => {
+    return new Promise((resolve18, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -157831,7 +158512,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve17(value2);
+        resolve18(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -160542,10 +161223,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve17) => {
+  const timeout = new Promise((resolve18) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve17(false);
+      resolve18(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -160616,8 +161297,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none2;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve17) => {
-    const timer = setTimeout(() => resolve17(none2), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve18) => {
+    const timer = setTimeout(() => resolve18(none2), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -168941,7 +169622,7 @@ function createRemoteOAuthHandler(options) {
   const pending = new Map;
   const codes = new Map;
   const completed = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve17) => setTimeout(resolve17, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve18) => setTimeout(resolve18, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -170111,8 +170792,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve17) => {
-          timer = setTimeout(resolve17, holdMs);
+        await Promise.race([settled, new Promise((resolve18) => {
+          timer = setTimeout(resolve18, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -170272,8 +170953,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve17) => {
-      settle = resolve17;
+    const settled = new Promise((resolve18) => {
+      settle = resolve18;
     });
     const analysis = {
       key: key2,
@@ -170469,10 +171150,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve17) => {
+    const stopped = new Promise((resolve18) => {
       if (abort.signal.aborted)
-        resolve17();
-      abort.signal.addEventListener("abort", () => resolve17(), { once: true });
+        resolve18();
+      abort.signal.addEventListener("abort", () => resolve18(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -170499,8 +171180,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve17) => {
-      claimSettled = resolve17;
+    const done = new Promise((resolve18) => {
+      claimSettled = resolve18;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -170539,10 +171220,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve17) => {
+    const stopped = new Promise((resolve18) => {
       if (abort.signal.aborted)
-        resolve17();
-      abort.signal.addEventListener("abort", () => resolve17(), { once: true });
+        resolve18();
+      abort.signal.addEventListener("abort", () => resolve18(), { once: true });
     });
     const record5 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -170673,8 +171354,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve17) => {
-      timer = setTimeout(resolve17, this.resetTimeoutMs);
+    const timeout = new Promise((resolve18) => {
+      timer = setTimeout(resolve18, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -171299,10 +171980,10 @@ function untilCancelled(pending, signal) {
     return pending;
   if (signal.aborted)
     return Promise.resolve(undefined);
-  return new Promise((resolve17, reject) => {
-    const onAbort = () => resolve17(undefined);
+  return new Promise((resolve18, reject) => {
+    const onAbort = () => resolve18(undefined);
     signal.addEventListener("abort", onAbort, { once: true });
-    pending.then(resolve17, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    pending.then(resolve18, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 function asRecord20(value2) {
@@ -171374,8 +172055,8 @@ function createRemotePrivateParts(options) {
     try {
       return await Promise.race([
         options.probe(request, timeoutMs),
-        new Promise((resolve17) => {
-          timer = setTimeout(() => resolve17("unknown"), timeoutMs);
+        new Promise((resolve18) => {
+          timer = setTimeout(() => resolve18("unknown"), timeoutMs);
           timer.unref?.();
         })
       ]);
@@ -172262,7 +172943,7 @@ var init_setup_backend = __esm(() => {
 
 // src/core/consult-settings-writer.ts
 import { chmodSync as chmodSync29, lstatSync as lstatSync42, mkdirSync as mkdirSync54, statSync as statSync31 } from "node:fs";
-import { dirname as dirname81, isAbsolute as isAbsolute28 } from "node:path";
+import { dirname as dirname81, isAbsolute as isAbsolute29 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -172270,7 +172951,7 @@ function writeConsultSettings(input, location = {}) {
   } catch {
     return { ok: false, reason: "directory_unavailable" };
   }
-  if (path === undefined || !isAbsolute28(path))
+  if (path === undefined || !isAbsolute29(path))
     return { ok: false, reason: "no_home" };
   const nextRevision = input.expectedRevision + 1;
   const candidate = parseConsultSettings({
@@ -173482,7 +174163,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync78 } from "node:fs";
-import { dirname as dirname83, isAbsolute as isAbsolute29, join as join109 } from "node:path";
+import { dirname as dirname83, isAbsolute as isAbsolute30, join as join109 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -174998,13 +175679,13 @@ async function main() {
     }
     if (!await eligible())
       throw new Error("open refused");
-    await new Promise((resolve17, reject) => {
+    await new Promise((resolve18, reject) => {
       const args = localOpenArguments(path, roots);
       if (!args) {
         reject(new Error("open refused"));
         return;
       }
-      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve17());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve18());
     });
   };
   const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
@@ -176774,7 +177455,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         openUrl: async (url, eligible) => {
           if (!await eligible())
             throw new Error("open refused");
-          await new Promise((resolve17, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve17()));
+          await new Promise((resolve18, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve18()));
         }
       } : {}
     });
@@ -177840,7 +178521,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (!isAbsolute29(dbPath)) {
+  if (!isAbsolute30(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
@@ -178497,7 +179178,7 @@ import { randomBytes as randomBytes30 } from "node:crypto";
 import { readFileSync as readFileSync75, openSync as openSync20, closeSync as closeSync21, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve17 } from "node:path";
+import { resolve as resolve18 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -180082,469 +180763,10 @@ init_unpaired_sources();
 init_connected_handles();
 init_secret_store();
 init_sovereignty();
-
-// src/workers/classification/tier-cli.ts
-init_data_lifecycle();
-init_mail_source_scope();
-init_connected_handles();
-init_operation_error();
-init_sovereignty();
-init_classification_ledger();
-init_sniffer();
-init_privacy_profile();
-init_sniffer_lane();
-init_sniffer_store();
-init_tier_classifier();
-init_tier_ledger();
-init_local_index();
-init_secrets_disposition();
-init_tiered_store_set();
-init_tier_rules();
-import { Database as Database15 } from "bun:sqlite";
-import { existsSync as existsSync60 } from "node:fs";
-var TIER_CLI_USAGE = {
-  "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
-  "tier explain": "olympus tier explain <locator>",
-  "tier rules": "olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>",
-  "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
-  "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
-};
-function tierCommandOpensStores(args) {
-  return args[0] === "set" || args[0] === "explain" || args[0] === "migrate";
-}
-async function runTierCommand(args, context2 = {}) {
-  const [command, ...rest] = args;
-  switch (command) {
-    case "set":
-      return runTierSet(rest, context2);
-    case "explain":
-      return runTierExplain(rest, context2);
-    case "rules":
-      return runTierRules(rest, context2);
-    case "classifier":
-      return runTierClassifier(rest, context2);
-    case "migrate": {
-      const { runTierMigrateCommand: runTierMigrateCommand2 } = await Promise.resolve().then(() => (init_tier_migration_cli(), exports_tier_migration_cli));
-      return runTierMigrateCommand2(rest);
-    }
-    default:
-      throw new OperationError("invalid_params", `Unknown tier command: ${command ?? "(none)"}.`, "Run olympus tier --help.");
-  }
-}
-function knownStorePaths(context2) {
-  const paths = context2.storePaths ?? lifecycleSourceSpecs().flatMap((spec) => spec.connectorStorePaths?.(context2) ?? []);
-  return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync60(path));
-}
-function matchStore(dbPath, needle) {
-  const db = new Database15(dbPath, { readonly: true });
-  try {
-    db.exec("PRAGMA busy_timeout = 10000;");
-    const rows = db.query(`
-      SELECT provider, family, account_scope, provider_item_id, provider_conversation_id, local_item_id FROM items
-      WHERE tombstoned = 0 AND (LOWER(locator_uri) = LOWER(?) OR provider_item_id = ?)
-      LIMIT 5
-    `).all(needle, needle);
-    if (rows.length === 0)
-      return [];
-    let boundLedgerPath;
-    try {
-      const binding = db.query("SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?").get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
-      const parsed = binding?.cursor ? JSON.parse(binding.cursor) : undefined;
-      if (typeof parsed?.ledgerPath === "string")
-        boundLedgerPath = parsed.ledgerPath;
-    } catch {}
-    return rows.map((row) => ({
-      identity: {
-        provider: row.provider,
-        family: row.family,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
-      },
-      localItemId: row.local_item_id,
-      ...boundLedgerPath ? { boundLedgerPath } : {},
-      ownLedgerPath: tierLedgerPathForStore(dbPath)
-    }));
-  } catch {
-    return [];
-  } finally {
-    closeSqliteStore(db, { checkpoint: false });
-  }
-}
-function locateTierItem(locator, context2 = {}) {
-  const needle = locator.trim();
-  if (!needle)
-    throw new OperationError("invalid_params", "A locator is required.");
-  const stores = knownStorePaths(context2);
-  const matches2 = stores.flatMap((dbPath) => matchStore(dbPath, needle));
-  const identities = new Map(matches2.map((match) => [identityKey2(match.identity), match.identity]));
-  if (identities.size === 0) {
-    throw new OperationError("invalid_params", "No stored item matches that locator.", "Use the locator an answer cited, or the provider item id.");
-  }
-  if (identities.size > 1) {
-    throw new OperationError("invalid_params", `That locator matches ${identities.size} different items.`, "Use the full locator URI an answer cited.");
-  }
-  const identity2 = [...identities.values()][0];
-  const localItemId = matches2[0].localItemId;
-  const ledgerPaths = new Set;
-  for (const dbPath of stores) {
-    const path = tierLedgerPathForStore(dbPath);
-    if (existsSync60(path))
-      ledgerPaths.add(path);
-  }
-  for (const match of matches2)
-    if (match.boundLedgerPath && existsSync60(match.boundLedgerPath))
-      ledgerPaths.add(match.boundLedgerPath);
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity2) !== undefined));
-  if (deciding.length > 0)
-    return deciding.map((ledgerPath) => ({ ledgerPath, identity: identity2, localItemId }));
-  const fallback = matches2[0];
-  return [{ ledgerPath: fallback.boundLedgerPath ?? fallback.ownLedgerPath, identity: identity2, localItemId }];
-}
-function identityKey2(identity2) {
-  return tierLedgerIdentityKey(identity2);
-}
-function withLedgerAt(ledgerPath, now, run) {
-  const ledger = new TierLedger({ dbPath: ledgerPath, ...now ? { now } : {} });
-  try {
-    return run(ledger);
-  } finally {
-    ledger.close();
-  }
-}
-function orphanedOverride(ledger, identity2) {
-  if (!identity2.providerConversationId)
-    return;
-  const { providerConversationId: _conversation, ...withoutConversation } = identity2;
-  return ledger.getOverride(withoutConversation);
-}
-function runTierSet(args, context2 = {}) {
-  const [locator, word] = args;
-  if (!locator || !word || args.length > 2) {
-    throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier set"]}`);
-  }
-  const normalized = word.trim().toLowerCase();
-  let override;
-  if (normalized === "clear")
-    override = "clear";
-  else if (normalized === "not-secret" || normalized === "not_secret")
-    override = { kind: "not_secret" };
-  else {
-    const tier = tierKeyFromDisplayName(normalized);
-    if (!tier) {
-      throw new OperationError("invalid_params", `Unknown tier "${word}".`, "Use public, personal, private, secrets, not-secret or clear.");
-    }
-    override = { kind: "tier", tier };
-  }
-  const items = locateTierItem(locator, context2);
-  const results = items.map((item) => withLedgerAt(item.ledgerPath, context2.now, (ledger) => {
-    if (override === "clear") {
-      const cleared = ledger.clearOverride(item.identity);
-      return { cleared, note: "The next sync re-decides this item without the override." };
-    }
-    ledger.setOverride(item.identity, override);
-    if (override.kind === "tier" && override.tier === "secrets") {
-      const current3 = ledger.getCurrent(item.identity);
-      const outcome2 = current3?.routed ? ledger.recordRoutedPlacement(item.identity, classifyItemTiers({ signals: {} }, { override }), { copies: [], embedHold: false }).outcome : undefined;
-      forgetSecretInSideStores({
-        ledger,
-        identity: { ...item.identity, ...item.localItemId ? { localItemId: item.localItemId } : {} },
-        confirmInWorker: true
-      });
-      if (current3?.routed) {
-        return { override: tierDisplayName(override.tier), outcome: outcome2 === "secrets" ? "hidden_now" : "set_applies_next_pass" };
-      }
-    }
-    if (override.kind === "not_secret") {
-      return { override: "not_secret", note: "The next sync sends this item back through normal classification." };
-    }
-    const current2 = ledger.getCurrent(item.identity);
-    if (current2?.routed) {
-      const decision2 = classifyItemTiers({ signals: {} }, { override });
-      if (decision2.contentTier === "secrets") {
-        const { outcome: outcome2 } = ledger.recordRoutedPlacement(item.identity, decision2, { copies: [], embedHold: false });
-        return { override: tierDisplayName(override.tier), outcome: outcome2 === "secrets" ? "hidden_now" : "set_applies_next_pass" };
-      }
-      const raised = ledger.queueOwnerRaise(item.identity, decision2, TIER_KEY_TRUST_DOMAIN[override.tier]);
-      if (raised === "hidden")
-        return { override: tierDisplayName(override.tier), outcome: "hidden_now_move_queued" };
-      if (raised === "retargeted")
-        return { override: tierDisplayName(override.tier), outcome: "move_retargeted" };
-      if (current2.state === "moving") {
-        return {
-          override: tierDisplayName(override.tier),
-          outcome: "set_applies_after_move",
-          note: "A tier move to tiers at least as private is in flight; the override applies once it lands."
-        };
-      }
-      return { override: tierDisplayName(override.tier), outcome: "set_applies_next_pass" };
-    }
-    const decision = classifyItemTiers({ signals: {} }, { override });
-    const { outcome, record: record2 } = ledger.recordDecision(item.identity, decision);
-    return {
-      override: tierDisplayName(override.tier),
-      outcome,
-      metadataTier: tierDisplayName(record2.metadataTier),
-      contentTier: tierDisplayName(record2.contentTier),
-      generation: record2.generation
-    };
-  }));
-  return {
-    locator,
-    item: publicIdentity(items[0].identity),
-    stores: items.length,
-    results
-  };
-}
-function runTierExplain(args, context2 = {}) {
-  const [locator] = args;
-  if (!locator || args.length > 1)
-    throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier explain"]}`);
-  const items = locateTierItem(locator, context2);
-  const records = items.map((item) => {
-    const recorded = withLedgerAt(item.ledgerPath, context2.now, (ledger) => ({
-      record: ledger.getCurrent(item.identity),
-      override: ledger.getOverride(item.identity),
-      orphaned: orphanedOverride(ledger, item.identity),
-      history: ledger.history(item.identity),
-      copies: ledger.copies(item.identity)
-    }));
-    const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
-    let waitingOn = [];
-    if (existsSync60(snifferPath)) {
-      const sniffer = new TierSnifferStore({ dbPath: snifferPath });
-      try {
-        waitingOn = ["metadata", "content"].filter((pass) => sniffer.questionFor(item.identity, pass) !== undefined);
-      } finally {
-        sniffer.close();
-      }
-    }
-    const { record: record2 } = recorded;
-    const orphanedNote = recorded.orphaned ? {
-      orphanedOverride: recorded.orphaned.kind === "tier" ? tierDisplayName(recorded.orphaned.tier) : "not_secret",
-      orphanedOverrideNote: "Set before the ledger keyed chat items by conversation; it no longer applies. Set it again with olympus tier set."
-    } : {};
-    if (!record2)
-      return { recorded: false, ...orphanedNote, note: "No decision is recorded for this item yet; the next sync records one." };
-    return {
-      recorded: true,
-      metadataTier: tierDisplayName(record2.metadataTier),
-      contentTier: tierDisplayName(record2.contentTier),
-      state: record2.state,
-      decidedBy: record2.decidedBy,
-      reasons: record2.reasons,
-      generation: record2.generation,
-      previousTiers: record2.previousContentTier ? { metadata: tierDisplayName(record2.previousMetadataTier ?? record2.previousContentTier), content: tierDisplayName(record2.previousContentTier) } : null,
-      override: recorded.override ? recorded.override.kind === "tier" ? tierDisplayName(recorded.override.tier) : "not_secret" : null,
-      classifierVersion: record2.engineVersion,
-      mapRevision: record2.mapRevision,
-      snifferModel: record2.modelId,
-      waitingOnSniffer: waitingOn,
-      routed: record2.routed,
-      copies: recorded.copies.map((copy) => ({ corpusId: copy.corpusId, layers: copy.layers, state: copy.state, embedHold: copy.embedHold })),
-      ...orphanedNote,
-      decidedAt: record2.decidedAt,
-      history: recorded.history.map((entry) => ({
-        generation: entry.generation,
-        metadataTier: tierDisplayName(entry.metadataTier),
-        contentTier: tierDisplayName(entry.contentTier),
-        decidedBy: entry.decidedBy,
-        state: entry.state,
-        decidedAt: entry.decidedAt
-      }))
-    };
-  });
-  return { locator, item: publicIdentity(items[0].identity), stores: records };
-}
-function publicIdentity(identity2) {
-  return {
-    provider: identity2.provider,
-    family: identity2.family,
-    accountScope: identity2.accountScope,
-    providerItemId: identity2.providerItemId
-  };
-}
-function runTierRules(args, context2 = {}) {
-  const env = context2.env ?? process.env;
-  const [command, ...rest] = args;
-  if (command === "list") {
-    const path = resolveTierRulesPath({ env });
-    const mailScopeRules = mailScopeTierRules(env);
-    if (!existsSync60(path)) {
-      return { path, rules: [], mailScopeRules, note: "No tier rules file yet; add one with olympus tier rules add." };
-    }
-    const validation = validateTierRulesFile({ env });
-    return { ...validation, rules: loadOwnerTierRules({ env }).map(describeRule), mailScopeRules };
-  }
-  if (command === "add") {
-    const options = parseFlags2(rest, ["id", "match", "tier", "source", "strength"]);
-    const matchText = options.get("match");
-    const separator = matchText?.indexOf("=") ?? -1;
-    if (!matchText || separator <= 0) {
-      throw new OperationError("invalid_params", `--match must be <kind>=<value>, with kind one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
-    }
-    const tierWord = options.get("tier") ?? "";
-    const tier = tierKeyFromDisplayName(tierWord);
-    if (!tier)
-      throw new OperationError("invalid_params", "--tier must be public, personal, private or secrets.");
-    const rule = parseOwnerTierRule({
-      id: options.get("id"),
-      ...options.get("source") ? { source: options.get("source") } : {},
-      match: { [matchText.slice(0, separator)]: matchText.slice(separator + 1) },
-      tier,
-      strength: options.get("strength") ?? "prior"
-    }, "tier rule");
-    const { path, rules } = addOwnerTierRule(rule, { env });
-    return { path, added: describeRule(rule), rules: rules.length };
-  }
-  if (command === "remove") {
-    const [id, ...extra] = rest;
-    if (!id || extra.length > 0)
-      throw new OperationError("invalid_params", "Usage: olympus tier rules remove <id>");
-    const { path, removed, rules } = removeOwnerTierRule(id, { env });
-    if (!removed)
-      throw new OperationError("invalid_params", `No tier rule has id "${id}".`);
-    return { path, removed: id, rules: rules.length };
-  }
-  throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier rules"]}`);
-}
-function mailScopeTierRules(env) {
-  try {
-    const registryPath = handleRegistryPathFromEnv(env, true);
-    if (!registryPath)
-      return [];
-    const approval = readMailSourceScopeApproval({
-      registry: readConnectedHandleRegistry(registryPath),
-      statePath: defaultMailSourceScopeStatePath(registryPath)
-    });
-    if (approval.status !== "approved")
-      return [];
-    return (approval.ownerTierRules ?? []).map((rule) => ({
-      ...describeRule(rule),
-      origin: "mail_scope_picker",
-      readOnly: true
-    }));
-  } catch {
-    return [];
-  }
-}
-function describeRule(rule) {
-  return {
-    id: rule.id,
-    ...rule.source ? { source: rule.source } : {},
-    match: { [rule.match.kind]: rule.match.value },
-    tier: tierDisplayName(rule.tier),
-    strength: rule.strength
-  };
-}
-async function runTierClassifier(args, context2 = {}) {
-  const env = context2.env ?? process.env;
-  const [command, ...rest] = args;
-  const ledgerPath = resolveClassificationLedgerPath(env);
-  const lane = (() => {
-    try {
-      return resolveSnifferLane(loadSovereigntyEngine({ env }));
-    } catch (error) {
-      if (error instanceof SnifferLaneRefusedError)
-        return { refused: error.reason };
-      throw error;
-    }
-  })();
-  const promptVersion = snifferPromptVersions(privacyOwnerContext({ env: context2.env ?? process.env })).approval;
-  const laneSummary = "refused" in lane ? { lane: null, refused: lane.refused } : { lane: lane.kind, profile: lane.profileId, modelId: lane.modelId };
-  if (command === "status") {
-    const ledger = await readClassificationLedger(ledgerPath);
-    const decision = "refused" in lane ? lane.refused === "no_private_lane" ? "not_applicable" : "refused" : classifierDecision(ledger.entries, { lane: lane.kind, profileId: lane.profileId, modelId: lane.modelId, promptVersion });
-    return {
-      ...laneSummary,
-      promptVersion,
-      approved: decision === "approved",
-      decision,
-      ledger: ledgerPath,
-      recent: ledger.entries.slice(0, 5),
-      skippedLines: ledger.skipped
-    };
-  }
-  if (command === "approve") {
-    const options = parseFlags2(rest, ["why"]);
-    const why = options.get("why")?.trim();
-    if (!why)
-      throw new OperationError("invalid_params", "--why is required: say what is approved and why.");
-    if ("refused" in lane) {
-      throw new OperationError("invalid_params", `No private sniffer lane is configured (${lane.refused}); there is nothing to approve.`);
-    }
-    const modelId = lane.modelId;
-    const entry = {
-      recorded_at: (context2.now?.() ?? new Date).toISOString(),
-      kind: "classifier_model_decision",
-      what: `The owner approved ${lane.kind} classifier model ${modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer.`,
-      model_id: modelId,
-      prompt_version: promptVersion,
-      lane: lane.kind,
-      profile_id: lane.profileId,
-      why,
-      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    };
-    await appendClassificationLedgerEntry(ledgerPath, entry);
-    return { ledger: ledgerPath, recorded: entry };
-  }
-  if (command === "decline") {
-    const options = parseFlags2(rest, ["why"]);
-    const why = options.get("why")?.trim();
-    if ("refused" in lane) {
-      throw new OperationError("invalid_params", `No private sniffer lane is configured (${lane.refused}); there is nothing to decline.`);
-    }
-    const entry = {
-      recorded_at: (context2.now?.() ?? new Date).toISOString(),
-      kind: "classifier_model_revoked",
-      what: `The owner declined ${lane.kind} classifier model ${lane.modelId} (profile ${lane.profileId}) with prompt ${promptVersion} for the privacy sniffer; possibly-private items stay held as Private.`,
-      model_id: lane.modelId,
-      prompt_version: promptVersion,
-      lane: lane.kind,
-      profile_id: lane.profileId,
-      ...why ? { why } : {},
-      approved_by: CLASSIFICATION_LEDGER_OWNER_APPROVAL,
-      status: "complete"
-    };
-    await appendClassificationLedgerEntry(ledgerPath, entry);
-    return { ledger: ledgerPath, recorded: entry };
-  }
-  throw new OperationError("invalid_params", `Usage: ${TIER_CLI_USAGE["tier classifier"]}`);
-}
-function classifierDecision(entries, key2) {
-  if (isClassifierApproved(entries, key2))
-    return "approved";
-  for (const entry of entries) {
-    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
-      continue;
-    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
-      continue;
-    if (entry.kind === "classifier_model_revoked")
-      return "declined";
-  }
-  return "not_asked";
-}
-function parseFlags2(args, allowed) {
-  const values = new Map;
-  for (let index = 0;index < args.length; index += 1) {
-    const arg = args[index];
-    if (!arg.startsWith("--"))
-      throw new OperationError("invalid_params", `Unexpected argument: ${arg}`);
-    const equals = arg.indexOf("=");
-    const key2 = arg.slice(2, equals === -1 ? undefined : equals);
-    if (!allowed.includes(key2))
-      throw new OperationError("invalid_params", `Unknown option: --${key2}`);
-    const value2 = equals === -1 ? args[index += 1] : arg.slice(equals + 1);
-    if (value2 === undefined)
-      throw new OperationError("invalid_params", `--${key2} needs a value.`);
-    values.set(key2, value2);
-  }
-  return values;
-}
-
-// src/cli.ts
+init_tier_cli();
 init_data_owner_lock();
+init_cli_via_worker();
+init_olympus_layout();
 
 // src/core/setup.ts
 init_privacy_language();
@@ -180855,7 +181077,7 @@ init_package_root();
 import { spawnSync as spawnSync17 } from "node:child_process";
 import { existsSync as existsSync63, lstatSync as lstatSync33, mkdirSync as mkdirSync45, mkdtempSync as mkdtempSync4, renameSync as renameSync16, rmSync as rmSync20 } from "node:fs";
 import { homedir as homedir36 } from "node:os";
-import { join as join86, resolve as resolve14 } from "node:path";
+import { join as join86, resolve as resolve15 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
 var MACOS_HELPER_TEAM_ENV = "OLYMPUS_MACOS_HELPER_TEAM_ID";
 function run(exec, command, args, env) {
@@ -180880,7 +181102,7 @@ function installEngineHelper(options = {}) {
     throw new OperationError("invalid_params", "The Olympus helper app is for macOS. Linux does not need one.");
   }
   const env = options.env ?? process.env;
-  const homeDir = resolve14(options.homeDir ?? homedir36());
+  const homeDir = resolve15(options.homeDir ?? homedir36());
   const paths = enginePaths(homeDir);
   const target = paths.helperAppPath;
   mkdirSync45(paths.appSupportDir, { recursive: true, mode: 448 });
@@ -180889,7 +181111,7 @@ function installEngineHelper(options = {}) {
     let built = false;
     let candidate;
     if (options.from !== undefined) {
-      candidate = resolve14(options.from);
+      candidate = resolve15(options.from);
       if (!existsSync63(join86(candidate, "Contents", "Info.plist"))) {
         throw new OperationError("invalid_params", `${candidate} is not an app bundle.`);
       }
@@ -181248,7 +181470,7 @@ async function followEngineLogs(deps, lines) {
   const child = spawn6("tail", ["-n", String(lines), "-F", paths.logPath, paths.errorLogPath], { stdio: ["ignore", "pipe", "ignore"] });
   const reader = createInterface2({ input: child.stdout });
   reader.on("line", (line) => console.log(redactLogLine(line)));
-  await new Promise((resolve15) => child.once("exit", () => resolve15()));
+  await new Promise((resolve16) => child.once("exit", () => resolve16()));
 }
 function parseNowArg(command, args) {
   if (args.length === 0)
@@ -181357,7 +181579,7 @@ function expectNoArgs(command, args) {
 init_engine_service();
 init_remote_access();
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve17(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve18(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -181725,7 +181947,7 @@ Run: ${ocr.repairHint}`);
   }
   if (!PUBLIC_RUNTIME_BUILD && args[0] === "ingestion" && args[1] === "status") {
     const json2 = args.includes("--json");
-    const result = await withDataOwnerLockIfFree(() => collectLocalSourceIngestionLedger({ config: loadConfig() }));
+    const result = await runLocallyOrThroughWorker(() => collectLocalSourceIngestionLedger({ config: loadConfig() }), () => callWorkerCli("ingestion-status", {}));
     console.log(json2 ? JSON.stringify(result, null, 2) : formatSourceIngestionLedger(result));
     return;
   }
@@ -181832,7 +182054,8 @@ Run: ${ocr.repairHint}`);
     try {
       const tierArgs = args.slice(1);
       const run2 = () => runTierCommand(tierArgs);
-      console.log(JSON.stringify(await (tierCommandOpensStores(tierArgs) ? withDataOwnerLockIfFree(run2) : run2()), null, 2));
+      const result = tierCommandOpensStores(tierArgs) ? await runLocallyOrThroughWorker(run2, tierCommandRewritesStores(tierArgs) ? undefined : () => callWorkerCli("tier", { args: tierArgs })) : await run2();
+      console.log(JSON.stringify(result, null, 2));
     } catch (error2) {
       if (error2 instanceof OperationError) {
         console.error(`Error [${error2.code}]: ${error2.message}`);
@@ -182262,7 +182485,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve17(out),
+    out_dir: resolve18(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -182312,7 +182535,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync75(resolve17(input2), "utf8");
+    raw = readFileSync75(resolve18(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -182619,7 +182842,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve17(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve18(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };
@@ -183505,9 +183728,15 @@ async function runDataCommand(args) {
   const command = args[0];
   if (command === "export") {
     const options = parseDataOptions(args.slice(1));
-    return withDataOwnerLockIfFree(() => exportOlympusData({
-      destination: options.output,
+    if (!options.output.trim())
+      throw new OperationError("invalid_params", "--output must be provided.");
+    const destination = resolve18(options.output.trim());
+    return runLocallyOrThroughWorker(() => exportOlympusData({
+      destination,
       ...options.sourceId ? { sourceId: options.sourceId } : {}
+    }), () => callWorkerCli("data-export", {
+      output: destination,
+      ...options.sourceId ? { source_id: options.sourceId } : {}
     }));
   }
   if (command === "verify") {
@@ -183519,7 +183748,7 @@ async function runDataCommand(args) {
     if (options.all && !options.yesIAMSure && options.dryRun !== true) {
       await confirmDeleteAll();
     }
-    return withDataOwnerLockIfFree(async () => {
+    const deleteLocally = async () => {
       const { workerState, engineLoaded } = observedWorkerServiceState();
       if (options.sourceId) {
         const sourceId = options.sourceId;
@@ -183541,6 +183770,23 @@ async function runDataCommand(args) {
         engineLoaded,
         relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env))
       });
+    };
+    if (options.sourceId) {
+      return runLocallyOrThroughWorker(deleteLocally, () => callWorkerCli("data-delete", {
+        source_id: options.sourceId,
+        dry_run: options.dryRun
+      }));
+    }
+    return runLocallyOrThroughWorker(deleteLocally, async () => {
+      const custodyInput = {
+        all: options.all,
+        dryRun: options.dryRun,
+        ...observedWorkerServiceState(),
+        relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env))
+      };
+      if (!dataDeleteCustody(custodyInput).ready || options.dryRun)
+        return deleteOlympusDataWithCustody(custodyInput);
+      throw new DataOwnerBusyError(olympusDataRoot(process.env));
     });
   }
   if (command === "--help" || command === "-h") {
@@ -183608,9 +183854,6 @@ function requireOptionValue(args, index, optionName) {
   if (!value2 || value2.startsWith("--"))
     throw new OperationError("invalid_params", `${optionName} requires a value.`);
   return value2;
-}
-function resolveWorkerAuthToken(env = process.env, config2 = loadConfig(env)) {
-  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv({ env }) ?? normalizeWorkerAuthToken(config2.worker.authToken);
 }
 function runConnectionsCommand(args, env = process.env) {
   const [command, ...rest] = args;
@@ -183729,7 +183972,7 @@ function remoteConnectionView(connection) {
   };
 }
 function runDashboardTokenCommand(env = process.env) {
-  const token = resolveWorkerAuthToken(env);
+  const token = resolveWorkerAuthToken(env, loadConfig(env));
   if (!token) {
     throw new OperationError("config_error", "No worker auth token is configured. Run olympus setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.");
   }

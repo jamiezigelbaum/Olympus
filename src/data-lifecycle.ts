@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath } from './core/olympus-layout.ts';
+import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath, olympusDataRoot } from './core/olympus-layout.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
 import { storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
@@ -1075,6 +1075,11 @@ export function deleteAllConfirmationPrompts(): { first: string; second: string 
   return { first: DELETE_CONFIRMATION_1, second: DELETE_CONFIRMATION_2 };
 }
 
+/** The data root this context's paths resolve under (core/olympus-layout.ts). */
+export function lifecycleDataRoot(context: LifecyclePathContext = {}): string {
+  return olympusDataRoot(envForContext(context));
+}
+
 export function knownOlympusDataRoots(context: LifecyclePathContext = {}): string[] {
   return olympusDataRoots({ homeDir: resolveHome(context.homeDir) });
 }
@@ -1348,7 +1353,7 @@ function selectSources(sourceId: string | undefined): LifecycleSourceSpec[] {
   return [requireSource(sourceId)];
 }
 
-function requireSource(sourceId: string | undefined): LifecycleSourceSpec {
+export function requireSource(sourceId: string | undefined): LifecycleSourceSpec {
   const normalized = requirePath(sourceId, '--source');
   const source = lifecycleSourceSpecs().find(
     (entry) => entry.sourceId === normalized || entry.sourceAliases?.includes(normalized),

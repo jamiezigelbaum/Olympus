@@ -39196,6 +39196,255 @@ var init_source_ingestion_ledger = __esm(() => {
   corpusPopulations = new WeakMap;
 });
 
+// src/workers/classification-ledger.ts
+import { mkdir as mkdir4, open as open3, readFile as readFile4 } from "node:fs/promises";
+import { dirname as dirname24 } from "node:path";
+async function appendClassificationLedgerEntry(path, entry) {
+  if (!isClassificationLedgerEntry(entry))
+    throw new Error("Refusing to append a malformed classification ledger entry.");
+  await mkdir4(dirname24(path), { recursive: true, mode: 448 });
+  const handle = await open3(path, "a", 384);
+  try {
+    await handle.chmod(384);
+    await handle.appendFile(`${JSON.stringify(entry)}
+`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+async function appendClassificationLedgerEntryOnce(path, entry) {
+  const id = entry.entry_id?.trim();
+  if (id) {
+    const existing = await readClassificationLedger(path);
+    if (existing.entries.some((recorded) => recorded.entry_id === id))
+      return false;
+  }
+  await appendClassificationLedgerEntry(path, entry);
+  return true;
+}
+async function readClassificationLedger(path) {
+  let raw = "";
+  try {
+    raw = await readFile4(path, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      throw error;
+  }
+  const { entries, skipped } = parseClassificationLedgerJsonl(raw);
+  return { entries: newestFirst(entries), skipped, path };
+}
+function parseClassificationLedgerJsonl(text2) {
+  const entries = [];
+  let skipped = 0;
+  for (const line of text2.split(`
+`)) {
+    if (line.trim() === "")
+      continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (isClassificationLedgerEntry(parsed))
+      entries.push(parsed);
+    else
+      skipped += 1;
+  }
+  return { entries, skipped };
+}
+function isClassifierApproved(entries, key2, options = {}) {
+  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key2);
+  for (const entry of entries) {
+    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
+      continue;
+    const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
+    const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
+    if (!owner && !builtInDefault)
+      continue;
+    if (owner && entry.kind === "classifier_model_revoked")
+      return false;
+    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
+      return true;
+  }
+  return false;
+}
+function builtInDefaultRevoked(entries, key2) {
+  for (const entry of entries) {
+    if (entry.model_id !== key2.modelId || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
+      continue;
+    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
+      continue;
+    if (entry.kind === "classifier_model_revoked")
+      return true;
+    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
+      return false;
+  }
+  return false;
+}
+function isClassificationLedgerEntry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return false;
+  const record = value;
+  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
+    return false;
+  if (typeof record.what !== "string" || record.what.trim() === "")
+    return false;
+  if (!["classifier_model_decision", "classifier_model_revoked", "note"].includes(record.kind))
+    return false;
+  if (!["owner", "built_in_default", "system-automatic", "unattributed-historical"].includes(record.approved_by))
+    return false;
+  if (!["pending", "complete", "n/a"].includes(record.status))
+    return false;
+  for (const key2 of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
+    if (record[key2] !== undefined && typeof record[key2] !== "string")
+      return false;
+  }
+  return true;
+}
+function newestFirst(entries) {
+  return entries.map((entry, index) => ({ entry, index, at: stampOrder2(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
+}
+function stampOrder2(recordedAt) {
+  const at = Date.parse(recordedAt);
+  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
+}
+var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner", CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
+var init_classification_ledger = __esm(() => {
+  init_olympus_layout();
+});
+
+// src/workers/classification/tier-rules.ts
+function defaultTierRulesPath(env = process.env) {
+  return defaultOwnerConfigPath("tier-rules.json", env);
+}
+function resolveTierRulesPath(options = {}) {
+  const env = options.env ?? process.env;
+  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
+}
+function loadOwnerTierRules(options = {}) {
+  const path = resolveTierRulesPath(options);
+  const read = readOwnerConfigFile(path);
+  if (read.status === "missing") {
+    if (options.allowMissing)
+      return [];
+    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
+  }
+  if (read.status === "refused") {
+    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
+  }
+  let raw;
+  try {
+    raw = JSON.parse(read.text);
+  } catch {
+    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
+  }
+  return parseOwnerTierRules(raw, path);
+}
+function tierRulesFileStamp(options = {}) {
+  return ownerConfigStamp(resolveTierRulesPath(options));
+}
+function parseOwnerTierRules(raw, label = "tier rules") {
+  const root = asRecord8(raw);
+  if (!root)
+    throw new OperationError("config_error", `${label} must be a JSON object.`);
+  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
+    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
+  }
+  if (!Array.isArray(root.rules))
+    throw new OperationError("config_error", `${label}.rules must be an array.`);
+  if (root.rules.length > MAX_RULES) {
+    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
+  }
+  const unknownKeys = Object.keys(root).filter((key2) => key2 !== "schemaVersion" && key2 !== "rules");
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const seen = new Set;
+  return root.rules.map((entry, index) => {
+    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
+    if (seen.has(rule.id))
+      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
+    seen.add(rule.id);
+    return rule;
+  });
+}
+function parseOwnerTierRule(raw, label = "tier rule") {
+  const record = asRecord8(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const unknownKeys = Object.keys(record).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
+  if (unknownKeys.length > 0) {
+    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
+  }
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  if (!RULE_ID_PATTERN.test(id)) {
+    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
+  }
+  let source;
+  if (record.source !== undefined) {
+    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
+      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
+    }
+    source = record.source.trim();
+  }
+  const match = parseMatch(record.match, `${label}.match`);
+  const tier = record.tier;
+  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
+    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
+  }
+  const strength = record.strength ?? "prior";
+  if (strength !== "prior" && strength !== "force") {
+    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
+  }
+  return { id, ...source ? { source } : {}, match, tier, strength };
+}
+function parseMatch(raw, label) {
+  const record = asRecord8(raw);
+  if (!record)
+    throw new OperationError("config_error", `${label} must be an object.`);
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
+    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
+  }
+  const kind = keys[0];
+  const value = record[kind];
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
+    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
+  }
+  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
+    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
+  }
+  return { kind, value: value.trim() };
+}
+function tierRulesRemedy(path) {
+  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
+}
+function asRecord8(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
+var init_tier_rules = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_classifier();
+  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
+  RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
+  SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
+  SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
+});
+
+// src/workers/classification/privacy-profile.ts
+var init_privacy_profile = __esm(() => {
+  init_atomic_file();
+  init_operation_error();
+  init_owner_config_read();
+  init_tier_rules();
+});
+
 // src/core/delphi.ts
 var init_delphi = __esm(() => {
   init_operation_error();
@@ -39208,7 +39457,7 @@ var init_delphi = __esm(() => {
 // src/workers/local-files/mac-permissions.ts
 import { existsSync as existsSync22, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync21 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname25, join as join27 } from "node:path";
+import { dirname as dirname26, join as join28 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -39291,10 +39540,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join27(this.home, "Desktop")],
-      ["documents", join27(this.home, "Documents")],
-      ["downloads", join27(this.home, "Downloads")],
-      ["icloud", join27(this.home, "Library", "Mobile Documents")]
+      ["desktop", join28(this.home, "Desktop")],
+      ["documents", join28(this.home, "Documents")],
+      ["downloads", join28(this.home, "Downloads")],
+      ["icloud", join28(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -39312,7 +39561,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join27(this.home, "Desktop"), join27(this.home, "Documents"), join27(this.home, "Downloads"), join27(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join28(this.home, "Desktop"), join28(this.home, "Documents"), join28(this.home, "Downloads"), join28(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.recall(guard) === "granted")
@@ -39347,7 +39596,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join27(this.home, "Library", "Safari"), join27(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join28(this.home, "Library", "Safari"), join28(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -39401,7 +39650,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync15(dirname25(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync15(dirname26(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -39455,6 +39704,19 @@ var init_mac_permissions = __esm(() => {
     unreadable: "Your user account is not allowed to open this folder. In Finder, choose Get Info on it and check who may open it under Sharing & Permissions, then choose Try again.",
     unreadableLinux: 'Your user account is not allowed to open this folder. Check who may open it (for example with "ls -ld" on it) and change its permissions or choose another folder, then choose Try again.'
   };
+});
+
+// src/workers/archive-import/lane.ts
+var ARCHIVE_TIER_CLASSIFICATION;
+var init_lane = __esm(() => {
+  init_source_storage();
+  init_tiered_store_set();
+  init_archive_formats();
+  init_state();
+  init_store2();
+  ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
+    holdContentUntilJudged: true
+  });
 });
 
 // src/core/engine-helper-names.ts
@@ -39656,133 +39918,27 @@ var init_credential_degradation = __esm(() => {
   DEFAULT_RETRY_DELAYS_MS = [30000, 60000];
 });
 
-// src/workers/classification/tier-rules.ts
-function defaultTierRulesPath(env = process.env) {
-  return defaultOwnerConfigPath("tier-rules.json", env);
-}
-function resolveTierRulesPath(options = {}) {
-  const env = options.env ?? process.env;
-  return options.path?.trim() || env[OLYMPUS_TIER_RULES_ENV]?.trim() || defaultTierRulesPath(env);
-}
-function loadOwnerTierRules(options = {}) {
-  const path = resolveTierRulesPath(options);
-  const read = readOwnerConfigFile(path);
-  if (read.status === "missing") {
-    if (options.allowMissing)
-      return [];
-    throw new OperationError("config_error", `Tier rules not found at ${path}.`, tierRulesRemedy(path));
-  }
-  if (read.status === "refused") {
-    throw new OperationError("config_error", read.reason === "unsafe_permissions" ? `Tier rules at ${path} are writable by someone other than their owner.` : `Tier rules at ${path} could not be read consistently (${read.reason}).`, read.reason === "unsafe_permissions" ? `chmod 600 ${path}` : tierRulesRemedy(path));
-  }
-  let raw;
-  try {
-    raw = JSON.parse(read.text);
-  } catch {
-    throw new OperationError("config_error", `Tier rules at ${path} are not valid JSON.`, tierRulesRemedy(path));
-  }
-  return parseOwnerTierRules(raw, path);
-}
-function tierRulesFileStamp(options = {}) {
-  return ownerConfigStamp(resolveTierRulesPath(options));
-}
-function parseOwnerTierRules(raw, label = "tier rules") {
-  const root = asRecord8(raw);
-  if (!root)
-    throw new OperationError("config_error", `${label} must be a JSON object.`);
-  if (root.schemaVersion !== TIER_RULES_SCHEMA_VERSION) {
-    throw new OperationError("config_error", `${label}.schemaVersion must be ${TIER_RULES_SCHEMA_VERSION}.`);
-  }
-  if (!Array.isArray(root.rules))
-    throw new OperationError("config_error", `${label}.rules must be an array.`);
-  if (root.rules.length > MAX_RULES) {
-    throw new OperationError("config_error", `${label}.rules may hold at most ${MAX_RULES} rules.`);
-  }
-  const unknownKeys = Object.keys(root).filter((key2) => key2 !== "schemaVersion" && key2 !== "rules");
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const seen = new Set;
-  return root.rules.map((entry, index) => {
-    const rule = parseOwnerTierRule(entry, `${label}.rules[${index}]`);
-    if (seen.has(rule.id))
-      throw new OperationError("config_error", `${label}: duplicate rule id "${rule.id}".`);
-    seen.add(rule.id);
-    return rule;
-  });
-}
-function parseOwnerTierRule(raw, label = "tier rule") {
-  const record = asRecord8(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const unknownKeys = Object.keys(record).filter((key2) => !["id", "source", "match", "tier", "strength"].includes(key2));
-  if (unknownKeys.length > 0) {
-    throw new OperationError("config_error", `${label} has unknown field(s): ${unknownKeys.join(", ")}.`);
-  }
-  const id = typeof record.id === "string" ? record.id.trim() : "";
-  if (!RULE_ID_PATTERN.test(id)) {
-    throw new OperationError("config_error", `${label}.id must be a short lower-case slug (a-z, 0-9, _ . : -).`);
-  }
-  let source;
-  if (record.source !== undefined) {
-    if (typeof record.source !== "string" || !SOURCE_PATTERN.test(record.source.trim())) {
-      throw new OperationError("config_error", `${label}.source must be a provider id (letters, digits, _ . : -).`);
-    }
-    source = record.source.trim();
-  }
-  const match = parseMatch(record.match, `${label}.match`);
-  const tier = record.tier;
-  if (typeof tier !== "string" || !TIER_KEYS.includes(tier)) {
-    throw new OperationError("config_error", `${label}.tier must be one of ${TIER_KEYS.join(", ")} (schema-v1 keys).`);
-  }
-  const strength = record.strength ?? "prior";
-  if (strength !== "prior" && strength !== "force") {
-    throw new OperationError("config_error", `${label}.strength must be prior or force.`);
-  }
-  return { id, ...source ? { source } : {}, match, tier, strength };
-}
-function parseMatch(raw, label) {
-  const record = asRecord8(raw);
-  if (!record)
-    throw new OperationError("config_error", `${label} must be an object.`);
-  const keys = Object.keys(record);
-  if (keys.length !== 1 || !OWNER_TIER_RULE_MATCH_KINDS.includes(keys[0])) {
-    throw new OperationError("config_error", `${label} must hold exactly one of ${OWNER_TIER_RULE_MATCH_KINDS.join(", ")}.`);
-  }
-  const kind = keys[0];
-  const value = record[kind];
-  if (typeof value !== "string" || !value.trim() || value.length > MAX_VALUE_LENGTH) {
-    throw new OperationError("config_error", `${label}.${kind} must be a non-empty string of at most ${MAX_VALUE_LENGTH} characters.`);
-  }
-  if (kind === "sender" && !SENDER_PATTERN.test(value.trim())) {
-    throw new OperationError("config_error", `${label}.sender must be an address (name@example.com) or a whole domain (@example.com).`);
-  }
-  return { kind, value: value.trim() };
-}
-function tierRulesRemedy(path) {
-  return `Write the rules to ${path} (schemaVersion 1), or add them with \`olympus tier rules add\`.`;
-}
-function asRecord8(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
-}
-var TIER_RULES_SCHEMA_VERSION = 1, OLYMPUS_TIER_RULES_ENV = "OLYMPUS_TIER_RULES_PATH", OWNER_TIER_RULE_MATCH_KINDS, MAX_RULES = 500, MAX_VALUE_LENGTH = 240, RULE_ID_PATTERN, SOURCE_PATTERN, SENDER_PATTERN;
-var init_tier_rules = __esm(() => {
-  init_atomic_file();
+// src/workers/classification/tier-migration.ts
+var TIER_MIGRATION_REPLAN_STOP_REASONS;
+var init_tier_migration = __esm(() => {
+  init_olympus_layout();
+  init_embedding_cost_estimates();
   init_operation_error();
-  init_owner_config_read();
+  init_tier_move();
+  init_secrets_disposition();
+  init_tier_placement();
+  init_embedding_ledger();
+  init_engine();
   init_tier_classifier();
-  OWNER_TIER_RULE_MATCH_KINDS = ["pathPrefix", "folderKey", "label", "sender", "chat"];
-  RULE_ID_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
-  SOURCE_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,63}$/i;
-  SENDER_PATTERN = /^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i;
-});
-
-// src/workers/classification/privacy-profile.ts
-var init_privacy_profile = __esm(() => {
-  init_atomic_file();
-  init_operation_error();
-  init_owner_config_read();
-  init_tier_rules();
+  init_tier_ledger();
+  TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
+    "unplanned_destination",
+    "copy_only_destination_needs_embed",
+    "destination_chunk_cap",
+    "destination_cost_cap",
+    "chunk_cap",
+    "cost_cap"
+  ]);
 });
 
 // scripts/source-embedding-drain.ts
@@ -42243,6 +42399,53 @@ init_file_scope_sources();
 
 // src/workers/email-source/index.ts
 init_data_lifecycle();
+
+// src/core/cli-via-worker.ts
+init_config();
+init_data_owner_lock();
+init_olympus_layout();
+init_operation_error();
+init_worker_auth();
+init_worker_transport();
+
+// src/workers/email-source/index.ts
+init_remote_access();
+
+// src/workers/cli-operations.ts
+init_config();
+init_data_owner_lock();
+init_operation_error();
+init_data_lifecycle();
+
+// src/workers/classification/tier-cli.ts
+init_data_lifecycle();
+init_mail_source_scope();
+init_connected_handles();
+init_operation_error();
+init_sovereignty();
+init_classification_ledger();
+init_sniffer();
+init_privacy_profile();
+init_sniffer_lane();
+init_sniffer_store();
+init_tier_classifier();
+init_tier_ledger();
+init_local_index();
+init_secrets_disposition();
+init_tiered_store_set();
+init_tier_rules();
+var TIER_CLI_USAGE = {
+  "tier set": "olympus tier set <locator> public|personal|private|secrets|not-secret|clear",
+  "tier explain": "olympus tier explain <locator>",
+  "tier rules": "olympus tier rules list | add --id <id> --match <kind>=<value> --tier <tier> [--source <provider>] [--strength prior|force] | remove <id>",
+  "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
+  "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
+};
+
+// src/workers/cli-operations.ts
+init_source_ingestion_ledger();
+
+// src/workers/email-source/index.ts
 init_corpora();
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
@@ -42455,7 +42658,7 @@ init_scope();
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire6 } from "node:module";
 import { existsSync as existsSync21, readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname24, join as join26 } from "node:path";
+import { dirname as dirname25, join as join27 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
   constructor(detail) {
@@ -42643,11 +42846,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join26(dir, "node_modules");
-    if (!existsSync21(join26(candidate, "@parcel", "watcher")))
+    const candidate = join27(dir, "node_modules");
+    if (!existsSync21(join27(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire6(join26(dirname24(candidate), "package.json"));
+      const requireFrom = createRequire6(join27(dirname25(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -44084,15 +44287,8 @@ var MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 var SKIPPED_LABELS = new Set(["spam", "trash"]);
 var decodableCharsets = new Map;
 
-// src/workers/archive-import/lane.ts
-init_source_storage();
-init_tiered_store_set();
-init_archive_formats();
-init_state();
-init_store2();
-var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
-  holdContentUntilJudged: true
-});
+// src/workers/archive-import/runtime.ts
+init_lane();
 
 // src/workers/archive-import/start.ts
 init_archive_formats();
@@ -44149,6 +44345,7 @@ init_manifest3();
 
 // src/workers/archive-import/removal.ts
 init_source_storage();
+init_lane();
 init_state();
 init_store2();
 
@@ -44158,6 +44355,7 @@ init_state();
 init_requests();
 
 // src/workers/email-source/server.ts
+init_lane();
 init_store2();
 init_state();
 
@@ -44477,7 +44675,7 @@ init_file_extraction_source();
 init_remote_access();
 import { lstatSync as lstatSync11, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
-import { join as join29 } from "node:path";
+import { join as join30 } from "node:path";
 
 // src/workers/source-scope-browser.ts
 init_credential_broker();
@@ -44710,9 +44908,9 @@ init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync24 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
-import { join as join28 } from "node:path";
+import { join as join29 } from "node:path";
 function helperAppPathForHome(home = homedir15()) {
-  return join28(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+  return join29(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run = deps.run ?? ((command, args) => {
@@ -44763,7 +44961,7 @@ function localFilesListing(options, mode) {
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
-    memoryPath: join29(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: join30(olympusDataDir(), "local-files", "folder-access.json")
   });
   const node = (scopePath, name, parentKey, access) => {
     const reason = mode === "folders" ? defaultExclusionForFolder(scopePath, context2) : undefined;
@@ -44807,7 +45005,7 @@ function localFilesListing(options, mode) {
     }
     const offered = (entry) => !entry.isSymbolicLink() && (entry.isDirectory() || mode === "archive" && entry.isFile() && !entry.name.startsWith("."));
     return entries.filter(offered).map((entry) => {
-      const childReal = join29(realPath, entry.name);
+      const childReal = join30(realPath, entry.name);
       if (!entry.isDirectory())
         return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
@@ -45095,133 +45293,13 @@ init_privacy_profile();
 // src/workers/classification/sniffer-service.ts
 init_tier_move();
 init_secret_locations();
-import { Database as Database6 } from "bun:sqlite";
-
-// src/workers/classification-ledger.ts
-init_olympus_layout();
-import { mkdir as mkdir4, open as open3, readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname26 } from "node:path";
-var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
-var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
-async function appendClassificationLedgerEntry(path, entry) {
-  if (!isClassificationLedgerEntry(entry))
-    throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname26(path), { recursive: true, mode: 448 });
-  const handle = await open3(path, "a", 384);
-  try {
-    await handle.chmod(384);
-    await handle.appendFile(`${JSON.stringify(entry)}
-`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-async function appendClassificationLedgerEntryOnce(path, entry) {
-  const id = entry.entry_id?.trim();
-  if (id) {
-    const existing = await readClassificationLedger(path);
-    if (existing.entries.some((recorded) => recorded.entry_id === id))
-      return false;
-  }
-  await appendClassificationLedgerEntry(path, entry);
-  return true;
-}
-async function readClassificationLedger(path) {
-  let raw = "";
-  try {
-    raw = await readFile4(path, "utf8");
-  } catch (error) {
-    if (error?.code !== "ENOENT")
-      throw error;
-  }
-  const { entries, skipped } = parseClassificationLedgerJsonl(raw);
-  return { entries: newestFirst(entries), skipped, path };
-}
-function parseClassificationLedgerJsonl(text2) {
-  const entries = [];
-  let skipped = 0;
-  for (const line of text2.split(`
-`)) {
-    if (line.trim() === "")
-      continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      skipped += 1;
-      continue;
-    }
-    if (isClassificationLedgerEntry(parsed))
-      entries.push(parsed);
-    else
-      skipped += 1;
-  }
-  return { entries, skipped };
-}
-function isClassifierApproved(entries, key2, options = {}) {
-  const defaultCounts = options.builtInDefault === true && !builtInDefaultRevoked(entries, key2);
-  for (const entry of entries) {
-    if (entry.model_id !== key2.modelId || entry.prompt_version !== key2.promptVersion || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
-      continue;
-    const owner = entry.approved_by === CLASSIFICATION_LEDGER_OWNER_APPROVAL;
-    const builtInDefault = defaultCounts && entry.approved_by === CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL;
-    if (!owner && !builtInDefault)
-      continue;
-    if (owner && entry.kind === "classifier_model_revoked")
-      return false;
-    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
-      return true;
-  }
-  return false;
-}
-function builtInDefaultRevoked(entries, key2) {
-  for (const entry of entries) {
-    if (entry.model_id !== key2.modelId || entry.lane !== key2.lane || entry.profile_id !== key2.profileId)
-      continue;
-    if (entry.approved_by !== CLASSIFICATION_LEDGER_OWNER_APPROVAL)
-      continue;
-    if (entry.kind === "classifier_model_revoked")
-      return true;
-    if (entry.kind === "classifier_model_decision" && entry.status === "complete")
-      return false;
-  }
-  return false;
-}
-function isClassificationLedgerEntry(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    return false;
-  const record = value;
-  if (typeof record.recorded_at !== "string" || record.recorded_at.trim() === "")
-    return false;
-  if (typeof record.what !== "string" || record.what.trim() === "")
-    return false;
-  if (!["classifier_model_decision", "classifier_model_revoked", "note"].includes(record.kind))
-    return false;
-  if (!["owner", "built_in_default", "system-automatic", "unattributed-historical"].includes(record.approved_by))
-    return false;
-  if (!["pending", "complete", "n/a"].includes(record.status))
-    return false;
-  for (const key2 of ["model_id", "prompt_version", "lane", "profile_id", "why", "entry_id"]) {
-    if (record[key2] !== undefined && typeof record[key2] !== "string")
-      return false;
-  }
-  return true;
-}
-function newestFirst(entries) {
-  return entries.map((entry, index) => ({ entry, index, at: stampOrder2(entry.recorded_at) })).sort((left, right) => right.at - left.at || right.index - left.index).map((row) => row.entry);
-}
-function stampOrder2(recordedAt) {
-  const at = Date.parse(recordedAt);
-  return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
-}
-
-// src/workers/classification/sniffer-service.ts
+init_classification_ledger();
 init_secrets_disposition();
 init_tier_move();
 init_provider();
 init_built_in_sniffer();
 init_sniffer();
+import { Database as Database6 } from "bun:sqlite";
 
 // src/workers/classification/sniffer-resolver.ts
 init_atomic_file();
@@ -46421,27 +46499,9 @@ function setEmbedsWithBuiltInOnly(set) {
   }
 }
 
-// src/workers/classification/tier-migration.ts
-init_olympus_layout();
-init_embedding_cost_estimates();
-init_operation_error();
-init_tier_move();
-init_secrets_disposition();
-init_tier_placement();
-init_embedding_ledger();
-init_engine();
-init_tier_classifier();
-init_tier_ledger();
-var TIER_MIGRATION_REPLAN_STOP_REASONS = new Set([
-  "unplanned_destination",
-  "copy_only_destination_needs_embed",
-  "destination_chunk_cap",
-  "destination_cost_cap",
-  "chunk_cap",
-  "cost_cap"
-]);
-
 // src/workers/email-source/server.ts
+init_classification_ledger();
+init_tier_migration();
 init_embedding_ledger();
 
 // src/core/remote-access-config.ts
