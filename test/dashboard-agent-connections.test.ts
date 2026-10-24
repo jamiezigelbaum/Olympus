@@ -469,25 +469,6 @@ describe('the panel', () => {
     expect(render({ state: 'off' })).toContain('Off. Only agents on this computer can ask Olympus.');
   });
 
-  test('with remote access off, a cloud agent says why it cannot connect and offers the fix on the spot', () => {
-    for (const platform of ['darwin', 'linux'] as const) {
-      const doc = new Window({ url: ORIGIN }).document;
-      doc.body.innerHTML = renderDashboardAgentsSection({ platform, view: { remoteAccess: { state: 'off' }, connections: [] }, now: NOW });
-      const grokApi = doc.querySelector('[data-agent="grok-api"]')!;
-      // No Create key that would make a key nothing can use; the reason, and the fix, instead.
-      expect(grokApi.querySelector('form[data-agent-kind="key"]')).toBeNull();
-      expect(grokApi.textContent).toMatch(/needs a tunnel you run yourself|remote access is off/);
-      if (platform === 'linux') {
-        expect(grokApi.querySelector('[data-remote-unavailable]')!.textContent).toContain('Turn on remote access above first');
-        expect(grokApi.querySelector('form[data-agent-kind="remote-on"] button')!.textContent).toBe('Turn on remote access');
-      }
-    }
-    // Not connected and invalid have their own explanation, and no second switch.
-    for (const access of [{ state: 'not_connected' }, { state: 'invalid', detail: 'OLYMPUS_PUBLIC_BASE_URL must use https.' }] as DashboardRemoteAccess[]) {
-      expect(render(access)).not.toContain('data-remote-unavailable-fix');
-    }
-  });
-
   test('lists active connections with dates and a Revoke control', () => {
     const store = fixtureStore();
     const muse = store.create('Muse');

@@ -132990,7 +132990,7 @@ function agentBody(agent, access, host) {
   if (needsOwnTunnel(agent, access))
     return tunnelNeeded(host) + instructionsStep(agent, false);
   if (access.state !== "on")
-    return remoteUnavailable(access, host) + instructionsStep(agent, false);
+    return remoteUnavailable(access) + instructionsStep(agent, false);
   if (agent.method === "oauth" && !ownTunnel(access) && agent.approveViaRelay) {
     return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
@@ -133022,10 +133022,9 @@ function tunnelNeeded(host) {
   const text3 = (host.platform === "linux" ? "Olympus's relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor, so this agent needs a tunnel you run yourself. " : "Olympus's relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. ") + "Advanced: set remote.publicBaseUrl in Olympus's settings to your tunnel's https address and turn on remote access; this agent's steps then appear here. " + "Claude Code and Codex on this computer need no tunnel.";
   return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text3)}</p>`;
 }
-function remoteUnavailable(access, host) {
+function remoteUnavailable(access) {
   const text3 = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
-  const fix = access.state === "off" && host.platform === "linux" ? `<form class="rowform" data-agent-kind="remote-on" data-remote-unavailable-fix>` + `<button class="btn primary" type="submit">Turn on remote access</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` : "";
-  return `<p class="why" data-remote-unavailable>${escapeHtml2(text3)}</p>${fix}`;
+  return `<p class="why" data-remote-unavailable>${escapeHtml2(text3)}</p>`;
 }
 function instructionsStep(agent, inStep) {
   const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
