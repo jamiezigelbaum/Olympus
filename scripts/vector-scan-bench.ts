@@ -20,6 +20,7 @@
  * is to compare against code that no longer exists.
  */
 import { Database } from 'bun:sqlite';
+import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { connectorStoreCurrentEmbeddingRows, connectorStoreCurrentEmbeddingRowsIterator } from '../src/workers/connector-store/index.ts';
 import { cosineSimilarity, decodeEmbedding } from '../src/workers/source-index/embeddings.ts';
 
@@ -213,4 +214,5 @@ function main(): void {
   }
 }
 
-main();
+// Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+await runUnderDataOwnerLock(main);

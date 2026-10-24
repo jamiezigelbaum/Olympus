@@ -48,6 +48,8 @@ export interface ZipFixtureEntry {
     crc?: number;
     compressedSize?: number;
     uncompressedSize?: number;
+    /** More bytes in the header's extra field, after the zip64 record if there is one. */
+    extra?: Uint8Array;
   };
 }
 
@@ -127,24 +129,26 @@ export function buildZip(entries: readonly ZipFixtureEntry[], options: ZipFixtur
     file.u16(0);
     file.u16(0x21);
     if (entry.descriptor) {
-      file.u32(0);
-      file.u32(0);
-      file.u32(0);
+      file.u32(entry.localHeader?.crc ?? 0);
+      file.u32(entry.localHeader?.compressedSize ?? 0);
+      file.u32(entry.localHeader?.uncompressedSize ?? 0);
     } else {
       file.u32(entry.localHeader?.crc ?? crc);
       file.u32(zip64 ? 0xffffffff : (entry.localHeader?.compressedSize ?? compressedSize));
       file.u32(zip64 ? 0xffffffff : (entry.localHeader?.uncompressedSize ?? uncompressedSize));
     }
     file.u16(localName.length);
-    const localExtra = zip64 && !entry.descriptor ? 20 : 0;
-    file.u16(localExtra);
+    const zip64Extra = zip64 && !entry.descriptor ? 20 : 0;
+    const moreExtra = entry.localHeader?.extra ?? new Uint8Array(0);
+    file.u16(zip64Extra + moreExtra.length);
     file.bytes(localName);
-    if (localExtra) {
+    if (zip64Extra) {
       file.u16(0x0001);
       file.u16(16);
-      file.u64(uncompressedSize);
-      file.u64(compressedSize);
+      file.u64(entry.localHeader?.uncompressedSize ?? uncompressedSize);
+      file.u64(entry.localHeader?.compressedSize ?? compressedSize);
     }
+    file.bytes(moreExtra);
     file.bytes(compressed);
     if (entry.descriptor) {
       file.u32(0x08074b50);
