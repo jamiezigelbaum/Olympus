@@ -93,6 +93,7 @@ import {
   dashboardQueryTokenFromWorkerAuthToken,
   environmentWithWorkerSetupEnv,
   readWorkerSetupEnv,
+  resolveWorkerAuthToken,
   withWorkerAuthHeader,
   normalizeWorkerAuthToken,
   workerAuthTokenFromConfig,
@@ -2791,31 +2792,6 @@ function requireOptionValue(args: string[], index: number, optionName: string): 
 }
 
 
-/**
- * The worker auth token this install actually authenticates with.
- *
- * The worker authenticates from ITS process environment, which the service
- * loads from worker.env — so that file outranks a token remembered in a legacy
- * config file, and an explicit environment variable outranks both. Handing over
- * the config's token when worker.env holds a newer one gives the reader a token
- * the worker refuses.
- *
- * `workerAuthTokenFromConfig` reads the same three places in the OPPOSITE
- * order, config first, because a caller holding a config is asking what that
- * config says. Anything the reader is meant to authenticate WITH must come
- * through here instead: `olympus dashboard` derived its dash_ query token from
- * the config-first lookup and so could print a URL a re-run setup had already
- * invalidated, while `olympus dashboard token` printed the working one.
- */
-function resolveWorkerAuthToken(
-  env: Record<string, string | undefined> = process.env,
-  config: OlympusConfig = loadConfig(env),
-): string | undefined {
-  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN)
-    ?? workerAuthTokenFromSetupEnv({ env })
-    ?? normalizeWorkerAuthToken(config.worker.authToken);
-}
-
 /** The worker auth token from worker.env or config, or a clear refusal. */
 /**
  * Remote agent connections (`/mcp` on the worker). `add` prints the token
@@ -2973,7 +2949,7 @@ function remoteConnectionView(connection: RemoteConnectionRecord): Record<string
 }
 
 export function runDashboardTokenCommand(env: Record<string, string | undefined> = process.env): string {
-  const token = resolveWorkerAuthToken(env);
+  const token = resolveWorkerAuthToken(env, loadConfig(env));
   if (!token) {
     throw new OperationError(
       'config_error',

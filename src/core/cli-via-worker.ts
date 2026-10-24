@@ -20,7 +20,7 @@ import { loadConfig, normalizeSourceWorkerBaseUrl } from './config.ts';
 import { DataOwnerBusyError, STOP_OLYMPUS_HINT, tryDataOwnerLock } from './data-owner-lock.ts';
 import { olympusDataRoot, type LayoutEnv } from './olympus-layout.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
-import { withWorkerAuthHeader, workerAuthTokenFromConfig } from './worker-auth.ts';
+import { resolveWorkerAuthToken, withWorkerAuthHeader } from './worker-auth.ts';
 import { createWorkerFetch } from './worker-transport.ts';
 
 /** The route family, under the worker's API base (`/v1`). */
@@ -103,7 +103,8 @@ export async function callWorkerCli<T = unknown>(
 ): Promise<T> {
   const env = options.env ?? process.env;
   const config = loadConfig(env);
-  const authToken = workerAuthTokenFromConfig(config, { env });
+  // The token the worker authenticates with (its environment, then worker.env), not a stale config's.
+  const authToken = resolveWorkerAuthToken(env, config);
   if (!authToken) throw new WorkerUnreachableError('this command has no worker token to present');
   const baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
   const fetchImpl = options.fetchImpl ?? createWorkerFetch({ env });

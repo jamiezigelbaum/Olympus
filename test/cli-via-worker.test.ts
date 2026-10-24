@@ -24,6 +24,7 @@ import {
   callWorkerCli,
   runLocallyOrThroughWorker,
 } from '../src/core/cli-via-worker.ts';
+import { workerSetupEnvPath } from '../src/core/worker-auth.ts';
 import { bindWorkerSocket, prepareWorkerSocket } from '../src/core/worker-transport.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import {
@@ -241,6 +242,25 @@ describe('callWorkerCli', () => {
     await expect(callWorkerCli('tier', { args: [] }, { env: withoutToken })).rejects.toBeInstanceOf(WorkerUnreachableError);
     expect(worker.requests).toEqual([]);
   }, 30_000);
+
+  test('presents the token the worker authenticates with: worker.env outranks a stale config token', async () => {
+    // A re-run setup wrote a new token to worker.env; ~/.olympus/config.json
+    // still remembers the old one. The worker authenticates from its
+    // environment (worker.env), so that is the token to send.
+    const served = serveWorker(withWorkerBearerAuth(async (request) => answers('/v1/cli/tier', { ok: true })(request), { authToken: TOKEN }));
+    const home = mkdtempSync(join(tmpdir(), 'olympus-cli-token-home-'));
+    roots.push(home);
+    const configPath = join(home, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ worker: { authToken: 'stale-config-token' } }));
+    const { OLYMPUS_WORKER_AUTH_TOKEN: _fromEnv, ...withoutEnvToken } = served.env;
+    const env = { ...withoutEnvToken, HOME: home, OLYMPUS_CONFIG: configPath };
+    const workerEnv = workerSetupEnvPath({ env });
+    mkdirSync(dirname(workerEnv), { recursive: true, mode: 0o700 });
+    writeFileSync(workerEnv, `OLYMPUS_WORKER_AUTH_TOKEN=${TOKEN}\n`, { mode: 0o600 });
+
+    await expect(callWorkerCli('tier', { args: ['explain', 'x'] }, { env })).resolves.toEqual({ ok: true });
+    expect(served.requests.find((request) => request.path === '/v1/cli/tier')?.authorization).toBe(`Bearer ${TOKEN}`);
+  });
 
   test('a worker that refuses the token, or is older than the command, says so and names how to stop Olympus', async () => {
     const refusing = serveWorker(answers('/v1/cli/tier', { error: { code: 'unauthorized', message: 'no' } }, 401));

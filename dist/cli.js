@@ -4209,6 +4209,7 @@ __export(exports_worker_auth, {
   workerAuthTokenFromConfig: () => workerAuthTokenFromConfig,
   withWorkerAuthHeader: () => withWorkerAuthHeader,
   unquoteEnvValue: () => unquoteEnvValue,
+  resolveWorkerAuthToken: () => resolveWorkerAuthToken,
   readWorkerSetupEnv: () => readWorkerSetupEnv,
   normalizeWorkerAuthToken: () => normalizeWorkerAuthToken,
   isWorkerAuthTokenPlaceholder: () => isWorkerAuthTokenPlaceholder,
@@ -4244,6 +4245,9 @@ function dashboardQueryTokenFromWorkerAuthToken(authToken) {
   if (!token)
     return;
   return `dash_${createHmac2("sha256", token).update("olympus-dashboard-query-token-v1").digest("base64url")}`;
+}
+function resolveWorkerAuthToken(env, config) {
+  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv({ env }) ?? normalizeWorkerAuthToken(config.worker.authToken);
 }
 function workerAuthTokenFromSetupEnv(options = {}) {
   return optionalToken(readWorkerSetupEnv(options)?.OLYMPUS_WORKER_AUTH_TOKEN);
@@ -91534,7 +91538,7 @@ function canonicalDataRoot(root) {
 async function callWorkerCli(operation, body, options = {}) {
   const env = options.env ?? process.env;
   const config = loadConfig(env);
-  const authToken = workerAuthTokenFromConfig(config, { env });
+  const authToken = resolveWorkerAuthToken(env, config);
   if (!authToken)
     throw new WorkerUnreachableError("this command has no worker token to present");
   const baseUrl = normalizeSourceWorkerBaseUrl(config.email.baseUrl);
@@ -183851,9 +183855,6 @@ function requireOptionValue(args, index, optionName) {
     throw new OperationError("invalid_params", `${optionName} requires a value.`);
   return value2;
 }
-function resolveWorkerAuthToken(env = process.env, config2 = loadConfig(env)) {
-  return normalizeWorkerAuthToken(env.OLYMPUS_WORKER_AUTH_TOKEN) ?? workerAuthTokenFromSetupEnv({ env }) ?? normalizeWorkerAuthToken(config2.worker.authToken);
-}
 function runConnectionsCommand(args, env = process.env) {
   const [command, ...rest] = args;
   if (command === "status") {
@@ -183971,7 +183972,7 @@ function remoteConnectionView(connection) {
   };
 }
 function runDashboardTokenCommand(env = process.env) {
-  const token = resolveWorkerAuthToken(env);
+  const token = resolveWorkerAuthToken(env, loadConfig(env));
   if (!token) {
     throw new OperationError("config_error", "No worker auth token is configured. Run olympus setup first; the token is written to worker.env as OLYMPUS_WORKER_AUTH_TOKEN.");
   }
