@@ -7,9 +7,9 @@
 // from the code under test.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   MediaCacheRekeyStopped,
   addMediaCacheHolder,
@@ -276,7 +276,7 @@ describe('the hand-over in two halves, either side of the move', () => {
     for (const picture of pictures) expect(existsSync(picture.path), picture.path).toBe(true);
   });
 
-  test('a drop that is told to stop leaves the rest for later, and removes nothing it should not', () => {
+  test('a drop that is told to stop throws and leaves the rest as it was; the next call finishes', () => {
     const { dir, cache } = workspace();
     const { oldStore, newStore, pictures, digests } = moved(dir, cache, 'a', 130);
     mkdirSync(join(newStore, '..'), { recursive: true });
@@ -284,13 +284,100 @@ describe('the hand-over in two halves, either side of the move', () => {
     renameSync(oldStore, newStore);
     let asked = 0;
 
-    const first = dropMediaCacheHolder(cache, digests, newStore, { stop: () => (asked += 1) > 1 });
+    expect(() => dropMediaCacheHolder(cache, digests, newStore, { stop: () => (asked += 1) > 1 })).toThrow(MediaCacheRekeyStopped);
 
-    expect(first).toBeGreaterThan(0);
-    expect(first).toBeLessThan(130);
     // Every picture is still held: the new marker everywhere, the old one where the drop had not got to.
     for (const picture of pictures) expect(markers(cache, picture).length, picture.path).toBeGreaterThan(0);
     expect(dropMediaCacheHolder(cache, digests, newStore)).toBeGreaterThan(0);
     expect(sweepMediaCache(cache, FAR_FUTURE)).toBe(0);
+  });
+
+  test('a cache too big for one run is finished by the next: pictures already covered are passed over, not written again', () => {
+    const { dir, cache } = workspace();
+    const { newStore, digests } = moved(dir, cache, 'a', 130);
+    mkdirSync(join(newStore, '..'), { recursive: true });
+    const syncs: number[] = [0, 0];
+    let round = 0;
+    const sync = (): void => { syncs[round] = syncs[round]! + 1; };
+    let asked = 0;
+
+    expect(() => addMediaCacheHolder(cache, digests, newStore, { sync, stagedBy: dirname(newStore), stop: () => (asked += 1) > 1 })).toThrow(MediaCacheRekeyStopped);
+    round = 1;
+    expect(addMediaCacheHolder(cache, digests, newStore, { sync, stagedBy: dirname(newStore) })).toBe(130);
+
+    // A staging marker, a marker and the folder, once for each picture across both runs: nothing was written twice.
+    expect(syncs[0]).toBeGreaterThan(0);
+    expect(syncs[0]! + syncs[1]!).toBe(130 * 3);
+  });
+});
+
+describe('a sweep by another process in the middle of a move', () => {
+  /** The store moves between two names: the sweeps the other process runs are where the pictures are lost or kept. */
+  function throughAMove(staged: boolean): { picture: { path: string; sha256: string }; oldStore: string; newStore: string; digests: string[]; cache: string } {
+    const { dir, cache } = workspace();
+    const oldStore = join(dir, 'legacy', 'a.sqlite');
+    const newStore = join(dir, 'sources', 'x', '1', 'stores', 'a.sqlite');
+    const picture = holding(cache, oldStore, `a picture ${staged}`);
+    // A picture of days ago, as the sweeps the cache really runs see it: unheld, it goes; a fresh staging marker keeps it.
+    const longAgo = new Date(Date.now() - 3 * 24 * 60 * 60_000);
+    utimesSync(picture.path, longAgo, longAgo);
+    const digests = mediaHolderDigests(oldStore);
+    addMediaCacheHolder(cache, digests, newStore, staged ? { stagedBy: oldStore } : {});
+    // The folders are made, the store is not in them yet: its new name is the name of a store that is not there.
+    mkdirSync(dirname(newStore), { recursive: true });
+    sweepMediaCache(cache);
+    renameSync(oldStore, newStore);
+    // And now the old name is.
+    sweepMediaCache(cache);
+    return { picture, oldStore, newStore, digests, cache };
+  }
+
+  test('without a staging marker the picture is lost (the control)', () => {
+    const { picture } = throughAMove(false);
+    expect(existsSync(picture.path)).toBe(false);
+  });
+
+  test('with it the picture is kept through both sweeps, and the second half makes the new marker sure and leaves nothing behind', () => {
+    const { picture, oldStore, newStore, digests, cache } = throughAMove(true);
+    expect(existsSync(picture.path)).toBe(true);
+
+    dropMediaCacheHolder(cache, digests, newStore, { stagedBy: oldStore });
+
+    const left = markers(cache, picture);
+    expect(left).toHaveLength(1);
+    expect(left).not.toContain(digests[0]);
+    expect(sweepMediaCache(cache)).toBe(0);
+    expect(existsSync(picture.path)).toBe(true);
+    // Held by the store where it is: the store's own release is the last hold.
+    expect(releaseMediaCacheFile(picture.path, picture.sha256, newStore, cache)).toBe(true);
+  });
+
+  test('the second half touches nothing while the store is not at its new path', () => {
+    const { dir, cache } = workspace();
+    const oldStore = join(dir, 'legacy', 'a.sqlite');
+    const newStore = join(dir, 'sources', 'x', '1', 'stores', 'a.sqlite');
+    const picture = holding(cache, oldStore, 'not there yet');
+    const digests = mediaHolderDigests(oldStore);
+    addMediaCacheHolder(cache, digests, newStore, { stagedBy: oldStore });
+    const before = markers(cache, picture);
+
+    expect(dropMediaCacheHolder(cache, digests, newStore, { stagedBy: oldStore })).toBe(0);
+
+    expect(markers(cache, picture)).toEqual(before);
+  });
+
+  test('each picture\'s staging marker, new marker and folder are made durable in that order', () => {
+    const { dir, cache } = workspace();
+    const oldStore = join(dir, 'legacy', 'a.sqlite');
+    const newStore = join(dir, 'sources', 'x', '1', 'stores', 'a.sqlite');
+    const picture = holding(cache, oldStore, 'one picture');
+    const synced: string[] = [];
+
+    addMediaCacheHolder(cache, mediaHolderDigests(oldStore), newStore, { stagedBy: oldStore, sync: (path) => { synced.push(path); } });
+
+    expect(synced).toHaveLength(3);
+    expect(synced[0]!.startsWith(`${picture.path}.refs/staging-`)).toBe(true);
+    expect(synced[1]!.startsWith(`${picture.path}.refs/`) && !synced[1]!.includes('staging-')).toBe(true);
+    expect(synced[2]).toBe(`${picture.path}.refs`);
   });
 });

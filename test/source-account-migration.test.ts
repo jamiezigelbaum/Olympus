@@ -22,6 +22,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -689,6 +690,84 @@ describe('the media cache: a moved store keeps its pictures', () => {
     expect(pictures.map(markersOf)).toEqual(before);
     expect(sweepMediaCache(mediaCacheDir(env), FAR_FUTURE)).toBe(0);
     for (const picture of pictures) expect(existsSync(picture.path)).toBe(true);
+  });
+
+  test('a sweep between any two steps drops no picture: every one is held by its store where it is, before the first file moves', () => {
+    const { env } = fixture();
+    install(env, 'dropbox.files', { walOn: 'none' });
+    const pictures = holdPictures(env, 'dropbox.files');
+    // Pictures of days ago: what the sweeps another store's writes run drop when nothing holds them.
+    const longAgo = new Date(Date.now() - 3 * 24 * 60 * 60_000);
+    for (const picture of pictures) utimesSync(picture.path, longAgo, longAgo);
+    const swept: string[] = [];
+    const dropped: string[] = [];
+    __accountMigrationTestHooks.checkpoint = (at) => {
+      // The sweep that another store's write would run, at every step: it drops what no store holds.
+      if (sweepMediaCache(mediaCacheDir(env)) !== 0) dropped.push(at);
+      swept.push(at);
+    };
+
+    const report = migrateAccountFolders(env);
+
+    expect(dropped, 'the sweeps that dropped a picture').toEqual([]);
+    expect(report, JSON.stringify(report)).toMatchObject({ moved: ['dropbox.files'] });
+    for (const picture of pictures) expect(existsSync(picture.path), picture.path).toBe(true);
+
+    expect(swept.filter((at) => at.startsWith('rename:')).length).toBeGreaterThan(5);
+    expectHeld(env, 'dropbox.files', pictures, 'moved');
+  });
+
+  test('the same on the way back: a sweep at any step of a move that is put back drops no picture', () => {
+    const { env } = fixture();
+    install(env, 'dropbox.files', { walOn: 'none' });
+    const pictures = holdPictures(env, 'dropbox.files');
+    const before = pictures.map(markersOf);
+    const longAgo = new Date(Date.now() - 3 * 24 * 60 * 60_000);
+    for (const picture of pictures) utimesSync(picture.path, longAgo, longAgo);
+    const folder = accountFolder({ source_id: 'dropbox.files', slot: '1' }, env);
+    __accountMigrationTestHooks.look = (path, actual): MigrationLook | undefined => (
+      path.startsWith(`${folder}/`) && path.endsWith('.tier-ledger.sqlite') && actual.kind === 'file'
+        ? { ...actual, size: actual.size + 1n }
+        : undefined
+    );
+    const dropped: string[] = [];
+    __accountMigrationTestHooks.checkpoint = (at) => {
+      if (sweepMediaCache(mediaCacheDir(env)) !== 0) dropped.push(at);
+    };
+
+    expect(migrateAccountFolders(env).movedBack).toHaveLength(1);
+
+    expect(dropped, 'the sweeps that dropped a picture').toEqual([]);
+    for (const picture of pictures) expect(existsSync(picture.path), picture.path).toBe(true);
+    expect(pictures.map(markersOf)).toEqual(before);
+  });
+
+  test('out of time handing the pictures over: nothing has moved, the plan waits, the pictures stay held, and the next start goes on', () => {
+    const { env } = fixture();
+    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+    const pictures = holdPictures(env, 'dropbox.files');
+    const before = pictures.map(markersOf);
+    __accountMigrationTestHooks.limits = { hardStopMs: -1 };
+
+    const report = migrateAccountFolders(env);
+
+    expect(report.stuck).toEqual([{ sourceId: 'dropbox.files', detail: expect.stringContaining('more than one start') }]);
+    expect(report.moved).toEqual([]);
+    expect(entryOf(env, 'dropbox.files')!.migration?.state).toBe('moving');
+    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(false);
+    for (const path of legacy.filter((file) => !/-(wal|shm)$/.test(file))) expect(existsSync(path), path).toBe(true);
+    // Not a problem for the owner: no Needs you row for time.
+    expect(sourceStorageNotices(env).filter((notice) => notice.kind !== 'stuck')).toEqual([]);
+    // Held as before, and a sweep drops none.
+    expect(sweepMediaCache(mediaCacheDir(env), FAR_FUTURE)).toBe(0);
+    for (const [index, picture] of pictures.entries()) {
+      expect(existsSync(picture.path)).toBe(true);
+      for (const [name, holder] of Object.entries(before[index]!)) expect(markersOf(picture)[name]).toBe(holder);
+    }
+
+    __accountMigrationTestHooks.reset();
+    expect(migrateAccountFolders(withoutSwitch(env)).moved).toEqual(['dropbox.files']);
+    expectHeld(env, 'dropbox.files', pictures, 'finished');
   });
 
   test('no picture cache at all: the move needs none', () => {
@@ -1624,6 +1703,23 @@ describe('a folder on the way that is a link is never followed', () => {
     expect(migrateAccountFolders(env).skipped).toEqual([{ sourceId: 'dropbox.files', reason: 'unexpected_file' }]);
     expect(readdirSync(elsewhere)).toEqual([]);
     for (const path of legacy) expect(existsSync(path), path).toBe(true);
+  });
+
+  test('a link made after the plan is written and before the first folder is: nothing is made through it, and nothing has moved', () => {
+    const { env, dir, root } = fixture();
+    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+    const elsewhere = join(dir, 'elsewhere');
+    mkdirSync(elsewhere);
+    __accountMigrationTestHooks.checkpoint = (at) => {
+      if (at === 'plan') symlinkSync(elsewhere, join(root, 'sources'));
+    };
+
+    const report = migrateAccountFolders(env);
+
+    expect(report.movedBack).toEqual([{ sourceId: 'dropbox.files', reason: 'move_failed' }]);
+    expect(readdirSync(elsewhere)).toEqual([]);
+    for (const path of legacy) expect(existsSync(path), path).toBe(true);
+    expect(entryOf(env, 'dropbox.files')!.layout).toBe('legacy');
   });
 
   test('a folder that becomes a link in the middle of the move is not followed for the files after it: what moved goes back', () => {

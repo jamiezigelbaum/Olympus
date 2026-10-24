@@ -43,6 +43,7 @@ import {
   rmSync,
   rmdirSync,
   statSync,
+  utimesSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -180,7 +181,7 @@ export function mediaHolderDigests(holder: string): string[] {
   return [...new Set([holderDigest(mediaHolderNameNear(holder)), holderDigest(holder)])];
 }
 
-/** Thrown by `addMediaCacheHolder` when `stop` says to leave off; what was done stays done. */
+/** Thrown by `addMediaCacheHolder` and `dropMediaCacheHolder` when `stop` says to leave off; what was done stays done. */
 export class MediaCacheRekeyStopped extends Error {
   constructor(readonly handed: number) {
     super('The media cache hand-over was stopped before it finished.');
@@ -190,42 +191,83 @@ export class MediaCacheRekeyStopped extends Error {
 
 export interface MediaCacheRekeyOptions {
   /**
-   * Asked every few pictures: true leaves off (`addMediaCacheHolder` throws
-   * `MediaCacheRekeyStopped`; `dropMediaCacheHolder` simply returns). Both are
-   * safe to cut short at that point, and a later call goes on.
+   * Asked every few pictures: true leaves off (both halves throw
+   * `MediaCacheRekeyStopped`). Both are safe to cut short at that point, and a
+   * later call goes on from where this one stopped.
    */
   stop?: () => boolean;
   /** Makes a path durable: a marker file, then its folder. Replaces the real `fsync`, for tests. */
   sync?: (path: string) => void;
+  /**
+   * Names the move (the store's old path). With it, every picture the move
+   * covers also carries a staging marker for the whole span of the move: the
+   * sweep keeps a staging marker for a day whatever happens to the paths of the
+   * stores, where it drops the marker of a store that is not at its path (the
+   * old one, once the store has moved; the new one, until it has). Without it a
+   * sweep that runs between the folders being made and the store being renamed
+   * would remove the new marker, and one after the rename the old one.
+   */
+  stagedBy?: string;
 }
 
 /** How often the pictures of a big cache are interrupted by a question about time: every this many. */
 const STOP_CHECK_EVERY = 64;
 
-/** Makes a marker exist with `name` in it and be on disk: the file's bytes, then the folder entry that names it. */
-function ensureMarkerDurable(marker: string, name: string, sync: ((path: string) => void) | undefined): void {
-  // A marker with these bytes may be a stopped run's, not on disk yet: it is synced either way (cheap when it is).
-  const present = readMarker(marker) === name;
-  const descriptor = openSync(marker, present ? 'r' : 'w', 0o600);
+/** The name of the staging marker a move leaves on the pictures it covers. */
+function movingMarkerName(stagedBy: string): string {
+  return holderName(`staging:move:${nearRealPath(stagedBy)}`);
+}
+
+/** A staging marker the sweep will not reach for hours yet: it has the bytes and was written within `STAGING_FRESH_MS`. */
+const STAGING_FRESH_MS = 6 * 60 * 60_000;
+function freshMarker(marker: string, content: string): boolean {
   try {
-    if (!present) writeSync(descriptor, name);
-    if (sync) sync(marker);
-    else fsyncSync(descriptor);
-  } finally {
-    closeSync(descriptor);
+    return readMarker(marker) === content && Date.now() - statSync(marker).mtimeMs < STAGING_FRESH_MS;
+  } catch {
+    return false;
   }
-  if (sync) sync(dirname(marker));
-  else syncDirectorySync(dirname(marker));
+}
+
+/**
+ * Makes markers exist with the bytes given and be on disk: each file's bytes,
+ * then the folder entries that name them, once. A marker that already has these
+ * bytes was written by a run that made it durable (or died first, which the
+ * next boot's file system shows), and is left alone unless `refresh` says to
+ * touch it (a staging marker is kept for a day from its last write).
+ */
+function ensureMarkersDurable(
+  refs: string,
+  markers: Array<{ name: string; content: string; refresh?: boolean }>,
+  sync: ((path: string) => void) | undefined,
+): void {
+  for (const { name, content, refresh } of markers) {
+    const marker = join(refs, name);
+    const present = readMarker(marker) === content;
+    if (present && !refresh) continue;
+    const descriptor = openSync(marker, present ? 'r+' : 'w', 0o600);
+    try {
+      if (!present) writeSync(descriptor, content);
+      else utimesSync(marker, new Date(), new Date());
+      if (sync) sync(marker);
+      else fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+  if (sync) sync(refs);
+  else syncDirectorySync(refs);
 }
 
 /**
  * The first half of handing a store's pictures to a new path: for every cache
- * file one of `fromDigests` holds, a marker under the new path's name is written
- * and made durable (the file and its folder are fsynced), the old marker left
+ * file one of `fromDigests` holds (or that a stopped earlier run staged), a
+ * staging marker for the move and a marker under the new path's name are written
+ * and made durable (the files and their folder are fsynced), the old marker left
  * where it is. Nothing is without a holder at any point, whichever way the
  * machine stops, and it can be repeated or cut short (`options.stop`) at will,
- * so it is done BEFORE the store moves, while the old holder is still real.
- * Returns how many pictures it covered.
+ * so it is done BEFORE the store moves, while the old holder is still real. A
+ * picture already complete is passed over with two reads, so a cache too big for
+ * one run is finished by the next. Returns how many pictures it now covers.
  */
 export function addMediaCacheHolder(
   dir: string,
@@ -236,43 +278,63 @@ export function addMediaCacheHolder(
   const entries = cacheRefsFolders(dir);
   const name = mediaHolderNameNear(toHolder);
   const target = holderDigest(name);
+  const staging = options.stagedBy === undefined ? undefined : movingMarkerName(options.stagedBy);
   let covered = 0;
   entries.forEach((entry, index) => {
     if (index % STOP_CHECK_EVERY === 0 && options.stop?.()) throw new MediaCacheRekeyStopped(covered);
     const refs = join(dir, entry);
-    if (!fromDigests.some((digest) => digest !== target && existsSync(join(refs, digest)))) return;
-    ensureMarkerDurable(join(refs, target), name, options.sync);
+    const staged = staging !== undefined && existsSync(join(refs, staging));
+    if (!staged && !fromDigests.some((digest) => digest !== target && existsSync(join(refs, digest)))) return;
+    const complete = readMarker(join(refs, target)) === name && (staging === undefined || freshMarker(join(refs, staging), options.stagedBy!));
+    if (!complete) {
+      ensureMarkersDurable(refs, [
+        ...(staging === undefined ? [] : [{ name: staging, content: options.stagedBy!, refresh: true }]),
+        { name: target, content: name },
+      ], options.sync);
+    }
     covered += 1;
   });
   return covered;
 }
 
 /**
- * The second half, after the store has moved: the old markers of every picture
- * that now has the new path's marker are removed. Not durable on purpose: an
- * old marker that comes back after a crash names a store that is gone, and the
- * sweep removes it. Cut short by `options.stop` (the rest are swept later).
- * Returns how many markers it removed.
+ * The second half, after the store has moved: the marker under the new path's
+ * name is made sure of (the store is there now, so no sweep removes it), then
+ * the old markers and the staging marker of every picture are removed. A picture
+ * that has the new marker and no staging marker (an earlier, uninterrupted run
+ * of this half) loses its old markers only. The old markers are not removed
+ * durably on purpose: one that comes back after a crash names a store that is
+ * gone, and the sweep removes it. When the store is not at its new path nothing
+ * is touched. Cut short by `options.stop` it throws `MediaCacheRekeyStopped`
+ * and the plan stays open: the pictures not reached are still staged. Returns
+ * how many old markers it removed.
  */
 export function dropMediaCacheHolder(
   dir: string,
   fromDigests: readonly string[],
   toHolder: string,
-  options: Pick<MediaCacheRekeyOptions, 'stop'> = {},
+  options: Pick<MediaCacheRekeyOptions, 'stop' | 'sync' | 'stagedBy'> = {},
 ): number {
   const entries = cacheRefsFolders(dir);
-  const target = holderDigest(mediaHolderNameNear(toHolder));
+  const name = mediaHolderNameNear(toHolder);
+  const target = holderDigest(name);
+  const staging = options.stagedBy === undefined ? undefined : movingMarkerName(options.stagedBy);
+  const there = existsSync(toHolder);
   let handed = 0;
-  for (const [index, entry] of entries.entries()) {
-    if (index % STOP_CHECK_EVERY === 0 && options.stop?.()) break;
+  entries.forEach((entry, index) => {
+    if (index % STOP_CHECK_EVERY === 0 && options.stop?.()) throw new MediaCacheRekeyStopped(handed);
     const refs = join(dir, entry);
-    if (!existsSync(join(refs, target))) continue;
+    const staged = staging !== undefined && existsSync(join(refs, staging));
+    if (staged && !there) return;
+    if (!staged && !existsSync(join(refs, target))) return;
+    if (staged) ensureMarkersDurable(refs, [{ name: target, content: name }], options.sync);
     for (const digest of fromDigests) {
       if (digest === target || !existsSync(join(refs, digest))) continue;
       rmSync(join(refs, digest), { force: true });
       handed += 1;
     }
-  }
+    if (staged) rmSync(join(refs, staging!), { force: true });
+  });
   return handed;
 }
 

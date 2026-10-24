@@ -743,25 +743,31 @@ function rebindStores(ctx: Context, migration: SourceRegistryMigration, moves: S
 
 /**
  * The media cache keeps a picture while some store holds it, and names the
- * holder by the store's path, so a store that moves must be handed over. In two
- * halves, either side of the renames. BEFORE them (`holdPictures`) a durable
- * marker under the destination's name is added for every picture, the old one
+ * holder by the store's path, so a store that moves must be handed over, and a
+ * sweep by another process can run at any point of the move: it removes the
+ * marker of a store that is not at its path, the old one once the store has
+ * moved and the new one until it has. So the pictures carry a staging marker for
+ * the whole move (the sweep keeps one for a day). In two halves, either side of
+ * the renames. BEFORE them (`holdPictures`) the staging marker and a durable
+ * marker under the destination's name are added for every picture, the old one
  * kept: the store still sits at its old place, so nothing is lost if this is cut
  * short (`MediaCacheRekeyStopped`, when the pass is out of time, ends the pass
- * with the plan kept; no file has moved), and from the moment the renames are
- * done every picture is held by the store where it now is. AFTER them
- * (`releasePictures`) the old markers go, which needs no care: one that comes
- * back names a store that is gone, and the sweep removes it.
+ * with the plan kept; no file has moved). AFTER them (`releasePictures`) the
+ * marker under the new name is made sure of once the store is there, then the
+ * old markers and the staging marker go; cut short, the pictures not reached
+ * stay staged and the plan stays open.
  */
-function holdersAt(ctx: Context, migration: SourceRegistryMigration, direction: 'forward' | 'back'): Array<{ from: readonly string[]; to: string }> {
-  const places: Array<{ from: readonly string[]; to: string }> = [];
+function holdersAt(ctx: Context, migration: SourceRegistryMigration, direction: 'forward' | 'back'): Array<{ from: readonly string[]; to: string; stagedBy: string }> {
+  const places: Array<{ from: readonly string[]; to: string; stagedBy: string }> = [];
   for (const holder of migration.holders ?? []) {
     const move = (migration.moves ?? []).find((candidate) => candidate.to === holder.store);
     if (!move) continue;
     const store = absPath(ctx.root, holder.store);
+    // The staging marker belongs to the move, not to a direction: the store's old path names it both ways.
+    const stagedBy = absPath(ctx.root, move.from);
     places.push(direction === 'forward'
-      ? { from: holder.digests, to: store }
-      : { from: mediaHolderDigests(store), to: absPath(ctx.root, move.from) });
+      ? { from: holder.digests, to: store, stagedBy }
+      : { from: mediaHolderDigests(store), to: stagedBy, stagedBy });
   }
   return places;
 }
@@ -769,13 +775,13 @@ function holdersAt(ctx: Context, migration: SourceRegistryMigration, direction: 
 function holdPictures(ctx: Context, migration: SourceRegistryMigration, direction: 'forward' | 'back'): void {
   if (!ctx.cacheDir) return;
   const stop = (): boolean => ctx.now() >= ctx.hardStop;
-  for (const place of holdersAt(ctx, migration, direction)) addMediaCacheHolder(ctx.cacheDir, place.from, place.to, { stop });
+  for (const place of holdersAt(ctx, migration, direction)) addMediaCacheHolder(ctx.cacheDir, place.from, place.to, { stop, stagedBy: place.stagedBy });
 }
 
 function releasePictures(ctx: Context, migration: SourceRegistryMigration, direction: 'forward' | 'back'): void {
   if (!ctx.cacheDir) return;
   const stop = (): boolean => ctx.now() >= ctx.hardStop;
-  for (const place of holdersAt(ctx, migration, direction)) dropMediaCacheHolder(ctx.cacheDir, place.from, place.to, { stop });
+  for (const place of holdersAt(ctx, migration, direction)) dropMediaCacheHolder(ctx.cacheDir, place.from, place.to, { stop, stagedBy: place.stagedBy });
 }
 
 function forward(ctx: Context, sourceId: string, slot: string, migration: SourceRegistryMigration): void {
