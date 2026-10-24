@@ -510,6 +510,30 @@ export function createWorkerMessagingCaptureOwnership(options: {
 }
 
 /**
+ * The dashboard's view of live capture on this computer, by source id: the
+ * supervisor's last report and what the grant approved, as a count. Only for
+ * the sources this worker runs capture for (`sources`): where the native
+ * service owns capture there is no supervisor here and no claim is made.
+ */
+export function workerCaptureRuntime(input: {
+  sources: readonly MessagingCaptureSource[];
+  statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
+  registryPath: string | undefined;
+}): Record<string, DashboardCaptureRuntime> {
+  const runtime: Record<string, DashboardCaptureRuntime> = {};
+  for (const source of input.sources) {
+    const status = input.statuses[source];
+    const scope = readMessagingCaptureScope(source, defaultMessagingCaptureGrantPath(source, input.registryPath));
+    if (!status && !scope) continue;
+    runtime[source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages'] = {
+      ...(status ? { supervisor: { state: status.state, ...(status.reason ? { reason: status.reason } : {}) } } : {}),
+      ...(scope ? { scope } : {}),
+    };
+  }
+  return runtime;
+}
+
+/**
  * Per-item tier overrides of a chat lane written before identities carried
  * their conversation: re-homed at boot where the conversation is derivable,
  * otherwise kept (applying to nothing) and reported as orphaned. Counts only.
@@ -2096,21 +2120,11 @@ export async function main(): Promise<void> {
     catch { console.warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.'); }
     finally { captureReconcileRunning = false; }
   };
-  // The dashboard's view of capture on this computer, by source id: the
-  // supervisor's last report and what the grant approved, as a count.
-  const dashboardCaptureRuntime = (): Record<string, DashboardCaptureRuntime> => {
-    const runtime: Record<string, DashboardCaptureRuntime> = {};
-    for (const [source] of captureEntries()) {
-      const status = captureStatuses[source];
-      const scope = readMessagingCaptureScope(source, defaultMessagingCaptureGrantPath(source, connectedHandleRegistryPath));
-      if (!status && !scope) continue;
-      runtime[source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages'] = {
-        ...(status ? { supervisor: { state: status.state, ...(status.reason ? { reason: status.reason } : {}) } } : {}),
-        ...(scope ? { scope } : {}),
-      };
-    }
-    return runtime;
-  };
+  const dashboardCaptureRuntime = () => workerCaptureRuntime({
+    sources: captureEntries().map(([source]) => source),
+    statuses: captureStatuses,
+    registryPath: connectedHandleRegistryPath,
+  });
   const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
     await captureOwnership.stopForUnpair(source);
   };

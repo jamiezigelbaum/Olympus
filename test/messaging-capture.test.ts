@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   MessagingCaptureSupervisor,
   defaultMessagingCaptureGrantPath,
+  readMessagingCaptureScope,
   saveMessagingCaptureGrant,
   type CaptureChild,
 } from '../src/core/messaging-capture.ts';
@@ -14,7 +15,7 @@ import {
   type MessagingPairingConnectedResult,
 } from '../src/core/messaging-pairing.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
-import { createWorkerMessagingCaptureOwnership } from '../src/workers/email-source/server.ts';
+import { createWorkerMessagingCaptureOwnership, workerCaptureRuntime } from '../src/workers/email-source/server.ts';
 
 function secretStore(values: Record<string, string>): SecretStore {
   const stored = new Map(Object.entries(values));
@@ -236,6 +237,106 @@ describe('worker and native capture ownership', () => {
     expect(grantRevoked).toBe(false);
     expect(existsSync(grantPath)).toBe(true);
     expect(existsSync(`${sessionPath}.session`)).toBe(true);
+  });
+});
+
+function whatsappPairing(allowedJids: string): MessagingPairingConnectedResult {
+  return {
+    ...telegramPairing('/fixture/whatsapp'),
+    source: 'whatsapp',
+    handles: ['whatsapp.personal_local'],
+    producer: {
+      source: 'whatsapp',
+      executable: '/fixture/olympus-whatsapp-bridge',
+      args: ['--capture-approved'],
+      env: { OLYMPUS_WHATSAPP_STATE_DIR: '/fixture/whatsapp', OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS: allowedJids },
+      secretEnvironment: [],
+      captureStarted: false,
+    },
+  } as unknown as MessagingPairingConnectedResult;
+}
+
+describe('approved capture scope, as a count', () => {
+  const grants = () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-scope-'));
+    return { root, registryPath: join(root, 'handles.json') };
+  };
+
+  test('says how many chats were approved, never which', () => {
+    const { registryPath } = grants();
+    const path = defaultMessagingCaptureGrantPath('telegram', registryPath);
+    saveMessagingCaptureGrant({ path, pairing: telegramPairing('/fixture/telegram') });
+    expect(readMessagingCaptureScope('telegram', path)).toEqual({ kind: 'chats', count: 1 });
+    const several = telegramPairing('/fixture/telegram');
+    several.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = 'telegram.personal:chat:101, telegram.personal:chat:102,telegram.personal:chat:101';
+    saveMessagingCaptureGrant({ path, pairing: several });
+    expect(readMessagingCaptureScope('telegram', path)).toEqual({ kind: 'chats', count: 2 });
+  });
+
+  test('a WhatsApp grant of * is the whole linked account; exact chats are a count', () => {
+    const { registryPath } = grants();
+    const path = defaultMessagingCaptureGrantPath('whatsapp', registryPath);
+    saveMessagingCaptureGrant({ path, pairing: whatsappPairing('*') });
+    expect(readMessagingCaptureScope('whatsapp', path)).toEqual({ kind: 'whole_account' });
+    saveMessagingCaptureGrant({ path, pairing: whatsappPairing('111@s.whatsapp.net,222@g.us') });
+    expect(readMessagingCaptureScope('whatsapp', path)).toEqual({ kind: 'chats', count: 2 });
+  });
+
+  test('no scope when there is no readable grant, when it names another source, or when it approves nothing', () => {
+    const { root, registryPath } = grants();
+    const path = defaultMessagingCaptureGrantPath('telegram', registryPath);
+    expect(readMessagingCaptureScope('telegram', path)).toBeUndefined();
+    saveMessagingCaptureGrant({ path, pairing: telegramPairing('/fixture/telegram') });
+    expect(readMessagingCaptureScope('whatsapp', path)).toBeUndefined();
+    const empty = telegramPairing('/fixture/telegram');
+    empty.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = ' , ';
+    saveMessagingCaptureGrant({ path, pairing: empty });
+    expect(readMessagingCaptureScope('telegram', path)).toBeUndefined();
+    // A writable grant is refused here exactly as the supervisor refuses it.
+    saveMessagingCaptureGrant({ path, pairing: telegramPairing('/fixture/telegram') });
+    chmodSync(path, 0o666);
+    expect(readMessagingCaptureScope('telegram', path)).toBeUndefined();
+    expect(existsSync(root)).toBe(true);
+  });
+});
+
+describe('the worker reports capture to the dashboard', () => {
+  test('supervisor state and scope by source id, only for sources this worker runs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-runtime-'));
+    const registryPath = join(root, 'handles.json');
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('telegram', registryPath), pairing: telegramPairing('/fixture/telegram') });
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('whatsapp', registryPath), pairing: whatsappPairing('*') });
+    expect(workerCaptureRuntime({
+      sources: ['telegram', 'whatsapp'],
+      statuses: {
+        telegram: { source: 'telegram', state: 'blocked', reason: 'session_missing' },
+        whatsapp: { source: 'whatsapp', state: 'running' },
+      },
+      registryPath,
+    })).toEqual({
+      'telegram.messages': { supervisor: { state: 'blocked', reason: 'session_missing' }, scope: { kind: 'chats', count: 1 } },
+      'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: { kind: 'whole_account' } },
+    });
+    // The native service owns Telegram capture here: this worker says nothing of it.
+    expect(Object.keys(workerCaptureRuntime({
+      sources: ['whatsapp'],
+      statuses: { telegram: { source: 'telegram', state: 'running' }, whatsapp: { source: 'whatsapp', state: 'running' } },
+      registryPath,
+    }))).toEqual(['whatsapp.personal.messages']);
+  });
+
+  test('before the first reconcile and without a grant there is nothing to report', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-runtime-empty-'));
+    expect(workerCaptureRuntime({ sources: ['telegram', 'whatsapp'], statuses: {}, registryPath: join(root, 'handles.json') })).toEqual({});
+  });
+
+  test('a supervisor that stopped for a reason that is no fault still reports its state', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-runtime-stopped-'));
+    expect(workerCaptureRuntime({
+      sources: ['telegram'],
+      statuses: { telegram: { state: 'stopped', reason: 'grant_missing' } },
+      registryPath: join(root, 'handles.json'),
+    })).toEqual({ 'telegram.messages': { supervisor: { state: 'stopped', reason: 'grant_missing' } } });
   });
 });
 
