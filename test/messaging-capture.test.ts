@@ -1,13 +1,18 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  MESSAGING_CAPTURE_REPEATED_EXITS,
   MessagingCaptureSupervisor,
   defaultMessagingCaptureGrantPath,
+  effectiveMessagingCaptureStatus,
+  readMessagingCaptureGrantFacts,
   readMessagingCaptureScope,
   saveMessagingCaptureGrant,
   type CaptureChild,
+  type MessagingCaptureStatus,
+  type SpawnCapture,
 } from '../src/core/messaging-capture.ts';
 import {
   TELEGRAM_API_HASH_SECRET_KEY,
@@ -15,7 +20,11 @@ import {
   type MessagingPairingConnectedResult,
 } from '../src/core/messaging-pairing.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
-import { createWorkerMessagingCaptureOwnership, workerCaptureRuntime } from '../src/workers/email-source/server.ts';
+import {
+  createWorkerMessagingCaptureOwnership,
+  reconcileWorkerCaptures,
+  workerCaptureRuntime,
+} from '../src/workers/email-source/server.ts';
 
 function secretStore(values: Record<string, string>): SecretStore {
   const stored = new Map(Object.entries(values));
@@ -300,12 +309,14 @@ describe('approved capture scope, as a count', () => {
   });
 });
 
+const PAIRED = new Date('2026-10-20T10:00:00.000Z');
+
 describe('the worker reports capture to the dashboard', () => {
-  test('supervisor state and scope by source id, only for sources this worker runs', () => {
+  test('supervisor state, scope and pairing time by source id, only for sources this worker runs', () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-capture-runtime-'));
     const registryPath = join(root, 'handles.json');
-    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('telegram', registryPath), pairing: telegramPairing('/fixture/telegram') });
-    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('whatsapp', registryPath), pairing: whatsappPairing('*') });
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('telegram', registryPath), pairing: telegramPairing('/fixture/telegram'), now: PAIRED });
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('whatsapp', registryPath), pairing: whatsappPairing('*'), now: PAIRED });
     expect(workerCaptureRuntime({
       sources: ['telegram', 'whatsapp'],
       statuses: {
@@ -314,8 +325,8 @@ describe('the worker reports capture to the dashboard', () => {
       },
       registryPath,
     })).toEqual({
-      'telegram.messages': { supervisor: { state: 'blocked', reason: 'session_missing' }, scope: { kind: 'chats', count: 1 } },
-      'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: { kind: 'whole_account' } },
+      'telegram.messages': { supervisor: { state: 'blocked', reason: 'session_missing' }, scope: { kind: 'chats', count: 1 }, paired_at: PAIRED.toISOString() },
+      'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: { kind: 'whole_account' }, paired_at: PAIRED.toISOString() },
     });
     // The native service owns Telegram capture here: this worker says nothing of it.
     expect(Object.keys(workerCaptureRuntime({
@@ -340,7 +351,244 @@ describe('the worker reports capture to the dashboard', () => {
   });
 });
 
+/** A helper process the test ends by hand, as if it had died on its own. */
+function mortalChild(): { child: CaptureChild; die: (code?: number) => void; signals: NodeJS.Signals[] } {
+  let end!: (code: number) => void;
+  const signals: NodeJS.Signals[] = [];
+  const exited = new Promise<number>((resolve) => { end = resolve; });
+  return {
+    child: { exited, kill: (signal = 'SIGTERM') => { signals.push(signal); end(0); } },
+    die: (code = 1) => end(code),
+    signals,
+  };
+}
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+describe('a helper that exits on its own is not reported as running', () => {
+  test('a helper that died is not alive and is counted as an exit of its own', async () => {
+    const helper = mortalChild();
+    const supervisor = captureSupervisorFixture({ spawn: () => helper.child });
+    expect(await supervisor.reconcile()).toEqual({ source: 'telegram', state: 'running' });
+    expect(supervisor.liveness()).toEqual({ alive: true, unexpectedExits: 0 });
+    helper.die(1);
+    await settle();
+    expect(supervisor.liveness()).toEqual({ alive: false, unexpectedExits: 1 });
+  });
+
+  test('stopping the helper ourselves is not an exit of its own', async () => {
+    const helper = mortalChild();
+    const supervisor = captureSupervisorFixture({ spawn: () => helper.child });
+    await supervisor.reconcile();
+    await supervisor.stop();
+    await settle();
+    expect(helper.signals).toEqual(['SIGTERM']);
+    expect(supervisor.liveness()).toEqual({ alive: false, unexpectedExits: 0 });
+  });
+
+  test('a helper that keeps dying is reported helper_exited over a last reconcile that still says running', async () => {
+    let clock = 1_000_000;
+    const helpers: Array<ReturnType<typeof mortalChild>> = [];
+    const supervisor = captureSupervisorFixture({
+      now: () => clock,
+      spawn: () => { const helper = mortalChild(); helpers.push(helper); return helper.child; },
+    });
+    let lastReconcile: MessagingCaptureStatus | undefined;
+    for (let round = 1; round <= MESSAGING_CAPTURE_REPEATED_EXITS; round += 1) {
+      lastReconcile = await supervisor.reconcile();
+      helpers.at(-1)!.die(1);
+      await settle();
+      clock += 10_000;
+      const effective = effectiveMessagingCaptureStatus({ status: lastReconcile, liveness: supervisor.liveness() });
+      if (round < MESSAGING_CAPTURE_REPEATED_EXITS) expect(effective).toEqual({ source: 'telegram', state: 'running' });
+      else expect(effective).toEqual({ source: 'telegram', state: 'blocked', reason: 'helper_exited' });
+    }
+    // The reconcile itself kept saying running: that is the stale report this corrects.
+    expect(lastReconcile).toEqual({ source: 'telegram', state: 'running' });
+  });
+
+  test('a helper that stays up for a minute is forgiven its earlier exits, and old exits age out', async () => {
+    let clock = 5_000_000;
+    const helpers: Array<ReturnType<typeof mortalChild>> = [];
+    const supervisor = captureSupervisorFixture({
+      now: () => clock,
+      spawn: () => { const helper = mortalChild(); helpers.push(helper); return helper.child; },
+    });
+    for (let round = 0; round < 3; round += 1) {
+      await supervisor.reconcile();
+      helpers.at(-1)!.die(1);
+      await settle();
+    }
+    expect(supervisor.liveness().unexpectedExits).toBe(3);
+    // Ten minutes later the exits no longer count.
+    clock += 10 * 60_000 + 1;
+    expect(supervisor.liveness().unexpectedExits).toBe(0);
+    // And a run that lasts a minute clears exits still inside the window.
+    for (let round = 0; round < 3; round += 1) {
+      await supervisor.reconcile();
+      helpers.at(-1)!.die(1);
+      await settle();
+    }
+    await supervisor.reconcile();
+    clock += 30_000;
+    expect(supervisor.liveness()).toEqual({ alive: true, unexpectedExits: 3 });
+    clock += 31_000;
+    expect(supervisor.liveness()).toEqual({ alive: true, unexpectedExits: 0 });
+  });
+
+  test('fewer than three exits, or a failed reconcile with nothing to correct, change nothing', () => {
+    const running: MessagingCaptureStatus = { source: 'whatsapp', state: 'running' };
+    expect(effectiveMessagingCaptureStatus({ status: running, liveness: { alive: true, unexpectedExits: 2 } })).toEqual(running);
+    expect(effectiveMessagingCaptureStatus({ status: undefined, liveness: { alive: false, unexpectedExits: 9 } })).toBeUndefined();
+    const stopped: MessagingCaptureStatus = { state: 'stopped', reason: 'handle_unavailable' };
+    expect(effectiveMessagingCaptureStatus({ status: stopped, liveness: { alive: false, unexpectedExits: 9 } })).toEqual(stopped);
+  });
+});
+
+describe('a capture helper that cannot be started is reported, not hidden by the last good status', () => {
+  const stubSupervisor = (reconcile: () => Promise<MessagingCaptureStatus>) => ({ reconcile, stop: async () => {} });
+
+  test('a reconcile that throws is recorded per source and clears when a later one succeeds', async () => {
+    const statuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
+    const failures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+    let telegramThrows = false;
+    const warnings: string[] = [];
+    const captures = {
+      telegram: stubSupervisor(async () => {
+        if (telegramThrows) throw new Error('Python 3 is required to start Telegram capture.');
+        return { source: 'telegram' as const, state: 'running' as const };
+      }),
+      whatsapp: stubSupervisor(async () => ({ source: 'whatsapp' as const, state: 'running' as const })),
+    };
+    await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });
+    expect(statuses).toEqual({ telegram: { source: 'telegram', state: 'running' }, whatsapp: { source: 'whatsapp', state: 'running' } });
+    expect(failures).toEqual({});
+
+    telegramThrows = true;
+    await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });
+    // WhatsApp is still reconciled; Telegram's failure is recorded and its old status is left to be corrected.
+    expect(failures).toEqual({ telegram: true });
+    expect(statuses.whatsapp).toEqual({ source: 'whatsapp', state: 'running' });
+    expect(warnings).toEqual(['An Olympus messaging capture process needs attention. Check pairing and its approved scope.']);
+    expect(warnings.join(' ')).not.toContain('Python');
+
+    telegramThrows = false;
+    await reconcileWorkerCaptures({ captures, statuses, failures, warn: (message) => warnings.push(message) });
+    expect(failures).toEqual({});
+  });
+
+  test('the dashboard says start_failed over a previous running status, and when nothing ever reported', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-start-failed-'));
+    const registryPath = join(root, 'handles.json');
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('telegram', registryPath), pairing: telegramPairing('/fixture/telegram'), now: PAIRED });
+    expect(workerCaptureRuntime({
+      sources: ['telegram'],
+      statuses: { telegram: { source: 'telegram', state: 'running' } },
+      failures: { telegram: true },
+      registryPath,
+    })['telegram.messages']?.supervisor).toEqual({ state: 'blocked', reason: 'start_failed' });
+    // The very first reconcile threw: there is no status at all, and the failure is still a fact.
+    expect(workerCaptureRuntime({ sources: ['telegram'], statuses: {}, failures: { telegram: true }, registryPath })['telegram.messages']?.supervisor)
+      .toEqual({ state: 'blocked', reason: 'start_failed' });
+  });
+
+  test('the dashboard says helper_exited for a helper that keeps exiting, from live liveness', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-exited-'));
+    const registryPath = join(root, 'handles.json');
+    const input = {
+      sources: ['whatsapp' as const],
+      statuses: { whatsapp: { source: 'whatsapp' as const, state: 'running' as const } },
+      registryPath,
+    };
+    expect(workerCaptureRuntime({ ...input, liveness: { whatsapp: { alive: false, unexpectedExits: 3 } } })['whatsapp.personal.messages']?.supervisor)
+      .toEqual({ state: 'blocked', reason: 'helper_exited' });
+    expect(workerCaptureRuntime({ ...input, liveness: { whatsapp: { alive: true, unexpectedExits: 2 } } })['whatsapp.personal.messages']?.supervisor)
+      .toEqual({ state: 'running' });
+  });
+});
+
+describe('a grant that parses but is not shaped as written never breaks the dashboard', () => {
+  const grantWith = (source: 'telegram' | 'whatsapp', edit: (grant: Record<string, any>) => void) => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-malformed-'));
+    const registryPath = join(root, 'handles.json');
+    const path = defaultMessagingCaptureGrantPath(source, registryPath);
+    saveMessagingCaptureGrant({
+      path,
+      pairing: source === 'telegram' ? telegramPairing('/fixture/telegram') : whatsappPairing('111@s.whatsapp.net'),
+      now: PAIRED,
+    });
+    const grant = JSON.parse(readFileSync(path, 'utf8')) as Record<string, any>;
+    edit(grant);
+    writeFileSync(path, JSON.stringify(grant));
+    chmodSync(path, 0o600);
+    return { path, registryPath };
+  };
+  const damage: Record<string, (grant: Record<string, any>) => void> = {
+    'no environment at all': (grant) => { delete grant.producer.env; },
+    'an environment that is a list': (grant) => { grant.producer.env = ['OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES']; },
+    'an environment that is text': (grant) => { grant.producer.env = 'scopes'; },
+    'a scope that is a number': (grant) => {
+      grant.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = 5;
+      grant.producer.env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS = 5;
+    },
+    'a scope that is a list': (grant) => {
+      grant.producer.env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES = ['a', 'b'];
+      grant.producer.env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS = ['a', 'b'];
+    },
+  };
+
+  for (const [name, edit] of Object.entries(damage)) {
+    for (const source of ['telegram', 'whatsapp'] as const) {
+      test(`${source}: ${name} gives no scope instead of throwing`, () => {
+        const { path } = grantWith(source, edit);
+        expect(() => readMessagingCaptureScope(source, path)).not.toThrow();
+        expect(readMessagingCaptureScope(source, path)).toBeUndefined();
+        expect(readMessagingCaptureGrantFacts(source, path)).toEqual({ pairedAt: PAIRED.toISOString() });
+      });
+    }
+
+    test(`the worker's capture report survives ${name} and still carries the supervisor state`, () => {
+      const { registryPath } = grantWith('telegram', edit);
+      const runtime = workerCaptureRuntime({
+        sources: ['telegram'],
+        statuses: { telegram: { source: 'telegram', state: 'running' } },
+        registryPath,
+      });
+      expect(runtime['telegram.messages']).toEqual({ supervisor: { state: 'running' }, paired_at: PAIRED.toISOString() });
+    });
+  }
+
+  test('a grant time that is not a time is no pairing time, and a damaged source does not hide the other', () => {
+    const bad = grantWith('telegram', (grant) => { grant.grantedAt = 'yesterday'; delete grant.producer.env; });
+    expect(readMessagingCaptureGrantFacts('telegram', bad.path)).toEqual({});
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-two-sources-'));
+    const registryPath = join(root, 'handles.json');
+    saveMessagingCaptureGrant({ path: defaultMessagingCaptureGrantPath('whatsapp', registryPath), pairing: whatsappPairing('*'), now: PAIRED });
+    writeFileSync(defaultMessagingCaptureGrantPath('telegram', registryPath), '{"version":1,"source":"telegram","handle":"h","sessionPath":"/x","producer":{"source":"telegram","secretEnvironment":[]},"grantedAt":7}');
+    chmodSync(defaultMessagingCaptureGrantPath('telegram', registryPath), 0o600);
+    const runtime = workerCaptureRuntime({
+      sources: ['telegram', 'whatsapp'],
+      statuses: { telegram: { source: 'telegram', state: 'running' } },
+      registryPath,
+    });
+    expect(runtime['whatsapp.personal.messages']).toEqual({ scope: { kind: 'whole_account' }, paired_at: PAIRED.toISOString() });
+    expect(runtime['telegram.messages']).toEqual({ supervisor: { state: 'running' } });
+  });
+
+  test('the pairing time is the grant\'s own, and a fresh pairing replaces it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'olympus-capture-paired-at-'));
+    const path = defaultMessagingCaptureGrantPath('telegram', join(root, 'handles.json'));
+    saveMessagingCaptureGrant({ path, pairing: telegramPairing('/fixture/telegram'), now: PAIRED });
+    expect(readMessagingCaptureGrantFacts('telegram', path).pairedAt).toBe('2026-10-20T10:00:00.000Z');
+    saveMessagingCaptureGrant({ path, pairing: telegramPairing('/fixture/telegram'), now: new Date('2026-10-24T09:00:00.000Z') });
+    expect(readMessagingCaptureGrantFacts('telegram', path).pairedAt).toBe('2026-10-24T09:00:00.000Z');
+  });
+});
+
 function runningSupervisorFixture(child: CaptureChild, stopTimeoutMs: number): MessagingCaptureSupervisor {
+  return captureSupervisorFixture({ spawn: () => child, stopTimeoutMs });
+}
+
+function captureSupervisorFixture(input: { spawn: SpawnCapture; stopTimeoutMs?: number; now?: () => number }): MessagingCaptureSupervisor {
   const root = mkdtempSync(join(tmpdir(), 'olympus-messaging-capture-stop-'));
   const registryPath = join(root, 'handles.json');
   const grantPath = join(root, 'messaging-capture.json');
@@ -355,12 +603,13 @@ function runningSupervisorFixture(child: CaptureChild, stopTimeoutMs: number): M
     baseEnv: {},
     packageRoot: '/fixture',
     pythonExecutable: '/fixture/python3',
-    stopTimeoutMs,
+    stopTimeoutMs: input.stopTimeoutMs ?? 2,
+    ...(input.now ? { now: input.now } : {}),
     secretStore: secretStore({
       [TELEGRAM_API_ID_SECRET_KEY]: '12345',
       [TELEGRAM_API_HASH_SECRET_KEY]: 'fixture-secret',
     }),
-    spawn: () => child,
+    spawn: input.spawn,
   });
 }
 

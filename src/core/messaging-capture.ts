@@ -76,23 +76,60 @@ export type MessagingCaptureScope =
   | { kind: 'whole_account' }
   | { kind: 'chats'; count: number };
 
+/** What the dashboard may know of a capture grant: how much was approved, and when it was granted. */
+export interface MessagingCaptureGrantFacts {
+  scope?: MessagingCaptureScope;
+  /** When this pairing's grant was written (ISO). A re-pairing writes a new one. */
+  pairedAt?: string;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * What a capture grant tells the dashboard, by the same file checks the
+ * supervisor starts capture from: the approved scope as a count (neither chat
+ * ids nor names) and when the pairing was granted. Reports only what it can
+ * read: a damaged grant that parses but is not shaped as written (no
+ * environment, a scope that is not text) yields nothing for that part rather
+ * than throwing, because this runs while the dashboard is being built.
+ */
+export function readMessagingCaptureGrantFacts(
+  source: MessagingPairingSource,
+  grantPath = defaultMessagingCaptureGrantPath(source),
+): MessagingCaptureGrantFacts {
+  try {
+    const read = readGrant(grantPath);
+    if (read.kind !== 'valid' || read.grant.source !== source) return {};
+    const facts: MessagingCaptureGrantFacts = {};
+    const grantedAt = typeof read.grant.grantedAt === 'string' ? Date.parse(read.grant.grantedAt) : Number.NaN;
+    if (Number.isFinite(grantedAt)) facts.pairedAt = new Date(grantedAt).toISOString();
+    const env: unknown = read.grant.producer.env;
+    const raw = isPlainRecord(env)
+      ? env[source === 'telegram' ? 'OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES' : 'OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS']
+      : undefined;
+    if (typeof raw === 'string') {
+      const scopes = raw.split(',').map((item) => item.trim()).filter(Boolean);
+      if (scopes.length > 0) {
+        facts.scope = scopes.includes('*') ? { kind: 'whole_account' } : { kind: 'chats', count: new Set(scopes).size };
+      }
+    }
+    return facts;
+  } catch {
+    return {};
+  }
+}
+
 /**
  * The approved scope of a capture grant, as a count, or undefined when there
- * is no readable grant or its scope list is empty. Reads the same grant file
- * the supervisor starts capture from, by the same checks, and returns neither
- * chat ids nor names: the dashboard says how much was approved, not what.
+ * is no readable grant or its scope list is empty or unreadable.
  */
 export function readMessagingCaptureScope(
   source: MessagingPairingSource,
   grantPath = defaultMessagingCaptureGrantPath(source),
 ): MessagingCaptureScope | undefined {
-  const read = readGrant(grantPath);
-  if (read.kind !== 'valid' || read.grant.source !== source) return undefined;
-  const env = read.grant.producer.env;
-  const raw = source === 'telegram' ? env.OLYMPUS_TELEGRAM_ALLOWED_CHAT_SCOPES : env.OLYMPUS_WHATSAPP_ALLOWED_CHAT_JIDS;
-  const scopes = (raw ?? '').split(',').map((item) => item.trim()).filter(Boolean);
-  if (scopes.length === 0) return undefined;
-  return scopes.includes('*') ? { kind: 'whole_account' } : { kind: 'chats', count: new Set(scopes).size };
+  return readMessagingCaptureGrantFacts(source, grantPath).scope;
 }
 
 export interface CaptureChild {
@@ -109,7 +146,57 @@ export type SpawnCapture = (input: {
 export interface MessagingCaptureStatus {
   source?: MessagingPairingSource;
   state: 'running' | 'stopped' | 'blocked';
-  reason?: 'grant_missing' | 'grant_invalid' | 'handle_unavailable' | 'session_missing' | 'secret_missing';
+  reason?: MessagingCaptureReason;
+}
+
+/**
+ * Why capture is not running. The first five come from the supervisor's own
+ * reconcile; the last two are what the worker adds when the helper process
+ * would not start or keeps exiting (see effectiveMessagingCaptureStatus).
+ */
+export type MessagingCaptureReason =
+  | 'grant_missing'
+  | 'grant_invalid'
+  | 'handle_unavailable'
+  | 'session_missing'
+  | 'secret_missing'
+  | 'start_failed'
+  | 'helper_exited';
+
+/** Whether the helper process is alive now, and how often it exited on its own lately. */
+export interface MessagingCaptureLiveness {
+  alive: boolean;
+  /** Exits not caused by Olympus stopping it, in the last ten minutes; cleared once one run stays up for a minute. */
+  unexpectedExits: number;
+}
+
+/** Three exits of their own in ten minutes is a helper that cannot stay up, not a restart. */
+export const MESSAGING_CAPTURE_REPEATED_EXITS = 3;
+const UNEXPECTED_EXIT_WINDOW_MS = 10 * 60_000;
+const STABLE_RUN_MS = 60_000;
+
+/**
+ * What to report for a source: the supervisor's last reconcile, corrected by
+ * facts that came after it. A reconcile that threw (Python missing, the
+ * executable gone) leaves no new status, so the old one must not stand: the
+ * helper did not start. A helper that keeps exiting by itself is not running,
+ * whatever the last reconcile said. Reporting only: nothing here starts or
+ * stops anything.
+ */
+export function effectiveMessagingCaptureStatus(input: {
+  status: MessagingCaptureStatus | undefined;
+  liveness?: MessagingCaptureLiveness | undefined;
+  reconcileFailed?: boolean | undefined;
+}): MessagingCaptureStatus | undefined {
+  const { status } = input;
+  const source = status?.source;
+  if (input.reconcileFailed) {
+    return { ...(source ? { source } : {}), state: 'blocked', reason: 'start_failed' };
+  }
+  if (status?.state === 'running' && input.liveness && input.liveness.unexpectedExits >= MESSAGING_CAPTURE_REPEATED_EXITS) {
+    return { ...(source ? { source } : {}), state: 'blocked', reason: 'helper_exited' };
+  }
+  return status;
 }
 
 /** One worker-owned child at a time; callers reconcile on boot and grant/handle changes. */
@@ -117,6 +204,9 @@ export class MessagingCaptureSupervisor {
   private child: CaptureChild | undefined;
   private fingerprint: string | undefined;
   private generation = 0;
+  private startedAt: number | undefined;
+  private readonly expectedStops = new WeakSet<CaptureChild>();
+  private unexpectedExitTimes: number[] = [];
 
   constructor(private readonly options: {
     source: MessagingPairingSource;
@@ -129,7 +219,25 @@ export class MessagingCaptureSupervisor {
     pythonExecutable?: string;
     whatsappBridgePath?: string;
     stopTimeoutMs?: number;
+    now?: () => number;
   }) {}
+
+  /** Whether the helper is alive right now, for the dashboard: a cached reconcile result can be ten seconds old. */
+  liveness(): MessagingCaptureLiveness {
+    const now = (this.options.now ?? Date.now)();
+    if (this.child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS) this.unexpectedExitTimes = [];
+    this.unexpectedExitTimes = this.unexpectedExitTimes.filter((at) => now - at < UNEXPECTED_EXIT_WINDOW_MS);
+    return { alive: this.child !== undefined, unexpectedExits: this.unexpectedExitTimes.length };
+  }
+
+  private childExited(child: CaptureChild): void {
+    if (!this.expectedStops.has(child)) this.unexpectedExitTimes.push((this.options.now ?? Date.now)());
+    if (this.child === child) {
+      this.child = undefined;
+      this.fingerprint = undefined;
+      this.startedAt = undefined;
+    }
+  }
 
   async reconcile(): Promise<MessagingCaptureStatus> {
     const generation = ++this.generation;
@@ -180,17 +288,8 @@ export class MessagingCaptureSupervisor {
     const child = spawn({ executable: launch.executable, args: launch.args, env: childEnv });
     this.child = child;
     this.fingerprint = nextFingerprint;
-    void child.exited.then(() => {
-      if (this.child === child) {
-        this.child = undefined;
-        this.fingerprint = undefined;
-      }
-    }, () => {
-      if (this.child === child) {
-        this.child = undefined;
-        this.fingerprint = undefined;
-      }
-    });
+    this.startedAt = (this.options.now ?? Date.now)();
+    void child.exited.then(() => this.childExited(child), () => this.childExited(child));
     return { source: grant.source, state: 'running' };
   }
 
@@ -198,6 +297,8 @@ export class MessagingCaptureSupervisor {
     this.generation += 1;
     const child = this.child;
     if (!child) return;
+    // Olympus ending the helper is not the helper failing.
+    this.expectedStops.add(child);
     child.kill('SIGTERM');
     const timeoutMs = this.options.stopTimeoutMs ?? 5_000;
     if (!await observeChildExit(child, timeoutMs)) {
@@ -212,6 +313,7 @@ export class MessagingCaptureSupervisor {
     if (this.child === child) {
       this.child = undefined;
       this.fingerprint = undefined;
+      this.startedAt = undefined;
     }
   }
 }
