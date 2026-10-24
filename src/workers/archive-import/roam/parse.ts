@@ -50,15 +50,16 @@ interface Flattened {
   created: string | undefined;
   edited: string | undefined;
   hasText: boolean;
-  /** Parts that could not be read: a block that is not a record, has no text field, or lies too deep, and a `children` that is no list. */
+  /** Parts that could not be read: a block that is not a record, has a text field that is not text (or none and no children), or lies too deep, and a `children` that is no list. */
   unsupported: number;
 }
 
 /**
  * Depth-first, in order: a block whose text is empty adds no line, but its
  * children keep their indent. Absent children are a page or block with none;
- * children that are not a list, and a block that is not a record or has no
- * text field (and no children to hold any), are content that is not read.
+ * children that are not a list, a block that is not a record, a text field
+ * that is not text, and a block with no text field and no children to hold
+ * any, are content that is not read.
  */
 function flattenBlocks(children: unknown): Flattened {
   const out: Flattened = { lines: [], blockCount: 0, created: undefined, edited: undefined, hasText: false, unsupported: 0 };
@@ -74,7 +75,9 @@ function flattenBlocks(children: unknown): Flattened {
         continue;
       }
       out.blockCount += 1;
-      if (typeof node.string !== 'string' && !Array.isArray(node.children)) out.unsupported += 1;
+      // A text field that is there must be text, whatever the block's children are; one that is not there is fine only when children hold the content.
+      const hasString = node.string !== undefined && node.string !== null;
+      if (hasString ? typeof node.string !== 'string' : !Array.isArray(node.children)) out.unsupported += 1;
       const text = typeof node.string === 'string' ? node.string.trimEnd() : '';
       if (text.trim() !== '') {
         out.lines.push(`${'  '.repeat(depth)}- ${text}`);

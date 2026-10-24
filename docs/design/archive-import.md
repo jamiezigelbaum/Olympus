@@ -67,7 +67,7 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Piece | What it is |
 |---|---|
 | Format registry | One registry of archive formats (`core/archive-formats.ts`, pure data like `core/file-scope-sources.ts`). Each entry: format id, label, a `detect(path)` probe, the source family, and a connector factory. Adding a format adds one entry and one thin connector. Nothing downstream branches on format. |
-| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect JSON and Roam JSON by the keys of the records at the start of the `.json` file (or of a JSON member of a zip), never by a word in a note's text: a Reflect note has a body key (`content`, `body`, `document_json`) and a title or date key, a Roam page has a `title` and one of Roam's time or author keys (or `children` with a `uid`), and a file that shows only one key of the kind, or both kinds, is not guessed at (a zip with one JSON file of each is refused too). The keys must show in the first 4 KB, so an export whose first note writes a huge body before its title or date is refused with the supported-formats answer. A zip's other JSON files are not read as that format: they are left out and counted (`section_not_imported`); Reflect Markdown by a zip of `.md` files that shows Reflect's hand (Reflect in the file name, a daily-note file name such as `Tue, March 21st, 2023.md`, or a reflect.app link) and holds no JSON, so a Roam Markdown zip is not mistaken for it. No match: say so and list what is supported. Two matches: ask. |
+| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect JSON and Roam JSON by the keys of the records at the start of the `.json` file (or of a JSON member of a zip), never by a word in a note's text: a Reflect note has a body key (`content`, `body`, `document_json`) and a title or date key, a Roam page has a `title` and one of Roam's time or author keys (or `children` with a `uid`), and a file that shows only one key of the kind, or both kinds, is not guessed at (a zip with one JSON file of each is refused too). The first 4 KB decide when they can. When they end inside the first record, before the keys that would tell, the probe reads on through the shared JSON reader (`record-probe.ts`, a generic helper that learns no format's keys) to the end of that record, skipping every value and keeping the key names: memory is the names and one chunk, work is that record (and the first field after it), it stops early once the keys so far decide, and a scan that does not decide is a file that is not told by it, never a refusal for size. A zip's JSON member gets the same read, and the formats that ask about one file share one scan. A zip's other JSON files are not read as that format: they are left out and counted (`section_not_imported`); Reflect Markdown by a zip of `.md` files that shows Reflect's hand (Reflect in the file name, a daily-note file name such as `Tue, March 21st, 2023.md`, or a reflect.app link) and holds no JSON, so a Roam Markdown zip is not mistaken for it. No match: say so and list what is supported. Two matches: ask. |
 | Connectors | Thin `SourceConnector`s (contracts.ts), one per format. Pages honour the `done` / `truncated` rule in contracts.ts. |
 | Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. The old Reflect connector used one constant connector id and the store keyed resume on it; moving Reflect onto the registry (step 2) retired that. |
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
@@ -133,8 +133,14 @@ make its reason true.
   JSON as well as its Markdown) the day in its title, else the day the archive
   file was saved, which is reported as `note_date_assumed`.
 - **Bodies and front matter.** A Reflect body is flattened only when it is
-  positively an editor document; text that merely looks like JSON
-  (`{"budget":100}`) is the note, kept as written. A Markdown file's leading
+  positively an editor document (an editor node that carries its text or its
+  children, alone or in a list); text that merely looks like JSON
+  (`{"budget":100}`, `{"type":"text","value":"..."}`) is the note, kept as
+  written. Once the document is recognised each node is read on its own: a
+  node of a kind Olympus has no rule for, a text that is not text and children
+  that are not a list are counted as unsupported and never hide the readable
+  nodes beside them. A Roam block is checked the same way (a `string` that is
+  there and is not text is unsupported, whatever its children are). A Markdown file's leading
   `---` block is front matter only when every line is a `key: value` pair,
   list item or comment and a key is one Reflect writes (title, dates, tags,
   id); any other text between two rules stays in the note.
@@ -149,7 +155,9 @@ make its reason true.
   zip), `file_damaged` (bad checksum, cut-short JSON), `section_not_imported`
   (a JSON document without the list its notes would be in, or with another
   kind of value there; a Roam document that is not a list of pages; a JSON
-  file in a zip that is not this format's).
+  file in a zip that is not this format's). A file whose list is there and
+  empty (`[]`, or `{"notes": []}` for Reflect) is an export with no notes and
+  reports nothing, in a zip as well as on its own.
 - **Streaming.** Records are read one at a time from the JSON stream, a zip
   member through streaming inflate; a page boundary keeps the byte offset,
   the member's running checksum and the JSON reader's resume point, and a
@@ -159,7 +167,18 @@ make its reason true.
   always read, so a listing always moves on. Whether the import is still
   wanted is asked before each record and with every chunk read, so a huge
   record or Markdown member does not outlast a removal: a stop part-way
-  through a record is resumed from the last whole one.
+  through a record is resumed from the last whole one. A JSON file in a zip is
+  asked about (its first bytes, and the first record's keys when those do not
+  say) under the same limits: the unit limit is checked before each member is
+  asked, and the bytes read to ask are charged to the byte budget whether the
+  member is taken or not.
+- **Checksums.** A stored member's CRC-32 is kept at every whole record as the
+  records are handed out (`resume-crc.ts`, generic), so a stop in the middle
+  of a record longer than a chunk still resumes with the sum at the last
+  whole one; a resume point that carries none is replayed from the member's
+  start (charged to the byte budget) before the member is entered. A member
+  whose end does not say its checksum matched (`crcOk` is anything but true,
+  including not checked) is reported as `file_damaged`, never accepted.
 
 What is known about the real exports. Confirmed from the apps' documentation
 and community write-ups: Reflect exports to JSON, CSV, Markdown (zip) and HTML
@@ -173,8 +192,11 @@ confirmed against a real export: Reflect's JSON field names (read liberally:
 document stored as a JSON string, `created_at`/`createdAt`), whether Reflect's
 JSON arrives as a bare file or in a zip (both are read), Reflect's Markdown
 front matter (read if present, not required), and the member names inside
-Roam's zip (any `.json` member is read). A real export from each app is the
-next check; anything that differs becomes a parser change, not a new path.
+Roam's zip (a `.json` member is read when its first record's keys show the
+format's hand; the others are left out and counted). The order of the keys
+inside a record is unverified too: detection reads past a long text to find
+them, so it does not depend on it. A real export from each app is the next
+check; anything that differs becomes a parser change, not a new path.
 
 ## Privacy while an import is judged
 

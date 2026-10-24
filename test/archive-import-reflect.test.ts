@@ -19,6 +19,7 @@ import {
   looksLikeReflectJson,
   reflectDailyNoteDate,
   type ArchiveDetection,
+  type ArchiveProbe,
 } from '../src/core/archive-formats.ts';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveContinuations } from '../src/workers/archive-import/continuation-cache.ts';
@@ -1001,5 +1002,109 @@ describe('the Reflect connector holds its bounds while it reads', () => {
     expect(first).toMatchObject({ items: [], done: false });
     const all = await listAll(opened.again({}).connector, first.cursors.at(-1));
     expect(all.items.map((item) => item.metadata.title)).toEqual(['Big', 'Synthetic harbour note 0', 'Synthetic harbour note 1']);
+  });
+});
+
+// --- Review round 2: the editor container, empty lists, and a long first record -------------
+
+describe('a Reflect body: the container is recognised, every node is read on its own', () => {
+  test('JSON text with a kind an editor writes but not what that kind carries is the note, kept as written', () => {
+    const text = '{"type":"text","value":"keep me"}';
+    for (const field of ['content', 'body', 'document_json']) {
+      expect(parseReflectNote({ id: 'a', [field]: text })).toMatchObject({ kind: 'note', note: { body: text } });
+    }
+    const list = '[{"type":"paragraph","value":"x"}]';
+    expect(parseReflectNote({ id: 'a', content: list })).toMatchObject({ kind: 'note', note: { body: list } });
+  });
+
+  test('a field that is there and is not what it should be is unsupported, whatever the node or its other fields are', () => {
+    const lostContent = { type: 'doc', content: { text: 'lost' } };
+    expect(parseReflectNote({ id: 'a', document_json: JSON.stringify(lostContent) })).toEqual({ kind: 'unsupported' });
+    expect(parseReflectNote({ id: 'a', document_json: lostContent })).toEqual({ kind: 'unsupported' });
+    const numberText = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 7 }] }] };
+    expect(parseReflectNote({ id: 'a', document_json: numberText })).toEqual({ kind: 'unsupported' });
+    const paragraph = { type: 'paragraph', content: [{ type: 'text', text: 'Kept' }] };
+    const oddChildren = { type: 'doc', content: [paragraph, { type: 'paragraph', content: 'oops' }] };
+    expect(parseReflectNote({ id: 'a', document_json: oddChildren })).toMatchObject({ kind: 'note', note: { body: 'Kept', unsupported: 1 } });
+    // A node that has both its lists reads both, and a text that is no text is counted beside the list it came with.
+    const both = { type: 'doc', content: [paragraph], children: [{ type: 'paragraph', content: [{ type: 'text', text: 'Also' }] }] };
+    expect(parseReflectNote({ id: 'a', document_json: both })).toMatchObject({ kind: 'note', note: { body: 'Kept\nAlso' } });
+    const textAndList = { type: 'doc', content: [{ type: 'paragraph', text: 5, content: [{ type: 'text', text: 'Kept' }] }] };
+    expect(parseReflectNote({ id: 'a', document_json: textAndList })).toMatchObject({ kind: 'note', note: { body: 'Kept', unsupported: 1 } });
+  });
+
+  test('one node Olympus does not know never hides the readable ones beside it', () => {
+    const kept = { type: 'paragraph', content: [{ type: 'text', text: 'Kept' }] };
+    const image = { type: 'image', attrs: { src: 'a.png' } };
+    const outcomes = [
+      parseReflectNote({ id: 'a', document_json: [kept, image] }),
+      parseReflectNote({ id: 'a', document_json: JSON.stringify([kept, image]) }),
+      parseReflectNote({ id: 'a', document_json: { content: [image, kept] } }),
+      parseReflectNote({ id: 'a', content: JSON.stringify({ content: [kept, image] }) }),
+      parseReflectNote({ id: 'a', document_json: { type: 'doc', content: [kept, image] } }),
+    ];
+    for (const outcome of outcomes) expect(outcome).toMatchObject({ kind: 'note', note: { body: 'Kept', unsupported: 1 } });
+    // With nothing readable in it, it is unsupported and not empty.
+    expect(parseReflectNote({ id: 'a', document_json: [image] })).toEqual({ kind: 'unsupported' });
+    expect(parseReflectNote({ id: 'a', document_json: { type: 'doc', content: [image] } })).toEqual({ kind: 'unsupported' });
+  });
+});
+
+describe('a long first record does not hide what a Reflect file is', () => {
+  const LONG = 'word '.repeat(40_000);
+
+  test('the keys after a long text still tell, in a list, a wrapped list and a zip member', () => {
+    const late = (extra: Record<string, unknown> = {}) => ({ id: 'a', content: LONG, subject: 'Late title', created_at: '2023-01-01T00:00:00Z', ...extra });
+    expect(formatOf(detectFile('list.json', JSON.stringify([late(), late({ id: 'b' })])))).toBe('reflect-json');
+    expect(formatOf(detectFile('wrapped.json', JSON.stringify({ version: 2, notes: [late()] })))).toBe('reflect-json');
+    expect(formatOf(detectFile('Reflect.zip', reflectJsonZip(JSON.stringify([late()]))))).toBe('reflect-json');
+    expect(formatOf(detectFile('Reflect stored.zip', reflectJsonZip(JSON.stringify([late()]), { method: 'stored' })))).toBe('reflect-json');
+    // A first record that shows nothing of the kind, however long, is still not Reflect's, and the answer is not a refusal for size.
+    expect(formatOf(detectFile('other.json', JSON.stringify([{ blob: LONG, other: 1 }])))).toBe('none');
+    expect(formatOf(detectFile('roam.json', JSON.stringify([{ children: [{ string: LONG }], title: 'Late page', uid: 'p1', 'create-time': 1 }])))).toBe('roam-json');
+  });
+
+  test('a first record bigger than the most one record is read whole does not refuse the file', () => {
+    const body = 'x'.repeat(NOTE_MAX_RECORD_BYTES + 1024);
+    const text = JSON.stringify([{ id: 'a', content: body, subject: 'Huge', created_at: '2023-01-01T00:00:00Z' }]);
+    expect(formatOf(detectFile('huge.json', text))).toBe('reflect-json');
+  });
+
+  test('the way on past the first bytes is asked only when they cannot settle it, and with what decides', () => {
+    const calls: Array<readonly string[]> = [];
+    const deciding: Array<(keys: ReadonlySet<string>) => boolean> = [];
+    const probeOf = (head: string, keys?: readonly string[]): ArchiveProbe => ({
+      chosen: {
+        relPath: '',
+        name: 'a.json',
+        kind: 'file',
+        head: new TextEncoder().encode(head),
+        firstRecordKeys: (list, enough) => {
+          calls.push(list);
+          if (enough) deciding.push(enough);
+          return keys ? new Set(keys) : undefined;
+        },
+      },
+      children: [],
+    });
+    const idOf = (probe: ArchiveProbe) => formatOf(detectArchiveFormat(probe));
+    // Settled by the first bytes: not asked.
+    expect(idOf(probeOf('[{"subject":"a","content":"b"}]'))).toBe('reflect-json');
+    expect(idOf(probeOf('[{"id":1,"x":2}]'))).toBe('none');
+    expect(idOf(probeOf('[' + ' '.repeat(5000)))).toBe('none');
+    expect(idOf(probeOf('[1,2,3,' + '4,'.repeat(2000)))).toBe('none');
+    expect(calls).toEqual([]);
+    // Cut inside the first record: asked, for the list it is in.
+    expect(idOf(probeOf(`[{"content":"${'x'.repeat(5000)}`, ['content', 'subject']))).toBe('reflect-json');
+    expect(idOf(probeOf(`{"notes":[{"content":"${'x'.repeat(5000)}`, ['content', 'title']))).toBe('reflect-json');
+    expect(calls).toEqual([[], ['notes']]);
+    // A scan that finds no such record, or none that tells, is no match.
+    expect(idOf(probeOf(`[{"content":"${'x'.repeat(5000)}`))).toBe('none');
+    expect(idOf(probeOf(`[{"content":"${'x'.repeat(5000)}`, ['content', 'other']))).toBe('none');
+    // It is told when the keys so far decide.
+    const enough = deciding[0]!;
+    expect(enough(new Set(['content']))).toBe(false);
+    expect(enough(new Set(['content', 'subject']))).toBe(true);
+    expect(enough(new Set(['title', 'create-time']))).toBe(true);
   });
 });

@@ -34,7 +34,17 @@ import {
   type ScopeFileVersion,
   type ScopeRoot,
 } from '../../core/scope-safe-fs.ts';
-import { ZipArchive, ZipFormatError, readZipMemberHead, type ZipEntry, type ZipMemberTable } from './zip-reader.ts';
+import { fileByteSource } from './byte-source.ts';
+import { probeFirstRecordKeys } from './record-probe.ts';
+import {
+  ZipArchive,
+  ZipFormatError,
+  ZipMemberError,
+  ZipMemberReader,
+  readZipMemberHead,
+  type ZipEntry,
+  type ZipMemberTable,
+} from './zip-reader.ts';
 
 /**
  * How much of each end of a file the content fingerprint hashes.
@@ -100,6 +110,57 @@ function fileHead(root: ScopeRoot, relPath: string): Uint8Array | undefined {
   }
 }
 
+type FirstRecordKeys = NonNullable<ArchiveProbeEntry['firstRecordKeys']>;
+
+/**
+ * The way on past a JSON file's first bytes: a read of the file from its start
+ * to the keys of the first record of a list (`probeFirstRecordKeys`). The file
+ * is opened when asked and closed after, so a probe that never asks holds
+ * nothing; a file that changed or cannot be read has no keys.
+ */
+function fileFirstRecordKeys(root: ScopeRoot, relPath: string): FirstRecordKeys {
+  return (list, enough) => {
+    try {
+      const reader = root.openFile(relPath);
+      try {
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough);
+      } finally {
+        reader.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError) return undefined;
+      throw error;
+    }
+  };
+}
+
+/**
+ * The same for a member of a zip, which is inflated from its start.
+ */
+function zipMemberFirstRecordKeys(root: ScopeRoot, zipRelPath: string, memberIndex: number): FirstRecordKeys {
+  return (list, enough) => {
+    try {
+      const file = root.openFile(zipRelPath);
+      try {
+        const archive = ZipArchive.open(file);
+        const entry = archive.entryAt(memberIndex);
+        if (!entry) return undefined;
+        const member = ZipMemberReader.open(archive, entry);
+        try {
+          return probeFirstRecordKeys(member, list, enough);
+        } finally {
+          member.close();
+        }
+      } finally {
+        file.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError || error instanceof ZipFormatError || error instanceof ZipMemberError) return undefined;
+      throw error;
+    }
+  };
+}
+
 function lastSegment(name: string): string {
   const parts = name.split('/').filter((part) => part !== '');
   return parts[parts.length - 1] ?? name;
@@ -146,6 +207,7 @@ function probeZipMembers(
         name: lastSegment(entry.name),
         kind: entry.isDirectory ? 'directory' as const : 'file' as const,
         ...(head ? { head } : {}),
+        ...(head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index) } : {}),
       };
     });
   } catch (error) {
@@ -185,7 +247,13 @@ export function probeArchivePath(
     const head = fileHead(root, chosenRelPath);
     const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames) : undefined;
     return {
-      chosen: { relPath: '', name, kind: 'file', ...(head ? { head } : {}), ...(members ? { members } : {}) },
+      chosen: {
+        relPath: '',
+        name,
+        kind: 'file',
+        ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath) } : {}),
+        ...(members ? { members } : {}),
+      },
       children: [],
     };
   }
@@ -227,7 +295,13 @@ export function probeArchivePath(
     } else if (kind === 'file') {
       const head = heads.get(index);
       const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames) : undefined;
-      children.push({ relPath: entry.name, name: entry.name, kind: 'file', ...(head ? { head } : {}), ...(members ? { members } : {}) });
+      children.push({
+        relPath: entry.name,
+        name: entry.name,
+        kind: 'file',
+        ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name)) } : {}),
+        ...(members ? { members } : {}),
+      });
     }
   });
   return { chosen: { relPath: '', name, kind: 'directory' }, children };

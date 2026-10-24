@@ -35692,6 +35692,8 @@ function headRecordKeys(head) {
   const stack = [];
   let shape;
   let listDepth = 0;
+  let closed = false;
+  let hasElements = false;
   if (text2[i] === "[") {
     shape = "list";
     listDepth = 1;
@@ -35706,6 +35708,8 @@ function headRecordKeys(head) {
   let current2;
   while (i < n) {
     const char = text2[i];
+    if (listDepth > 0 && stack.length === listDepth && !isSpace(char) && char !== "," && char !== "]")
+      hasElements = true;
     if (char === '"') {
       let end = i + 1;
       while (end < n && text2[end] !== '"')
@@ -35740,16 +35744,21 @@ function headRecordKeys(head) {
       }
     } else if (char === "]" || char === "}") {
       stack.pop();
+      if (listDepth > 0 && stack.length < listDepth) {
+        closed = true;
+        listDepth = 0;
+      }
       if (stack.length === 0)
         break;
       if (listDepth > 0 && stack.length === listDepth)
         current2 = undefined;
-      if (listDepth > 0 && stack.length < listDepth)
-        listDepth = 0;
     }
     i += 1;
   }
-  return shape ? { shape, records } : undefined;
+  if (!shape)
+    return;
+  const open2 = listDepth > 0;
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open2 && records.length === 1 && current2 !== undefined };
 }
 function isReflectRecord(keys) {
   return REFLECT_BODY_KEYS.some((key2) => keys.has(key2)) && REFLECT_NOTE_KEYS.some((key2) => keys.has(key2));
@@ -35757,23 +35766,38 @@ function isReflectRecord(keys) {
 function isRoamRecord(keys) {
   return keys.has("title") && (ROAM_TIME_KEYS.some((key2) => keys.has(key2)) || keys.has("children") && keys.has("uid"));
 }
-function notesJsonFormat(head) {
-  const parsed = headRecordKeys(head);
-  if (!parsed)
-    return;
-  const reflect = parsed.records.some(isReflectRecord);
-  const roam = parsed.records.some(isRoamRecord);
+function recordsFormat(records, shape) {
+  const reflect = records.some(isReflectRecord);
+  const roam = records.some(isRoamRecord);
   if (reflect === roam)
     return;
   if (roam)
-    return parsed.shape === "list" ? "roam" : undefined;
+    return shape === "list" ? "roam" : undefined;
   return "reflect";
 }
-function looksLikeReflectJson(head) {
-  return notesJsonFormat(head) === "reflect";
+function notesJsonFormat(probe) {
+  const parsed = headRecordKeys(probe.head);
+  if (!parsed)
+    return;
+  const fromHead = recordsFormat(parsed.records, parsed.shape);
+  if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
+    return fromHead;
+  if (SCANNED.has(probe))
+    return SCANNED.get(probe);
+  const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : ["notes"], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+  const found = keys ? recordsFormat([keys], parsed.shape) : undefined;
+  SCANNED.set(probe, found);
+  return found;
 }
-function looksLikeRoamJson(head) {
-  return notesJsonFormat(head) === "roam";
+function isEmptyRecordList(head, inNotes) {
+  const parsed = headRecordKeys(head);
+  return parsed !== undefined && parsed.empty && (inNotes || parsed.shape === "list");
+}
+function acceptsReflectJson(probe) {
+  return notesJsonFormat(probe) === "reflect" || isEmptyRecordList(probe.head, true);
+}
+function acceptsRoamJson(probe) {
+  return notesJsonFormat(probe) === "roam" || isEmptyRecordList(probe.head, false);
 }
 function detectFile(probe, reads) {
   if (probe.chosen.kind === "file")
@@ -35784,12 +35808,13 @@ function detectFile(probe, reads) {
 function zipJsonMembers(entry) {
   return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
 }
-function readsJsonExport(entry, isThisFormat, isOtherFormat) {
+function readsJsonExport(entry, format) {
+  const other = format === "reflect" ? "roam" : "reflect";
   if (entry.members) {
-    const members = zipJsonMembers(entry);
-    return members.some((member) => isThisFormat(member.head)) && !members.some((member) => isOtherFormat(member.head));
+    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
+    return members.includes(format) && !members.includes(other);
   }
-  return isThisFormat(entry.head);
+  return notesJsonFormat(entry) === format;
 }
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
@@ -35903,7 +35928,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -35929,6 +35954,7 @@ var init_archive_formats = __esm(() => {
   REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
   REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
   ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  SCANNED = new WeakMap;
   REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
     id: "reflect-json",
     label: "Reflect notes (JSON)",
@@ -35937,7 +35963,7 @@ var init_archive_formats = __esm(() => {
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
     probeNames: Object.freeze(["*.json"]),
-    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeReflectJson, looksLikeRoamJson))
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
   REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
     id: "reflect-markdown",
@@ -35967,7 +35993,7 @@ var init_archive_formats = __esm(() => {
     chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
     citationLabel: "Roam",
     probeNames: Object.freeze(["*.json"]),
-    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson, looksLikeReflectJson))
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -50125,6 +50151,1873 @@ var init_scope_safe_fs = __esm(() => {
   };
 });
 
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data2, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data2.length; index += 1) {
+    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data2) {
+  if (data2.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
+}
+function fileByteSource(reader, options = {}) {
+  const end = Math.min(reader.size, options.end ?? reader.size);
+  const chunkBytes = Math.max(1, options.chunkBytes ?? ARCHIVE_SOURCE_CHUNK_BYTES);
+  let readFrom = Math.max(0, options.start ?? 0);
+  let position = readFrom;
+  let pending;
+  let last = new Uint8Array(0);
+  let held = 0;
+  return {
+    get position() {
+      return position;
+    },
+    next() {
+      let chunk;
+      if (pending) {
+        chunk = pending;
+        pending = undefined;
+      } else {
+        if (readFrom >= end)
+          return;
+        chunk = reader.readAt(readFrom, Math.min(chunkBytes, end - readFrom));
+        readFrom += chunk.length;
+        if (chunk.length === 0)
+          return;
+      }
+      last = chunk;
+      held = chunk.length;
+      position += chunk.length;
+      return chunk;
+    },
+    unread(count) {
+      if (!Number.isInteger(count) || count < 0 || count > held)
+        throw new RangeError("unread past the last chunk");
+      if (count === 0)
+        return;
+      held -= count;
+      position -= count;
+      pending = last.subarray(held);
+    }
+  };
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/bufferedString.js
+class NonBufferedString {
+  constructor() {
+    this.decoder = new TextDecoder("utf-8", { fatal: true });
+    this.pending = [];
+    this.string = "";
+    this.byteLength = 0;
+  }
+  appendChar(char) {
+    this.pending.push(String.fromCharCode(char));
+    this.byteLength += 1;
+  }
+  appendBuf(buf, start = 0, end = buf.length) {
+    this.pending.push(this.decoder.decode(buf.subarray(start, end)));
+    this.byteLength += end - start;
+  }
+  appendCharCode(code) {
+    this.pending.push(String.fromCharCode(code));
+  }
+  reset() {
+    this.pending = [];
+    this.string = "";
+    this.byteLength = 0;
+  }
+  toString() {
+    if (this.pending.length > 0) {
+      this.string += this.pending.join("");
+      this.pending = [];
+    }
+    return this.string;
+  }
+}
+
+class BufferedString {
+  constructor(bufferSize) {
+    this.decoder = new TextDecoder("utf-8", { fatal: true });
+    this.bufferOffset = 0;
+    this.string = "";
+    this.byteLength = 0;
+    this.buffer = new Uint8Array(bufferSize);
+  }
+  appendChar(char) {
+    if (this.bufferOffset >= this.buffer.length)
+      this.flushStringBuffer();
+    this.buffer[this.bufferOffset++] = char;
+    this.byteLength += 1;
+  }
+  appendBuf(buf, start = 0, end = buf.length) {
+    const size = end - start;
+    if (this.bufferOffset + size > this.buffer.length)
+      this.flushStringBuffer();
+    if (size > this.buffer.length) {
+      this.string += this.decoder.decode(buf.subarray(start, end));
+      this.byteLength += size;
+      return;
+    }
+    this.buffer.set(buf.subarray(start, end), this.bufferOffset);
+    this.bufferOffset += size;
+    this.byteLength += size;
+  }
+  appendCharCode(code) {
+    this.flushStringBuffer();
+    this.string += String.fromCharCode(code);
+  }
+  flushStringBuffer() {
+    this.string += this.decoder.decode(this.buffer.subarray(0, this.bufferOffset));
+    this.bufferOffset = 0;
+  }
+  reset() {
+    this.string = "";
+    this.bufferOffset = 0;
+    this.byteLength = 0;
+  }
+  toString() {
+    this.flushStringBuffer();
+    return this.string;
+  }
+}
+
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType, tokenType_default;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+  tokenType_default = TokenType;
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset, escapedSequences;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+  escapedSequences = {
+    [34]: 34,
+    [92]: 92,
+    [47]: 47,
+    [98]: 8,
+    [102]: 12,
+    [110]: 10,
+    [114]: 13,
+    [116]: 9
+  };
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+function TokenizerStateToString(tokenizerState) {
+  return [
+    "START",
+    "ENDED",
+    "ERROR",
+    "TRUE1",
+    "TRUE2",
+    "TRUE3",
+    "FALSE1",
+    "FALSE2",
+    "FALSE3",
+    "FALSE4",
+    "NULL1",
+    "NULL2",
+    "NULL3",
+    "STRING_DEFAULT",
+    "STRING_AFTER_BACKSLASH",
+    "STRING_UNICODE_DIGIT_1",
+    "STRING_UNICODE_DIGIT_2",
+    "STRING_UNICODE_DIGIT_3",
+    "STRING_UNICODE_DIGIT_4",
+    "STRING_INCOMPLETE_CHAR",
+    "NUMBER_AFTER_INITIAL_MINUS",
+    "NUMBER_AFTER_INITIAL_ZERO",
+    "NUMBER_AFTER_INITIAL_NON_ZERO",
+    "NUMBER_AFTER_FULL_STOP",
+    "NUMBER_AFTER_DECIMAL",
+    "NUMBER_AFTER_E",
+    "NUMBER_AFTER_E_AND_SIGN",
+    "NUMBER_AFTER_E_AND_DIGIT",
+    "SEPARATOR",
+    "BOM_OR_START",
+    "BOM"
+  ][tokenizerState];
+}
+function validateBufferSize(name, size) {
+  if (size === undefined)
+    return;
+  if (!Number.isInteger(size) || size < 0) {
+    throw new TokenizerError(`Invalid "${name}": ${size}. Expected a non-negative integer.`);
+  }
+}
+function utf8SequenceLength(leadByte) {
+  if (leadByte >= 194 && leadByte <= 223)
+    return 2;
+  if (leadByte <= 239)
+    return 3;
+  return 4;
+}
+function multiByteRunEnd(buffer, start) {
+  let j = start;
+  while (j < buffer.length && buffer[j] >= 128) {
+    const seqLength = utf8SequenceLength(buffer[j]);
+    if (j + seqLength > buffer.length)
+      break;
+    j += seqLength;
+  }
+  return j;
+}
+
+class Tokenizer {
+  constructor(opts) {
+    this.state = 29;
+    this.bomIndex = 0;
+    this.separatorIndex = 0;
+    this.escapedCharsByteLength = 0;
+    this.bytes_remaining = 0;
+    this.bytes_in_sequence = 0;
+    this.char_split_buffer = new Uint8Array(4);
+    this.encoder = new TextEncoder;
+    this.offset = -1;
+    this.streamByteLength = 0;
+    opts = Object.assign(Object.assign({}, defaultOpts), opts);
+    validateBufferSize("stringBufferSize", opts.stringBufferSize);
+    validateBufferSize("numberBufferSize", opts.numberBufferSize);
+    this.emitPartialTokens = opts.emitPartialTokens === true;
+    this.bufferedString = opts.stringBufferSize && opts.stringBufferSize > 4 ? new BufferedString(opts.stringBufferSize) : new NonBufferedString;
+    this.bufferedNumber = opts.numberBufferSize && opts.numberBufferSize > 0 ? new BufferedString(opts.numberBufferSize) : new NonBufferedString;
+    this.separator = opts.separator;
+    this.separatorBytes = opts.separator ? this.encoder.encode(opts.separator) : undefined;
+  }
+  get isEnded() {
+    return this.state === 1;
+  }
+  appendUnicodeCodeUnit(intVal) {
+    if (this.highSurrogate !== undefined) {
+      if (intVal >= 56320 && intVal <= 57343) {
+        const unicodeString2 = String.fromCharCode(this.highSurrogate, intVal);
+        const unicodeBuffer2 = this.encoder.encode(unicodeString2);
+        this.bufferedString.appendBuf(unicodeBuffer2);
+        this.escapedCharsByteLength += 6 - unicodeBuffer2.byteLength;
+        this.highSurrogate = undefined;
+        return;
+      }
+      this.flushPendingHighSurrogate();
+    }
+    if (intVal >= 55296 && intVal <= 56319) {
+      this.highSurrogate = intVal;
+      this.escapedCharsByteLength += 6;
+      return;
+    }
+    if (intVal >= 56320 && intVal <= 57343) {
+      this.bufferedString.appendCharCode(intVal);
+      this.escapedCharsByteLength += 6;
+      return;
+    }
+    const unicodeString = String.fromCharCode(intVal);
+    const unicodeBuffer = this.encoder.encode(unicodeString);
+    this.bufferedString.appendBuf(unicodeBuffer);
+    this.escapedCharsByteLength += 6 - unicodeBuffer.byteLength;
+  }
+  flushPendingHighSurrogate() {
+    if (this.highSurrogate !== undefined) {
+      this.bufferedString.appendCharCode(this.highSurrogate);
+      this.highSurrogate = undefined;
+    }
+  }
+  startIncompleteChar(buffer, start) {
+    this.bytes_in_sequence = utf8SequenceLength(buffer[start]);
+    this.bytes_remaining = start + this.bytes_in_sequence - buffer.length;
+    this.char_split_buffer.set(buffer.subarray(start));
+    this.state = 19;
+  }
+  write(input) {
+    try {
+      let buffer;
+      if (input instanceof Uint8Array) {
+        buffer = input;
+      } else if (typeof input === "string") {
+        if (this.pendingStringSurrogate !== undefined) {
+          input = this.pendingStringSurrogate + input;
+          this.pendingStringSurrogate = undefined;
+        }
+        const lastCharCode = input.charCodeAt(input.length - 1);
+        if (lastCharCode >= 55296 && lastCharCode <= 56319) {
+          this.pendingStringSurrogate = input[input.length - 1];
+          input = input.slice(0, -1);
+        }
+        buffer = this.encoder.encode(input);
+      } else if (ArrayBuffer.isView(input)) {
+        buffer = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      } else if (input !== null && typeof input === "object" && typeof input[Symbol.iterator] === "function") {
+        buffer = Uint8Array.from(input);
+      } else {
+        throw new TypeError("Unexpected type. The `write` function only accepts Iterables (e.g. Arrays, Sets, Generators), TypedArrays and Strings.");
+      }
+      for (let i = 0;i < buffer.length; i += 1) {
+        const n = buffer[i];
+        switch (this.state) {
+          case 29:
+            if (n === 239) {
+              this.bom = [239, 187, 191];
+              this.bomIndex += 1;
+              this.state = 30;
+              continue;
+            }
+            if (input instanceof Uint16Array) {
+              if (n === 254) {
+                this.bom = [254, 255];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+              if (n === 255) {
+                this.bom = [255, 254];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+            }
+            if (input instanceof Uint32Array) {
+              if (n === 0) {
+                this.bom = [0, 0, 254, 255];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+              if (n === 255) {
+                this.bom = [255, 254, 0, 0];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+            }
+          case 0:
+            this.offset += 1;
+            if (this.separatorBytes && n === this.separatorBytes[0]) {
+              if (this.separatorBytes.length === 1) {
+                this.state = 0;
+                this.onToken({
+                  token: tokenType_default.SEPARATOR,
+                  value: this.separator,
+                  offset: this.offset + this.separatorBytes.length - 1
+                });
+                continue;
+              }
+              this.state = 28;
+              continue;
+            }
+            if (n === 32 || n === 10 || n === 13 || n === 9) {
+              continue;
+            }
+            if (n === 123) {
+              this.onToken({
+                token: tokenType_default.LEFT_BRACE,
+                value: "{",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 125) {
+              this.onToken({
+                token: tokenType_default.RIGHT_BRACE,
+                value: "}",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 91) {
+              this.onToken({
+                token: tokenType_default.LEFT_BRACKET,
+                value: "[",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 93) {
+              this.onToken({
+                token: tokenType_default.RIGHT_BRACKET,
+                value: "]",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 58) {
+              this.onToken({
+                token: tokenType_default.COLON,
+                value: ":",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 44) {
+              this.onToken({
+                token: tokenType_default.COMMA,
+                value: ",",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 116) {
+              this.state = 3;
+              continue;
+            }
+            if (n === 102) {
+              this.state = 6;
+              continue;
+            }
+            if (n === 110) {
+              this.state = 10;
+              continue;
+            }
+            if (n === 34) {
+              this.bufferedString.reset();
+              this.escapedCharsByteLength = 0;
+              this.state = 13;
+              continue;
+            }
+            if (n >= 49 && n <= 57) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 22;
+              continue;
+            }
+            if (n === 48) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 21;
+              continue;
+            }
+            if (n === 45) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 20;
+              continue;
+            }
+            break;
+          case 13:
+            if (n === 34) {
+              this.flushPendingHighSurrogate();
+              const string = this.bufferedString.toString();
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.STRING,
+                value: string,
+                offset: this.offset
+              });
+              this.offset += this.escapedCharsByteLength + this.bufferedString.byteLength + 1;
+              continue;
+            }
+            if (n === 92) {
+              this.state = 14;
+              continue;
+            }
+            if (n >= 128) {
+              this.flushPendingHighSurrogate();
+              const runEnd = multiByteRunEnd(buffer, i);
+              if (runEnd > i) {
+                this.bufferedString.appendBuf(buffer, i, runEnd);
+                i = runEnd - 1;
+              }
+              if (runEnd < buffer.length && buffer[runEnd] >= 128) {
+                this.startIncompleteChar(buffer, runEnd);
+                i = buffer.length - 1;
+              }
+              continue;
+            }
+            if (n >= 32) {
+              this.flushPendingHighSurrogate();
+              let j = i;
+              while (j < buffer.length) {
+                const b = buffer[j];
+                if (b < 32 || b >= 128 || b === 34 || b === 92)
+                  break;
+                j += 1;
+              }
+              if (j - i >= 16) {
+                this.bufferedString.appendBuf(buffer, i, j);
+              } else {
+                for (let k = i;k < j; k += 1)
+                  this.bufferedString.appendChar(buffer[k]);
+              }
+              i = j - 1;
+              continue;
+            }
+            break;
+          case 19: {
+            const available = Math.min(this.bytes_remaining, buffer.length - i);
+            this.char_split_buffer.set(buffer.subarray(i, i + available), this.bytes_in_sequence - this.bytes_remaining);
+            this.bytes_remaining -= available;
+            if (this.bytes_remaining > 0) {
+              i = buffer.length - 1;
+              continue;
+            }
+            this.bufferedString.appendBuf(this.char_split_buffer, 0, this.bytes_in_sequence);
+            i += available - 1;
+            this.state = 13;
+            continue;
+          }
+          case 14: {
+            const controlChar = escapedSequences[n];
+            if (controlChar) {
+              this.flushPendingHighSurrogate();
+              this.bufferedString.appendChar(controlChar);
+              this.escapedCharsByteLength += 1;
+              this.state = 13;
+              continue;
+            }
+            if (n === 117) {
+              this.unicode = "";
+              this.state = 15;
+              continue;
+            }
+            break;
+          }
+          case 15:
+          case 16:
+          case 17:
+            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
+              this.unicode += String.fromCharCode(n);
+              this.state += 1;
+              continue;
+            }
+            break;
+          case 18:
+            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
+              const intVal = parseInt(this.unicode + String.fromCharCode(n), 16);
+              this.appendUnicodeCodeUnit(intVal);
+              this.state = 13;
+              continue;
+            }
+            break;
+          case 20:
+            if (n === 48) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 21;
+              continue;
+            }
+            if (n >= 49 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 22;
+              continue;
+            }
+            break;
+          case 21:
+            if (n === 46) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 23;
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 22:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            if (n === 46) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 23;
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 23:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 24;
+              continue;
+            }
+            break;
+          case 24:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 25:
+            if (n === 43 || n === 45) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 26;
+              continue;
+            }
+          case 26:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 27;
+              continue;
+            }
+            break;
+          case 27:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            i -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 3:
+            if (n === 114) {
+              this.state = 4;
+              continue;
+            }
+            break;
+          case 4:
+            if (n === 117) {
+              this.state = 5;
+              continue;
+            }
+            break;
+          case 5:
+            if (n === 101) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.TRUE,
+                value: true,
+                offset: this.offset
+              });
+              this.offset += 3;
+              continue;
+            }
+            break;
+          case 6:
+            if (n === 97) {
+              this.state = 7;
+              continue;
+            }
+            break;
+          case 7:
+            if (n === 108) {
+              this.state = 8;
+              continue;
+            }
+            break;
+          case 8:
+            if (n === 115) {
+              this.state = 9;
+              continue;
+            }
+            break;
+          case 9:
+            if (n === 101) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.FALSE,
+                value: false,
+                offset: this.offset
+              });
+              this.offset += 4;
+              continue;
+            }
+            break;
+          case 10:
+            if (n === 117) {
+              this.state = 11;
+              continue;
+            }
+            break;
+          case 11:
+            if (n === 108) {
+              this.state = 12;
+              continue;
+            }
+            break;
+          case 12:
+            if (n === 108) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.NULL,
+                value: null,
+                offset: this.offset
+              });
+              this.offset += 3;
+              continue;
+            }
+            break;
+          case 28:
+            this.separatorIndex += 1;
+            if (!this.separatorBytes || n !== this.separatorBytes[this.separatorIndex]) {
+              break;
+            }
+            if (this.separatorIndex === this.separatorBytes.length - 1) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.SEPARATOR,
+                value: this.separator,
+                offset: this.offset + this.separatorIndex
+              });
+              this.separatorIndex = 0;
+            }
+            continue;
+          case 30:
+            if (n === this.bom[this.bomIndex]) {
+              if (this.bomIndex === this.bom.length - 1) {
+                this.state = 0;
+                this.bom = undefined;
+                this.bomIndex = 0;
+                continue;
+              }
+              this.bomIndex += 1;
+              continue;
+            }
+            break;
+          case 1:
+            if (n === 32 || n === 10 || n === 13 || n === 9) {
+              continue;
+            }
+        }
+        throw new TokenizerError(`Unexpected "${String.fromCharCode(n)}" at chunk position "${i}" (absolute position "${this.streamByteLength + i}") in state ${TokenizerStateToString(this.state)}`);
+      }
+      this.streamByteLength += buffer.length;
+      if (this.emitPartialTokens) {
+        switch (this.state) {
+          case 3:
+          case 4:
+          case 5:
+            this.onToken({
+              token: tokenType_default.TRUE,
+              value: true,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 6:
+          case 7:
+          case 8:
+          case 9:
+            this.onToken({
+              token: tokenType_default.FALSE,
+              value: false,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 10:
+          case 11:
+          case 12:
+            this.onToken({
+              token: tokenType_default.NULL,
+              value: null,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 13: {
+            const string = this.bufferedString.toString();
+            this.onToken({
+              token: tokenType_default.STRING,
+              value: string,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          }
+          case 21:
+          case 22:
+          case 24:
+          case 27:
+            try {
+              this.onToken({
+                token: tokenType_default.NUMBER,
+                value: this.parseNumber(this.bufferedNumber.toString()),
+                offset: this.offset,
+                partial: true
+              });
+            } catch (_a2) {}
+        }
+      }
+    } catch (err) {
+      this.error(err);
+    }
+  }
+  emitNumber() {
+    this.onToken({
+      token: tokenType_default.NUMBER,
+      value: this.parseNumber(this.bufferedNumber.toString()),
+      offset: this.offset
+    });
+    this.offset += this.bufferedNumber.byteLength - 1;
+  }
+  parseNumber(numberStr) {
+    return Number(numberStr);
+  }
+  error(err) {
+    if (this.state !== 1) {
+      this.state = 2;
+    }
+    this.onError(err);
+  }
+  end() {
+    switch (this.state) {
+      case 21:
+      case 22:
+      case 24:
+      case 27:
+        this.state = 1;
+        this.emitNumber();
+        this.onEnd();
+        break;
+      case 29:
+      case 0:
+      case 2:
+        this.state = 1;
+        this.onEnd();
+        break;
+      default:
+        this.error(new TokenizerError(`Tokenizer ended in the middle of a token (state: ${TokenizerStateToString(this.state)}). Either not all the data was received or the data was invalid.`));
+    }
+  }
+  onToken(parsedToken) {
+    throw new TokenizerError(`Can't emit tokens before the "onToken" callback has been set up.`);
+  }
+  onError(err) {
+    throw err;
+  }
+  onEnd() {}
+}
+var TokenizerStates, defaultOpts, TokenizerError;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+  defaultOpts = {
+    stringBufferSize: 0,
+    numberBufferSize: 0,
+    separator: undefined,
+    emitPartialTokens: false
+  };
+  TokenizerError = class TokenizerError extends Error {
+    constructor(message2) {
+      super(message2);
+      Object.setPrototypeOf(this, TokenizerError.prototype);
+    }
+  };
+});
+
+// src/workers/archive-import/stop-errors.ts
+function archiveStopFromScopeError(error, relPath) {
+  if (!(error instanceof ScopeSafeError))
+    return error;
+  if (error.code === "not_found") {
+    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
+  }
+  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
+    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
+  }
+  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
+}
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/json-stream.ts
+function isHexDigit(byte) {
+  return byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102;
+}
+function isEscapeByte(byte) {
+  return byte === 34 || byte === 92 || byte === 47 || byte === 98 || byte === 102 || byte === 110 || byte === 114 || byte === 116;
+}
+function isSpaceOrStructure(byte) {
+  return byte === 32 || byte === 10 || byte === 13 || byte === 9 || byte === 44 || byte === 58 || byte === 91 || byte === 93 || byte === 123 || byte === 125;
+}
+function isValueStart(type) {
+  return type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET || type === tokenType_default.STRING || type === tokenType_default.NUMBER || type === tokenType_default.TRUE || type === tokenType_default.FALSE || type === tokenType_default.NULL || type === OVERSIZE;
+}
+function invalid() {
+  return new JsonStreamError("invalid_json", "This file is not valid JSON.");
+}
+function classify(kind, phase, type) {
+  if (kind === "root") {
+    if (phase === "root" && isValueStart(type))
+      return "value";
+    throw invalid();
+  }
+  if (kind === "object") {
+    if (phase === "first") {
+      if (type === tokenType_default.STRING)
+        return "key";
+      if (type === tokenType_default.RIGHT_BRACE)
+        return "close";
+    } else if (phase === "next") {
+      if (type === tokenType_default.STRING)
+        return "key";
+    } else if (phase === "colon") {
+      if (type === tokenType_default.COLON)
+        return "colon";
+    } else if (phase === "value") {
+      if (isValueStart(type))
+        return "value";
+    } else if (phase === "after") {
+      if (type === tokenType_default.COMMA)
+        return "comma";
+      if (type === tokenType_default.RIGHT_BRACE)
+        return "close";
+    }
+    throw invalid();
+  }
+  if (phase === "first") {
+    if (isValueStart(type))
+      return "value";
+    if (type === tokenType_default.RIGHT_BRACKET)
+      return "close";
+  } else if (phase === "next") {
+    if (isValueStart(type))
+      return "value";
+  } else if (phase === "after") {
+    if (type === tokenType_default.COMMA)
+      return "comma";
+    if (type === tokenType_default.RIGHT_BRACKET)
+      return "close";
+  }
+  throw invalid();
+}
+function setOwn(target, key2, value) {
+  Object.defineProperty(target, key2, { value, enumerable: true, writable: true, configurable: true });
+}
+function copyFrame(frame) {
+  const out = {};
+  for (const key2 of Object.keys(frame))
+    setOwn(out, key2, frame[key2]);
+  return out;
+}
+function serializeJsonResume(point) {
+  return JSON.stringify({
+    o: point.offset,
+    l: point.levels.map((level) => [level.kind === "object" ? "o" : "a", level.pointer, level.frame])
+  });
+}
+function parseJsonResume(text2) {
+  let raw;
+  try {
+    raw = JSON.parse(text2);
+  } catch {
+    return;
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return;
+  const { o, l } = raw;
+  if (typeof o !== "number" || !Number.isSafeInteger(o) || o < 0)
+    return;
+  if (!Array.isArray(l) || l.length === 0 || l.length > JSON_STREAM_MAX_DEPTH)
+    return;
+  const levels = [];
+  for (const entry of l) {
+    if (!Array.isArray(entry) || entry.length !== 3)
+      return;
+    const [code, pointer, frame] = entry;
+    if (code !== "o" && code !== "a")
+      return;
+    if (code === "a") {
+      if (typeof pointer !== "number" || !Number.isSafeInteger(pointer) || pointer < 0)
+        return;
+    } else if (typeof pointer !== "string" || pointer.length > JSON_STREAM_MAX_KEY_CHARS) {
+      return;
+    }
+    if (typeof frame !== "object" || frame === null || Array.isArray(frame))
+      return;
+    const keys = Object.keys(frame);
+    if (keys.length > JSON_STREAM_MAX_FRAME_KEYS)
+      return;
+    const clean2 = {};
+    for (const key2 of keys) {
+      const value = frame[key2];
+      if (value !== null && typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean")
+        return;
+      if (typeof value === "string" && value.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
+        return;
+      setOwn(clean2, key2, value);
+    }
+    levels.push({ kind: code === "o" ? "object" : "array", pointer, frame: clean2 });
+  }
+  return { offset: o, levels };
+}
+
+class JsonStreamReader {
+  source;
+  itemPaths;
+  maxItemBytes;
+  queue = [];
+  queueAt = 0;
+  peakQueued = 0;
+  levels = [];
+  phase = "root";
+  capture;
+  pending;
+  merged;
+  tokenizer;
+  base = 0;
+  inbox;
+  inboxAt = 0;
+  inboxBase = 0;
+  lex = LEX_OUT;
+  hexLeft = 0;
+  utfLeft = 0;
+  utfLow = 128;
+  utfHigh = 191;
+  stringStart = 0;
+  stringLimit = 0;
+  runStart = -1;
+  stop = STOP_END;
+  skipping = false;
+  failure;
+  resuming;
+  started = false;
+  head;
+  finished = false;
+  constructor(source, options) {
+    this.source = source;
+    this.itemPaths = options.itemPaths;
+    this.maxItemBytes = Math.max(1, options.maxItemBytes);
+    this.resuming = options.resume !== undefined;
+    if (options.resume) {
+      const resume = options.resume;
+      if (source.position !== resume.offset || resume.levels.length === 0 || resume.levels.length > JSON_STREAM_MAX_DEPTH) {
+        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
+      }
+      this.levels = resume.levels.map((level) => ({ kind: level.kind, pointer: level.pointer, frame: level.frame }));
+      this.phase = "after";
+      this.started = true;
+    }
+  }
+  get position() {
+    return this.source.position;
+  }
+  get peakQueuedEvents() {
+    return this.peakQueued;
+  }
+  next() {
+    for (;; ) {
+      if (this.queueAt < this.queue.length) {
+        const event = this.queue[this.queueAt];
+        this.queueAt += 1;
+        if (this.queueAt === this.queue.length) {
+          this.queue.length = 0;
+          this.queueAt = 0;
+        }
+        return event;
+      }
+      if (this.failure)
+        throw this.failure;
+      if (this.inbox) {
+        this.pump();
+        continue;
+      }
+      if (this.finished)
+        return;
+      const chunk = this.source.next();
+      if (chunk === undefined) {
+        if (this.head) {
+          this.inbox = this.head;
+          this.inboxAt = 0;
+          this.inboxBase = 0;
+          this.head = undefined;
+          this.started = true;
+          continue;
+        }
+        this.finished = true;
+        this.finish();
+        continue;
+      }
+      this.feed(chunk);
+    }
+  }
+  startTokenizer(base) {
+    const tokenizer = new ExactNumberTokenizer;
+    this.base = base;
+    tokenizer.onToken = (info) => {
+      if (this.failure)
+        return;
+      try {
+        this.handle(info.token, info.value, this.base + info.offset);
+      } catch (error) {
+        this.failure = error instanceof JsonStreamError ? error : invalid();
+        throw this.failure;
+      }
+    };
+    tokenizer.onError = () => {
+      this.failure ??= this.resuming ? new JsonStreamError("resume_invalid", "No item ends where this import was to resume.") : invalid();
+    };
+    this.tokenizer = tokenizer;
+    return tokenizer;
+  }
+  feed(chunk) {
+    let data2 = chunk;
+    let at = this.source.position - chunk.length;
+    if (!this.started) {
+      const joined = this.head ? concat(this.head, data2) : data2;
+      at -= this.head ? this.head.length : 0;
+      if (joined.length < 3) {
+        this.head = joined;
+        return;
+      }
+      this.head = undefined;
+      this.started = true;
+      data2 = joined;
+      if (data2[0] === 239 && data2[1] === 187 && data2[2] === 191) {
+        data2 = data2.subarray(3);
+        at += 3;
+      }
+    }
+    if (data2.length === 0)
+      return;
+    this.inbox = data2;
+    this.inboxAt = 0;
+    this.inboxBase = at;
+  }
+  pump() {
+    const inbox = this.inbox;
+    try {
+      while (this.inboxAt < inbox.length && !this.failure && this.queue.length <= JSON_STREAM_MAX_QUEUED_EVENTS) {
+        const begin = this.inboxAt;
+        const end = Math.min(inbox.length, begin + JSON_STREAM_FEED_SLICE_BYTES);
+        this.inboxAt = end;
+        this.consume(inbox, begin, end, this.inboxBase);
+        if (this.queue.length > this.peakQueued)
+          this.peakQueued = this.queue.length;
+      }
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+    if (this.failure || this.inboxAt >= inbox.length)
+      this.inbox = undefined;
+  }
+  consume(data2, begin, end, base) {
+    let index = begin;
+    let fed = begin;
+    while (index < end) {
+      if (this.skipping) {
+        const stopped2 = this.skipScan(data2, index, end);
+        if (this.stop === STOP_END) {
+          index = end;
+          fed = end;
+          break;
+        }
+        if (this.stop === STOP_BAD) {
+          this.failure ??= invalid();
+          return;
+        }
+        const start = this.stringStart;
+        this.skipping = false;
+        index = stopped2 + 1;
+        fed = index;
+        this.deliver(OVERSIZE, undefined, start);
+        continue;
+      }
+      const stopped = this.scanNormal(data2, index, end, base);
+      if (this.stop === STOP_END) {
+        index = end;
+        break;
+      }
+      if (this.stop === STOP_BAD) {
+        this.write(data2.subarray(fed, stopped), base + fed);
+        this.failure ??= invalid();
+        return;
+      }
+      const quote = this.stringStart - base;
+      if (quote >= fed)
+        this.write(data2.subarray(fed, quote + 1), base + fed);
+      if (this.failure)
+        return;
+      this.tokenizer = undefined;
+      this.skipping = true;
+      fed = stopped;
+      index = stopped;
+    }
+    if (!this.skipping && fed < end && !this.failure)
+      this.write(data2.subarray(fed, end), base + fed);
+  }
+  write(piece, offset) {
+    if (piece.length === 0)
+      return;
+    const tokenizer = this.tokenizer ?? this.startTokenizer(offset);
+    try {
+      tokenizer.write(piece);
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+  }
+  scanNormal(data2, from, to, at) {
+    const max = this.maxItemBytes;
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let runStart = this.runStart;
+    let index = from;
+    this.stop = STOP_END;
+    for (;index < to; index += 1) {
+      const byte = data2[index];
+      if (lex === LEX_OUT) {
+        if (byte === 34) {
+          lex = LEX_STRING;
+          this.stringStart = at + index;
+          this.stringLimit = at + index + max;
+          runStart = -1;
+          utfLeft = 0;
+        } else if (isSpaceOrStructure(byte)) {
+          runStart = -1;
+        } else if (runStart < 0) {
+          runStart = at + index;
+        } else if (at + index + 1 - runStart > max) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        continue;
+      }
+      if (at + index === this.stringLimit) {
+        this.stop = STOP_OVERSIZE;
+        break;
+      }
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 128;
+        this.utfHigh = 191;
+        continue;
+      }
+      if (lex === LEX_STRING) {
+        if (byte === 34) {
+          lex = LEX_OUT;
+        } else if (byte === 92) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 32) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 128) {
+          utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 117) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else if (isEscapeByte(byte)) {
+          lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
+        }
+      } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        hexLeft -= 1;
+        if (hexLeft === 0)
+          lex = LEX_STRING;
+      }
+    }
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = runStart;
+    return index;
+  }
+  utfLead(byte) {
+    this.utfLow = 128;
+    this.utfHigh = 191;
+    if (byte >= 194 && byte <= 223)
+      return 1;
+    if (byte >= 224 && byte <= 239) {
+      if (byte === 224)
+        this.utfLow = 160;
+      else if (byte === 237)
+        this.utfHigh = 159;
+      return 2;
+    }
+    if (byte >= 240 && byte <= 244) {
+      if (byte === 240)
+        this.utfLow = 144;
+      else if (byte === 244)
+        this.utfHigh = 143;
+      return 3;
+    }
+    return 0;
+  }
+  skipScan(data2, from, to) {
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let index = from;
+    this.stop = STOP_END;
+    for (;index < to; index += 1) {
+      const byte = data2[index];
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 128;
+        this.utfHigh = 191;
+        continue;
+      }
+      if (lex === LEX_STRING) {
+        if (byte === 34) {
+          lex = LEX_OUT;
+          this.stop = STOP_CLOSED;
+          break;
+        }
+        if (byte === 92) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 32) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 128) {
+          utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 117) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else if (isEscapeByte(byte)) {
+          lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
+        }
+      } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        hexLeft -= 1;
+        if (hexLeft === 0)
+          lex = LEX_STRING;
+      }
+    }
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = -1;
+    return index;
+  }
+  finish() {
+    try {
+      if (this.lex !== LEX_OUT || this.skipping) {
+        throw new JsonStreamError("truncated", "This file ends inside a piece of text.");
+      }
+      if (this.tokenizer) {
+        try {
+          this.tokenizer.end();
+        } catch (error) {
+          throw this.failure ?? (error instanceof JsonStreamError ? error : invalid());
+        }
+        if (this.failure)
+          throw this.failure;
+      }
+      if (this.capture || this.pending || this.levels.length > 0 || this.phase === "first" || this.phase === "next" || this.phase === "colon" || this.phase === "value") {
+        throw new JsonStreamError("truncated", "This file ends before its last item does.");
+      }
+      if (this.phase === "root")
+        throw new JsonStreamError("empty", "This file holds no JSON.");
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+  }
+  deliver(type, value, start) {
+    try {
+      this.handle(type, value, start);
+    } catch (error) {
+      this.failure = error instanceof JsonStreamError ? error : invalid();
+      throw this.failure;
+    }
+  }
+  handle(type, value, start) {
+    if (this.resuming) {
+      this.resuming = false;
+      const top2 = this.levels[this.levels.length - 1];
+      const fits = type === tokenType_default.COMMA || (top2.kind === "object" ? type === tokenType_default.RIGHT_BRACE : type === tokenType_default.RIGHT_BRACKET);
+      if (!fits)
+        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
+    }
+    if (this.capture) {
+      this.captureToken(this.capture, type, value, start);
+      return;
+    }
+    const top = this.levels[this.levels.length - 1];
+    const role = classify(top ? top.kind : "root", this.phase, type);
+    switch (role) {
+      case "key": {
+        const key2 = value;
+        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
+          throw invalid();
+        this.levels[this.levels.length - 1] = { kind: "object", pointer: key2, frame: top.frame };
+        this.phase = "colon";
+        return;
+      }
+      case "colon":
+        this.phase = "value";
+        return;
+      case "comma":
+        this.flush(start);
+        this.phase = "next";
+        return;
+      case "close":
+        this.flush(start);
+        this.levels.pop();
+        this.merged = undefined;
+        this.phase = this.levels.length === 0 ? "done" : "after";
+        return;
+      case "value":
+        this.beginValue(type, value, start);
+        return;
+    }
+  }
+  beginValue(type, value, start) {
+    let top = this.levels[this.levels.length - 1];
+    if (top && top.kind === "array") {
+      top = { kind: "array", pointer: typeof top.pointer === "number" ? top.pointer + 1 : 0, frame: top.frame };
+      this.levels[this.levels.length - 1] = top;
+    }
+    if (top) {
+      const index = this.matchingPath();
+      if (index >= 0) {
+        const path = this.levels.map((level) => level.pointer);
+        const capture = {
+          start,
+          pathIndex: index,
+          path,
+          frame: this.mergedFrame(),
+          oversize: false,
+          depth: 0,
+          build: [],
+          result: undefined
+        };
+        this.capture = capture;
+        this.captureToken(capture, type, value, start);
+        return;
+      }
+    }
+    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+      if (this.levels.length >= JSON_STREAM_MAX_DEPTH)
+        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
+      this.levels.push({
+        kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
+        pointer: undefined,
+        frame: EMPTY_FRAME
+      });
+      this.merged = undefined;
+      this.phase = "first";
+      return;
+    }
+    if (top && top.kind === "object" && type !== OVERSIZE)
+      this.recordFrame(top, value);
+    this.phase = top ? "after" : "done";
+  }
+  recordFrame(top, value) {
+    if (typeof value === "string" && value.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
+      return;
+    const key2 = top.pointer;
+    if (!Object.prototype.hasOwnProperty.call(top.frame, key2) && Object.keys(top.frame).length >= JSON_STREAM_MAX_FRAME_KEYS)
+      return;
+    const frame = copyFrame(top.frame);
+    setOwn(frame, key2, value);
+    this.levels[this.levels.length - 1] = { kind: "object", pointer: top.pointer, frame };
+    this.merged = undefined;
+  }
+  matchingPath() {
+    const depth = this.levels.length - 1;
+    for (let index = 0;index < this.itemPaths.length; index += 1) {
+      const path = this.itemPaths[index];
+      if (path.length !== depth)
+        continue;
+      let all = true;
+      for (let at = 0;at < depth; at += 1) {
+        const wanted = path[at];
+        if (wanted !== JSON_STREAM_ANY && wanted !== this.levels[at].pointer) {
+          all = false;
+          break;
+        }
+      }
+      if (all)
+        return index;
+    }
+    return -1;
+  }
+  mergedFrame() {
+    if (this.merged)
+      return this.merged;
+    const out = {};
+    for (const level of this.levels) {
+      for (const key2 of Object.keys(level.frame))
+        setOwn(out, key2, level.frame[key2]);
+    }
+    this.merged = Object.keys(out).length === 0 ? EMPTY_FRAME : out;
+    return this.merged;
+  }
+  captureToken(capture, type, value, start) {
+    if (!capture.oversize && (type === OVERSIZE || start - capture.start > this.maxItemBytes)) {
+      capture.oversize = true;
+      capture.result = undefined;
+      for (const level of capture.build)
+        level.value = undefined;
+    }
+    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+      capture.depth += 1;
+      if (capture.depth > JSON_STREAM_MAX_DEPTH)
+        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
+    } else if (type === tokenType_default.RIGHT_BRACE || type === tokenType_default.RIGHT_BRACKET) {
+      capture.depth -= 1;
+      if (capture.depth < 0)
+        throw invalid();
+    }
+    this.build(capture, capture.build, type, value);
+    if (capture.depth === 0) {
+      this.capture = undefined;
+      this.pending = capture;
+      this.phase = "after";
+    }
+  }
+  build(capture, stack, type, value) {
+    const top = stack[stack.length - 1];
+    const role = classify(top ? top.kind : "root", top ? top.phase : "root", type);
+    const place = (placed) => {
+      const parent = stack[stack.length - 1];
+      if (!parent) {
+        capture.result = capture.oversize ? undefined : placed;
+        return;
+      }
+      if (!capture.oversize) {
+        if (parent.kind === "array")
+          parent.value.push(placed);
+        else
+          setOwn(parent.value, parent.key, placed);
+      }
+      parent.phase = "after";
+    };
+    switch (role) {
+      case "key": {
+        const key2 = value;
+        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
+          throw invalid();
+        top.key = key2;
+        top.phase = "colon";
+        return;
+      }
+      case "colon":
+        top.phase = "value";
+        return;
+      case "comma":
+        top.phase = "next";
+        return;
+      case "close": {
+        const closed = stack.pop();
+        place(closed.value);
+        return;
+      }
+      case "value":
+        if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+          stack.push({
+            kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
+            phase: "first",
+            key: undefined,
+            value: capture.oversize ? undefined : type === tokenType_default.LEFT_BRACE ? {} : []
+          });
+        } else {
+          place(value);
+        }
+        return;
+    }
+  }
+  flush(delimiterAt) {
+    const capture = this.pending;
+    if (!capture)
+      return;
+    this.pending = undefined;
+    const oversize = capture.oversize || delimiterAt - capture.start > this.maxItemBytes;
+    this.queue.push({
+      kind: oversize ? "oversize" : "item",
+      path: capture.path,
+      pathIndex: capture.pathIndex,
+      value: oversize ? undefined : capture.result,
+      frame: capture.frame,
+      start: capture.start,
+      end: delimiterAt,
+      resume: { offset: delimiterAt, levels: this.levels.slice() }
+    });
+  }
+}
+function concat(first, second) {
+  const out = new Uint8Array(first.length + second.length);
+  out.set(first);
+  out.set(second, first.length);
+  return out;
+}
+function archiveStopFromReaderError(error, relPath) {
+  if (error instanceof JsonStreamError) {
+    return error.code === "resume_invalid" ? new ArchiveImportStoppedError("resume_point_invalid", "Nothing starts where this import was to resume.", relPath) : new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
+  }
+  return archiveStopFromScopeError(error, relPath);
+}
+var JSON_STREAM_ANY = "*", JSON_STREAM_MAX_DEPTH = 512, JSON_STREAM_MAX_KEY_CHARS = 1024, JSON_STREAM_MAX_FRAME_VALUE_CHARS = 1024, JSON_STREAM_MAX_FRAME_KEYS = 64, JSON_STREAM_FEED_SLICE_BYTES = 1024, JSON_STREAM_MAX_QUEUED_EVENTS = 64, JsonStreamError, OVERSIZE = -1, LEX_OUT = 0, LEX_STRING = 1, LEX_ESCAPE = 2, LEX_HEX = 3, STOP_END = 0, STOP_OVERSIZE = 1, STOP_BAD = 2, STOP_CLOSED = 3, EMPTY_FRAME, MAX_SAFE_DIGITS, ExactNumberTokenizer;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  init_archive_formats();
+  init_stop_errors();
+  JsonStreamError = class JsonStreamError extends Error {
+    code;
+    constructor(code, message2) {
+      super(message2);
+      this.name = "JsonStreamError";
+      this.code = code;
+    }
+  };
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+  ExactNumberTokenizer = class ExactNumberTokenizer extends Tokenizer {
+    parseNumber(numberStr) {
+      const value = Number(numberStr);
+      if (Number.isSafeInteger(value) || !Number.isFinite(value))
+        return value;
+      const digits = numberStr.startsWith("-") ? numberStr.slice(1) : numberStr;
+      let wholeNumber = digits.length > 0;
+      for (let index = 0;index < digits.length; index += 1) {
+        const code = digits.charCodeAt(index);
+        if (code < 48 || code > 57) {
+          wholeNumber = false;
+          break;
+        }
+      }
+      if (!wholeNumber)
+        return value;
+      if (digits.length < MAX_SAFE_DIGITS.length)
+        return value;
+      return numberStr;
+    }
+  };
+});
+
+// src/workers/archive-import/record-probe.ts
+function probeFirstRecordKeys(source, list, enough) {
+  const keys = new Set;
+  let found = false;
+  try {
+    const reader = new JsonStreamReader(source, { itemPaths: [[...list, JSON_STREAM_ANY]], maxItemBytes: RECORD_PROBE_MAX_VALUE_BYTES });
+    for (;; ) {
+      const event = reader.next();
+      if (!event)
+        break;
+      const record = event.path[list.length];
+      const key2 = event.path[list.length + 1];
+      if (typeof record !== "number" || typeof key2 !== "string")
+        continue;
+      if (record !== 0)
+        break;
+      found = true;
+      if (keys.size < RECORD_PROBE_MAX_KEYS)
+        keys.add(key2);
+      if (enough?.(keys))
+        break;
+    }
+  } catch (error) {
+    if (!(error instanceof JsonStreamError))
+      throw error;
+  }
+  return found ? keys : undefined;
+}
+var RECORD_PROBE_MAX_KEYS = 256, RECORD_PROBE_MAX_VALUE_BYTES;
+var init_record_probe = __esm(() => {
+  init_json_stream();
+  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+});
+
 // node_modules/fflate/esm/browser.js
 var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
   var b = new u16(31);
@@ -50437,93 +52330,6 @@ var init_browser = __esm(() => {
     td.decode(et, { stream: true });
     tds = 1;
   } catch (e) {}
-});
-
-// src/workers/archive-import/stop-errors.ts
-function archiveStopFromScopeError(error, relPath) {
-  if (!(error instanceof ScopeSafeError))
-    return error;
-  if (error.code === "not_found") {
-    return new ArchiveImportStoppedError("file_missing", "A file of this archive is no longer there.", relPath);
-  }
-  if (error.code === "changed" || error.code === "escape" || error.code === "not_regular") {
-    return new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", relPath);
-  }
-  return new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
-}
-var init_stop_errors = __esm(() => {
-  init_archive_formats();
-  init_scope_safe_fs();
-});
-
-// src/workers/archive-import/byte-source.ts
-import * as zlib from "node:zlib";
-function tableCrc32(data2, value) {
-  if (!crcTable) {
-    crcTable = new Int32Array(256);
-    for (let n = 0;n < 256; n += 1) {
-      let c = n;
-      for (let k = 0;k < 8; k += 1)
-        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
-      crcTable[n] = c;
-    }
-  }
-  let crc = ~value;
-  for (let index = 0;index < data2.length; index += 1) {
-    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
-  }
-  return ~crc >>> 0;
-}
-function crc32Update(value, data2) {
-  if (data2.length === 0)
-    return value >>> 0;
-  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
-}
-function fileByteSource(reader, options = {}) {
-  const end = Math.min(reader.size, options.end ?? reader.size);
-  const chunkBytes = Math.max(1, options.chunkBytes ?? ARCHIVE_SOURCE_CHUNK_BYTES);
-  let readFrom = Math.max(0, options.start ?? 0);
-  let position = readFrom;
-  let pending;
-  let last = new Uint8Array(0);
-  let held = 0;
-  return {
-    get position() {
-      return position;
-    },
-    next() {
-      let chunk;
-      if (pending) {
-        chunk = pending;
-        pending = undefined;
-      } else {
-        if (readFrom >= end)
-          return;
-        chunk = reader.readAt(readFrom, Math.min(chunkBytes, end - readFrom));
-        readFrom += chunk.length;
-        if (chunk.length === 0)
-          return;
-      }
-      last = chunk;
-      held = chunk.length;
-      position += chunk.length;
-      return chunk;
-    },
-    unread(count) {
-      if (!Number.isInteger(count) || count < 0 || count > held)
-        throw new RangeError("unread past the last chunk");
-      if (count === 0)
-        return;
-      held -= count;
-      position -= count;
-      pending = last.subarray(held);
-    }
-  };
-}
-var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
-var init_byte_source = __esm(() => {
-  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-  nativeCrc32 = zlib.crc32;
 });
 
 // src/workers/archive-import/zip-reader.ts
@@ -51330,6 +53136,47 @@ function fileHead(root, relPath) {
     throw error;
   }
 }
+function fileFirstRecordKeys(root, relPath) {
+  return (list, enough) => {
+    try {
+      const reader = root.openFile(relPath);
+      try {
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough);
+      } finally {
+        reader.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError)
+        return;
+      throw error;
+    }
+  };
+}
+function zipMemberFirstRecordKeys(root, zipRelPath, memberIndex) {
+  return (list, enough) => {
+    try {
+      const file = root.openFile(zipRelPath);
+      try {
+        const archive = ZipArchive.open(file);
+        const entry = archive.entryAt(memberIndex);
+        if (!entry)
+          return;
+        const member = ZipMemberReader.open(archive, entry);
+        try {
+          return probeFirstRecordKeys(member, list, enough);
+        } finally {
+          member.close();
+        }
+      } finally {
+        file.close();
+      }
+    } catch (error) {
+      if (error instanceof ScopeSafeError || error instanceof ZipFormatError || error instanceof ZipMemberError)
+        return;
+      throw error;
+    }
+  };
+}
 function lastSegment(name) {
   const parts = name.split("/").filter((part) => part !== "");
   return parts[parts.length - 1] ?? name;
@@ -51367,7 +53214,8 @@ function probeZipMembers(root, relPath, probeNames) {
         relPath: entry.name,
         name: lastSegment(entry.name),
         kind: entry.isDirectory ? "directory" : "file",
-        ...head ? { head } : {}
+        ...head ? { head } : {},
+        ...head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index) } : {}
       };
     });
   } catch (error) {
@@ -51389,7 +53237,13 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
     const head = fileHead(root, chosenRelPath);
     const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames) : undefined;
     return {
-      chosen: { relPath: "", name, kind: "file", ...head ? { head } : {}, ...members ? { members } : {} },
+      chosen: {
+        relPath: "",
+        name,
+        kind: "file",
+        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath) } : {},
+        ...members ? { members } : {}
+      },
       children: []
     };
   }
@@ -51432,7 +53286,13 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
     } else if (kind === "file") {
       const head = heads.get(index);
       const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames) : undefined;
-      children.push({ relPath: entry.name, name: entry.name, kind: "file", ...head ? { head } : {}, ...members ? { members } : {} });
+      children.push({
+        relPath: entry.name,
+        name: entry.name,
+        kind: "file",
+        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name)) } : {},
+        ...members ? { members } : {}
+      });
     }
   });
   return { chosen: { relPath: "", name, kind: "directory" }, children };
@@ -51580,6 +53440,8 @@ var ARCHIVE_FINGERPRINT_BYTES, PROBE_MAX_FILE_HEADS = 32, PROBE_MAX_ZIPS = 4, PR
 var init_manifest2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
+  init_byte_source();
+  init_record_probe();
   init_zip_reader();
   ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
   ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
@@ -52336,34 +54198,34 @@ function mailScopeFromDraft(draft) {
   };
 }
 function parseMailScopeDraft(value) {
-  const invalid = (message2) => {
+  const invalid2 = (message2) => {
     throw new OperationError("invalid_request", message2);
   };
   if (!value || typeof value !== "object" || Array.isArray(value))
-    invalid("The mail scope draft must be an object.");
+    invalid2("The mail scope draft must be an object.");
   const record = value;
   if (!isMailScopeWindow(record.window))
-    invalid("Choose a valid mail time window.");
+    invalid2("Choose a valid mail time window.");
   const strings = (field, max2) => {
     const list = record[field];
     if (!Array.isArray(list) || list.length > max2 || list.some((entry) => typeof entry !== "string" || entry.length > 320)) {
-      invalid(`${field} must be a list of at most ${max2} strings.`);
+      invalid2(`${field} must be a list of at most ${max2} strings.`);
     }
     return list;
   };
   const categories = strings("skipped_categories", GMAIL_SCOPE_CATEGORIES.length);
   if (categories.some((category) => !isGmailScopeCategory(category)))
-    invalid("Every skipped category must be a Gmail category.");
+    invalid2("Every skipped category must be a Gmail category.");
   const labels = record.skipped_labels;
   if (!Array.isArray(labels) || labels.length > 500)
-    invalid("skipped_labels must be a list of at most 500 labels.");
+    invalid2("skipped_labels must be a list of at most 500 labels.");
   return {
     window: record.window,
     skipped_categories: categories,
     skipped_labels: labels.map((label) => {
       const entry = label && typeof label === "object" && !Array.isArray(label) ? label : {};
       if (typeof entry.id !== "string" || typeof entry.name !== "string" || entry.id.length > 256 || entry.name.length > 256) {
-        return invalid("Every skipped label needs its Gmail id and name.");
+        return invalid2("Every skipped label needs its Gmail id and name.");
       }
       return { id: entry.id, name: entry.name };
     }),
@@ -71847,10 +73709,10 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
   if (onStatus) {
     const stream = statusChannel?.reader ?? child.stdio[3];
     let pending = "";
-    let invalid = false;
+    let invalid2 = false;
     const reject = () => {
-      if (!invalid) {
-        invalid = true;
+      if (!invalid2) {
+        invalid2 = true;
         onStatus({ event: "refused", code: "no_status_event" });
       }
     };
@@ -71858,7 +73720,7 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
       reject();
     stream?.setEncoding("utf8");
     stream?.on("data", (chunk) => {
-      if (invalid)
+      if (invalid2)
         return;
       pending += chunk;
       if (pending.length > 65536) {
@@ -83889,18 +85751,18 @@ function questionModel(subQuestions) {
     const variants = [viewTokens, viewTokens.map((token) => /\p{L}/u.test(token) ? mapCharacters(token, LEET) : token)];
     for (const variant of variants) {
       for (let start = 0;start < variant.length; start += 1) {
-        let concat = "";
+        let concat2 = "";
         let onlyFunctionWords = true;
         for (let end = start;end < variant.length && end - start < CONSULT_GATE_COMPACT_WINDOW_TOKENS; end += 1) {
-          concat += variant[end];
+          concat2 += variant[end];
           onlyFunctionWords &&= FUNCTION_WORDS.has(viewTokens[end] ?? "");
-          if (concat.length > CONSULT_GATE_COMPACT_WINDOW_CHARS)
+          if (concat2.length > CONSULT_GATE_COMPACT_WINDOW_CHARS)
             break;
-          if (!forms.has(concat))
-            forms.set(concat, source);
+          if (!forms.has(concat2))
+            forms.set(concat2, source);
           if (onlyFunctionWords)
             continue;
-          const reversed = [...concat].reverse().join("");
+          const reversed = [...concat2].reverse().join("");
           if (!forms.has(reversed))
             forms.set(reversed, source);
         }
@@ -86435,12 +88297,12 @@ function parseConsultSettingsText(text2) {
   try {
     parsed = JSON.parse(text2);
   } catch {
-    return invalid("malformed_json");
+    return invalid2("malformed_json");
   }
   if (hasDuplicateObjectKey(text2))
-    return invalid("duplicate_key");
+    return invalid2("duplicate_key");
   const settings = parseConsultSettings(parsed);
-  return settings ? { state: "valid", settings } : invalid("invalid_shape");
+  return settings ? { state: "valid", settings } : invalid2("invalid_shape");
 }
 function readConsultSettings(location = {}) {
   try {
@@ -86455,20 +88317,20 @@ function readConsultSettings(location = {}) {
       if (code === "ENOENT" || code === "ENOTDIR")
         return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
       if (code === "ELOOP" || code === "EMLINK")
-        return invalid("not_a_regular_file");
-      return invalid("unreadable");
+        return invalid2("not_a_regular_file");
+      return invalid2("unreadable");
     }
     try {
       __consultSettingsTestHooks.afterOpen?.(path);
       const stats = fstatSync5(descriptor);
       if (!stats.isFile())
-        return invalid("not_a_regular_file");
+        return invalid2("not_a_regular_file");
       if ((stats.mode & 18) !== 0)
-        return invalid("insecure_permissions");
+        return invalid2("insecure_permissions");
       if (typeof process.getuid === "function" && stats.uid !== process.getuid())
-        return invalid("insecure_permissions");
+        return invalid2("insecure_permissions");
       if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
-        return invalid("too_large");
+        return invalid2("too_large");
       __consultSettingsTestHooks.afterStat?.(path);
       const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
       let length = 0;
@@ -86480,19 +88342,19 @@ function readConsultSettings(location = {}) {
       }
       __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES)
-        return invalid("too_large");
+        return invalid2("too_large");
       let text2;
       try {
         text2 = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
       } catch {
-        return invalid("invalid_utf8");
+        return invalid2("invalid_utf8");
       }
       return parseConsultSettingsText(text2);
     } finally {
       closeSync18(descriptor);
     }
   } catch {
-    return invalid("unreadable");
+    return invalid2("unreadable");
   }
 }
 function consultGateOptionsFromSettings(settings) {
@@ -86508,7 +88370,7 @@ function consultWriterIdentity(choice) {
     return "built-in";
   return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
 }
-function invalid(reason) {
+function invalid2(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
 }
 function hasDuplicateObjectKey(text2) {
@@ -90471,28 +92333,28 @@ function privacyOwnerContext(options = {}) {
 function parsePrivacyProfileInput(raw) {
   const record2 = asRecord12(raw);
   if (!record2)
-    throw invalid2("The privacy settings must be an object.");
+    throw invalid3("The privacy settings must be an object.");
   const unknownKeys = Object.keys(record2).filter((key2) => key2 !== "description" && key2 !== "rules");
   if (unknownKeys.length > 0)
-    throw invalid2("The privacy settings have unknown fields.");
+    throw invalid3("The privacy settings have unknown fields.");
   const out = {};
   if (record2.description !== undefined) {
     if (typeof record2.description !== "string")
-      throw invalid2("description must be text.");
+      throw invalid3("description must be text.");
     const description = record2.description.replace(/\r\n/g, `
 `).trim();
     if (description.length > PRIVACY_DESCRIPTION_MAX_CHARS) {
-      throw invalid2(`description may be at most ${PRIVACY_DESCRIPTION_MAX_CHARS} characters.`);
+      throw invalid3(`description may be at most ${PRIVACY_DESCRIPTION_MAX_CHARS} characters.`);
     }
     if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(description))
-      throw invalid2("description has control characters.");
+      throw invalid3("description has control characters.");
     out.description = description;
   }
   if (record2.rules !== undefined) {
     if (!Array.isArray(record2.rules))
-      throw invalid2("rules must be a list.");
+      throw invalid3("rules must be a list.");
     if (record2.rules.length > PRIVACY_RULES_MAX)
-      throw invalid2(`At most ${PRIVACY_RULES_MAX} rules.`);
+      throw invalid3(`At most ${PRIVACY_RULES_MAX} rules.`);
     const seen = new Set;
     out.rules = [];
     for (const entry of record2.rules) {
@@ -90509,47 +92371,47 @@ function parsePrivacyProfileInput(raw) {
 function parsePrivacyRule(raw) {
   const record2 = asRecord12(raw);
   if (!record2)
-    throw invalid2("Each rule must be an object.");
+    throw invalid3("Each rule must be an object.");
   const unknownKeys = Object.keys(record2).filter((key3) => !["kind", "source_id", "key", "value", "display"].includes(key3));
   if (unknownKeys.length > 0)
-    throw invalid2("A rule has unknown fields.");
+    throw invalid3("A rule has unknown fields.");
   const kind = record2.kind;
   if (typeof kind !== "string" || !PRIVACY_RULE_KINDS.includes(kind)) {
-    throw invalid2("A rule kind must be folder, label or sender.");
+    throw invalid3("A rule kind must be folder, label or sender.");
   }
   const sources = RULE_SOURCES[kind];
   const sourceId = record2.source_id;
   if (typeof sourceId !== "string" || !Object.prototype.hasOwnProperty.call(sources, sourceId)) {
-    throw invalid2("A rule names a source that kind of rule does not apply to.");
+    throw invalid3("A rule names a source that kind of rule does not apply to.");
   }
   const display = record2.display === undefined ? undefined : boundedName(record2.display, "display");
   if (kind === "sender") {
     if (record2.key !== undefined)
-      throw invalid2("A sender rule takes value, not key.");
+      throw invalid3("A sender rule takes value, not key.");
     const value2 = typeof record2.value === "string" ? record2.value.trim().toLowerCase() : "";
     if (value2.length > 240 || !/^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(value2)) {
-      throw invalid2("A sender rule needs an address (name@example.com) or a whole domain (@example.com).");
+      throw invalid3("A sender rule needs an address (name@example.com) or a whole domain (@example.com).");
     }
     return { kind, source_id: sourceId, value: value2 };
   }
   const key2 = typeof record2.key === "string" ? record2.key.trim() : "";
   if (!key2 || key2.length > PRIVACY_KEY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(key2)) {
-    throw invalid2(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
+    throw invalid3(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
   }
   if (sources[sourceId].match === "pathPrefix" && !key2.startsWith("/"))
-    throw invalid2("A folder key for this source is a path.");
+    throw invalid3("A folder key for this source is a path.");
   if (kind === "label") {
     const value2 = boundedName(record2.value, "value");
     return { kind, source_id: sourceId, key: key2, value: value2 };
   }
   if (record2.value !== undefined)
-    throw invalid2("A folder rule takes key, not value.");
+    throw invalid3("A folder rule takes key, not value.");
   return { kind, source_id: sourceId, key: key2, ...display ? { display } : {} };
 }
 function boundedName(value2, field) {
   const name = typeof value2 === "string" ? value2.trim() : "";
   if (!name || name.length > PRIVACY_DISPLAY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(name)) {
-    throw invalid2(`A rule's ${field} must be a name of at most ${PRIVACY_DISPLAY_MAX_CHARS} characters.`);
+    throw invalid3(`A rule's ${field} must be a name of at most ${PRIVACY_DISPLAY_MAX_CHARS} characters.`);
   }
   return name;
 }
@@ -90590,7 +92452,7 @@ function writePrivacyProfile(update, options = {}) {
 `);
   return next;
 }
-function invalid2(message2) {
+function invalid3(message2) {
   return new OperationError("invalid_params", message2);
 }
 function asRecord12(value2) {
@@ -108966,8 +110828,8 @@ var require_multipleOf = __commonJS((exports) => {
       const { gen, data: data2, schemaCode, it } = cxt;
       const prec = it.opts.multipleOfPrecision;
       const res = gen.let("res");
-      const invalid3 = prec ? (0, codegen_1._)`Math.abs(Math.round(${res}) - ${res}) > 1e-${prec}` : (0, codegen_1._)`${res} !== parseInt(${res})`;
-      cxt.fail$data((0, codegen_1._)`(${schemaCode} === 0 || (${res} = ${data2}/${schemaCode}, ${invalid3}))`);
+      const invalid4 = prec ? (0, codegen_1._)`Math.abs(Math.round(${res}) - ${res}) > 1e-${prec}` : (0, codegen_1._)`${res} !== parseInt(${res})`;
+      cxt.fail$data((0, codegen_1._)`(${schemaCode} === 0 || (${res} = ${data2}/${schemaCode}, ${invalid4}))`);
     }
   };
   exports.default = def;
@@ -117822,14 +119684,14 @@ import { chmodSync as chmodSync27, mkdirSync as mkdirSync49 } from "node:fs";
 import { createHash as createHash65, randomUUID as randomUUID27 } from "node:crypto";
 import { dirname as dirname71 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
-function settleUnreadable(candidates, classify) {
+function settleUnreadable(candidates, classify2) {
   const items = [];
   let blocked = 0;
   for (const candidate of candidates) {
     let verdict = "unreadable";
-    if (classify) {
+    if (classify2) {
       try {
-        verdict = classify(candidate);
+        verdict = classify2(candidate);
       } catch {
         verdict = "blocked_policy";
       }
@@ -129364,14 +131226,14 @@ function outsideHelpScriptConfig(csrfToken) {
 function renderStatusBlock(status, summary, access) {
   const route = status.route;
   const on = status.settings.state === "on";
-  const invalid3 = status.settings.state === "invalid";
+  const invalid4 = status.settings.state === "invalid";
   const unavailable2 = summary.state === "unavailable";
-  const blockedReason = invalid3 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable2 && !on ? "" : access === "unlock" ? unlockFirst(invalid3 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid3 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const blockedReason = invalid4 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const button = access === "read" || unavailable2 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
   const usage = !unavailable2 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
   const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable2 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
-  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid3 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid4 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
   const count = ready.requestsToday.count;
@@ -129495,14 +131357,14 @@ function renderBeforeTurningOn() {
   });
 }
 function renderLevel(status, canEdit) {
-  const invalid3 = status.settings.state === "invalid";
+  const invalid4 = status.settings.state === "invalid";
   const current2 = status.settings.level;
-  const blocked = !canEdit || invalid3 ? ' disabled aria-disabled="true"' : "";
+  const blocked = !canEdit || invalid4 ? ' disabled aria-disabled="true"' : "";
   const options = ["unnamed", "general"].map((level) => {
     const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
     return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current2 ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
   }).join("");
-  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid3 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid4 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current2].short, body });
 }
 function renderStandard(standard, level, canEdit) {
@@ -146769,19 +148631,19 @@ function decodeBase642(base642) {
   }
   return arrayBuffer;
 }
-function normalizeCharset(charset) {
-  return charset.replace(/^(?:x-ms-|x-|cs)/, "").replace(/[\s._-]+/g, "");
+function normalizeCharset(charset2) {
+  return charset2.replace(/^(?:x-ms-|x-|cs)/, "").replace(/[\s._-]+/g, "");
 }
-function resolveLabel(charset) {
-  charset = (charset || "utf8").trim().toLowerCase();
-  if (ENCODING_LABELS.has(charset)) {
-    return charset;
+function resolveLabel(charset2) {
+  charset2 = (charset2 || "utf8").trim().toLowerCase();
+  if (ENCODING_LABELS.has(charset2)) {
+    return charset2;
   }
-  const utf16 = UTF16_LABELS.get(charset);
+  const utf16 = UTF16_LABELS.get(charset2);
   if (utf16) {
     return utf16;
   }
-  const normalized = normalizeCharset(charset);
+  const normalized = normalizeCharset(charset2);
   const codePage = normalized.match(codePagePattern);
   const alias = codePage && codePageAliases.get(codePage[1]) || charsetAliases.get(normalized) || normalized;
   return ENCODING_LABELS.has(alias) ? alias : null;
@@ -146800,12 +148662,12 @@ function tryDecoder(label) {
   }
   return decoder;
 }
-function findDecoder(charset) {
-  const label = resolveLabel(charset);
+function findDecoder(charset2) {
+  const label = resolveLabel(charset2);
   return label ? tryDecoder(label) : null;
 }
-function getDecoder2(charset) {
-  return findDecoder(charset) || tryDecoder("windows-1252") || utf8Decoder;
+function getDecoder2(charset2) {
+  return findDecoder(charset2) || tryDecoder("windows-1252") || utf8Decoder;
 }
 function bomByteOrder(bytes) {
   if (bytes[0] === 254 && bytes[1] === 255) {
@@ -146855,9 +148717,9 @@ function decodeUtf8OrWindows1252(bytes, utf83 = utf8Decoder) {
   const view3 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   return isUtf8(view3) ? utf83.decode(view3) : getDecoder2("windows-1252").decode(view3);
 }
-function decodeCharset(bytes, charset) {
+function decodeCharset(bytes, charset2) {
   const view3 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const label = resolveLabel(charset);
+  const label = resolveLabel(charset2);
   let decoder = label ? tryDecoder(label) : null;
   if (label && UTF16_UNORDERED_LABELS.has(label)) {
     const order = bomByteOrder(view3);
@@ -146881,10 +148743,10 @@ function sniffHtmlCharset(bytes) {
   }
   return null;
 }
-function decodeText(bytes, charset, html3) {
+function decodeText(bytes, charset2, html3) {
   const view3 = new Uint8Array(bytes);
-  if (charset) {
-    return decodeCharset(view3, charset);
+  if (charset2) {
+    return decodeCharset(view3, charset2);
   }
   const sniffed = html3 ? sniffHtmlCharset(view3) : null;
   const decoder = sniffed ? findDecoder(sniffed) : null;
@@ -146923,10 +148785,10 @@ function hexNibble(c) {
 function foldLineBreaks(str) {
   return str.replace(/[\r\n]+/g, " ");
 }
-function decodeWord(charset, encoding, str) {
-  let splitPos = charset.indexOf("*");
+function decodeWord(charset2, encoding, str) {
+  let splitPos = charset2.indexOf("*");
   if (splitPos >= 0) {
-    charset = charset.slice(0, splitPos);
+    charset2 = charset2.slice(0, splitPos);
   }
   encoding = encoding.toUpperCase();
   let byteStr;
@@ -146957,7 +148819,7 @@ function decodeWord(charset, encoding, str) {
   } else {
     byteStr = textEncoder.encode(str);
   }
-  return foldLineBreaks(decodeCharset(byteStr, charset));
+  return foldLineBreaks(decodeCharset(byteStr, charset2));
 }
 function isEncodedWordsOnly(str) {
   return ENCODED_WORDS_ONLY_REGEX.test(str);
@@ -147031,8 +148893,8 @@ function decodeWords(str) {
   const result = renderTokens(tokens, true);
   return result.indexOf("�") < 0 ? result : renderTokens(tokens, false);
 }
-function decodeURIComponentWithCharset(encodedStr, charset) {
-  charset = charset || "utf-8";
+function decodeURIComponentWithCharset(encodedStr, charset2) {
+  charset2 = charset2 || "utf-8";
   let encodedBytes = [];
   for (let i2 = 0;i2 < encodedStr.length; i2++) {
     let c = encodedStr.charAt(i2);
@@ -147055,7 +148917,7 @@ function decodeURIComponentWithCharset(encodedStr, charset) {
   for (let i2 = 0, len = encodedBytes.length;i2 < len; i2++) {
     dataView.setUint8(i2, encodedBytes[i2]);
   }
-  return decodeCharset(byteStr, charset);
+  return decodeCharset(byteStr, charset2);
 }
 function decodeParameterValueContinuations(header) {
   let paramKeys = new Map;
@@ -150903,7 +152765,7 @@ function _handleAddress(tokens, from, to) {
   return address;
 }
 
-class Tokenizer {
+class Tokenizer2 {
   constructor(str) {
     this.str = (str || "").toString();
     this.operatorCurrent = "";
@@ -151135,7 +152997,7 @@ function mergeNameFragments(list) {
   return merged.reverse();
 }
 function parseAddressList(str) {
-  const tokens = new Tokenizer(str).tokenize();
+  const tokens = new Tokenizer2(str).tokenize();
   const parsedAddresses = [];
   let group = null;
   let members = [];
@@ -151952,8 +153814,8 @@ function isoDate(value2) {
 function stripHtml2(value2) {
   return value2.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
-function charsetDecodable(charset) {
-  const label = charset.trim().toLowerCase();
+function charsetDecodable(charset2) {
+  const label = charset2.trim().toLowerCase();
   if (!label)
     return true;
   const cached3 = decodableCharsets.get(label);
@@ -152029,7 +153891,7 @@ async function messageOutcome(input, span) {
   const attachments = attachmentInventory(email2);
   if (attachments.count > 0)
     findings.push({ kind: MBOX_FINDINGS.attachments, count: attachments.count });
-  if (declaredCharsets(raw).some((charset) => !charsetDecodable(charset)))
+  if (declaredCharsets(raw).some((charset2) => !charsetDecodable(charset2)))
     findings.push({ kind: MBOX_FINDINGS.charset });
   const summary = [
     email2.subject?.trim() ? `Subject: ${email2.subject.trim()}` : undefined,
@@ -152296,1750 +154158,87 @@ var init_continuation_cache = __esm(() => {
   archiveContinuations = new ContinuationCache;
 });
 
-// node_modules/@streamparser/json/dist/mjs/utils/bufferedString.js
-class NonBufferedString {
-  constructor() {
-    this.decoder = new TextDecoder("utf-8", { fatal: true });
-    this.pending = [];
-    this.string = "";
-    this.byteLength = 0;
-  }
-  appendChar(char) {
-    this.pending.push(String.fromCharCode(char));
-    this.byteLength += 1;
-  }
-  appendBuf(buf, start = 0, end = buf.length) {
-    this.pending.push(this.decoder.decode(buf.subarray(start, end)));
-    this.byteLength += end - start;
-  }
-  appendCharCode(code) {
-    this.pending.push(String.fromCharCode(code));
-  }
-  reset() {
-    this.pending = [];
-    this.string = "";
-    this.byteLength = 0;
-  }
-  toString() {
-    if (this.pending.length > 0) {
-      this.string += this.pending.join("");
-      this.pending = [];
-    }
-    return this.string;
-  }
-}
-
-class BufferedString {
-  constructor(bufferSize) {
-    this.decoder = new TextDecoder("utf-8", { fatal: true });
-    this.bufferOffset = 0;
-    this.string = "";
-    this.byteLength = 0;
-    this.buffer = new Uint8Array(bufferSize);
-  }
-  appendChar(char) {
-    if (this.bufferOffset >= this.buffer.length)
-      this.flushStringBuffer();
-    this.buffer[this.bufferOffset++] = char;
-    this.byteLength += 1;
-  }
-  appendBuf(buf, start = 0, end = buf.length) {
-    const size = end - start;
-    if (this.bufferOffset + size > this.buffer.length)
-      this.flushStringBuffer();
-    if (size > this.buffer.length) {
-      this.string += this.decoder.decode(buf.subarray(start, end));
-      this.byteLength += size;
-      return;
-    }
-    this.buffer.set(buf.subarray(start, end), this.bufferOffset);
-    this.bufferOffset += size;
-    this.byteLength += size;
-  }
-  appendCharCode(code) {
-    this.flushStringBuffer();
-    this.string += String.fromCharCode(code);
-  }
-  flushStringBuffer() {
-    this.string += this.decoder.decode(this.buffer.subarray(0, this.bufferOffset));
-    this.bufferOffset = 0;
-  }
-  reset() {
-    this.string = "";
-    this.bufferOffset = 0;
-    this.byteLength = 0;
-  }
-  toString() {
-    this.flushStringBuffer();
-    return this.string;
-  }
-}
-
-// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
-var TokenType, tokenType_default;
-var init_tokenType = __esm(() => {
-  (function(TokenType2) {
-    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-    TokenType2[TokenType2["COLON"] = 4] = "COLON";
-    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
-    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
-    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
-    TokenType2[TokenType2["NULL"] = 8] = "NULL";
-    TokenType2[TokenType2["STRING"] = 9] = "STRING";
-    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
-    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
-  })(TokenType || (TokenType = {}));
-  tokenType_default = TokenType;
-});
-
-// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
-var charset, escapedSequences;
-var init_utf_8 = __esm(() => {
-  (function(charset2) {
-    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
-    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
-    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
-    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-    charset2[charset2["TAB"] = 9] = "TAB";
-    charset2[charset2["SPACE"] = 32] = "SPACE";
-    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
-    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
-    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
-    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-    charset2[charset2["COMMA"] = 44] = "COMMA";
-    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
-    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
-    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-    charset2[charset2["COLON"] = 58] = "COLON";
-    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
-    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
-    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-    charset2[charset2["TILDE"] = 126] = "TILDE";
-  })(charset || (charset = {}));
-  escapedSequences = {
-    [34]: 34,
-    [92]: 92,
-    [47]: 47,
-    [98]: 8,
-    [102]: 12,
-    [110]: 10,
-    [114]: 13,
-    [116]: 9
-  };
-});
-
-// node_modules/@streamparser/json/dist/mjs/tokenizer.js
-function TokenizerStateToString(tokenizerState) {
-  return [
-    "START",
-    "ENDED",
-    "ERROR",
-    "TRUE1",
-    "TRUE2",
-    "TRUE3",
-    "FALSE1",
-    "FALSE2",
-    "FALSE3",
-    "FALSE4",
-    "NULL1",
-    "NULL2",
-    "NULL3",
-    "STRING_DEFAULT",
-    "STRING_AFTER_BACKSLASH",
-    "STRING_UNICODE_DIGIT_1",
-    "STRING_UNICODE_DIGIT_2",
-    "STRING_UNICODE_DIGIT_3",
-    "STRING_UNICODE_DIGIT_4",
-    "STRING_INCOMPLETE_CHAR",
-    "NUMBER_AFTER_INITIAL_MINUS",
-    "NUMBER_AFTER_INITIAL_ZERO",
-    "NUMBER_AFTER_INITIAL_NON_ZERO",
-    "NUMBER_AFTER_FULL_STOP",
-    "NUMBER_AFTER_DECIMAL",
-    "NUMBER_AFTER_E",
-    "NUMBER_AFTER_E_AND_SIGN",
-    "NUMBER_AFTER_E_AND_DIGIT",
-    "SEPARATOR",
-    "BOM_OR_START",
-    "BOM"
-  ][tokenizerState];
-}
-function validateBufferSize(name, size) {
-  if (size === undefined)
-    return;
-  if (!Number.isInteger(size) || size < 0) {
-    throw new TokenizerError(`Invalid "${name}": ${size}. Expected a non-negative integer.`);
-  }
-}
-function utf8SequenceLength(leadByte) {
-  if (leadByte >= 194 && leadByte <= 223)
-    return 2;
-  if (leadByte <= 239)
-    return 3;
-  return 4;
-}
-function multiByteRunEnd(buffer, start) {
-  let j = start;
-  while (j < buffer.length && buffer[j] >= 128) {
-    const seqLength = utf8SequenceLength(buffer[j]);
-    if (j + seqLength > buffer.length)
-      break;
-    j += seqLength;
-  }
-  return j;
-}
-
-class Tokenizer2 {
-  constructor(opts) {
-    this.state = 29;
-    this.bomIndex = 0;
-    this.separatorIndex = 0;
-    this.escapedCharsByteLength = 0;
-    this.bytes_remaining = 0;
-    this.bytes_in_sequence = 0;
-    this.char_split_buffer = new Uint8Array(4);
-    this.encoder = new TextEncoder;
-    this.offset = -1;
-    this.streamByteLength = 0;
-    opts = Object.assign(Object.assign({}, defaultOpts), opts);
-    validateBufferSize("stringBufferSize", opts.stringBufferSize);
-    validateBufferSize("numberBufferSize", opts.numberBufferSize);
-    this.emitPartialTokens = opts.emitPartialTokens === true;
-    this.bufferedString = opts.stringBufferSize && opts.stringBufferSize > 4 ? new BufferedString(opts.stringBufferSize) : new NonBufferedString;
-    this.bufferedNumber = opts.numberBufferSize && opts.numberBufferSize > 0 ? new BufferedString(opts.numberBufferSize) : new NonBufferedString;
-    this.separator = opts.separator;
-    this.separatorBytes = opts.separator ? this.encoder.encode(opts.separator) : undefined;
-  }
-  get isEnded() {
-    return this.state === 1;
-  }
-  appendUnicodeCodeUnit(intVal) {
-    if (this.highSurrogate !== undefined) {
-      if (intVal >= 56320 && intVal <= 57343) {
-        const unicodeString2 = String.fromCharCode(this.highSurrogate, intVal);
-        const unicodeBuffer2 = this.encoder.encode(unicodeString2);
-        this.bufferedString.appendBuf(unicodeBuffer2);
-        this.escapedCharsByteLength += 6 - unicodeBuffer2.byteLength;
-        this.highSurrogate = undefined;
+// src/workers/archive-import/resume-crc.ts
+function trackBoundaries(inner, startCrc) {
+  let chunk;
+  let chunkStart = 0;
+  let crcBeforeChunk;
+  let first = true;
+  let kept;
+  return {
+    get position() {
+      return inner.position;
+    },
+    get crc32() {
+      return inner.crc32;
+    },
+    get boundary() {
+      return kept?.offset;
+    },
+    next() {
+      const crcBefore = first ? startCrc : inner.crc32;
+      const pulled = inner.next();
+      first = false;
+      if (pulled) {
+        chunk = pulled;
+        chunkStart = inner.position - pulled.length;
+        crcBeforeChunk = crcBefore;
+      }
+      return pulled;
+    },
+    unread(count) {
+      inner.unread(count);
+      if (chunk && count > 0)
+        chunk = chunk.subarray(0, Math.max(0, chunk.length - count));
+    },
+    markBoundary(offset) {
+      const within2 = offset - chunkStart;
+      if (!chunk || crcBeforeChunk === undefined || within2 < 0 || within2 > chunk.length) {
+        kept = undefined;
         return;
       }
-      this.flushPendingHighSurrogate();
-    }
-    if (intVal >= 55296 && intVal <= 56319) {
-      this.highSurrogate = intVal;
-      this.escapedCharsByteLength += 6;
-      return;
-    }
-    if (intVal >= 56320 && intVal <= 57343) {
-      this.bufferedString.appendCharCode(intVal);
-      this.escapedCharsByteLength += 6;
-      return;
-    }
-    const unicodeString = String.fromCharCode(intVal);
-    const unicodeBuffer = this.encoder.encode(unicodeString);
-    this.bufferedString.appendBuf(unicodeBuffer);
-    this.escapedCharsByteLength += 6 - unicodeBuffer.byteLength;
-  }
-  flushPendingHighSurrogate() {
-    if (this.highSurrogate !== undefined) {
-      this.bufferedString.appendCharCode(this.highSurrogate);
-      this.highSurrogate = undefined;
-    }
-  }
-  startIncompleteChar(buffer, start) {
-    this.bytes_in_sequence = utf8SequenceLength(buffer[start]);
-    this.bytes_remaining = start + this.bytes_in_sequence - buffer.length;
-    this.char_split_buffer.set(buffer.subarray(start));
-    this.state = 19;
-  }
-  write(input) {
-    try {
-      let buffer;
-      if (input instanceof Uint8Array) {
-        buffer = input;
-      } else if (typeof input === "string") {
-        if (this.pendingStringSurrogate !== undefined) {
-          input = this.pendingStringSurrogate + input;
-          this.pendingStringSurrogate = undefined;
-        }
-        const lastCharCode = input.charCodeAt(input.length - 1);
-        if (lastCharCode >= 55296 && lastCharCode <= 56319) {
-          this.pendingStringSurrogate = input[input.length - 1];
-          input = input.slice(0, -1);
-        }
-        buffer = this.encoder.encode(input);
-      } else if (ArrayBuffer.isView(input)) {
-        buffer = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-      } else if (input !== null && typeof input === "object" && typeof input[Symbol.iterator] === "function") {
-        buffer = Uint8Array.from(input);
-      } else {
-        throw new TypeError("Unexpected type. The `write` function only accepts Iterables (e.g. Arrays, Sets, Generators), TypedArrays and Strings.");
-      }
-      for (let i2 = 0;i2 < buffer.length; i2 += 1) {
-        const n = buffer[i2];
-        switch (this.state) {
-          case 29:
-            if (n === 239) {
-              this.bom = [239, 187, 191];
-              this.bomIndex += 1;
-              this.state = 30;
-              continue;
-            }
-            if (input instanceof Uint16Array) {
-              if (n === 254) {
-                this.bom = [254, 255];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-              if (n === 255) {
-                this.bom = [255, 254];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-            }
-            if (input instanceof Uint32Array) {
-              if (n === 0) {
-                this.bom = [0, 0, 254, 255];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-              if (n === 255) {
-                this.bom = [255, 254, 0, 0];
-                this.bomIndex += 1;
-                this.state = 30;
-                continue;
-              }
-            }
-          case 0:
-            this.offset += 1;
-            if (this.separatorBytes && n === this.separatorBytes[0]) {
-              if (this.separatorBytes.length === 1) {
-                this.state = 0;
-                this.onToken({
-                  token: tokenType_default.SEPARATOR,
-                  value: this.separator,
-                  offset: this.offset + this.separatorBytes.length - 1
-                });
-                continue;
-              }
-              this.state = 28;
-              continue;
-            }
-            if (n === 32 || n === 10 || n === 13 || n === 9) {
-              continue;
-            }
-            if (n === 123) {
-              this.onToken({
-                token: tokenType_default.LEFT_BRACE,
-                value: "{",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 125) {
-              this.onToken({
-                token: tokenType_default.RIGHT_BRACE,
-                value: "}",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 91) {
-              this.onToken({
-                token: tokenType_default.LEFT_BRACKET,
-                value: "[",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 93) {
-              this.onToken({
-                token: tokenType_default.RIGHT_BRACKET,
-                value: "]",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 58) {
-              this.onToken({
-                token: tokenType_default.COLON,
-                value: ":",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 44) {
-              this.onToken({
-                token: tokenType_default.COMMA,
-                value: ",",
-                offset: this.offset
-              });
-              continue;
-            }
-            if (n === 116) {
-              this.state = 3;
-              continue;
-            }
-            if (n === 102) {
-              this.state = 6;
-              continue;
-            }
-            if (n === 110) {
-              this.state = 10;
-              continue;
-            }
-            if (n === 34) {
-              this.bufferedString.reset();
-              this.escapedCharsByteLength = 0;
-              this.state = 13;
-              continue;
-            }
-            if (n >= 49 && n <= 57) {
-              this.bufferedNumber.reset();
-              this.bufferedNumber.appendChar(n);
-              this.state = 22;
-              continue;
-            }
-            if (n === 48) {
-              this.bufferedNumber.reset();
-              this.bufferedNumber.appendChar(n);
-              this.state = 21;
-              continue;
-            }
-            if (n === 45) {
-              this.bufferedNumber.reset();
-              this.bufferedNumber.appendChar(n);
-              this.state = 20;
-              continue;
-            }
-            break;
-          case 13:
-            if (n === 34) {
-              this.flushPendingHighSurrogate();
-              const string5 = this.bufferedString.toString();
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.STRING,
-                value: string5,
-                offset: this.offset
-              });
-              this.offset += this.escapedCharsByteLength + this.bufferedString.byteLength + 1;
-              continue;
-            }
-            if (n === 92) {
-              this.state = 14;
-              continue;
-            }
-            if (n >= 128) {
-              this.flushPendingHighSurrogate();
-              const runEnd = multiByteRunEnd(buffer, i2);
-              if (runEnd > i2) {
-                this.bufferedString.appendBuf(buffer, i2, runEnd);
-                i2 = runEnd - 1;
-              }
-              if (runEnd < buffer.length && buffer[runEnd] >= 128) {
-                this.startIncompleteChar(buffer, runEnd);
-                i2 = buffer.length - 1;
-              }
-              continue;
-            }
-            if (n >= 32) {
-              this.flushPendingHighSurrogate();
-              let j = i2;
-              while (j < buffer.length) {
-                const b = buffer[j];
-                if (b < 32 || b >= 128 || b === 34 || b === 92)
-                  break;
-                j += 1;
-              }
-              if (j - i2 >= 16) {
-                this.bufferedString.appendBuf(buffer, i2, j);
-              } else {
-                for (let k = i2;k < j; k += 1)
-                  this.bufferedString.appendChar(buffer[k]);
-              }
-              i2 = j - 1;
-              continue;
-            }
-            break;
-          case 19: {
-            const available = Math.min(this.bytes_remaining, buffer.length - i2);
-            this.char_split_buffer.set(buffer.subarray(i2, i2 + available), this.bytes_in_sequence - this.bytes_remaining);
-            this.bytes_remaining -= available;
-            if (this.bytes_remaining > 0) {
-              i2 = buffer.length - 1;
-              continue;
-            }
-            this.bufferedString.appendBuf(this.char_split_buffer, 0, this.bytes_in_sequence);
-            i2 += available - 1;
-            this.state = 13;
-            continue;
-          }
-          case 14: {
-            const controlChar = escapedSequences[n];
-            if (controlChar) {
-              this.flushPendingHighSurrogate();
-              this.bufferedString.appendChar(controlChar);
-              this.escapedCharsByteLength += 1;
-              this.state = 13;
-              continue;
-            }
-            if (n === 117) {
-              this.unicode = "";
-              this.state = 15;
-              continue;
-            }
-            break;
-          }
-          case 15:
-          case 16:
-          case 17:
-            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
-              this.unicode += String.fromCharCode(n);
-              this.state += 1;
-              continue;
-            }
-            break;
-          case 18:
-            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
-              const intVal = parseInt(this.unicode + String.fromCharCode(n), 16);
-              this.appendUnicodeCodeUnit(intVal);
-              this.state = 13;
-              continue;
-            }
-            break;
-          case 20:
-            if (n === 48) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 21;
-              continue;
-            }
-            if (n >= 49 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 22;
-              continue;
-            }
-            break;
-          case 21:
-            if (n === 46) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 23;
-              continue;
-            }
-            if (n === 101 || n === 69) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 25;
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 22:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              continue;
-            }
-            if (n === 46) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 23;
-              continue;
-            }
-            if (n === 101 || n === 69) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 25;
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 23:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 24;
-              continue;
-            }
-            break;
-          case 24:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              continue;
-            }
-            if (n === 101 || n === 69) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 25;
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 25:
-            if (n === 43 || n === 45) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 26;
-              continue;
-            }
-          case 26:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              this.state = 27;
-              continue;
-            }
-            break;
-          case 27:
-            if (n >= 48 && n <= 57) {
-              this.bufferedNumber.appendChar(n);
-              continue;
-            }
-            i2 -= 1;
-            this.state = 0;
-            this.emitNumber();
-            continue;
-          case 3:
-            if (n === 114) {
-              this.state = 4;
-              continue;
-            }
-            break;
-          case 4:
-            if (n === 117) {
-              this.state = 5;
-              continue;
-            }
-            break;
-          case 5:
-            if (n === 101) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.TRUE,
-                value: true,
-                offset: this.offset
-              });
-              this.offset += 3;
-              continue;
-            }
-            break;
-          case 6:
-            if (n === 97) {
-              this.state = 7;
-              continue;
-            }
-            break;
-          case 7:
-            if (n === 108) {
-              this.state = 8;
-              continue;
-            }
-            break;
-          case 8:
-            if (n === 115) {
-              this.state = 9;
-              continue;
-            }
-            break;
-          case 9:
-            if (n === 101) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.FALSE,
-                value: false,
-                offset: this.offset
-              });
-              this.offset += 4;
-              continue;
-            }
-            break;
-          case 10:
-            if (n === 117) {
-              this.state = 11;
-              continue;
-            }
-            break;
-          case 11:
-            if (n === 108) {
-              this.state = 12;
-              continue;
-            }
-            break;
-          case 12:
-            if (n === 108) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.NULL,
-                value: null,
-                offset: this.offset
-              });
-              this.offset += 3;
-              continue;
-            }
-            break;
-          case 28:
-            this.separatorIndex += 1;
-            if (!this.separatorBytes || n !== this.separatorBytes[this.separatorIndex]) {
-              break;
-            }
-            if (this.separatorIndex === this.separatorBytes.length - 1) {
-              this.state = 0;
-              this.onToken({
-                token: tokenType_default.SEPARATOR,
-                value: this.separator,
-                offset: this.offset + this.separatorIndex
-              });
-              this.separatorIndex = 0;
-            }
-            continue;
-          case 30:
-            if (n === this.bom[this.bomIndex]) {
-              if (this.bomIndex === this.bom.length - 1) {
-                this.state = 0;
-                this.bom = undefined;
-                this.bomIndex = 0;
-                continue;
-              }
-              this.bomIndex += 1;
-              continue;
-            }
-            break;
-          case 1:
-            if (n === 32 || n === 10 || n === 13 || n === 9) {
-              continue;
-            }
-        }
-        throw new TokenizerError(`Unexpected "${String.fromCharCode(n)}" at chunk position "${i2}" (absolute position "${this.streamByteLength + i2}") in state ${TokenizerStateToString(this.state)}`);
-      }
-      this.streamByteLength += buffer.length;
-      if (this.emitPartialTokens) {
-        switch (this.state) {
-          case 3:
-          case 4:
-          case 5:
-            this.onToken({
-              token: tokenType_default.TRUE,
-              value: true,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          case 6:
-          case 7:
-          case 8:
-          case 9:
-            this.onToken({
-              token: tokenType_default.FALSE,
-              value: false,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          case 10:
-          case 11:
-          case 12:
-            this.onToken({
-              token: tokenType_default.NULL,
-              value: null,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          case 13: {
-            const string5 = this.bufferedString.toString();
-            this.onToken({
-              token: tokenType_default.STRING,
-              value: string5,
-              offset: this.offset,
-              partial: true
-            });
-            break;
-          }
-          case 21:
-          case 22:
-          case 24:
-          case 27:
-            try {
-              this.onToken({
-                token: tokenType_default.NUMBER,
-                value: this.parseNumber(this.bufferedNumber.toString()),
-                offset: this.offset,
-                partial: true
-              });
-            } catch (_a5) {}
-        }
-      }
-    } catch (err2) {
-      this.error(err2);
-    }
-  }
-  emitNumber() {
-    this.onToken({
-      token: tokenType_default.NUMBER,
-      value: this.parseNumber(this.bufferedNumber.toString()),
-      offset: this.offset
-    });
-    this.offset += this.bufferedNumber.byteLength - 1;
-  }
-  parseNumber(numberStr) {
-    return Number(numberStr);
-  }
-  error(err2) {
-    if (this.state !== 1) {
-      this.state = 2;
-    }
-    this.onError(err2);
-  }
-  end() {
-    switch (this.state) {
-      case 21:
-      case 22:
-      case 24:
-      case 27:
-        this.state = 1;
-        this.emitNumber();
-        this.onEnd();
-        break;
-      case 29:
-      case 0:
-      case 2:
-        this.state = 1;
-        this.onEnd();
-        break;
-      default:
-        this.error(new TokenizerError(`Tokenizer ended in the middle of a token (state: ${TokenizerStateToString(this.state)}). Either not all the data was received or the data was invalid.`));
-    }
-  }
-  onToken(parsedToken) {
-    throw new TokenizerError(`Can't emit tokens before the "onToken" callback has been set up.`);
-  }
-  onError(err2) {
-    throw err2;
-  }
-  onEnd() {}
-}
-var TokenizerStates, defaultOpts, TokenizerError;
-var init_tokenizer = __esm(() => {
-  init_tokenType();
-  init_utf_8();
-  (function(TokenizerStates2) {
-    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
-    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
-    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
-    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
-    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
-    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
-    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
-    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
-    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
-    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
-    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
-    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
-    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
-    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
-    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
-    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
-  })(TokenizerStates || (TokenizerStates = {}));
-  defaultOpts = {
-    stringBufferSize: 0,
-    numberBufferSize: 0,
-    separator: undefined,
-    emitPartialTokens: false
-  };
-  TokenizerError = class TokenizerError extends Error {
-    constructor(message2) {
-      super(message2);
-      Object.setPrototypeOf(this, TokenizerError.prototype);
+      kept = { offset, crcBefore: crcBeforeChunk, prefix: chunk.subarray(0, within2) };
+    },
+    crcAtBoundary() {
+      return kept ? crc32Update(kept.crcBefore, kept.prefix) >>> 0 : undefined;
     }
   };
-});
-
-// src/workers/archive-import/json-stream.ts
-function isHexDigit(byte) {
-  return byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102;
 }
-function isEscapeByte(byte) {
-  return byte === 34 || byte === 92 || byte === 47 || byte === 98 || byte === 102 || byte === 110 || byte === 114 || byte === 116;
-}
-function isSpaceOrStructure(byte) {
-  return byte === 32 || byte === 10 || byte === 13 || byte === 9 || byte === 44 || byte === 58 || byte === 91 || byte === 93 || byte === 123 || byte === 125;
-}
-function isValueStart(type) {
-  return type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET || type === tokenType_default.STRING || type === tokenType_default.NUMBER || type === tokenType_default.TRUE || type === tokenType_default.FALSE || type === tokenType_default.NULL || type === OVERSIZE;
-}
-function invalid3() {
-  return new JsonStreamError("invalid_json", "This file is not valid JSON.");
-}
-function classify(kind, phase, type) {
-  if (kind === "root") {
-    if (phase === "root" && isValueStart(type))
-      return "value";
-    throw invalid3();
-  }
-  if (kind === "object") {
-    if (phase === "first") {
-      if (type === tokenType_default.STRING)
-        return "key";
-      if (type === tokenType_default.RIGHT_BRACE)
-        return "close";
-    } else if (phase === "next") {
-      if (type === tokenType_default.STRING)
-        return "key";
-    } else if (phase === "colon") {
-      if (type === tokenType_default.COLON)
-        return "colon";
-    } else if (phase === "value") {
-      if (isValueStart(type))
-        return "value";
-    } else if (phase === "after") {
-      if (type === tokenType_default.COMMA)
-        return "comma";
-      if (type === tokenType_default.RIGHT_BRACE)
-        return "close";
-    }
-    throw invalid3();
-  }
-  if (phase === "first") {
-    if (isValueStart(type))
-      return "value";
-    if (type === tokenType_default.RIGHT_BRACKET)
-      return "close";
-  } else if (phase === "next") {
-    if (isValueStart(type))
-      return "value";
-  } else if (phase === "after") {
-    if (type === tokenType_default.COMMA)
-      return "comma";
-    if (type === tokenType_default.RIGHT_BRACKET)
-      return "close";
-  }
-  throw invalid3();
-}
-function setOwn(target, key2, value2) {
-  Object.defineProperty(target, key2, { value: value2, enumerable: true, writable: true, configurable: true });
-}
-function copyFrame(frame) {
-  const out = {};
-  for (const key2 of Object.keys(frame))
-    setOwn(out, key2, frame[key2]);
-  return out;
-}
-function serializeJsonResume(point) {
-  return JSON.stringify({
-    o: point.offset,
-    l: point.levels.map((level) => [level.kind === "object" ? "o" : "a", level.pointer, level.frame])
-  });
-}
-function parseJsonResume(text3) {
-  let raw;
+function recoverZipMemberCrc(archive, entry, offset, shouldContinue) {
+  if (offset === 0)
+    return { kind: "crc", crc: 0 };
+  let reader;
   try {
-    raw = JSON.parse(text3);
-  } catch {
-    return;
+    reader = ZipMemberReader.open(archive, entry);
+  } catch (error2) {
+    if (error2 instanceof ZipMemberError || error2 instanceof ZipFormatError)
+      return { kind: "unavailable" };
+    throw error2;
   }
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
-    return;
-  const { o, l } = raw;
-  if (typeof o !== "number" || !Number.isSafeInteger(o) || o < 0)
-    return;
-  if (!Array.isArray(l) || l.length === 0 || l.length > JSON_STREAM_MAX_DEPTH)
-    return;
-  const levels = [];
-  for (const entry of l) {
-    if (!Array.isArray(entry) || entry.length !== 3)
-      return;
-    const [code, pointer, frame] = entry;
-    if (code !== "o" && code !== "a")
-      return;
-    if (code === "a") {
-      if (typeof pointer !== "number" || !Number.isSafeInteger(pointer) || pointer < 0)
-        return;
-    } else if (typeof pointer !== "string" || pointer.length > JSON_STREAM_MAX_KEY_CHARS) {
-      return;
-    }
-    if (typeof frame !== "object" || frame === null || Array.isArray(frame))
-      return;
-    const keys = Object.keys(frame);
-    if (keys.length > JSON_STREAM_MAX_FRAME_KEYS)
-      return;
-    const clean2 = {};
-    for (const key2 of keys) {
-      const value2 = frame[key2];
-      if (value2 !== null && typeof value2 !== "string" && typeof value2 !== "number" && typeof value2 !== "boolean")
-        return;
-      if (typeof value2 === "string" && value2.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
-        return;
-      setOwn(clean2, key2, value2);
-    }
-    levels.push({ kind: code === "o" ? "object" : "array", pointer, frame: clean2 });
-  }
-  return { offset: o, levels };
-}
-
-class JsonStreamReader {
-  source;
-  itemPaths;
-  maxItemBytes;
-  queue = [];
-  queueAt = 0;
-  peakQueued = 0;
-  levels = [];
-  phase = "root";
-  capture;
-  pending;
-  merged;
-  tokenizer;
-  base = 0;
-  inbox;
-  inboxAt = 0;
-  inboxBase = 0;
-  lex = LEX_OUT;
-  hexLeft = 0;
-  utfLeft = 0;
-  utfLow = 128;
-  utfHigh = 191;
-  stringStart = 0;
-  stringLimit = 0;
-  runStart = -1;
-  stop = STOP_END;
-  skipping = false;
-  failure;
-  resuming;
-  started = false;
-  head;
-  finished = false;
-  constructor(source, options) {
-    this.source = source;
-    this.itemPaths = options.itemPaths;
-    this.maxItemBytes = Math.max(1, options.maxItemBytes);
-    this.resuming = options.resume !== undefined;
-    if (options.resume) {
-      const resume = options.resume;
-      if (source.position !== resume.offset || resume.levels.length === 0 || resume.levels.length > JSON_STREAM_MAX_DEPTH) {
-        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
-      }
-      this.levels = resume.levels.map((level) => ({ kind: level.kind, pointer: level.pointer, frame: level.frame }));
-      this.phase = "after";
-      this.started = true;
-    }
-  }
-  get position() {
-    return this.source.position;
-  }
-  get peakQueuedEvents() {
-    return this.peakQueued;
-  }
-  next() {
+  try {
     for (;; ) {
-      if (this.queueAt < this.queue.length) {
-        const event = this.queue[this.queueAt];
-        this.queueAt += 1;
-        if (this.queueAt === this.queue.length) {
-          this.queue.length = 0;
-          this.queueAt = 0;
-        }
-        return event;
-      }
-      if (this.failure)
-        throw this.failure;
-      if (this.inbox) {
-        this.pump();
-        continue;
-      }
-      if (this.finished)
-        return;
-      const chunk = this.source.next();
-      if (chunk === undefined) {
-        if (this.head) {
-          this.inbox = this.head;
-          this.inboxAt = 0;
-          this.inboxBase = 0;
-          this.head = undefined;
-          this.started = true;
-          continue;
-        }
-        this.finished = true;
-        this.finish();
-        continue;
-      }
-      this.feed(chunk);
-    }
-  }
-  startTokenizer(base) {
-    const tokenizer = new ExactNumberTokenizer;
-    this.base = base;
-    tokenizer.onToken = (info) => {
-      if (this.failure)
-        return;
-      try {
-        this.handle(info.token, info.value, this.base + info.offset);
-      } catch (error2) {
-        this.failure = error2 instanceof JsonStreamError ? error2 : invalid3();
-        throw this.failure;
-      }
-    };
-    tokenizer.onError = () => {
-      this.failure ??= this.resuming ? new JsonStreamError("resume_invalid", "No item ends where this import was to resume.") : invalid3();
-    };
-    this.tokenizer = tokenizer;
-    return tokenizer;
-  }
-  feed(chunk) {
-    let data2 = chunk;
-    let at = this.source.position - chunk.length;
-    if (!this.started) {
-      const joined = this.head ? concat(this.head, data2) : data2;
-      at -= this.head ? this.head.length : 0;
-      if (joined.length < 3) {
-        this.head = joined;
-        return;
-      }
-      this.head = undefined;
-      this.started = true;
-      data2 = joined;
-      if (data2[0] === 239 && data2[1] === 187 && data2[2] === 191) {
-        data2 = data2.subarray(3);
-        at += 3;
+      if (!shouldContinue())
+        return { kind: "interrupted" };
+      const chunk = reader.next();
+      if (!chunk)
+        return { kind: "unavailable" };
+      if (reader.position >= offset) {
+        reader.unread(reader.position - offset);
+        const crc = reader.crc32;
+        return crc === undefined ? { kind: "unavailable" } : { kind: "crc", crc };
       }
     }
-    if (data2.length === 0)
-      return;
-    this.inbox = data2;
-    this.inboxAt = 0;
-    this.inboxBase = at;
-  }
-  pump() {
-    const inbox = this.inbox;
-    try {
-      while (this.inboxAt < inbox.length && !this.failure && this.queue.length <= JSON_STREAM_MAX_QUEUED_EVENTS) {
-        const begin = this.inboxAt;
-        const end = Math.min(inbox.length, begin + JSON_STREAM_FEED_SLICE_BYTES);
-        this.inboxAt = end;
-        this.consume(inbox, begin, end, this.inboxBase);
-        if (this.queue.length > this.peakQueued)
-          this.peakQueued = this.queue.length;
-      }
-    } catch (error2) {
-      this.failure ??= error2 instanceof JsonStreamError ? error2 : invalid3();
-    }
-    if (this.failure || this.inboxAt >= inbox.length)
-      this.inbox = undefined;
-  }
-  consume(data2, begin, end, base) {
-    let index = begin;
-    let fed = begin;
-    while (index < end) {
-      if (this.skipping) {
-        const stopped2 = this.skipScan(data2, index, end);
-        if (this.stop === STOP_END) {
-          index = end;
-          fed = end;
-          break;
-        }
-        if (this.stop === STOP_BAD) {
-          this.failure ??= invalid3();
-          return;
-        }
-        const start = this.stringStart;
-        this.skipping = false;
-        index = stopped2 + 1;
-        fed = index;
-        this.deliver(OVERSIZE, undefined, start);
-        continue;
-      }
-      const stopped = this.scanNormal(data2, index, end, base);
-      if (this.stop === STOP_END) {
-        index = end;
-        break;
-      }
-      if (this.stop === STOP_BAD) {
-        this.write(data2.subarray(fed, stopped), base + fed);
-        this.failure ??= invalid3();
-        return;
-      }
-      const quote = this.stringStart - base;
-      if (quote >= fed)
-        this.write(data2.subarray(fed, quote + 1), base + fed);
-      if (this.failure)
-        return;
-      this.tokenizer = undefined;
-      this.skipping = true;
-      fed = stopped;
-      index = stopped;
-    }
-    if (!this.skipping && fed < end && !this.failure)
-      this.write(data2.subarray(fed, end), base + fed);
-  }
-  write(piece, offset) {
-    if (piece.length === 0)
-      return;
-    const tokenizer = this.tokenizer ?? this.startTokenizer(offset);
-    try {
-      tokenizer.write(piece);
-    } catch (error2) {
-      this.failure ??= error2 instanceof JsonStreamError ? error2 : invalid3();
-    }
-  }
-  scanNormal(data2, from, to, at) {
-    const max2 = this.maxItemBytes;
-    let lex = this.lex;
-    let hexLeft = this.hexLeft;
-    let utfLeft = this.utfLeft;
-    let runStart = this.runStart;
-    let index = from;
-    this.stop = STOP_END;
-    for (;index < to; index += 1) {
-      const byte = data2[index];
-      if (lex === LEX_OUT) {
-        if (byte === 34) {
-          lex = LEX_STRING;
-          this.stringStart = at + index;
-          this.stringLimit = at + index + max2;
-          runStart = -1;
-          utfLeft = 0;
-        } else if (isSpaceOrStructure(byte)) {
-          runStart = -1;
-        } else if (runStart < 0) {
-          runStart = at + index;
-        } else if (at + index + 1 - runStart > max2) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        continue;
-      }
-      if (at + index === this.stringLimit) {
-        this.stop = STOP_OVERSIZE;
-        break;
-      }
-      if (utfLeft > 0) {
-        if (byte < this.utfLow || byte > this.utfHigh) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        utfLeft -= 1;
-        this.utfLow = 128;
-        this.utfHigh = 191;
-        continue;
-      }
-      if (lex === LEX_STRING) {
-        if (byte === 34) {
-          lex = LEX_OUT;
-        } else if (byte === 92) {
-          lex = LEX_ESCAPE;
-        } else if (byte < 32) {
-          this.stop = STOP_BAD;
-          break;
-        } else if (byte >= 128) {
-          utfLeft = this.utfLead(byte);
-          if (utfLeft === 0) {
-            this.stop = STOP_BAD;
-            break;
-          }
-        }
-      } else if (lex === LEX_ESCAPE) {
-        if (byte === 117) {
-          lex = LEX_HEX;
-          hexLeft = 4;
-        } else if (isEscapeByte(byte)) {
-          lex = LEX_STRING;
-        } else {
-          this.stop = STOP_BAD;
-          break;
-        }
-      } else {
-        if (!isHexDigit(byte)) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        hexLeft -= 1;
-        if (hexLeft === 0)
-          lex = LEX_STRING;
-      }
-    }
-    this.lex = lex;
-    this.hexLeft = hexLeft;
-    this.utfLeft = utfLeft;
-    this.runStart = runStart;
-    return index;
-  }
-  utfLead(byte) {
-    this.utfLow = 128;
-    this.utfHigh = 191;
-    if (byte >= 194 && byte <= 223)
-      return 1;
-    if (byte >= 224 && byte <= 239) {
-      if (byte === 224)
-        this.utfLow = 160;
-      else if (byte === 237)
-        this.utfHigh = 159;
-      return 2;
-    }
-    if (byte >= 240 && byte <= 244) {
-      if (byte === 240)
-        this.utfLow = 144;
-      else if (byte === 244)
-        this.utfHigh = 143;
-      return 3;
-    }
-    return 0;
-  }
-  skipScan(data2, from, to) {
-    let lex = this.lex;
-    let hexLeft = this.hexLeft;
-    let utfLeft = this.utfLeft;
-    let index = from;
-    this.stop = STOP_END;
-    for (;index < to; index += 1) {
-      const byte = data2[index];
-      if (utfLeft > 0) {
-        if (byte < this.utfLow || byte > this.utfHigh) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        utfLeft -= 1;
-        this.utfLow = 128;
-        this.utfHigh = 191;
-        continue;
-      }
-      if (lex === LEX_STRING) {
-        if (byte === 34) {
-          lex = LEX_OUT;
-          this.stop = STOP_CLOSED;
-          break;
-        }
-        if (byte === 92) {
-          lex = LEX_ESCAPE;
-        } else if (byte < 32) {
-          this.stop = STOP_BAD;
-          break;
-        } else if (byte >= 128) {
-          utfLeft = this.utfLead(byte);
-          if (utfLeft === 0) {
-            this.stop = STOP_BAD;
-            break;
-          }
-        }
-      } else if (lex === LEX_ESCAPE) {
-        if (byte === 117) {
-          lex = LEX_HEX;
-          hexLeft = 4;
-        } else if (isEscapeByte(byte)) {
-          lex = LEX_STRING;
-        } else {
-          this.stop = STOP_BAD;
-          break;
-        }
-      } else {
-        if (!isHexDigit(byte)) {
-          this.stop = STOP_BAD;
-          break;
-        }
-        hexLeft -= 1;
-        if (hexLeft === 0)
-          lex = LEX_STRING;
-      }
-    }
-    this.lex = lex;
-    this.hexLeft = hexLeft;
-    this.utfLeft = utfLeft;
-    this.runStart = -1;
-    return index;
-  }
-  finish() {
-    try {
-      if (this.lex !== LEX_OUT || this.skipping) {
-        throw new JsonStreamError("truncated", "This file ends inside a piece of text.");
-      }
-      if (this.tokenizer) {
-        try {
-          this.tokenizer.end();
-        } catch (error2) {
-          throw this.failure ?? (error2 instanceof JsonStreamError ? error2 : invalid3());
-        }
-        if (this.failure)
-          throw this.failure;
-      }
-      if (this.capture || this.pending || this.levels.length > 0 || this.phase === "first" || this.phase === "next" || this.phase === "colon" || this.phase === "value") {
-        throw new JsonStreamError("truncated", "This file ends before its last item does.");
-      }
-      if (this.phase === "root")
-        throw new JsonStreamError("empty", "This file holds no JSON.");
-    } catch (error2) {
-      this.failure ??= error2 instanceof JsonStreamError ? error2 : invalid3();
-    }
-  }
-  deliver(type, value2, start) {
-    try {
-      this.handle(type, value2, start);
-    } catch (error2) {
-      this.failure = error2 instanceof JsonStreamError ? error2 : invalid3();
-      throw this.failure;
-    }
-  }
-  handle(type, value2, start) {
-    if (this.resuming) {
-      this.resuming = false;
-      const top2 = this.levels[this.levels.length - 1];
-      const fits = type === tokenType_default.COMMA || (top2.kind === "object" ? type === tokenType_default.RIGHT_BRACE : type === tokenType_default.RIGHT_BRACKET);
-      if (!fits)
-        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
-    }
-    if (this.capture) {
-      this.captureToken(this.capture, type, value2, start);
-      return;
-    }
-    const top = this.levels[this.levels.length - 1];
-    const role = classify(top ? top.kind : "root", this.phase, type);
-    switch (role) {
-      case "key": {
-        const key2 = value2;
-        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
-          throw invalid3();
-        this.levels[this.levels.length - 1] = { kind: "object", pointer: key2, frame: top.frame };
-        this.phase = "colon";
-        return;
-      }
-      case "colon":
-        this.phase = "value";
-        return;
-      case "comma":
-        this.flush(start);
-        this.phase = "next";
-        return;
-      case "close":
-        this.flush(start);
-        this.levels.pop();
-        this.merged = undefined;
-        this.phase = this.levels.length === 0 ? "done" : "after";
-        return;
-      case "value":
-        this.beginValue(type, value2, start);
-        return;
-    }
-  }
-  beginValue(type, value2, start) {
-    let top = this.levels[this.levels.length - 1];
-    if (top && top.kind === "array") {
-      top = { kind: "array", pointer: typeof top.pointer === "number" ? top.pointer + 1 : 0, frame: top.frame };
-      this.levels[this.levels.length - 1] = top;
-    }
-    if (top) {
-      const index = this.matchingPath();
-      if (index >= 0) {
-        const path = this.levels.map((level) => level.pointer);
-        const capture = {
-          start,
-          pathIndex: index,
-          path,
-          frame: this.mergedFrame(),
-          oversize: false,
-          depth: 0,
-          build: [],
-          result: undefined
-        };
-        this.capture = capture;
-        this.captureToken(capture, type, value2, start);
-        return;
-      }
-    }
-    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
-      if (this.levels.length >= JSON_STREAM_MAX_DEPTH)
-        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
-      this.levels.push({
-        kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
-        pointer: undefined,
-        frame: EMPTY_FRAME
-      });
-      this.merged = undefined;
-      this.phase = "first";
-      return;
-    }
-    if (top && top.kind === "object" && type !== OVERSIZE)
-      this.recordFrame(top, value2);
-    this.phase = top ? "after" : "done";
-  }
-  recordFrame(top, value2) {
-    if (typeof value2 === "string" && value2.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
-      return;
-    const key2 = top.pointer;
-    if (!Object.prototype.hasOwnProperty.call(top.frame, key2) && Object.keys(top.frame).length >= JSON_STREAM_MAX_FRAME_KEYS)
-      return;
-    const frame = copyFrame(top.frame);
-    setOwn(frame, key2, value2);
-    this.levels[this.levels.length - 1] = { kind: "object", pointer: top.pointer, frame };
-    this.merged = undefined;
-  }
-  matchingPath() {
-    const depth2 = this.levels.length - 1;
-    for (let index = 0;index < this.itemPaths.length; index += 1) {
-      const path = this.itemPaths[index];
-      if (path.length !== depth2)
-        continue;
-      let all = true;
-      for (let at = 0;at < depth2; at += 1) {
-        const wanted = path[at];
-        if (wanted !== JSON_STREAM_ANY && wanted !== this.levels[at].pointer) {
-          all = false;
-          break;
-        }
-      }
-      if (all)
-        return index;
-    }
-    return -1;
-  }
-  mergedFrame() {
-    if (this.merged)
-      return this.merged;
-    const out = {};
-    for (const level of this.levels) {
-      for (const key2 of Object.keys(level.frame))
-        setOwn(out, key2, level.frame[key2]);
-    }
-    this.merged = Object.keys(out).length === 0 ? EMPTY_FRAME : out;
-    return this.merged;
-  }
-  captureToken(capture, type, value2, start) {
-    if (!capture.oversize && (type === OVERSIZE || start - capture.start > this.maxItemBytes)) {
-      capture.oversize = true;
-      capture.result = undefined;
-      for (const level of capture.build)
-        level.value = undefined;
-    }
-    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
-      capture.depth += 1;
-      if (capture.depth > JSON_STREAM_MAX_DEPTH)
-        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
-    } else if (type === tokenType_default.RIGHT_BRACE || type === tokenType_default.RIGHT_BRACKET) {
-      capture.depth -= 1;
-      if (capture.depth < 0)
-        throw invalid3();
-    }
-    this.build(capture, capture.build, type, value2);
-    if (capture.depth === 0) {
-      this.capture = undefined;
-      this.pending = capture;
-      this.phase = "after";
-    }
-  }
-  build(capture, stack, type, value2) {
-    const top = stack[stack.length - 1];
-    const role = classify(top ? top.kind : "root", top ? top.phase : "root", type);
-    const place = (placed) => {
-      const parent = stack[stack.length - 1];
-      if (!parent) {
-        capture.result = capture.oversize ? undefined : placed;
-        return;
-      }
-      if (!capture.oversize) {
-        if (parent.kind === "array")
-          parent.value.push(placed);
-        else
-          setOwn(parent.value, parent.key, placed);
-      }
-      parent.phase = "after";
-    };
-    switch (role) {
-      case "key": {
-        const key2 = value2;
-        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
-          throw invalid3();
-        top.key = key2;
-        top.phase = "colon";
-        return;
-      }
-      case "colon":
-        top.phase = "value";
-        return;
-      case "comma":
-        top.phase = "next";
-        return;
-      case "close": {
-        const closed = stack.pop();
-        place(closed.value);
-        return;
-      }
-      case "value":
-        if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
-          stack.push({
-            kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
-            phase: "first",
-            key: undefined,
-            value: capture.oversize ? undefined : type === tokenType_default.LEFT_BRACE ? {} : []
-          });
-        } else {
-          place(value2);
-        }
-        return;
-    }
-  }
-  flush(delimiterAt) {
-    const capture = this.pending;
-    if (!capture)
-      return;
-    this.pending = undefined;
-    const oversize = capture.oversize || delimiterAt - capture.start > this.maxItemBytes;
-    this.queue.push({
-      kind: oversize ? "oversize" : "item",
-      path: capture.path,
-      pathIndex: capture.pathIndex,
-      value: oversize ? undefined : capture.result,
-      frame: capture.frame,
-      start: capture.start,
-      end: delimiterAt,
-      resume: { offset: delimiterAt, levels: this.levels.slice() }
-    });
+  } catch (error2) {
+    if (error2 instanceof ZipMemberError || error2 instanceof ZipFormatError)
+      return { kind: "unavailable" };
+    throw error2;
+  } finally {
+    reader.close();
   }
 }
-function concat(first, second) {
-  const out = new Uint8Array(first.length + second.length);
-  out.set(first);
-  out.set(second, first.length);
-  return out;
-}
-function archiveStopFromReaderError(error2, relPath) {
-  if (error2 instanceof JsonStreamError) {
-    return error2.code === "resume_invalid" ? new ArchiveImportStoppedError("resume_point_invalid", "Nothing starts where this import was to resume.", relPath) : new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", relPath);
-  }
-  return archiveStopFromScopeError(error2, relPath);
-}
-var JSON_STREAM_ANY = "*", JSON_STREAM_MAX_DEPTH = 512, JSON_STREAM_MAX_KEY_CHARS = 1024, JSON_STREAM_MAX_FRAME_VALUE_CHARS = 1024, JSON_STREAM_MAX_FRAME_KEYS = 64, JSON_STREAM_FEED_SLICE_BYTES = 1024, JSON_STREAM_MAX_QUEUED_EVENTS = 64, JsonStreamError, OVERSIZE = -1, LEX_OUT = 0, LEX_STRING = 1, LEX_ESCAPE = 2, LEX_HEX = 3, STOP_END = 0, STOP_OVERSIZE = 1, STOP_BAD = 2, STOP_CLOSED = 3, EMPTY_FRAME, MAX_SAFE_DIGITS, ExactNumberTokenizer;
-var init_json_stream = __esm(() => {
-  init_tokenizer();
-  init_tokenType();
-  init_archive_formats();
-  init_stop_errors();
-  JsonStreamError = class JsonStreamError extends Error {
-    code;
-    constructor(code, message2) {
-      super(message2);
-      this.name = "JsonStreamError";
-      this.code = code;
-    }
-  };
-  EMPTY_FRAME = Object.freeze({});
-  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
-  ExactNumberTokenizer = class ExactNumberTokenizer extends Tokenizer2 {
-    parseNumber(numberStr) {
-      const value2 = Number(numberStr);
-      if (Number.isSafeInteger(value2) || !Number.isFinite(value2))
-        return value2;
-      const digits = numberStr.startsWith("-") ? numberStr.slice(1) : numberStr;
-      let wholeNumber2 = digits.length > 0;
-      for (let index = 0;index < digits.length; index += 1) {
-        const code = digits.charCodeAt(index);
-        if (code < 48 || code > 57) {
-          wholeNumber2 = false;
-          break;
-        }
-      }
-      if (!wholeNumber2)
-        return value2;
-      if (digits.length < MAX_SAFE_DIGITS.length)
-        return value2;
-      return numberStr;
-    }
-  };
+var init_resume_crc = __esm(() => {
+  init_byte_source();
+  init_zip_reader();
 });
 
 // src/workers/archive-import/notes/note.ts
@@ -154252,6 +154451,9 @@ function createNoteArchiveConnector(input, spec) {
     progressOf: (offset) => offset,
     head: () => reader.readAt(0, ROOT_PEEK_BYTES),
     open: (offset) => fileByteSource(reader, { start: offset }),
+    mark: () => {
+      return;
+    },
     checkpoint: () => ({}),
     end: () => {
       return;
@@ -154260,8 +154462,9 @@ function createNoteArchiveConnector(input, spec) {
       return;
     }
   });
-  const zipUnit = (archive, entry, fileIndex) => {
+  const zipUnit = (archive, entry, fileIndex, segment) => {
     let reader;
+    let tracked;
     const key2 = { archiveId: input.archiveId, manifestTag: tag, fileIndex, memberIndex: entry.index };
     return {
       member: entry.index,
@@ -154269,33 +154472,44 @@ function createNoteArchiveConnector(input, spec) {
       progressOf: (offset) => entry.localHeaderOffset + Math.floor(entry.compressedSize * Math.min(1, offset / Math.max(1, entry.uncompressedSize))),
       head: () => readZipMemberHead(archive, entry, ROOT_PEEK_BYTES),
       open(offset, crc) {
+        let startCrc = offset === 0 ? 0 : crc;
+        if (startCrc === undefined && entry.method === 0) {
+          const replay = recoverZipMemberCrc(archive, entry, offset, input.shouldContinue);
+          if (replay.kind === "interrupted")
+            throw new ReadInterrupted;
+          segment.bytes += offset;
+          if (replay.kind === "crc")
+            startCrc = replay.crc;
+        }
         const continuation = offset > 0 ? archiveContinuations.take(key2, offset) : undefined;
         reader = ZipMemberReader.open(archive, entry, {
           start: offset,
-          ...crc !== undefined ? { startCrc: crc } : {},
+          ...startCrc !== undefined && offset > 0 ? { startCrc } : {},
           ...continuation ? { continuation } : {}
         });
-        return reader;
+        tracked = trackBoundaries(reader, offset === 0 || entry.method === 0 ? startCrc : undefined);
+        return tracked;
       },
+      mark: (offset) => tracked?.markBoundary(offset),
       checkpoint(endOffset) {
         const member = reader;
         if (!member)
           return {};
+        let crc = tracked?.boundary === endOffset ? tracked.crcAtBoundary() : undefined;
         try {
           const back = member.position - endOffset;
           if (back > 0)
             member.unread(back);
+          crc = member.crc32 ?? crc;
+          const continuation = member.suspend();
+          if (continuation)
+            archiveContinuations.put(key2, continuation);
         } catch {
           member.close();
-          return {};
         }
-        const crc = member.crc32;
-        const continuation = member.suspend();
-        if (continuation)
-          archiveContinuations.put(key2, continuation);
         return crc !== undefined ? { crc } : {};
       },
-      end: () => reader?.end,
+      end: () => reader?.end ?? MEMBER_NOT_CHECKED,
       close: () => reader?.close()
     };
   };
@@ -154381,6 +154595,12 @@ function createNoteArchiveConnector(input, spec) {
     try {
       bytes = watched(unit.open(unitCursor.offset, unitCursor.crc));
     } catch (error2) {
+      if (error2 instanceof ReadInterrupted) {
+        segment.stopped = true;
+        segment.next = unitCursor;
+        segment.position = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+        return "paused";
+      }
       if (error2 instanceof ZipMemberError) {
         if (unitCursor.offset > 0)
           throw invalid4("Nothing starts where this import was to resume.");
@@ -154455,7 +154675,7 @@ function createNoteArchiveConnector(input, spec) {
         unit.close();
         const readTo = Math.max(last?.end ?? unitCursor.offset, reader.position);
         const end = unit.end();
-        if (end && (end.crcOk === false || !end.sizeOk)) {
+        if (end && (end.crcOk !== true || !end.sizeOk)) {
           segment.bytes += readTo - unitCursor.offset;
           damaged(end.bytes);
           return "ended";
@@ -154473,6 +154693,7 @@ function createNoteArchiveConnector(input, spec) {
         return "ended";
       }
       last = event;
+      unit.mark(event.end);
       const offset = unit.posOf(event.start);
       if (event.resume.levels[event.resume.levels.length - 1]?.kind !== "array") {
         unit.close();
@@ -154574,7 +154795,7 @@ function createNoteArchiveConnector(input, spec) {
       } else {
         const place = { fileIndex, member: entry.index, ordinal: entry.index };
         takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt, read.cut);
-        if (read.end && (read.end.crcOk === false || !read.end.sizeOk)) {
+        if (!read.end || read.end.crcOk !== true || !read.end.sizeOk) {
           report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, zipFindingOffset(entry.index, entry.uncompressedSize));
         }
       }
@@ -154583,6 +154804,41 @@ function createNoteArchiveConnector(input, spec) {
     }
     segment.next = startOfFile(fileIndex + 1);
     finishZip(archive, fileIndex);
+  };
+  const memberAccepted = (archive, entry, segment) => {
+    if (source.kind !== "json")
+      return false;
+    const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
+    segment.bytes += head?.length ?? 0;
+    if (!head || head.length === 0)
+      return true;
+    const firstRecordKeys = (list, enough) => {
+      let member;
+      try {
+        member = ZipMemberReader.open(archive, entry);
+      } catch (error2) {
+        if (error2 instanceof ZipMemberError)
+          return;
+        throw error2;
+      }
+      try {
+        return probeFirstRecordKeys(watched(member), list, enough);
+      } catch (error2) {
+        if (error2 instanceof ZipMemberError)
+          return;
+        throw error2;
+      } finally {
+        segment.bytes += member.position;
+        member.close();
+      }
+    };
+    try {
+      return source.accepts({ head, firstRecordKeys });
+    } catch (error2) {
+      if (error2 instanceof ReadInterrupted)
+        return "interrupted";
+      throw error2;
+    }
   };
   const readJsonZip = (archive, file, fileIndex, cursor, limits, segment, savedAt) => {
     if (source.kind !== "json")
@@ -154602,14 +154858,24 @@ function createNoteArchiveConnector(input, spec) {
           segment.next = unitCursor;
           return;
         }
+        if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+          segment.next = unitCursor;
+          segment.position = { fileIndex, offset: entry.localHeaderOffset };
+          return;
+        }
         if (segment.bytes >= limits.bytes && (segment.consumed > 0 || limits.started)) {
           segment.budgetHit = true;
           segment.next = unitCursor;
           segment.position = { fileIndex, offset: entry.localHeaderOffset };
           return;
         }
-        const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
-        if (head && head.length > 0 && !source.accepts(head)) {
+        const accepted = memberAccepted(archive, entry, segment);
+        if (accepted === "interrupted") {
+          segment.stopped = true;
+          segment.next = unitCursor;
+          return;
+        }
+        if (!accepted) {
           segment.consumed += 1;
           report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", fileIndex, zipFindingOffset(entry.index, 0));
           segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
@@ -154617,7 +154883,7 @@ function createNoteArchiveConnector(input, spec) {
           continue;
         }
       }
-      const unit = zipUnit(archive, entry, fileIndex);
+      const unit = zipUnit(archive, entry, fileIndex, segment);
       const result = readJsonUnit(unit, unitCursor, fileIndex, file.relPath, limits, segment, savedAt);
       if (result === "paused")
         return;
@@ -154770,12 +155036,14 @@ function createNoteArchiveConnector(input, spec) {
     }
   };
 }
-var NOTES_DEFAULT_PAGE_SIZE = 100, NOTES_DEFAULT_MAX_BYTES_PER_LISTING, NOTES_MAX_UNITS_PER_PAGE = 5000, MARKDOWN_MAX_BYTES, ROOT_PEEK_BYTES = 1024, LIST_PEEK_BYTES, ReadInterrupted;
+var NOTES_DEFAULT_PAGE_SIZE = 100, NOTES_DEFAULT_MAX_BYTES_PER_LISTING, NOTES_MAX_UNITS_PER_PAGE = 5000, MARKDOWN_MAX_BYTES, ROOT_PEEK_BYTES = 1024, LIST_PEEK_BYTES, ReadInterrupted, MEMBER_NOT_CHECKED;
 var init_archive = __esm(() => {
   init_archive_formats();
   init_byte_source();
   init_continuation_cache();
   init_json_stream();
+  init_record_probe();
+  init_resume_crc();
   init_zip_reader();
   init_note();
   NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
@@ -154783,6 +155051,7 @@ var init_archive = __esm(() => {
   LIST_PEEK_BYTES = 64 * 1024;
   ReadInterrupted = class ReadInterrupted extends Error {
   };
+  MEMBER_NOT_CHECKED = Object.freeze({ bytes: 0, sizeOk: false, crcOk: undefined });
 });
 
 // src/workers/archive-import/reflect/markdown.ts
@@ -154920,22 +155189,25 @@ function isKnownEditorNode(node) {
   const type = nodeType(node);
   return BLOCK_EDITOR_NODE_TYPES.has(type) || INLINE_EDITOR_NODE_TYPES.has(type);
 }
-function editorNodeChildren(node) {
-  if (Array.isArray(node.content))
-    return node.content;
-  if (Array.isArray(node.children))
-    return node.children;
-  return [];
+function isPresent(value2) {
+  return value2 !== undefined && value2 !== null;
+}
+function isEditorNode(value2) {
+  if (!isRecord9(value2) || !isKnownEditorNode(value2))
+    return false;
+  return typeof value2.text === "string" || CHILD_KEYS.some((key2) => isPresent(value2[key2]));
 }
 function isEditorDocument(value2) {
   if (Array.isArray(value2))
-    return value2.length > 0 && value2.every(isKnownEditorNode);
+    return value2.some(isEditorNode);
   if (!isRecord9(value2))
     return false;
-  if (isKnownEditorNode(value2))
+  if (isEditorNode(value2))
     return true;
-  const children = editorNodeChildren(value2);
-  return children.length > 0 && children.every(isKnownEditorNode);
+  return CHILD_KEYS.some((key2) => {
+    const children = value2[key2];
+    return Array.isArray(children) && children.some(isEditorNode);
+  });
 }
 function flattenEditorNodes(nodes, depth2) {
   let text3 = "";
@@ -154968,12 +155240,31 @@ function flattenNode(node, depth2) {
     return flattenEditorNodes(node, depth2);
   if (!isRecord9(node))
     return { text: "", unsupported: 1 };
-  const ownText = typeof node.text === "string" ? node.text : "";
-  const children = flattenEditorNodes(editorNodeChildren(node), depth2);
-  const text3 = ownText && children.text ? `${ownText}
-${children.text}` : ownText || children.text;
-  const lost = text3 === "" && !isKnownEditorNode(node) ? 1 : 0;
-  return { text: text3, unsupported: children.unsupported + lost };
+  let unsupported = 0;
+  let ownText = "";
+  if (typeof node.text === "string")
+    ownText = node.text;
+  else if (isPresent(node.text))
+    unsupported += 1;
+  let childText = "";
+  for (const key2 of CHILD_KEYS) {
+    const children = node[key2];
+    if (!isPresent(children))
+      continue;
+    if (!Array.isArray(children)) {
+      unsupported += 1;
+      continue;
+    }
+    const flat2 = flattenEditorNodes(children, depth2);
+    unsupported += flat2.unsupported;
+    childText = childText && flat2.text ? `${childText}
+${flat2.text}` : childText || flat2.text;
+  }
+  const text3 = ownText && childText ? `${ownText}
+${childText}` : ownText || childText;
+  if (text3 === "" && unsupported === 0 && !isKnownEditorNode(node))
+    unsupported = 1;
+  return { text: text3, unsupported };
 }
 function readReflectBody(value2) {
   if (value2 === undefined || value2 === null)
@@ -155039,7 +155330,7 @@ function parseReflectNote(record5) {
     }
   };
 }
-var MAX_EDITOR_DEPTH = 200, BLOCK_EDITOR_NODE_TYPES, INLINE_EDITOR_NODE_TYPES, NOTHING;
+var MAX_EDITOR_DEPTH = 200, BLOCK_EDITOR_NODE_TYPES, INLINE_EDITOR_NODE_TYPES, CHILD_KEYS, NOTHING;
 var init_parse4 = __esm(() => {
   init_archive_formats();
   init_note();
@@ -155074,6 +155365,7 @@ var init_parse4 = __esm(() => {
     "ul"
   ]);
   INLINE_EDITOR_NODE_TYPES = new Set(["hardbreak", "text"]);
+  CHILD_KEYS = ["content", "children"];
   NOTHING = { text: "", unsupported: 0 };
 });
 
@@ -155099,7 +155391,7 @@ var init_connector7 = __esm(() => {
     source: {
       kind: "json",
       itemPaths: (root) => root === "array" ? [[]] : [["notes"]],
-      accepts: looksLikeReflectJson,
+      accepts: acceptsReflectJson,
       parse: parseReflectNote
     }
   };
@@ -155141,7 +155433,8 @@ function flattenBlocks(children) {
         continue;
       }
       out.blockCount += 1;
-      if (typeof node.string !== "string" && !Array.isArray(node.children))
+      const hasString = node.string !== undefined && node.string !== null;
+      if (hasString ? typeof node.string !== "string" : !Array.isArray(node.children))
         out.unsupported += 1;
       const text3 = typeof node.string === "string" ? node.string.trimEnd() : "";
       if (text3.trim() !== "") {
@@ -155207,7 +155500,7 @@ var init_connector8 = __esm(() => {
     source: {
       kind: "json",
       itemPaths: (root) => root === "array" ? [[]] : undefined,
-      accepts: looksLikeRoamJson,
+      accepts: acceptsRoamJson,
       parse: parseRoamPage
     }
   };

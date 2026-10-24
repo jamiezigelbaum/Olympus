@@ -670,3 +670,35 @@ describe('the Roam connector says what it could not read', () => {
     expect(all.items.map((item) => item.metadata.title)).toEqual(['Big', 'Synthetic lighthouse page 0', 'Synthetic lighthouse page 1']);
   });
 });
+
+// --- Review round 2: a text that is there must be text, and a long first record -------------
+
+describe('a Roam block is read field by field', () => {
+  test('a text field that is there and is not text is unsupported, whatever the block\'s children are', () => {
+    const base = { title: 'P', uid: 'u', 'create-time': Date.UTC(2024, 5, 1) };
+    expect(parseRoamPage({ ...base, children: [{ string: 7, children: [] }] })).toEqual({ kind: 'unsupported' });
+    expect(parseRoamPage({ ...base, children: [{ string: { text: 'lost' }, children: [{ string: '' }] }] })).toEqual({ kind: 'unsupported' });
+    expect(parseRoamPage({ ...base, children: [{ string: 'Kept' }, { string: 7, children: [] }] }))
+      .toMatchObject({ kind: 'note', note: { body: '- Kept', unsupported: 1 } });
+    // A block with no text of its own that holds blocks is only a container, and a block that holds nothing is not read.
+    expect(parseRoamPage({ ...base, children: [{ children: [{ string: 'Kept' }] }] }))
+      .toMatchObject({ kind: 'note', note: { body: '  - Kept' } });
+    expect(parseRoamPage({ ...base, children: [{ uid: 'x' }] })).toEqual({ kind: 'unsupported' });
+    expect(parseRoamPage({ ...base, children: [{ string: null }] })).toEqual({ kind: 'unsupported' });
+  });
+});
+
+describe('a long first page does not hide what a Roam file is', () => {
+  test('the keys after a long block still tell, in a file and in a zip member', async () => {
+    const LONG = 'word '.repeat(40_000);
+    const late = { children: [{ string: LONG }], title: 'Late page', uid: 'p1', 'create-time': Date.UTC(2024, 5, 1) };
+    const text = JSON.stringify([late, { ...late, uid: 'p2' }]);
+    expect(formatOf(detectFile('roam.json', text))).toBe('roam-json');
+    expect(formatOf(detectFile('Roam-Export-1700000000000.zip', roamJsonZip(text)))).toBe('roam-json');
+    const { connector, findings } = roamConnector('Roam-Export-1700000000000.zip', roamJsonZip(text));
+    const { items, done } = await listAll(connector);
+    expect(done).toBe(true);
+    expect(items).toHaveLength(2);
+    expect(findings).toEqual([]);
+  });
+});

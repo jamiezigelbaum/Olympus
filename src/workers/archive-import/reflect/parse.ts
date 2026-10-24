@@ -10,10 +10,14 @@
  * double-encoded); that is parsed and flattened to plain lines.
  *
  * Only a body that is positively an editor document is flattened: JSON-looking
- * text that is not one (`{"budget":100}`) is what the person wrote and is kept
- * as it is. A body that is neither text nor an editor document, and an editor
- * node with no text and no kind Olympus knows, are not read, and the note says
- * so (`unsupported`) instead of being taken for empty.
+ * text that is not one (`{"budget":100}`, `{"type":"text","value":"..."}`) is
+ * what the person wrote and is kept as it is. The document is recognised by an
+ * editor node in it (a kind an editor writes, with its text or its children);
+ * every node in it is then read on its own, so a node Olympus cannot read (an
+ * image, a text field that is no text, children that are no list) is counted
+ * and never hides the readable ones beside it. A body that is neither text nor
+ * an editor document is not read either. The note says so (`unsupported`)
+ * instead of being taken for empty.
  */
 import { reflectDailyNoteDate } from '../../../core/archive-formats.ts';
 import {
@@ -75,23 +79,39 @@ function isKnownEditorNode(node: unknown): boolean {
   return BLOCK_EDITOR_NODE_TYPES.has(type) || INLINE_EDITOR_NODE_TYPES.has(type);
 }
 
-function editorNodeChildren(node: Record<string, unknown>): readonly unknown[] {
-  if (Array.isArray(node.content)) return node.content;
-  if (Array.isArray(node.children)) return node.children;
-  return [];
+/** The keys an editor node holds its children under. */
+const CHILD_KEYS = ['content', 'children'] as const;
+
+function isPresent(value: unknown): boolean {
+  return value !== undefined && value !== null;
 }
 
 /**
- * Whether a parsed value is an editor document: a node of a kind an editor
- * writes (`doc`, `paragraph`, `text`, ...), a list of them, or a record whose
- * `content` is such a list. Any other value, however much it looks like JSON, is not.
+ * A record that is positively an editor node: a kind an editor writes, with
+ * what that kind carries: its text, or a place for children (whatever is in
+ * it: a malformed one is read as unsupported, not passed over as no editor).
+ * `{"type":"text","value":"..."}` has neither and is somebody's data.
+ */
+function isEditorNode(value: unknown): boolean {
+  if (!isRecord(value) || !isKnownEditorNode(value)) return false;
+  return typeof value.text === 'string' || CHILD_KEYS.some((key) => isPresent(value[key]));
+}
+
+/**
+ * Whether a parsed value is an editor document: an editor node, a list with
+ * an editor node in it, or a record whose `content` is such a list. Only the
+ * container is recognised here; each node in it is read (or reported) on its
+ * own, so one node Olympus does not know never hides the readable ones beside
+ * it. Any other value, however much it looks like JSON, is not.
  */
 export function isEditorDocument(value: unknown): boolean {
-  if (Array.isArray(value)) return value.length > 0 && value.every(isKnownEditorNode);
+  if (Array.isArray(value)) return value.some(isEditorNode);
   if (!isRecord(value)) return false;
-  if (isKnownEditorNode(value)) return true;
-  const children = editorNodeChildren(value);
-  return children.length > 0 && children.every(isKnownEditorNode);
+  if (isEditorNode(value)) return true;
+  return CHILD_KEYS.some((key) => {
+    const children = value[key];
+    return Array.isArray(children) && children.some(isEditorNode);
+  });
 }
 
 /** Text read from part of a note, and how many parts of it could not be. */
@@ -130,12 +150,27 @@ function flattenNode(node: unknown, depth: number): Flattened {
   if (depth > MAX_EDITOR_DEPTH) return { text: '', unsupported: 1 };
   if (Array.isArray(node)) return flattenEditorNodes(node, depth);
   if (!isRecord(node)) return { text: '', unsupported: 1 };
-  const ownText = typeof node.text === 'string' ? node.text : '';
-  const children = flattenEditorNodes(editorNodeChildren(node), depth);
-  const text = ownText && children.text ? `${ownText}\n${children.text}` : ownText || children.text;
+  let unsupported = 0;
+  // Each field a node reads is checked on its own, whatever the node's kind or its other fields are.
+  let ownText = '';
+  if (typeof node.text === 'string') ownText = node.text;
+  else if (isPresent(node.text)) unsupported += 1;
+  let childText = '';
+  for (const key of CHILD_KEYS) {
+    const children = node[key];
+    if (!isPresent(children)) continue;
+    if (!Array.isArray(children)) {
+      unsupported += 1;
+      continue;
+    }
+    const flat = flattenEditorNodes(children, depth);
+    unsupported += flat.unsupported;
+    childText = childText && flat.text ? `${childText}\n${flat.text}` : childText || flat.text;
+  }
+  const text = ownText && childText ? `${ownText}\n${childText}` : ownText || childText;
   // A node that says nothing and is not a kind Olympus knows (an image, a mention, an embed) is content it could not read.
-  const lost = text === '' && !isKnownEditorNode(node) ? 1 : 0;
-  return { text, unsupported: children.unsupported + lost };
+  if (text === '' && unsupported === 0 && !isKnownEditorNode(node)) unsupported = 1;
+  return { text, unsupported };
 }
 
 /** An editor node or document as plain text. */

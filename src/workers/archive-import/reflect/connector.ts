@@ -14,7 +14,7 @@
  *   the judge, and is held Private until judged.
  */
 import {
-  looksLikeReflectJson,
+  acceptsReflectJson,
   registerArchiveFormatConnector,
   type ArchiveConnectorInput,
 } from '../../../core/archive-formats.ts';
@@ -31,7 +31,7 @@ const REFLECT_JSON_SPEC: NoteArchiveSpec = {
   source: {
     kind: 'json',
     itemPaths: (root) => (root === 'array' ? [[]] : [['notes']]),
-    accepts: looksLikeReflectJson,
+    accepts: acceptsReflectJson,
     parse: parseReflectNote,
   },
 };

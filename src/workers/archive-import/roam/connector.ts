@@ -15,7 +15,7 @@
  *   the judge, and is held Private until judged.
  */
 import {
-  looksLikeRoamJson,
+  acceptsRoamJson,
   registerArchiveFormatConnector,
   type ArchiveConnectorInput,
 } from '../../../core/archive-formats.ts';
@@ -31,7 +31,7 @@ const ROAM_SPEC: NoteArchiveSpec = {
     kind: 'json',
     // Only a list of pages is a Roam export; any other document is reported, not guessed at.
     itemPaths: (root) => (root === 'array' ? [[]] : undefined),
-    accepts: looksLikeRoamJson,
+    accepts: acceptsRoamJson,
     parse: parseRoamPage,
   },
 };

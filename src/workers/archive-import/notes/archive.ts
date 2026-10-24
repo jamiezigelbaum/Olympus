@@ -13,17 +13,24 @@
  *   kept. Nothing reads a whole file or a whole member.
  * - Findings: an empty note is skipped, a record that is no note, a record
  *   too big and a note (or part of one) of a kind Olympus has no rule for are
- *   gaps, a zip member whose checksum or size is wrong, or a JSON file cut
- *   short, is `file_damaged` (what was read before it stays), a JSON document
- *   without the list the format keeps its notes in, or a zip member that is
- *   not this format's, is `section_not_imported`, and a zip's other files are
+ *   gaps, a zip member whose checksum or size is wrong (or whose checksum was
+ *   not checked: that is never a pass), or a JSON file cut short, is
+ *   `file_damaged` (what was read before it stays), a JSON document without
+ *   the list the format keeps its notes in, or a zip member that is not this
+ *   format's, is `section_not_imported` (a list that is there and empty is an
+ *   export with no notes, not another file), and a zip's other files are
  *   counted as not imported. Each finding is at the place of its note, so a
  *   page read again after a restart counts nothing twice.
  * - Bounds: the listing's byte budget is held while reading, at every record
  *   (and every Markdown member), not after a whole file; the first record of a
  *   listing is always read, so every listing makes progress. Whether the import
  *   is still wanted is asked before each record and again with each chunk read,
- *   so a single huge record or member does not outlast its cancellation.
+ *   so a single huge record or member does not outlast its cancellation. A
+ *   JSON member of a zip is asked about under the same limits, and what is
+ *   read to ask is charged to the byte budget, whether the member is taken or
+ *   not. A stored member's CRC-32 is kept at every whole record
+ *   (`resume-crc.ts`), or replayed from the member's start when a resume point
+ *   has none.
  * - Resume point: `<prefix><manifest>:<file>:<member>:<offset>:<crc>:<json>`,
  *   the next note to read: a zip member (or -1), the byte offset after the
  *   last note read in it, the CRC-32 of the member before that offset, and the
@@ -48,6 +55,7 @@ import {
   isJunkArchiveMember,
   type ArchiveConnectorInput,
   type ArchiveFileEntry,
+  type ArchiveJsonProbe,
 } from '../../../core/archive-formats.ts';
 import type { ScopeFileReader } from '../../../core/scope-safe-fs.ts';
 import { fileByteSource, type ArchiveByteSource } from '../byte-source.ts';
@@ -63,6 +71,8 @@ import {
   type JsonResumePoint,
   type JsonStreamEvent,
 } from '../json-stream.ts';
+import { probeFirstRecordKeys } from '../record-probe.ts';
+import { recoverZipMemberCrc, trackBoundaries, type BoundaryTrackedSource } from '../resume-crc.ts';
 import {
   ZipArchive,
   ZipFormatError,
@@ -106,11 +116,13 @@ export type NoteSource =
      */
     itemPaths(root: 'array' | 'object'): readonly (readonly JsonPathSegment[])[] | undefined;
     /**
-     * Whether a JSON document, from its first ARCHIVE_PROBE_HEAD_BYTES bytes,
-     * is this format's. Asked of each JSON member of a zip, so a member that is
-     * some other file is left alone and reported, not read as this format.
+     * Whether a JSON document is this format's, from its first
+     * ARCHIVE_PROBE_HEAD_BYTES bytes and, when those do not say, a read on to
+     * the first record's keys. Asked of each JSON member of a zip, so a member
+     * that is some other file is left alone and reported, not read as this
+     * format; a document with an empty list of notes is accepted and has none.
      */
-    accepts(head: Uint8Array | undefined): boolean;
+    accepts(probe: ArchiveJsonProbe): boolean;
     parse(record: unknown): NoteOutcome;
   }
   | {
@@ -171,12 +183,19 @@ interface JsonUnit {
   /** Progress, in the file's own bytes, for an offset in the document. */
   progressOf(offset: number): number;
   head(): Uint8Array | undefined;
+  /** Throws `ReadInterrupted` when the import is told to stop while the member is read to find its checksum. */
   open(offset: number, crc: number | undefined): ArchiveByteSource;
+  /** A whole record ends at `offset`: its place and the member's CRC there are kept, however much is read after it. */
+  mark(offset: number): void;
   /** After the last note read: give back what was read past it; the member's CRC there. */
   checkpoint(endOffset: number): { crc?: number };
+  /** How the document ended; a member that was never read to its end has not been checked, which `crcOk` says as undefined. */
   end(): ZipMemberEnd | undefined;
   close(): void;
 }
+
+/** A member whose read never reached its end: nothing about it was checked. */
+const MEMBER_NOT_CHECKED: ZipMemberEnd = Object.freeze({ bytes: 0, sizeOk: false, crcOk: undefined });
 
 function rootKindOf(head: Uint8Array | undefined): 'array' | 'object' | undefined {
   if (!head) return undefined;
@@ -270,13 +289,15 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     progressOf: (offset) => offset,
     head: () => reader.readAt(0, ROOT_PEEK_BYTES),
     open: (offset) => fileByteSource(reader, { start: offset }),
+    mark: () => undefined,
     checkpoint: () => ({}),
     end: () => undefined,
     close: () => undefined,
   });
 
-  const zipUnit = (archive: ZipArchive, entry: ZipEntry, fileIndex: number): JsonUnit => {
+  const zipUnit = (archive: ZipArchive, entry: ZipEntry, fileIndex: number, segment: Segment): JsonUnit => {
     let reader: ZipMemberReader | undefined;
+    let tracked: BoundaryTrackedSource | undefined;
     const key: ContinuationKey = { archiveId: input.archiveId, manifestTag: tag, fileIndex, memberIndex: entry.index };
     return {
       member: entry.index,
@@ -284,31 +305,43 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
       progressOf: (offset) => entry.localHeaderOffset + Math.floor(entry.compressedSize * Math.min(1, offset / Math.max(1, entry.uncompressedSize))),
       head: () => readZipMemberHead(archive, entry, ROOT_PEEK_BYTES),
       open(offset, crc) {
+        let startCrc = offset === 0 ? 0 : crc;
+        if (startCrc === undefined && entry.method === 0) {
+          // A stored member entered part-way can only say its checksum matched if it knows the sum of what it skips: read it once.
+          const replay = recoverZipMemberCrc(archive, entry, offset, input.shouldContinue);
+          if (replay.kind === 'interrupted') throw new ReadInterrupted();
+          segment.bytes += offset;
+          if (replay.kind === 'crc') startCrc = replay.crc;
+        }
         const continuation = offset > 0 ? archiveContinuations.take(key, offset) : undefined;
         reader = ZipMemberReader.open(archive, entry, {
           start: offset,
-          ...(crc !== undefined ? { startCrc: crc } : {}),
+          ...(startCrc !== undefined && offset > 0 ? { startCrc } : {}),
           ...(continuation ? { continuation } : {}),
         });
-        return reader;
+        // A deflated member entered part-way is inflated from its start (or continued), and its checksum never comes from the resume point.
+        tracked = trackBoundaries(reader, offset === 0 || entry.method === 0 ? startCrc : undefined);
+        return tracked;
       },
+      mark: (offset) => tracked?.markBoundary(offset),
       checkpoint(endOffset) {
         const member = reader;
         if (!member) return {};
+        // The sum at the last whole record, kept as the records were handed out: still there after a stop in the middle of a long one.
+        let crc = tracked?.boundary === endOffset ? tracked.crcAtBoundary() : undefined;
         try {
           const back = member.position - endOffset;
           if (back > 0) member.unread(back);
+          crc = member.crc32 ?? crc;
+          const continuation = member.suspend();
+          if (continuation) archiveContinuations.put(key, continuation);
         } catch {
-          // Cannot give the bytes back: the next page enters here without a checksum, or inflates again.
+          // Cannot give the bytes back: a deflated member is inflated again next page; a stored one enters at the sum kept above.
           member.close();
-          return {};
         }
-        const crc = member.crc32;
-        const continuation = member.suspend();
-        if (continuation) archiveContinuations.put(key, continuation);
         return crc !== undefined ? { crc } : {};
       },
-      end: () => reader?.end,
+      end: () => reader?.end ?? MEMBER_NOT_CHECKED,
       close: () => reader?.close(),
     };
   };
@@ -411,6 +444,13 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     try {
       bytes = watched(unit.open(unitCursor.offset, unitCursor.crc));
     } catch (error) {
+      if (error instanceof ReadInterrupted) {
+        // Told to stop while the member was read for its checksum: it is entered again here.
+        segment.stopped = true;
+        segment.next = unitCursor;
+        segment.position = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+        return 'paused';
+      }
       if (error instanceof ZipMemberError) {
         if (unitCursor.offset > 0) throw invalid('Nothing starts where this import was to resume.');
         damaged(0);
@@ -485,7 +525,8 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
         unit.close();
         const readTo = Math.max(last?.end ?? unitCursor.offset, reader.position);
         const end = unit.end();
-        if (end && (end.crcOk === false || !end.sizeOk)) {
+        // A checksum that was not checked (a read that did not cover the member) is no pass.
+        if (end && (end.crcOk !== true || !end.sizeOk)) {
           segment.bytes += readTo - unitCursor.offset;
           damaged(end.bytes);
           return 'ended';
@@ -503,6 +544,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
         return 'ended';
       }
       last = event;
+      unit.mark(event.end);
       const offset = unit.posOf(event.start);
       if (event.resume.levels[event.resume.levels.length - 1]?.kind !== 'array') {
         // Where the notes should be is a value of another kind: nothing here is read as a note.
@@ -617,7 +659,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
       } else {
         const place: NotePlace = { fileIndex, member: entry.index, ordinal: entry.index };
         takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt, read.cut);
-        if (read.end && (read.end.crcOk === false || !read.end.sizeOk)) {
+        if (!read.end || read.end.crcOk !== true || !read.end.sizeOk) {
           report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', fileIndex, zipFindingOffset(entry.index, entry.uncompressedSize));
         }
       }
@@ -626,6 +668,44 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     }
     segment.next = startOfFile(fileIndex + 1);
     finishZip(archive, fileIndex);
+  };
+
+  /**
+   * Whether a JSON member of a zip is this format's. The bytes read to tell
+   * (its first bytes, and any read on to its first record's keys) are charged
+   * to the listing whether the member is taken or not. 'interrupted': the
+   * import was told to stop while it was being read.
+   */
+  const memberAccepted = (archive: ZipArchive, entry: ZipEntry, segment: Segment): boolean | 'interrupted' => {
+    if (source.kind !== 'json') return false;
+    const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
+    segment.bytes += head?.length ?? 0;
+    // Nothing to judge it by: it is read, and said to be damaged there if it is.
+    if (!head || head.length === 0) return true;
+    const firstRecordKeys: NonNullable<ArchiveJsonProbe['firstRecordKeys']> = (list, enough) => {
+      let member: ZipMemberReader;
+      try {
+        member = ZipMemberReader.open(archive, entry);
+      } catch (error) {
+        if (error instanceof ZipMemberError) return undefined;
+        throw error;
+      }
+      try {
+        return probeFirstRecordKeys(watched(member), list, enough);
+      } catch (error) {
+        if (error instanceof ZipMemberError) return undefined;
+        throw error;
+      } finally {
+        segment.bytes += member.position;
+        member.close();
+      }
+    };
+    try {
+      return source.accepts({ head, firstRecordKeys });
+    } catch (error) {
+      if (error instanceof ReadInterrupted) return 'interrupted';
+      throw error;
+    }
   };
 
   const readJsonZip = (
@@ -651,6 +731,11 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
           segment.next = unitCursor;
           return;
         }
+        if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+          segment.next = unitCursor;
+          segment.position = { fileIndex, offset: entry.localHeaderOffset };
+          return;
+        }
         if (segment.bytes >= limits.bytes && (segment.consumed > 0 || limits.started)) {
           segment.budgetHit = true;
           segment.next = unitCursor;
@@ -658,8 +743,13 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
           return;
         }
         // A JSON file in the zip is read as this format only when it shows this format's hand; any other is reported, not guessed at.
-        const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
-        if (head && head.length > 0 && !source.accepts(head)) {
+        const accepted = memberAccepted(archive, entry, segment);
+        if (accepted === 'interrupted') {
+          segment.stopped = true;
+          segment.next = unitCursor;
+          return;
+        }
+        if (!accepted) {
           segment.consumed += 1;
           report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', fileIndex, zipFindingOffset(entry.index, 0));
           segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
@@ -667,7 +757,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
           continue;
         }
       }
-      const unit = zipUnit(archive, entry, fileIndex);
+      const unit = zipUnit(archive, entry, fileIndex, segment);
       const result = readJsonUnit(unit, unitCursor, fileIndex, file.relPath, limits, segment, savedAt);
       if (result === 'paused') return;
       segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
