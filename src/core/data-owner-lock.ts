@@ -5,7 +5,8 @@
  * The worker holds it for its whole life. Anything else that opens a store
  * (an operator script, a CLI command while the worker is stopped) holds it
  * for its run, so it refuses with a clear message while Olympus runs and the
- * worker cannot start under it.
+ * worker cannot start under it. A CLI command that finds it held asks the
+ * running worker to do the work instead (core/cli-via-worker.ts).
  *
  * It is a `flock(2)` exclusive lock on `<data>/data-owner.lock`, through
  * `bun:ffi` to libc. The lock sits in the data root itself, so two processes
@@ -188,22 +189,6 @@ export function withDataOwnerLock<T>(env: LayoutEnv, run: () => T, options: Data
   if (isPromiseLike(result)) return Promise.resolve(result).finally(() => lock.release()) as T;
   lock.release();
   return result;
-}
-
-/**
- * INTERIM, until the CLI goes through the worker's API (step 2b-ii of
- * docs/design/source-storage.md): a CLI command that opens stores holds the
- * lock for its run when it is free, so the worker cannot start under it. When
- * the worker owns the lock (it runs), the command runs exactly as it did
- * before this lock existed. This is the one place the CLI decides that.
- */
-export async function withDataOwnerLockIfFree<T>(run: () => T | Promise<T>, env: LayoutEnv = process.env): Promise<T> {
-  const lock = tryDataOwnerLock(env);
-  try {
-    return await run();
-  } finally {
-    lock?.release();
-  }
 }
 
 /**
