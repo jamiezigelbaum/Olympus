@@ -131,10 +131,16 @@ Inside the data root:
 - **The X usage ledger stays shared.** It is the quota ledger, kept when X is
   deleted, so it stays in the data root; only X's reconcile state is
   per-account (`raw/x-reconcile.sqlite`). The request budgets stay shared too.
-- **Native-owned capture stays legacy.** The Telegram and WhatsApp capture
-  services run in processes the worker does not own (the Gateway-hosted
-  services included), and Reflect and Roam name their paths through JSON
-  mounts, so they keep their legacy paths until steps 4b and 4d.
+- **Messaging, Reflect and Roam stay legacy for now.** Telegram and WhatsApp
+  capture run in separate processes that name their paths, so they keep
+  their legacy paths until steps 4b and 4d; Reflect and Roam name theirs
+  through JSON mounts.
+- **Gateway-run capture stays legacy after 4d too.** In OpenClaw-hosted mode
+  the Gateway runs the capture services, and the worker can neither stop nor
+  coordinate them, so an account whose capture the Gateway owns, or whose
+  path a plugin-config setting pins, is never moved. Moving those would need
+  a Gateway-level step (run the move before the Gateway starts capture, or
+  have the worker ask it to stop), which is not planned.
 
 ## Registry
 
