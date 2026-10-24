@@ -30,7 +30,7 @@ import {
 } from '../scripts/release-check/archive-leg.ts';
 import { egressVerdict } from '../scripts/release-check/inbox.ts';
 import { runJourney, type Journey, type JourneyTrace } from '../scripts/release-check/journey.ts';
-import { PANEL_IDS, PanelDriver, browseFixtures, closeWindows, dashboardAnswer, entryFor, evalIn, live, mountPanel, type Serve } from './helpers/release-check-panel.ts';
+import { PANEL_IDS, PanelDriver, browseFixtures, closeWindows, dashboardAnswer, entryFor, evalIn, live, mountPanel, settle, type Serve } from './helpers/release-check-panel.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../src/workers/dashboard/vocabulary.ts';
 
 const fill = (template: string, values: Record<string, string>): string => Object.entries(values).reduce((out, [key, value]) => out.split(`{${key}}`).join(value), template);
@@ -575,6 +575,16 @@ describe('the private model switch', () => {
 // ---------------------------------------------------------------------------
 // The journeys, run on the product's real panel
 
+/** The row once the panel has drawn it, as a journey waits for it: the panel renders after its first answer, later on a loaded machine. */
+async function rowOnPanel(driver: PanelDriver, name: string, waitMs = 5_000): Promise<ReturnType<typeof rowNamed>> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const row = rowNamed(panelArchivesOf(evalIn(driver.win, ARCHIVE_PANEL_PROBE)), name);
+    if (row || Date.now() > deadline) return row;
+    await settle(20);
+  }
+}
+
 async function runOn(serve: Serve, journey: Journey): Promise<{ trace: JourneyTrace; driver: PanelDriver }> {
   const driver = new PanelDriver(async () => (await mountPanel(serve)).win);
   await driver.go();
@@ -756,7 +766,7 @@ describe('the leg\'s journeys on the product\'s real panel', () => {
     const heldEntry = entryFor(heldFx, { judged: 0, held: heldFx.expect.messages });
     const driver = new PanelDriver(async () => (await mountPanel({ [DASHBOARD_TOOL_NAME]: () => dashboardAnswer([heldEntry], [], 'off') })).win);
     await driver.go();
-    const row = rowNamed(panelArchivesOf(evalIn(driver.win, ARCHIVE_PANEL_PROBE)), heldFx.fileName)!;
+    const row = (await rowOnPanel(driver, heldFx.fileName))!;
     expect(row).toBeDefined();
     expect(judgedLineOf(row.text)).toEqual({ judged: 0, held: heldFx.expect.messages });
     expect(heldSentenceOf(row.text)).toBe('off');
