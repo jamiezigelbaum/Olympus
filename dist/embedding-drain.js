@@ -31847,13 +31847,14 @@ var init_vocabulary = __esm(() => {
     gaps: {
       message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
       message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
+      message_content_unsupported: { one: "1 message with a kind of content Olympus cannot read yet", many: "{n} messages with a kind of content Olympus cannot read yet" },
       charset_not_decoded: { one: "1 message in a character set Olympus could not read", many: "{n} messages in a character set Olympus could not read" },
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
       service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
-      media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
+      media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
       assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
@@ -45009,6 +45010,19 @@ init_stop_errors();
 var EMPTY_FRAME = Object.freeze({});
 var MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
 
+// src/workers/archive-import/telegram/message.ts
+var READ_OBJECTS = new Set([
+  "contact_information",
+  "location_information",
+  "poll",
+  "todo_list",
+  "invoice_information",
+  "text",
+  "text_entities",
+  "reactions",
+  "inline_bot_buttons"
+]);
+
 // src/workers/archive-import/telegram/connector.ts
 var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 var TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
@@ -45029,6 +45043,8 @@ var SECTION_PATHS = [
   { path: ["other_data"], name: "other_data" }
 ];
 var ITEM_PATHS = [...MESSAGE_PATHS, ...SECTION_PATHS.map((section) => section.path)];
+var SECTION_ROOTS = new Set(SECTION_PATHS.map((section) => section.path[0]));
+var LISTED_SECTIONS = new Set(SECTION_PATHS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 
 // src/workers/archive-import/lane.ts
 init_source_storage();

@@ -77711,13 +77711,14 @@ var init_vocabulary = __esm(() => {
     gaps: {
       message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
       message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
+      message_content_unsupported: { one: "1 message with a kind of content Olympus cannot read yet", many: "{n} messages with a kind of content Olympus cannot read yet" },
       charset_not_decoded: { one: "1 message in a character set Olympus could not read", many: "{n} messages in a character set Olympus could not read" },
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
       service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
-      media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
+      media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
       assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
@@ -152658,28 +152659,46 @@ class JsonStreamReader {
         this.stop = STOP_OVERSIZE;
         break;
       }
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 128;
+        this.utfHigh = 191;
+        continue;
+      }
       if (lex === LEX_STRING) {
-        if (byte < 128) {
-          utfLeft = 0;
-          if (byte === 34)
-            lex = LEX_OUT;
-          else if (byte === 92)
-            lex = LEX_ESCAPE;
-        } else if (utfLeft > 0 && byte >= this.utfLow && byte <= this.utfHigh) {
-          utfLeft -= 1;
-          this.utfLow = 128;
-          this.utfHigh = 191;
-        } else {
+        if (byte === 34) {
+          lex = LEX_OUT;
+        } else if (byte === 92) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 32) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 128) {
           utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
         }
       } else if (lex === LEX_ESCAPE) {
         if (byte === 117) {
           lex = LEX_HEX;
           hexLeft = 4;
-        } else {
+        } else if (isEscapeByte(byte)) {
           lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
         }
       } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
         hexLeft -= 1;
         if (hexLeft === 0)
           lex = LEX_STRING;
@@ -153237,11 +153256,13 @@ function mediaLine(message2, content, lines) {
     const kind = typeof message2.media_type === "string" ? MEDIA_LABELS[message2.media_type] : undefined;
     const emoji2 = kind === "Sticker" ? text3(message2.sticker_emoji) : undefined;
     const label = emoji2 ? `${kind} ${emoji2}` : kind ?? "File";
+    const name = text3(message2.file_name);
     if (fileLeftOut(file)) {
-      lines.push(`[${label} (not in the export)]`);
+      lines.push(name ? `[${label}: ${cut(name)} (not in the export)]` : `[${label} (not in the export)]`);
       content.mediaFiles += 1;
+      if (name)
+        content.attachments.push(`${label}: ${cut(name)}`);
     } else {
-      const name = text3(message2.file_name);
       const track = [text3(message2.performer), text3(message2.title)].filter(Boolean).join(" - ");
       const duration3 = seconds(message2.duration_seconds);
       const detail = [name && name !== file ? name : undefined, track || undefined, cut(file), duration3].filter(Boolean).join(", ");
@@ -153268,14 +153289,14 @@ function factLines(message2, lines) {
   }
   const poll = message2.poll;
   if (isRecord9(poll)) {
-    const question = text3(poll.question);
+    const question = flattenTelegramText(poll.question).trim();
     if (question)
       lines.push(`Poll: ${cut(question)}`);
     if (Array.isArray(poll.answers)) {
-      for (const answer of poll.answers.slice(0, MAX_POLL_ANSWERS)) {
+      for (const answer of poll.answers.slice(0, MAX_LIST_ENTRIES)) {
         if (!isRecord9(answer))
           continue;
-        const label = text3(answer.text);
+        const label = flattenTelegramText(answer.text).trim();
         if (!label)
           continue;
         const voters = typeof answer.voters === "number" ? ` (${answer.voters} ${answer.voters === 1 ? "vote" : "votes"})` : "";
@@ -153283,12 +153304,41 @@ function factLines(message2, lines) {
       }
     }
   }
-  const game = text3(message2.game_title);
+  const todo = message2.todo_list;
+  if (isRecord9(todo)) {
+    const title = flattenTelegramText(todo.title).trim();
+    const tasks = [];
+    if (Array.isArray(todo.answers)) {
+      for (const task of todo.answers.slice(0, MAX_LIST_ENTRIES)) {
+        const label = isRecord9(task) ? flattenTelegramText(task.text).trim() : "";
+        if (label)
+          tasks.push(`- ${cut(label)}`);
+      }
+    }
+    if (title || tasks.length > 0)
+      lines.push(title ? `To-do list: ${cut(title)}` : "To-do list:", ...tasks);
+  }
+  const invoice = message2.invoice_information;
+  if (isRecord9(invoice)) {
+    const detail = [text3(invoice.title), text3(invoice.description)].filter(Boolean).map((part) => cut(part)).join(", ");
+    if (detail)
+      lines.push(`Invoice: ${detail}`);
+  }
+  const game = [text3(message2.game_title), text3(message2.game_description)].filter(Boolean).map((part) => cut(part)).join(", ");
   if (game)
-    lines.push(`Game: ${cut(game)}`);
+    lines.push(`Game: ${game}`);
+}
+function carriesUnsupported(message2) {
+  if (message2.type === "unsupported" || message2.paid_stars_amount !== undefined)
+    return true;
+  for (const [key2, value2] of Object.entries(message2)) {
+    if (typeof value2 === "object" && value2 !== null && !READ_OBJECTS.has(key2))
+      return true;
+  }
+  return false;
 }
 function telegramMessageContent(message2) {
-  const content = { text: "", mediaFiles: 0, attachments: [], hasContent: false };
+  const content = { text: "", mediaFiles: 0, attachments: [], hasContent: false, unsupported: carriesUnsupported(message2) };
   let words2 = flattenTelegramText(message2.text);
   if (words2.trim() === "")
     words2 = flattenTelegramText(message2.text_entities);
@@ -153324,7 +153374,7 @@ function cutText(value2, limit) {
   const end = value2.charCodeAt(limit - 1);
   return value2.slice(0, end >= 55296 && end <= 56319 ? limit - 1 : limit);
 }
-var MAX_LINE_CHARS = 500, MAX_POLL_ANSWERS = 20, MEDIA_LABELS, LATEST_PLAUSIBLE_SECONDS = 4102444800, ZONELESS_DATE;
+var MAX_LINE_CHARS = 500, MAX_LIST_ENTRIES = 50, MEDIA_LABELS, READ_OBJECTS, LATEST_PLAUSIBLE_SECONDS = 4102444800, ZONELESS_DATE;
 var init_message = __esm(() => {
   MEDIA_LABELS = {
     sticker: "Sticker",
@@ -153334,6 +153384,17 @@ var init_message = __esm(() => {
     video_file: "Video",
     audio_file: "Audio"
   };
+  READ_OBJECTS = new Set([
+    "contact_information",
+    "location_information",
+    "poll",
+    "todo_list",
+    "invoice_information",
+    "text",
+    "text_entities",
+    "reactions",
+    "inline_bot_buttons"
+  ]);
   ZONELESS_DATE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/;
 });
 
@@ -153361,9 +153422,11 @@ function cursorAt2(input, point, assumedZone) {
 function doneCursor2(input) {
   return `${TELEGRAM_CURSOR_PREFIX}${manifestTag2(input)}:done`;
 }
+function isIndex(value2) {
+  return typeof value2 === "number" && Number.isSafeInteger(value2) && value2 >= 0;
+}
 function afterMessage(point) {
   const levels = point.levels;
-  const isIndex = (value2) => typeof value2 === "number" && Number.isSafeInteger(value2) && value2 >= 0;
   if (levels.length === 2) {
     return levels[0].kind === "object" && levels[0].pointer === "messages" && levels[1].kind === "array" && isIndex(levels[1].pointer);
   }
@@ -153371,6 +153434,19 @@ function afterMessage(point) {
     return levels[0].kind === "object" && (levels[0].pointer === "chats" || levels[0].pointer === "left_chats") && levels[1].kind === "object" && levels[1].pointer === "list" && levels[2].kind === "array" && isIndex(levels[2].pointer) && levels[3].kind === "object" && levels[3].pointer === "messages" && levels[4].kind === "array" && isIndex(levels[4].pointer);
   }
   return false;
+}
+function sectionOfResume(point) {
+  const levels = point.levels;
+  const root = levels[0];
+  if (!root || root.kind !== "object" || typeof root.pointer !== "string" || !SECTION_ROOTS.has(root.pointer))
+    return;
+  if (LISTED_SECTIONS.has(root.pointer)) {
+    return levels.length === 3 && levels[1].kind === "object" && levels[1].pointer === "list" && levels[2].kind === "array" && isIndex(levels[2].pointer) ? root.pointer : undefined;
+  }
+  if (levels.length !== 2)
+    return;
+  const entry = levels[1];
+  return entry.kind === "object" && typeof entry.pointer === "string" || entry.kind === "array" && isIndex(entry.pointer) ? root.pointer : undefined;
 }
 function parseCursor2(input, cursor) {
   if (!cursor)
@@ -153384,7 +153460,7 @@ function parseCursor2(input, cursor) {
     return { resume: undefined, assumedZone: false, done: true };
   const flag = rest.slice(0, 2);
   const resume = flag === "0:" || flag === "1:" ? parseJsonResume(rest.slice(2)) : undefined;
-  if (!resume || !afterMessage(resume) || resume.offset > input.files[0].version.size) {
+  if (!resume || !(afterMessage(resume) || sectionOfResume(resume)) || resume.offset > input.files[0].version.size) {
     throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.");
   }
   return { resume, assumedZone: flag === "1:", done: false };
@@ -153408,14 +153484,17 @@ function chatTitle(name, type, place) {
 function messageOutcome2(input, event, fetchedAt) {
   const message2 = event.value;
   if (typeof message2 !== "object" || message2 === null || Array.isArray(message2))
-    return { kind: "unreadable" };
+    return { kind: "gap", reason: TELEGRAM_FINDINGS.unreadable };
   const record5 = message2;
   if (record5.type === "service")
     return { kind: "skipped", reason: TELEGRAM_FINDINGS.serviceMessage };
   const content = telegramMessageContent(record5);
-  if (!content.hasContent)
-    return { kind: "skipped", reason: TELEGRAM_FINDINGS.withoutText };
+  if (!content.hasContent) {
+    return content.unsupported ? { kind: "gap", reason: TELEGRAM_FINDINGS.unsupported } : { kind: "skipped", reason: TELEGRAM_FINDINGS.withoutText };
+  }
   const findings = [];
+  if (content.unsupported)
+    findings.push({ kind: TELEGRAM_FINDINGS.unsupported });
   let body = content.text;
   if (body.length > TELEGRAM_MAX_ITEM_TEXT_CHARS) {
     body = cutText(body, TELEGRAM_MAX_ITEM_TEXT_CHARS);
@@ -153519,7 +153598,7 @@ function createTelegramArchiveConnector(input) {
             throw archiveStopFromReaderError(error2, file.relPath);
           }
           const fetchedAt = new Date().toISOString();
-          const reportedSections = new Set;
+          const reportedSections = new Set(start.resume ? [sectionOfResume(start.resume)].filter((name) => name !== undefined) : []);
           let assumedZone = start.assumedZone;
           let page2 = [];
           let after;
@@ -153554,14 +153633,12 @@ function createTelegramArchiveConnector(input) {
                 reportedSections.add(section);
                 report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
               }
-              continue;
-            }
-            if (event.kind === "oversize") {
+            } else if (event.kind === "oversize") {
               report(TELEGRAM_FINDINGS.tooLarge, "gap", event.start);
             } else {
               const outcome = messageOutcome2(input, event, fetchedAt);
-              if (outcome.kind === "unreadable") {
-                report(TELEGRAM_FINDINGS.unreadable, "gap", event.start);
+              if (outcome.kind === "gap") {
+                report(outcome.reason, "gap", event.start);
               } else if (outcome.kind === "skipped") {
                 report(outcome.reason, "skipped", event.start);
               } else {
@@ -153616,7 +153693,7 @@ function createTelegramArchiveConnector(input) {
 function registerTelegramArchiveConnector() {
   registerArchiveFormatConnector("telegram_json", createTelegramArchiveConnector);
 }
-var TELEGRAM_CURSOR_PREFIX = "tg1:", TELEGRAM_DEFAULT_PAGE_SIZE = 200, TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_ITEM_TEXT_CHARS = 1e6, TELEGRAM_MAX_MESSAGE_BYTES, TELEGRAM_FINDINGS, MESSAGE_PATHS, SECTION_PATHS, ITEM_PATHS, CHAT_TYPE_KINDS, CHAT_TYPE_TITLES;
+var TELEGRAM_CURSOR_PREFIX = "tg1:", TELEGRAM_DEFAULT_PAGE_SIZE = 200, TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_ITEM_TEXT_CHARS = 1e6, TELEGRAM_MAX_MESSAGE_BYTES, TELEGRAM_FINDINGS, MESSAGE_PATHS, SECTION_PATHS, ITEM_PATHS, CHAT_TYPE_KINDS, CHAT_TYPE_TITLES, SECTION_ROOTS, LISTED_SECTIONS;
 var init_connector7 = __esm(() => {
   init_archive_formats();
   init_byte_source();
@@ -153627,6 +153704,7 @@ var init_connector7 = __esm(() => {
   TELEGRAM_FINDINGS = {
     tooLarge: "message_too_large",
     unreadable: "message_unreadable",
+    unsupported: "message_content_unsupported",
     serviceMessage: "service_message",
     withoutText: "message_without_text"
   };
@@ -153664,6 +153742,8 @@ var init_connector7 = __esm(() => {
     replies: "Replies",
     verification_codes: "Telegram verification codes"
   };
+  SECTION_ROOTS = new Set(SECTION_PATHS.map((section) => section.path[0]));
+  LISTED_SECTIONS = new Set(SECTION_PATHS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
 
 // src/workers/archive-import/format-connectors.ts
