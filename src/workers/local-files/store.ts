@@ -22,8 +22,9 @@ import {
   type SourceIngestionPolicy,
 } from '../../core/source-ingestion-policy.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { TierLedger } from '../classification/tier-ledger.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore, openTierLedger } from '../../core/source-storage.ts';
 import { fileLaneIngestionMatcher } from '../connector-store/file-ingestion-matcher.ts';
 import type {
   ConnectorStorePlacementRule,
@@ -139,14 +140,14 @@ export function createLocalFilesConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? defaultLocalFilesIngestionPolicy();
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: LOCAL_FILES_SOURCE_ID }, {
     dbPath: defaultLocalFilesConnectorStoreDbPath(env),
     corpusId: LOCAL_FILES_CORPUS_ID,
     family: 'file',
     trustDomain: 'secure_local',
     exclusions: localFilesCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
-  });
+  }, env);
 }
 
 export function createLocalFilesTierConnectorStore(
@@ -155,7 +156,7 @@ export function createLocalFilesTierConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy; tierLedger?: TierLedger } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? defaultLocalFilesIngestionPolicy();
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: LOCAL_FILES_SOURCE_ID }, {
     dbPath: trustDomain === 'internal'
       ? defaultLocalFilesInternalConnectorStoreDbPath(env)
       : defaultLocalFilesPublicConnectorStoreDbPath(env),
@@ -165,7 +166,7 @@ export function createLocalFilesTierConnectorStore(
     exclusions: localFilesCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
     ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
-  });
+  }, env);
 }
 
 export interface LocalFilesTierLane {
@@ -186,7 +187,7 @@ export function createLocalFilesTierLane(options: {
 }): LocalFilesTierLane {
   const env = options.env ?? process.env;
   const ledger = options.secureStore.tierLedger()
-    ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+    ?? openTierLedger({ sourceId: LOCAL_FILES_SOURCE_ID }, { dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) }, env);
   const leg = (domain: 'internal' | 'public_safe'): OnDemandTierStore => onDemandTierStore({
     corpusId: LOCAL_FILES_TIER_CORPUS_IDS[domain],
     dbPath: domain === 'internal'

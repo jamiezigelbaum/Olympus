@@ -28815,94 +28815,6 @@ var init_tiered_store_set = __esm(() => {
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
-// src/workers/connector-store/principal.ts
-function isCanonicalConnectorStoreProvider(provider) {
-  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
-}
-function isCanonicalConnectorStoreAccountScope(accountScope) {
-  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
-}
-var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
-var init_principal = __esm(() => {
-  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
-  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
-});
-
-// src/workers/connector-store/filter-capabilities.ts
-function connectorStoreFilterCapabilityRegistry(entries) {
-  const familyEntries = new Map;
-  const providerEntries = new Map;
-  for (const [scope, capabilities] of entries) {
-    const provider = "provider" in scope ? scope.provider : undefined;
-    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
-      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
-    }
-    const registry = provider === undefined ? familyEntries : providerEntries;
-    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
-    if (registry.has(key2)) {
-      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
-      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
-    }
-    registry.set(key2, Object.freeze({ ...capabilities }));
-  }
-  return Object.freeze({
-    resolve(identity) {
-      const familyCapabilities = familyEntries.get(identity.family);
-      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
-      if (!familyCapabilities)
-        return providerCapabilities;
-      if (!providerCapabilities)
-        return familyCapabilities;
-      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
-    }
-  });
-}
-function providerScopeKey(family, provider) {
-  return `${family}\x00${provider}`;
-}
-var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
-var init_filter_capabilities = __esm(() => {
-  init_principal();
-  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
-    "corpus_id",
-    "query",
-    "retrieval_mode",
-    "max_results",
-    "account",
-    "conversation_id",
-    "sender_id",
-    "sender_label",
-    "authored_after",
-    "authored_before",
-    "after",
-    "before",
-    "trust_domain",
-    "all_tiers"
-  ];
-  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
-    "approved_scope_key",
-    "chat_scope",
-    "participant_id",
-    "include_deleted",
-    "attachment_type",
-    "include_locators",
-    "chat_title",
-    "chat_title_hint",
-    "folder_id",
-    "folder_name"
-  ];
-  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
-    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
-    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
-  ]);
-});
-
-// src/workers/connector-store/index.ts
-var init_connector_store = __esm(() => {
-  init_local_index();
-  init_filter_capabilities();
-});
-
 // src/workers/connector-store/file-ingestion-matcher.ts
 var POLICY_ADMITTED;
 var init_file_ingestion_matcher = __esm(() => {
@@ -28914,6 +28826,198 @@ var init_file_ingestion_matcher = __esm(() => {
     disposition: "admit",
     outcome: "admitted"
   });
+});
+
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+function isArchiveCorpusId(corpusId, trustDomain) {
+  return corpusId.startsWith(`${trustDomain}.archive.`);
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
+// src/core/source-registry.ts
+import { readFileSync as readFileSync17 } from "node:fs";
+function sourceRegistryPath(env = process.env) {
+  return olympusDataPath(env, "registry.json");
+}
+function readSourceRegistry(env = process.env) {
+  return readSourceRegistryAt(sourceRegistryPath(env));
+}
+function updateSourceRegistry(env, mutate) {
+  const path = sourceRegistryPath(env);
+  return withFileLeaseSync(path, (lease) => {
+    const current2 = readSourceRegistryAt(path);
+    const next = mutate(current2) ?? current2;
+    const text2 = `${JSON.stringify(validateRegistry(next, path), null, 2)}
+`;
+    lease.commit(() => writePrivateFileAtomicSync(path, text2));
+    return next;
+  });
+}
+function findRegistryAccount(registry, sourceId, slot) {
+  return registry.accounts.find((account) => account.source_id === sourceId && account.slot === slot);
+}
+function readSourceRegistryAt(path) {
+  let text2;
+  try {
+    text2 = readFileSync17(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+    throw new SourceRegistryError(path, "cannot be read");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text2);
+  } catch {
+    throw new SourceRegistryError(path, "not JSON");
+  }
+  return validateRegistry(parsed, path);
+}
+function validateRegistry(value, path) {
+  if (!isRecord(value))
+    throw new SourceRegistryError(path, "not an object");
+  if (value.schema !== SOURCE_REGISTRY_SCHEMA)
+    throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
+  if (!Array.isArray(value.accounts))
+    throw new SourceRegistryError(path, "accounts is not a list");
+  const seen = new Set;
+  for (const [index, account] of value.accounts.entries()) {
+    if (!isValidAccount(account))
+      throw new SourceRegistryError(path, `account #${index + 1} is malformed`);
+    const key2 = `${account.source_id}\x00${account.slot}`;
+    if (seen.has(key2))
+      throw new SourceRegistryError(path, `${account.source_id} slot ${account.slot} is listed twice`);
+    seen.add(key2);
+  }
+  return value;
+}
+function isValidAccount(value) {
+  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at);
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+var SOURCE_REGISTRY_SCHEMA = 1, SourceRegistryError, STATES, LAYOUTS;
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+  SourceRegistryError = class SourceRegistryError extends Error {
+    code = "source_registry_unreadable";
+    path;
+    constructor(path, detail) {
+      super(`The source registry at ${path} is unreadable (${detail}); no source store opens until it is repaired.`);
+      this.name = "SourceRegistryError";
+      this.path = path;
+    }
+  };
+  STATES = ["active", "deleting", "deleted"];
+  LAYOUTS = ["legacy", "folder"];
+});
+
+// src/core/source-storage.ts
+function openConnectorStore(account, options, env = process.env) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, slot);
+  if (adoptionEnabled && options.readOnly !== true) {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry?.corpus_ids.includes(options.corpusId))
+      adopt(env, account.sourceId, slot, options.corpusId);
+  }
+  return new LocalConnectorStore(options);
+}
+function storageAccountForCorpus(corpus, registered2 = []) {
+  const known = [...registered2, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
+  if (known)
+    return { sourceId: known.sourceId };
+  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain))
+    return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
+  const prefix = `${corpus.trustDomain}.`;
+  const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
+  return { sourceId: unprefixed || corpus.corpusId };
+}
+function unavailableStateReason(state) {
+  return state === "deleting" ? "its data is being deleted" : "its data was deleted";
+}
+function assertOpenable(registry, sourceId, slot) {
+  const state = findRegistryAccount(registry, sourceId, slot)?.state;
+  if (state !== undefined && state !== "active")
+    throw new SourceStorageUnavailableError(sourceId, slot, state);
+}
+function adopt(env, sourceId, slot, corpusId) {
+  updateSourceRegistry(env, (registry) => {
+    assertOpenable(registry, sourceId, slot);
+    const entry = findRegistryAccount(registry, sourceId, slot);
+    if (!entry) {
+      registry.accounts.push({
+        source_id: sourceId,
+        slot,
+        state: "active",
+        layout: "legacy",
+        corpus_ids: [corpusId],
+        created_at: new Date().toISOString()
+      });
+    } else if (!entry.corpus_ids.includes(corpusId)) {
+      entry.corpus_ids.push(corpusId);
+    }
+  });
+}
+var DEFAULT_STORAGE_SLOT = "1", ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", SourceStorageUnavailableError, adoptionEnabled = false;
+var init_source_storage = __esm(() => {
+  init_secret_locations();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_local_index();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_registry();
+  SourceStorageUnavailableError = class SourceStorageUnavailableError extends Error {
+    code = "source_storage_unavailable";
+    sourceId;
+    slot;
+    state;
+    constructor(sourceId, slot, state) {
+      const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
+      super(`${account} is not available: ${unavailableStateReason(state)}.`);
+      this.name = "SourceStorageUnavailableError";
+      this.sourceId = sourceId;
+      this.slot = slot;
+      this.state = state;
+    }
+  };
 });
 
 // src/workers/dropbox-files/corpus-adapter.ts
@@ -28930,12 +29034,12 @@ function defaultDropboxConnectorStoreDbPath(env = process.env) {
   return olympusDataPath(env, "dropbox-files-connector-store.sqlite");
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT;
-var init_connector_store2 = __esm(() => {
+var init_connector_store = __esm(() => {
   init_olympus_layout();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_connector_store();
   init_file_ingestion_matcher();
+  init_source_storage();
   init_corpus_adapter();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -28953,7 +29057,7 @@ var init_connector_store2 = __esm(() => {
 var init_provider_store_sync = __esm(() => {
   init_embeddings();
   init_tiered_store_set();
-  init_connector_store2();
+  init_connector_store();
   init_connector();
   init_provider_client();
 });
@@ -29193,6 +29297,94 @@ var init_dropbox2 = __esm(() => {
   init_pdf_render();
   init_credential_broker();
   init_approved_scope_filter();
+});
+
+// src/workers/connector-store/principal.ts
+function isCanonicalConnectorStoreProvider(provider) {
+  return provider === provider.trim() && CANONICAL_PROVIDER.test(provider);
+}
+function isCanonicalConnectorStoreAccountScope(accountScope) {
+  return accountScope === accountScope.trim() && CANONICAL_ACCOUNT_SCOPE.test(accountScope);
+}
+var CANONICAL_PROVIDER, CANONICAL_ACCOUNT_SCOPE;
+var init_principal = __esm(() => {
+  CANONICAL_PROVIDER = /^[a-z0-9][a-z0-9_-]*$/;
+  CANONICAL_ACCOUNT_SCOPE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+});
+
+// src/workers/connector-store/filter-capabilities.ts
+function connectorStoreFilterCapabilityRegistry(entries) {
+  const familyEntries = new Map;
+  const providerEntries = new Map;
+  for (const [scope, capabilities] of entries) {
+    const provider = "provider" in scope ? scope.provider : undefined;
+    if (provider !== undefined && !isCanonicalConnectorStoreProvider(provider)) {
+      throw new Error(`Connector-store capability provider scope ${JSON.stringify(provider)} in family ${JSON.stringify(scope.family)} must be a canonical lowercase provider id with no whitespace.`);
+    }
+    const registry = provider === undefined ? familyEntries : providerEntries;
+    const key2 = provider === undefined ? scope.family : providerScopeKey(scope.family, provider);
+    if (registry.has(key2)) {
+      const label = provider === undefined ? `family "${scope.family}"` : `provider "${provider}" in family "${scope.family}"`;
+      throw new Error(`Connector-store filter capabilities are duplicated for ${label}.`);
+    }
+    registry.set(key2, Object.freeze({ ...capabilities }));
+  }
+  return Object.freeze({
+    resolve(identity) {
+      const familyCapabilities = familyEntries.get(identity.family);
+      const providerCapabilities = identity.provider === undefined ? undefined : providerEntries.get(providerScopeKey(identity.family, identity.provider));
+      if (!familyCapabilities)
+        return providerCapabilities;
+      if (!providerCapabilities)
+        return familyCapabilities;
+      return Object.freeze({ ...familyCapabilities, ...providerCapabilities });
+    }
+  });
+}
+function providerScopeKey(family, provider) {
+  return `${family}\x00${provider}`;
+}
+var CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS, CONNECTOR_STORE_DECLARED_FILTER_FIELDS, CONNECTOR_STORE_SEARCH_REQUEST_FIELDS;
+var init_filter_capabilities = __esm(() => {
+  init_principal();
+  CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS = [
+    "corpus_id",
+    "query",
+    "retrieval_mode",
+    "max_results",
+    "account",
+    "conversation_id",
+    "sender_id",
+    "sender_label",
+    "authored_after",
+    "authored_before",
+    "after",
+    "before",
+    "trust_domain",
+    "all_tiers"
+  ];
+  CONNECTOR_STORE_DECLARED_FILTER_FIELDS = [
+    "approved_scope_key",
+    "chat_scope",
+    "participant_id",
+    "include_deleted",
+    "attachment_type",
+    "include_locators",
+    "chat_title",
+    "chat_title_hint",
+    "folder_id",
+    "folder_name"
+  ];
+  CONNECTOR_STORE_SEARCH_REQUEST_FIELDS = new Set([
+    ...CONNECTOR_STORE_CORE_SEARCH_REQUEST_FIELDS,
+    ...CONNECTOR_STORE_DECLARED_FILTER_FIELDS
+  ]);
+});
+
+// src/workers/connector-store/index.ts
+var init_connector_store2 = __esm(() => {
+  init_local_index();
+  init_filter_capabilities();
 });
 // src/workers/answer-activity.ts
 var DEFAULT_ANSWER_LEASE_MS;
@@ -29683,16 +29875,16 @@ var init_analyst_answer = __esm(() => {
 // src/workers/dropbox-files/qualification.ts
 var init_qualification = __esm(() => {
   init_corpus();
-  init_connector_store();
+  init_connector_store2();
   init_analyst_answer();
   init_corpus_adapter();
 });
 
 // src/workers/dropbox-files/tier-set.ts
 var init_tier_set = __esm(() => {
-  init_tier_ledger();
+  init_source_storage();
   init_tiered_store_set();
-  init_connector_store2();
+  init_connector_store();
   init_corpus_adapter();
 });
 
@@ -29710,7 +29902,7 @@ var init_dropbox_files = __esm(() => {
   init_corpus_adapter();
   init_qualification();
   init_tier_set();
-  init_connector_store2();
+  init_connector_store();
 });
 
 // src/core/google-handle-compatibility.ts
@@ -29725,35 +29917,6 @@ var init_privacy_language = __esm(() => {
     secure: "Private",
     secrets: "Secrets"
   };
-});
-
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
-  CONNECTOR_FACTORIES = new Map;
 });
 
 // src/core/ingestion-throughput.ts
@@ -29801,6 +29964,9 @@ var init_source_failure = __esm(() => {
 
 // src/workers/dashboard/answer-ready-coverage.ts
 var init_answer_ready_coverage = () => {};
+
+// src/workers/connector-store/capture-freshness.ts
+var init_capture_freshness = () => {};
 
 // src/workers/dashboard/phases.ts
 var init_phases = __esm(() => {
@@ -31303,7 +31469,7 @@ var init_connector2 = __esm(() => {
   init_olympus_layout();
   init_atomic_file();
   init_credential_broker();
-  init_connector_store();
+  init_source_storage();
   init_api();
   init_corpus_adapter2();
   READWISE_STORE_PLACEMENT = Object.freeze({
@@ -31323,7 +31489,7 @@ var init_live_control = __esm(() => {
 
 // src/workers/readwise/live-sync.ts
 var init_live_sync = __esm(() => {
-  init_connector_store();
+  init_connector_store2();
   init_tiered_store_set();
   init_api();
   init_connector2();
@@ -31347,7 +31513,7 @@ var init_corpus_adapter3 = __esm(() => {
 // src/workers/x-bookmarks/qualification.ts
 var init_qualification2 = __esm(() => {
   init_corpus();
-  init_connector_store();
+  init_connector_store2();
   init_analyst_answer();
   init_corpus_adapter3();
 });
@@ -31409,7 +31575,7 @@ function defaultXBookmarksConnectorStoreDbPath(env = process.env) {
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_corpus_adapter3();
   init_folder_facets();
   X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
@@ -31474,7 +31640,7 @@ var init_window_diagnostic = __esm(() => {
 
 // src/workers/x-bookmarks/live-sync.ts
 var init_live_sync2 = __esm(() => {
-  init_connector_store();
+  init_connector_store2();
   init_tiered_store_set();
   init_api_connector();
   init_live_control2();
@@ -31487,7 +31653,7 @@ var init_live_sync2 = __esm(() => {
 // src/workers/x-bookmarks/content-recovery.ts
 var init_content_recovery = __esm(() => {
   init_types();
-  init_connector_store();
+  init_connector_store2();
   init_credential_broker();
   init_api2();
   init_connector3();
@@ -31702,8 +31868,7 @@ var init_store = __esm(() => {
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_tier_ledger();
-  init_connector_store();
+  init_source_storage();
   init_file_ingestion_matcher();
   init_tiered_store_set();
   init_scope();
@@ -31755,9 +31920,10 @@ var init_capture_spool_connector = __esm(() => {
 // src/workers/telegram-messages/store-sync.ts
 var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync = __esm(() => {
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -31936,6 +32102,7 @@ var init_source_dashboard = __esm(() => {
   init_source_failure();
   init_answer_ready_coverage();
   init_vocabulary();
+  init_capture_freshness();
   init_phases();
   init_credential_health();
   init_status();
@@ -32004,7 +32171,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -32029,6 +32196,13 @@ var init_vocabulary = __esm(() => {
     "Content extraction is stalled": "reading files has stalled",
     [DASHBOARD_MANY_UNREADABLE_LABEL]: "many files can't be read"
   };
+  CAPTURE_JUDGED_CONNECTION_STATES = new Set([
+    "connected",
+    "waiting_for_first_sync",
+    "syncing",
+    "synced"
+  ]);
+  CAPTURE_UNEXPECTED_STOP_REASONS = new Set(["grant_missing", "handle_unavailable"]);
   REDIRECT_REFUSAL_CODES = new Set([
     "redirect_uri_mismatch",
     "invalid_redirect_uri",
@@ -33908,11 +34082,151 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
+import { closeSync as closeSync8, constants, fstatSync, lstatSync as lstatSync9, openSync as openSync8, readFileSync as readFileSync18 } from "node:fs";
+function unpairedSourcesPath(registryPath) {
+  return `${registryPath}.unpaired`;
+}
+function inspectRecordNode(path) {
+  let stat2;
+  try {
+    stat2 = lstatSync9(path);
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    if (code === "ENOENT" || code === "ENOTDIR")
+      return { kind: "missing" };
+    return { kind: "unreadable", reason: `${code}: ${error.message}` };
+  }
+  if (stat2.isSymbolicLink())
+    return { kind: "unreadable", reason: "record path is a symbolic link" };
+  if (!stat2.isFile())
+    return { kind: "unreadable", reason: "record path is not a regular file" };
+  return { kind: "file", stat: stat2 };
+}
+function readRecordText(path) {
+  const node = inspectRecordNode(path);
+  if (node.kind !== "file")
+    return node;
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+  let fd;
+  try {
+    fd = openSync8(path, flags);
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    if (code === "ENOENT" || code === "ENOTDIR")
+      return { kind: "missing" };
+    return { kind: "unreadable", reason: `${code}: ${error.message}` };
+  }
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== node.stat.dev || opened.ino !== node.stat.ino) {
+      return { kind: "unreadable", reason: "record path changed between inspection and opening" };
+    }
+    return { kind: "ok", text: readFileSync18(fd, "utf8") };
+  } catch (error) {
+    const code = error.code ?? "UNKNOWN";
+    return { kind: "unreadable", reason: `${code}: ${error.message}` };
+  } finally {
+    try {
+      closeSync8(fd);
+    } catch {}
+  }
+}
+function readUnpairedSources(registryPath) {
+  const path = unpairedSourcesPath(registryPath);
+  const read = readRecordText(path);
+  if (read.kind === "missing")
+    return { status: "missing" };
+  if (read.kind === "unreadable")
+    return { status: "unreadable", path, reason: read.reason };
+  let parsed;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch (error) {
+    return { status: "unreadable", path, reason: error.message };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { status: "unreadable", path, reason: "record must be a JSON object" };
+  }
+  const record = parsed;
+  if (record.version !== 1) {
+    return { status: "unreadable", path, reason: `unsupported record version: ${String(record.version)}` };
+  }
+  if (!Array.isArray(record.sources)) {
+    return { status: "unreadable", path, reason: "record.sources must be an array" };
+  }
+  const records = new Map;
+  for (const [index, entry] of record.sources.entries()) {
+    const normalized = normalizeRecord(entry);
+    if (normalized === "invalid") {
+      return { status: "unreadable", path, reason: `record.sources[${index}] is not a recognized entry` };
+    }
+    records.set(normalized.source_id, normalized);
+  }
+  return {
+    status: "ok",
+    records: [...records.values()].sort((a, b) => a.source_id.localeCompare(b.source_id))
+  };
+}
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim() !== "");
+}
+function normalizeRecord(entry) {
+  if (typeof entry === "string") {
+    return entry.trim() === "" ? "invalid" : { source_id: entry.trim(), state: "unpaired" };
+  }
+  if (!entry || typeof entry !== "object" || Array.isArray(entry))
+    return "invalid";
+  const value = entry;
+  for (const key2 of Object.keys(value))
+    if (!UNPAIRED_RECORD_KEYS.has(key2))
+      return "invalid";
+  if (typeof value.source_id !== "string" || value.source_id.trim() === "")
+    return "invalid";
+  if (value.state !== undefined && (typeof value.state !== "string" || !UNPAIRED_RECORD_STATES.has(value.state))) {
+    return "invalid";
+  }
+  if (value.unremoved_paths !== undefined && !isStringArray(value.unremoved_paths))
+    return "invalid";
+  if (value.failed_steps !== undefined && !isStringArray(value.failed_steps))
+    return "invalid";
+  const paths = value.unremoved_paths ?? [];
+  const steps = value.failed_steps ?? [];
+  return {
+    source_id: value.source_id.trim(),
+    state: value.state ?? "unpaired",
+    ...paths.length > 0 ? { unremoved_paths: [...new Set(paths)].sort() } : {},
+    ...steps.length > 0 ? { failed_steps: [...new Set(steps)].sort() } : {}
+  };
+}
+function unpairedLaneProviders(registryPath) {
+  const read = readUnpairedSources(registryPath);
+  if (read.status === "missing")
+    return new Set;
+  if (read.status === "unreadable")
+    return new Set(Object.values(UNPAIRED_SOURCE_PROVIDERS));
+  const providers = new Set;
+  for (const record of read.records) {
+    const provider = UNPAIRED_SOURCE_PROVIDERS[record.source_id];
+    if (provider)
+      providers.add(provider);
+  }
+  return providers;
+}
+function withoutUnpairedLaneHandles(handles, registryPath) {
+  const unpaired = unpairedLaneProviders(registryPath);
+  if (unpaired.size === 0)
+    return [...handles];
+  return handles.filter((handle) => !unpaired.has(handle.provider));
+}
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES, UNPAIRED_SOURCE_PROVIDERS;
 var init_unpaired_sources = __esm(() => {
   init_atomic_file();
   UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
   UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+  UNPAIRED_SOURCE_PROVIDERS = {
+    "telegram.messages": "telegram",
+    "whatsapp.personal.messages": "whatsapp_personal"
+  };
 });
 
 // src/core/worker-service.ts
@@ -33984,11 +34298,66 @@ var init_connect = __esm(() => {
   ]);
 });
 
+// src/core/pairing-session-paths.ts
+var init_pairing_session_paths = __esm(() => {
+  init_olympus_layout();
+});
+
 // src/core/remote-open.ts
 var init_remote_open = __esm(() => {
   init_linux_desktop_opener();
   init_worker_transport();
   init_open_targets();
+});
+
+// src/core/file-extraction-source.ts
+import { createHash as createHash20 } from "node:crypto";
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
+  });
+  FileExtractionSourceError = class FileExtractionSourceError extends Error {
+    errorKind;
+    settleAs;
+    retryable;
+    errorHash;
+    constructor(errorKind, options = {}) {
+      super(errorKind);
+      this.name = "FileExtractionSourceError";
+      this.errorKind = errorKind;
+      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
+      this.retryable = this.settleAs === "failed_retryable";
+      const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      if (errorHash)
+        this.errorHash = errorHash;
+    }
+  };
+});
+
+// src/workers/whatsapp/extraction-source.ts
+var init_extraction_source = __esm(() => {
+  init_file_extraction_source();
 });
 
 // src/workers/whatsapp/reaction-index.ts
@@ -34003,19 +34372,20 @@ var init_live_connector = __esm(() => {
 });
 
 // src/workers/whatsapp/store-sync.ts
-import { join as join25 } from "node:path";
+import { join as join27 } from "node:path";
 function defaultWhatsAppStateDir(env = process.env) {
-  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join25(legacyCaptureDataRoot(env), "whatsapp-live");
+  return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join27(legacyCaptureDataRoot(env), "whatsapp-live");
 }
 function defaultWhatsAppConnectorStoreDbPath(env = process.env) {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join25(defaultWhatsAppStateDir(env), "connector-store.db");
+  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim() || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim() || join27(defaultWhatsAppStateDir(env), "connector-store.db");
 }
 var WHATSAPP_PERSONAL_SOURCE_ID = "whatsapp.personal.messages", WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
@@ -36743,7 +37113,7 @@ function chatgptPickerProgram(kit) {
   const el = kit.el;
   const add = kit.add;
   const fill2 = kit.fill;
-  const STATES = ["ingest", "metadata_only", "exclude"];
+  const STATES2 = ["ingest", "metadata_only", "exclude"];
   const WINDOWS = ["6m", "1y", "2y", "5y", "all"];
   const CATEGORIES = ["primary", "updates", "forums", "social", "promotions"];
   let p = null;
@@ -37117,7 +37487,7 @@ function chatgptPickerProgram(kit) {
       p.wholeConfirmed = p.whole;
       const saved = Array.isArray(page2.selections) ? page2.selections : [];
       for (const selection of saved) {
-        if (!selection || typeof selection.key !== "string" || STATES.indexOf(selection.state) < 0)
+        if (!selection || typeof selection.key !== "string" || STATES2.indexOf(selection.state) < 0)
           continue;
         p.own.set(selection.key, selection.state);
         p.ancestors.set(selection.key, Array.isArray(selection.ancestor_keys) ? selection.ancestor_keys.filter((key2) => typeof key2 === "string") : []);
@@ -37309,7 +37679,7 @@ function chatgptPickerProgram(kit) {
         p.edited = true;
       }
     } else {
-      if (value && STATES.indexOf(value) < 0)
+      if (value && STATES2.indexOf(value) < 0)
         return;
       if (value && !allowed(key2, value))
         return;
@@ -37538,7 +37908,7 @@ function chatgptPickerProgram(kit) {
     group2.setAttribute("role", "group");
     group2.setAttribute("aria-label", fill2(Q.choiceGroup, { name }));
     const buttons = [];
-    for (const state of STATES) {
+    for (const state of STATES2) {
       const words2 = Q.segments[state];
       const pressed = model.pressed === state;
       const button = el("button", "seg-opt" + (pressed ? " on" : model.inherited === state ? " inherited" : ""));
@@ -39417,10 +39787,915 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_olympus_layout();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_storage();
+  init_state();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire2, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire2 = createRequire4(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// node_modules/fflate/esm/browser.js
+var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0;i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1;i < 30; ++i) {
+    for (var j = b[i];j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+}, _a2, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
+  var s = cd.length;
+  var i2 = 0;
+  var l = new u16(mb);
+  for (;i2 < s; ++i2) {
+    if (cd[i2])
+      ++l[cd[i2] - 1];
+  }
+  var le = new u16(mb);
+  for (i2 = 1;i2 < mb; ++i2) {
+    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+  }
+  var co;
+  if (r) {
+    co = new u16(1 << mb);
+    var rvb = 15 - mb;
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        var sv = i2 << 4 | cd[i2];
+        var r_1 = mb - cd[i2];
+        var v = le[cd[i2] - 1]++ << r_1;
+        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
+          co[rev[v] >> rvb] = sv;
+        }
+      }
+    }
+  } else {
+    co = new u16(s);
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+      }
+    }
+  }
+  return co;
+}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
+  var m = a[0];
+  for (var i2 = 1;i2 < a.length; ++i2) {
+    if (a[i2] > m)
+      m = a[i2];
+  }
+  return m;
+}, bits = function(d, p, m) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+}, bits16 = function(d, p) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+}, shft = function(p) {
+  return (p + 7) / 8 | 0;
+}, slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+}, ec, err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+}, inflt = function(dat, st, buf, dict) {
+  var sl = dat.length, dl = dict ? dict.length : 0;
+  if (!sl || st.f && !st.l)
+    return buf || new u8(0);
+  var noBuf = !buf;
+  var resize = noBuf || st.i != 2;
+  var noSt = st.i;
+  if (noBuf)
+    buf = new u8(sl * 3);
+  var cbuf = function(l2) {
+    var bl = buf.length;
+    if (l2 > bl) {
+      var nbuf = new u8(Math.max(bl * 2, l2));
+      nbuf.set(buf);
+      buf = nbuf;
+    }
+  };
+  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+  var tbts = sl * 8;
+  do {
+    if (!lm) {
+      final = bits(dat, pos, 1);
+      var type = bits(dat, pos + 1, 3);
+      pos += 3;
+      if (!type) {
+        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+        if (t > sl) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + l);
+        buf.set(dat.subarray(s, t), bt);
+        st.b = bt += l, st.p = pos = t * 8, st.f = final;
+        continue;
+      } else if (type == 1)
+        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+      else if (type == 2) {
+        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        pos += 14;
+        var ldt = new u8(tl);
+        var clt = new u8(19);
+        for (var i2 = 0;i2 < hcLen; ++i2) {
+          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+        }
+        pos += hcLen * 3;
+        var clb = max(clt), clbmsk = (1 << clb) - 1;
+        var clm = hMap(clt, clb, 1);
+        for (var i2 = 0;i2 < tl; ) {
+          var r = clm[bits(dat, pos, clbmsk)];
+          pos += r & 15;
+          var s = r >> 4;
+          if (s < 16) {
+            ldt[i2++] = s;
+          } else {
+            var c = 0, n = 0;
+            if (s == 16)
+              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+            else if (s == 17)
+              n = 3 + bits(dat, pos, 7), pos += 3;
+            else if (s == 18)
+              n = 11 + bits(dat, pos, 127), pos += 7;
+            while (n--)
+              ldt[i2++] = c;
+          }
+        }
+        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+        lbt = max(lt);
+        dbt = max(dt);
+        lm = hMap(lt, lbt, 1);
+        dm = hMap(dt, dbt, 1);
+      } else
+        err(1);
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+    }
+    if (resize)
+      cbuf(bt + 131072);
+    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+    var lpos = pos;
+    for (;; lpos = pos) {
+      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+      pos += c & 15;
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+      if (!c)
+        err(2);
+      if (sym < 256)
+        buf[bt++] = sym;
+      else if (sym == 256) {
+        lpos = pos, lm = null;
+        break;
+      } else {
+        var add = sym - 254;
+        if (sym > 264) {
+          var i2 = sym - 257, b = fleb[i2];
+          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+          pos += b;
+        }
+        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+        if (!d)
+          err(3);
+        pos += d & 15;
+        var dt = fd[dsym];
+        if (dsym > 3) {
+          var b = fdeb[dsym];
+          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+        }
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var end = bt + add;
+        if (bt < dt) {
+          var shift = dl - dt, dend = Math.min(dt, end);
+          if (shift + bt < 0)
+            err(3);
+          for (;bt < dend; ++bt)
+            buf[bt] = dict[shift + bt];
+        }
+        for (;bt < end; ++bt)
+          buf[bt] = buf[bt - dt];
+      }
+    }
+    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+    if (lm)
+      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+  } while (!final);
+  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+}, et, Inflate, td, tds = 0;
+var init_browser = __esm(() => {
+  u8 = Uint8Array;
+  u16 = Uint16Array;
+  i32 = Int32Array;
+  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  _a2 = freb(fleb, 2);
+  fl = _a2.b;
+  revfl = _a2.r;
+  fl[28] = 258, revfl[258] = 28;
+  _b = freb(fdeb, 0);
+  fd = _b.b;
+  revfd = _b.r;
+  rev = new u16(32768);
+  for (i = 0;i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  flt = new u8(288);
+  for (i = 0;i < 144; ++i)
+    flt[i] = 8;
+  for (i = 144;i < 256; ++i)
+    flt[i] = 9;
+  for (i = 256;i < 280; ++i)
+    flt[i] = 7;
+  for (i = 280;i < 288; ++i)
+    flt[i] = 8;
+  fdt = new u8(32);
+  for (i = 0;i < 32; ++i)
+    fdt[i] = 5;
+  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+  ];
+  et = /* @__PURE__ */ new u8(0);
+  Inflate = /* @__PURE__ */ function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  }();
+  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {}
+});
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+var TokenizerStates;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+});
+
+// src/workers/archive-import/json-stream.ts
+var EMPTY_FRAME, MAX_SAFE_DIGITS;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  init_json_stream();
+});
+
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data2, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data2.length; index += 1) {
+    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data2) {
+  if (data2.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+
+// src/workers/archive-import/zip-reader.ts
+function readExact(source, offset, length) {
+  if (length < 0 || offset < 0 || offset + length > source.size)
+    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+  if (length <= ZIP_READ_CHUNK_BYTES) {
+    const bytes = source.readAt(offset, length);
+    if (bytes.length !== length)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    return bytes;
+  }
+  const out = new Uint8Array(length);
+  for (let done = 0;done < length; ) {
+    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
+    if (part.length === 0)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    out.set(part, done);
+    done += part.length;
+  }
+  return out;
+}
+function memberKey(entry) {
+  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
+}
+
+class ZipMemberReader {
+  entry;
+  archive;
+  dataStart;
+  startAt;
+  pos = 0;
+  runningCrc = 0;
+  crcKnown;
+  out = [];
+  lastChunk = new Uint8Array(0);
+  crcBeforeLast = 0;
+  heldLast = 0;
+  closed = false;
+  result;
+  storedNext = 0;
+  inflate;
+  compressedNext = 0;
+  compressedBlock = new Uint8Array(0);
+  compressedOffset = 0;
+  inflateFinished = false;
+  constructor(archive, entry, dataStart, options) {
+    this.archive = archive;
+    this.entry = entry;
+    this.dataStart = dataStart;
+    const start = options.start ?? 0;
+    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
+    }
+    this.startAt = start;
+    this.crcKnown = start === 0;
+    if (entry.isDirectory || entry.uncompressedSize === 0) {
+      this.inflateFinished = true;
+      this.pos = start;
+      this.crcKnown = true;
+      return;
+    }
+    if (entry.method === 0) {
+      this.storedNext = start;
+      this.pos = start;
+      if (start > 0 && options.startCrc !== undefined) {
+        this.runningCrc = options.startCrc >>> 0;
+        this.crcKnown = true;
+      }
+      return;
+    }
+    const kept = options.continuation;
+    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
+      this.inflate = this.bind(kept.inflate);
+      this.compressedNext = kept.compressedNext;
+      this.compressedBlock = kept.compressedBlock;
+      this.compressedOffset = 0;
+      this.out = [...kept.out];
+      this.inflateFinished = kept.inflateFinished;
+      this.pos = start;
+      this.runningCrc = kept.crc;
+      this.crcKnown = kept.crcKnown;
+      return;
+    }
+    this.inflate = this.bind(new Inflate(() => {
+      return;
+    }));
+    this.crcKnown = true;
+  }
+  bind(inflate) {
+    inflate.ondata = (chunk) => {
+      if (chunk.length > 0)
+        this.out.push(chunk);
+    };
+    return inflate;
+  }
+  static open(archive, entry, options = {}) {
+    if (entry.encrypted)
+      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
+    }
+    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
+    }
+    const empty = entry.isDirectory || entry.uncompressedSize === 0;
+    const dataStart = empty ? 0 : archive.dataStart(entry);
+    return new ZipMemberReader(archive, entry, dataStart, options);
+  }
+  get position() {
+    return Math.max(this.pos, this.startAt);
+  }
+  get crc32() {
+    return this.crcKnown ? this.runningCrc : undefined;
+  }
+  get end() {
+    return this.result;
+  }
+  next() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    for (;; ) {
+      let chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (!this.fill()) {
+          this.conclude();
+          return;
+        }
+        continue;
+      }
+      if (this.pos < this.startAt) {
+        const skip = this.startAt - this.pos;
+        if (chunk.length <= skip) {
+          this.runningCrc = crc32Update(this.runningCrc, chunk);
+          this.pos += chunk.length;
+          continue;
+        }
+        const head = chunk.subarray(0, skip);
+        this.runningCrc = crc32Update(this.runningCrc, head);
+        this.pos += head.length;
+        chunk = chunk.subarray(skip);
+      }
+      this.crcBeforeLast = this.runningCrc;
+      if (this.crcKnown)
+        this.runningCrc = crc32Update(this.runningCrc, chunk);
+      this.lastChunk = chunk;
+      this.heldLast = chunk.length;
+      this.pos += chunk.length;
+      return chunk;
+    }
+  }
+  unread(count) {
+    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
+      throw new RangeError("unread past the last chunk");
+    if (count === 0)
+      return;
+    this.heldLast -= count;
+    this.pos -= count;
+    if (this.crcKnown)
+      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
+    this.out.unshift(this.lastChunk.subarray(this.heldLast));
+    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
+    this.result = undefined;
+  }
+  suspend() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
+      return;
+    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES || this.pos < this.startAt)
+      return;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
+    const state = {
+      position: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
+      memberKey: memberKey(this.entry),
+      crc: this.runningCrc,
+      crcKnown: this.crcKnown,
+      inflate: this.inflate,
+      compressedNext: this.compressedNext,
+      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
+      out: [...this.out],
+      inflateFinished: this.inflateFinished
+    };
+    this.inflate = undefined;
+    this.out = [];
+    return state;
+  }
+  close() {
+    this.closed = true;
+    this.inflate = undefined;
+    this.out = [];
+  }
+  fill() {
+    if (this.entry.method === 0) {
+      if (this.storedNext >= this.entry.uncompressedSize)
+        return false;
+      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
+      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
+      if (bytes.length === 0)
+        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
+      this.storedNext += bytes.length;
+      this.out.push(bytes);
+      return true;
+    }
+    if (this.inflateFinished || !this.inflate)
+      return false;
+    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
+      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
+      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
+      this.compressedOffset = 0;
+      this.compressedNext += length;
+    }
+    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
+    this.compressedOffset += slice.length;
+    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
+    try {
+      this.inflate.push(slice, final);
+    } catch (error) {
+      if (error instanceof ZipMemberError)
+        throw error;
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
+    }
+    if (final)
+      this.inflateFinished = true;
+    return true;
+  }
+  conclude() {
+    if (this.result)
+      return;
+    const sizeOk = this.pos === this.entry.uncompressedSize;
+    this.result = {
+      bytes: this.pos,
+      sizeOk,
+      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
+    };
+  }
+}
+function readBlock(source, offset, length, name) {
+  try {
+    return readExact(source, offset, length);
+  } catch (error) {
+    if (error instanceof ZipFormatError)
+      throw new ZipMemberError("damaged", name, error.message);
+    throw error;
+  }
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var init_zip_reader = __esm(() => {
+  init_browser();
+  init_stop_errors();
+  init_byte_source();
+  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
+  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
+  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
+  ZipFormatError = class ZipFormatError extends Error {
+    code;
+    constructor(code, message2) {
+      super(message2);
+      this.name = "ZipFormatError";
+      this.code = code;
+    }
+  };
+  ZipMemberError = class ZipMemberError extends Error {
+    code;
+    memberName;
+    constructor(code, memberName, message2) {
+      super(message2);
+      this.name = "ZipMemberError";
+      this.code = code;
+      this.memberName = memberName;
+    }
+  };
+  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
+var init_manifest3 = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  init_zip_reader();
+  ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+  ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+});
+
+// src/workers/archive-import/requests.ts
+var STATUSES;
+var init_requests = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_manifest3();
+  init_state();
+  STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
+});
+
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector2();
 });
@@ -39428,26 +40703,54 @@ var init_tier_set2 = __esm(() => {
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector3();
 });
 
-// src/workers/archive-import/store.ts
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
-var ARCHIVE_STORE_PLACEMENT;
-var init_store2 = __esm(() => {
+// src/workers/whatsapp/connector.ts
+var init_connector4 = () => {};
+
+// src/workers/whatsapp/index.ts
+var init_whatsapp = __esm(() => {
+  init_connector4();
+  init_live_connector();
+  init_store_sync2();
+  init_extraction_source();
+});
+
+// src/data-lifecycle.ts
+var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
+  init_source_storage();
+  init_atomic_file();
+  init_operation_error();
+  init_sqlite_migrations();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_ingestion_policy();
+  init_dropbox_files();
+  init_store();
   init_archive_formats();
+  init_store2();
+  init_state();
+  init_requests();
+  init_google_connectors();
+  init_telegram_messages();
+  init_readwise();
+  init_tier_set2();
+  init_x_bookmarks();
+  init_tier_set3();
+  init_reconcile_state();
+  init_live_control2();
+  init_whatsapp();
+  init_sovereignty();
+  init_pairing_session_paths();
+  init_unpaired_sources();
   init_source_corpus_registry();
-  init_connector_store();
-  ARCHIVE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    secretsInContent: true
-  });
+  init_public_source_capabilities();
+  init_worker_service();
+  init_media_cache();
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -39460,7 +40763,8 @@ var init_source_ingestion_ledger = __esm(() => {
   init_answer_ready_coverage();
   init_status();
   init_google_connectors();
-  init_connector_store();
+  init_source_storage();
+  init_data_lifecycle();
   init_readwise();
   init_tier_set2();
   init_x_bookmarks();
@@ -39531,57 +40835,6 @@ var init_source_ingestion_ledger = __esm(() => {
   corpusPopulations = new WeakMap;
 });
 
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
-var init_tokens = __esm(() => {
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
-var init_pinned_clients = __esm(() => {
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-  CURSOR_REDIRECT_URIS = Object.freeze([
-    CURSOR_REDIRECT_URI,
-    "https://www.cursor.com/bot/mcp/oauth/callback",
-    "https://grok.com/connectors-oauth-exchange-code/"
-  ]);
-});
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  init_pinned_clients();
-  init_operation_caller();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/remote-connections.ts
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-  init_waiting_private_questions();
-  init_tokens();
-  init_linux_engine_layout();
-  init_olympus_layout();
-});
-
 // src/core/delphi.ts
 var init_delphi = __esm(() => {
   init_operation_error();
@@ -39592,9 +40845,9 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync20, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync19 } from "node:fs";
+import { existsSync as existsSync22, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync22 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname24, join as join28 } from "node:path";
+import { dirname as dirname25, join as join30 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -39677,10 +40930,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join28(this.home, "Desktop")],
-      ["documents", join28(this.home, "Documents")],
-      ["downloads", join28(this.home, "Downloads")],
-      ["icloud", join28(this.home, "Library", "Mobile Documents")]
+      ["desktop", join30(this.home, "Desktop")],
+      ["documents", join30(this.home, "Documents")],
+      ["downloads", join30(this.home, "Downloads")],
+      ["icloud", join30(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -39698,7 +40951,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join28(this.home, "Desktop"), join28(this.home, "Documents"), join28(this.home, "Downloads"), join28(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join30(this.home, "Desktop"), join30(this.home, "Documents"), join30(this.home, "Downloads"), join30(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.recall(guard) === "granted")
@@ -39733,7 +40986,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join28(this.home, "Library", "Safari"), join28(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join30(this.home, "Library", "Safari"), join30(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -39787,7 +41040,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync15(dirname24(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync15(dirname25(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -39796,9 +41049,9 @@ class MacPermissions {
     if (this.memory)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync20(this.memoryPath)) {
+    if (this.memoryPath && existsSync22(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync19(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync22(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -40195,8 +41448,8 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash26 } from "node:crypto";
-import { existsSync as existsSync24, lstatSync as lstatSync11, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname27, isAbsolute as isAbsolute11 } from "node:path";
+import { existsSync as existsSync26, lstatSync as lstatSync12, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname28, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_vocabulary();
@@ -40716,19 +41969,210 @@ init_engine_maintenance();
 init_worker_transport();
 init_package_root();
 
+// src/core/messaging-runtime.ts
+import { existsSync as existsSync18 } from "node:fs";
+import { homedir as homedir11 } from "node:os";
+import { join as join25 } from "node:path";
+function telegramPythonExecutable(options = {}) {
+  if (options.pythonExecutable)
+    return options.pythonExecutable;
+  const env = options.env ?? process.env;
+  const home = options.homeDir ?? env.HOME ?? homedir11();
+  const isolated = join25(env.XDG_CACHE_HOME ?? join25(home, ".cache"), "olympus", "telegram-python", "bin", "python");
+  return existsSync18(isolated) ? isolated : Bun.which("python3") ?? undefined;
+}
+
 // src/core/messaging-capture.ts
 init_atomic_file();
 init_secret_store();
 init_unpaired_sources();
 init_connected_handles();
+import { closeSync as closeSync9, constants as constants2, existsSync as existsSync19, fstatSync as fstatSync2, openSync as openSync9, readFileSync as readFileSync19, rmSync as rmSync6 } from "node:fs";
+import { homedir as homedir12 } from "node:os";
+import { dirname as dirname22, join as join26 } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
+  return join26(dirname22(registryPath), `messaging-capture.${source}.json`);
+}
+var UNEXPECTED_EXIT_WINDOW_MS = 10 * 60000;
+var STABLE_RUN_MS = 60000;
+class MessagingCaptureSupervisor {
+  options;
+  child;
+  fingerprint;
+  generation = 0;
+  startedAt;
+  expectedStops = new WeakSet;
+  unexpectedExitTimes = [];
+  constructor(options) {
+    this.options = options;
+  }
+  liveness() {
+    const now = (this.options.now ?? Date.now)();
+    if (this.child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS)
+      this.unexpectedExitTimes = [];
+    this.unexpectedExitTimes = this.unexpectedExitTimes.filter((at) => now - at < UNEXPECTED_EXIT_WINDOW_MS);
+    return { alive: this.child !== undefined, unexpectedExits: this.unexpectedExitTimes.length };
+  }
+  childExited(child) {
+    const now = (this.options.now ?? Date.now)();
+    if (this.child === child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS)
+      this.unexpectedExitTimes = [];
+    if (!this.expectedStops.has(child))
+      this.unexpectedExitTimes.push(now);
+    if (this.child === child) {
+      this.child = undefined;
+      this.fingerprint = undefined;
+      this.startedAt = undefined;
+    }
+  }
+  async reconcile() {
+    const generation = ++this.generation;
+    const registryPath = this.options.registryPath ?? defaultHandleRegistryPath();
+    const grantPath = this.options.grantPath ?? defaultMessagingCaptureGrantPath(this.options.source, registryPath);
+    const grantRead = readGrant(grantPath);
+    if (grantRead.kind !== "valid") {
+      await this.stop();
+      return { state: grantRead.kind === "missing" ? "stopped" : "blocked", reason: grantRead.kind === "missing" ? "grant_missing" : "grant_invalid" };
+    }
+    const grant = grantRead.grant;
+    if (grant.source !== this.options.source) {
+      await this.stop();
+      return { state: "blocked", reason: "grant_invalid" };
+    }
+    const handle = withoutUnpairedLaneHandles(readConnectedHandleRegistry(registryPath).handles, registryPath).find((candidate) => candidate.handle === grant.handle);
+    if (!handleAllowsCapture(handle, grant.source)) {
+      await this.stop();
+      return { source: grant.source, state: "stopped", reason: "handle_unavailable" };
+    }
+    if (!sessionExists(grant)) {
+      await this.stop();
+      return { source: grant.source, state: "blocked", reason: "session_missing" };
+    }
+    const childEnv = {};
+    for (const [key2, value] of Object.entries({ ...process.env, ...this.options.baseEnv ?? {}, ...grant.producer.env })) {
+      if (value !== undefined)
+        childEnv[key2] = value;
+    }
+    const secrets = this.options.secretStore ?? createDefaultSecretStore();
+    for (const mapping of grant.producer.secretEnvironment) {
+      const value = await secrets.get(mapping.secretKey);
+      if (!value) {
+        await this.stop();
+        return { source: grant.source, state: "blocked", reason: "secret_missing" };
+      }
+      childEnv[mapping.env] = value;
+    }
+    if (generation !== this.generation)
+      return { source: grant.source, state: "stopped", reason: "grant_missing" };
+    const nextFingerprint = JSON.stringify(grant);
+    if (this.child && this.fingerprint === nextFingerprint)
+      return { source: grant.source, state: "running" };
+    await this.stop();
+    if (generation !== this.generation - 1)
+      return { source: grant.source, state: "stopped", reason: "grant_missing" };
+    const spawn3 = this.options.spawn ?? spawnCapture;
+    const launch = resolveCurrentLaunch(this.options, grant.source);
+    const child = spawn3({ executable: launch.executable, args: launch.args, env: childEnv });
+    this.child = child;
+    this.fingerprint = nextFingerprint;
+    this.startedAt = (this.options.now ?? Date.now)();
+    child.exited.then(() => this.childExited(child), () => this.childExited(child));
+    return { source: grant.source, state: "running" };
+  }
+  async stop() {
+    this.generation += 1;
+    const child = this.child;
+    if (!child)
+      return;
+    this.expectedStops.add(child);
+    child.kill("SIGTERM");
+    const timeoutMs = this.options.stopTimeoutMs ?? 5000;
+    if (!await observeChildExit(child, timeoutMs)) {
+      child.kill("SIGKILL");
+      if (!await observeChildExit(child, timeoutMs)) {
+        throw new Error("Messaging capture did not exit after SIGKILL; session custody is retained.");
+      }
+    }
+    if (this.child === child) {
+      this.child = undefined;
+      this.fingerprint = undefined;
+      this.startedAt = undefined;
+    }
+  }
+}
+async function observeChildExit(child, timeoutMs) {
+  let timeout;
+  const observed = await Promise.race([
+    child.exited.then(() => true, () => true),
+    new Promise((resolve7) => {
+      timeout = setTimeout(() => resolve7(false), timeoutMs);
+    })
+  ]);
+  if (timeout)
+    clearTimeout(timeout);
+  return observed;
+}
+function readGrant(path) {
+  if (!existsSync19(path))
+    return { kind: "missing" };
+  let descriptor;
+  try {
+    descriptor = openSync9(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
+    const info = fstatSync2(descriptor);
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
+      return { kind: "invalid" };
+    }
+    const value = JSON.parse(readFileSync19(descriptor, "utf8"));
+    if (value.version !== 1 || !["telegram", "whatsapp"].includes(value.source) || !value.handle || !value.sessionPath)
+      return { kind: "invalid" };
+    if (!value.producer || value.producer.source !== value.source || !Array.isArray(value.producer.secretEnvironment))
+      return { kind: "invalid" };
+    return { kind: "valid", grant: value };
+  } catch {
+    return { kind: "invalid" };
+  } finally {
+    if (descriptor !== undefined)
+      closeSync9(descriptor);
+  }
+}
+function resolveCurrentLaunch(options, source) {
+  if (source === "telegram") {
+    const executable = telegramPythonExecutable({ ...options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {} });
+    if (!executable)
+      throw new Error("Python 3 is required to start Telegram capture.");
+    const packageRoot = options.packageRoot ?? join26(dirname22(fileURLToPath3(import.meta.url)), "..", "..");
+    return { executable, args: [join26(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
+  }
+  return {
+    executable: options.whatsappBridgePath ?? join26(homedir12(), ".cache", "olympus", "bin", "olympus-whatsapp-bridge"),
+    args: ["--capture-approved"]
+  };
+}
+function handleAllowsCapture(handle, source) {
+  if (!handle || handle.backendState?.status === "reauth_required")
+    return false;
+  return source === "telegram" ? handle.provider === "telegram" && handle.allowedCapabilities.includes("telegram.messages.sync") : handle.provider === "whatsapp_personal" && handle.allowedCapabilities.includes("whatsapp.personal.messages.sync");
+}
+function sessionExists(grant) {
+  return grant.source === "telegram" ? existsSync19(`${grant.sessionPath.replace(/\.session$/, "")}.session`) : existsSync19(join26(grant.sessionPath, "session.db"));
+}
+function spawnCapture(input) {
+  const child = Bun.spawn([input.executable, ...input.args], {
+    env: input.env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore"
+  });
+  return { exited: child.exited, kill: (signal) => child.kill(signal) };
+}
 
 // src/core/messaging-pairing.ts
 init_atomic_file();
 init_secret_store();
 init_connect();
-
-// src/core/pairing-session-paths.ts
-init_olympus_layout();
+init_pairing_session_paths();
 
 // src/core/native-worker-service.ts
 init_worker_transport();
@@ -40754,59 +42198,15 @@ init_worker_auth();
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
 init_types();
-
-// src/core/file-extraction-source.ts
-import { createHash as createHash20 } from "node:crypto";
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-  source_item_not_found: "failed_terminal",
-  source_permission_denied: "failed_terminal",
-  source_version_gone: "failed_terminal",
-  source_content_unavailable: "skipped_unsupported",
-  source_request_rejected: "failed_terminal",
-  source_too_large: "skipped_too_large",
-  source_rate_limited: "failed_retryable",
-  source_unavailable: "failed_retryable",
-  source_auth_expired: "failed_retryable",
-  source_budget_exhausted: "failed_retryable",
-  network_unreachable: "failed_retryable",
-  network_socket_closed: "failed_retryable"
-});
-var ERROR_HASH_CHARS = 32;
-
-class FileExtractionSourceError extends Error {
-  errorKind;
-  settleAs;
-  retryable;
-  errorHash;
-  constructor(errorKind, options = {}) {
-    super(errorKind);
-    this.name = "FileExtractionSourceError";
-    this.errorKind = errorKind;
-    this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
-    this.retryable = this.settleAs === "failed_retryable";
-    const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
-    if (errorHash)
-      this.errorHash = errorHash;
-  }
-}
-function splitScopedLocalItemId(localItemId) {
-  const separator = localItemId.indexOf(":");
-  if (separator <= 0 || separator === localItemId.length - 1)
-    return;
-  return {
-    accountScope: localItemId.slice(0, separator),
-    providerItemId: localItemId.slice(separator + 1)
-  };
-}
-
-// src/workers/email-source/file-extraction-runtime.ts
+init_file_extraction_source();
 init_media_cache();
-init_connector_store2();
+init_connector_store();
 
 // src/workers/dropbox-files/extraction-source.ts
 init_dropbox_content_hash();
 init_provider_client();
 init_http_timeout();
+init_file_extraction_source();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
 import { relative as relative3, resolve as resolve7, sep as sep3 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
@@ -41170,6 +42570,7 @@ init_store();
 init_drive();
 
 // src/workers/google-connectors/drive-extraction-source.ts
+init_file_extraction_source();
 init_drive();
 init_request_budget();
 var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
@@ -41184,6 +42585,7 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
 ]);
 
 // src/workers/email-source/file-extraction-runtime.ts
+init_extraction_source();
 init_store_sync2();
 
 // src/workers/file-extraction/job-store.ts
@@ -41306,6 +42708,7 @@ init_media_cache();
 init_operation_error();
 init_model_transport();
 init_types();
+init_file_extraction_source();
 init_command_runner();
 init_tier_classifier();
 init_bounded_text();
@@ -41315,7 +42718,7 @@ init_engine();
 init_tier_classifier();
 init_secrets_disposition();
 init_source_ingestion_exclusions();
-init_connector_store();
+init_connector_store2();
 var EXTRACTION_SINK_SKIPPED_ITEM_MISSING = "store_item_missing";
 var EXTRACTION_SINK_SKIPPED_NOT_ELIGIBLE = "store_item_not_eligible";
 var EXTRACTION_SINK_SKIPPED_OWNED_ELSEWHERE = "store_item_owned_elsewhere";
@@ -41386,16 +42789,16 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync18,
+  existsSync as existsSync20,
   mkdirSync as mkdirSync14,
-  readFileSync as readFileSync17,
+  readFileSync as readFileSync20,
   renameSync as renameSync5,
-  rmSync as rmSync6,
+  rmSync as rmSync7,
   writeFileSync as writeFileSync6
 } from "node:fs";
 import { randomUUID as randomUUID7 } from "node:crypto";
-import { homedir as homedir11 } from "node:os";
-import { dirname as dirname22, isAbsolute as isAbsolute10, join as join26 } from "node:path";
+import { homedir as homedir13 } from "node:os";
+import { dirname as dirname23, isAbsolute as isAbsolute10, join as join28 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -41403,15 +42806,15 @@ var CACHE_SCHEMA_VERSION = 1;
 var MAX_CATALOG_TIMEOUT_MS = 30000;
 var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
-function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir11(), type = "text") {
+function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir13(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute10(configuredRoot) ? configuredRoot : join26(homeDir, ".cache");
-  return join26(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
+  const cacheRoot = configuredRoot && isAbsolute10(configuredRoot) ? configuredRoot : join28(homeDir, ".cache");
+  return join28(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
   const options = input.catalog ?? {};
   const type = options.type ?? "text";
-  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir11(), type);
+  const cachePath = options.cachePath ?? defaultVeniceModelCatalogCachePath(process.env, homedir13(), type);
   const cacheKey = `${cachePath}
 ${type}`;
   const ttlMs = boundedNonNegativeMs(options.ttlMs, DEFAULT_VENICE_MODEL_CATALOG_TTL_MS);
@@ -41559,14 +42962,14 @@ async function fetchCatalog(input, fetchedAtMs) {
   return { status: "success", catalog };
 }
 function parseCatalogModels(payload2) {
-  if (!isRecord(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
+  if (!isRecord2(payload2) || !Array.isArray(payload2.data) || payload2.data.length === 0) {
     return;
   }
   const models = {};
   for (const rawItem of payload2.data) {
-    if (!isRecord(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
+    if (!isRecord2(rawItem) || typeof rawItem.id !== "string" || !rawItem.id.trim())
       continue;
-    if (!isRecord(rawItem.model_spec))
+    if (!isRecord2(rawItem.model_spec))
       continue;
     const category = parsePrivacyCategory(rawItem.model_spec.privacy);
     if (!category)
@@ -41576,21 +42979,21 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync18(path))
+  if (!existsSync20(path))
     return;
   let payload2;
   try {
-    payload2 = JSON.parse(readFileSync17(path, "utf8"));
+    payload2 = JSON.parse(readFileSync20(path, "utf8"));
   } catch {
     return;
   }
-  if (!isRecord(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
+  if (!isRecord2(payload2) || payload2.schema_version !== CACHE_SCHEMA_VERSION)
     return;
   if (payload2.catalog_type !== undefined && payload2.catalog_type !== type)
     return;
   if (type === "embedding" && payload2.catalog_type !== "embedding")
     return;
-  if (typeof payload2.fetched_at !== "string" || !isRecord(payload2.models))
+  if (typeof payload2.fetched_at !== "string" || !isRecord2(payload2.models))
     return;
   const fetchedAtMs = Date.parse(payload2.fetched_at);
   if (!Number.isFinite(fetchedAtMs))
@@ -41612,7 +43015,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID7()}.tmp`;
   try {
-    mkdirSync14(dirname22(path), { recursive: true, mode: 448 });
+    mkdirSync14(dirname23(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync6(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -41623,7 +43026,7 @@ function writeCatalogCache(path, catalog) {
 `, { mode: 384 });
     renameSync5(tempPath, path);
   } catch {} finally {
-    rmSync6(tempPath, { force: true });
+    rmSync7(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value) {
@@ -41645,7 +43048,7 @@ function boundedPositiveMs(value, fallback, maximum) {
     return fallback;
   return Math.min(maximum, Math.max(1, Math.floor(value)));
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function throwIfAborted(signal) {
@@ -41736,6 +43139,7 @@ init_selected_item_safety();
 init_venice_models();
 init_public_surface();
 init_unpaired_sources();
+init_pairing_session_paths();
 
 // src/workers/source-index/answer-latency-log.ts
 init_olympus_layout();
@@ -42363,7 +43767,7 @@ init_source_ingestion_exclusions();
 init_source_ingestion_ledger();
 init_connected_handles();
 init_credential_broker();
-init_connector_store();
+init_connector_store2();
 
 // src/workers/chat/chat-scope-filter.ts
 init_principal();
@@ -42490,860 +43894,9 @@ var CHAT_TITLE_STOPWORDS = new Set([
 init_atomic_file();
 init_file_lease();
 init_file_scope_sources();
-// src/data-lifecycle.ts
-init_olympus_layout();
-init_atomic_file();
-init_operation_error();
-init_sqlite_migrations();
-init_remote_connections();
-init_waiting_private_questions();
-init_source_ingestion_policy();
-init_dropbox_files();
-init_store();
-init_archive_formats();
-init_store2();
-
-// src/workers/archive-import/state.ts
-init_olympus_layout();
-init_atomic_file();
-init_file_lease();
-
-// src/workers/archive-import/requests.ts
-init_atomic_file();
-init_file_lease();
-
-// src/workers/archive-import/manifest.ts
-init_archive_formats();
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire2 = createRequire4(import.meta.url);
-var SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
-
-// node_modules/fflate/esm/browser.js
-var u8 = Uint8Array;
-var u16 = Uint16Array;
-var i32 = Int32Array;
-var fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
-var fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
-var clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
-var freb = function(eb, start) {
-  var b = new u16(31);
-  for (var i = 0;i < 31; ++i) {
-    b[i] = start += 1 << eb[i - 1];
-  }
-  var r = new i32(b[30]);
-  for (var i = 1;i < 30; ++i) {
-    for (var j = b[i];j < b[i + 1]; ++j) {
-      r[j] = j - b[i] << 5 | i;
-    }
-  }
-  return { b, r };
-};
-var _a2 = freb(fleb, 2);
-var fl = _a2.b;
-var revfl = _a2.r;
-fl[28] = 258, revfl[258] = 28;
-var _b = freb(fdeb, 0);
-var fd = _b.b;
-var revfd = _b.r;
-var rev = new u16(32768);
-for (i = 0;i < 32768; ++i) {
-  x = (i & 43690) >> 1 | (i & 21845) << 1;
-  x = (x & 52428) >> 2 | (x & 13107) << 2;
-  x = (x & 61680) >> 4 | (x & 3855) << 4;
-  rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
-}
-var x;
-var i;
-var hMap = function(cd, mb, r) {
-  var s = cd.length;
-  var i2 = 0;
-  var l = new u16(mb);
-  for (;i2 < s; ++i2) {
-    if (cd[i2])
-      ++l[cd[i2] - 1];
-  }
-  var le = new u16(mb);
-  for (i2 = 1;i2 < mb; ++i2) {
-    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
-  }
-  var co;
-  if (r) {
-    co = new u16(1 << mb);
-    var rvb = 15 - mb;
-    for (i2 = 0;i2 < s; ++i2) {
-      if (cd[i2]) {
-        var sv = i2 << 4 | cd[i2];
-        var r_1 = mb - cd[i2];
-        var v = le[cd[i2] - 1]++ << r_1;
-        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
-          co[rev[v] >> rvb] = sv;
-        }
-      }
-    }
-  } else {
-    co = new u16(s);
-    for (i2 = 0;i2 < s; ++i2) {
-      if (cd[i2]) {
-        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
-      }
-    }
-  }
-  return co;
-};
-var flt = new u8(288);
-for (i = 0;i < 144; ++i)
-  flt[i] = 8;
-var i;
-for (i = 144;i < 256; ++i)
-  flt[i] = 9;
-var i;
-for (i = 256;i < 280; ++i)
-  flt[i] = 7;
-var i;
-for (i = 280;i < 288; ++i)
-  flt[i] = 8;
-var i;
-var fdt = new u8(32);
-for (i = 0;i < 32; ++i)
-  fdt[i] = 5;
-var i;
-var flrm = /* @__PURE__ */ hMap(flt, 9, 1);
-var fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
-var max = function(a) {
-  var m = a[0];
-  for (var i2 = 1;i2 < a.length; ++i2) {
-    if (a[i2] > m)
-      m = a[i2];
-  }
-  return m;
-};
-var bits = function(d, p, m) {
-  var o = p / 8 | 0;
-  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
-};
-var bits16 = function(d, p) {
-  var o = p / 8 | 0;
-  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
-};
-var shft = function(p) {
-  return (p + 7) / 8 | 0;
-};
-var slc = function(v, s, e) {
-  if (s == null || s < 0)
-    s = 0;
-  if (e == null || e > v.length)
-    e = v.length;
-  return new u8(v.subarray(s, e));
-};
-var ec = [
-  "unexpected EOF",
-  "invalid block type",
-  "invalid length/literal",
-  "invalid distance",
-  "stream finished",
-  "no stream handler",
-  ,
-  "no callback",
-  "invalid UTF-8 data",
-  "extra field too long",
-  "date not in range 1980-2099",
-  "filename too long",
-  "stream finishing",
-  "invalid zip data"
-];
-var err = function(ind, msg, nt) {
-  var e = new Error(msg || ec[ind]);
-  e.code = ind;
-  if (Error.captureStackTrace)
-    Error.captureStackTrace(e, err);
-  if (!nt)
-    throw e;
-  return e;
-};
-var inflt = function(dat, st, buf, dict) {
-  var sl = dat.length, dl = dict ? dict.length : 0;
-  if (!sl || st.f && !st.l)
-    return buf || new u8(0);
-  var noBuf = !buf;
-  var resize = noBuf || st.i != 2;
-  var noSt = st.i;
-  if (noBuf)
-    buf = new u8(sl * 3);
-  var cbuf = function(l2) {
-    var bl = buf.length;
-    if (l2 > bl) {
-      var nbuf = new u8(Math.max(bl * 2, l2));
-      nbuf.set(buf);
-      buf = nbuf;
-    }
-  };
-  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
-  var tbts = sl * 8;
-  do {
-    if (!lm) {
-      final = bits(dat, pos, 1);
-      var type = bits(dat, pos + 1, 3);
-      pos += 3;
-      if (!type) {
-        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
-        if (t > sl) {
-          if (noSt)
-            err(0);
-          break;
-        }
-        if (resize)
-          cbuf(bt + l);
-        buf.set(dat.subarray(s, t), bt);
-        st.b = bt += l, st.p = pos = t * 8, st.f = final;
-        continue;
-      } else if (type == 1)
-        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
-      else if (type == 2) {
-        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
-        var tl = hLit + bits(dat, pos + 5, 31) + 1;
-        pos += 14;
-        var ldt = new u8(tl);
-        var clt = new u8(19);
-        for (var i2 = 0;i2 < hcLen; ++i2) {
-          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
-        }
-        pos += hcLen * 3;
-        var clb = max(clt), clbmsk = (1 << clb) - 1;
-        var clm = hMap(clt, clb, 1);
-        for (var i2 = 0;i2 < tl; ) {
-          var r = clm[bits(dat, pos, clbmsk)];
-          pos += r & 15;
-          var s = r >> 4;
-          if (s < 16) {
-            ldt[i2++] = s;
-          } else {
-            var c = 0, n = 0;
-            if (s == 16)
-              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
-            else if (s == 17)
-              n = 3 + bits(dat, pos, 7), pos += 3;
-            else if (s == 18)
-              n = 11 + bits(dat, pos, 127), pos += 7;
-            while (n--)
-              ldt[i2++] = c;
-          }
-        }
-        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
-        lbt = max(lt);
-        dbt = max(dt);
-        lm = hMap(lt, lbt, 1);
-        dm = hMap(dt, dbt, 1);
-      } else
-        err(1);
-      if (pos > tbts) {
-        if (noSt)
-          err(0);
-        break;
-      }
-    }
-    if (resize)
-      cbuf(bt + 131072);
-    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
-    var lpos = pos;
-    for (;; lpos = pos) {
-      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
-      pos += c & 15;
-      if (pos > tbts) {
-        if (noSt)
-          err(0);
-        break;
-      }
-      if (!c)
-        err(2);
-      if (sym < 256)
-        buf[bt++] = sym;
-      else if (sym == 256) {
-        lpos = pos, lm = null;
-        break;
-      } else {
-        var add = sym - 254;
-        if (sym > 264) {
-          var i2 = sym - 257, b = fleb[i2];
-          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
-          pos += b;
-        }
-        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
-        if (!d)
-          err(3);
-        pos += d & 15;
-        var dt = fd[dsym];
-        if (dsym > 3) {
-          var b = fdeb[dsym];
-          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
-        }
-        if (pos > tbts) {
-          if (noSt)
-            err(0);
-          break;
-        }
-        if (resize)
-          cbuf(bt + 131072);
-        var end = bt + add;
-        if (bt < dt) {
-          var shift = dl - dt, dend = Math.min(dt, end);
-          if (shift + bt < 0)
-            err(3);
-          for (;bt < dend; ++bt)
-            buf[bt] = dict[shift + bt];
-        }
-        for (;bt < end; ++bt)
-          buf[bt] = buf[bt - dt];
-      }
-    }
-    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
-    if (lm)
-      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
-  } while (!final);
-  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
-};
-var et = /* @__PURE__ */ new u8(0);
-var Inflate = /* @__PURE__ */ function() {
-  function Inflate2(opts, cb) {
-    if (typeof opts == "function")
-      cb = opts, opts = {};
-    this.ondata = cb;
-    var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
-    this.s = { i: 0, b: dict ? dict.length : 0 };
-    this.o = new u8(32768);
-    this.p = new u8(0);
-    if (dict)
-      this.o.set(dict);
-  }
-  Inflate2.prototype.e = function(c) {
-    if (!this.ondata)
-      err(5);
-    if (this.d)
-      err(4);
-    if (!this.p.length)
-      this.p = c;
-    else if (c.length) {
-      var n = new u8(this.p.length + c.length);
-      n.set(this.p), n.set(c, this.p.length), this.p = n;
-    }
-  };
-  Inflate2.prototype.c = function(final) {
-    this.s.i = +(this.d = final || false);
-    var bts = this.s.b;
-    var dt = inflt(this.p, this.s, this.o);
-    this.ondata(slc(dt, bts, this.s.b), this.d);
-    this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
-    this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
-  };
-  Inflate2.prototype.push = function(chunk, final) {
-    this.e(chunk), this.c(final);
-  };
-  return Inflate2;
-}();
-var td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
-var tds = 0;
-try {
-  td.decode(et, { stream: true });
-  tds = 1;
-} catch (e) {}
-
-// src/workers/archive-import/stop-errors.ts
-init_archive_formats();
-
-// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
-var TokenType;
-(function(TokenType2) {
-  TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
-  TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
-  TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
-  TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
-  TokenType2[TokenType2["COLON"] = 4] = "COLON";
-  TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
-  TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
-  TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
-  TokenType2[TokenType2["NULL"] = 8] = "NULL";
-  TokenType2[TokenType2["STRING"] = 9] = "STRING";
-  TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
-  TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
-})(TokenType || (TokenType = {}));
-
-// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
-var charset;
-(function(charset2) {
-  charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
-  charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
-  charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
-  charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
-  charset2[charset2["TAB"] = 9] = "TAB";
-  charset2[charset2["SPACE"] = 32] = "SPACE";
-  charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
-  charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
-  charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
-  charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
-  charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
-  charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
-  charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
-  charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
-  charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
-  charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
-  charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
-  charset2[charset2["COMMA"] = 44] = "COMMA";
-  charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
-  charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
-  charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
-  charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
-  charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
-  charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
-  charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
-  charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
-  charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
-  charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
-  charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
-  charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
-  charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
-  charset2[charset2["COLON"] = 58] = "COLON";
-  charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
-  charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
-  charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
-  charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
-  charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
-  charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
-  charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
-  charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
-  charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
-  charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
-  charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
-  charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
-  charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
-  charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
-  charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
-  charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
-  charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
-  charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
-  charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
-  charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
-  charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
-  charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
-  charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
-  charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
-  charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
-  charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
-  charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
-  charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
-  charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
-  charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
-  charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
-  charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
-  charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
-  charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
-  charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
-  charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
-  charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
-  charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
-  charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
-  charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
-  charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
-  charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
-  charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
-  charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
-  charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
-  charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
-  charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
-  charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
-  charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
-  charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
-  charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
-  charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
-  charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
-  charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
-  charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
-  charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
-  charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
-  charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
-  charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
-  charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
-  charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
-  charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
-  charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
-  charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
-  charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
-  charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
-  charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
-  charset2[charset2["TILDE"] = 126] = "TILDE";
-})(charset || (charset = {}));
-
-// node_modules/@streamparser/json/dist/mjs/tokenizer.js
-var TokenizerStates;
-(function(TokenizerStates2) {
-  TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
-  TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
-  TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
-  TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
-  TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
-  TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
-  TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
-  TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
-  TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
-  TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
-  TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
-  TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
-  TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
-  TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
-  TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
-  TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
-  TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
-  TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
-  TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
-  TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
-  TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
-  TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
-  TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
-  TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
-})(TokenizerStates || (TokenizerStates = {}));
-
-// src/workers/archive-import/json-stream.ts
-var EMPTY_FRAME = Object.freeze({});
-var MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
-
-// src/workers/archive-import/byte-source.ts
-import * as zlib from "node:zlib";
-var ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
-var nativeCrc32 = zlib.crc32;
-var crcTable;
-function tableCrc32(data2, value) {
-  if (!crcTable) {
-    crcTable = new Int32Array(256);
-    for (let n = 0;n < 256; n += 1) {
-      let c = n;
-      for (let k = 0;k < 8; k += 1)
-        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
-      crcTable[n] = c;
-    }
-  }
-  let crc = ~value;
-  for (let index = 0;index < data2.length; index += 1) {
-    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
-  }
-  return ~crc >>> 0;
-}
-function crc32Update(value, data2) {
-  if (data2.length === 0)
-    return value >>> 0;
-  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
-}
-
-// src/workers/archive-import/zip-reader.ts
-var ZIP_READ_CHUNK_BYTES = 1024 * 1024;
-var ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
-var ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
-var ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
-var ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
-var MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
-class ZipFormatError extends Error {
-  code;
-  constructor(code, message2) {
-    super(message2);
-    this.name = "ZipFormatError";
-    this.code = code;
-  }
-}
-
-class ZipMemberError extends Error {
-  code;
-  memberName;
-  constructor(code, memberName, message2) {
-    super(message2);
-    this.name = "ZipMemberError";
-    this.code = code;
-    this.memberName = memberName;
-  }
-}
-var strictUtf8 = new TextDecoder("utf-8", { fatal: true });
-var lenientUtf8 = new TextDecoder("utf-8");
-function readExact(source, offset, length) {
-  if (length < 0 || offset < 0 || offset + length > source.size)
-    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-  if (length <= ZIP_READ_CHUNK_BYTES) {
-    const bytes = source.readAt(offset, length);
-    if (bytes.length !== length)
-      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-    return bytes;
-  }
-  const out = new Uint8Array(length);
-  for (let done = 0;done < length; ) {
-    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
-    if (part.length === 0)
-      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
-    out.set(part, done);
-    done += part.length;
-  }
-  return out;
-}
-function memberKey(entry) {
-  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
-}
-
-class ZipMemberReader {
-  entry;
-  archive;
-  dataStart;
-  startAt;
-  pos = 0;
-  runningCrc = 0;
-  crcKnown;
-  out = [];
-  lastChunk = new Uint8Array(0);
-  crcBeforeLast = 0;
-  heldLast = 0;
-  closed = false;
-  result;
-  storedNext = 0;
-  inflate;
-  compressedNext = 0;
-  compressedBlock = new Uint8Array(0);
-  compressedOffset = 0;
-  inflateFinished = false;
-  constructor(archive, entry, dataStart, options) {
-    this.archive = archive;
-    this.entry = entry;
-    this.dataStart = dataStart;
-    const start = options.start ?? 0;
-    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
-      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
-    }
-    this.startAt = start;
-    this.crcKnown = start === 0;
-    if (entry.isDirectory || entry.uncompressedSize === 0) {
-      this.inflateFinished = true;
-      this.pos = start;
-      this.crcKnown = true;
-      return;
-    }
-    if (entry.method === 0) {
-      this.storedNext = start;
-      this.pos = start;
-      if (start > 0 && options.startCrc !== undefined) {
-        this.runningCrc = options.startCrc >>> 0;
-        this.crcKnown = true;
-      }
-      return;
-    }
-    const kept = options.continuation;
-    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
-      this.inflate = this.bind(kept.inflate);
-      this.compressedNext = kept.compressedNext;
-      this.compressedBlock = kept.compressedBlock;
-      this.compressedOffset = 0;
-      this.out = [...kept.out];
-      this.inflateFinished = kept.inflateFinished;
-      this.pos = start;
-      this.runningCrc = kept.crc;
-      this.crcKnown = kept.crcKnown;
-      return;
-    }
-    this.inflate = this.bind(new Inflate(() => {
-      return;
-    }));
-    this.crcKnown = true;
-  }
-  bind(inflate) {
-    inflate.ondata = (chunk) => {
-      if (chunk.length > 0)
-        this.out.push(chunk);
-    };
-    return inflate;
-  }
-  static open(archive, entry, options = {}) {
-    if (entry.encrypted)
-      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
-    if (entry.method !== 0 && entry.method !== 8) {
-      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
-    }
-    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
-      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
-    }
-    const empty = entry.isDirectory || entry.uncompressedSize === 0;
-    const dataStart = empty ? 0 : archive.dataStart(entry);
-    return new ZipMemberReader(archive, entry, dataStart, options);
-  }
-  get position() {
-    return Math.max(this.pos, this.startAt);
-  }
-  get crc32() {
-    return this.crcKnown ? this.runningCrc : undefined;
-  }
-  get end() {
-    return this.result;
-  }
-  next() {
-    if (this.closed)
-      throw new Error("This member reader was suspended or closed.");
-    for (;; ) {
-      let chunk = this.out.shift();
-      if (chunk === undefined) {
-        if (!this.fill()) {
-          this.conclude();
-          return;
-        }
-        continue;
-      }
-      if (this.pos < this.startAt) {
-        const skip = this.startAt - this.pos;
-        if (chunk.length <= skip) {
-          this.runningCrc = crc32Update(this.runningCrc, chunk);
-          this.pos += chunk.length;
-          continue;
-        }
-        const head = chunk.subarray(0, skip);
-        this.runningCrc = crc32Update(this.runningCrc, head);
-        this.pos += head.length;
-        chunk = chunk.subarray(skip);
-      }
-      this.crcBeforeLast = this.runningCrc;
-      if (this.crcKnown)
-        this.runningCrc = crc32Update(this.runningCrc, chunk);
-      this.lastChunk = chunk;
-      this.heldLast = chunk.length;
-      this.pos += chunk.length;
-      return chunk;
-    }
-  }
-  unread(count) {
-    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
-      throw new RangeError("unread past the last chunk");
-    if (count === 0)
-      return;
-    this.heldLast -= count;
-    this.pos -= count;
-    if (this.crcKnown)
-      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
-    this.out.unshift(this.lastChunk.subarray(this.heldLast));
-    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
-    this.result = undefined;
-  }
-  suspend() {
-    if (this.closed)
-      return;
-    this.closed = true;
-    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
-      return;
-    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
-    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES || this.pos < this.startAt)
-      return;
-    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
-    const state = {
-      position: this.pos,
-      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
-      memberKey: memberKey(this.entry),
-      crc: this.runningCrc,
-      crcKnown: this.crcKnown,
-      inflate: this.inflate,
-      compressedNext: this.compressedNext,
-      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
-      out: [...this.out],
-      inflateFinished: this.inflateFinished
-    };
-    this.inflate = undefined;
-    this.out = [];
-    return state;
-  }
-  close() {
-    this.closed = true;
-    this.inflate = undefined;
-    this.out = [];
-  }
-  fill() {
-    if (this.entry.method === 0) {
-      if (this.storedNext >= this.entry.uncompressedSize)
-        return false;
-      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
-      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
-      if (bytes.length === 0)
-        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
-      this.storedNext += bytes.length;
-      this.out.push(bytes);
-      return true;
-    }
-    if (this.inflateFinished || !this.inflate)
-      return false;
-    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
-      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
-      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
-      this.compressedOffset = 0;
-      this.compressedNext += length;
-    }
-    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
-    this.compressedOffset += slice.length;
-    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
-    try {
-      this.inflate.push(slice, final);
-    } catch (error) {
-      if (error instanceof ZipMemberError)
-        throw error;
-      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
-    }
-    if (final)
-      this.inflateFinished = true;
-    return true;
-  }
-  conclude() {
-    if (this.result)
-      return;
-    const sizeOk = this.pos === this.entry.uncompressedSize;
-    this.result = {
-      bytes: this.pos,
-      sizeOk,
-      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
-    };
-  }
-}
-function readBlock(source, offset, length, name) {
-  try {
-    return readExact(source, offset, length);
-  } catch (error) {
-    if (error instanceof ZipFormatError)
-      throw new ZipMemberError("damaged", name, error.message);
-    throw error;
-  }
-}
-
-// src/workers/archive-import/manifest.ts
-var ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
-var ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
-
-// src/workers/archive-import/requests.ts
-var STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
-
-// src/data-lifecycle.ts
-init_google_connectors();
-init_telegram_messages();
-init_readwise();
-init_tier_set2();
-init_x_bookmarks();
-init_tier_set3();
-init_reconcile_state();
-init_live_control2();
-// src/workers/whatsapp/index.ts
-init_live_connector();
-init_store_sync2();
-
-// src/data-lifecycle.ts
-init_sovereignty();
-init_unpaired_sources();
-init_source_corpus_registry();
-init_public_source_capabilities();
-init_worker_service();
-init_media_cache();
 
 // src/workers/email-source/index.ts
+init_data_lifecycle();
 init_corpora();
 var CONNECTOR_STORE_FILTER_CAPABILITIES = connectorStoreFilterCapabilityRegistry([
   [{ family: "chat" }, { chatScope: CHAT_SCOPE_FILTER_CODEC }],
@@ -43434,6 +43987,10 @@ init_store();
 // src/workers/local-files/provider-store-sync.ts
 init_embeddings();
 init_tiered_store_set();
+
+// src/workers/local-files/connector.ts
+init_file_extraction_source();
+
 // src/core/file-mime.ts
 var MIME_BY_EXTENSION = Object.freeze({
   pdf: "application/pdf",
@@ -43523,6 +44080,9 @@ var SOURCE_CODE_EXTENSIONS = new Set([
   "env"
 ]);
 
+// src/workers/local-files/connector.ts
+init_scope_safe_fs();
+
 // src/workers/local-files/locations.ts
 init_paths();
 function realPathOfScopePath(volumes, scopePath) {
@@ -43548,8 +44108,8 @@ init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire5 } from "node:module";
-import { existsSync as existsSync19, readFileSync as readFileSync18 } from "node:fs";
-import { dirname as dirname23, join as join27 } from "node:path";
+import { existsSync as existsSync21, readFileSync as readFileSync21 } from "node:fs";
+import { dirname as dirname24, join as join29 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
   constructor(detail) {
@@ -43608,7 +44168,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync19(snapshotPath))
+    if (!existsSync21(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -43721,7 +44281,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value = Number.parseInt(readFileSync18("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value = Number.parseInt(readFileSync21("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value) && value > 0 ? value : undefined;
   } catch {
     return;
@@ -43737,11 +44297,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join27(dir, "node_modules");
-    if (!existsSync19(join27(candidate, "@parcel", "watcher")))
+    const candidate = join29(dir, "node_modules");
+    if (!existsSync21(join29(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire5(join27(dirname23(candidate), "package.json"));
+      const requireFrom = createRequire5(join29(dirname24(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -43777,12 +44337,13 @@ init_source_ingestion_policy();
 init_dropbox_files();
 init_provider_client();
 import { createHash as createHash23 } from "node:crypto";
-init_connector_store();
+init_connector_store2();
 init_google_connectors();
 init_readwise();
 init_embeddings();
 init_x_bookmarks();
 init_live_control2();
+init_whatsapp();
 init_telegram_messages();
 
 // src/workers/source-scheduler-state.ts
@@ -45006,6 +45567,7 @@ var MAX_HEADERS_SIZE = 2 * 1024 * 1024;
 
 // src/workers/archive-import/mbox/connector.ts
 init_archive_formats();
+init_stop_errors();
 init_sender_rules();
 
 // src/workers/archive-import/mbox/split.ts
@@ -45177,9 +45739,10 @@ var SKIPPED_LABELS = new Set(["spam", "trash"]);
 var decodableCharsets = new Map;
 
 // src/workers/archive-import/lane.ts
-init_tier_ledger();
+init_source_storage();
 init_tiered_store_set();
 init_archive_formats();
+init_state();
 init_store2();
 var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
   holdContentUntilJudged: true
@@ -45187,17 +45750,23 @@ var ARCHIVE_TIER_CLASSIFICATION = Object.freeze({
 
 // src/workers/archive-import/start.ts
 init_archive_formats();
+init_scope_safe_fs();
+init_manifest3();
 
 // src/workers/archive-import/runtime.ts
+init_state();
 init_store2();
 
 // src/workers/archive-import/dashboard.ts
 init_archive_formats();
+init_scope_safe_fs();
 
 // src/workers/archive-import/agent.ts
 init_open_targets();
 init_display_text();
 init_vocabulary();
+init_requests();
+init_state();
 var ARCHIVE_AGENT_COPY = {
   invalidPath: "Give the full path of the file or folder, starting with /. Olympus does not look at it until the person approves.",
   tooMany: "Too many requests are already waiting for the person. Ask them to answer the ones under Archives on their computer's dashboard first.",
@@ -45229,8 +45798,11 @@ var ARCHIVE_AGENT_COPY = {
   }
 };
 
+// src/workers/archive-import/dashboard.ts
+init_manifest3();
+
 // src/workers/archive-import/removal.ts
-init_sniffer_store();
+init_source_storage();
 
 // src/workers/archive-import/continuation-cache.ts
 var CONTINUATION_CACHE_MAX_ENTRIES = 4;
@@ -45296,20 +45868,27 @@ class ContinuationCache {
 var archiveContinuations = new ContinuationCache;
 
 // src/workers/archive-import/removal.ts
+init_state();
 init_store2();
 
 // src/workers/archive-import/dashboard.ts
 init_display_text();
+init_state();
+init_requests();
 
 // src/workers/email-source/server.ts
 init_store2();
+init_state();
 
 // src/workers/archive-import/scheduler-source.ts
 init_embeddings();
 
 // src/workers/archive-import/sync.ts
 init_archive_formats();
+init_scope_safe_fs();
 init_tiered_store_set();
+init_manifest3();
+init_state();
 init_store2();
 
 // src/workers/archive-import/scheduler-source.ts
@@ -45326,8 +45905,8 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync21, lstatSync as lstatSync9, readFileSync as readFileSync20, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
-import { homedir as homedir12 } from "node:os";
+import { existsSync as existsSync23, lstatSync as lstatSync10, readFileSync as readFileSync23, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
+import { homedir as homedir14 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
   "nfs4",
@@ -45383,7 +45962,7 @@ class VolumeResolver {
     this.deps = {
       ...deps,
       platform: deps.platform ?? process.platform,
-      home: deps.home ?? homedir12(),
+      home: deps.home ?? homedir14(),
       now: deps.now ?? Date.now
     };
   }
@@ -45513,9 +46092,9 @@ function probeIgnoresCaseIn(dir) {
     if (swapped === name)
       continue;
     try {
-      const own3 = lstatSync9(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
+      const own3 = lstatSync10(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
       try {
-        const other = lstatSync9(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
+        const other = lstatSync10(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
         return other.ino === own3.ino && other.dev === own3.dev;
       } catch (error) {
         if (error.code === "ENOENT")
@@ -45542,7 +46121,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync2("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync20("/proc/self/mountinfo", "utf8");
+  return readFileSync23("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -45559,7 +46138,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync21(dir))
+    if (!existsSync23(dir))
       return result;
     for (const name of readdirSync3(dir)) {
       try {
@@ -45610,11 +46189,14 @@ function plistString(plist, key2) {
 // src/workers/email-source/server.ts
 init_local_open();
 
+// src/workers/file-extraction/connector-source.ts
+init_file_extraction_source();
+
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
-import { lstatSync as lstatSync10, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
-import { homedir as homedir14 } from "node:os";
-import { join as join30 } from "node:path";
+import { lstatSync as lstatSync11, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
+import { homedir as homedir16 } from "node:os";
+import { join as join32 } from "node:path";
 
 // src/workers/source-scope-browser.ts
 init_credential_broker();
@@ -45845,18 +46427,18 @@ init_scope();
 // src/workers/local-files/mac-settings.ts
 init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync22 } from "node:fs";
-import { homedir as homedir13 } from "node:os";
-import { join as join29 } from "node:path";
-function helperAppPathForHome(home = homedir13()) {
-  return join29(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+import { existsSync as existsSync24 } from "node:fs";
+import { homedir as homedir15 } from "node:os";
+import { join as join31 } from "node:path";
+function helperAppPathForHome(home = homedir15()) {
+  return join31(home, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run = deps.run ?? ((command, args) => {
     spawn3(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync22)(helper))
+  if ((deps.exists ?? existsSync24)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -45891,7 +46473,7 @@ function ancestorScopePaths(scopePath) {
 }
 function localFilesListing(options, mode) {
   const volumes = options.volumes ?? new VolumeResolver;
-  const home = safeRealpath(options.home ?? options.context?.home ?? homedir14());
+  const home = safeRealpath(options.home ?? options.context?.home ?? homedir16());
   const context2 = options.context ?? {
     ...defaultExclusionContext(),
     home,
@@ -45900,7 +46482,7 @@ function localFilesListing(options, mode) {
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync4(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home,
-    memoryPath: join30(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: join32(olympusDataDir(), "local-files", "folder-access.json")
   });
   const node = (scopePath, name, parentKey, access) => {
     const reason = mode === "folders" ? defaultExclusionForFolder(scopePath, context2) : undefined;
@@ -45944,7 +46526,7 @@ function localFilesListing(options, mode) {
     }
     const offered = (entry) => !entry.isSymbolicLink() && (entry.isDirectory() || mode === "archive" && entry.isFile() && !entry.name.startsWith("."));
     return entries.filter(offered).map((entry) => {
-      const childReal = join30(realPath, entry.name);
+      const childReal = join32(realPath, entry.name);
       if (!entry.isDirectory())
         return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
@@ -46017,7 +46599,7 @@ function localFilesListing(options, mode) {
     const real = realPathOfScopePath(volumes, entry.key);
     let stat3;
     try {
-      stat3 = real ? lstatSync10(real) : undefined;
+      stat3 = real ? lstatSync11(real) : undefined;
     } catch {
       stat3 = undefined;
     }
@@ -46056,7 +46638,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
           throw new Error("A selected disk is not connected right now.");
         let isFolder = false;
         try {
-          isFolder = lstatSync10(real).isDirectory();
+          isFolder = lstatSync11(real).isDirectory();
         } catch {
           isFolder = false;
         }
@@ -46084,12 +46666,12 @@ registerFileScopeBrowserFactory(LOCAL_FILES_SOURCE_ID, (_context) => createLocal
 // src/workers/email-source/server.ts
 init_source_ingestion_exclusions();
 init_telegram_messages();
-init_connector_store();
+init_connector_store2();
 init_principal();
 
 // src/workers/email-source/source-answer-lanes.ts
 init_embeddings();
-init_connector_store();
+init_connector_store2();
 
 // src/workers/email-source/gmail-status-scope.ts
 init_google_connectors();
@@ -46104,6 +46686,8 @@ init_tier_ledger();
 
 // src/workers/email-source/server.ts
 init_secret_locations();
+init_source_storage();
+init_data_lifecycle();
 init_credential_broker();
 init_types();
 init_secret_store();
@@ -46114,6 +46698,7 @@ init_provider();
 init_assets();
 init_manifest();
 init_source_watch();
+init_whatsapp();
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
@@ -46233,13 +46818,13 @@ import { Database as Database6 } from "bun:sqlite";
 // src/workers/classification-ledger.ts
 init_olympus_layout();
 import { mkdir as mkdir4, open as open3, readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname25 } from "node:path";
+import { dirname as dirname26 } from "node:path";
 var CLASSIFICATION_LEDGER_OWNER_APPROVAL = "owner";
 var CLASSIFICATION_LEDGER_BUILT_IN_DEFAULT_APPROVAL = "built_in_default";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname25(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname26(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -46361,8 +46946,8 @@ init_atomic_file();
 init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
-import { mkdirSync as mkdirSync16, readFileSync as readFileSync21 } from "node:fs";
-import { dirname as dirname26 } from "node:path";
+import { mkdirSync as mkdirSync16, readFileSync as readFileSync24 } from "node:fs";
+import { dirname as dirname27 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -46380,7 +46965,7 @@ class SnifferCallBudget {
     this.statePath = options.statePath;
     if (this.statePath) {
       try {
-        const saved = JSON.parse(readFileSync21(this.statePath, "utf8"));
+        const saved = JSON.parse(readFileSync24(this.statePath, "utf8"));
         if (typeof saved.day === "string" && typeof saved.used === "number" && Number.isFinite(saved.used)) {
           this.day = saved.day;
           this.used = Math.max(0, Math.floor(saved.used));
@@ -46400,7 +46985,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync16(dirname26(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync16(dirname27(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -46740,7 +47325,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync23 } from "node:fs";
+import { existsSync as existsSync25 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
@@ -46824,7 +47409,7 @@ class TierSnifferService {
         db = new Database6(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync23(path);
+        const hasQueue = existsSync25(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -47025,11 +47610,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync23(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync25(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync23(own3))
+      if (existsSync25(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -47841,7 +48426,7 @@ function optionalEnv(env, name) {
 if (false) {}
 
 // scripts/source-embedding-drain.ts
-init_connector_store();
+init_source_storage();
 init_x_bookmarks();
 init_readwise();
 
@@ -47987,6 +48572,7 @@ async function recordEmbeddingLedgerObservations(path, observations, context2) {
 init_embedding_ledger();
 init_google_connectors();
 init_telegram_messages();
+init_whatsapp();
 init_credential_degradation();
 var DROPBOX_CORPUS_ID = "secure_local.dropbox.files";
 var EMAIL_CORPUS_ID = GMAIL_SECURE_CONNECTOR_CORPUS_ID;
@@ -48097,7 +48683,7 @@ class DirectSourceEmbeddingDrainClient {
     }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
-      store = new LocalConnectorStore({
+      store = openConnectorStore(storageAccountForCorpus(config), {
         dbPath: config.dbPath,
         corpusId: config.corpusId,
         family: config.family,
@@ -48449,9 +49035,9 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync24(config.dbPath))
+    if (!config.dbPath || !existsSync26(config.dbPath))
       return [];
-    const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
+    const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {
       const counts = store.status().counts;
       const chunksCurrent2 = Math.min(counts.chunks, counts.embeddedChunks);
@@ -48884,9 +49470,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute11(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname27(readinessPath);
+  const directory = dirname28(readinessPath);
   mkdirSync17(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync11(directory);
+  const parent = lstatSync12(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -48907,7 +49493,7 @@ if (__require.main == __require.module) {
     const report = secureLocalBackfillDryRunFromEnv(process.env);
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync17(dirname27(args.reportPath), { recursive: true });
+      mkdirSync17(dirname28(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -48917,7 +49503,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync17(dirname27(args.reportPath), { recursive: true });
+      mkdirSync17(dirname28(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

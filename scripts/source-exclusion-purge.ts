@@ -60,15 +60,17 @@ import {
 import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
+  GOOGLE_DRIVE_SOURCE_ID,
   defaultGoogleDriveConnectorStoreDbPath,
   defaultGoogleDriveSecureConnectorStoreDbPath,
   googleDriveIngestionExclusionMatcher,
 } from '../src/workers/google-connectors/index.ts';
-import {
+import type {
   LocalConnectorStore,
-  type ConnectorStoreMetadataOnlyStripSummary,
-  type ConnectorStorePurgeSummary,
+  ConnectorStoreMetadataOnlyStripSummary,
+  ConnectorStorePurgeSummary,
 } from '../src/workers/connector-store/index.ts';
+import { openConnectorStore } from '../src/core/source-storage.ts';
 
 export interface SourceExclusionPurgeArgs {
   purge: boolean;
@@ -228,24 +230,24 @@ function purgeTargets(env: Record<string, string | undefined>): Array<{
     {
       label: 'Drive docs (internal)',
       dbPath: defaultGoogleDriveConnectorStoreDbPath(env),
-      open: () => new LocalConnectorStore({
+      open: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
         dbPath: defaultGoogleDriveConnectorStoreDbPath(env),
         corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
         family: 'file',
         trustDomain: 'internal',
         exclusions: driveExclusions(),
-      }),
+      }, env),
     },
     {
       label: 'Drive docs (secure_local)',
       dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(env),
-      open: () => new LocalConnectorStore({
+      open: () => openConnectorStore({ sourceId: GOOGLE_DRIVE_SOURCE_ID }, {
         dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(env),
         corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
         family: 'file',
         trustDomain: 'secure_local',
         exclusions: driveExclusions(),
-      }),
+      }, env),
     },
   ];
 }

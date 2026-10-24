@@ -5063,6 +5063,30 @@ var init_release_manifest = __esm(() => {
   withheldAnswers = new WeakSet;
 });
 
+// src/core/operation-caller.ts
+function sanitizeCallerDisplayName(value) {
+  if (typeof value !== "string")
+    return;
+  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned)
+    return;
+  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
+}
+function operationCallerToWire(caller) {
+  const displayName = sanitizeCallerDisplayName(caller.displayName);
+  return {
+    surface: caller.surface,
+    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
+    ...displayName ? { display_name: displayName } : {},
+    ...caller.provider ? { provider: caller.provider } : {}
+  };
+}
+var OPERATION_CALLER_DISPLAY_NAME_MAX = 80, UNSAFE_LABEL_CHARS, inProcessRemoteRequests;
+var init_operation_caller = __esm(() => {
+  UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  inProcessRemoteRequests = new WeakSet;
+});
+
 // src/core/sqlite-migrations.ts
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
@@ -6348,6 +6372,46 @@ var init_sovereignty = __esm(() => {
     encrypted_cloud: 2,
     standard_cloud: 1
   };
+});
+
+// src/core/worker-service.ts
+import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
+function workerServicePaths(platform2, homeDir, env = {}) {
+  homeDir = validatedAbsolutePath(homeDir, "home directory");
+  if (platform2 === "darwin") {
+    const logDir = join25(homeDir, "Library", "Logs", "Olympus");
+    return {
+      label: "com.openclaw.olympus.worker",
+      unitPath: join25(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
+      envPath: join25(homeDir, ".config", "olympus", "worker.env"),
+      logPath: join25(logDir, "worker.log"),
+      errorLogPath: join25(logDir, "worker.err")
+    };
+  }
+  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
+  const stateDir = join25(layout.stateHome, "olympus", "worker");
+  return {
+    label: "olympus-worker",
+    unitPath: join25(layout.configHome, "systemd", "user", "olympus-worker.service"),
+    envPath: layout.workerEnvPath,
+    logPath: join25(stateDir, "worker.log"),
+    errorLogPath: join25(stateDir, "worker.err")
+  };
+}
+function validatedAbsolutePath(value, label) {
+  const trimmed = value.trim();
+  if (trimmed && isAbsolute15(trimmed) && !/[\0\r\n]/.test(trimmed))
+    return trimmed;
+  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
+}
+var WORKER_LOG_TAIL_BYTES;
+var init_worker_service = __esm(() => {
+  init_linux_engine_layout();
+  init_atomic_file();
+  init_openclaw_executable();
+  init_operation_error();
+  init_worker_auth();
+  WORKER_LOG_TAIL_BYTES = 64 * 1024;
 });
 
 // src/core/managed-tools.ts
@@ -12914,6 +12978,14 @@ var init_connected_handles = __esm(() => {
 // src/core/google-handle-compatibility.ts
 var init_google_handle_compatibility = () => {};
 
+// src/workers/credential-broker/unpaired-sources.ts
+var UNPAIRED_RECORD_KEYS, UNPAIRED_RECORD_STATES;
+var init_unpaired_sources = __esm(() => {
+  init_atomic_file();
+  UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
+  UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
+});
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -12930,6 +13002,9 @@ function startsWithFromLine(head) {
   if (!head || head.length < FROM_LINE.length)
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
 }
 var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
@@ -13129,7 +13204,7 @@ function syncMid(name) {
 function archivePickIntro(formats = ARCHIVE_FORMATS) {
   return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -13146,6 +13221,13 @@ var init_vocabulary = __esm(() => {
     "Content extraction is stalled": "reading files has stalled",
     [DASHBOARD_MANY_UNREADABLE_LABEL]: "many files can't be read"
   };
+  CAPTURE_JUDGED_CONNECTION_STATES = new Set([
+    "connected",
+    "waiting_for_first_sync",
+    "syncing",
+    "synced"
+  ]);
+  CAPTURE_UNEXPECTED_STOP_REASONS = new Set(["grant_missing", "handle_unavailable"]);
   REDIRECT_REFUSAL_CODES = new Set([
     "redirect_uri_mismatch",
     "invalid_redirect_uri",
@@ -13874,6 +13956,9 @@ var init_vocabulary = __esm(() => {
     }
   };
 });
+
+// src/workers/connector-store/capture-freshness.ts
+var init_capture_freshness = () => {};
 
 // src/workers/dashboard/phases.ts
 var init_phases = __esm(() => {
@@ -15468,6 +15553,287 @@ var init_corpus_adapter = __esm(() => {
   init_source_corpus_registry();
 });
 
+// src/core/secret-patterns.ts
+var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
+var init_secret_patterns = __esm(() => {
+  PROSE_WORDS = new Set([
+    "above",
+    "again",
+    "below",
+    "cannot",
+    "change",
+    "changed",
+    "characters",
+    "choose",
+    "click",
+    "contact",
+    "enter",
+    "expired",
+    "expires",
+    "forgot",
+    "forgotten",
+    "guideline",
+    "guidelines",
+    "hidden",
+    "incorrect",
+    "information",
+    "instruction",
+    "instructions",
+    "invalid",
+    "least",
+    "letters",
+    "link",
+    "manager",
+    "maximum",
+    "min",
+    "minimum",
+    "must",
+    "need",
+    "needed",
+    "needs",
+    "number",
+    "numbers",
+    "optional",
+    "please",
+    "policies",
+    "policy",
+    "protected",
+    "provide",
+    "provided",
+    "required",
+    "requirements",
+    "reset",
+    "retry",
+    "see",
+    "send",
+    "sent",
+    "setting",
+    "settings",
+    "shared",
+    "should",
+    "shown",
+    "sign",
+    "strength",
+    "symbols",
+    "unchanged",
+    "use",
+    "used",
+    "using",
+    "via"
+  ]);
+  CREDENTIAL_KEYS = [
+    { pattern: String.raw`api[_ -]?key`, legacy: true },
+    { pattern: String.raw`access[_ -]?token`, legacy: true },
+    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
+    { pattern: String.raw`client[_ -]?secret`, legacy: true },
+    { pattern: "password", legacy: true },
+    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
+    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
+    { pattern: String.raw`private[_ -]?key` },
+    { pattern: "secret" },
+    { pattern: String.raw`token(?!s)` },
+    { pattern: "sig", urlOnly: true }
+  ];
+  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
+  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
+  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
+  PLACEHOLDER_WORDS = new RegExp([
+    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
+    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
+    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
+    "placeholder",
+    "redacted",
+    "changeme",
+    "change[_-]me",
+    "replace[_-]?me",
+    "insert[_-]?(?:your|here|key|token)",
+    "[_-]here$",
+    "^n/a$",
+    "not[_ -]?set",
+    "^unset$"
+  ].join("|"), "i");
+  BARE_LITERALS = new Set([
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "string",
+    "null",
+    "none",
+    "nil",
+    "undefined",
+    "true",
+    "false",
+    "empty",
+    "hidden",
+    "masked",
+    "required",
+    "optional",
+    "changeme",
+    "enabled",
+    "disabled",
+    "encrypted",
+    "hashed",
+    "unknown",
+    "tbd",
+    "pending",
+    "missing"
+  ]);
+  COMMON_OBJECTS = new Set([
+    "user",
+    "users",
+    "body",
+    "data",
+    "form",
+    "state",
+    "props",
+    "creds",
+    "credentials",
+    "account",
+    "profile",
+    "session",
+    "auth",
+    "db",
+    "app",
+    "json",
+    "response",
+    "res",
+    "row",
+    "record",
+    "item",
+    "model"
+  ]);
+  STRONG_QUALIFIERS = new Set([
+    "client",
+    "app",
+    "api",
+    "access",
+    "refresh",
+    "auth",
+    "bearer",
+    "id",
+    "session",
+    "bot",
+    "oauth",
+    "webhook",
+    "signing",
+    "jwt",
+    "service",
+    "personal",
+    "consumer",
+    "shared",
+    "encryption",
+    "master",
+    "admin",
+    "root",
+    "user",
+    "db",
+    "database",
+    "wifi",
+    "email",
+    "login"
+  ]);
+  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
+  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
+  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
+  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
+  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
+  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
+  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
+  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
+  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
+  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
+});
+
+// src/workers/dropbox-files/content-policy.ts
+var init_content_policy = __esm(() => {
+  init_secret_patterns();
+});
+
+// src/workers/classification/engine.ts
+var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
+var init_engine = __esm(() => {
+  init_content_policy();
+  SECRET_FINDING_TYPES = new Set([
+    "private_key_material",
+    "aws_access_key_id",
+    "slack_token",
+    "api_secret_token",
+    "credential_assignment"
+  ]);
+  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
+});
+// src/workers/classification/tier-classifier.ts
+var UNDECIDED_TIER_SNIFFER;
+var init_tier_classifier = __esm(() => {
+  init_secret_patterns();
+  init_secret_patterns();
+  init_engine();
+  init_sender_rules();
+  UNDECIDED_TIER_SNIFFER = Object.freeze({
+    id: "undecided",
+    judge: () => ({ verdict: "undecided" })
+  });
+});
+// src/workers/classification/secret-locations.ts
+var STOP_WORDS;
+var init_secret_locations = __esm(() => {
+  init_sqlite_migrations();
+  init_engine();
+  init_tier_classifier();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "did",
+    "do",
+    "does",
+    "find",
+    "for",
+    "have",
+    "i",
+    "in",
+    "is",
+    "it",
+    "kept",
+    "keep",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "put",
+    "saved",
+    "show",
+    "stored",
+    "the",
+    "there",
+    "to",
+    "what",
+    "where",
+    "which",
+    "who",
+    "with"
+  ]);
+});
+
+// src/workers/classification/sniffer-store.ts
+var init_sniffer_store = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
+
+// src/workers/classification/tier-ledger.ts
+var init_tier_ledger = __esm(() => {
+  init_sqlite_migrations();
+  init_tier_classifier();
+});
+
 // src/core/source-index/keyword-languages.ts
 var profiles;
 var init_keyword_languages = __esm(() => {
@@ -15699,281 +16065,6 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
-
-// src/core/secret-patterns.ts
-var PROSE_WORDS, CREDENTIAL_KEYS, CREDENTIAL_KEY_WORDS, LEGACY_KEY_WORDS, CREDENTIAL_QUERY_KEY, PLACEHOLDER_WORDS, BARE_LITERALS, COMMON_OBJECTS, STRONG_QUALIFIERS, ENV_KEY_WORDS, ENV_CREDENTIAL_KEY, KEYWORD, SEPARATOR, VALUE, CREDENTIAL_ASSIGNMENT, ENV_ASSIGNMENT, BLOCK_SCALAR, LABELLED_PASSPHRASE, LEGACY_CREDENTIAL_ASSIGNMENT;
-var init_secret_patterns = __esm(() => {
-  PROSE_WORDS = new Set([
-    "above",
-    "again",
-    "below",
-    "cannot",
-    "change",
-    "changed",
-    "characters",
-    "choose",
-    "click",
-    "contact",
-    "enter",
-    "expired",
-    "expires",
-    "forgot",
-    "forgotten",
-    "guideline",
-    "guidelines",
-    "hidden",
-    "incorrect",
-    "information",
-    "instruction",
-    "instructions",
-    "invalid",
-    "least",
-    "letters",
-    "link",
-    "manager",
-    "maximum",
-    "min",
-    "minimum",
-    "must",
-    "need",
-    "needed",
-    "needs",
-    "number",
-    "numbers",
-    "optional",
-    "please",
-    "policies",
-    "policy",
-    "protected",
-    "provide",
-    "provided",
-    "required",
-    "requirements",
-    "reset",
-    "retry",
-    "see",
-    "send",
-    "sent",
-    "setting",
-    "settings",
-    "shared",
-    "should",
-    "shown",
-    "sign",
-    "strength",
-    "symbols",
-    "unchanged",
-    "use",
-    "used",
-    "using",
-    "via"
-  ]);
-  CREDENTIAL_KEYS = [
-    { pattern: String.raw`api[_ -]?key`, legacy: true },
-    { pattern: String.raw`access[_ -]?token`, legacy: true },
-    { pattern: String.raw`refresh[_ -]?token`, legacy: true },
-    { pattern: String.raw`client[_ -]?secret`, legacy: true },
-    { pattern: "password", legacy: true },
-    { pattern: String.raw`pass(?:wd|phrase|code)|(?<![a-z])pass|pwd` },
-    { pattern: String.raw`secret[_ -]?(?:access[_ -]?)?key(?:[_-]?base)?` },
-    { pattern: String.raw`private[_ -]?key` },
-    { pattern: "secret" },
-    { pattern: String.raw`token(?!s)` },
-    { pattern: "sig", urlOnly: true }
-  ];
-  CREDENTIAL_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => !key.urlOnly).map((key) => key.pattern).join("|");
-  LEGACY_KEY_WORDS = CREDENTIAL_KEYS.filter((key) => key.legacy).map((key) => key.pattern).join("|");
-  CREDENTIAL_QUERY_KEY = new RegExp(`^(?:${CREDENTIAL_KEYS.map((key) => key.pattern).join("|")})$`, "i");
-  PLACEHOLDER_WORDS = new RegExp([
-    String.raw`(?:^|[^a-z])your[_ .-]?[a-z_ -]{0,16}(?:api|secret|token|key|pass|password|client|value|here)`,
-    String.raw`(?:^|[^a-z])my[_ .-](?:api|secret|token|key|pass|password|client)`,
-    String.raw`(?:^|[^a-z])(?:example|dummy|todo|fixme)(?:[^a-z]|$)`,
-    "placeholder",
-    "redacted",
-    "changeme",
-    "change[_-]me",
-    "replace[_-]?me",
-    "insert[_-]?(?:your|here|key|token)",
-    "[_-]here$",
-    "^n/a$",
-    "not[_ -]?set",
-    "^unset$"
-  ].join("|"), "i");
-  BARE_LITERALS = new Set([
-    "password",
-    "passwd",
-    "passphrase",
-    "secret",
-    "token",
-    "apikey",
-    "api_key",
-    "api-key",
-    "string",
-    "null",
-    "none",
-    "nil",
-    "undefined",
-    "true",
-    "false",
-    "empty",
-    "hidden",
-    "masked",
-    "required",
-    "optional",
-    "changeme",
-    "enabled",
-    "disabled",
-    "encrypted",
-    "hashed",
-    "unknown",
-    "tbd",
-    "pending",
-    "missing"
-  ]);
-  COMMON_OBJECTS = new Set([
-    "user",
-    "users",
-    "body",
-    "data",
-    "form",
-    "state",
-    "props",
-    "creds",
-    "credentials",
-    "account",
-    "profile",
-    "session",
-    "auth",
-    "db",
-    "app",
-    "json",
-    "response",
-    "res",
-    "row",
-    "record",
-    "item",
-    "model"
-  ]);
-  STRONG_QUALIFIERS = new Set([
-    "client",
-    "app",
-    "api",
-    "access",
-    "refresh",
-    "auth",
-    "bearer",
-    "id",
-    "session",
-    "bot",
-    "oauth",
-    "webhook",
-    "signing",
-    "jwt",
-    "service",
-    "personal",
-    "consumer",
-    "shared",
-    "encryption",
-    "master",
-    "admin",
-    "root",
-    "user",
-    "db",
-    "database",
-    "wifi",
-    "email",
-    "login"
-  ]);
-  ENV_KEY_WORDS = CREDENTIAL_KEY_WORDS;
-  ENV_CREDENTIAL_KEY = new RegExp(ENV_KEY_WORDS, "i");
-  KEYWORD = `(?<kw>${CREDENTIAL_KEY_WORDS})`;
-  SEPARATOR = String.raw`["'\x60*_]{0,3}[ \t]*(?::=|=>|[:=])[*_]{0,2}[ \t]*(?<nl>\r?\n[ \t]*)?`;
-  VALUE = String.raw`(?:"(?<dq>(?:[^"\\\n\r]|\\.)*)"|'(?<sq>(?:[^'\\\n\r]|\\.)*)'|\x60(?<bq>[^\x60\n\r]*)\x60|(?<uv>[^\s"'\x60]+))`;
-  CREDENTIAL_ASSIGNMENT = new RegExp(`${KEYWORD}${SEPARATOR}${VALUE}`, "gi");
-  ENV_ASSIGNMENT = new RegExp(String.raw`(?<![A-Za-z0-9_.?&/%+=-])(?=(?:--)?[A-Za-z0-9_.-]*?(?:${ENV_KEY_WORDS}))(?<ek>(?:--)?[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=(?![=~>])[ \t]*${VALUE}`, "gi");
-  BLOCK_SCALAR = new RegExp(String.raw`${KEYWORD}["'\x60]{0,2}[ \t]*:[ \t]*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#[^\r\n]*)?\r?\n(?:[ \t]*\r?\n)*(?<ind>[ \t]+)(?<bv>[^ \t\r\n][^\r\n]*)`, "gi");
-  LABELLED_PASSPHRASE = new RegExp(String.raw`^[ \t>*•-]*(?:[A-Za-z0-9 _.-]{0,30}?)pass(?:word|phrase|code)["'\x60*_]{0,3}[ \t]*(?::=|[:=])[*_]{0,2}[ \t]*(?<mv>[^\s][^\n\r]{5,159})$`, "gim");
-  LEGACY_CREDENTIAL_ASSIGNMENT = new RegExp(String.raw`\b(${LEGACY_KEY_WORDS})\b\s*[:=]\s*['"]?[^'"\s]{12,}`, "gi");
-});
-
-// src/workers/dropbox-files/content-policy.ts
-var init_content_policy = __esm(() => {
-  init_secret_patterns();
-});
-
-// src/workers/classification/engine.ts
-var SECRET_FINDING_TYPES, CLEAN_GMAIL_CATEGORIES;
-var init_engine = __esm(() => {
-  init_content_policy();
-  SECRET_FINDING_TYPES = new Set([
-    "private_key_material",
-    "aws_access_key_id",
-    "slack_token",
-    "api_secret_token",
-    "credential_assignment"
-  ]);
-  CLEAN_GMAIL_CATEGORIES = new Set(["CATEGORY_FORUMS", "CATEGORY_UPDATES"]);
-});
-// src/workers/classification/tier-classifier.ts
-var UNDECIDED_TIER_SNIFFER;
-var init_tier_classifier = __esm(() => {
-  init_secret_patterns();
-  init_secret_patterns();
-  init_engine();
-  init_sender_rules();
-  UNDECIDED_TIER_SNIFFER = Object.freeze({
-    id: "undecided",
-    judge: () => ({ verdict: "undecided" })
-  });
-});
-// src/workers/classification/tier-ledger.ts
-var init_tier_ledger = __esm(() => {
-  init_sqlite_migrations();
-  init_tier_classifier();
-});
-
-// src/workers/classification/secret-locations.ts
-var STOP_WORDS;
-var init_secret_locations = __esm(() => {
-  init_sqlite_migrations();
-  init_engine();
-  init_tier_classifier();
-  STOP_WORDS = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "did",
-    "do",
-    "does",
-    "find",
-    "for",
-    "have",
-    "i",
-    "in",
-    "is",
-    "it",
-    "kept",
-    "keep",
-    "me",
-    "my",
-    "of",
-    "on",
-    "or",
-    "put",
-    "saved",
-    "show",
-    "stored",
-    "the",
-    "there",
-    "to",
-    "what",
-    "where",
-    "which",
-    "who",
-    "with"
-  ]);
-});
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
   init_types();
@@ -16006,12 +16097,6 @@ var init_delphi_scorer = __esm(() => {
     '{"tier":"internal"|"secure","category":"financial"|"health"|"legal"|"identity"|"personal"|"work"|"other","confidence":<number between 0 and 1>}'
   ].join(`
 `);
-});
-
-// src/workers/classification/sniffer-store.ts
-var init_sniffer_store = __esm(() => {
-  init_sqlite_migrations();
-  init_tier_classifier();
 });
 
 // src/workers/classification/sniffer.ts
@@ -16424,6 +16509,48 @@ var init_local_index = __esm(() => {
   ]);
 });
 
+// src/core/source-registry.ts
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+});
+
+// src/core/source-storage.ts
+var init_source_storage = __esm(() => {
+  init_secret_locations();
+  init_sniffer_store();
+  init_tier_ledger();
+  init_local_index();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_registry();
+});
+
+// src/workers/readwise/connector.ts
+var READWISE_STORE_PLACEMENT;
+var init_connector = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_credential_broker();
+  init_source_storage();
+  init_api();
+  init_corpus_adapter();
+  READWISE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S1",
+    trustDomain: "internal"
+  });
+});
+
+// src/workers/readwise/live-control.ts
+var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
+var init_live_control = __esm(() => {
+  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
+  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
+  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
+  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
+});
+
 // src/workers/connector-store/principal.ts
 var init_principal = () => {};
 
@@ -16469,30 +16596,6 @@ var init_filter_capabilities = __esm(() => {
 var init_connector_store = __esm(() => {
   init_local_index();
   init_filter_capabilities();
-});
-
-// src/workers/readwise/connector.ts
-var READWISE_STORE_PLACEMENT;
-var init_connector = __esm(() => {
-  init_olympus_layout();
-  init_atomic_file();
-  init_credential_broker();
-  init_connector_store();
-  init_api();
-  init_corpus_adapter();
-  READWISE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S1",
-    trustDomain: "internal"
-  });
-});
-
-// src/workers/readwise/live-control.ts
-var READWISE_STORE_PULL_INTERVAL_MS, READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS, READWISE_STORE_RECONCILE_INTERVAL_MS, READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS;
-var init_live_control = __esm(() => {
-  READWISE_STORE_PULL_INTERVAL_MS = 15 * 60000;
-  READWISE_STORE_PULL_FRESHNESS_THRESHOLD_MS = 60 * 60000;
-  READWISE_STORE_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
-  READWISE_STORE_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
 });
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
@@ -17440,7 +17543,7 @@ var init_folder_facets = __esm(() => {
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_corpus_adapter2();
   init_folder_facets();
   X_BOOKMARKS_STORE_PLACEMENT = Object.freeze({
@@ -17579,8 +17682,8 @@ var init_connector_store2 = __esm(() => {
   init_olympus_layout();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_connector_store();
   init_file_ingestion_matcher();
+  init_source_storage();
   init_corpus_adapter3();
   DROPBOX_TIER_CORPUS_IDS = Object.freeze({
     public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -17946,7 +18049,7 @@ var init_qualification2 = __esm(() => {
 
 // src/workers/dropbox-files/tier-set.ts
 var init_tier_set = __esm(() => {
-  init_tier_ledger();
+  init_source_storage();
   init_tiered_store_set();
   init_connector_store2();
   init_corpus_adapter3();
@@ -18017,8 +18120,7 @@ var init_store = __esm(() => {
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
-  init_tier_ledger();
-  init_connector_store();
+  init_source_storage();
   init_file_ingestion_matcher();
   init_tiered_store_set();
   init_scope();
@@ -18062,9 +18164,10 @@ var init_capture_spool_connector = __esm(() => {
 
 // src/workers/telegram-messages/store-sync.ts
 var init_store_sync = __esm(() => {
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_corpus_adapter4();
   init_capture_spool_connector();
 });
@@ -18262,6 +18365,7 @@ var init_source_dashboard = __esm(() => {
   init_source_failure();
   init_answer_ready_coverage();
   init_vocabulary();
+  init_capture_freshness();
   init_phases();
   init_credential_health();
   init_status();
@@ -18367,10 +18471,937 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/waiting-private-questions.ts
+var WAITING_QUESTION_LIMITS;
+var init_waiting_private_questions = __esm(() => {
+  init_sqlite_migrations();
+  WAITING_QUESTION_LIMITS = Object.freeze({
+    questionBytes: 2048,
+    localQuestionBytes: 8 * 1024,
+    selectorBytes: 4096,
+    perConnection: 20,
+    total: 50,
+    totalBytes: 256 * 1024,
+    answeredPerConnection: 50,
+    answeredBytesPerConnection: 1024 * 1024,
+    autoAnswersPerWindow: 5,
+    autoAnswerWindowMs: 60 * 60000,
+    answeredTotal: 500,
+    answeredBytes: 16 * 1024 * 1024,
+    answerBytes: 128 * 1024,
+    ttlMs: 7 * 24 * 60 * 60000
+  });
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_olympus_layout();
+  init_atomic_file();
+  init_file_lease();
+});
+
+// src/workers/archive-import/store.ts
+var ARCHIVE_STORE_PLACEMENT;
+var init_store2 = __esm(() => {
+  init_olympus_layout();
+  init_archive_formats();
+  init_source_corpus_registry();
+  init_source_storage();
+  init_state();
+  ARCHIVE_STORE_PLACEMENT = Object.freeze({
+    trustTier: "S4",
+    trustDomain: "secure_local",
+    secretsInContent: true
+  });
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire3 = createRequire4(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// node_modules/fflate/esm/browser.js
+var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0;i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1;i < 30; ++i) {
+    for (var j = b[i];j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+}, _a, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
+  var s = cd.length;
+  var i2 = 0;
+  var l = new u16(mb);
+  for (;i2 < s; ++i2) {
+    if (cd[i2])
+      ++l[cd[i2] - 1];
+  }
+  var le = new u16(mb);
+  for (i2 = 1;i2 < mb; ++i2) {
+    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+  }
+  var co;
+  if (r) {
+    co = new u16(1 << mb);
+    var rvb = 15 - mb;
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        var sv = i2 << 4 | cd[i2];
+        var r_1 = mb - cd[i2];
+        var v = le[cd[i2] - 1]++ << r_1;
+        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
+          co[rev[v] >> rvb] = sv;
+        }
+      }
+    }
+  } else {
+    co = new u16(s);
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+      }
+    }
+  }
+  return co;
+}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
+  var m = a[0];
+  for (var i2 = 1;i2 < a.length; ++i2) {
+    if (a[i2] > m)
+      m = a[i2];
+  }
+  return m;
+}, bits = function(d, p, m) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+}, bits16 = function(d, p) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+}, shft = function(p) {
+  return (p + 7) / 8 | 0;
+}, slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+}, ec, err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+}, inflt = function(dat, st, buf, dict) {
+  var sl = dat.length, dl = dict ? dict.length : 0;
+  if (!sl || st.f && !st.l)
+    return buf || new u8(0);
+  var noBuf = !buf;
+  var resize = noBuf || st.i != 2;
+  var noSt = st.i;
+  if (noBuf)
+    buf = new u8(sl * 3);
+  var cbuf = function(l2) {
+    var bl = buf.length;
+    if (l2 > bl) {
+      var nbuf = new u8(Math.max(bl * 2, l2));
+      nbuf.set(buf);
+      buf = nbuf;
+    }
+  };
+  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+  var tbts = sl * 8;
+  do {
+    if (!lm) {
+      final = bits(dat, pos, 1);
+      var type = bits(dat, pos + 1, 3);
+      pos += 3;
+      if (!type) {
+        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+        if (t > sl) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + l);
+        buf.set(dat.subarray(s, t), bt);
+        st.b = bt += l, st.p = pos = t * 8, st.f = final;
+        continue;
+      } else if (type == 1)
+        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+      else if (type == 2) {
+        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        pos += 14;
+        var ldt = new u8(tl);
+        var clt = new u8(19);
+        for (var i2 = 0;i2 < hcLen; ++i2) {
+          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+        }
+        pos += hcLen * 3;
+        var clb = max(clt), clbmsk = (1 << clb) - 1;
+        var clm = hMap(clt, clb, 1);
+        for (var i2 = 0;i2 < tl; ) {
+          var r = clm[bits(dat, pos, clbmsk)];
+          pos += r & 15;
+          var s = r >> 4;
+          if (s < 16) {
+            ldt[i2++] = s;
+          } else {
+            var c = 0, n = 0;
+            if (s == 16)
+              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+            else if (s == 17)
+              n = 3 + bits(dat, pos, 7), pos += 3;
+            else if (s == 18)
+              n = 11 + bits(dat, pos, 127), pos += 7;
+            while (n--)
+              ldt[i2++] = c;
+          }
+        }
+        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+        lbt = max(lt);
+        dbt = max(dt);
+        lm = hMap(lt, lbt, 1);
+        dm = hMap(dt, dbt, 1);
+      } else
+        err(1);
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+    }
+    if (resize)
+      cbuf(bt + 131072);
+    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+    var lpos = pos;
+    for (;; lpos = pos) {
+      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+      pos += c & 15;
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+      if (!c)
+        err(2);
+      if (sym < 256)
+        buf[bt++] = sym;
+      else if (sym == 256) {
+        lpos = pos, lm = null;
+        break;
+      } else {
+        var add = sym - 254;
+        if (sym > 264) {
+          var i2 = sym - 257, b = fleb[i2];
+          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+          pos += b;
+        }
+        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+        if (!d)
+          err(3);
+        pos += d & 15;
+        var dt = fd[dsym];
+        if (dsym > 3) {
+          var b = fdeb[dsym];
+          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+        }
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var end = bt + add;
+        if (bt < dt) {
+          var shift = dl - dt, dend = Math.min(dt, end);
+          if (shift + bt < 0)
+            err(3);
+          for (;bt < dend; ++bt)
+            buf[bt] = dict[shift + bt];
+        }
+        for (;bt < end; ++bt)
+          buf[bt] = buf[bt - dt];
+      }
+    }
+    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+    if (lm)
+      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+  } while (!final);
+  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+}, et, Inflate, td, tds = 0;
+var init_browser = __esm(() => {
+  u8 = Uint8Array;
+  u16 = Uint16Array;
+  i32 = Int32Array;
+  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  _a = freb(fleb, 2);
+  fl = _a.b;
+  revfl = _a.r;
+  fl[28] = 258, revfl[258] = 28;
+  _b = freb(fdeb, 0);
+  fd = _b.b;
+  revfd = _b.r;
+  rev = new u16(32768);
+  for (i = 0;i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  flt = new u8(288);
+  for (i = 0;i < 144; ++i)
+    flt[i] = 8;
+  for (i = 144;i < 256; ++i)
+    flt[i] = 9;
+  for (i = 256;i < 280; ++i)
+    flt[i] = 7;
+  for (i = 280;i < 288; ++i)
+    flt[i] = 8;
+  fdt = new u8(32);
+  for (i = 0;i < 32; ++i)
+    fdt[i] = 5;
+  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+  ];
+  et = /* @__PURE__ */ new u8(0);
+  Inflate = /* @__PURE__ */ function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  }();
+  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {}
+});
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+var TokenizerStates;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+});
+
+// src/workers/archive-import/json-stream.ts
+var EMPTY_FRAME, MAX_SAFE_DIGITS;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  init_json_stream();
+});
+
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data.length; index += 1) {
+    crc = crcTable[(crc ^ data[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data) {
+  if (data.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data, value) >>> 0 : tableCrc32(data, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+
+// src/workers/archive-import/zip-reader.ts
+function readExact(source, offset, length) {
+  if (length < 0 || offset < 0 || offset + length > source.size)
+    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+  if (length <= ZIP_READ_CHUNK_BYTES) {
+    const bytes = source.readAt(offset, length);
+    if (bytes.length !== length)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    return bytes;
+  }
+  const out = new Uint8Array(length);
+  for (let done = 0;done < length; ) {
+    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
+    if (part.length === 0)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    out.set(part, done);
+    done += part.length;
+  }
+  return out;
+}
+function memberKey(entry) {
+  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
+}
+
+class ZipMemberReader {
+  entry;
+  archive;
+  dataStart;
+  startAt;
+  pos = 0;
+  runningCrc = 0;
+  crcKnown;
+  out = [];
+  lastChunk = new Uint8Array(0);
+  crcBeforeLast = 0;
+  heldLast = 0;
+  closed = false;
+  result;
+  storedNext = 0;
+  inflate;
+  compressedNext = 0;
+  compressedBlock = new Uint8Array(0);
+  compressedOffset = 0;
+  inflateFinished = false;
+  constructor(archive, entry, dataStart, options) {
+    this.archive = archive;
+    this.entry = entry;
+    this.dataStart = dataStart;
+    const start = options.start ?? 0;
+    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
+    }
+    this.startAt = start;
+    this.crcKnown = start === 0;
+    if (entry.isDirectory || entry.uncompressedSize === 0) {
+      this.inflateFinished = true;
+      this.pos = start;
+      this.crcKnown = true;
+      return;
+    }
+    if (entry.method === 0) {
+      this.storedNext = start;
+      this.pos = start;
+      if (start > 0 && options.startCrc !== undefined) {
+        this.runningCrc = options.startCrc >>> 0;
+        this.crcKnown = true;
+      }
+      return;
+    }
+    const kept = options.continuation;
+    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
+      this.inflate = this.bind(kept.inflate);
+      this.compressedNext = kept.compressedNext;
+      this.compressedBlock = kept.compressedBlock;
+      this.compressedOffset = 0;
+      this.out = [...kept.out];
+      this.inflateFinished = kept.inflateFinished;
+      this.pos = start;
+      this.runningCrc = kept.crc;
+      this.crcKnown = kept.crcKnown;
+      return;
+    }
+    this.inflate = this.bind(new Inflate(() => {
+      return;
+    }));
+    this.crcKnown = true;
+  }
+  bind(inflate) {
+    inflate.ondata = (chunk) => {
+      if (chunk.length > 0)
+        this.out.push(chunk);
+    };
+    return inflate;
+  }
+  static open(archive, entry, options = {}) {
+    if (entry.encrypted)
+      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
+    }
+    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
+    }
+    const empty = entry.isDirectory || entry.uncompressedSize === 0;
+    const dataStart = empty ? 0 : archive.dataStart(entry);
+    return new ZipMemberReader(archive, entry, dataStart, options);
+  }
+  get position() {
+    return Math.max(this.pos, this.startAt);
+  }
+  get crc32() {
+    return this.crcKnown ? this.runningCrc : undefined;
+  }
+  get end() {
+    return this.result;
+  }
+  next() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    for (;; ) {
+      let chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (!this.fill()) {
+          this.conclude();
+          return;
+        }
+        continue;
+      }
+      if (this.pos < this.startAt) {
+        const skip = this.startAt - this.pos;
+        if (chunk.length <= skip) {
+          this.runningCrc = crc32Update(this.runningCrc, chunk);
+          this.pos += chunk.length;
+          continue;
+        }
+        const head = chunk.subarray(0, skip);
+        this.runningCrc = crc32Update(this.runningCrc, head);
+        this.pos += head.length;
+        chunk = chunk.subarray(skip);
+      }
+      this.crcBeforeLast = this.runningCrc;
+      if (this.crcKnown)
+        this.runningCrc = crc32Update(this.runningCrc, chunk);
+      this.lastChunk = chunk;
+      this.heldLast = chunk.length;
+      this.pos += chunk.length;
+      return chunk;
+    }
+  }
+  unread(count) {
+    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
+      throw new RangeError("unread past the last chunk");
+    if (count === 0)
+      return;
+    this.heldLast -= count;
+    this.pos -= count;
+    if (this.crcKnown)
+      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
+    this.out.unshift(this.lastChunk.subarray(this.heldLast));
+    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
+    this.result = undefined;
+  }
+  suspend() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
+      return;
+    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES || this.pos < this.startAt)
+      return;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
+    const state = {
+      position: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
+      memberKey: memberKey(this.entry),
+      crc: this.runningCrc,
+      crcKnown: this.crcKnown,
+      inflate: this.inflate,
+      compressedNext: this.compressedNext,
+      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
+      out: [...this.out],
+      inflateFinished: this.inflateFinished
+    };
+    this.inflate = undefined;
+    this.out = [];
+    return state;
+  }
+  close() {
+    this.closed = true;
+    this.inflate = undefined;
+    this.out = [];
+  }
+  fill() {
+    if (this.entry.method === 0) {
+      if (this.storedNext >= this.entry.uncompressedSize)
+        return false;
+      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
+      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
+      if (bytes.length === 0)
+        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
+      this.storedNext += bytes.length;
+      this.out.push(bytes);
+      return true;
+    }
+    if (this.inflateFinished || !this.inflate)
+      return false;
+    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
+      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
+      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
+      this.compressedOffset = 0;
+      this.compressedNext += length;
+    }
+    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
+    this.compressedOffset += slice.length;
+    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
+    try {
+      this.inflate.push(slice, final);
+    } catch (error) {
+      if (error instanceof ZipMemberError)
+        throw error;
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
+    }
+    if (final)
+      this.inflateFinished = true;
+    return true;
+  }
+  conclude() {
+    if (this.result)
+      return;
+    const sizeOk = this.pos === this.entry.uncompressedSize;
+    this.result = {
+      bytes: this.pos,
+      sizeOk,
+      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
+    };
+  }
+}
+function readBlock(source, offset, length, name) {
+  try {
+    return readExact(source, offset, length);
+  } catch (error) {
+    if (error instanceof ZipFormatError)
+      throw new ZipMemberError("damaged", name, error.message);
+    throw error;
+  }
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var init_zip_reader = __esm(() => {
+  init_browser();
+  init_stop_errors();
+  init_byte_source();
+  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
+  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
+  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
+  ZipFormatError = class ZipFormatError extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.name = "ZipFormatError";
+      this.code = code;
+    }
+  };
+  ZipMemberError = class ZipMemberError extends Error {
+    code;
+    memberName;
+    constructor(code, memberName, message) {
+      super(message);
+      this.name = "ZipMemberError";
+      this.code = code;
+      this.memberName = memberName;
+    }
+  };
+  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
+// src/workers/archive-import/manifest.ts
+var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
+var init_manifest2 = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+  init_zip_reader();
+  ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
+  ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
+});
+
+// src/workers/archive-import/requests.ts
+var STATUSES;
+var init_requests = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_manifest2();
+  init_state();
+  STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
+});
+
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector();
 });
@@ -18378,10 +19409,13 @@ var init_tier_set2 = __esm(() => {
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_connector2();
 });
+
+// src/workers/whatsapp/connector.ts
+var init_connector4 = () => {};
 
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
@@ -18398,9 +19432,10 @@ var init_live_connector = __esm(() => {
 var WHATSAPP_STORE_PLACEMENT;
 var init_store_sync2 = __esm(() => {
   init_olympus_layout();
-  init_connector_store();
+  init_source_storage();
   init_tiered_store_set();
   init_capture_spool_secrets();
+  init_capture_freshness();
   init_live_connector();
   WHATSAPP_STORE_PLACEMENT = Object.freeze({
     trustTier: "S4",
@@ -18408,21 +19443,75 @@ var init_store_sync2 = __esm(() => {
   });
 });
 
-// src/workers/archive-import/store.ts
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
-var ARCHIVE_STORE_PLACEMENT;
-var init_store2 = __esm(() => {
-  init_olympus_layout();
-  init_archive_formats();
-  init_source_corpus_registry();
-  init_connector_store();
-  ARCHIVE_STORE_PLACEMENT = Object.freeze({
-    trustTier: "S4",
-    trustDomain: "secure_local",
-    secretsInContent: true
+// src/core/file-extraction-source.ts
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
   });
+});
+
+// src/workers/whatsapp/extraction-source.ts
+var init_extraction_source = __esm(() => {
+  init_file_extraction_source();
+});
+
+// src/workers/whatsapp/index.ts
+var init_whatsapp = __esm(() => {
+  init_connector4();
+  init_live_connector();
+  init_store_sync2();
+  init_extraction_source();
+});
+
+// src/core/pairing-session-paths.ts
+var init_pairing_session_paths = __esm(() => {
+  init_olympus_layout();
+});
+
+// src/data-lifecycle.ts
+var init_data_lifecycle = __esm(() => {
+  init_olympus_layout();
+  init_source_storage();
+  init_atomic_file();
+  init_operation_error();
+  init_sqlite_migrations();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_ingestion_policy();
+  init_dropbox_files();
+  init_store();
+  init_archive_formats();
+  init_store2();
+  init_state();
+  init_requests();
+  init_google_connectors();
+  init_telegram_messages();
+  init_readwise();
+  init_tier_set2();
+  init_x_bookmarks();
+  init_tier_set3();
+  init_reconcile_state();
+  init_live_control2();
+  init_whatsapp();
+  init_sovereignty();
+  init_pairing_session_paths();
+  init_unpaired_sources();
+  init_source_corpus_registry();
+  init_public_source_capabilities();
+  init_worker_service();
+  init_media_cache();
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -18943,7 +20032,8 @@ var init_source_ingestion_ledger = __esm(() => {
   init_answer_ready_coverage();
   init_status();
   init_google_connectors();
-  init_connector_store();
+  init_source_storage();
+  init_data_lifecycle();
   init_readwise();
   init_tier_set2();
   init_x_bookmarks();
@@ -21498,30 +22588,7 @@ function assertNoRawEmailFieldsAtPath(value, path) {
 // src/core/email.ts
 init_http_timeout();
 init_operation_error();
-
-// src/core/operation-caller.ts
-var OPERATION_CALLER_DISPLAY_NAME_MAX = 80;
-var UNSAFE_LABEL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
-function sanitizeCallerDisplayName(value) {
-  if (typeof value !== "string")
-    return;
-  const cleaned = value.replace(UNSAFE_LABEL_CHARS, " ").replace(/\s+/g, " ").trim();
-  if (!cleaned)
-    return;
-  return cleaned.slice(0, OPERATION_CALLER_DISPLAY_NAME_MAX);
-}
-function operationCallerToWire(caller) {
-  const displayName = sanitizeCallerDisplayName(caller.displayName);
-  return {
-    surface: caller.surface,
-    ...caller.connectionId ? { connection_id: caller.connectionId } : {},
-    ...displayName ? { display_name: displayName } : {},
-    ...caller.provider ? { provider: caller.provider } : {}
-  };
-}
-var inProcessRemoteRequests = new WeakSet;
-
-// src/core/email.ts
+init_operation_caller();
 init_source_corpus_registry();
 
 // src/core/source-watch.ts
@@ -24383,45 +25450,7 @@ init_config();
 init_remote_access();
 init_sovereignty();
 init_worker_auth();
-
-// src/core/worker-service.ts
-init_linux_engine_layout();
-import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
-init_atomic_file();
-init_openclaw_executable();
-init_operation_error();
-init_worker_auth();
-var WORKER_LOG_TAIL_BYTES = 64 * 1024;
-function workerServicePaths(platform2, homeDir, env = {}) {
-  homeDir = validatedAbsolutePath(homeDir, "home directory");
-  if (platform2 === "darwin") {
-    const logDir = join25(homeDir, "Library", "Logs", "Olympus");
-    return {
-      label: "com.openclaw.olympus.worker",
-      unitPath: join25(homeDir, "Library", "LaunchAgents", "com.openclaw.olympus.worker.plist"),
-      envPath: join25(homeDir, ".config", "olympus", "worker.env"),
-      logPath: join25(logDir, "worker.log"),
-      errorLogPath: join25(logDir, "worker.err")
-    };
-  }
-  const layout = resolveLinuxEngineLayout({ ...env, HOME: homeDir });
-  const stateDir = join25(layout.stateHome, "olympus", "worker");
-  return {
-    label: "olympus-worker",
-    unitPath: join25(layout.configHome, "systemd", "user", "olympus-worker.service"),
-    envPath: layout.workerEnvPath,
-    logPath: join25(stateDir, "worker.log"),
-    errorLogPath: join25(stateDir, "worker.err")
-  };
-}
-function validatedAbsolutePath(value, label) {
-  const trimmed = value.trim();
-  if (trimmed && isAbsolute15(trimmed) && !/[\0\r\n]/.test(trimmed))
-    return trimmed;
-  throw new OperationError("config_error", `Could not resolve an absolute ${label} path for the worker service.`);
-}
-
-// src/core/engine-service.ts
+init_worker_service();
 init_consult_transport_zkapi();
 var ENGINE_LABEL = "ai.olympusplugin.engine";
 var PACKAGE_NAMES = new Set(["olympus", "olympus-source-checkout"]);
@@ -24793,6 +25822,7 @@ import { existsSync as existsSync18, mkdirSync as mkdirSync15, readFileSync as r
 import { dirname as dirname27, join as join39 } from "node:path";
 import { homedir as homedir15 } from "node:os";
 init_openclaw_executable();
+init_worker_service();
 init_worker_auth();
 init_sovereignty();
 
@@ -25123,17 +26153,12 @@ import { mkdirSync as mkdirSync14, readFileSync as readFileSync26, rmSync as rmS
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname24, join as join33 } from "node:path";
 init_secret_store();
+init_worker_service();
 init_http_timeout();
 init_oauth_relay();
 init_publisher_oauth_client();
 init_connected_handles();
-
-// src/workers/credential-broker/unpaired-sources.ts
-init_atomic_file();
-var UNPAIRED_RECORD_KEYS = new Set(["source_id", "state", "unremoved_paths", "failed_steps"]);
-var UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
-
-// src/core/connect.ts
+init_unpaired_sources();
 init_credential_broker();
 
 // src/core/provider-account-identity.ts

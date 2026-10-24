@@ -133,7 +133,7 @@ Inside the data root:
       "slot": "1",
       "state": "active",
       "layout": "folder",
-      "corpus_ids": ["dropbox.files.secure", "dropbox.files.internal", "dropbox.files.public"],
+      "corpus_ids": ["secure_local.dropbox.files", "internal.dropbox.files", "public_safe.dropbox.files"],
       "provider_account_hash": "…",
       "created_at": "…"
     }
@@ -143,6 +143,10 @@ Inside the data root:
 
 - `state` is `active`, `deleting`, or `deleted` (kept briefly so the
   dashboard can say so, then dropped).
+- A missing file is an empty registry. A file that cannot be parsed, names
+  an unknown schema or lists an account twice is never read as empty: every
+  open refuses until it is repaired, since it may hold a delete marker
+  (`src/core/source-registry.ts`).
 - `layout` is `legacy` (files still at today's paths, as step 2 adopts
   existing accounts) or `folder` (inside `sources/<source_id>/<slot>/`).
   Whether an account exists and where its files are are tracked apart: the
@@ -172,15 +176,26 @@ Inside the data root:
 One module in the worker, `src/core/source-storage.ts`, is the only code
 that opens files inside an account folder:
 
-- `open(source_id, slot)` returns the account's tier stores (the existing
-  `LocalConnectorStore` and tier-set objects), opened once and shared, as
-  today.
+- `openConnectorStore(account, options)` constructs a `LocalConnectorStore`,
+  and `openTierLedger`, `openSecretLocations` and `openTierSniffer` its tier
+  sidecars, for `account = { sourceId, slot? }` (slot `1` by default) at the
+  caller's path, unchanged until step 4. Callers keep sharing the objects
+  they open, as today; the service holds no cache.
 - An account whose registry state is not `active` is never opened. Callers
-  get "not available", the same answer as a lane that is not mounted today;
-  no stand-in store is ever returned.
-- The extra read-only connection per vector scan (`local-index.ts:9993`)
-  and the per-request opens of the dispositions page (`server.ts:1076`) go
-  through the service.
+  get `SourceStorageUnavailableError` ("not available"), the same answer as
+  a lane that is not mounted today; no stand-in store is ever returned. At
+  worker boot, `isSourceAccountOpenable` decides the mount: a lane whose
+  account may not be opened is not mounted, with one `[storage]` log line.
+  A store declared only by its corpus (a JSON mount, a script's `--db`)
+  takes the source the corpus registry names for it, else its corpus id
+  without the trust-domain prefix.
+- Adoption: the worker turns it on at boot. A writable open of an account
+  with no entry records one (slot `1`, `active`, `legacy`, its corpus id);
+  an open of a further corpus adds that corpus. Read-only opens, and every
+  open from the CLI, scripts and tests, never write the registry.
+- The per-request opens of the dispositions page go through the service.
+  The extra read-only connection per vector scan stays the store's own
+  connection, inside `local-index.ts`, of a store the service opened.
 - Search keeps reading disconnected accounts' stores ("Disconnected ·
   indexed data kept"), because they stay `active` until deleted.
 
@@ -199,10 +214,16 @@ inode never changes while held. Every other opener of a store:
 | `connector-store:embed`, `whatsapp-live-sync`, repair and backfill scripts | take the owner lock, so they refuse while Olympus runs |
 | Telegram reader, WhatsApp bridge | write only `raw/` and `session/` of their account; stopped by Disconnect |
 
-A guard test (salvaged from #467's `store-open-guard`) fails on any
-`new Database(`/`new DatabaseSync(`/`LocalConnectorStore(` on a data file
-outside the storage service and a short allowlist (the lock database,
-Apple Messages' `chat.db`).
+A guard test (`test/store-open-guard.test.ts`, salvaged from #467's)
+fails on any construction of `LocalConnectorStore`, `TierLedger`,
+`SecretLocationsIndex`, `TierSnifferStore` or any `new *Database*(` in
+`src/` or `scripts/` outside the storage service and an allowlist that names
+a reason for each file: the store and sidecar classes themselves, the lock
+database, Apple Messages' `chat.db`, the shared files (step 3), X's
+per-account state (step 4), `data-lifecycle.ts` (step 5), generic code that
+reopens sidecars beside a store by path, and operator scripts on a `--db`
+(the owner lock). An entry that stops matching fails too, so the list only
+shrinks.
 
 ## Shared files
 

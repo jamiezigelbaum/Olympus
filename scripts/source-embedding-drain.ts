@@ -15,7 +15,8 @@ import {
   createSourceIndexEmbeddingProviderFromEnv,
   createSourceIndexEmbeddingProviderFromSovereignty,
 } from '../src/workers/email-source/server.ts';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
 import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
 // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
@@ -411,7 +412,7 @@ export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainCli
     }
     let store = this.connectorStores.get(config.corpusId);
     if (!store) {
-      store = new LocalConnectorStore({
+      store = openConnectorStore(storageAccountForCorpus(config), {
         dbPath: config.dbPath,
         corpusId: config.corpusId,
         family: config.family,
@@ -905,7 +906,7 @@ export function secureLocalBackfillDryRunFromEnv(
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === 'true';
   const corpora = configs.flatMap((config) => {
     if (!config.dbPath || !existsSync(config.dbPath)) return [];
-    const store = new LocalConnectorStore({ ...config, dbPath: config.dbPath, readOnly: true });
+    const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {
       const counts = store.status().counts;
       const chunksCurrent = Math.min(counts.chunks, counts.embeddedChunks);

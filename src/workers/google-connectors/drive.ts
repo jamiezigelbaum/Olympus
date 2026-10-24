@@ -34,6 +34,7 @@ import {
   type GoogleRequestBudgetStatus,
 } from './request-budget.ts';
 
+export const GOOGLE_DRIVE_SOURCE_ID = 'google_drive.docs';
 export const GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = 'internal.drive.docs';
 export const GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = 'secure_local.drive.docs';
 /** The lane's Public store (P1b per-tier stores), created when its first item is routed there. */

@@ -1,17 +1,19 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-const READ_ONLY_TOOLS = [
-  'eval/run-real.ts',
-  'scripts/source-eval-pack-inspect.ts',
-] as const;
+// How each tool opens the store: scripts/ goes through the storage service
+// (test/store-open-guard.test.ts); eval/ is outside that guard.
+const READ_ONLY_TOOLS = {
+  'eval/run-real.ts': 'new LocalConnectorStore({',
+  'scripts/source-eval-pack-inspect.ts': 'openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {',
+} as const;
 
 describe('private eval store access', () => {
-  for (const relativePath of READ_ONLY_TOOLS) {
+  for (const [relativePath, opener] of Object.entries(READ_ONLY_TOOLS)) {
     test(`${relativePath} opens only the canonical connector store query-only`, () => {
       const source = readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
 
-      expect(source).toContain('new LocalConnectorStore({');
+      expect(source).toContain(opener);
       expect(source).toContain('readOnly: true');
       expect(source).toContain('createConnectorStoreCorpusAdapter({');
       expect(source).toContain('createConnectorStoreContentProvider({');

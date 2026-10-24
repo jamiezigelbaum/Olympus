@@ -17,6 +17,7 @@ import { olympusDataRoot } from '../../core/olympus-layout.ts';
 import { join } from 'node:path';
 import {
   ARCHIVE_FORMATS,
+  archiveCorpusId,
   archiveFamilyProvider,
   archiveImportFamilies,
   type ArchiveFormatDefinition,
@@ -28,8 +29,10 @@ import {
 } from '../../core/source-corpus-registry.ts';
 import type { SourceFamily, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
+import { ARCHIVE_IMPORTS_SOURCE_ID } from './state.ts';
 
 export const ARCHIVE_TIER_DOMAINS: readonly SourceTrustDomain[] = ['public_safe', 'internal', 'secure_local'];
 
@@ -42,12 +45,7 @@ export const ARCHIVE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freez
   secretsInContent: true,
 });
 
-/**
- * The corpus id of one tier store of one family's archives.
- */
-export function archiveCorpusId(trustDomain: SourceTrustDomain, family: SourceFamily): string {
-  return `${trustDomain}.archive.${family}`;
-}
+export { archiveCorpusId };
 
 /**
  * The set id of one family's archive stores in the tier ledger.
@@ -92,14 +90,14 @@ export function createArchiveConnectorStore(
   env: Record<string, string | undefined> = process.env,
   options: { readOnly?: boolean; tierLedger?: TierLedger } = {},
 ): LocalConnectorStore {
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, {
     dbPath: archiveConnectorStoreDbPath(trustDomain, family, env),
     corpusId: archiveCorpusId(trustDomain, family),
     family,
     trustDomain,
     ...(options.readOnly === true ? { readOnly: true } : {}),
     ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
-  });
+  }, env);
 }
 
 const CORPUS_ROLE: Readonly<Record<string, { capabilities: SourceCorpusConfig['capabilities']; description: string }>> = {

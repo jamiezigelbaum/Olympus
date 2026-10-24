@@ -28,6 +28,7 @@ export {
   createTelegramCaptureSpoolConnector,
   defaultTelegramCaptureSpoolDir,
   readTelegramCaptureSpool,
+  readTelegramCaptureSpoolNewestCapturedAt,
   type TelegramCaptureSpoolReadResult,
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
