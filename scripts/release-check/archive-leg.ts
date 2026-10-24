@@ -350,11 +350,13 @@ export interface ModelObservation {
 // ---------------------------------------------------------------------------
 // Journeys (data for the journey runner)
 
+/** The dashboard opens on what the step needs (the page loaded, the panel read). */
+const OPEN_S = 60;
 const BEFORE_NAME = (template: string): string => template.split('{name}')[0] ?? '';
 const rowTarget = (fileName: string) => ({ css: 'li.archive:not(.request)', text: fileName, contains: true });
 
 /** The request an agent left waiting, then the owner's press of its Import, until the archive's row is on the page. */
-export function approveRequestSteps(fx: LegFixture, fullPath: string, startS = 180): Journey['steps'] {
+export function approveRequestSteps(fx: LegFixture, fullPath: string, startS = 180, openS = OPEN_S): Journey['steps'] {
   return [
     {
       name: 'Open the dashboard: the agent\'s request is waiting for the owner',
@@ -364,7 +366,7 @@ export function approveRequestSteps(fx: LegFixture, fullPath: string, startS = 1
         { text: new RegExp(`${escapeRe(BEFORE_NAME(A.requestLine))}${escapeRe(fx.fileName)}`), frame: 'panel' },
         { text: fill(A.fullPath, { path: fullPath }), frame: 'panel' },
       ],
-      timeoutMs: 60_000,
+      timeoutMs: openS * 1_000,
     },
     {
       name: 'Press Import on the agent\'s request',
@@ -392,7 +394,7 @@ const gapsStep = (fx: LegFixture): Journey['steps'][number] => ({
   ],
 });
 
-export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: { startS?: number; settleS?: number } = {}): Journey {
+export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
   const hasGaps = expectedGapLines(fx.expect).length > 0;
   return {
     id: `archive-${fx.role}-${fx.format}-import`,
@@ -400,14 +402,14 @@ export function agentImportJourney(fx: LegFixture, fullPath: string, bounds: { s
     source: 'archive import: the agent path (archive_import start, needs approval, the owner presses Import)',
     mutates: true,
     steps: [
-      ...approveRequestSteps(fx, fullPath, bounds.startS ?? ARCHIVE_BOUNDS.startS),
+      ...approveRequestSteps(fx, fullPath, bounds.startS ?? ARCHIVE_BOUNDS.startS, bounds.openS ?? OPEN_S),
       settleStep(fx, bounds.settleS ?? ARCHIVE_BOUNDS.settleS),
       ...(hasGaps ? [gapsStep(fx)] : []),
     ],
   };
 }
 
-export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; settleS?: number } = {}): Journey {
+export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; settleS?: number; openS?: number } = {}): Journey {
   const hasGaps = expectedGapLines(fx.expect).length > 0;
   const importFile = fill(A.pick.makePrivateFor, { name: fx.fileName });
   return {
@@ -420,9 +422,14 @@ export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; s
         name: 'Open the dashboard: no archive is imported yet, and Import an archive is offered',
         do: { go: '/dashboard' },
         expect: [{ present: { role: 'button', name: A.importAction }, frame: 'panel' }, { absent: { css: 'li.archive' }, frame: 'panel' }],
-        timeoutMs: 60_000,
+        timeoutMs: (bounds.openS ?? OPEN_S) * 1_000,
       },
-      { name: 'Press Import an archive', do: { click: { role: 'button', name: A.importAction }, frame: 'panel' }, expect: [{ text: A.pick.intro, frame: 'panel' }] },
+      {
+        name: 'Press Import an archive: the picker lists the computer\'s folders',
+        do: { click: { role: 'button', name: A.importAction }, frame: 'panel' },
+        // The listing arrives after the picker opens; the next press waits for it.
+        expect: [{ text: A.pick.intro, frame: 'panel' }, { present: { css: 'button[data-key^="picker:open:"]', text: FIXTURE_FOLDER, contains: true }, frame: 'panel' }],
+      },
       {
         name: `Open the folder ${FIXTURE_FOLDER}`,
         do: { click: { css: 'button[data-key^="picker:open:"]', text: FIXTURE_FOLDER, contains: true }, frame: 'panel' },
@@ -441,7 +448,7 @@ export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; s
 }
 
 /** Remove, pressed on the archive's row and confirmed, until the row is gone. */
-export function removeJourney(role: string, fileName: string, removeS: number = ARCHIVE_BOUNDS.removeS): Journey {
+export function removeJourney(role: string, fileName: string, removeS: number = ARCHIVE_BOUNDS.removeS, openS: number = OPEN_S): Journey {
   const confirm = fill(PANEL.confirm, { label: A.remove.toLowerCase() });
   return {
     id: `archive-${role}-remove`,
@@ -449,7 +456,7 @@ export function removeJourney(role: string, fileName: string, removeS: number = 
     source: 'archive import: Remove asks first, then deletes what Olympus made and leaves the file',
     mutates: true,
     steps: [
-      { name: 'Open the dashboard: the archive is listed', do: { go: '/dashboard' }, expect: [{ present: rowTarget(fileName), frame: 'panel' }], timeoutMs: 60_000 },
+      { name: 'Open the dashboard: the archive is listed', do: { go: '/dashboard' }, expect: [{ present: rowTarget(fileName), frame: 'panel' }], timeoutMs: openS * 1_000 },
       {
         name: 'Press Remove: the row asks first, and says the file itself stays',
         do: { click: { role: 'button', name: A.remove, within: rowTarget(fileName) }, frame: 'panel' },
