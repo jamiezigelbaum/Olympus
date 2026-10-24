@@ -43,6 +43,7 @@ import {
   writeUnpairedSources,
 } from '../src/workers/credential-broker/unpaired-sources.ts';
 import { connectGuidedSession } from '../src/core/connect.ts';
+import { accountFolder } from '../src/core/olympus-layout.ts';
 import { clearUnpairedSource } from '../src/workers/credential-broker/unpaired-sources.ts';
 import { withWorkerBearerAuth } from '../src/workers/http.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
@@ -259,6 +260,61 @@ describe('bounded dashboard Unpair', () => {
     expect(existsSync(spoolItem)).toBe(true);
     expect(existsSync(mediaItem)).toBe(true);
     expect(await secrets.get('whatsapp.personal_local.session_path')).toBeUndefined();
+  });
+
+  test.each([false, true])('removes a folder Telegram account\'s session wherever the data folder is (relocated: %s), and leaves its spool', async (relocated) => {
+    const home = fixtureHome();
+    const env = { HOME: home, XDG_DATA_HOME: relocated ? fixtureHome() : join(home, '.local/share') };
+    const folder = accountFolder({ source_id: 'telegram.messages', slot: '1' }, env);
+    const base = join(folder, 'session', 'telegram');
+    const sessionPath = touch(`${base}.session`);
+    const journalPath = touch(`${base}.session-journal`);
+    const spoolItem = touch(join(folder, 'raw', 'telegram-spool', '0001.jsonl'));
+    const registryPath = join(home, 'handles.json');
+    writeConnectedHandleRegistry(registryOf(telegramHandle()), registryPath);
+    // Pairing stores the folder's session base, as the legacy pairing stored its own.
+    const secrets = memorySecretStore({ 'telegram.personal.session_path': base });
+    const worker = trackWorker(createEmailSourceWorker({ sourceDashboard: {
+      sovereigntyEngine: fixtureSovereigntyEngine(), registryPath, secretStore: secrets,
+      pairingSessionPathContext: { homeDir: home, env },
+    } }));
+
+    const response = await worker.fetch(jsonRequest('/dashboard/unpair', { source_id: 'telegram.messages', acknowledge: true }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      removed_session_paths: [journalPath, sessionPath].sort(),
+      policy: { local_pairing_session_removed: true, captured_messages_deleted: false },
+    });
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(existsSync(journalPath)).toBe(false);
+    expect(existsSync(spoolItem)).toBe(true);
+  });
+
+  test('removes a folder WhatsApp account\'s session from the layout alone, and leaves its spool and media', async () => {
+    const home = fixtureHome();
+    const env = { HOME: home, XDG_DATA_HOME: fixtureHome() };
+    const stateDir = join(accountFolder({ source_id: 'whatsapp.personal.messages', slot: '1' }, env), 'raw', 'whatsapp');
+    const sessionDb = touch(join(stateDir, 'session.db'));
+    const qr = touch(join(stateDir, 'qr.png'));
+    const spoolItem = touch(join(stateDir, 'spool/0001.jsonl'));
+    const mediaItem = touch(join(stateDir, 'media/audio/voice-note.ogg'));
+    const registryPath = join(home, 'handles.json');
+    writeConnectedHandleRegistry(registryOf(whatsappHandle()), registryPath);
+    const worker = trackWorker(createEmailSourceWorker({ sourceDashboard: {
+      sovereigntyEngine: fixtureSovereigntyEngine(), registryPath, secretStore: memorySecretStore({}),
+      pairingSessionPathContext: { homeDir: home, env },
+    } }));
+
+    const response = await worker.fetch(jsonRequest('/dashboard/unpair', { source_id: 'whatsapp.personal.messages', acknowledge: true }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, removed_session_paths: [qr, sessionDb].sort() });
+    expect(existsSync(sessionDb)).toBe(false);
+    expect(existsSync(qr)).toBe(false);
+    expect(existsSync(spoolItem)).toBe(true);
+    expect(existsSync(mediaItem)).toBe(true);
   });
 
   test('requires the same explicit acknowledgement Disconnect requires', async () => {

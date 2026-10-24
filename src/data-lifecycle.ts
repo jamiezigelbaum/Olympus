@@ -95,9 +95,11 @@ import {
   defaultWhatsAppInternalConnectorStoreDbPath,
 } from './workers/whatsapp/index.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
+import { defaultMessagingCaptureGrantPath, readMessagingCaptureGrantSessionPath } from './core/messaging-capture.ts';
 import {
   olympusDataRoots,
   pairingOwnedRoots,
+  pairingSessionPathsFromStoredValue,
   telegramPairingSessionPaths,
   whatsappPairingSessionPaths,
   whatsappStateDir as resolveWhatsAppStateDir,
@@ -2088,6 +2090,9 @@ function assertRawStateTargetsContained(
     for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
+  // A legacy account's grant keeps the path its session was paired at, which an override lifted since
+  // no longer names: it may be inside an account folder this delete is about to take.
+  for (const path of retainedGrantSessionPaths(context)) protectedPaths.add(path);
   // A store the connector-store mount list places by path (Reflect, Roam, an
   // operator's own) may sit anywhere, an account folder included: another
   // source's mounted store and its sidecars are protected where they really are.
@@ -2167,6 +2172,15 @@ function assertSourcesFolderTargetsUnlinked(targets: readonly DeleteTarget[], co
       );
     }
   }
+}
+
+function retainedGrantSessionPaths(context: LifecyclePathContext): string[] {
+  const registryPath = envForContext(context).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
+    || join(resolveHome(context.homeDir), '.config', 'olympus', 'handles.json');
+  return (['telegram', 'whatsapp'] as const).flatMap((source) => {
+    const stored = readMessagingCaptureGrantSessionPath(source, defaultMessagingCaptureGrantPath(source, registryPath));
+    return stored ? pairingSessionPathsFromStoredValue(source, stored) : [];
+  });
 }
 
 function isInsideKnownOlympusRoot(path: string, context: LifecyclePathContext): boolean {

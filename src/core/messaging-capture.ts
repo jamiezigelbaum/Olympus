@@ -136,6 +136,23 @@ export function readMessagingCaptureGrantFacts(
 }
 
 /**
+ * The session path a `legacy` account's grant retains, if there is a readable
+ * grant that names one: where the session was paired, which an override lifted
+ * since cannot be told from the environment. A `folder` account's grant has none.
+ */
+export function readMessagingCaptureGrantSessionPath(
+  source: MessagingPairingSource,
+  grantPath = defaultMessagingCaptureGrantPath(source),
+): string | undefined {
+  try {
+    const read = readGrant(grantPath);
+    return read.kind === 'valid' && read.grant.source === source ? read.grant.sessionPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The approved scope of a capture grant, as a count, or undefined when there
  * is no readable grant or its scope list is empty or unreadable.
  */

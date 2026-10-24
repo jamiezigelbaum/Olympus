@@ -165,6 +165,24 @@ describe('placement: a new account', () => {
     }
   });
 
+  test('native ownership of capture pins Telegram and WhatsApp legacy, unless it is explicitly off', () => {
+    for (const [sourceId, name] of [
+      ['telegram.messages', 'OLYMPUS_NATIVE_TELEGRAM_CAPTURE_OWNER'],
+      ['whatsapp.personal.messages', 'OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER'],
+    ] as const) {
+      // A value the worker would refuse is not an off either: nothing moves on a guess.
+      for (const on of ['true', '1', 'yes', ' TRUE ', 'garbage']) {
+        expect(decideAccountLayout(sourceId, { ...env, [name]: on })).toEqual({ layout: 'legacy', why: `${name} (native capture) pins its files` });
+      }
+      for (const off of ['false', '0', 'no', 'FALSE', '', '  ']) {
+        expect(decideAccountLayout(sourceId, { ...env, [name]: off }).layout, `${name}=${off}`).toBe('folder');
+      }
+      // Not another source's business.
+      expect(decideAccountLayout('readwise.library', { ...env, [name]: 'true' }).layout).toBe('folder');
+    }
+    expect(decideAccountLayout('telegram.messages', { ...env, OLYMPUS_NATIVE_WHATSAPP_CAPTURE_OWNER: 'true' }).layout).toBe('folder');
+  });
+
   test('a connector-store mount that names the account\'s corpus pins it legacy; another source\'s does not', () => {
     const mount = (corpusId: string, trustDomain: string) => JSON.stringify([{ corpusId, trustDomain, dbPath: join(dir, 'mount.sqlite') }]);
     const mounted = { ...env, [MOUNTS]: mount('internal.readwise.library', 'internal') };
