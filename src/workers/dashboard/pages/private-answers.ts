@@ -82,6 +82,13 @@ const PRIVATE_ANSWERS_CSS = `
 .pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
 .pa .pazone b { color: var(--t2); font-weight: 600; }
 .pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .palevel { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; display: grid; gap: 6px; }
+.pa .palevel legend { padding: 0; margin: 0 0 2px; color: var(--t2); font-size: var(--fs-body); font-weight: 600; }
+.pa .palevelopt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; font-size: var(--fs-body); color: var(--t1); cursor: pointer; }
+.pa .palevelopt input { margin: 3px 0 0; accent-color: var(--link); }
+.pa .palevelopt b { font-weight: 600; }
+.pa .palevelhint { display: block; color: var(--t3); }
+.pa [data-pa-card="anonymous"]:not([data-pa-state="ready"]) .palevel { display: none; }
 .pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
 @media (max-width: 640px) {
   .pa .paasks { grid-template-columns: minmax(0, 1fr); }
@@ -167,8 +174,20 @@ function renderDestinations(options: DashboardPageOptions | undefined, enabled: 
       const notReadyDot = notReadyLabel === W.downloadingStatus ? 'run' : notReadyLabel === W.pausedStatus ? 'pause' : 'hollow';
       const statuses = [['ready', W.readyStatus, 'ok'], ['not_set_up', notReadyLabel, notReadyDot], ['not_allowed', W.offStatus, 'hollow'], ['busy', W.answering, 'run']]
         .map(([key, label, dot]) => `<span class="pastatus" data-pa-status="${key}"><span class="dot ${dot}" aria-hidden="true"></span>${escapeHtml(label!)}</span>`).join('');
-      return (d.id === 'anonymous' ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml(W.leaves)}</b><span>${escapeHtml(W.order)}</span></div>` : '') + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml(d.name)}</h3><p class="pnote patag">${escapeHtml(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml(d.leaves)}</p><p class="pnote paknows">${escapeHtml(d.knows)}</p></div><div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
+      return (d.id === 'anonymous' ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml(W.leaves)}</b><span>${escapeHtml(W.order)}</span></div>` : '') + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml(d.name)}</h3><p class="pnote patag">${escapeHtml(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml(d.leaves)}</p><p class="pnote paknows">${escapeHtml(d.knows)}</p>${d.id === 'anonymous' && enabled ? renderLevelChoice(zk?.settings.level === 'general' ? 'strict' : 'standard', models + '#anonymous') : ''}</div><div class="paaction">${action}</div>${Object.entries(actions).map(([key, html]) => `<template data-pa-template="${key}">${html}</template>`).join('')}</section>`;
     }).join('')}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
+}
+
+// Strict or Standard for this question (owner, 2026-10-24): the saved
+// setting is only the starting choice; the pick goes with the question.
+function renderLevelChoice(level: 'strict' | 'standard', settingsHref: string): string {
+  const option = (value: 'strict' | 'standard', label: string, hint: string) =>
+    `<label class="palevelopt"><input type="radio" name="level" value="${value}"${value === level ? ' checked' : ''}><span><b>${escapeHtml(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
+  const standardHint = escapeHtml(W.levelStandardHint).replace('{models}', `<a href="${escapeHtml(settingsHref)}">${escapeHtml(W.levelModelsLink)}</a>`);
+  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml(W.levelLegend)}</legend>`
+    + option('strict', W.levelStrict, escapeHtml(W.levelStrictHint))
+    + option('standard', W.levelStandard, standardHint)
+    + '</fieldset>';
 }
 
 function renderWaiting(waiting: { questions: readonly DashboardWaitingQuestion[]; olderRemoved: boolean } | undefined, now: Date): string {
@@ -392,7 +411,10 @@ function privateAnswersClientScript(input: { csrfToken: string; unlockOnly: bool
       if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
       if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: button.getAttribute('data-pa-action'), question: question });
+      var body = { action: button.getAttribute('data-pa-action'), question: question };
+      var level = body.action === 'ask_anonymous' ? Array.from(ask.querySelectorAll('[data-pa-level] input[name="level"]')).find(function (input) { return input.checked; }) : null;
+      if (level) body.level = level.value;
+      var outcome = await send(body);
       if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
       if (reason) reason.textContent = '';
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }

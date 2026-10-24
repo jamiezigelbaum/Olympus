@@ -5323,7 +5323,7 @@ export async function main(): Promise<void> {
   const { PrivateAnswerJobs, createPrivateAnswerHandler, withPrivateAnswerRoute } = await import('../chatgpt/private-answer-jobs.ts');
   const { readConsultSettings, DEFAULT_CONSULT_SETTINGS, consultStandardBinding } = await import('../../core/consult-settings.ts');
   const { PrivateQuestionJobs } = await import('../chatgpt/private-question-jobs.ts');
-  const { consultAskLevelFromSettings } = await import('../../core/consult-ask.ts');
+  const { consultAskLevelFromSettings, consultAskLevelOrSaved } = await import('../../core/consult-ask.ts');
   const { createBuiltInPrivateAnswerModel, embeddingPanelRelevance } = await import('../chatgpt/private-answer-model.ts');
   const { DASHBOARD_UI_DOMAIN } = await import('../chatgpt/dashboard-resource.ts');
   const { createDropboxOpenTargets, localDropboxRoots } = await import('../dropbox-files/open-target.ts');
@@ -5375,11 +5375,7 @@ export async function main(): Promise<void> {
   // question goes to zkAPI), wired inside the consult block below.
   let askAnonymouslyNow: ((input: import('../../core/consult-ask.ts').ConsultAskInput) => Promise<import('../../core/consult-ask.ts').ConsultAskResult>) | undefined;
   const localAnonymousAsk = (input: import('../../core/consult-ask.ts').ConsultAskInput) => {
-    const read = readConsultSettings();
-    return askWithAnonymousInbox({
-      ...input,
-      level: consultAskLevelFromSettings(read.state === 'valid' ? read.settings.level : DEFAULT_CONSULT_SETTINGS.level),
-    }, {
+    return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved(input.level, readConsultSettings()) }, {
       store: waitingQuestionStore, connectionId: '@local:You', local: true, isActive: connectionActive,
       ask: request => askAnonymouslyNow ? askAnonymouslyNow(request) : Promise.resolve({ ok: false, code: 'transport_unavailable', message: PRIVATE_ANSWERS_COPY.anonymousNotSetUp }),
     });

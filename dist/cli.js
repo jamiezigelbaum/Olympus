@@ -42317,6 +42317,12 @@ var init_vocabulary = __esm(() => {
     veniceKnows: "Venice says it doesn’t keep them.",
     zkapiLeaves: "A top model that can’t see your files. It reads your question but isn’t told who’s asking. What you ask can still identify you.",
     zkapiKnows: "Takes 1 to 3 minutes.",
+    levelLegend: "How this question leaves",
+    levelStrict: "Strict",
+    levelStrictHint: "Your own model rewrites it into general questions first, so nothing identifying can leave.",
+    levelStandard: "Standard",
+    levelStandardHint: "Your words, prepared the way you chose in {models}.",
+    levelModelsLink: "Models",
     askComputer: "Ask the local model",
     askVenice: "Ask a Venice model",
     askZkapi: "Ask a model through zkAPI",
@@ -42341,6 +42347,7 @@ var init_vocabulary = __esm(() => {
     anonymousAsk: "Ask anonymously",
     anonymousPlaceholder: "Ask with outside help",
     anonymousNotSetUp: "Anonymous answers are not set up.",
+    levelInvalid: "Choose Strict or Standard.",
     anonymousPending: "Anonymous question pending",
     inboxUnavailable: "The inbox cannot keep another answer right now. Try again later.",
     inboxBeforeSend: "The inbox cannot keep this answer right now. Nothing was sent.",
@@ -42400,7 +42407,7 @@ var init_vocabulary = __esm(() => {
     },
     experimental: "Experimental: Olympus says “anonymous route” only after a session passes its Tor, network confinement and key checks and the payment settles. Otherwise: network route not verified.",
     intro: "For people running a strong local model at home: ask frontier models anonymously when your model needs help. Ask your agent to use Olympus zkAPI, and Olympus sends your question to a top AI model through zkAPI, paid and sent anonymously. The provider reads the question, and an unusual situation could still hint at who you are.",
-    levelTitle: "What may zkAPI send?",
+    levelTitle: "What may zkAPI send by default?",
     writer: {
       title: "Who writes the question",
       builtInShort: "the model built into Olympus",
@@ -119453,7 +119460,9 @@ function createLocalPrivateAnswers(options) {
       if (action === "ask_anonymous") {
         if (!options.anonymousAsk)
           return refused(503, "unavailable", DASHBOARD_PRIVATE_ANSWERS_COPY.anonymousNotSetUp);
-        const result = await options.anonymousAsk({ question: typeof body.question === "string" ? body.question : "" });
+        if (body.level !== undefined && body.level !== "strict" && body.level !== "standard")
+          return refused(400, "invalid_params", DASHBOARD_PRIVATE_ANSWERS_COPY.levelInvalid);
+        const result = await options.anonymousAsk({ question: typeof body.question === "string" ? body.question : "", ...body.level !== undefined ? { level: body.level } : {} });
         return result.ok ? { status: 200, body: { ok: true, status: "answered", answer: result.reply, sent: result.sent, citations: [] } } : refused(400, result.code, result.message);
       }
       if (action === "ask" || action === "ask_venice") {
@@ -139868,8 +139877,13 @@ function renderDestinations(options, enabled) {
     const notReadyLabel = d.id === "computer" ? d.reason === DASHBOARD_PRIVATE_ANSWERS_COPY.downloading ? DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notSetUpStatus : d.id === "anonymous" && zkState === "off" ? DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus : d.id === "anonymous" && zkState === "needs_acceptance" ? DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus : DASHBOARD_PRIVATE_ANSWERS_COPY.notConnectedStatus;
     const notReadyDot = notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.downloadingStatus ? "run" : notReadyLabel === DASHBOARD_PRIVATE_ANSWERS_COPY.pausedStatus ? "pause" : "hollow";
     const statuses = [["ready", DASHBOARD_PRIVATE_ANSWERS_COPY.readyStatus, "ok"], ["not_set_up", notReadyLabel, notReadyDot], ["not_allowed", DASHBOARD_PRIVATE_ANSWERS_COPY.offStatus, "hollow"], ["busy", DASHBOARD_PRIVATE_ANSWERS_COPY.answering, "run"]].map(([key2, label, dot2]) => `<span class="pastatus" data-pa-status="${key2}"><span class="dot ${dot2}" aria-hidden="true"></span>${escapeHtml2(label)}</span>`).join("");
-    return (d.id === "anonymous" ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.leaves)}</b><span>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.order)}</span></div>` : "") + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote patag">${escapeHtml2(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p></div><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
+    return (d.id === "anonymous" ? `<div class="pazone paboundary"><span class="parail" aria-hidden="true"></span><b>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.leaves)}</b><span>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.order)}</span></div>` : "") + `<section class="padestination" id="${d.id}" data-pa-card="${d.id}" data-pa-state="${state}"><span class="parail" aria-hidden="true"></span><span class="panode" aria-hidden="true"></span><div class="paname"><h3 class="sect">${escapeHtml2(d.name)}</h3><p class="pnote patag">${escapeHtml2(d.tag)}</p>${statuses}</div><div class="pawhat"><p class="pnote paleaves">${escapeHtml2(d.leaves)}</p><p class="pnote paknows">${escapeHtml2(d.knows)}</p>${d.id === "anonymous" && enabled ? renderLevelChoice(zk?.settings.level === "general" ? "strict" : "standard", models + "#anonymous") : ""}</div><div class="paaction">${action}</div>${Object.entries(actions).map(([key2, html2]) => `<template data-pa-template="${key2}">${html2}</template>`).join("")}</section>`;
   }).join("")}</div><div class="paout" data-pa-out aria-live="polite"></div></form>`;
+}
+function renderLevelChoice(level, settingsHref) {
+  const option = (value2, label, hint) => `<label class="palevelopt"><input type="radio" name="level" value="${value2}"${value2 === level ? " checked" : ""}><span><b>${escapeHtml2(label)}</b><span class="palevelhint">${hint}</span></span></label>`;
+  const standardHint = escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandardHint).replace("{models}", `<a href="${escapeHtml2(settingsHref)}">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelModelsLink)}</a>`);
+  return `<fieldset class="palevel" data-pa-level><legend>${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelLegend)}</legend>` + option("strict", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrict, escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.levelStrictHint)) + option("standard", DASHBOARD_PRIVATE_ANSWERS_COPY.levelStandard, standardHint) + "</fieldset>";
 }
 function renderWaiting(waiting, now) {
   const parts = [`<section class="pasection" aria-labelledby="waiting"><h3 class="sect" id="waiting">${escapeHtml2(DASHBOARD_PRIVATE_ANSWERS_COPY.waitingTitle)}</h3>`];
@@ -140083,7 +140097,10 @@ function privateAnswersClientScript(input) {
       if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
       if (reason) reason.textContent = config.copy.destinationBusy;
       message(out, config.copy.answering, false, question);
-      var outcome = await send({ action: button.getAttribute('data-pa-action'), question: question });
+      var body = { action: button.getAttribute('data-pa-action'), question: question };
+      var level = body.action === 'ask_anonymous' ? Array.from(ask.querySelectorAll('[data-pa-level] input[name="level"]')).find(function (input) { return input.checked; }) : null;
+      if (level) body.level = level.value;
+      var outcome = await send(body);
       if (button) { button.disabled = false; button.removeAttribute('aria-busy'); }
       if (reason) reason.textContent = '';
       if (!outcome.ok) { message(out, errorText(outcome), true, question); return; }
@@ -140291,6 +140308,13 @@ var DASHBOARD_PRIVATE_ANSWERS_ANONYMOUS_FRAGMENT = "anonymous", POST_PATH = "/da
 .pa .pazone { grid-column: 1 / -1; position: relative; padding: 12px 0 6px 40px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: var(--t3); font-size: var(--fs-caption); }
 .pa .pazone b { color: var(--t2); font-weight: 600; }
 .pa .paboundary { border-top: 1px dashed var(--field); }
+.pa .palevel { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; display: grid; gap: 6px; }
+.pa .palevel legend { padding: 0; margin: 0 0 2px; color: var(--t2); font-size: var(--fs-body); font-weight: 600; }
+.pa .palevelopt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; font-size: var(--fs-body); color: var(--t1); cursor: pointer; }
+.pa .palevelopt input { margin: 3px 0 0; accent-color: var(--link); }
+.pa .palevelopt b { font-weight: 600; }
+.pa .palevelhint { display: block; color: var(--t3); }
+.pa [data-pa-card="anonymous"]:not([data-pa-state="ready"]) .palevel { display: none; }
 .pa .pachooser { margin: 12px 0 8px; color: var(--t2); font-size: var(--fs-body); }
 @media (max-width: 640px) {
   .pa .paasks { grid-template-columns: minmax(0, 1fr); }
@@ -166102,6 +166126,7 @@ __export(exports_consult_ask, {
   consultGateRetryFeedback: () => consultGateRetryFeedback,
   consultGateRefusedMessage: () => consultGateRefusedMessage,
   consultAskLevelToSettings: () => consultAskLevelToSettings,
+  consultAskLevelOrSaved: () => consultAskLevelOrSaved,
   consultAskLevelFromSettings: () => consultAskLevelFromSettings,
   askAnonymously: () => askAnonymously,
   CONSULT_ASK_MESSAGES: () => CONSULT_ASK_MESSAGES,
@@ -166114,6 +166139,9 @@ function consultAskLevelToSettings(level) {
 }
 function consultAskLevelFromSettings(level) {
   return level === "general" ? "strict" : "standard";
+}
+function consultAskLevelOrSaved(level, read) {
+  return level ?? consultAskLevelFromSettings(read.state === "valid" ? read.settings.level : DEFAULT_CONSULT_SETTINGS.level);
 }
 function consultGateRetryFeedback(reasons) {
   if (reasons.length === 0 || !reasons.every((reason) => CONSULT_GATE_RETRY_REASONS.has(reason)))
@@ -185601,7 +185629,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   const { PrivateAnswerJobs: PrivateAnswerJobs2, createPrivateAnswerHandler: createPrivateAnswerHandler2, withPrivateAnswerRoute: withPrivateAnswerRoute2 } = await Promise.resolve().then(() => (init_private_answer_jobs(), exports_private_answer_jobs));
   const { readConsultSettings: readConsultSettings2, DEFAULT_CONSULT_SETTINGS: DEFAULT_CONSULT_SETTINGS2, consultStandardBinding: consultStandardBinding2 } = await Promise.resolve().then(() => (init_consult_settings(), exports_consult_settings));
   const { PrivateQuestionJobs: PrivateQuestionJobs2 } = await Promise.resolve().then(() => (init_private_question_jobs(), exports_private_question_jobs));
-  const { consultAskLevelFromSettings: consultAskLevelFromSettings2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
+  const { consultAskLevelFromSettings: consultAskLevelFromSettings2, consultAskLevelOrSaved: consultAskLevelOrSaved2 } = await Promise.resolve().then(() => (init_consult_ask(), exports_consult_ask));
   const { createBuiltInPrivateAnswerModel: createBuiltInPrivateAnswerModel2, embeddingPanelRelevance: embeddingPanelRelevance2 } = await Promise.resolve().then(() => (init_private_answer_model(), exports_private_answer_model));
   const { DASHBOARD_UI_DOMAIN: DASHBOARD_UI_DOMAIN2 } = await Promise.resolve().then(() => (init_dashboard_resource(), exports_dashboard_resource));
   const { createDropboxOpenTargets: createDropboxOpenTargets2, localDropboxRoots: localDropboxRoots2 } = await Promise.resolve().then(() => (init_open_target(), exports_open_target));
@@ -185629,11 +185657,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
   });
   let askAnonymouslyNow;
   const localAnonymousAsk = (input) => {
-    const read = readConsultSettings2();
-    return askWithAnonymousInbox({
-      ...input,
-      level: consultAskLevelFromSettings2(read.state === "valid" ? read.settings.level : DEFAULT_CONSULT_SETTINGS2.level)
-    }, {
+    return askWithAnonymousInbox({ ...input, level: consultAskLevelOrSaved2(input.level, readConsultSettings2()) }, {
       store: waitingQuestionStore,
       connectionId: "@local:You",
       local: true,

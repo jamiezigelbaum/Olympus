@@ -526,7 +526,7 @@ describe('the Outside help page: states and copy', () => {
   test('What may zkAPI send: one line showing the level; Standard and Strict with the owner\'s copy, both always selectable, a plain Save', () => {
     const html = page(status());
     const text = visibleText(html);
-    expect(text).toContain('What may zkAPI send?');
+    expect(text).toContain('What may zkAPI send by default?');
     for (const line of ['Standard (recommended)', 'Your question goes out as you choose: exactly as written, lightly cleaned, or by your own instruction. The provider can read it but isn\'t told who sent it.',
       'Strict', 'Your model rewrites it into general questions first (Vitalik Buterin\'s approach).']) expect(text).toContain(line);
     expect(text).not.toContain('without names (recommended)');
