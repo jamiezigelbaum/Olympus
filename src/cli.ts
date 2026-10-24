@@ -78,7 +78,8 @@ import {
   writeSovereigntyConfigFile,
   type SovereigntyPresetName,
 } from './core/sovereignty.ts';
-import { TIER_CLI_USAGE, runTierCommand } from './workers/classification/tier-cli.ts';
+import { TIER_CLI_USAGE, runTierCommand, tierCommandOpensStores } from './workers/classification/tier-cli.ts';
+import { withDataOwnerLockIfFree } from './core/data-owner-lock.ts';
 import {
   runSetupWizard,
   type SetupCloudLane,
@@ -560,7 +561,7 @@ async function main(): Promise<void> {
 
   if (!PUBLIC_RUNTIME_BUILD && args[0] === 'ingestion' && args[1] === 'status') {
     const json = args.includes('--json');
-    const result = await collectLocalSourceIngestionLedger({ config: loadConfig() });
+    const result = await withDataOwnerLockIfFree(() => collectLocalSourceIngestionLedger({ config: loadConfig() }));
     console.log(json ? JSON.stringify(result, null, 2) : formatSourceIngestionLedger(result));
     return;
   }
@@ -674,7 +675,9 @@ async function main(): Promise<void> {
 
   if (args[0] === 'tier') {
     try {
-      console.log(JSON.stringify(await runTierCommand(args.slice(1)), null, 2));
+      const tierArgs = args.slice(1);
+      const run = () => runTierCommand(tierArgs);
+      console.log(JSON.stringify(await (tierCommandOpensStores(tierArgs) ? withDataOwnerLockIfFree(run) : run()), null, 2));
     } catch (error) {
       if (error instanceof OperationError) {
         console.error(`Error [${error.code}]: ${error.message}`);
@@ -2616,10 +2619,10 @@ async function runDataCommand(args: string[]): Promise<unknown> {
   const command = args[0];
   if (command === 'export') {
     const options = parseDataOptions(args.slice(1));
-    return exportOlympusData({
+    return withDataOwnerLockIfFree(() => exportOlympusData({
       destination: options.output,
       ...(options.sourceId ? { sourceId: options.sourceId } : {}),
-    });
+    }));
   }
   if (command === 'verify') {
     const options = parseDataOptions(args.slice(1));
@@ -2630,34 +2633,38 @@ async function runDataCommand(args: string[]): Promise<unknown> {
     if (options.all && !options.yesIAMSure && options.dryRun !== true) {
       await confirmDeleteAll();
     }
-    // Custody decides the precondition; the CLI only reports what it observes.
-    // A public source is gated on Disconnect and ignores this, but a source
-    // with no public capability falls through to the worker-inactive
-    // requirement, which is unsatisfiable unless the observed state is passed
-    // in — the delete was refused at every worker state without it.
-    const { workerState, engineLoaded } = observedWorkerServiceState();
-    if (options.sourceId) {
-      const sourceId = options.sourceId;
-      const registryPath = handleRegistryPathFromEnv(process.env, true)!;
-      return withConnectedHandleGrantCustody(registryPath, {}, async () =>
-        deleteOlympusDataWithCustody({
-          sourceId,
-          dryRun: options.dryRun,
-          connectedRegistry: readConnectedHandleRegistry(registryPath),
-          thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
-          // A paired-session source is "disconnected" only after a clean Unpair.
-          unpairedSources: readReconciledUnpairedSources(registryPath),
-          workerState,
-          engineLoaded,
-        })
-      );
-    }
-    return deleteOlympusDataWithCustody({
-      all: options.all,
-      dryRun: options.dryRun,
-      workerState,
-      engineLoaded,
-      relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
+    // Under the owner lock when it is free, taken before the worker state is
+    // read so the state cannot change under the delete (see withDataOwnerLockIfFree).
+    return withDataOwnerLockIfFree(async () => {
+      // Custody decides the precondition; the CLI only reports what it observes.
+      // A public source is gated on Disconnect and ignores this, but a source
+      // with no public capability falls through to the worker-inactive
+      // requirement, which is unsatisfiable unless the observed state is passed
+      // in — the delete was refused at every worker state without it.
+      const { workerState, engineLoaded } = observedWorkerServiceState();
+      if (options.sourceId) {
+        const sourceId = options.sourceId;
+        const registryPath = handleRegistryPathFromEnv(process.env, true)!;
+        return withConnectedHandleGrantCustody(registryPath, {}, async () =>
+          deleteOlympusDataWithCustody({
+            sourceId,
+            dryRun: options.dryRun,
+            connectedRegistry: readConnectedHandleRegistry(registryPath),
+            thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
+            // A paired-session source is "disconnected" only after a clean Unpair.
+            unpairedSources: readReconciledUnpairedSources(registryPath),
+            workerState,
+            engineLoaded,
+          })
+        );
+      }
+      return deleteOlympusDataWithCustody({
+        all: options.all,
+        dryRun: options.dryRun,
+        workerState,
+        engineLoaded,
+        relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env)),
+      });
     });
   }
   if (command === '--help' || command === '-h') {

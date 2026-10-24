@@ -396,6 +396,14 @@ function withFileLeaseSync(targetPath, callback, options = {}) {
     owner.release();
   }
 }
+function holdFileLeaseSync(targetPath, options = {}) {
+  const owner = acquireFileLeaseSync(targetPath, normalizeOptions(options));
+  return {
+    targetPath: owner.targetPath,
+    lockPath: owner.lockPath,
+    release: () => owner.release()
+  };
+}
 function isFileLeaseSidecarName(target, name) {
   if (!name.startsWith(`${target}.lock`))
     return false;
@@ -15668,6 +15676,74 @@ function tierSnifferPathForStore(storeDbPath) {
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
 var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_SQLITE_STORE_ID = "olympus_secret_locations", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_SQLITE_STORE_ID = "olympus_tier_sniffer", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
+
+// src/core/data-owner-lock.ts
+function dataOwnerLockTarget(env = process.env) {
+  return olympusDataPath(env, OWNER_LOCK_TARGET);
+}
+function dataOwnerLockPath(env = process.env) {
+  return `${dataOwnerLockTarget(env)}.lock.db`;
+}
+function isDataOwnerLockName(name) {
+  return isFileLeaseSidecarName(OWNER_LOCK_TARGET, name);
+}
+function holdDataOwnerLock(env = process.env, options = {}) {
+  const waitMs = Math.max(0, options.waitMs ?? 0);
+  let lease;
+  try {
+    lease = holdFileLeaseSync(dataOwnerLockTarget(env), {
+      acquireTimeoutMs: Math.max(1, waitMs),
+      pollIntervalMs: Math.min(25, Math.max(1, waitMs))
+    });
+  } catch (error) {
+    if (error instanceof FileLeaseBusyError)
+      throw new DataOwnerBusyError(olympusDataRoot(env));
+    throw error;
+  }
+  return { root: olympusDataRoot(env), lockPath: lease.lockPath, release: () => lease.release() };
+}
+function tryDataOwnerLock(env = process.env) {
+  try {
+    return holdDataOwnerLock(env);
+  } catch (error) {
+    if (error instanceof DataOwnerBusyError)
+      return;
+    throw error;
+  }
+}
+async function withDataOwnerLockIfFree(run, env = process.env) {
+  const lock = tryDataOwnerLock(env);
+  try {
+    return await run();
+  } finally {
+    lock?.release();
+  }
+}
+function takeWorkerDataOwnerLock(env = process.env, options = {}) {
+  try {
+    return holdDataOwnerLock(env, { waitMs: options.waitMs ?? WORKER_OWNER_LOCK_WAIT_MS });
+  } catch (error) {
+    if (!(error instanceof DataOwnerBusyError))
+      throw error;
+    (options.report ?? console.error)(`Another Olympus already owns its data at ${error.root}, so this worker is exiting. Stop the running one first (${STOP_OLYMPUS_HINT}).`);
+    return (options.exit ?? ((code) => process.exit(code)))(1);
+  }
+}
+var OWNER_LOCK_TARGET = "data-owner", STOP_OLYMPUS_HINT = "olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it", WORKER_OWNER_LOCK_WAIT_MS = 1e4, DataOwnerBusyError;
+var init_data_owner_lock = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+  DataOwnerBusyError = class DataOwnerBusyError extends Error {
+    code = "data_owner_busy";
+    root;
+    retryable = true;
+    constructor(root) {
+      super(`Olympus is running and owns its data at ${root}. Stop it first (${STOP_OLYMPUS_HINT}), then try again.`);
+      this.name = "DataOwnerBusyError";
+      this.root = root;
+    }
+  };
+});
 
 // src/core/sqlite-migrations.ts
 function currentStoreMigrations() {
@@ -48727,6 +48803,8 @@ var init_paths = __esm(() => {
 // src/workers/local-files/scope.ts
 function decideLocalFilesPath(approval, scopePath, context2) {
   const path = normalizeScopePath(scopePath);
+  if (isDataOwnerLockName(path.slice(path.lastIndexOf("/") + 1)))
+    return "denied";
   const selected = approval.selections.map((selection) => ({ key: safeKey(selection.key), state: selection.state })).filter((selection) => selection.key !== undefined && scopePathIsWithin(path, selection.key, context2));
   const defaultOff = deepestDefaultExclusion(path, context2);
   if (defaultOff) {
@@ -48793,6 +48871,7 @@ function fileSourceScopeLocalFilesPolicy(base, approval) {
 }
 var LOCAL_FILES_SOURCE_ID = "local.files", LOCAL_FILES_PROVIDER = "local_files", LOCAL_FILES_ACCOUNT_SCOPE = "this_computer", LOCAL_FILES_POLICY_SOURCE;
 var init_scope = __esm(() => {
+  init_data_owner_lock();
   init_paths();
   LOCAL_FILES_POLICY_SOURCE = `${LOCAL_FILES_PROVIDER}.${LOCAL_FILES_ACCOUNT_SCOPE}`;
 });
@@ -63317,7 +63396,7 @@ function deleteOlympusData(options) {
     }
     removed.push(target.path);
     if (options.dryRun !== true) {
-      rmSync13(target.path, { recursive: target.allowRecursive, force: true });
+      rmTargetKeepingOwnerLock(target, dataOwnerLockPath(envForContext(options)));
     }
   }
   removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
@@ -63475,6 +63554,29 @@ function allDeleteTargets(context2) {
     ...globExisting(join56(home2, "Library", "LaunchAgents"), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/).map(serviceUnitTarget),
     ...globExisting(join56(home2, ".config", "systemd", "user"), /^olympus.*\.(service|timer)$/).map(serviceUnitTarget)
   ];
+}
+function rmTargetKeepingOwnerLock(target, lockPath) {
+  const lock = canonicalPath(lockPath);
+  const root = canonicalPath(target.path);
+  if (!target.allowRecursive || !isStrictlyInside(lock, root) || !existsSync41(lockPath)) {
+    rmSync13(target.path, { recursive: target.allowRecursive, force: true });
+    return;
+  }
+  const keep = relative7(root, lock).split(sep8);
+  const clear = (directory, depth) => {
+    const inLockDirectory = depth === keep.length - 1;
+    for (const name of readdirSync6(directory)) {
+      const child = join56(directory, name);
+      if (inLockDirectory && isDataOwnerLockName(name))
+        continue;
+      if (!inLockDirectory && name === keep[depth] && lstatSync22(child).isDirectory()) {
+        clear(child, depth + 1);
+        continue;
+      }
+      rmSync13(child, { recursive: true, force: true });
+    }
+  };
+  clear(target.path, 0);
 }
 function mediaCacheDeleteTargets(context2) {
   try {
@@ -64033,6 +64135,7 @@ function uniqueTargets(values) {
 var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store", DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA", DELETE_CONFIRMATION_2 = "DELETE EVERYTHING";
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
+  init_data_owner_lock();
   init_source_storage();
   init_atomic_file();
   init_operation_error();
@@ -92788,7 +92891,6 @@ var init_native_embedding_drain_service = __esm(() => {
     "OLYMPUS_EMAIL_BASE_URL",
     "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON",
     "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH",
-    "OLYMPUS_EMBEDDING_LEDGER_PATH",
     "OLYMPUS_SOVEREIGNTY_CONFIG",
     "OLYMPUS_SOVEREIGNTY_CONFIG_PATH",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL",
@@ -92803,8 +92905,6 @@ var init_native_embedding_drain_service = __esm(() => {
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_IDLE_SLEEP_SECONDS",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVATION_INTERVAL_SECONDS",
-    "OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVER_ENABLED",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_CONSECUTIVE_FAILURES",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_PENDING_CHUNKS",
     "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNS",
@@ -174300,6 +174400,7 @@ async function startWorkerWithLaunch(launch) {
   await main();
 }
 async function main() {
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   enableSourceRegistryAdoption();
   let closeDesktopBridge = () => {};
   const shutdownSignals = installWorkerShutdownSignals({ closeOwnerBridge: () => closeDesktopBridge(), exit: (code) => process.exit(code) });
@@ -177718,7 +177819,7 @@ function googleFilePage(locator) {
     return false;
   }
 }
-var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch;
+var INGESTION_DISPOSITION_SOURCES, BUILT_IN_MODEL_RETRY_MS, CONNECTOR_STORE_ANSWER_FILTER_CAPABILITIES, workerLaunch, dataOwnerLock;
 var init_server5 = __esm(async () => {
   init_vocabulary();
   init_local_private_answers();
@@ -177811,6 +177912,7 @@ var init_server5 = __esm(async () => {
   init_tier_visibility();
   init_secret_locations();
   init_source_storage();
+  init_data_owner_lock();
   init_data_lifecycle();
   init_chat_scope_filter();
   init_credential_broker();
@@ -179930,6 +180032,9 @@ var TIER_CLI_USAGE = {
   "tier classifier": "olympus tier classifier status | approve --why <reason> | decline [--why <reason>]",
   "tier migrate": "olympus tier migrate plan [--with-sniffer] [--top <n>] | approve --plan <id> [--why <reason>] | " + "run --plan <id> [--batch source:<id>|folder:<path>|label:<key>|sender:<address>|chat:<key>] [--max-items <n>] | " + "rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status"
 };
+function tierCommandOpensStores(args) {
+  return args[0] === "set" || args[0] === "explain" || args[0] === "migrate";
+}
 async function runTierCommand(args, context2 = {}) {
   const [command, ...rest] = args;
   switch (command) {
@@ -180360,6 +180465,9 @@ function parseFlags2(args, allowed) {
   }
   return values;
 }
+
+// src/cli.ts
+init_data_owner_lock();
 
 // src/core/setup.ts
 init_privacy_language();
@@ -181540,7 +181648,7 @@ Run: ${ocr.repairHint}`);
   }
   if (!PUBLIC_RUNTIME_BUILD && args[0] === "ingestion" && args[1] === "status") {
     const json2 = args.includes("--json");
-    const result = await collectLocalSourceIngestionLedger({ config: loadConfig() });
+    const result = await withDataOwnerLockIfFree(() => collectLocalSourceIngestionLedger({ config: loadConfig() }));
     console.log(json2 ? JSON.stringify(result, null, 2) : formatSourceIngestionLedger(result));
     return;
   }
@@ -181645,7 +181753,9 @@ Run: ${ocr.repairHint}`);
   }
   if (args[0] === "tier") {
     try {
-      console.log(JSON.stringify(await runTierCommand(args.slice(1)), null, 2));
+      const tierArgs = args.slice(1);
+      const run2 = () => runTierCommand(tierArgs);
+      console.log(JSON.stringify(await (tierCommandOpensStores(tierArgs) ? withDataOwnerLockIfFree(run2) : run2()), null, 2));
     } catch (error2) {
       if (error2 instanceof OperationError) {
         console.error(`Error [${error2.code}]: ${error2.message}`);
@@ -183318,10 +183428,10 @@ async function runDataCommand(args) {
   const command = args[0];
   if (command === "export") {
     const options = parseDataOptions(args.slice(1));
-    return exportOlympusData({
+    return withDataOwnerLockIfFree(() => exportOlympusData({
       destination: options.output,
       ...options.sourceId ? { sourceId: options.sourceId } : {}
-    });
+    }));
   }
   if (command === "verify") {
     const options = parseDataOptions(args.slice(1));
@@ -183332,26 +183442,28 @@ async function runDataCommand(args) {
     if (options.all && !options.yesIAMSure && options.dryRun !== true) {
       await confirmDeleteAll();
     }
-    const { workerState, engineLoaded } = observedWorkerServiceState();
-    if (options.sourceId) {
-      const sourceId = options.sourceId;
-      const registryPath = handleRegistryPathFromEnv(process.env, true);
-      return withConnectedHandleGrantCustody(registryPath, {}, async () => deleteOlympusDataWithCustody({
-        sourceId,
+    return withDataOwnerLockIfFree(async () => {
+      const { workerState, engineLoaded } = observedWorkerServiceState();
+      if (options.sourceId) {
+        const sourceId = options.sourceId;
+        const registryPath = handleRegistryPathFromEnv(process.env, true);
+        return withConnectedHandleGrantCustody(registryPath, {}, async () => deleteOlympusDataWithCustody({
+          sourceId,
+          dryRun: options.dryRun,
+          connectedRegistry: readConnectedHandleRegistry(registryPath),
+          thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, "")),
+          unpairedSources: readReconciledUnpairedSources(registryPath),
+          workerState,
+          engineLoaded
+        }));
+      }
+      return deleteOlympusDataWithCustody({
+        all: options.all,
         dryRun: options.dryRun,
-        connectedRegistry: readConnectedHandleRegistry(registryPath),
-        thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, "")),
-        unpairedSources: readReconciledUnpairedSources(registryPath),
         workerState,
-        engineLoaded
-      }));
-    }
-    return deleteOlympusDataWithCustody({
-      all: options.all,
-      dryRun: options.dryRun,
-      workerState,
-      engineLoaded,
-      relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env))
+        engineLoaded,
+        relayRunning: relayProcessRunning(remoteAccessDirForCli(process.env))
+      });
     });
   }
   if (command === "--help" || command === "-h") {

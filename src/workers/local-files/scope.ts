@@ -13,7 +13,11 @@
  *  3. A `metadata_only` selection anywhere on the path keeps content unread.
  *  4. Otherwise the path needs an `ingest` selection above it (or "whole
  *     computer").
+ *
+ * Before all of them: the data owner lock is never listed or read, whatever
+ * the person selected (see `decideLocalFilesPath`).
  */
+import { isDataOwnerLockName } from '../../core/data-owner-lock.ts';
 import type { SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import type { FileSourceScopeApprovalSnapshot } from '../../core/source-scope-approval.ts';
 import type { FileSourceScopeAuthority, FileSourceScopePolicyRef } from '../source-scope-runtime.ts';
@@ -62,6 +66,11 @@ export function decideLocalFilesPath(
   context: DefaultExclusionContext,
 ): LocalFilesDecision {
   const path = normalizeScopePath(scopePath);
+  // The data owner lock (core/data-owner-lock.ts) sits in Olympus's own data
+  // folder, which a whole-computer pass reaches on a standalone Linux install.
+  // This process may hold that lock, and reading the file would close a
+  // descriptor on it and drop the lock, so it is denied outright.
+  if (isDataOwnerLockName(path.slice(path.lastIndexOf('/') + 1))) return 'denied';
   const selected = approval.selections
     .map((selection) => ({ key: safeKey(selection.key), state: selection.state }))
     .filter((selection): selection is { key: string; state: typeof approval.selections[number]['state'] } =>

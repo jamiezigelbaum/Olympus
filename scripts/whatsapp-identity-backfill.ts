@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
+import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 
 interface Args {
   db: string;
@@ -323,20 +324,23 @@ function parseArgs(argv: readonly string[]): Args {
 if (import.meta.main) {
   try {
     const args = parseArgs(process.argv.slice(2));
-    const connectorStoreDb = new Database(args.db);
-    const sessionDb = new Database(args.sessionDb, { readonly: true });
-    // This backfill writes the same connector store the live-drain unit is
-    // writing, so without a timeout its first contended UPDATE fails instantly
-    // with SQLITE_BUSY and leaves the run part-applied.
-    connectorStoreDb.exec('PRAGMA busy_timeout = 10000;');
-    sessionDb.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
-    try {
-      const summary = backfillWhatsAppConnectorStoreIdentities({ connectorStoreDb, sessionDb, apply: args.apply });
-      console.log(JSON.stringify(summary, null, 2));
-    } finally {
-      connectorStoreDb.close();
-      sessionDb.close();
-    }
+    // Held for the run: it refuses while Olympus runs (core/data-owner-lock.ts).
+    withDataOwnerLock(process.env, () => {
+      const connectorStoreDb = new Database(args.db);
+      const sessionDb = new Database(args.sessionDb, { readonly: true });
+      // This backfill writes the same connector store the live-drain unit is
+      // writing, so without a timeout its first contended UPDATE fails instantly
+      // with SQLITE_BUSY and leaves the run part-applied.
+      connectorStoreDb.exec('PRAGMA busy_timeout = 10000;');
+      sessionDb.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      try {
+        const summary = backfillWhatsAppConnectorStoreIdentities({ connectorStoreDb, sessionDb, apply: args.apply });
+        console.log(JSON.stringify(summary, null, 2));
+      } finally {
+        connectorStoreDb.close();
+        sessionDb.close();
+      }
+    });
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

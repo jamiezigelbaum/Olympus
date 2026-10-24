@@ -321,6 +321,7 @@ import {
   type StorageAccount,
   type StoreFileOwner,
 } from '../../core/source-storage.ts';
+import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
@@ -875,7 +876,7 @@ export function localPrivateEmbeddingTargets(input: {
   });
 }
 
-/** Shared worker/direct-drain startup policy loading; hosted paths stay read-only. */
+/** Worker startup policy loading; hosted paths stay read-only. */
 export function loadSourceWorkerSovereignty(
   config: Pick<ReturnType<typeof loadConfig>, 'sovereignty'>,
   env: Record<string, string | undefined>,
@@ -2068,7 +2069,18 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
   await main();
 }
 
+/**
+ * The data owner lock, held from boot until the process exits (the kernel
+ * releases it then). Module state so it stays referenced: a collected lock
+ * would close its connection and let go.
+ */
+let dataOwnerLock: HeldDataOwnerLock | undefined;
+
 export async function main(): Promise<void> {
+  // First, before anything mounts or opens a store: this worker owns the data
+  // root. A second worker on it waits a short while (restarts overlap), then
+  // exits without mounting anything (core/data-owner-lock.ts).
+  dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   // From here on, a writable store open records its account in the registry
   // (core/source-storage.ts). Before any lane mounts.
   enableSourceRegistryAdoption();
@@ -6167,6 +6179,8 @@ export async function main(): Promise<void> {
     worker.close();
     sourceScheduler?.stop();
     void server.stop();
+    // The data owner lock stays held: the teardown above is still running, and
+    // the kernel releases the lock when this process exits.
   };
   shutdownSignals.setShutdown(shutdown);
   requestModelReload = shutdownSignals.modelReload({

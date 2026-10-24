@@ -7,6 +7,7 @@
 import { Database } from 'bun:sqlite';
 import { lstatSync } from 'node:fs';
 import type { ConnectorStoreLocatorIdentityIndexStatus } from '../src/workers/connector-store/index.ts';
+import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import { resolveConnectorStoreOptions } from './connector-store-embed.ts';
 
@@ -174,7 +175,9 @@ function receipt(
 
 if (import.meta.main) {
   try {
-    console.log(JSON.stringify(runConnectorStoreLocatorIndex(process.argv.slice(2)), null, 2));
+    // Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+    const receipt = withDataOwnerLock(process.env, () => runConnectorStoreLocatorIndex(process.argv.slice(2)));
+    console.log(JSON.stringify(receipt, null, 2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

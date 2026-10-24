@@ -93,7 +93,7 @@ Inside the data root:
 ```
 <data>/
   registry.json                  the account registry (below)
-  data-owner.lock                the owner lock (never removed, even by Delete all)
+  data-owner.lock.db             the owner lock (never removed, even by Delete all)
   sources/<source_id>/<slot>/
     stores/<tier>.sqlite         one per trust tier, sidecars beside it
     raw/                         spools, watch snapshots, capture cursors
@@ -201,16 +201,20 @@ that opens files inside an account folder:
 
 **Owner lock.** The worker takes an exclusive kernel lock
 (`file-lease.ts`'s `BEGIN EXCLUSIVE`, released by the kernel on death) on
-`<data>/data-owner.lock` for its lifetime. The lock sits in the data root
+`<data>/data-owner.lock.db` for its lifetime (lease target `data-owner`;
+`src/core/data-owner-lock.ts`). The lock sits in the data root
 itself, not the state root, so any two processes that resolve the same data
 root contend on the same lock even with different `XDG_STATE_HOME` values;
 it is outside every directory that Delete or Delete all removes, so its
-inode never changes while held. Every other opener of a store:
+inode never changes while held. Closing any descriptor a process has on a
+file drops all of that process's locks on it, so no code in a lock-holding
+process opens the lock file apart from the lease: walkers of the data root
+skip it (`isDataOwnerLockName`). Every other opener of a store:
 
 | Opener | After this change |
 |---|---|
-| Embedding drain | `http` mode only (default today); direct mode removed |
-| CLI `data`, `ingestion status`, `tier` | through the worker's API when it runs; otherwise take the owner lock |
+| Embedding drain | `http` mode only; direct mode removed (2b-i) |
+| CLI `data`, `ingestion status`, `tier` | takes the lock when free; through the worker in 2b-ii |
 | `connector-store:embed`, `whatsapp-live-sync`, repair and backfill scripts | take the owner lock, so they refuse while Olympus runs |
 | Telegram reader, WhatsApp bridge | write only `raw/` and `session/` of their account; stopped by Disconnect |
 
@@ -285,7 +289,7 @@ outside it to find and nobody else to fence.
 **Delete all** (`data delete --all`) removes the data root's `sources/`,
 `shared/`, `.trash/`, `media-cache/`, the registry and the known legacy
 leftovers (below), under the owner lock, with the engine stopped as today.
-It never removes `data-owner.lock`; uninstall removes it last, after
+It never removes `data-owner.lock.db`; uninstall removes it last, after
 everything else.
 
 ## Export and uninstall
@@ -386,8 +390,10 @@ touch the store path (`eval/`).
 2. **Registry + storage service + owner lock + guard.** Registry adopted
    from legacy locations without moving files; all store opens through the
    service; drain direct mode removed; CLI and scripts take the owner lock.
-   Two PRs: registry, storage service and guard first; then the owner lock,
-   the CLI through the worker, and the drain's direct mode removed.
+   Three PRs: 2a, registry, storage service and guard (done); 2b-i, the
+   owner lock held by the worker and taken by scripts and, when free, by the
+   CLI, with the drain's direct mode removed; 2b-ii, the CLI through the
+   worker's API.
 3. **Forget registry.** Forget steps for the shared files above, and the
    guard test.
 4. **Migration into account folders.** Behind the boot pass, with the

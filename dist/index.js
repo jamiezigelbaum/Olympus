@@ -18053,6 +18053,12 @@ var init_dropbox_files = __esm(() => {
   init_connector_store2();
 });
 
+// src/core/data-owner-lock.ts
+var init_data_owner_lock = __esm(() => {
+  init_file_lease();
+  init_olympus_layout();
+});
+
 // src/workers/local-files/paths.ts
 var UNSAFE_PATH_CHARACTERS, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES;
 var init_paths = __esm(() => {
@@ -18090,6 +18096,7 @@ var init_paths = __esm(() => {
 // src/workers/local-files/scope.ts
 var LOCAL_FILES_PROVIDER = "local_files", LOCAL_FILES_ACCOUNT_SCOPE = "this_computer", LOCAL_FILES_POLICY_SOURCE;
 var init_scope = __esm(() => {
+  init_data_owner_lock();
   init_paths();
   LOCAL_FILES_POLICY_SOURCE = `${LOCAL_FILES_PROVIDER}.${LOCAL_FILES_ACCOUNT_SCOPE}`;
 });
@@ -18658,6 +18665,7 @@ var init_pairing_session_paths = __esm(() => {
 // src/data-lifecycle.ts
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
+  init_data_owner_lock();
   init_source_storage();
   init_atomic_file();
   init_operation_error();
@@ -24054,7 +24062,6 @@ var EMBEDDING_SETTING_ENV_NAMES = new Set([
   "OLYMPUS_EMAIL_BASE_URL",
   "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON",
   "OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH",
-  "OLYMPUS_EMBEDDING_LEDGER_PATH",
   "OLYMPUS_SOVEREIGNTY_CONFIG",
   "OLYMPUS_SOVEREIGNTY_CONFIG_PATH",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL",
@@ -24069,8 +24076,6 @@ var EMBEDDING_SETTING_ENV_NAMES = new Set([
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_IDLE_SLEEP_SECONDS",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED",
-  "OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVATION_INTERVAL_SECONDS",
-  "OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVER_ENABLED",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_CONSECUTIVE_FAILURES",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_PENDING_CHUNKS",
   "OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNS",

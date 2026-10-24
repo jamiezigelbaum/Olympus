@@ -4,40 +4,19 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { loadConfig, normalizeSourceWorkerBaseUrl } from '../src/core/config.ts';
-import { loadSovereigntyEngine } from '../src/core/sovereignty.ts';
-import { resolveSecretRefValueSync } from '../src/core/secret-store.ts';
+import { DataOwnerBusyError, withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { withWorkerAuthHeader, workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
 import {
   DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
   defaultDropboxConnectorStoreDbPath,
 } from '../src/workers/dropbox-files/index.ts';
-import {
-  createSourceIndexEmbeddingProviderFromEnv,
-  createSourceIndexEmbeddingProviderFromSovereignty,
-} from '../src/workers/email-source/server.ts';
-import type { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-import {
-  recordEmbeddingLedgerObservations,
-  type EmbeddingCorpusObservation,
-} from '../src/workers/embedding-ledger-observer.ts';
-import { resolveEmbeddingLedgerPath } from '../src/workers/embedding-ledger.ts';
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
 import {
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   defaultGmailSecureConnectorStoreDbPath,
-  defaultGoogleDriveConnectorStoreDbPath,
 } from '../src/workers/google-connectors/index.ts';
-import {
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
-} from '../src/workers/telegram-messages/index.ts';
-import { defaultWhatsAppConnectorStoreDbPath } from '../src/workers/whatsapp/index.ts';
-import { WorkerBootSecretResolver } from '../src/workers/credential-degradation.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
 
@@ -66,15 +45,6 @@ const DEFAULT_IDLE_SLEEP_SECONDS = 15;
 const DEFAULT_ERROR_BACKOFF_SECONDS = 60;
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
 const DEFAULT_PROGRESS_HEARTBEAT_SECONDS = 15;
-/**
- * Five minutes between ledger observations.
- *
- * A coverage read counts every chunk and every current embedding in each open
- * store, which on a corpus the size of Dropbox is real work. Pass boundaries
- * come far more often than the transitions the ledger records, so the floor
- * costs nothing a reader would notice and keeps the drain's own throughput.
- */
-const DEFAULT_LEDGER_OBSERVATION_INTERVAL_SECONDS = 300;
 const NATIVE_SERVICE_INSTANCE_ID_ENV = 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID';
 const NATIVE_SERVICE_READINESS_PATH_ENV = 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH';
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -91,35 +61,8 @@ export interface CorpusEmbeddingRequest {
   max_pending_chunks?: number;
 }
 
-/** What one connector store holds, for the embedding decision ledger. */
-export interface SourceEmbeddingCorpusCoverage {
-  corpusId: ActiveEmbeddingCorpusId;
-  trustDomain: Extract<SourceTrustDomain, 'internal' | 'secure_local'>;
-  embeddedChunks: number;
-  missingChunks: number;
-}
-
-/** The embedding configuration one trust domain is running with right now. */
-export interface SourceEmbeddingLaneConfig {
-  modelId: string;
-  epoch: string;
-  endpoint?: string;
-}
-
-export interface SourceEmbeddingDrainCoverage {
-  secureLocal?: SourceEmbeddingLaneConfig;
-  internal?: SourceEmbeddingLaneConfig;
-  corpora: SourceEmbeddingCorpusCoverage[];
-}
-
 export interface SourceEmbeddingDrainClient {
   embedConnectorStore(request: CorpusEmbeddingRequest): Promise<DropboxEmbeddingResult>;
-  /**
-   * Coverage for the ledger observer, from the stores this client already has
-   * open. Direct mode only — over HTTP the drain never touches a database and
-   * has nothing to observe, so the method is absent and nothing is recorded.
-   */
-  observeCoverage?(): SourceEmbeddingDrainCoverage;
   close?(): void;
 }
 
@@ -152,21 +95,6 @@ export interface SourceEmbeddingDrainOptions {
   stopWhenIdle?: boolean;
   progressHeartbeatMs?: number;
   onProgress?: (report: SourceEmbeddingDrainReport) => void;
-  /**
-   * Write what the corpora currently look like into the embedding ledger.
-   *
-   * Called at ROUND-ROBIN PASS boundaries and once more when the drain exits —
-   * never per batch. A re-embed is thousands of batches spread over days, and
-   * the ledger's unit is the transition ("this corpus started", "this corpus
-   * finished"), not the batch; see the embedding-ledger-observer header.
-   *
-   * Recording only. This hook can never change what the drain embeds, and a
-   * failure to write the record is counted and dropped rather than raised: an
-   * unwritable ledger must not stop the work it is a record of.
-   */
-  recordLedgerObservations?: () => Promise<void>;
-  /** Floor between pass-boundary observations. Defaults to five minutes. */
-  ledgerObservationIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -191,9 +119,6 @@ export interface SourceEmbeddingDrainReport {
   chunks_skipped: number;
   consecutive_failures: number;
   transient_lock_retries: number;
-  /** Present only when a ledger observer is wired. Counts, never content. */
-  ledger_observations?: number;
-  ledger_observation_failures?: number;
   scopes: SourceEmbeddingDrainScopeReport[];
   lanes?: SourceEmbeddingDrainLaneReport[];
   policy: {
@@ -328,121 +253,6 @@ type ConnectorStoreCorpusId =
   | typeof X_BOOKMARKS_CORPUS_ID
   | typeof DRIVE_INTERNAL_CORPUS_ID;
 
-export interface DirectClientOptions {
-  connectorStores: Array<{
-    corpusId: ConnectorStoreCorpusId;
-    dbPath?: string;
-    family: 'chat' | 'note' | 'file' | 'email' | 'readwise' | 'x';
-    trustDomain: Extract<SourceTrustDomain, 'internal' | 'secure_local'>;
-  }>;
-  secureLocalProvider: SourceEmbeddingProvider;
-  internalProvider?: SourceEmbeddingProvider;
-  /**
-   * The local embedding endpoint, for the ledger's endpoint-drift watch. It is
-   * not on SourceEmbeddingProvider, so it is passed alongside; when it is
-   * unknown the ledger records no endpoint rather than an invented one, and
-   * that is the whole reason 2026-08-20 could not be reconstructed.
-   */
-  secureLocalEndpoint?: string;
-}
-
-export class DirectSourceEmbeddingDrainClient implements SourceEmbeddingDrainClient {
-  private readonly connectorStoreConfigs: DirectClientOptions['connectorStores'];
-  private readonly connectorStores = new Map<string, LocalConnectorStore>();
-  private readonly secureLocalProvider: SourceEmbeddingProvider;
-  private readonly internalProvider: SourceEmbeddingProvider | undefined;
-  private readonly secureLocalEndpoint: string | undefined;
-
-  constructor(options: DirectClientOptions) {
-    assertEmbeddingProviderForLane('secure_local', options.secureLocalProvider);
-    if (options.internalProvider) assertEmbeddingProviderForLane('internal', options.internalProvider);
-    this.connectorStoreConfigs = options.connectorStores;
-    this.secureLocalProvider = options.secureLocalProvider;
-    this.internalProvider = options.internalProvider;
-    this.secureLocalEndpoint = options.secureLocalEndpoint?.trim() || undefined;
-  }
-
-  /**
-   * What the open connector stores hold, right now.
-   *
-   * Only stores this client has ALREADY opened are read. Opening the rest to
-   * complete the picture would create an empty database for every configured
-   * lane that has never run, and a drain that manufactures the stores it is
-   * meant to observe is worse than one that reports less.
-   */
-  observeCoverage(): SourceEmbeddingDrainCoverage {
-    const corpora: SourceEmbeddingCorpusCoverage[] = [];
-    for (const [corpusId, store] of this.connectorStores) {
-      const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === corpusId);
-      if (!config) continue;
-      const counts = store.status().counts;
-      corpora.push({
-        corpusId: config.corpusId,
-        trustDomain: config.trustDomain,
-        embeddedChunks: counts.embeddedChunks,
-        missingChunks: Math.max(0, counts.chunks - counts.embeddedChunks),
-      });
-    }
-    return {
-      secureLocal: {
-        modelId: this.secureLocalProvider.modelId,
-        epoch: this.secureLocalProvider.epochId,
-        ...(this.secureLocalEndpoint ? { endpoint: this.secureLocalEndpoint } : {}),
-      },
-      ...(this.internalProvider
-        ? {
-            internal: {
-              modelId: this.internalProvider.modelId,
-              epoch: this.internalProvider.epochId,
-            },
-          }
-        : {}),
-      corpora,
-    };
-  }
-
-  async embedConnectorStore(request: CorpusEmbeddingRequest): Promise<DropboxEmbeddingResult> {
-    const config = this.connectorStoreConfigs.find((entry) => entry.corpusId === request.corpus_id);
-    if (!config?.dbPath) throw new Error(`Direct connector-store embedding is not configured for ${request.corpus_id}.`);
-    if (config.family === 'file') {
-      throw new Error(
-        `Direct connector-store embedding refuses file-family corpus ${request.corpus_id} because it cannot own `
-        + 'the current approved content scope. Use the default HTTP drain mode.',
-      );
-    }
-    let store = this.connectorStores.get(config.corpusId);
-    if (!store) {
-      store = openConnectorStore(storageAccountForCorpus(config), {
-        dbPath: config.dbPath,
-        corpusId: config.corpusId,
-        family: config.family,
-        trustDomain: config.trustDomain,
-      });
-      this.connectorStores.set(config.corpusId, store);
-    }
-    const provider = config.trustDomain === 'internal'
-      ? this.internalProvider
-      : this.secureLocalProvider;
-    if (!provider) {
-      throw new Error(`Direct connector-store embedding has no sovereignty-resolved ${config.trustDomain} provider.`);
-    }
-    const result = await store.embedChunks({
-      provider,
-      ...(request.max_pending_chunks !== undefined ? { limit: request.max_pending_chunks } : {}),
-    });
-    return {
-      chunks_seen: result.chunksSeen,
-      chunks_embedded: result.chunksEmbedded,
-      chunks_skipped: result.chunksSkipped,
-      status: 'completed',
-    };
-  }
-
-  close(): void {
-    for (const store of this.connectorStores.values()) store.close();
-  }
-}
-
 export async function runSourceEmbeddingDrain(
   options: SourceEmbeddingDrainOptions,
 ): Promise<SourceEmbeddingDrainReport> {
@@ -475,11 +285,6 @@ export async function runSourceEmbeddingDrain(
     'maxConsecutiveFailures',
   );
   const stopWhenIdle = options.stopWhenIdle ?? false;
-  const ledgerObservationIntervalMs = nonNegativeIntOption(
-    options.ledgerObservationIntervalMs,
-    DEFAULT_LEDGER_OBSERVATION_INTERVAL_SECONDS * 1_000,
-    'ledgerObservationIntervalMs',
-  );
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const startedAt = Date.now();
   const deadlineMs = startedAt + maxRuntimeSeconds * 1_000;
@@ -489,9 +294,6 @@ export async function runSourceEmbeddingDrain(
   const laneConsecutiveFailures = lanes.map(() => 0);
   const isolatedLanes = lanes.map(() => false);
   let transientLockRetries = 0;
-  let ledgerObservations = 0;
-  let ledgerObservationFailures = 0;
-  let ledgerObservedAt: number | undefined;
   let consecutiveIdleScopeChecks = 0;
   let activePhase: SourceEmbeddingDrainReport['active_phase'] = 'starting';
   let activeScope: string | undefined;
@@ -533,12 +335,6 @@ export async function runSourceEmbeddingDrain(
       chunks_skipped: chunksSkipped,
       consecutive_failures: consecutiveFailures,
       transient_lock_retries: transientLockRetries,
-      ...(options.recordLedgerObservations
-        ? {
-            ledger_observations: ledgerObservations,
-            ledger_observation_failures: ledgerObservationFailures,
-          }
-        : {}),
       scopes: reports,
       ...(explicitRoster ? { lanes: laneReports } : {}),
       policy: {
@@ -564,26 +360,6 @@ export async function runSourceEmbeddingDrain(
     if (!options.onProgress) return;
     heartbeatSeq += 1;
     options.onProgress(currentReport('running', activePhase));
-  };
-
-  /**
-   * Record where the corpora stand, if enough time has passed.
-   *
-   * `final` forces the write, so the pass that finished a corpus is on record
-   * even when the drain exits inside the throttle window. Nothing here can
-   * throw: the ledger observes the drain and never governs it.
-   */
-  const observeLedger = async (final: boolean): Promise<void> => {
-    if (!options.recordLedgerObservations) return;
-    const at = Date.now();
-    if (!final && ledgerObservedAt !== undefined && at - ledgerObservedAt < ledgerObservationIntervalMs) return;
-    ledgerObservedAt = at;
-    try {
-      await options.recordLedgerObservations();
-      ledgerObservations += 1;
-    } catch {
-      ledgerObservationFailures += 1;
-    }
   };
 
   const runWithHeartbeat = async <T>(
@@ -619,10 +395,6 @@ export async function runSourceEmbeddingDrain(
     }
 
     while (passItemIndex >= passItems.length) {
-      // A completed round-robin pass is the drain's only natural boundary: every
-      // due lane has just had its turn, so the stores are momentarily quiet and
-      // a coverage read is cheap and coherent.
-      await observeLedger(false);
       pass += 1;
       passItems = embeddingPassItems(lanes, laneReports, pass, isolatedLanes);
       passItemIndex = 0;
@@ -691,7 +463,6 @@ export async function runSourceEmbeddingDrain(
   }
 
   if (Date.now() >= deadlineMs && runs < maxRuns) exhaustedTimeBudget = true;
-  await observeLedger(true);
   activePhase = 'complete';
   const finalReport = currentReport('complete', 'complete');
   if (options.onProgress) options.onProgress(finalReport);
@@ -716,18 +487,13 @@ export function optionsFromEnv(
     env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_PENDING_CHUNKS,
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_PENDING_CHUNKS',
   );
-  const mode = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE?.trim() || 'http';
-  if (mode !== 'http' && mode !== 'direct') {
-    throw new Error('OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE must be http or direct.');
-  }
-  const client = mode === 'direct'
-    ? createDirectSourceEmbeddingDrainClient(env)
-    : new HttpSourceEmbeddingDrainClient({
-        baseUrl: normalizeSourceWorkerBaseUrl(env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL?.trim() || config.email.baseUrl),
-        requestTimeoutMs: requestTimeoutSeconds * 1_000,
-        ...(authToken ? { authToken } : {}),
-        ...(fetchImpl ? { fetchImpl } : {}),
-      });
+  assertHttpDrainMode(env);
+  const client = new HttpSourceEmbeddingDrainClient({
+    baseUrl: normalizeSourceWorkerBaseUrl(env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL?.trim() || config.email.baseUrl),
+    requestTimeoutMs: requestTimeoutSeconds * 1_000,
+    ...(authToken ? { authToken } : {}),
+    ...(fetchImpl ? { fetchImpl } : {}),
+  });
   const rosterEnabled = [
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED',
@@ -740,23 +506,11 @@ export function optionsFromEnv(
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_READWISE_ENABLED',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_DRIVE_INTERNAL_ENABLED',
   ].some((name) => env[name] !== undefined);
-  let recordLedgerObservations: SourceEmbeddingDrainOptions['recordLedgerObservations'];
-  // The installation-specific legacy ledger stays in the private runtime,
-  // just as it does for the existing CLI and dashboard builds.
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-  recordLedgerObservations = embeddingLedgerRecorderFromEnv(client, env);
-  // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
   return {
     client,
     ...(rosterEnabled
       ? { lanes: sourceEmbeddingLaneRosterFromEnv(client, env, maxPendingChunks) }
       : {}),
-    ...(recordLedgerObservations ? { recordLedgerObservations } : {}),
-    ledgerObservationIntervalMs: secondsToMs(nonNegativeInt(
-      env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVATION_INTERVAL_SECONDS,
-      DEFAULT_LEDGER_OBSERVATION_INTERVAL_SECONDS,
-      'OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVATION_INTERVAL_SECONDS',
-    )),
     workerId: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_WORKER_ID?.trim() || DEFAULT_WORKER_ID,
     ...(maxPendingChunks !== undefined ? { maxPendingChunks } : {}),
     maxRuns: positiveIntOrUnbounded(
@@ -795,84 +549,28 @@ export function optionsFromEnv(
   };
 }
 
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-/**
- * The name the ledger knows each corpus by.
- *
- * TWO ID SPACES, and they are not interchangeable. The drain works in corpus
- * ids; the embedding ledger was written by hand in store names, and the five
- * it already carries (`dropbox`, `gmail-secure`, `drive-secure`,
- * `whatsapp-live`, `telegram-protected`) name the connector stores the
- * 2026-08-20 invalidation emptied. Translating between them is this file's job
- * precisely because this is the one place both spaces are in view — an
- * observer that guessed would file every entry under a corpus nobody reads.
- *
- * A corpus with no row is simply not observed. Every name here is permanent —
- * changing one splits a corpus's history across two identities.
- */
-const EMBEDDING_LEDGER_CORPUS_NAMES: Partial<Record<ActiveEmbeddingCorpusId, string>> = {
-  [DROPBOX_CORPUS_ID]: 'dropbox',
-  [EMAIL_CORPUS_ID]: 'gmail-secure',
-  [WHATSAPP_CORPUS_ID]: 'whatsapp-live',
-  [PROTECTED_TELEGRAM_CORPUS_ID]: 'telegram-protected',
-  [INTERNAL_TELEGRAM_CORPUS_ID]: 'telegram-internal',
-  [READWISE_CORPUS_ID]: 'readwise',
-  [X_BOOKMARKS_CORPUS_ID]: 'x-bookmarks',
-};
-
-/**
- * The drain's ledger hook, or nothing when there is nothing to observe.
- *
- * The two trust domains are recorded in SEPARATE calls with separate contexts,
- * because the ledger's endpoint- and epoch-drift watch compares against the
- * last value on record regardless of which corpus carried it. Folding the local
- * and the Gemini configurations into one context would make every observation
- * look like the epoch had just moved, and a record that cries wolf about the
- * exact event it exists to catch is worse than no record.
- *
- * The internal call deliberately carries no model, epoch or endpoint at all:
- * this ledger tracks the local embedding configuration, and stamping internal
- * corpora with its fields — or with Gemini's, into the same shared history —
- * would be an invention either way. The corpus transitions still land, which
- * is the part a reader of the internal corpora needs.
- */
-export function embeddingLedgerRecorderFromEnv(
-  client: SourceEmbeddingDrainClient,
-  env: Record<string, string | undefined>,
-): (() => Promise<void>) | undefined {
-  if (!client.observeCoverage) return undefined;
-  if (!booleanEnv(env, 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_LEDGER_OBSERVER_ENABLED', true)) return undefined;
-  const observe = client.observeCoverage.bind(client);
-  const path = resolveEmbeddingLedgerPath(env);
-  return async () => {
-    const coverage = observe();
-    const observedAt = new Date();
-    for (const domain of ['secure_local', 'internal'] as const) {
-      const observations = coverage.corpora
-        .filter((corpus) => corpus.trustDomain === domain)
-        .flatMap((corpus): EmbeddingCorpusObservation[] => {
-          const name = EMBEDDING_LEDGER_CORPUS_NAMES[corpus.corpusId];
-          return name
-            ? [{
-                corpus: name,
-                embedded_chunks: corpus.embeddedChunks,
-                missing_chunks: corpus.missingChunks,
-              }]
-            : [];
-        });
-      if (observations.length === 0) continue;
-      const config = domain === 'secure_local' ? coverage.secureLocal : undefined;
-      await recordEmbeddingLedgerObservations(path, observations, {
-        observed_at: observedAt,
-        ...(config?.modelId ? { model_id: config.modelId } : {}),
-        ...(config?.epoch ? { epoch: config.epoch } : {}),
-        ...(config?.endpoint ? { endpoint: config.endpoint } : {}),
-      });
-    }
-  };
+interface DryRunStoreConfig {
+  corpusId: typeof DROPBOX_CORPUS_ID | typeof EMAIL_CORPUS_ID;
+  dbPath?: string;
+  family: 'file' | 'email';
+  trustDomain: 'secure_local';
 }
 
-// OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
+/**
+ * The drain only embeds through the running worker. The mode that opened the
+ * stores in the drain's own process was removed (docs/design/source-storage.md,
+ * "Owner lock"): the worker is the only process that owns the data.
+ */
+function assertHttpDrainMode(env: Record<string, string | undefined>): void {
+  const mode = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE?.trim() || 'http';
+  if (mode === 'direct') {
+    throw new Error(
+      'OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE=direct was removed: the drain no longer opens stores itself. '
+      + 'Use http (the default), which embeds through the running worker.',
+    );
+  }
+  if (mode !== 'http') throw new Error('OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE must be http.');
+}
 
 export function secureLocalBackfillDryRunFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -885,7 +583,7 @@ export function secureLocalBackfillDryRunFromEnv(
     throw new Error('Secure-local embedding backfill dry-run requires a local source-index embedding provider.');
   }
 
-  const configs: DirectClientOptions['connectorStores'] = [
+  const configs: DryRunStoreConfig[] = [
     {
       corpusId: DROPBOX_CORPUS_ID,
       dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH?.trim()
@@ -956,88 +654,6 @@ export function secureLocalBackfillDryRunFromEnv(
         'backfill: do not run before the Delphi no-touch window and load plan are approved.',
       ],
     };
-}
-
-function createDirectSourceEmbeddingDrainClient(
-  env: Record<string, string | undefined>,
-): DirectSourceEmbeddingDrainClient {
-  const config = loadConfig(env);
-  const sovereigntyEngine = loadSovereigntyEngine({
-    env,
-    migratePrivateMeaning: true,
-    ...(config.sovereignty?.policy ? { inlineConfig: config.sovereignty.policy } : {}),
-    ...(config.sovereignty?.configPath ? { configPath: config.sovereignty.configPath } : {}),
-  });
-  const bootSecretResolver = new WorkerBootSecretResolver({
-    resolveSecretRefValueSync: (secretRef, resolverEnv) => resolveSecretRefValueSync(secretRef, { env: resolverEnv }),
-  });
-  const policySecureProvider = createSourceIndexEmbeddingProviderFromSovereignty(
-    sovereigntyEngine,
-    'secure_local',
-    env,
-    bootSecretResolver,
-  );
-  const envProvider = sovereigntyEngine.source === 'env_bridge'
-    ? createSourceIndexEmbeddingProviderFromEnv(env)
-    : undefined;
-  const secureLocalProvider = policySecureProvider
-    ?? (envProvider?.backend === 'local' ? envProvider : undefined);
-  if (!secureLocalProvider) {
-    throw new Error('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER is required for direct source embedding drain mode.');
-  }
-  assertEmbeddingProviderForLane('secure_local', secureLocalProvider);
-  const resolvedInternalProvider = createSourceIndexEmbeddingProviderFromSovereignty(
-    sovereigntyEngine,
-    'internal',
-    env,
-    bootSecretResolver,
-  );
-  const internalLaneEnabled = booleanEnv(env, 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_X_BOOKMARKS_ENABLED', false)
-    || booleanEnv(env, 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_READWISE_ENABLED', false)
-    || booleanEnv(env, 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED', false)
-    || booleanEnv(env, 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_DRIVE_INTERNAL_ENABLED', false);
-  if (internalLaneEnabled && !resolvedInternalProvider) {
-    throw new Error('Internal embedding lanes require a sovereignty-resolved internal embedding provider.');
-  }
-  if (internalLaneEnabled) assertEmbeddingProviderForLane('internal', resolvedInternalProvider!);
-  const emailEnabled = booleanEnv(env, 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED', false);
-  const dropboxEnabled = booleanEnv(env, 'OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED', true);
-  const connectorStores: DirectClientOptions['connectorStores'] = [
-    ...(dropboxEnabled
-      ? [{
-          corpusId: DROPBOX_CORPUS_ID,
-          dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH?.trim()
-            || defaultDropboxConnectorStoreDbPath(env),
-          family: 'file' as const,
-          trustDomain: 'secure_local' as const,
-        }]
-      : []),
-    ...(emailEnabled
-      ? [{
-          corpusId: EMAIL_CORPUS_ID as typeof EMAIL_CORPUS_ID,
-          dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_DB_PATH?.trim()
-            || defaultGmailSecureConnectorStoreDbPath(env),
-          family: 'email' as const,
-          trustDomain: 'secure_local' as const,
-        }]
-      : []),
-    connectorStoreConfigFromEnv(env, WHATSAPP_CORPUS_ID, 'WHATSAPP', 'chat', 'secure_local'),
-    connectorStoreConfigFromEnv(env, INTERNAL_TELEGRAM_CORPUS_ID, 'INTERNAL_TELEGRAM', 'chat', 'internal'),
-    connectorStoreConfigFromEnv(env, PROTECTED_TELEGRAM_CORPUS_ID, 'PROTECTED_TELEGRAM', 'chat', 'secure_local'),
-    connectorStoreConfigFromEnv(env, READWISE_CORPUS_ID, 'READWISE', 'readwise', 'internal'),
-    connectorStoreConfigFromEnv(env, X_BOOKMARKS_CORPUS_ID, 'X_BOOKMARKS', 'x', 'internal'),
-    connectorStoreConfigFromEnv(env, DRIVE_INTERNAL_CORPUS_ID, 'DRIVE_INTERNAL', 'file', 'internal'),
-  ].filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
-  return new DirectSourceEmbeddingDrainClient({
-    connectorStores,
-    secureLocalProvider,
-    ...(env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL?.trim()
-      ? { secureLocalEndpoint: env.OLYMPUS_SOURCE_INDEX_EMBEDDING_BASE_URL.trim() }
-      : {}),
-    ...(resolvedInternalProvider?.provider === 'google-gemini'
-      ? { internalProvider: resolvedInternalProvider }
-      : {}),
-  });
 }
 
 /**
@@ -1236,45 +852,6 @@ function booleanEnv(env: Record<string, string | undefined>, name: string, defau
   return value === undefined ? defaultValue : parseBoolean(value, name);
 }
 
-/**
- * The store path a lane falls back to when the host set no explicit one.
- *
- * Every value here is the SAME default the connector that writes the store
- * resolves, so a lane can never embed a different file than the one being
- * filled. A lane with no entry gets no fallback and stays unconfigured, which
- * fails loudly on first use instead of quietly embedding nothing.
- */
-function connectorStoreFallbackDbPath(
-  env: Record<string, string | undefined>,
-  envName: ConnectorStoreLaneEnvName,
-): string | undefined {
-  switch (envName) {
-    case 'DROPBOX': return defaultDropboxConnectorStoreDbPath(env);
-    case 'EMAIL': return defaultGmailSecureConnectorStoreDbPath(env);
-    case 'WHATSAPP': return defaultWhatsAppConnectorStoreDbPath(env);
-    case 'INTERNAL_TELEGRAM': return defaultInternalTelegramConnectorStoreDbPath(env);
-    case 'PROTECTED_TELEGRAM': return defaultProtectedTelegramConnectorStoreDbPath(env);
-    case 'READWISE': return defaultReadwiseConnectorStoreDbPath(env);
-    case 'X_BOOKMARKS': return defaultXBookmarksConnectorStoreDbPath(env);
-    case 'DRIVE_INTERNAL': return defaultGoogleDriveConnectorStoreDbPath(env);
-    default: return undefined;
-  }
-}
-
-function connectorStoreConfigFromEnv(
-  env: Record<string, string | undefined>,
-  corpusId: ConnectorStoreCorpusId,
-  envName: ConnectorStoreLaneEnvName,
-  family: 'chat' | 'note' | 'file' | 'email' | 'readwise' | 'x',
-  trustDomain: Extract<SourceTrustDomain, 'internal' | 'secure_local'>,
-): DirectClientOptions['connectorStores'][number] | undefined {
-  const enabled = booleanEnv(env, `OLYMPUS_SOURCE_EMBEDDING_DRAIN_${envName}_ENABLED`, false);
-  if (!enabled) return undefined;
-  const dbPath = env[`OLYMPUS_SOURCE_EMBEDDING_DRAIN_${envName}_DB_PATH`]?.trim()
-    || connectorStoreFallbackDbPath(env, envName);
-  return { corpusId, family, trustDomain, ...(dbPath ? { dbPath } : {}) };
-}
-
 function emptyScopeReport(scope: string): SourceEmbeddingDrainScopeReport {
   return {
     scope_key_hash: hashScope(scope),
@@ -1389,7 +966,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message.trim() ? error.message.trim() : 'unknown embedding drain error';
 }
 
-/** The per-store embedding lease is held by another embedder (direct mode throws it; HTTP mode answers 409). */
+/** The per-store embedding lease is held by another embedder (the worker answers 409). */
 export function isEmbeddingLaneBusyError(error: unknown, message: string): boolean {
   if (error instanceof FileLeaseBusyError) return true;
   return /embedding_lane_busy|file_lease_busy|already holds the lease/i.test(message);
@@ -1458,7 +1035,16 @@ export function publishNativeEmbeddingDrainReadiness(
 if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
   if (args.dryRun) {
-    const report = secureLocalBackfillDryRunFromEnv(process.env);
+    // The dry run opens the stores read-only itself, so it holds the owner lock
+    // and refuses while Olympus runs. The drain proper opens nothing.
+    let report: SecureLocalEmbeddingBackfillDryRunReport;
+    try {
+      report = withDataOwnerLock(process.env, () => secureLocalBackfillDryRunFromEnv(process.env));
+    } catch (error) {
+      if (!(error instanceof DataOwnerBusyError)) throw error;
+      console.error(error.message);
+      process.exit(1);
+    }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
       mkdirSync(dirname(args.reportPath), { recursive: true });
