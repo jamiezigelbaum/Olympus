@@ -10565,6 +10565,9 @@ function effectiveMessagingCaptureStatus(input) {
   if (status?.state === "running" && input.liveness && input.liveness.unexpectedExits >= MESSAGING_CAPTURE_REPEATED_EXITS) {
     return { ...source ? { source } : {}, state: "blocked", reason: "helper_exited" };
   }
+  if (status?.state === "running" && input.liveness && !input.liveness.alive) {
+    return { ...source ? { source } : {}, state: "stopped", reason: "restarting" };
+  }
   return status;
 }
 
@@ -10587,8 +10590,11 @@ class MessagingCaptureSupervisor {
     return { alive: this.child !== undefined, unexpectedExits: this.unexpectedExitTimes.length };
   }
   childExited(child) {
+    const now = (this.options.now ?? Date.now)();
+    if (this.child === child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS)
+      this.unexpectedExitTimes = [];
     if (!this.expectedStops.has(child))
-      this.unexpectedExitTimes.push((this.options.now ?? Date.now)());
+      this.unexpectedExitTimes.push(now);
     if (this.child === child) {
       this.child = undefined;
       this.fingerprint = undefined;
@@ -75113,12 +75119,15 @@ function dashboardCaptureAttentionReason(source) {
   if (!problem)
     return;
   if (problem.cause === "helper") {
-    return problem.reason === undefined ? DASHBOARD_CAPTURE_COPY.helperUnknown : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
+    return problem.reason === undefined || problem.reason === "restarting" ? DASHBOARD_CAPTURE_COPY.helperUnknown : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
   }
   const age = source.freshness.capture?.age_seconds;
   const relative9 = typeof age === "number" ? dashboardRelativeFromMs(age * 1000) : "";
   const base = relative9 ? DASHBOARD_CAPTURE_COPY.stale(relative9) : DASHBOARD_CAPTURE_COPY.staleNoAge;
-  return source.capture?.supervisor?.state === "stopped" ? `${base} · ${DASHBOARD_CAPTURE_COPY.stopped}` : base;
+  return source.capture?.supervisor?.state === "stopped" ? `${base} · ${dashboardStoppedClause(source)}` : base;
+}
+function dashboardStoppedClause(source) {
+  return source.capture?.supervisor?.reason === "restarting" ? DASHBOARD_CAPTURE_COPY.restarting : DASHBOARD_CAPTURE_COPY.stopped;
 }
 function dashboardCaptureAwaitingClause(source) {
   const capture = source.freshness.capture;
@@ -75135,7 +75144,7 @@ function dashboardCaptureClause(source) {
   if (supervisor === "running")
     parts.push(DASHBOARD_CAPTURE_COPY.running);
   else if (supervisor === "stopped")
-    parts.push(DASHBOARD_CAPTURE_COPY.stopped);
+    parts.push(dashboardStoppedClause(source));
   const scope = source.capture?.scope;
   if (scope?.kind === "whole_account")
     parts.push(DASHBOARD_CAPTURE_COPY.wholeAccount);
@@ -75549,6 +75558,7 @@ var init_vocabulary = __esm(() => {
     helperUnknown: "capture cannot start",
     running: "capture running",
     stopped: "capture stopped",
+    restarting: "capture restarting",
     wholeAccount: "whole account",
     chats: (count) => `${dashboardCount(count)} ${count === 1 ? "chat" : "chats"}`,
     nextAction: {
@@ -155623,7 +155633,8 @@ var init_dashboard_view_model = __esm(() => {
     "session_missing",
     "secret_missing",
     "start_failed",
-    "helper_exited"
+    "helper_exited",
+    "restarting"
   ]);
   MANUAL_SYNC_OUTCOMES = new Set(["checking", "checked", "failed", "busy"]);
 });
@@ -173110,6 +173121,7 @@ async function reconcileWorkerCaptures(input) {
     await Promise.all(entries.map(async ([source, capture]) => {
       await capture.stop();
       input.statuses[source] = { source, state: "stopped" };
+      delete input.failures[source];
     }));
     return;
   }

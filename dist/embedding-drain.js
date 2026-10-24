@@ -40886,8 +40886,11 @@ class MessagingCaptureSupervisor {
     return { alive: this.child !== undefined, unexpectedExits: this.unexpectedExitTimes.length };
   }
   childExited(child) {
+    const now = (this.options.now ?? Date.now)();
+    if (this.child === child && this.startedAt !== undefined && now - this.startedAt >= STABLE_RUN_MS)
+      this.unexpectedExitTimes = [];
     if (!this.expectedStops.has(child))
-      this.unexpectedExitTimes.push((this.options.now ?? Date.now)());
+      this.unexpectedExitTimes.push(now);
     if (this.child === child) {
       this.child = undefined;
       this.fingerprint = undefined;
