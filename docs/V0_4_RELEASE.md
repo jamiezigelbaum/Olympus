@@ -52,6 +52,20 @@ shared classifier hold is built (`holdContentUntilJudged`, change-logged in
 import lane is the only one that sets it. Design and delivery sequence:
 [archive import](design/archive-import.md).
 
+## Source storage (proposed 2026-10-24, awaiting owner approval)
+
+Every connected account's data moves into one folder owned by the shared
+engine, with one registry of accounts that Export, Delete, uninstall and
+status read; connectors stop naming files, and each shared file registers
+one forget step. Deleting a source becomes a rename at worker restart. This
+replaces the hand-kept per-source file list in `src/data-lifecycle.ts` and
+the store-custody and fence work in #467, which is frozen (owner,
+2026-10-24) after eight review rounds traced every finding to the unowned,
+unlisted layout. #481 (worker restart backoff, found by the release check:
+a Delete waited 80 s for the restart) is independent and lands first.
+Design, migration, tests and delivery steps:
+[source storage](design/source-storage.md).
+
 ## Olympus 1.0 (ChatGPT)
 
 Status: active, 2026-10-02. Owner decision 2026-10-01 (Decisions, below):
