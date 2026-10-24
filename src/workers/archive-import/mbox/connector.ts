@@ -28,10 +28,11 @@ import PostalMime, { decodeWords, type Email } from 'postal-mime';
 import type { RawItem, SourceClassificationSignals, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../../core/contracts.ts';
 import {
   ArchiveImportStoppedError,
+  archiveStopFromScopeError,
   registerArchiveFormatConnector,
   type ArchiveConnectorInput,
 } from '../../../core/archive-formats.ts';
-import { ScopeSafeError, type ScopeFileReader } from '../../../core/scope-safe-fs.ts';
+import type { ScopeFileReader } from '../../../core/scope-safe-fs.ts';
 import { MAX_FROM_HEADER_CHARS } from '../../../core/sender-rules.ts';
 import { MBOX_DEFAULT_MAX_MESSAGE_BYTES, MboxFormatError, MboxSplitter, type MboxMessageSpan } from './split.ts';
 
@@ -90,19 +91,10 @@ function parseCursor(input: ArchiveConnectorInput, cursor: string | undefined): 
 }
 
 function stoppedFrom(error: unknown, relPath: string): unknown {
-  if (error instanceof ScopeSafeError) {
-    if (error.code === 'not_found') {
-      return new ArchiveImportStoppedError('file_missing', 'A file of this archive is no longer there.', relPath);
-    }
-    if (error.code === 'changed' || error.code === 'escape' || error.code === 'not_regular') {
-      return new ArchiveImportStoppedError('file_changed', 'A file of this archive changed since the import started.', relPath);
-    }
-    return new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', relPath);
-  }
   if (error instanceof MboxFormatError) {
     return new ArchiveImportStoppedError('resume_point_invalid', 'No message starts where this import was to resume.', relPath);
   }
-  return error;
+  return archiveStopFromScopeError(error, relPath);
 }
 
 function sha256(value: Uint8Array | string): string {

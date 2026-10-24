@@ -11,27 +11,46 @@
  * (`registerArchiveFormatConnector`), so this module imports no worker code.
  */
 import type { SourceConnector } from './contracts.ts';
-import type { ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
+import { ScopeSafeError, type ScopeFileVersion, type ScopeRoot } from './scope-safe-fs.ts';
 import type { SourceFamily } from './source-index/types.ts';
 
 /** How many first bytes the probe reads from a file. */
 export const ARCHIVE_PROBE_HEAD_BYTES = 4096;
 /** How many entries of a chosen folder the probe looks at. */
 export const ARCHIVE_PROBE_MAX_CHILDREN = 256;
+/**
+ * How many more entries the probe keeps, past the first ARCHIVE_PROBE_MAX_CHILDREN,
+ * when their names are ones a format asks for (`probeNames`).
+ */
+export const ARCHIVE_PROBE_MAX_NAMED = 1024;
 
 /** One file or folder the probe looked at. */
 export interface ArchiveProbeEntry {
-  /** Relative to the chosen path; '' is the chosen path itself. */
+  /**
+   * Relative to the chosen path; '' is the chosen path itself. For a member
+   * of a zip (`members`) it is the member's name inside the zip, never a
+   * path on disk.
+   */
   relPath: string;
   name: string;
   kind: 'file' | 'directory';
   /** The first ARCHIVE_PROBE_HEAD_BYTES bytes of a file (fewer when it is shorter). */
   head?: Uint8Array;
+  /**
+   * A file that is a zip: the members the probe looked at (the first
+   * ARCHIVE_PROBE_MAX_CHILDREN, and members a format asks for by name past
+   * them), each with its first bytes where they could be read.
+   */
+  members?: readonly ArchiveProbeEntry[];
 }
 
 export interface ArchiveProbe {
   chosen: ArchiveProbeEntry;
-  /** For a chosen folder, the entries directly inside it (at most ARCHIVE_PROBE_MAX_CHILDREN). */
+  /**
+   * For a chosen folder, the entries directly inside it: the first
+   * ARCHIVE_PROBE_MAX_CHILDREN, then up to ARCHIVE_PROBE_MAX_NAMED more whose
+   * names a format asks for (`probeNames`).
+   */
   children: readonly ArchiveProbeEntry[];
 }
 
@@ -43,6 +62,14 @@ export interface ArchiveFormatDefinition {
   provider: string;
   /** How an answer's citation names this format's items ("Imported mail"); absent: the family's word. */
   citationLabel?: string;
+  /**
+   * File and zip-member names (`*` and `?` wildcards, case-insensitive) this
+   * format recognises itself by. A folder of thousands of files, or a zip of
+   * thousands of members, hides the one file that says what it is; the
+   * probe lists these names even past its usual bound and reads their first
+   * bytes before any other file's. Absent: only the usual look.
+   */
+  probeNames?: readonly string[];
   /**
    * The files to read, relative to the chosen path and in reading order, when
    * the probe is this format; undefined when it is not.
@@ -89,8 +116,61 @@ export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | un
 }
 
 /** The format whose items carry this provider name, if any. */
-export function archiveFormatForProvider(provider: string): ArchiveFormatDefinition | undefined {
-  return ARCHIVE_FORMATS.find((format) => format.provider === provider);
+export function archiveFormatForProvider(
+  provider: string,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): ArchiveFormatDefinition | undefined {
+  return formats.find((format) => format.provider === provider);
+}
+
+/** The formats of one family, in the order they are registered. */
+export function archiveFormatsOfFamily(
+  family: SourceFamily,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): ArchiveFormatDefinition[] {
+  return formats.filter((format) => format.family === family);
+}
+
+/**
+ * Whether a name matches one of a format's `probeNames`: `*` stands for any
+ * run of characters (none included), `?` for any one, and case does not
+ * matter. A name with folders in it also matches by its last part.
+ */
+export function archiveProbeNameMatches(name: string, patterns: readonly string[] | undefined): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  const full = name.toLowerCase();
+  const slash = full.lastIndexOf('/');
+  const last = slash >= 0 ? full.slice(slash + 1) : full;
+  return patterns.some((pattern) => {
+    const wanted = pattern.toLowerCase();
+    return wildcardMatches(wanted, last) || (last !== full && wildcardMatches(wanted, full));
+  });
+}
+
+function wildcardMatches(pattern: string, text: string): boolean {
+  let p = 0;
+  let t = 0;
+  let star = -1;
+  let resume = 0;
+  while (t < text.length) {
+    const wanted = pattern[p];
+    if (wanted === '*') {
+      star = p;
+      resume = t;
+      p += 1;
+    } else if (wanted === '?' || wanted === text[t]) {
+      p += 1;
+      t += 1;
+    } else if (star >= 0) {
+      p = star + 1;
+      resume += 1;
+      t = resume;
+    } else {
+      return false;
+    }
+  }
+  while (pattern[p] === '*') p += 1;
+  return p === pattern.length;
 }
 
 /** The source families archive imports store, one store set per family. */
@@ -127,6 +207,11 @@ export function detectArchiveFormat(
 export interface ArchiveFileEntry {
   relPath: string;
   version: ScopeFileVersion;
+  /**
+   * A zip: how many members it held when the import was approved, and the
+   * digest of its member table. A reader checks it before it reads a member.
+   */
+  members?: { count: number; sha256: string };
 }
 
 /**
@@ -143,6 +228,24 @@ export interface ArchiveImportFinding {
   offset: number;
   count?: number;
 }
+
+/**
+ * Finding kinds every format can use, whatever it imports. A format's own
+ * kinds (mail's, say) live with its connector; these are the ones the spine
+ * and the shared readers know, each with a sentence in the dashboard's words.
+ */
+export const ARCHIVE_COMMON_FINDINGS = {
+  /** Pictures, audio, video or other files named in the archive that were not read. */
+  mediaNotImported: 'media_not_imported',
+  /** An item longer than the import keeps: the start of it is kept. */
+  itemTruncated: 'item_truncated',
+  /** Something the import had to take as given because the archive does not say. */
+  assumption: 'assumption',
+  /** A whole part of the archive the import does not read. */
+  sectionNotImported: 'section_not_imported',
+  /** A file inside the archive whose bytes did not check out, so what was read of it may be wrong. */
+  fileDamaged: 'file_damaged',
+} as const;
 
 export interface ArchiveConnectorInput {
   archiveId: string;
@@ -183,6 +286,21 @@ export class ArchiveImportStoppedError extends Error {
     this.code = code;
     this.relPath = relPath;
   }
+}
+
+/**
+ * A scope error from reading one file of the archive, as the import stopping
+ * with the reason a person is told; anything else is returned as it is.
+ */
+export function archiveStopFromScopeError(error: unknown, relPath: string): unknown {
+  if (!(error instanceof ScopeSafeError)) return error;
+  if (error.code === 'not_found') {
+    return new ArchiveImportStoppedError('file_missing', 'A file of this archive is no longer there.', relPath);
+  }
+  if (error.code === 'changed' || error.code === 'escape' || error.code === 'not_regular') {
+    return new ArchiveImportStoppedError('file_changed', 'A file of this archive changed since the import started.', relPath);
+  }
+  return new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', relPath);
 }
 
 const CONNECTOR_FACTORIES = new Map<string, ArchiveConnectorFactory>();
