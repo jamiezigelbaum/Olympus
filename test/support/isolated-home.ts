@@ -9,26 +9,38 @@
  * test onto the real data. A test that needs a variable sets it itself.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { homedir, tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import * as osModule from 'node:os';
 import * as childProcessModule from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { afterAll, mock } from 'bun:test';
 
-// The account's home from the user database, never from HOME (Bun's
-// os.userInfo() and os.homedir() both follow HOME): the shell expands ~user
-// with getpwnam.
+// One spelling per directory: a trailing slash, `..` or a symlink alias of a
+// directory compares equal to the directory itself.
+function canonical(path: string): string {
+  const absolute = resolve(path);
+  try { return realpathSync(absolute); } catch { return absolute; }
+}
+function isInside(path: string, root: string): boolean {
+  return path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+// The account's home from the user database, keyed by the kernel's uid
+// (`id -un`), never from HOME, USER or LOGNAME: Bun's os.userInfo() and
+// os.homedir() both follow the environment.
 const realHome = (() => {
   try {
-    const user = userInfo().username;
-    const out = childProcessModule.spawnSync('/bin/sh', ['-c', 'eval echo "~$1"', 'sh', user], { env: {}, encoding: 'utf8' });
+    const out = childProcessModule.spawnSync('/bin/sh', ['-c', 'user=$(id -un) && eval echo "~$user"'], {
+      env: { PATH: '/usr/bin:/bin' },
+      encoding: 'utf8',
+    });
     const resolved = String(out.stdout).trim();
-    if (out.status === 0 && resolved.startsWith('/')) return resolved;
-  } catch { /* the account has no resolvable home (a bare container user) */ }
-  // Unknown: HOME cannot stand in for it (Bun's userInfo() just echoes HOME), so
-  // there is no real home to refuse, and the checks below stay inert.
+    if (out.status === 0 && resolved.startsWith('/')) return canonical(resolved);
+  } catch { /* no user database entry (a bare container user) */ }
+  // Unknown: there is no account home to compare against. The temp-directory
+  // rule below still holds.
   return '';
 })();
 // Bun reads HOME for os.homedir() once, at process start, and every descendant
@@ -36,9 +48,17 @@ const realHome = (() => {
 // HOME cannot be made safe from inside (a grandchild with a scrubbed env would
 // find the real home again), so it does not run: start tests with an isolated
 // HOME (the package scripts, scripts/test-lane.ts, or a HOME=<temp dir> prefix).
-if (realHome && process.env.HOME === realHome) {
+// When the account home cannot be found, only a temp directory is provably
+// not it. OLYMPUS_TEST_REFUSE_HOME names one more home to refuse, so a test can
+// prove the refusal without ever starting a run in the real home; it can only
+// add refusals.
+const startHome = canonical(process.env.HOME || homedir());
+const refusedHomes = [realHome, process.env.OLYMPUS_TEST_REFUSE_HOME?.trim() ?? ''].filter(Boolean).map(canonical);
+const startsInRealHome = refusedHomes.includes(startHome)
+  || (!realHome && !isInside(startHome, canonical(tmpdir())) && !isInside(startHome, canonical('/tmp')));
+if (startsInRealHome) {
   throw new Error(
-    `Refusing to run tests with HOME set to the real home (${realHome}). Use the package test scripts, or set HOME to a throwaway directory first.`,
+    `Refusing to run tests with HOME=${startHome}: that is the real home, or a home that cannot be shown not to be. Use the package test scripts, or prefix HOME="$(mktemp -d)".`,
   );
 }
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'olympus-test-home-')));
@@ -66,10 +86,13 @@ try { (createRequire(import.meta.url)('node:os') as { homedir: () => string }).h
 // with no HOME, and a Bun child resolves the real account home from the OS.
 // Every spawn made from a test gets the isolated HOME when its env has none,
 // and a child asked to run against the real home is refused.
+// Not covered: a grandchild that a child starts with an empty environment. It
+// has no HOME to inherit, and Bun then reads the account's home from the user
+// database; only an OS-level sandbox could stop that.
 type Env = Record<string, string | undefined>;
 function isolatedChildEnv(env: Env): Env {
   const requested = env.HOME;
-  if (requested && realHome && requested === realHome) {
+  if (requested && realHome && canonical(requested) === realHome) {
     throw new Error(`a test asked a child process to run with the real HOME ${realHome}`);
   }
   return requested ? env : { ...env, HOME: home };
