@@ -62,3 +62,13 @@ export function legacyCaptureDataRoot(env: LayoutEnv = process.env): string {
 export function legacyTelegramStoreRoot(env: LayoutEnv = process.env): string {
   return standaloneLinuxDataDir(env) ?? join(layoutHome(env), '.local', 'share', 'openclaw', 'olympus');
 }
+
+/**
+ * Legacy: the Telegram reader's gateway state, under the XDG state home, where
+ * `scripts/telegram-telethon-reader.py` writes it. The service's readiness
+ * probe and Delete both read it from here; step 4 moves it.
+ */
+export function legacyTelegramGatewayStateDir(env: LayoutEnv = process.env): string {
+  return env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim()
+    || join(env.XDG_STATE_HOME?.trim() || join(layoutHome(env), '.local', 'state'), 'olympus', 'telegram-capture-gateway');
+}

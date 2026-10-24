@@ -8,6 +8,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import {
   legacyCaptureDataRoot,
+  legacyTelegramGatewayStateDir,
   legacyTelegramStoreRoot,
   layoutHome,
   olympusDataPath,
@@ -42,6 +43,13 @@ describe('olympus layout', () => {
     if (process.platform === 'linux') return;
     // Telegram's stores ignore XDG_DATA_HOME today; moving them is step 4's job.
     expect(legacyTelegramStoreRoot({ HOME: home, XDG_DATA_HOME: '/data' })).toBe(`${home}/.local/share/openclaw/olympus`);
+  });
+
+  test('the Telegram readiness probe reads gateway state where the reader writes it', () => {
+    // scripts/telegram-telethon-reader.py: XDG_STATE_HOME, else <home>/.local/state.
+    expect(legacyTelegramGatewayStateDir({ HOME: home })).toBe(`${home}/.local/state/olympus/telegram-capture-gateway`);
+    expect(legacyTelegramGatewayStateDir({ HOME: home, XDG_STATE_HOME: '/state' })).toBe('/state/olympus/telegram-capture-gateway');
+    expect(legacyTelegramGatewayStateDir({ HOME: home, OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR: ' /gw ' })).toBe('/gw');
   });
 
   test('the X recovery command opens the reconcile state the worker writes', () => {

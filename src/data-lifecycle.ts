@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { legacyCaptureDataRoot, olympusDataPath } from './core/olympus-layout.ts';
+import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath } from './core/olympus-layout.ts';
 import { Database } from 'bun:sqlite';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
@@ -577,8 +577,7 @@ function telegramCaptureStatePaths(env: Record<string, string | undefined>): str
   const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
     || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim()
     || join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool');
-  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim()
-    || join(stateHome, 'olympus', 'telegram-capture-gateway');
+  const gatewayStateDir = legacyTelegramGatewayStateDir(env);
   const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim()
     || join(stateHome, 'olympus', 'telegram-spool-drain');
   const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim()
