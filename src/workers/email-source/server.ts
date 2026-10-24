@@ -423,7 +423,7 @@ import {
   fileSourceScopeContentFilters,
   fileSourceScopeDropboxPolicy,
   fileSourceScopeMetadataEnabled,
-  fileSourceScopeMetadataFilters,
+  fileSourceScopeReadScope,
   isMailSourceScopePolicyRef,
   scopeBoundEmbeddingProvider,
   scopeBoundSchedulerSource,
@@ -2865,6 +2865,11 @@ export async function main(): Promise<void> {
     volumeIgnoresCase: (volumeId: string | undefined, path?: string) => localFilesVolumes.ignoresCase(volumeId, path),
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
+  // Olympus's own folders are never read back, even what an earlier version
+  // indexed there (a folder the person had chosen by name): every read scope
+  // of this source leaves them out, whatever the approval says.
+  const alwaysExcludedFor = (sourceId: string): readonly string[] =>
+    sourceId === LOCAL_FILES_SOURCE_ID ? localFilesExclusionContext.ownRoots ?? [] : [];
   let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;
   const localFilesSyncFor = (ref: SourceScopePolicyRef) => {
     if (!localFilesConnectorStore || !fileSourceScopeAuthority) return undefined;
@@ -3106,7 +3111,9 @@ export async function main(): Promise<void> {
             },
             resolveCandidateFilters: () => {
               const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
-              const scope = approval ? fileSourceScopeContentFilters(approval) : { allowed: false as const };
+              const scope = approval
+                ? fileSourceScopeContentFilters(approval, alwaysExcludedFor(LOCAL_FILES_SOURCE_ID))
+                : { allowed: false as const };
               if (!scope.allowed || !scope.filters) {
                 throw new OperationError(
                   'source_index_policy_violation',
@@ -3231,7 +3238,7 @@ export async function main(): Promise<void> {
         if (!sourceId) return true;
         const approval = fileSourceScopeAuthority?.snapshot(sourceId);
         if (!approval) return false;
-        const scope = fileSourceScopeContentFilters(approval);
+        const scope = fileSourceScopeContentFilters(approval, alwaysExcludedFor(sourceId));
         // The row may sit in any of the lane's tier stores: the corpus reads it through its view.
         return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
       },
@@ -3391,18 +3398,9 @@ export async function main(): Promise<void> {
     if (!sourceId) return { allowed: true, contentAllowed: true };
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
     if (!approval || approval.status !== 'approved') return { allowed: false };
-    const metadataScope = fileSourceScopeMetadataFilters(approval);
-    if (!metadataScope.allowed) return { allowed: false };
-    const contentScope = fileSourceScopeContentFilters(approval);
     const scopeAccount = fileScopeAccount(sourceId);
     if (!scopeAccount) return { allowed: false };
-    return {
-      allowed: true,
-      accountScope: scopeAccount.accountScope,
-      filters: metadataScope.filters,
-      contentAllowed: contentScope.allowed,
-      ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
-    };
+    return fileSourceScopeReadScope(approval, scopeAccount.accountScope, alwaysExcludedFor(sourceId));
   };
   const connectorStoreStatusScope = (store: LocalConnectorStore):
     ConnectorStoreStatusScope | undefined => {

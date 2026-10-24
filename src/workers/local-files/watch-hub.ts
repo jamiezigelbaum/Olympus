@@ -72,6 +72,7 @@ export function watchIgnoreGlobs(context: DefaultExclusionContext, extra: readon
   // above one never reports it; no folder chosen by name sits inside one
   // (`localFilesRoots`), so `ignoreGlobsForRoot` never has to keep one apart.
   for (const root of context.ownRoots ?? []) globs.push(root);
+  for (const file of context.ownFiles ?? []) for (const glob of file.globs) globs.push(`${file.dir}/${glob}`);
   return [...globs, ...extra];
 }
 

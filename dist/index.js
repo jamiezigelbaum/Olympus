@@ -18564,8 +18564,9 @@ var init_data_owner_lock = __esm(() => {
 });
 
 // src/workers/local-files/paths.ts
-var UNSAFE_PATH_CHARACTERS, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES, ownRootIndexes;
+var UNSAFE_PATH_CHARACTERS, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES, ownRootIndexes, ownFileIndexes;
 var init_paths = __esm(() => {
+  init_config();
   init_olympus_layout();
   UNSAFE_PATH_CHARACTERS = new RegExp("[\\x00-\\x1f\\x7f-\\x9f" + String.fromCharCode(8232, 8233) + "]");
   DEFAULT_EXCLUSION_LABELS = Object.freeze({
@@ -18597,6 +18598,7 @@ var init_paths = __esm(() => {
   ]);
   SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
   ownRootIndexes = new WeakMap;
+  ownFileIndexes = new WeakMap;
 });
 
 // src/workers/local-files/scope.ts

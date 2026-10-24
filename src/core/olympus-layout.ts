@@ -415,7 +415,120 @@ function linuxInstallRoots(env: LayoutEnv): string[] {
 }
 
 /**
- * Every folder Olympus itself writes to, as absolute paths in the spelling its
+ * What an install's plugin config says about where the capture services keep
+ * their state (`worker.telegramCapture.stateDir` / `spoolDir`,
+ * `worker.whatsappCapture.stateDir`). The config module hands it over
+ * (`configuredCaptureLocations`); this module reads no config itself.
+ */
+export interface OlympusCaptureConfig {
+  telegramStateDir?: string;
+  telegramSpoolDir?: string;
+  whatsappStateDir?: string;
+}
+
+/**
+ * A file Olympus writes into a folder that other things share: the folder is
+ * not Olympus's, so only the files the writer names are. `name` is matched on
+ * the lower-cased base name (the writers' names are all lower case); `globs`
+ * are the same names as watch-ignore patterns, relative to `dir`.
+ */
+export interface OlympusOwnFileRule {
+  dir: string;
+  name: RegExp;
+  globs: readonly string[];
+}
+
+/** Everything Olympus writes: folders that are wholly its own, and files in folders that are not. */
+export interface OlympusOwnLocations {
+  folders: string[];
+  files: OlympusOwnFileRule[];
+}
+
+// What each writer puts in a folder an owner pointed it at. Read from the
+// writers: tools/whatsapp-bridge/main.go (the session store, the pairing QR and
+// status, the readiness receipt and their temporary files, `spool/`, `media/`),
+// src/workers/whatsapp/store-sync.ts (the connector stores beside them),
+// scripts/telegram-telethon-reader.py (the gateway state, its readiness
+// receipt, the backfill requests and their temporary files) and the two
+// spools' `YYYY-MM-DD.jsonl` files.
+interface OwnArtifacts {
+  folders: readonly string[];
+  files: ReadonlyArray<{ name: RegExp; globs: readonly string[] }>;
+}
+
+const SPOOL_FILES: OwnArtifacts['files'] = [
+  { name: /^\d{4}-\d{2}-\d{2}\.jsonl$/, globs: ['????-??-??.jsonl'] },
+];
+
+const WHATSAPP_STATE_ARTIFACTS: OwnArtifacts = {
+  folders: ['spool', 'media'],
+  files: [
+    { name: /^session\.db(?:-wal|-shm|-journal)?$/, globs: ['session.db', 'session.db-wal', 'session.db-shm', 'session.db-journal'] },
+    { name: /^qr\.(?:txt|png)(?:\.tmp)?$/, globs: ['qr.txt', 'qr.png', 'qr.png.tmp'] },
+    { name: /^(?:native-service-readiness|pairing-status)\.json$/, globs: ['native-service-readiness.json', 'pairing-status.json'] },
+    { name: /^\.(?:native-service-readiness\.json\.tmp|pairing-status-)[^/]*$/, globs: ['.native-service-readiness.json.tmp*', '.pairing-status-*'] },
+    {
+      name: /^connector-store[^/]*\.db(?:-wal|-shm|-journal)?$/,
+      globs: ['connector-store*.db', 'connector-store*.db-wal', 'connector-store*.db-shm', 'connector-store*.db-journal'],
+    },
+  ],
+};
+
+const TELEGRAM_STATE_ARTIFACTS: OwnArtifacts = {
+  folders: [],
+  files: [
+    {
+      name: /^(?:state\.json|gateway\.lock|backfill-requests\.jsonl|native-service-readiness\.json)$/,
+      globs: ['state.json', 'gateway.lock', 'backfill-requests.jsonl', 'native-service-readiness.json'],
+    },
+    { name: /^\.(?:state|native-service-readiness)\.json\.tmp\.\d+$/, globs: ['.state.json.tmp.*', '.native-service-readiness.json.tmp.*'] },
+  ],
+};
+
+const SPOOL_ARTIFACTS: OwnArtifacts = { folders: [], files: SPOOL_FILES };
+
+/**
+ * Folders an install shares with other things, and so never Olympus's own as a
+ * whole: the home, the XDG homes and the base folders under them, the Mac's
+ * Library folders. Anything above one of them is shared too.
+ */
+function sharedBases(env: LayoutEnv): string[] {
+  const home = layoutHome(env);
+  const bases = [
+    home,
+    join(home, '.local'),
+    join(home, '.local', 'share'),
+    join(home, '.local', 'state'),
+    join(home, '.config'),
+    join(home, '.cache'),
+    join(home, 'Library'),
+    join(home, 'Library', 'Application Support'),
+    join(home, 'Library', 'Logs'),
+  ];
+  for (const [name, value] of Object.entries(env)) {
+    if (name.startsWith('XDG_') && value?.trim()) bases.push(value.trim());
+  }
+  return bases.filter((path) => isAbsolute(path)).map((path) => resolve(path));
+}
+
+/**
+ * Whether a folder an override names can be Olympus's whole: it is not the home
+ * folder, a folder above it, or one of the shared base folders. Compared as
+ * spelled, the way the override was written, and without regard to case on a
+ * Mac.
+ */
+export function isDedicatedOlympusFolder(path: string, env: LayoutEnv = process.env): boolean {
+  const fold = (value: string): string => process.platform === 'darwin' ? value.toLowerCase() : value;
+  const folder = fold(resolve(path));
+  if (folder === '/') return false;
+  return !sharedBases(env).some((base) => {
+    const shared = fold(base);
+    return shared === folder || shared.startsWith(`${folder}/`);
+  });
+}
+
+/**
+ * Every place Olympus itself writes to, as absolute paths in the spelling its
  * writers use (a caller that compares against real paths resolves links
  * itself). Relative locations a writer would accept are left out: they name no
  * fixed place.
@@ -431,30 +544,68 @@ function linuxInstallRoots(env: LayoutEnv): string[] {
  *    `$XDG_STATE_HOME/olympus`;
  *  - cache: the WhatsApp bridge and the Telegram Python under
  *    `$XDG_CACHE_HOME/olympus` (`<home>/.cache/olympus` by default);
- *  - the Linux install's folders (`linuxInstallRoots`).
+ *  - the Mac's app folder and logs under `~/Library`;
+ *  - the Linux install's folders (`linuxInstallRoots`);
+ *  - the capture services' state and spool folders when an environment
+ *    variable or the plugin config (`capture`) moves them. One of those is
+ *    Olympus's whole only when it is a dedicated folder
+ *    (`isDedicatedOlympusFolder`); at the home folder or a shared base, only the
+ *    files the writer puts there are (`files`), and its `spool/` and `media/`.
  */
-export function olympusOwnRoots(env: LayoutEnv = process.env): string[] {
+export function olympusOwnLocations(env: LayoutEnv = process.env, capture: OlympusCaptureConfig = {}): OlympusOwnLocations {
   const home = layoutHome(env);
   const xdg = (name: string, fallback: string): string => env[name]?.trim() || join(home, fallback);
-  const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
-  const candidates = [
+  const folders: string[] = [
     olympusDataRoot(env),
     mediaCacheRoot(env),
     legacyCaptureDataRoot(env),
     legacyWhatsAppServiceStateDir(env),
     legacyTelegramStoreRoot(env),
-    legacyTelegramGatewayStateDir(env),
-    ...(whatsappState ? [whatsappStateDirFromValue(whatsappState)] : []),
+    join(xdg('XDG_STATE_HOME', '.local/state'), 'olympus', 'telegram-capture-gateway'),
     join(home, '.olympus'),
     join(home, '.config', 'olympus'),
     join(home, '.local', 'share', 'olympus'),
     join(home, '.local', 'share', 'openclaw', 'olympus'),
     join(home, '.local', 'state', 'olympus'),
     join(home, '.cache', 'olympus'),
+    join(home, 'Library', 'Logs', 'Olympus'),
+    join(home, 'Library', 'Application Support', 'Olympus'),
     join(xdg('XDG_CONFIG_HOME', '.config'), 'olympus'),
     join(xdg('XDG_STATE_HOME', '.local/state'), 'olympus'),
     join(xdg('XDG_CACHE_HOME', '.cache'), 'olympus'),
     ...linuxInstallRoots(env),
   ];
-  return [...new Set(candidates.filter((path) => isAbsolute(path)).map((path) => resolve(path)))];
+  const files: OlympusOwnFileRule[] = [];
+  const placed = (value: string | undefined, artifacts: OwnArtifacts): void => {
+    const trimmed = value?.trim();
+    if (!trimmed || !isAbsolute(trimmed)) return;
+    const dir = resolve(trimmed);
+    if (isDedicatedOlympusFolder(dir, env)) {
+      folders.push(dir);
+      return;
+    }
+    for (const sub of artifacts.folders) folders.push(join(dir, sub));
+    for (const file of artifacts.files) files.push({ dir, name: file.name, globs: file.globs });
+  };
+  const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
+  if (whatsappState) placed(whatsappStateDirFromValue(whatsappState), WHATSAPP_STATE_ARTIFACTS);
+  placed(capture.whatsappStateDir, WHATSAPP_STATE_ARTIFACTS);
+  placed(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR, SPOOL_ARTIFACTS);
+  placed(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR, TELEGRAM_STATE_ARTIFACTS);
+  placed(capture.telegramStateDir, TELEGRAM_STATE_ARTIFACTS);
+  // The reader writes to the first of these that is set (the plugin config
+  // outranks the environment for it); the worker reads the other two. Each is a
+  // place the spool may be.
+  placed(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR, SPOOL_ARTIFACTS);
+  placed(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR, SPOOL_ARTIFACTS);
+  placed(capture.telegramSpoolDir, SPOOL_ARTIFACTS);
+  return {
+    folders: [...new Set(folders.filter((path) => isAbsolute(path)).map((path) => resolve(path)))],
+    files,
+  };
+}
+
+/** The folders of `olympusOwnLocations`: every one is wholly Olympus's. */
+export function olympusOwnRoots(env: LayoutEnv = process.env, capture: OlympusCaptureConfig = {}): string[] {
+  return olympusOwnLocations(env, capture).folders;
 }

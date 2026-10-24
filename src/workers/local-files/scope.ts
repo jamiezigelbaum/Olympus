@@ -8,7 +8,8 @@
  * Rules, in order:
  *  0. Olympus's own folders (paths.ts `ownRoots`) are denied, and so is
  *     everything inside them, whatever else was selected: not even a folder the
- *     person chose by name turns them on.
+ *     person chose by name turns them on. So are the files it writes into a
+ *     folder it shares (`ownFiles`).
  *  1. A folder that is off by default (`paths.ts`) is denied unless the person
  *     selected that folder, or one below it, explicitly. A selection above it
  *     does not turn it on.
@@ -27,6 +28,7 @@ import type { FileSourceScopeAuthority, FileSourceScopePolicyRef } from '../sour
 import {
   deepestDefaultExclusion,
   isInsideOwnRoot,
+  isOwnPath,
   normalizeScopePath,
   scopePathDepth,
   scopePathIsWithin,
@@ -55,6 +57,11 @@ export interface LocalFilesContentScope {
   ignoresCase?(scopePath: string): boolean;
   decide(scopePath: string): LocalFilesDecision;
   /**
+   * Olympus's own folders (paths.ts `ownRoots`), as scope paths. Nothing inside
+   * them is indexed; the connector removes what an earlier version indexed there.
+   */
+  ownRoots?(): readonly string[];
+  /**
    * Checks the approval is current once and returns a decider over exactly
    * that approval. A pass that decides thousands of paths asks for one of
    * these per page instead of re-reading the approval for every path.
@@ -77,7 +84,9 @@ export function decideLocalFilesPath(
   if (isDataOwnerLockName(path.slice(path.lastIndexOf('/') + 1))) return 'denied';
   // Olympus's own stores, credential references and session secrets: never
   // listed or read, under a whole-computer pass or a folder chosen by name.
-  if (isInsideOwnRoot(path, context)) return 'denied';
+  // (A file of Olympus's in a shared folder, such as a capture service's spool
+  // under the home folder, is one of them; the folder around it is not.)
+  if (isOwnPath(path, context)) return 'denied';
   const selected = approval.selections
     .map((selection) => ({ key: safeKey(selection.key), state: selection.state }))
     .filter((selection): selection is { key: string; state: typeof approval.selections[number]['state'] } =>
@@ -131,6 +140,7 @@ export function createScopeBoundLocalFilesContentScope(input: {
     assertCurrent() { current(); },
     ignoresCase: (scopePath) => scopePathsIgnoreCase(input.context, scopePath),
     decide: (scopePath) => decideLocalFilesPath(current(), scopePath, input.context),
+    ownRoots: () => input.context.ownRoots ?? [],
     snapshotDecider() {
       const approval = current();
       return (scopePath) => decideLocalFilesPath(approval, scopePath, input.context);

@@ -413,6 +413,44 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
     return absent;
   };
 
+  /**
+   * The deletions for whatever is indexed inside Olympus's own folders. They are
+   * never indexed now, but an earlier version indexed one the person had chosen
+   * by name, and such a folder is no longer a root (`localFilesRoots`), so no
+   * walk of it ever judges what is stored there. Asked on every pass, whatever
+   * the pass's folder is: a store with nothing under them answers at once.
+   */
+  const ownRootDeletions = (deletedSeen: Set<string>): RawItem[] => {
+    const store = options.store;
+    const ownRoots = options.scope.ownRoots?.() ?? [];
+    if (!store?.activeItemsUnderLocatorIfIndexed || ownRoots.length === 0) return [];
+    if (store.lookupsReady && !store.lookupsReady()) return [];
+    const items: RawItem[] = [];
+    const judge = (stored: { identity: SourceItemIdentity; locatorUri: string }, base: string): void => {
+      // The store's range ignores ASCII case; on a volume that keeps case a
+      // sibling spelled differently (`Olympus` beside `olympus`) is not inside `base`.
+      if (!pathIsAtOrBelow(stored.locatorUri, base)) return;
+      if (deletedSeen.has(stored.identity.providerItemId)) return;
+      deletedSeen.add(stored.identity.providerItemId);
+      items.push(deletedItem(stored.identity, stored.locatorUri));
+    };
+    for (const base of ownRoots) {
+      const self = store.activeIdentityForLocatorIfIndexed({
+        provider: LOCAL_FILES_PROVIDER,
+        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+        locatorUri: base,
+      });
+      if (self) judge({ identity: self, locatorUri: base }, base);
+      for (const stored of store.activeItemsUnderLocatorIfIndexed({
+        provider: LOCAL_FILES_PROVIDER,
+        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+        locatorUri: base,
+        limit: ABSENCE_SCAN_LIMIT,
+      })) judge(stored, base);
+    }
+    return items;
+  };
+
   /** True when a folder the person chose lies at or below `scopePath`. */
   const leadsToSelection = (scopePath: string): boolean =>
     options.scope.roots().some((entry) => entry.scopePath !== root && pathIsAtOrBelow(entry.scopePath, scopePath));
@@ -653,6 +691,14 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
                 yield { items: page, done: false };
                 page = [];
               }
+            }
+          }
+          for (const deletion of ownRootDeletions(deletedSeen)) {
+            page.push(deletion);
+            if (page.length >= pageSize) {
+              options.scope.assertCurrent();
+              yield { items: page, done: false };
+              page = [];
             }
           }
           options.scope.assertCurrent();

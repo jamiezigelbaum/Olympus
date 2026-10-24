@@ -15,7 +15,8 @@
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { olympusOwnRoots } from '../../core/olympus-layout.ts';
+import { configuredCaptureLocations } from '../../core/config.ts';
+import { olympusOwnLocations, type OlympusCaptureConfig, type OlympusOwnFileRule } from '../../core/olympus-layout.ts';
 
 export const VOLUME_SEGMENT_PREFIX = '@';
 const MAX_SCOPE_PATH_LENGTH = 4_096;
@@ -175,6 +176,12 @@ export interface DefaultExclusionContext {
    * it. They are never indexed, and no choice of the person turns them on.
    */
   ownRoots?: readonly string[];
+  /**
+   * Files Olympus writes into a folder it shares with other things (a capture
+   * service pointed at the home folder): the folder stays the person's, these
+   * files do not. Same promise as `ownRoots`.
+   */
+  ownFiles?: readonly OwnFileRule[];
   platform?: NodeJS.Platform;
   /**
    * Whether the volume with this id (undefined: the computer's own) ignores
@@ -184,35 +191,59 @@ export interface DefaultExclusionContext {
   volumeIgnoresCase?: (volumeId: string | undefined, path?: string) => boolean | undefined;
 }
 
+/** An own file rule with its folder as a scope path (see `DefaultExclusionContext.ownFiles`). */
+export type OwnFileRule = OlympusOwnFileRule;
+
 export function defaultExclusionContext(
   env: Record<string, string | undefined> = process.env,
+  capture: OlympusCaptureConfig = configuredCaptureLocations(env),
 ): DefaultExclusionContext {
   // The home folder as the file system names it: walked paths are real paths,
   // so a home reached through a link (/home -> /var/home) must be compared as
   // its real self or none of the folders that are off by default would match.
   let home = env.HOME?.trim() || homedir();
   try { home = realpathSync.native(home); } catch { /* keep the configured path */ }
-  return { home, syncedRoots: configuredSyncedRoots(env), ownRoots: resolvedOwnRoots(env, home), platform: process.platform };
+  const own = resolvedOwnLocations(env, home, capture);
+  return {
+    home,
+    syncedRoots: configuredSyncedRoots(env),
+    ownRoots: own.roots,
+    ownFiles: own.files,
+    platform: process.platform,
+  };
 }
 
 /**
- * Olympus's own folders as the walk will see them: walked paths are real
- * paths, so a root reached through a link (a data folder moved to another disk
- * and linked back) is listed under both spellings. A folder that does not
- * exist yet is resolved through the part of its path that does. The home
- * folder, or a folder above it, is never one of them, whatever an override
- * says: that would turn off the person's own files.
+ * Olympus's own places as the walk will see them: walked paths are real paths,
+ * so a folder reached through a link (a data folder moved to another disk and
+ * linked back) is listed under both spellings. A folder that does not exist yet
+ * is resolved through the part of its path that does. The home folder, or a
+ * folder above it, is never one of the whole folders, whatever an override says:
+ * that would turn off the person's own files. (The layout already keeps such an
+ * override to the files the writer puts there.)
  */
-function resolvedOwnRoots(env: Record<string, string | undefined>, home: string): string[] {
-  const roots = new Set<string>();
-  for (const root of olympusOwnRoots(env)) {
-    for (const spelling of [root, realPathThroughExisting(root)]) {
-      let key: string;
-      try { key = normalizeScopePath(spelling); } catch { continue; }
-      if (!isWithinScopePath(home, key)) roots.add(key);
+function resolvedOwnLocations(
+  env: Record<string, string | undefined>,
+  home: string,
+  capture: OlympusCaptureConfig,
+): { roots: string[]; files: OwnFileRule[] } {
+  const own = olympusOwnLocations(env, capture);
+  const spellings = (path: string): string[] => {
+    const keys = new Set<string>();
+    for (const spelling of [path, realPathThroughExisting(path)]) {
+      try { keys.add(normalizeScopePath(spelling)); } catch { /* not a usable path */ }
     }
+    return [...keys];
+  };
+  const roots = new Set<string>();
+  for (const root of own.folders) {
+    for (const key of spellings(root)) if (!isWithinScopePath(home, key)) roots.add(key);
   }
-  return [...roots];
+  const files: OwnFileRule[] = [];
+  for (const rule of own.files) {
+    for (const dir of spellings(rule.dir)) files.push({ ...rule, dir });
+  }
+  return { roots: [...roots], files };
 }
 
 /** The real path of `path`, or, when it is not there yet, of its nearest existing parent with the rest appended. */
@@ -288,6 +319,45 @@ export function isInsideOwnRoot(
     if (isOwnRoot(volumeId ? scopePathFor(prefix, volumeId) : prefix, context)) return true;
     if (cut === -1) return false;
   }
+}
+
+// The own file rules by lower-cased folder, built once per list.
+const ownFileIndexes = new WeakMap<readonly OwnFileRule[], Map<string, OwnFileRule[]>>();
+
+/** Whether `scopePath` is a file Olympus writes into a folder that is not its own. */
+export function isOwnFile(
+  scopePath: string,
+  context: Pick<DefaultExclusionContext, 'ownFiles' | 'platform' | 'volumeIgnoresCase'>,
+): boolean {
+  const rules = context.ownFiles;
+  if (!rules || rules.length === 0) return false;
+  let index = ownFileIndexes.get(rules);
+  if (!index) {
+    index = new Map();
+    for (const rule of rules) {
+      const key = rule.dir.toLowerCase();
+      index.set(key, [...(index.get(key) ?? []), rule]);
+    }
+    ownFileIndexes.set(rules, index);
+  }
+  const { volumeId, path } = splitScopePath(scopePath);
+  const slash = path.lastIndexOf('/');
+  if (slash < 0 || slash === path.length - 1) return false;
+  const parent = scopePathFor(path.slice(0, slash) || '/', volumeId);
+  const named = index.get(parent.toLowerCase());
+  if (!named) return false;
+  const foldedParent = foldScopePath(parent, context);
+  const folded = foldScopePath(scopePath, context);
+  const foldedName = folded.slice(folded.lastIndexOf('/') + 1);
+  return named.some((rule) => foldScopePath(rule.dir, context) === foldedParent && rule.name.test(foldedName));
+}
+
+/** Whether `scopePath` is Olympus's own: inside one of its folders, or one of its files in a shared folder. */
+export function isOwnPath(
+  scopePath: string,
+  context: Pick<DefaultExclusionContext, 'ownRoots' | 'ownFiles' | 'platform' | 'volumeIgnoresCase'>,
+): boolean {
+  return isInsideOwnRoot(scopePath, context) || isOwnFile(scopePath, context);
 }
 
 /**

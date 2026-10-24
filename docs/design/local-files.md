@@ -138,20 +138,48 @@ The user can turn any of these back on in the picker:
 
 What Olympus itself writes is not the person's files: its stores, the
 credential references and session secrets beside them, the capture services'
-state, its caches. These folders cannot be turned on, by choosing a parent
-(home, the whole computer) or by choosing the folder by name. The list is
-`olympusOwnRoots` in `core/olympus-layout.ts`, built from the same resolvers
-the writers use, so it follows an XDG home, the Linux install receipt and
-`OLYMPUS_MEDIA_CACHE_DIR` to wherever they point. A root reached through a
-link is excluded under both spellings. The engine's folder listing marks such
-a folder "Olympus's own data", not selectable and without children, which the
-dashboard shows as its disabled controls ("Olympus cannot read this folder."),
-and a choice of one is refused when it is saved. The live watch never reports
-them.
+state, its caches, and on a Mac its app and log folders under `~/Library`.
+These cannot be turned on, by choosing a parent (home, the whole computer) or
+by choosing the folder by name. The list is `olympusOwnLocations` in
+`core/olympus-layout.ts`, built from the same resolvers the writers use, so it
+follows an XDG home, the Linux install receipt, `OLYMPUS_MEDIA_CACHE_DIR`, and
+the capture services' environment variables and plugin config
+(`worker.telegramCapture.stateDir` / `spoolDir`, `worker.whatsappCapture.stateDir`,
+read as `loadConfig` reads them) to wherever they point. A folder reached
+through a link is excluded under both spellings. The engine's folder listing
+marks such a folder "Olympus's own data", not selectable and without children,
+which the dashboard shows as its disabled controls ("Olympus cannot read this
+folder."), and a choice of one is refused when it is saved. The live watch
+never reports them.
 
-Known limits: a folder an individual file override points at (for example
-`OLYMPUS_TELEGRAM_SESSION_PATH`, the per-store `*_DB_PATH` overrides) and a
-data folder on a disk that is not the computer's own are not in the list.
+A capture folder an owner moved is Olympus's whole only when it is a dedicated
+folder. When it is the home folder, a folder above it, or a base that other
+things share (`~/.local/share`, `~/.config`, `~/.local/state`, `~/.cache`,
+`~/Library`, `~/Library/Application Support`, an `XDG_*` value, or anything
+above one of those), only what the writer puts there is Olympus's: the
+bridge's `session.db` (with `-wal`, `-shm`, `-journal`), `qr.txt` / `qr.png`,
+the pairing status and readiness receipts, the connector stores
+(`connector-store*.db`), `spool/` and `media/`; the Telegram reader's
+`state.json`, `gateway.lock`, `backfill-requests.jsonl` and readiness receipt;
+and a spool's `YYYY-MM-DD.jsonl` files. These are decided file by file, in the
+scope decision and in the watch ignore patterns; the names are read from
+`tools/whatsapp-bridge/main.go` and `scripts/telegram-telethon-reader.py`.
+
+What an earlier version indexed inside an own folder (a folder the owner had
+chosen by name) is never returned: every read scope of the source (search,
+answers, listings, status, extraction candidates) excludes the own folders
+(`fileSourceScopeReadScope`), whatever the approval says. The next pass of any
+folder also deletes those items from the index (`ownRootDeletions` in the
+connector), the way it deletes a file that is gone. A source whose only chosen
+folder is an own folder has no pass, so its items stay out of sight until a
+folder is chosen again or the source is disconnected.
+
+Known limits: the Telegram session file and the per-store `*_DB_PATH`
+overrides (individual files), the WhatsApp live-drain media and transcribe
+folders, the Telegram drain cursor, and a data folder on a disk that is not the
+computer's own are not in the list. An OpenClaw-hosted plugin config
+(`openclaw.json`) is not read, only the engine's own; set the environment
+variable in `worker.env` there.
 
 ### iCloud Drive
 
