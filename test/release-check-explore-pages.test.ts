@@ -48,6 +48,8 @@ interface State {
   reloadingSection?: boolean;
   zkOpen?: boolean;
   zkAdded?: boolean;
+  /** A sign-in button that keeps a blank tab while its address comes, as the product does, then sends it on to the provider, leaves it blank, or closes it. */
+  signInTab?: 'provider' | 'blank' | 'closes';
 }
 
 class PagesDriver implements JourneyDriver {
@@ -56,8 +58,14 @@ class PagesDriver implements JourneyDriver {
   state: State = { connections: [], secret: '', sheetOpen: false, locked: false };
   pressed: string[] = [];
   path = '/dashboard?agents';
+  /** A tab the page opens: one that has gone on to another site no longer lets the page read where it is, as in a browser. A load starts from this one again. */
+  private readonly windowOpen = () => {
+    const tab = { closed: false, gone: false, get location() { if (tab.gone) throw new Error('SecurityError: cross-origin'); return { href: 'about:blank' }; } };
+    return tab;
+  };
   constructor(initial: Partial<State> = {}) {
     Object.assign(this.state, initial);
+    (this.host as any).open = this.windowOpen;
     (this.host.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = function (this: any) {
       const hidden = this.hasAttribute?.('hidden') || this.closest?.('[hidden]');
       return hidden ? { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 } : { left: 10, top: 10, width: 120, height: 24, right: 130, bottom: 34 };
@@ -81,6 +89,7 @@ class PagesDriver implements JourneyDriver {
       ${s.silentDisabled ? '<button type="button" class="btn" disabled>Wait</button>' : ''}
       ${s.sections ? '<details><summary>Add it yourself instead</summary><button type="button" class="btn">Copy the address</button></details><details open><summary>Advanced</summary><button type="button" class="btn">Show advanced</button></details>' : ''}
       ${s.reloadingSection ? `<details data-zk-section ${s.zkOpen ? 'open' : ''}><summary>Set up zkAPI</summary><button type="button" class="btn" data-zk-add>Add zkAPI to Olympus</button>${s.zkAdded ? '<p>zkAPI added.</p>' : ''}</details>` : ''}
+      ${s.signInTab ? '<button type="button" class="btn" data-sign-in>Connect Drive</button>' : ''}
       ${s.secret ? secret : ''}
       <ul>${rows}</ul>
       ${s.noLockOnConnector && this.path.endsWith('connector') ? '' : s.locked ? '<form data-control-session-kind="unlock"><button type="submit">Unlock</button></form>' : '<form data-control-session-kind="lock"><button type="submit">Lock</button></form>'}
@@ -116,6 +125,7 @@ class PagesDriver implements JourneyDriver {
       this.state.zkOpen = true;
       delete (this.host as any).__rcConfirms;
       delete (this.host as any).__rcOpened;
+      (this.host as any).open = this.windowOpen;
       (this.host as any).__rc = undefined;
       (this.host as any).confirm = (text: string) => { this.events.console.push(`a browser dialog opened (confirm): ${text}`); return false; };
       this.render();
@@ -124,6 +134,11 @@ class PagesDriver implements JourneyDriver {
       const win = this.host as unknown as { confirm(text: string): boolean };
       if (win.confirm('This adds zkAPI. Continue?')) this.state.zkAdded = true;
       this.render();
+    });
+    on('[data-sign-in]', () => {
+      const tab = (this.host as any).open('', '_blank');
+      if (this.state.signInTab === 'provider') tab.gone = true;
+      if (this.state.signInTab === 'closes') tab.closed = true;
     });
     on('form[data-control-session-kind="lock"] button', () => { this.pressed.push('lock'); this.state.locked = true; this.render(); });
     on('button[data-copy-target]', () => { this.pressed.push('copy'); });
@@ -149,6 +164,7 @@ class PagesDriver implements JourneyDriver {
     (this.host as unknown as { sessionStorage: Storage }).sessionStorage.clear();
     delete (this.host as any).__rcConfirms;
     delete (this.host as any).__rcOpened;
+    (this.host as any).open = this.windowOpen;
     this.host.document.body.innerHTML = '';
     (this.host as any).__rc = undefined;
     this.render();
@@ -278,6 +294,15 @@ describe('exploring the other pages', () => {
     expect(disabled.failed.some((step) => /disabled and says nothing about why/.test(step.findings.join(' ')))).toBe(true);
     const field = await run(new PagesDriver({ unnamedField: true }), [PAGES[0]!]);
     expect(field.failed.some((step) => /has no name/.test(step.findings.join(' ')))).toBe(true);
+  });
+
+  test('a tab kept blank for a sign-in is judged by where it went: on to the provider or closed again passes, left blank fails', async () => {
+    const step = async (signInTab: NonNullable<State['signInTab']>) => (await run(new PagesDriver({ signInTab }), [PAGES[0]!])).steps.find((entry) => entry.name === 'Connect Drive')!;
+    expect(await step('provider')).toMatchObject({ ok: true, findings: [] });
+    expect(await step('closes')).toMatchObject({ ok: true, findings: [] });
+    const blank = await step('blank');
+    expect(blank.ok).toBe(false);
+    expect(blank.findings).toContain('a window was opened and left blank');
   });
 
   test('when the last page has no Lock, Lock is pressed once at the end, back on a page that has it', async () => {

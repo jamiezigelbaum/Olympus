@@ -22,6 +22,7 @@ import type { InventoryControl } from './explore-inventory.ts';
 import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
 import { pagesChecks, type PagesResult } from './explore-pages.ts';
+import { BLANK_WINDOW } from './probe.ts';
 
 export interface PanelControl {
   key: string;
@@ -579,7 +580,11 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       for (const message of consoleErrors) findings.push(`console error: ${message.slice(0, 200)}`);
       for (const request of requests) findings.push(`failed request: ${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`);
       // Windows.
-      for (const url of openedWindows) if (!OWN_HOSTS.test(url)) findings.push(`a window was opened to a page that is not Olympus's own: ${url.slice(0, 80)}`);
+      for (const url of openedWindows) {
+        // A kept tab that closed again is judged by the window count (a flash); one that went on to another site is not Olympus's own page.
+        if (url === BLANK_WINDOW.left) findings.push('a window was opened and left blank');
+        else if (url !== BLANK_WINDOW.closed && !OWN_HOSTS.test(url)) findings.push(`a window was opened to a page that is not Olympus's own: ${url.slice(0, 80)}`);
+      }
       if (openedWindows.length > 1) findings.push(`one press opened ${openedWindows.length} windows`);
       if (pagesMax > pagesBefore && pagesAfter <= pagesBefore) findings.push('a window flashed up and vanished');
       const ok = findings.length === 0 && outcomes.every((outcome) => outcome.ok);
