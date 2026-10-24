@@ -26,6 +26,12 @@ import {
 } from '../connector-store/capture-spool-secrets.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import {
+  captureFreshness,
+  captureFreshnessCounts,
+  captureStaleThresholdSeconds,
+  type CaptureFreshness,
+} from '../connector-store/capture-freshness.ts';
+import {
   WHATSAPP_LIVE_CONNECTOR_ID,
   createWhatsAppLiveSourceConnector,
   readWhatsAppLiveSpoolStatus,
@@ -59,7 +65,6 @@ export const WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = 'whatsapp_capture_freshness_
 export const WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = 'whatsapp_spool_secret_redaction_failed';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const WHATSAPP_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:whatsapp';
-const DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS = 64_800;
 
 export interface WhatsAppConnectorStoreSyncReceipt {
   status: 'progress' | 'idle';
@@ -84,11 +89,7 @@ export interface WhatsAppConnectorStoreSyncReceipt {
      */
     spool_records_redacted: number;
   } & TieredLaneReceiptCounts;
-  capture: {
-    status: 'fresh' | 'stale' | 'unavailable';
-    threshold_seconds: number;
-    age_seconds?: number;
-  };
+  capture: CaptureFreshness;
   warnings?: string[];
   policy: {
     counts_only: true;
@@ -360,7 +361,7 @@ function whatsappSyncReceipt(
   redacted?: CaptureSpoolRedactionResult,
   redactionFailed = false,
 ): WhatsAppConnectorStoreSyncReceipt {
-  const capture = whatsappCaptureFreshness(spool.newestMessageTimestamp, nowMs, staleThresholdSeconds);
+  const capture = captureFreshness(spool.newestMessageTimestamp, nowMs, staleThresholdSeconds);
   const warnings = [
     ...(spool.malformedLines > 0 ? [WHATSAPP_MALFORMED_SPOOL_WARNING] : []),
     ...(spool.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : []),
@@ -381,11 +382,7 @@ function whatsappSyncReceipt(
       chunks_indexed: run.chunksIndexed,
       malformed_spool_lines: spool.malformedLines,
       unresolved_reaction_targets: spool.unresolvedReactionTargets,
-      capture_fresh: capture.status === 'fresh' ? 1 : 0,
-      capture_stale: capture.status === 'stale' ? 1 : 0,
-      capture_unavailable: capture.status === 'unavailable' ? 1 : 0,
-      capture_stale_threshold_seconds: capture.threshold_seconds,
-      ...(capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {}),
+      ...captureFreshnessCounts(capture),
       spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered,
     },
@@ -405,30 +402,9 @@ function whatsappCaptureStaleThresholdSeconds(
   configured: number | undefined,
   env: Record<string, string | undefined>,
 ): number {
-  const raw = configured ?? (
-    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS?.trim()
-      ? Number(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS)
-      : DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS
+  return captureStaleThresholdSeconds(
+    configured,
+    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_STALE_THRESHOLD_SECONDS,
+    'WhatsApp',
   );
-  if (!Number.isSafeInteger(raw) || raw <= 0) {
-    throw new Error('WhatsApp capture stale threshold must be a positive integer.');
-  }
-  return raw;
-}
-
-function whatsappCaptureFreshness(
-  newestTimestamp: string | undefined,
-  nowMs: number,
-  thresholdSeconds: number,
-): WhatsAppConnectorStoreSyncReceipt['capture'] {
-  const newestMs = newestTimestamp ? Date.parse(newestTimestamp) : Number.NaN;
-  if (!Number.isFinite(nowMs) || !Number.isFinite(newestMs)) {
-    return { status: 'unavailable', threshold_seconds: thresholdSeconds };
-  }
-  const ageSeconds = Math.max(0, Math.floor((nowMs - newestMs) / 1_000));
-  return {
-    status: ageSeconds > thresholdSeconds ? 'stale' : 'fresh',
-    threshold_seconds: thresholdSeconds,
-    age_seconds: ageSeconds,
-  };
 }

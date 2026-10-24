@@ -213,6 +213,7 @@ import {
   DASHBOARD_SUPPORTED_SOURCES,
   buildSourceDashboardViewModel,
   dashboardManualSyncOutcome,
+  type DashboardCaptureRuntime,
   type DashboardManualSync,
   type DashboardApiKeySource,
   type DashboardConnectSource,
@@ -561,6 +562,12 @@ export interface EmailSourceWorkerOptions {
      */
     privateAnswers?: Pick<LocalPrivateAnswers, 'destinations' | 'waiting' | 'waitingCount' | 'handle'>;
     stopMessagingCapture?: (source: 'telegram' | 'whatsapp') => Promise<void>;
+    /**
+     * How live capture runs on this computer, by source id: the supervisor's
+     * last report and what the grant approved (counts only). Absent for a
+     * source another process owns capture for; the cards then say nothing of it.
+     */
+    captureRuntime?: () => Readonly<Record<string, DashboardCaptureRuntime>>;
     triggerSourceSync?: (request: DashboardSourceSyncRequest) => Promise<unknown>;
     /**
      * The sources `triggerSourceSync` actually serves.
@@ -1485,6 +1492,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
                 sourceDashboard.registryPath ?? defaultHandleRegistryPath(),
               ),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
+              ...(sourceDashboard.captureRuntime ? { captureRuntime: sourceDashboard.captureRuntime() } : {}),
               ...(options.unreadableFileNames ? { unreadableFileNames: options.unreadableFileNames } : {}),
               ...(options.unreadableRecheck ? { unreadableRecheck: options.unreadableRecheck } : {}),
               ...(credentialHealth ? { credentialHealth } : {}),

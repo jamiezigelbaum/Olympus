@@ -9,6 +9,7 @@
  */
 import type {
   DashboardAnswerLaneCard,
+  DashboardCaptureSupervisorReason,
   DashboardConnectionState,
   DashboardImportAttention,
   DashboardSourceCard,
@@ -235,6 +236,10 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   if (readinessStatus === 'Needs you' || queueStatus === 'Needs you') {
     return { status: 'Needs you', mappedUnknown: false };
   }
+  // A live feed that has gone quiet or whose helper is not running is the
+  // owner's whatever the readiness label says: another problem's label must
+  // not be what decides whether this one is seen.
+  if (dashboardCaptureProblem(source) !== undefined) return { status: 'Needs you', mappedUnknown: false };
   // A folder source that is connected but has no approved scope has read
   // nothing and will read nothing until the owner chooses folders. Its
   // connection state is `connected`, which alone reads Fresh — a green dot and
@@ -242,6 +247,11 @@ export function dashboardStatusResolution(input: DashboardStatusInput): Dashboar
   // It is waiting, exactly as a source before its first sync is; the Choose
   // folders banner carries the ask.
   if (dashboardScopePending(source)) return { status: 'Waiting', mappedUnknown: false };
+  // A pairing that has not captured its first message is waiting, whatever
+  // older messages the index still holds from before it.
+  if (connectionStatus === 'Fresh' && source.freshness.capture?.state === 'awaiting') {
+    return { status: 'Waiting', mappedUnknown: false };
+  }
   return { status: connectionStatus, mappedUnknown: false };
 }
 
@@ -417,19 +427,37 @@ export function dashboardAttentionLine(
   source: DashboardSourceCard,
   options?: DashboardVocabularyOptions,
 ): string {
+  const { reason, capture } = dashboardAttentionParts(source, options);
+  return [reason, capture].filter((part): part is string => !!part).join(' · ');
+}
+
+/**
+ * The attention line in its two independent halves: `reason`, the source's
+ * own problem (empty when it has none besides capture), and `capture`, the
+ * live feed's problem when there is one. A row states both in its one line;
+ * the Needs you list gives each its own item and its own route, because the
+ * route for a late refresh (Sync now) is not the route for a feed that stopped
+ * (open the source on the computer). Neither hides the other.
+ */
+export function dashboardAttentionParts(
+  source: DashboardSourceCard,
+  options?: DashboardVocabularyOptions,
+): { reason: string; capture?: string } {
+  const capture = dashboardCaptureAttentionReason(source);
+  const withCapture = (reason: string): { reason: string; capture?: string } => (capture ? { reason, capture } : { reason });
   const degradation = dashboardDegradationForSource(source, options?.degradedCredentials);
   if (degradation) {
     const clause = degradationClause(degradation);
-    return clause ? `can't sign in · ${clause}` : `can't sign in`;
+    return withCapture(clause ? `can't sign in · ${clause}` : `can't sign in`);
   }
   // The provider's refusal, translated. It replaces every connection-state
   // line below, because "not connected" over an attempt the provider
   // explicitly rejected explains nothing the owner can act on. The provider's
   // own words stay in the sheet's How to fix disclosure.
-  if (source.connection.provider_refusal) return dashboardProviderRefusalLine(source, options);
+  if (source.connection.provider_refusal) return withCapture(dashboardProviderRefusalLine(source, options));
   switch (source.connection.state) {
     case 'reauth_required':
-      return DASHBOARD_SIGNED_OUT;
+      return withCapture(DASHBOARD_SIGNED_OUT);
     case 'awaiting_consent': {
       // The label is the provider's own name off the card, so the sentence
       // points at the tab the owner is actually looking at.
@@ -437,28 +465,29 @@ export function dashboardAttentionLine(
       // what to do, never which tab to look in (owner rule, 2026-10-02).
       const base = `finish signing in to ${source.label}`;
       const minutes = source.connection.pending?.expires_in_minutes;
-      return minutes !== undefined && minutes > 0
+      return withCapture(minutes !== undefined && minutes > 0
         ? `${base} · link expires in ${Math.max(1, Math.ceil(minutes))} min`
-        : base;
+        : base);
     }
     case 'needs_setup':
     case 'not_connected':
-      return source.connection.label;
+      return withCapture(source.connection.label);
     default:
       break;
   }
   // What an import source's imports need is one Needs you item each
   // (dashboardImportAttentionSentence); the row keeps its own line.
-  if (source.connection.imports_attention?.length) return source.connection.label;
-  if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return DASHBOARD_FOLDER_NEEDS_PERMISSION;
-  if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return DASHBOARD_FOLDER_NEEDS_HELPER;
-  if (source.schedule?.degraded_reason === 'scope_root_unreadable') return DASHBOARD_FOLDER_UNREADABLE;
-  if (source.schedule?.degraded_reason === 'scope_root_missing' || (source.schedule?.missing_folders?.length ?? 0) > 0) return DASHBOARD_MISSING_FOLDER;
+  if (source.connection.imports_attention?.length) return withCapture(source.connection.label);
+  if (source.schedule?.degraded_reason === 'scope_root_permission_needed') return withCapture(DASHBOARD_FOLDER_NEEDS_PERMISSION);
+  if (source.schedule?.degraded_reason === 'scope_root_helper_needed') return withCapture(DASHBOARD_FOLDER_NEEDS_HELPER);
+  if (source.schedule?.degraded_reason === 'scope_root_unreadable') return withCapture(DASHBOARD_FOLDER_UNREADABLE);
+  if (source.schedule?.degraded_reason === 'scope_root_missing' || (source.schedule?.missing_folders?.length ?? 0) > 0) return withCapture(DASHBOARD_MISSING_FOLDER);
   // "Paused" is said only of a real pause — Olympus parked the lane on a budget
   // or a rate limit (owner ruling, 2026-10-08). A broken file, a stale sync or
-  // a failing task is stated as itself.
-  if (source.answer_readiness.state === 'needs_attention') {
-    return dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source);
+  // a failing task is stated as itself. A readiness that only names the live
+  // feed has its words in `capture`; it is not a pause.
+  if (source.answer_readiness.state === 'needs_attention' && !dashboardReadinessNamesCapture(source)) {
+    return withCapture(dashboardOperatorPaused(source) ? `paused — ${pausedReason(source)}` : pausedReason(source));
   }
   // Owner ruling, 2026-08-24: NO ERROR COUNTS ANYWHERE. This line used to end
   // "3 items need attention · 1 task retrying", which is a number about queue
@@ -466,9 +495,9 @@ export function dashboardAttentionLine(
   // nothing with either figure. The row still says which of the two states it
   // is in, because the row exists and has to explain itself; it just stops
   // quantifying a fault nobody can act on by the size of it.
-  if (source.queue_health.needs_attention > 0) return 'some items could not be read';
-  if ((source.queue_health.retrying_tasks ?? 0) > 0) return 'a sync is retrying on its own';
-  return '';
+  if (source.queue_health.needs_attention > 0) return withCapture('some items could not be read');
+  if ((source.queue_health.retrying_tasks ?? 0) > 0) return withCapture('a sync is retrying on its own');
+  return withCapture('');
 }
 
 /** The row word for a connection the owner has to sign back into. */
@@ -519,6 +548,157 @@ const READINESS_REASONS: Readonly<Record<string, string>> = {
 
 /** The view model's catch-all readiness label, which names no cause. */
 const GENERIC_READINESS_ATTENTION_LABEL = 'Needs attention before answers';
+
+/**
+ * Live capture: WhatsApp and Telegram messages arrive through a helper that
+ * holds a linked session. A pull of what it captured can succeed on schedule
+ * while the helper has captured nothing for days, so "synced a minute ago"
+ * and "no new messages in days" are different facts and the card says both.
+ *
+ * The readiness labels source-dashboard.ts raises for a live feed; the
+ * sentence is built from the card's capture fields, not from the label (see
+ * dashboardCaptureProblem), so another problem owning the label hides nothing.
+ */
+export const DASHBOARD_CAPTURE_STALE_LABEL = 'Live capture is stale';
+export const DASHBOARD_CAPTURE_BLOCKED_LABEL = 'Live capture cannot start';
+
+export const DASHBOARD_CAPTURE_COPY = {
+  /** The label of the route to the source's panel on the computer. */
+  fixLabel: 'Check capture',
+  /** The newest captured message is older than the threshold. */
+  stale: (age: string) => `capture stale: newest message ${age}`,
+  /** Nothing was captured since the pairing, for longer than the threshold. */
+  staleNoAge: 'capture stale: nothing captured since linking',
+  /** A pull succeeded, and nothing it holds says when a message was captured. */
+  unavailable: 'no live messages captured yet',
+  /** Linked a moment ago and no message has arrived under this pairing yet. */
+  awaiting: 'waiting for the first live message',
+  /** The same, over messages kept from an earlier pairing: their age stays visible. */
+  awaitingWithHistory: (age: string) => `waiting for the first live message · newest kept message ${age}`,
+  /** The helper's own state, by reason: every fault names what is wrong and none names a chat. */
+  helper: {
+    grant_invalid: 'capture cannot start: its approval cannot be read',
+    session_missing: 'capture cannot start: its linked session is missing',
+    secret_missing: 'capture cannot start: its saved sign-in key is missing',
+    start_failed: 'capture cannot start: its helper would not start',
+    helper_exited: 'capture keeps stopping: its helper exits soon after it starts',
+    grant_missing: 'capture stopped: its approval is missing',
+    handle_unavailable: 'capture stopped: its sign-in is no longer available',
+  } satisfies Record<Exclude<DashboardCaptureSupervisorReason, 'restarting'>, string>,
+  /** A helper fault with no reason the page knows. */
+  helperUnknown: 'capture cannot start',
+  running: 'capture running',
+  stopped: 'capture stopped',
+  /** The helper exited and the next check will start it again: not a fault, and not running either. */
+  restarting: 'capture restarting',
+  wholeAccount: 'whole account',
+  chats: (count: number) => `${dashboardCount(count)} ${count === 1 ? 'chat' : 'chats'}`,
+  nextAction: {
+    stale: (label: string) => `Open ${label} on this computer to check the link and capture. Syncing again will not bring in messages that were never captured.`,
+    blocked: (label: string) => `Open ${label} on this computer and link it again so live capture can start.`,
+    awaiting: (label: string) => `Keep ${label} linked. The first live message since linking will end this wait; if none arrives within the day, this row says so.`,
+  },
+} as const;
+
+/** The connection states a live feed can be judged in: it is linked and has had a pull. */
+const CAPTURE_JUDGED_CONNECTION_STATES: ReadonlySet<DashboardConnectionState> = new Set<DashboardConnectionState>([
+  'connected',
+  'waiting_for_first_sync',
+  'syncing',
+  'synced',
+]);
+
+/**
+ * A stop that nobody asked for. A helper stopped for no reason (the secure-
+ * local posture forbids capture) is a choice and stays a quiet clause; one
+ * stopped because its approval or its sign-in is gone, on a source that still
+ * reads connected, is a feed that is not being captured.
+ */
+const CAPTURE_UNEXPECTED_STOP_REASONS: ReadonlySet<string> = new Set(['grant_missing', 'handle_unavailable']);
+
+export interface DashboardCaptureProblem {
+  /** `helper`: nothing is capturing. `stale`: the helper may run, but the feed went quiet. */
+  cause: 'helper' | 'stale';
+  /** The supervisor's reason, for `helper`. */
+  reason?: DashboardCaptureSupervisorReason;
+}
+
+/**
+ * Whether the live feed of a connected source is a problem, from the card's
+ * capture fields alone, never from the readiness label: another problem
+ * (a late refresh, a queue) may own the label and must not hide this one. A
+ * helper that cannot run outranks a quiet feed, being its likely cause.
+ */
+export function dashboardCaptureProblem(source: DashboardSourceCard): DashboardCaptureProblem | undefined {
+  if (!CAPTURE_JUDGED_CONNECTION_STATES.has(source.connection.state)) return undefined;
+  const supervisor = source.capture?.supervisor;
+  if (supervisor?.state === 'blocked'
+    || (supervisor?.state === 'stopped' && supervisor.reason !== undefined && CAPTURE_UNEXPECTED_STOP_REASONS.has(supervisor.reason))) {
+    return { cause: 'helper', ...(supervisor.reason ? { reason: supervisor.reason } : {}) };
+  }
+  if (source.freshness.capture?.state === 'stale') return { cause: 'stale' };
+  return undefined;
+}
+
+/** True when the card's readiness label is one of the two that only name the live feed. */
+export function dashboardReadinessNamesCapture(source: DashboardSourceCard): boolean {
+  return source.answer_readiness.label === DASHBOARD_CAPTURE_STALE_LABEL
+    || source.answer_readiness.label === DASHBOARD_CAPTURE_BLOCKED_LABEL;
+}
+
+/**
+ * The reason half of a Needs you row for a live feed that is stale or whose
+ * helper is not running, or undefined when the feed is no problem. "capture
+ * stale: newest message 3d ago", with an intentionally stopped helper named
+ * beside it.
+ */
+export function dashboardCaptureAttentionReason(source: DashboardSourceCard): string | undefined {
+  const problem = dashboardCaptureProblem(source);
+  if (!problem) return undefined;
+  if (problem.cause === 'helper') {
+    return problem.reason === undefined || problem.reason === 'restarting'
+      ? DASHBOARD_CAPTURE_COPY.helperUnknown
+      : DASHBOARD_CAPTURE_COPY.helper[problem.reason];
+  }
+  const age = source.freshness.capture?.age_seconds;
+  const relative = typeof age === 'number' ? dashboardRelativeFromMs(age * 1_000) : '';
+  const base = relative ? DASHBOARD_CAPTURE_COPY.stale(relative) : DASHBOARD_CAPTURE_COPY.staleNoAge;
+  return source.capture?.supervisor?.state === 'stopped' ? `${base} · ${dashboardStoppedClause(source)}` : base;
+}
+
+/** A stopped helper in words: restarting when it only exited and will be started again, else stopped. */
+function dashboardStoppedClause(source: DashboardSourceCard): string {
+  return source.capture?.supervisor?.reason === 'restarting' ? DASHBOARD_CAPTURE_COPY.restarting : DASHBOARD_CAPTURE_COPY.stopped;
+}
+
+/**
+ * A pairing that has not captured its first message yet, in words, with the
+ * age of the newest message kept from before it when there is one. Empty when
+ * the feed is not awaiting.
+ */
+export function dashboardCaptureAwaitingClause(source: DashboardSourceCard): string {
+  const capture = source.freshness.capture;
+  if (capture?.state !== 'awaiting') return '';
+  const relative = typeof capture.age_seconds === 'number' ? dashboardRelativeFromMs(capture.age_seconds * 1_000) : '';
+  return relative ? DASHBOARD_CAPTURE_COPY.awaitingWithHistory(relative) : DASHBOARD_CAPTURE_COPY.awaiting;
+}
+
+/**
+ * What a quiet row says about live capture beside its sync time: nothing
+ * captured yet, whether the helper runs, and what it was approved to read.
+ * Empty for a source that reports none of it.
+ */
+export function dashboardCaptureClause(source: DashboardSourceCard): string {
+  const parts: string[] = [];
+  if (source.freshness.capture?.state === 'unavailable') parts.push(DASHBOARD_CAPTURE_COPY.unavailable);
+  const supervisor = source.capture?.supervisor?.state;
+  if (supervisor === 'running') parts.push(DASHBOARD_CAPTURE_COPY.running);
+  else if (supervisor === 'stopped') parts.push(dashboardStoppedClause(source));
+  const scope = source.capture?.scope;
+  if (scope?.kind === 'whole_account') parts.push(DASHBOARD_CAPTURE_COPY.wholeAccount);
+  else if (scope?.kind === 'chats' && scope.count > 0) parts.push(DASHBOARD_CAPTURE_COPY.chats(scope.count));
+  return parts.join(' · ');
+}
 
 function lowerFirst(value: string): string {
   return value.length > 0 ? value[0]!.toLowerCase() + value.slice(1) : value;
@@ -1006,16 +1186,18 @@ function freshLine(source: DashboardSourceCard, now: Date): string {
   // The owner's own Sync now press, while it is the latest word, says what it
   // found in place of the bare sync time.
   const manual = dashboardManualSyncLine(source, now);
-  if (manual) return unreadable ? `${manual} · ${unreadable}` : manual;
+  const capture = dashboardCaptureClause(source);
+  const tail = [unreadable, capture].filter((part): part is string => !!part).join(' · ');
+  if (manual) return tail ? `${manual} · ${tail}` : manual;
   const hours = source.freshness.hours;
-  if (typeof hours !== 'number' || !Number.isFinite(hours)) return unreadable ?? '';
+  if (typeof hours !== 'number' || !Number.isFinite(hours)) return tail;
   const relative = dashboardRelativeFromHours(hours);
-  if (!relative) return unreadable ?? '';
+  if (!relative) return tail;
   // A lane Olympus parked is calm, not idle by accident. Saying so keeps this
   // line from implying the sync is still running, and matches the detail
   // page's paused sentence for the same marker.
   const synced = dashboardOperatorPaused(source) ? `synced ${relative} · sync paused` : `synced ${relative}`;
-  return unreadable ? `${synced} · ${unreadable}` : synced;
+  return tail ? `${synced} · ${tail}` : synced;
 }
 
 /**
@@ -1323,6 +1505,11 @@ function workingLine(source: DashboardSourceCard): string {
 }
 
 function waitingLine(source: DashboardSourceCard): string {
+  const awaiting = dashboardCaptureAwaitingClause(source);
+  if (awaiting) {
+    const clause = dashboardCaptureClause(source);
+    return clause ? `${awaiting} · ${clause}` : awaiting;
+  }
   if (dashboardScopePending(source)) {
     return source.scope_selection?.kind === 'mail' ? 'choose which mail to include' : 'choose which folders to include';
   }

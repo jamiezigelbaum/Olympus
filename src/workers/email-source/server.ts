@@ -18,7 +18,11 @@ import {
   MessagingCaptureSupervisor,
   NativeMessagingCaptureOwnerError,
   defaultMessagingCaptureGrantPath,
+  effectiveMessagingCaptureStatus,
+  readMessagingCaptureGrantFacts,
   revokeMessagingCaptureGrant,
+  type MessagingCaptureLiveness,
+  type MessagingCaptureStatus,
 } from '../../core/messaging-capture.ts';
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
@@ -378,7 +382,7 @@ import {
   createWhatsAppConnectorStoreSyncHandler,
   type WhatsAppConnectorStoreSyncHandler,
 } from '../whatsapp/index.ts';
-import { SqliteSourceDashboardHistory, type SourceDashboardViewModel } from '../source-dashboard.ts';
+import { SqliteSourceDashboardHistory, type DashboardCaptureRuntime, type SourceDashboardViewModel } from '../source-dashboard.ts';
 import type { DashboardPanelTools } from './dashboard-panel-tools.ts';
 import { readEmbeddingRuntime } from '../dashboard/embedding-runtime.ts';
 import {
@@ -453,7 +457,8 @@ const DROPBOX_SOURCE_ANSWER_SELF_HEAL_RETRY_AFTER_MS = 5_000;
 const DROPBOX_SOURCE_ANSWER_SELF_HEAL_PRIORITY = 1_000_000;
 
 type MessagingCaptureSource = 'telegram' | 'whatsapp';
-type WorkerMessagingCaptureSupervisor = Pick<MessagingCaptureSupervisor, 'reconcile' | 'stop'>;
+type WorkerMessagingCaptureSupervisor = Pick<MessagingCaptureSupervisor, 'reconcile' | 'stop'>
+  & Partial<Pick<MessagingCaptureSupervisor, 'liveness'>>;
 
 export function createWorkerMessagingCaptureOwnership(options: {
   env?: Record<string, string | undefined>;
@@ -505,6 +510,82 @@ export function createWorkerMessagingCaptureOwnership(options: {
       revokeGrant(defaultMessagingCaptureGrantPath(source, options.registryPath));
     },
   };
+}
+
+/**
+ * One pass over the sources this worker runs capture for. Each source is
+ * reconciled on its own: one that throws (no Python, a missing executable) is
+ * recorded as a failure for the dashboard and does not stop the others, and a
+ * failure clears when a later reconcile succeeds. `stopAll` is the posture
+ * that forbids capture altogether (secure-local routes off): every helper is
+ * stopped and reported stopped, as before.
+ */
+export async function reconcileWorkerCaptures(input: {
+  captures: Partial<Record<MessagingCaptureSource, WorkerMessagingCaptureSupervisor>>;
+  statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
+  failures: Partial<Record<MessagingCaptureSource, true>>;
+  stopAll?: boolean;
+  warn?: (message: string) => void;
+}): Promise<void> {
+  const warn = input.warn ?? ((message: string) => console.warn(message));
+  const entries = Object.entries(input.captures) as Array<[MessagingCaptureSource, WorkerMessagingCaptureSupervisor]>;
+  if (input.stopAll) {
+    await Promise.all(entries.map(async ([source, capture]) => {
+      await capture.stop();
+      input.statuses[source] = { source, state: 'stopped' };
+      // An earlier failure to start is moot once capture is stopped on purpose.
+      delete input.failures[source];
+    }));
+    return;
+  }
+  await Promise.all(entries.map(async ([source, capture]) => {
+    try {
+      input.statuses[source] = await capture.reconcile();
+      delete input.failures[source];
+    } catch {
+      // Not reconciled: the last status is no longer a fact about the helper.
+      input.failures[source] = true;
+      warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.');
+    }
+  }));
+}
+
+/**
+ * The dashboard's view of live capture on this computer, by source id: the
+ * supervisor's report (corrected by whether its helper is alive and whether
+ * the last reconcile failed), what the grant approved as a count, and when it
+ * was granted. Only for the sources this worker runs capture for (`sources`):
+ * where the native service owns capture there is no supervisor here and no
+ * claim is made. A source whose grant cannot be read is reported without it,
+ * never as an error: this runs while the dashboard is being built.
+ */
+export function workerCaptureRuntime(input: {
+  sources: readonly MessagingCaptureSource[];
+  statuses: Partial<Record<MessagingCaptureSource, MessagingCaptureStatus>>;
+  registryPath: string | undefined;
+  liveness?: Partial<Record<MessagingCaptureSource, MessagingCaptureLiveness | undefined>>;
+  failures?: Partial<Record<MessagingCaptureSource, boolean>>;
+}): Record<string, DashboardCaptureRuntime> {
+  const runtime: Record<string, DashboardCaptureRuntime> = {};
+  for (const source of input.sources) {
+    try {
+      const status = effectiveMessagingCaptureStatus({
+        status: input.statuses[source],
+        liveness: input.liveness?.[source],
+        reconcileFailed: input.failures?.[source] === true,
+      });
+      const facts = readMessagingCaptureGrantFacts(source, defaultMessagingCaptureGrantPath(source, input.registryPath));
+      if (!status && !facts.scope && !facts.pairedAt) continue;
+      runtime[source === 'telegram' ? 'telegram.messages' : 'whatsapp.personal.messages'] = {
+        ...(status ? { supervisor: { state: status.state, ...(status.reason ? { reason: status.reason } : {}) } } : {}),
+        ...(facts.scope ? { scope: facts.scope } : {}),
+        ...(facts.pairedAt ? { paired_at: facts.pairedAt } : {}),
+      };
+    } catch {
+      // One source's damaged record never takes the dashboard down with it.
+    }
+  }
+  return runtime;
 }
 
 /**
@@ -2070,17 +2151,32 @@ export async function main(): Promise<void> {
   const captures = captureOwnership.captures;
   let captureReconcileRunning = false;
   let capturesClosed = false;
+  // What each supervisor last reported, for the dashboard. Absent for a source
+  // whose capture the native service owns: this worker runs nothing there.
+  const captureStatuses: Partial<Record<'telegram' | 'whatsapp', MessagingCaptureStatus>> = {};
+  // Sources whose last reconcile threw: their old status is no fact about the helper.
+  const captureFailures: Partial<Record<'telegram' | 'whatsapp', true>> = {};
+  const captureEntries = () => Object.entries(captures) as Array<['telegram' | 'whatsapp', WorkerMessagingCaptureSupervisor]>;
   const reconcileCaptures = async () => {
     if (capturesClosed || captureReconcileRunning) return;
     captureReconcileRunning = true;
-    if (sovereigntyEngine.config.routes.secure_local?.mode === 'disabled' || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap') {
-      try { await Promise.all(Object.values(captures).map((capture) => capture.stop())); } finally { captureReconcileRunning = false; }
-      return;
-    }
-    try { await Promise.all(Object.values(captures).map((capture) => capture.reconcile())); }
-    catch { console.warn('An Olympus messaging capture process needs attention. Check pairing and its approved scope.'); }
-    finally { captureReconcileRunning = false; }
+    try {
+      await reconcileWorkerCaptures({
+        captures,
+        statuses: captureStatuses,
+        failures: captureFailures,
+        stopAll: sovereigntyEngine.config.routes.secure_local?.mode === 'disabled'
+          || sovereigntyEngine.config.retrieval.trustDomains.secure_local?.secureHandling === 'metadata_only_gap',
+      });
+    } finally { captureReconcileRunning = false; }
   };
+  const dashboardCaptureRuntime = () => workerCaptureRuntime({
+    sources: captureEntries().map(([source]) => source),
+    statuses: captureStatuses,
+    registryPath: connectedHandleRegistryPath,
+    liveness: Object.fromEntries(captureEntries().map(([source, capture]) => [source, capture.liveness?.()])),
+    failures: captureFailures,
+  });
   const stopMessagingCapture = async (source: 'telegram' | 'whatsapp') => {
     await captureOwnership.stopForUnpair(source);
   };
@@ -4937,6 +5033,7 @@ export async function main(): Promise<void> {
               saveStandard: (update) => dashboardConsult.saveStandard(update),
             },
             stopMessagingCapture,
+            captureRuntime: dashboardCaptureRuntime,
             // Delete indexed data: the same supervised restart a model-key
             // change uses. `canRestart` has no side effect, so the route can
             // check it before deleting anything.

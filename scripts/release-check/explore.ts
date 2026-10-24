@@ -666,7 +666,7 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
     checks.push({
       id: 'explore.sources', title: 'Every source the machine drives reached the states it has',
       status: 'fail',
-      detail: failures.slice(0, 6).map((failure) => `${failure.source} (${failure.seed}): ${failure.detail.slice(0, 200)}`).join(' | '),
+      detail: failures.slice(0, 6).map((failure) => `${failure.source} (${failure.seed}): ${failure.detail.slice(0, 1200)}`).join(' | '),
     });
   }
   const s = result.summary;
