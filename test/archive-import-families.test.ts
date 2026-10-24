@@ -117,6 +117,14 @@ describe('the Archives card holds every family\'s stores', () => {
     expect(card.provider).toBe(ARCHIVE_NEUTRAL_PROVIDER);
   });
 
+  test('a Reflect notes archive\'s store set is counted on the card, not set aside as unassigned', () => {
+    const view = buildDashboardPreviewView('archives-notes-reflect');
+    const card = view.sources.find((source) => source.source_id === 'archive.imports')!;
+    expect(card.coverage.indexed_items).toBe(1_208);
+    expect(view.unassigned_corpora).toMatchObject({ corpus_count: 0, entries: [] });
+    expect(card.provider).toBe(ARCHIVE_NEUTRAL_PROVIDER);
+  });
+
   test('a mail archive is on the card as before', () => {
     const view = buildDashboardPreviewView('archives-imported');
     const card = view.sources.find((source) => source.source_id === 'archive.imports')!;

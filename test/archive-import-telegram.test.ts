@@ -654,13 +654,13 @@ describe('telegram connector: time', () => {
     expect(findings).toEqual([]);
   });
 
-  test('releases before 4.0 write only a zone-less date: read in this zone, counted as one assumption', async () => {
+  test('releases before 4.0 write only a zone-less date: read in this zone, counted once as the time zone assumed', async () => {
     const messages = [0, 1, 2, 3].map((index) => telegramText(index, `Old note ${index}.`, { dateOnly: true }));
     const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages }))));
     const { connector, findings } = connectorFor(file.dir, file.name, { pageSize: 2 });
     const { items, cursors } = await listAll(connector);
     expect(items.map((item) => item.metadata.authoredAt)).toEqual([0, 1, 2, 3].map((index) => new Date(2015, 0, 5, 10 + index, 0, 0).toISOString()));
-    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 1 });
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1 });
     // A restart after the first page does not say it a second time.
     const resumed = connectorFor(file.dir, file.name, { pageSize: 2 });
     const rest = await listAll(resumed.connector, cursors[0]);

@@ -439,8 +439,8 @@ describe('whatsapp connector over text files', () => {
     expect(JSON.stringify(first.identity)).not.toContain('Harbour');
     expect(first.identity.providerItemId).not.toBe(second.identity.providerItemId);
     // The zone is said once for the archive, at its start; this file's dates say day first, so no other assumption.
-    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 1 });
-    expect(findings[0]).toMatchObject({ kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap', fileIndex: 0, offset: 0 });
+    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1 });
+    expect(findings[0]).toMatchObject({ kind: ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, class: 'gap', fileIndex: 0, offset: 0 });
   });
 
   test('every style reads to the same times', async () => {
@@ -462,8 +462,8 @@ describe('whatsapp connector over text files', () => {
     const { connector, findings } = connectorFor(dir, ['_chat.txt']);
     const { items } = await listAll(connector);
     expect(items.map((item) => item.metadata.authoredAt)).toEqual([localIso('2026-04-03T10:00:00'), localIso('2026-05-04T10:00:00')]);
-    // The zone, and the order.
-    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 2 });
+    // The zone, and the order, each said as itself.
+    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1, [ARCHIVE_COMMON_FINDINGS.dateOrderAssumed]: 1 });
   });
 
   test('the date order is per file: a month-first file and a day-first file in one archive', async () => {
@@ -556,7 +556,7 @@ describe('whatsapp connector over text files', () => {
     expect(again.items.map((item) => item.identity.providerItemId)).toEqual(items.map((item) => item.identity.providerItemId));
   });
 
-  test('a header typed or pasted into a message still starts a message, is counted as an assumption, and does not decide the date order', async () => {
+  test('a header typed or pasted into a message still starts a message, is counted as a line taken for the start of one, and does not decide the date order', async () => {
     const dir = workDir();
     put(dir, '_chat.txt', [
       '03/04/2026, 10:00 - Sam Example: opening line',
@@ -574,18 +574,18 @@ describe('whatsapp connector over text files', () => {
     // The headers that say which part is the day outvote the pasted one: day first, not "the first to say".
     expect(items[0]!.metadata.authoredAt).toBe(localIso('2026-04-03T10:00:00'));
     expect(items[2]!.metadata.authoredAt).toBe(localIso('2026-04-20T11:00:00'));
-    // The zone, once; and the two lines that cannot belong (dated before the one above, written in another style), counted.
-    expect(kinds(findings, 'gap')[ARCHIVE_COMMON_FINDINGS.assumption]).toBe(3);
+    // The zone, once; and the two lines that cannot belong (dated before the one above, written in another style), counted as what they are.
+    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1, [ARCHIVE_COMMON_FINDINGS.itemStartAssumed]: 2 });
     // Nothing else about the pasted lines is hidden: each carries where it was read from.
     expect(items.every((item) => item.metadata.sourceFile === '_chat.txt')).toBe(true);
   });
 
-  test('a clean export counts no such assumption: only the zone, said once', async () => {
+  test('a clean export counts no line taken for a message start or date order: only the zone, said once', async () => {
     const dir = workDir();
     put(dir, '_chat.txt', chatText(syntheticChat(30), { style: 'ios-24-dmy' }));
     const { connector, findings } = connectorFor(dir, ['_chat.txt']);
     await listAll(connector);
-    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 1 });
+    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1 });
   });
 
   test('each item says which export file, and which member of it, it was read from', async () => {
@@ -1087,7 +1087,7 @@ describe('whatsapp connector over zips', () => {
     const { items } = await listAll(connector);
     expect(items).toHaveLength(5);
     expect(items.every((item) => item.metadata.chat === 'Harbour crew')).toBe(true);
-    expect(findings.map((finding) => finding.kind)).toEqual([ARCHIVE_COMMON_FINDINGS.assumption]);
+    expect(findings.map((finding) => finding.kind)).toEqual([ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]);
   });
 
   test('a zip of several chats: each member is its own chat, named for itself', async () => {
@@ -1289,7 +1289,7 @@ describe('whatsapp archive on the shared spine', () => {
     const record = f.runtime.state.get(archiveId)!;
     expect(record.status).toBe('imported');
     expect(record.findings.skipped).toEqual({ [WHATSAPP_FINDINGS.systemMessage]: 1 });
-    expect(record.findings.gaps).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 1, [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 });
+    expect(record.findings.gaps).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1, [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 });
     expect(record.date_range).toEqual({ earliest: localIso('2026-02-14T09:01:00'), latest: localIso('2026-03-15T09:21:00') });
 
     const rows = rowsOf(f.env, archiveId);
@@ -1359,7 +1359,11 @@ describe('whatsapp archive on the shared spine', () => {
     expect(rowsOf(f.env, archiveId)).toHaveLength(30 + Math.ceil(30 / 7));
     expect(record.findings.skipped).toEqual({ [WHATSAPP_FINDINGS.systemMessage]: 6 });
     // The zone, and the one message dated before the message above it (the fixture's days wrap round at the 19th message).
-    expect(record.findings.gaps).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 2, [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 5 });
+    expect(record.findings.gaps).toEqual({
+      [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1,
+      [ARCHIVE_COMMON_FINDINGS.itemStartAssumed]: 1,
+      [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 5,
+    });
   });
 
   test('a crash after a page of notices was counted, and a restart whose pages are longer, count every notice once', async () => {

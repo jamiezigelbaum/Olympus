@@ -327,7 +327,7 @@ function whatsappSmall(token: string): BuiltArchive {
       messages: 5,
       earliest: '2024-03-14',
       latest: '2024-03-19',
-      gaps: [{ kind: 'media_not_imported', count: 1 }, { kind: 'assumption', count: 1 }],
+      gaps: [{ kind: 'media_not_imported', count: 1 }, { kind: 'time_zone_assumed', count: 1 }],
       leftOut: [{ kind: 'system_message', count: 1 }],
     },
   };

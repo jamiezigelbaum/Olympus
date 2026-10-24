@@ -77,6 +77,7 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Removal | Per archive, not per source. Lifecycle delete today removes a whole source's store (`data-lifecycle.ts:657`) and Reflect has one store for the whole family (`data-lifecycle.ts:404`), so removing one import that way would erase the others. Remove cancels and fences that archive's running work, deletes its items, chunks, vectors and derived data (including private answers built from it, `data-lifecycle.ts:691`), and never touches the user's file. |
 | Operation | One operation, `archive_import` (start, status, remove), on the public tool lists, CLI, and MCP. The dashboard calls the same core functions as the operation. An agent cannot import a path just by naming it: start needs a path the user approved, through the dashboard picker or a confirmation the user answers, the same approval the scope picker gives other sources. A prompt-injected or accidental tool call can at most ask. |
 | Dashboard | An "Archives" source showing each import: format, file name, item count, date range, progress, gaps (unreadable messages, skipped attachments), and Remove. Every problem has a route to exactly what failed. |
+| Findings | What a connector did not read, left out or took as given is reported as findings, each of a kind with one plain sentence in the dashboard's words (a one and a many form), and each counted once by its position however a restart cuts its pages. An assumption is never one generic finding: each thing taken as given is its own kind, so the sentence says exactly what and, where it is known, the value taken. The kinds every format can use (`ARCHIVE_COMMON_FINDINGS`): `time_zone_assumed` (times carry no zone: read in this computer's), `date_order_assumed` (dates do not say which part is the day: read day first), `item_start_assumed` (a line shaped like the start of an item was taken as one), `zip_overlap_unchecked` (a zip too large to check its members for shared bytes: taken not to share). A format's own kinds live with its connector. `assumption` is kept only as the fallback sentence for an archive recorded before the split; nothing reports it now. |
 
 ### Mail (mbox), first
 
@@ -321,13 +322,13 @@ Both are in scope. They come after mail because they reuse the same spine
   vote when it cannot be read as on or after it (up to two in a row; more are
   taken as the file's own dates), so a pasted older date after an ambiguous
   `01/02/2026` cannot turn the file month first. When nothing says, or the
-  votes tie, it is read day first and reported as an `assumption`. The time is read in this computer's zone and
-  reported once per archive. Dates with a weekday or month name, non-Latin
+  votes tie, it is read day first and reported as `date_order_assumed`. The time is read in this computer's zone and
+  reported once per archive as `time_zone_assumed`. Dates with a weekday or month name, non-Latin
   digits and non-UTF-8 files are not read.
 - **Pasted headers.** A line inside a message body that looks like a header
   starts a new message, in its own style, because the format cannot say
   otherwise. Each one in a style other than the file's, or dated before the
-  header before it, is counted in an `assumption` finding, so the person is
+  header before it, is counted as `item_start_assumed`, so the person is
   told the import took it as a message.
 - **Items and identity.** One item per message; the chat is the thread, named
   from the export's file name (the zip's, or its folder's, for a `_chat.txt`).
@@ -387,7 +388,7 @@ Both are in scope. They come after mail because they reuse the same spine
     place, poll, to-do list, invoice or game (the words of a poll or a list
     can be formatted, so they are read as text, not as strings). `authoredAt`
     is `date_unixtime` (releases 4.0 and later), else the zone-less `date` read in this computer's zone and
-    counted as one `assumption`.
+    counted once as `time_zone_assumed`.
   - *Control characters.* Telegram writes them as `\xNN`, which is not JSON
     and stops a strict reader at the first one. A byte filter
     (`telegram/json-repair.ts`) turns each into four spaces of the same

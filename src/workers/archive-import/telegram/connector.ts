@@ -19,7 +19,7 @@
  *   unique across users, groups and channels. Text = the message's words with
  *   links kept, then a line for each picture, file, contact, place, poll,
  *   to-do list, invoice or game it carries. `authoredAt` = `date_unixtime`, else the zone-less `date` read in
- *   this computer's zone (one assumption, counted once).
+ *   this computer's zone (`time_zone_assumed`, counted once).
  * - Left out, counted: service messages (joins, calls, pins) and messages with
  *   nothing to read are `skipped`; media files are named in the text and
  *   counted as `media_not_imported` (the files are never opened), a file the
@@ -425,7 +425,7 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
                 for (const finding of outcome.findings) report(finding.kind, 'gap', event.start, finding.count);
                 if (outcome.assumedZone && !assumedZone) {
                   assumedZone = true;
-                  report(ARCHIVE_COMMON_FINDINGS.assumption, 'gap', event.start);
+                  report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, 'gap', event.start);
                 }
               }
             }
