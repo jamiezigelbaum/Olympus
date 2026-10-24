@@ -199,8 +199,9 @@ Both are in scope. They come after mail because they reuse the same spine
     in the file (`chats:3`), because a chat's own `id` repeats across users,
     groups and channels. The text is the words with links kept (`label
     (address)` when they differ), then a line per picture, file, contact,
-    place, poll or game. `authoredAt` is `date_unixtime` (releases 4.0 and
-    later), else the zone-less `date` read in this computer's zone and
+    place, poll, to-do list, invoice or game (the words of a poll or a list
+    can be formatted, so they are read as text, not as strings). `authoredAt`
+    is `date_unixtime` (releases 4.0 and later), else the zone-less `date` read in this computer's zone and
     counted as one `assumption`.
   - *Control characters.* Telegram writes them as `\xNN`, which is not JSON
     and stops a strict reader at the first one. A byte filter
@@ -209,16 +210,23 @@ Both are in scope. They come after mail because they reuse the same spine
   - *Left out, counted.* Service messages (joins, calls, pins) and messages
     with nothing to read are `skipped`; media files are named in the text
     and counted as `media_not_imported` (never opened), and so is a file
-    the export itself left out, marked "not in the export"; each part of the
+    the export itself left out, marked "not in the export" and keeping the
+    name the export gave it, so a search for the name finds the message. A
+    message that carries what the reader does not know (a giveaway, a rich
+    message, paid media, a message the writer marks `unsupported`, any object
+    the reader has no rule for) is `message_content_unsupported`, a gap and
+    not "nothing to read"; its words, if it has any, are kept. Each part of the
     account export that is not messages (personal information, contacts,
     sessions, other data and so on) is one `section_not_imported`, said once
     and never stored. A message over 1,000,000 characters keeps its start
     (`item_truncated`); one over 16 MiB is `message_too_large`; a file cut
     short imports what came before and counts `file_damaged`.
-  - *Resume.* The cursor is the JSON reader's point after a message, bound to
-    the manifest; any other cursor stops the import. The reader returns every
-    message it finished before a mid-file JSON error, so damage costs only
-    the messages from the damage on.
+  - *Resume.* The cursor is the JSON reader's point after a message or after
+    an entry of a part that is not messages, bound to the manifest; any other
+    cursor stops the import. A pass counts the bytes of those parts against
+    its budget too, and a pass that starts inside a part does not say the
+    part again. The reader returns every message it finished before a
+    mid-file JSON error, so damage costs only the messages from the damage on.
   - *HTML form.* `messages.html` is recognised and turned away with plain
     advice to export again as JSON (`unsupportedVariants` on the format).
   - *Limits of the finding shape.* A finding has no name or path field, so

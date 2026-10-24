@@ -865,7 +865,7 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       ],
     });
   } else if (state === 'archives-chat') {
-    // An invented Telegram Desktop export: messages kept, service messages left out, pictures and files counted not read.
+    // An invented Telegram Desktop export: messages kept, service messages left out, pictures and files counted not read, a kind of content not read said so.
     archives.push({
       ...takeout,
       id: '6c2f8a41-9d3e-4b5a-a7c1-2e4f6a8b0c3d',
@@ -881,6 +881,7 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       gaps: [
         { kind: 'media_not_imported', count: 2_318 },
         { kind: 'section_not_imported', count: 6 },
+        { kind: 'message_content_unsupported', count: 12 },
         { kind: 'item_truncated', count: 1 },
         { kind: 'assumption', count: 1 },
         { kind: 'file_damaged', count: 1 },

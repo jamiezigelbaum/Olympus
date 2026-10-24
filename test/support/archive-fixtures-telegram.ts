@@ -55,7 +55,7 @@ function base(index: number, type: 'message' | 'service', options: Common): Tele
   };
 }
 
-type TextPart = string | { type: string; text: string; href?: string };
+export type TextPart = string | { type: string; text: string; href?: string };
 
 function entities(parts: readonly TextPart[]): Array<{ type: string; text: string; href?: string }> {
   return parts.map((part) => (typeof part === 'string' ? { type: 'plain', text: part } : part));
@@ -175,6 +175,42 @@ export function telegramPoll(index: number, options: Common = {}): TelegramFixtu
       ],
     },
     ...options.extra,
+  };
+}
+
+/** A to-do list: its title and tasks (the writer calls the tasks `answers`), and no ordinary text. */
+export function telegramTodo(
+  index: number,
+  title: string | readonly TextPart[],
+  tasks: ReadonlyArray<string | readonly TextPart[]>,
+  options: Common = {},
+): TelegramFixtureMessage {
+  return {
+    ...base(index, 'message', options),
+    from: options.from ?? 'Sam Example',
+    from_id: options.fromId ?? 'user1001',
+    text: '',
+    text_entities: [],
+    todo_list: {
+      title,
+      others_can_append: false,
+      others_can_complete: true,
+      answers: tasks.map((task, position) => ({ text: task, id: position + 1 })),
+    },
+    ...options.extra,
+  };
+}
+
+/** A kind of content the importer does not read: `extra` is the part of the message the writer adds for it. */
+export function telegramUnreadableKind(index: number, extra: Record<string, unknown>, options: Common & { text?: string } = {}): TelegramFixtureMessage {
+  const words = options.text ?? '';
+  return {
+    ...base(index, 'message', options),
+    from: options.from ?? 'Sam Example',
+    from_id: options.fromId ?? 'user1001',
+    text: words,
+    text_entities: entities(words === '' ? [] : [words]),
+    ...extra,
   };
 }
 

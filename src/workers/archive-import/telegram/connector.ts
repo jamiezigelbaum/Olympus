@@ -17,21 +17,26 @@
  * - Items: one per message. Thread = the chat, keyed by its place in the file
  *   (section and index, stable for these files): a chat's bare `id` is not
  *   unique across users, groups and channels. Text = the message's words with
- *   links kept, then a line for each picture, file, contact, place or poll it
- *   carries. `authoredAt` = `date_unixtime`, else the zone-less `date` read in
+ *   links kept, then a line for each picture, file, contact, place, poll,
+ *   to-do list, invoice or game it carries. `authoredAt` = `date_unixtime`, else the zone-less `date` read in
  *   this computer's zone (one assumption, counted once).
  * - Left out, counted: service messages (joins, calls, pins) and messages with
  *   nothing to read are `skipped`; media files are named in the text and
- *   counted as `media_not_imported` (the files are never opened); each part of
- *   the account export that is not messages is one `section_not_imported`.
+ *   counted as `media_not_imported` (the files are never opened), a file the
+ *   export itself left out too; each part of the account export that is not
+ *   messages is one `section_not_imported`; a message that carries a kind of
+ *   content this does not read (a giveaway, a rich message, paid media) is
+ *   `message_content_unsupported`, never "nothing to read".
  * - Bounds: item text over TELEGRAM_MAX_ITEM_TEXT_CHARS is cut and counted
  *   (`item_truncated`); a message too large to build is `message_too_large`.
  *   A file that is not whole JSON (cut short by an interrupted export) imports
  *   what came before and counts the file as damaged.
  * - Resume point: `tg1:<manifest>:<assumed>:<json resume point>`, the JSON
- *   reader's point after a message (section, chat index, message ordinal, byte
- *   offset) in a file of exactly this manifest. Any other manifest, or a point
- *   that is not after a message, stops the import.
+ *   reader's point after a message, or after an entry of a part that is not
+ *   messages (section, chat index, message ordinal, byte offset) in a file of
+ *   exactly this manifest. Any other manifest, or a point that is not after one
+ *   of these, stops the import. The byte budget of a pass counts the parts that
+ *   are not messages too, so a long one does not run in a single pass.
  * - Live Telegram capture is a different provider (`telegram`) in different
  *   stores; nothing here reads or writes it.
  */
@@ -75,6 +80,7 @@ export const TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 export const TELEGRAM_FINDINGS = {
   tooLarge: 'message_too_large',
   unreadable: 'message_unreadable',
+  unsupported: 'message_content_unsupported',
   serviceMessage: 'service_message',
   withoutText: 'message_without_text',
 } as const;
@@ -149,10 +155,17 @@ function doneCursor(input: ArchiveConnectorInput): string {
   return `${TELEGRAM_CURSOR_PREFIX}${manifestTag(input)}:done`;
 }
 
+const SECTION_ROOTS: ReadonlySet<string> = new Set(SECTION_PATHS.map((section) => section.path[0]!));
+/** Parts of the account export whose entries are in a `list` of the part. */
+const LISTED_SECTIONS: ReadonlySet<string> = new Set(SECTION_PATHS.filter((section) => section.path.length === 2).map((section) => section.path[0]!));
+
+function isIndex(value: unknown): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 /** Whether a resume point is the one after a message: `messages` of a single chat, or of a chat in `chats` or `left_chats`. */
 function afterMessage(point: JsonResumePoint): boolean {
   const levels = point.levels;
-  const isIndex = (value: unknown): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
   if (levels.length === 2) {
     return levels[0]!.kind === 'object' && levels[0]!.pointer === 'messages'
       && levels[1]!.kind === 'array' && isIndex(levels[1]!.pointer);
@@ -167,6 +180,28 @@ function afterMessage(point: JsonResumePoint): boolean {
   return false;
 }
 
+/**
+ * The part of the account export that is not messages a resume point is in,
+ * after one of its entries: `personal_information` and the like hold their
+ * entries directly, `contacts` and the like in a `list`.
+ */
+function sectionOfResume(point: JsonResumePoint): string | undefined {
+  const levels = point.levels;
+  const root = levels[0];
+  if (!root || root.kind !== 'object' || typeof root.pointer !== 'string' || !SECTION_ROOTS.has(root.pointer)) return undefined;
+  if (LISTED_SECTIONS.has(root.pointer)) {
+    return levels.length === 3 && levels[1]!.kind === 'object' && levels[1]!.pointer === 'list'
+      && levels[2]!.kind === 'array' && isIndex(levels[2]!.pointer)
+      ? root.pointer
+      : undefined;
+  }
+  if (levels.length !== 2) return undefined;
+  const entry = levels[1]!;
+  return (entry.kind === 'object' && typeof entry.pointer === 'string') || (entry.kind === 'array' && isIndex(entry.pointer))
+    ? root.pointer
+    : undefined;
+}
+
 function parseCursor(input: ArchiveConnectorInput, cursor: string | undefined): ParsedCursor {
   if (!cursor) return { resume: undefined, assumedZone: false, done: false };
   const prefix = `${TELEGRAM_CURSOR_PREFIX}${manifestTag(input)}:`;
@@ -177,7 +212,7 @@ function parseCursor(input: ArchiveConnectorInput, cursor: string | undefined): 
   if (rest === 'done') return { resume: undefined, assumedZone: false, done: true };
   const flag = rest.slice(0, 2);
   const resume = flag === '0:' || flag === '1:' ? parseJsonResume(rest.slice(2)) : undefined;
-  if (!resume || !afterMessage(resume) || resume.offset > input.files[0]!.version.size) {
+  if (!resume || !(afterMessage(resume) || sectionOfResume(resume)) || resume.offset > input.files[0]!.version.size) {
     throw new ArchiveImportStoppedError('resume_point_invalid', 'The resume point is not a position in this archive.');
   }
   return { resume, assumedZone: flag === '1:', done: false };
@@ -208,7 +243,7 @@ function chatTitle(name: string | undefined, type: string | undefined, place: Ch
 type MessageOutcome =
   | { kind: 'item'; item: RawItem; findings: Array<{ kind: string; count?: number }>; assumedZone: boolean }
   | { kind: 'skipped'; reason: string }
-  | { kind: 'unreadable' };
+  | { kind: 'gap'; reason: string };
 
 function messageOutcome(
   input: ArchiveConnectorInput,
@@ -216,13 +251,19 @@ function messageOutcome(
   fetchedAt: string,
 ): MessageOutcome {
   const message = event.value;
-  if (typeof message !== 'object' || message === null || Array.isArray(message)) return { kind: 'unreadable' };
+  if (typeof message !== 'object' || message === null || Array.isArray(message)) return { kind: 'gap', reason: TELEGRAM_FINDINGS.unreadable };
   const record = message as Record<string, unknown>;
   if (record.type === 'service') return { kind: 'skipped', reason: TELEGRAM_FINDINGS.serviceMessage };
   const content = telegramMessageContent(record);
-  if (!content.hasContent) return { kind: 'skipped', reason: TELEGRAM_FINDINGS.withoutText };
+  if (!content.hasContent) {
+    // Nothing read is not nothing there: a kind of content this reader does not know is counted as such.
+    return content.unsupported
+      ? { kind: 'gap', reason: TELEGRAM_FINDINGS.unsupported }
+      : { kind: 'skipped', reason: TELEGRAM_FINDINGS.withoutText };
+  }
 
   const findings: Array<{ kind: string; count?: number }> = [];
+  if (content.unsupported) findings.push({ kind: TELEGRAM_FINDINGS.unsupported });
   let body = content.text;
   if (body.length > TELEGRAM_MAX_ITEM_TEXT_CHARS) {
     body = cutText(body, TELEGRAM_MAX_ITEM_TEXT_CHARS);
@@ -334,7 +375,8 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
             throw archiveStopFromReaderError(error, file.relPath);
           }
           const fetchedAt = new Date().toISOString();
-          const reportedSections = new Set<string>();
+          // A pass that starts inside a part of the account export has already said it.
+          const reportedSections = new Set<string>(start.resume ? [sectionOfResume(start.resume)].filter((name): name is string => name !== undefined) : []);
           let assumedZone = start.assumedZone;
           let page: RawItem[] = [];
           // The resume point after the last message read, and whether a message was read since a page went out.
@@ -370,14 +412,12 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
                 reportedSections.add(section);
                 report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
               }
-              continue;
-            }
-            if (event.kind === 'oversize') {
+            } else if (event.kind === 'oversize') {
               report(TELEGRAM_FINDINGS.tooLarge, 'gap', event.start);
             } else {
               const outcome = messageOutcome(input, event, fetchedAt);
-              if (outcome.kind === 'unreadable') {
-                report(TELEGRAM_FINDINGS.unreadable, 'gap', event.start);
+              if (outcome.kind === 'gap') {
+                report(outcome.reason, 'gap', event.start);
               } else if (outcome.kind === 'skipped') {
                 report(outcome.reason, 'skipped', event.start);
               } else {

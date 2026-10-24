@@ -15,6 +15,12 @@
  *   sentence in parentheses in place of the path.
  * - `type` is `service` for joins, calls, pins and the like; such a message
  *   has `action` and `actor` instead of `from` and `text`.
+ * - A poll, a to-do list, an invoice, a contact and a place are objects whose
+ *   words are read (the words of a poll or a list can be formatted, so they
+ *   are text in the `text` form). A giveaway, a rich message, paid media and
+ *   anything the writer adds later are objects or amounts this reader does not
+ *   know how to read: a message that carries one is said to, never counted as
+ *   empty.
  */
 
 export interface TelegramMessageContent {
@@ -22,14 +28,16 @@ export interface TelegramMessageContent {
   text: string;
   /** Media files the message names that were not imported: those in the export (never read) and those the export left out. */
   mediaFiles: number;
-  /** The kinds and names of those in the export, for search context. */
+  /** The kinds and names of those the message names, for search context (a file with no name has none). */
   attachments: string[];
   /** Whether there is anything to keep. */
   hasContent: boolean;
+  /** The message carries something this reader cannot read (a giveaway, a rich message, paid media, a kind the writer added later). */
+  unsupported: boolean;
 }
 
 const MAX_LINE_CHARS = 500;
-const MAX_POLL_ANSWERS = 20;
+const MAX_LIST_ENTRIES = 50;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -107,11 +115,13 @@ function mediaLine(message: Record<string, unknown>, content: TelegramMessageCon
     const kind = typeof message.media_type === 'string' ? MEDIA_LABELS[message.media_type] : undefined;
     const emoji = kind === 'Sticker' ? text(message.sticker_emoji) : undefined;
     const label = emoji ? `${kind} ${emoji}` : kind ?? 'File';
+    const name = text(message.file_name);
     if (fileLeftOut(file)) {
-      lines.push(`[${label} (not in the export)]`);
+      // The export still names the file it left out; the name is what a search for it finds.
+      lines.push(name ? `[${label}: ${cut(name)} (not in the export)]` : `[${label} (not in the export)]`);
       content.mediaFiles += 1;
+      if (name) content.attachments.push(`${label}: ${cut(name)}`);
     } else {
-      const name = text(message.file_name);
       const track = [text(message.performer), text(message.title)].filter(Boolean).join(' - ');
       const duration = seconds(message.duration_seconds);
       const detail = [name && name !== file ? name : undefined, track || undefined, cut(file), duration].filter(Boolean).join(', ');
@@ -137,29 +147,67 @@ function factLines(message: Record<string, unknown>, lines: string[]): void {
   }
   const poll = message.poll;
   if (isRecord(poll)) {
-    const question = text(poll.question);
+    const question = flattenTelegramText(poll.question).trim();
     if (question) lines.push(`Poll: ${cut(question)}`);
     if (Array.isArray(poll.answers)) {
-      for (const answer of poll.answers.slice(0, MAX_POLL_ANSWERS)) {
+      for (const answer of poll.answers.slice(0, MAX_LIST_ENTRIES)) {
         if (!isRecord(answer)) continue;
-        const label = text(answer.text);
+        const label = flattenTelegramText(answer.text).trim();
         if (!label) continue;
         const voters = typeof answer.voters === 'number' ? ` (${answer.voters} ${answer.voters === 1 ? 'vote' : 'votes'})` : '';
         lines.push(`- ${cut(label)}${voters}`);
       }
     }
   }
-  const game = text(message.game_title);
-  if (game) lines.push(`Game: ${cut(game)}`);
+  // A to-do list is a title and its tasks (the writer calls them `answers`); who ticked what is not exported.
+  const todo = message.todo_list;
+  if (isRecord(todo)) {
+    const title = flattenTelegramText(todo.title).trim();
+    const tasks: string[] = [];
+    if (Array.isArray(todo.answers)) {
+      for (const task of todo.answers.slice(0, MAX_LIST_ENTRIES)) {
+        const label = isRecord(task) ? flattenTelegramText(task.text).trim() : '';
+        if (label) tasks.push(`- ${cut(label)}`);
+      }
+    }
+    if (title || tasks.length > 0) lines.push(title ? `To-do list: ${cut(title)}` : 'To-do list:', ...tasks);
+  }
+  const invoice = message.invoice_information;
+  if (isRecord(invoice)) {
+    const detail = [text(invoice.title), text(invoice.description)].filter(Boolean).map((part) => cut(part!)).join(', ');
+    if (detail) lines.push(`Invoice: ${detail}`);
+  }
+  const game = [text(message.game_title), text(message.game_description)].filter(Boolean).map((part) => cut(part!)).join(', ');
+  if (game) lines.push(`Game: ${game}`);
+}
+
+/** Objects of a message whose words are read, or that hold no words of their own. */
+const READ_OBJECTS: ReadonlySet<string> = new Set([
+  'contact_information', 'location_information', 'poll', 'todo_list', 'invoice_information',
+  'text', 'text_entities', 'reactions', 'inline_bot_buttons',
+]);
+
+/**
+ * Whether the message carries something this reader cannot read: a message
+ * the writer marked `unsupported`, paid media, and any object it does not
+ * know (a giveaway, a rich message, a kind added after this was written).
+ */
+function carriesUnsupported(message: Record<string, unknown>): boolean {
+  if (message.type === 'unsupported' || message.paid_stars_amount !== undefined) return true;
+  for (const [key, value] of Object.entries(message)) {
+    if (typeof value === 'object' && value !== null && !READ_OBJECTS.has(key)) return true;
+  }
+  return false;
 }
 
 /**
  * What a (non-service) message keeps: its words, then a line for each
- * picture or file it names (marked as not imported), contact, place, poll or
- * game it carries. Empty when it has none of these.
+ * picture or file it names (marked as not imported), contact, place, poll,
+ * to-do list, invoice or game it carries. Empty when it has none of these;
+ * `unsupported` says when that is because it carries what is not read.
  */
 export function telegramMessageContent(message: Record<string, unknown>): TelegramMessageContent {
-  const content: TelegramMessageContent = { text: '', mediaFiles: 0, attachments: [], hasContent: false };
+  const content: TelegramMessageContent = { text: '', mediaFiles: 0, attachments: [], hasContent: false, unsupported: carriesUnsupported(message) };
   let words = flattenTelegramText(message.text);
   if (words.trim() === '') words = flattenTelegramText(message.text_entities);
   const lines: string[] = [];

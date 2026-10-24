@@ -373,13 +373,14 @@ describe('each archive under the Archives row', () => {
     expect(lines).toEqual([
       fill(A.gaps.media_not_imported.many, { n: '2,318' }),
       fill(A.gaps.section_not_imported.many, { n: '6' }),
+      fill(A.gaps.message_content_unsupported.many, { n: '12' }),
       A.gaps.item_truncated.one,
       A.gaps.assumption.one,
       A.gaps.file_damaged.one,
       fill(A.gaps.service_message.many, { n: '3,071' }),
       fill(A.gaps.message_without_text.many, { n: '54' }),
     ]);
-    for (const kind of ['service_message', 'message_without_text'] as const) {
+    for (const kind of ['service_message', 'message_without_text', 'message_content_unsupported'] as const) {
       expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
       expect(A.gaps[kind].many).toContain('{n}');
     }

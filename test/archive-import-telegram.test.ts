@@ -58,6 +58,8 @@ import {
   telegramSticker,
   telegramText,
   telegramTexts,
+  telegramTodo,
+  telegramUnreadableKind,
   telegramVoice,
   writeTelegramExport,
   writeTelegramHtmlExport,
@@ -338,10 +340,13 @@ describe('telegram message text', () => {
     const sticker = telegramMessageContent(telegramSticker(3));
     expect(sticker.text).toBe('[Sticker \u{1F600}: stickers/sticker_3.webp (not imported)]');
 
-    // A file the export left out is said so; it is a file the import did not bring in, with no name to keep.
+    // A file the export left out is said so and counted, and keeps the name the export gave it: a search for the name finds the message.
     const missing = telegramMessageContent(telegramFileLeftOut(4));
-    expect(missing.text).toBe('[File (not in the export)]');
-    expect(missing).toMatchObject({ mediaFiles: 1, hasContent: true, attachments: [] });
+    expect(missing.text).toBe('[File: synthetic-report.pdf (not in the export)]');
+    expect(missing).toMatchObject({ mediaFiles: 1, hasContent: true, attachments: ['File: synthetic-report.pdf'] });
+    // Without a name there is nothing to keep but the marker.
+    const unnamed = telegramMessageContent({ file: '(File exceeds maximum size. Change data exporting settings to download.)', media_type: 'voice_message' });
+    expect(unnamed).toMatchObject({ text: '[Voice message (not in the export)]', mediaFiles: 1, attachments: [] });
     expect(telegramMessageContent({ photo: '(File not included. Change data exporting settings to download.)' })).toMatchObject({
       text: '[Photo (not in the export)]',
       mediaFiles: 1,
@@ -356,6 +361,73 @@ describe('telegram message text', () => {
     expect(telegramMessageContent(telegramContact(1)).text).toBe('Contact: Robin Placeholder, +1 555 0100');
     expect(telegramMessageContent(telegramLocation(2)).text).toBe('Place: Synthetic Pier\nLocation: 51.5, -0.12');
     expect(telegramMessageContent(telegramPoll(3)).text).toBe('Poll: Which harbour at dawn?\n- North quay (2 votes)\n- South quay (1 vote)');
+  });
+
+  test('a poll keeps its question and answers whether they are plain, formatted or mixed', () => {
+    const poll = (question: unknown, answers: unknown[]) => telegramMessageContent({
+      text: '',
+      poll: { question, closed: false, total_voters: 3, answers: answers.map((text, index) => ({ text, voters: index + 1, chosen: false })) },
+    });
+    // Plain: the form the writer uses when nothing in the words is formatted.
+    expect(poll('Which harbour?', ['North', 'South']).text).toBe('Poll: Which harbour?\n- North (1 vote)\n- South (2 votes)');
+    // Formatted: an array of strings and typed parts, in the question and in each answer.
+    expect(poll(['Which ', { type: 'bold', text: 'harbour' }, '?'], [[{ type: 'italic', text: 'North' }], ['Sou', { type: 'bold', text: 'th' }]]).text)
+      .toBe('Poll: Which harbour?\n- North (1 vote)\n- South (2 votes)');
+    // Mixed: a formatted question over plain answers, and plain over formatted, and a link keeps its address.
+    expect(poll([{ type: 'bold', text: 'Which harbour?' }], ['North', 'South']).text).toBe('Poll: Which harbour?\n- North (1 vote)\n- South (2 votes)');
+    expect(poll('Which harbour?', [[{ type: 'bold', text: 'North' }], 'South', [{ type: 'text_link', text: 'the map', href: 'https://harbour.example.invalid/map' }]]).text)
+      .toBe('Poll: Which harbour?\n- North (1 vote)\n- South (2 votes)\n- the map (https://harbour.example.invalid/map) (3 votes)');
+    // A poll whose words are all formatted is a poll, not "nothing to read".
+    const allFormatted = poll([{ type: 'bold', text: 'Which harbour?' }], [[{ type: 'bold', text: 'North' }], [{ type: 'bold', text: 'South' }]]);
+    expect(allFormatted.hasContent).toBe(true);
+    expect(allFormatted.unsupported).toBe(false);
+    expect(poll([], [[], '']).hasContent).toBe(false);
+  });
+
+  test('a to-do list keeps its title and tasks, plain or formatted, and is never empty or unreadable', () => {
+    const plain = telegramMessageContent(telegramTodo(1, 'Before sailing', ['Check the tide table', 'Fill the water tank']));
+    expect(plain.text).toBe('To-do list: Before sailing\n- Check the tide table\n- Fill the water tank');
+    expect(plain).toMatchObject({ hasContent: true, unsupported: false, mediaFiles: 0 });
+    const formatted = telegramMessageContent(telegramTodo(2, [{ type: 'bold', text: 'Before ' }, 'sailing'], [
+      [{ type: 'italic', text: 'Check' }, ' the tide table'],
+      '',
+      [{ type: 'text_link', text: 'the harbour office', href: 'https://harbour.example.invalid/office' }],
+    ]));
+    expect(formatted.text).toBe('To-do list: Before sailing\n- Check the tide table\n- the harbour office (https://harbour.example.invalid/office)');
+    // Tasks without a title, a title without tasks, and the words of the message above them.
+    expect(telegramMessageContent(telegramTodo(3, '', ['Only task'])).text).toBe('To-do list:\n- Only task');
+    expect(telegramMessageContent(telegramTodo(4, 'No tasks yet', [])).text).toBe('To-do list: No tasks yet');
+    expect(telegramMessageContent({ ...telegramTodo(5, 'Packing', ['Rope']), text: 'Our list' }).text).toBe('Our list\nTo-do list: Packing\n- Rope');
+    expect(telegramMessageContent(telegramTodo(6, '', [])).hasContent).toBe(false);
+  });
+
+  test('an invoice and a game keep their words', () => {
+    expect(telegramMessageContent({ invoice_information: { title: 'Harbour pass', description: 'Three nights', amount: 1500, currency: 'USD' } }).text)
+      .toBe('Invoice: Harbour pass, Three nights');
+    expect(telegramMessageContent({ game_title: 'Knots', game_description: 'Tie them fast' }).text).toBe('Game: Knots, Tie them fast');
+    expect(telegramMessageContent({ game_title: 'Knots' }).text).toBe('Game: Knots');
+  });
+
+  test('a kind of content that is not read is said so, and never taken for an empty message', () => {
+    const unreadable = (extra: Record<string, unknown>, words = '') => telegramMessageContent(telegramUnreadableKind(1, extra, { text: words }));
+    for (const extra of [
+      { rich_message: { rtl: false, part: false, blocks: [{ type: 'paragraph', text: { type: 'plain', text: 'Words in a block' } }] } },
+      { giveaway_information: { quantity: 5, months: 3, channels: ['1001'], countries: [], additional_prize: '', stars: 0 } },
+      { giveaway_results: { channel: '1001', winners: [], winners_count: 0 } },
+      { paid_stars_amount: 50 },
+      { type: 'unsupported' },
+      { some_kind_added_later: { anything: true } },
+    ]) {
+      const content = unreadable(extra);
+      expect({ extra, hasContent: content.hasContent, unsupported: content.unsupported }).toEqual({ extra, hasContent: false, unsupported: true });
+    }
+    // With words beside it, the words are kept and the rest is still said.
+    expect(unreadable({ paid_stars_amount: 50 }, 'Look at this')).toMatchObject({ text: 'Look at this', hasContent: true, unsupported: true });
+    // What the reader knows, or that holds no words, is not unreadable; an empty message is just empty.
+    expect(unreadable({ reactions: [{ type: 'emoji', count: 1, emoji: 'x' }], inline_bot_buttons: [[{ type: 'url', text: 'Open' }]] }))
+      .toMatchObject({ hasContent: false, unsupported: false });
+    expect(unreadable({ location_information: null })).toMatchObject({ hasContent: false, unsupported: false });
+    expect(telegramMessageContent(telegramText(1, ''))).toMatchObject({ hasContent: false, unsupported: false });
   });
 
   test('a message with nothing to keep has no content', () => {
@@ -615,6 +687,49 @@ describe('telegram connector: what is left out', () => {
     expect(counts(findings, 'gap')).toEqual({});
   });
 
+  test('a kind of content that is not read is a gap, never "nothing to read"; the words beside it are still kept', async () => {
+    const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: [
+      telegramText(0, 'First.'),
+      telegramUnreadableKind(1, { rich_message: { rtl: false, part: false, blocks: [] } }),
+      telegramUnreadableKind(2, { giveaway_information: { quantity: 5, months: 3, channels: [], countries: [], additional_prize: '', stars: 0 } }),
+      telegramUnreadableKind(3, { type: 'unsupported' }),
+      telegramUnreadableKind(4, { paid_stars_amount: 50 }, { text: 'Paid picture caption.' }),
+      telegramText(5, ''),
+    ] }))));
+    const { connector, findings } = connectorFor(file.dir, file.name);
+    const { items } = await listAll(connector);
+    expect(items.map(textOf)).toEqual(['First.', 'Paid picture caption.']);
+    expect(counts(findings, 'gap')).toEqual({ [TELEGRAM_FINDINGS.unsupported]: 4 });
+    expect(counts(findings, 'skipped')).toEqual({ [TELEGRAM_FINDINGS.withoutText]: 1 });
+  });
+
+  test('a to-do list and a formatted poll are imported as messages, with their words to search', async () => {
+    const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: [
+      telegramTodo(0, 'Before sailing', ['Check the tide table', 'Fill the water tank']),
+      telegramPoll(1, { extra: { poll: {
+        question: [{ type: 'bold', text: 'Which harbour?' }],
+        answers: [{ text: [{ type: 'bold', text: 'North quay' }], voters: 2 }],
+      } } }),
+    ] }))));
+    const { connector, findings } = connectorFor(file.dir, file.name);
+    const { items } = await listAll(connector);
+    expect(items.map(textOf)).toEqual([
+      'To-do list: Before sailing\n- Check the tide table\n- Fill the water tank',
+      'Poll: Which harbour?\n- North quay (2 votes)',
+    ]);
+    expect(counts(findings, 'skipped')).toEqual({});
+    expect(counts(findings, 'gap')).toEqual({});
+  });
+
+  test('a file the export left out keeps its name in the text and in the attachments, and is counted', async () => {
+    const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: [telegramFileLeftOut(0)] }))));
+    const { connector, findings } = connectorFor(file.dir, file.name);
+    const { items } = await listAll(connector);
+    expect(textOf(items[0]!)).toBe('[File: synthetic-report.pdf (not in the export)]');
+    expect(items[0]!.metadata).toMatchObject({ attachments: ['File: synthetic-report.pdf'], attachmentsNotIngested: 1 });
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 });
+  });
+
   test('pictures and files stay as a marker in the text, and are counted once each', async () => {
     const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: [
       telegramPhoto(0, 'Dawn'),
@@ -628,9 +743,8 @@ describe('telegram connector: what is left out', () => {
     expect(items).toHaveLength(5);
     expect(textOf(items[0]!)).toContain('[Photo: photos/photo_0@05-01-2015_10-00-00.jpg (not imported)]');
     expect(items[0]!.metadata).toMatchObject({ attachmentsNotIngested: 1, attachments: ['Photo: photos/photo_0@05-01-2015_10-00-00.jpg'] });
-    expect(textOf(items[3]!)).toBe('[File (not in the export)]');
+    expect(textOf(items[3]!)).toBe('[File: synthetic-report.pdf (not in the export)]');
     expect(items[3]!.metadata.attachmentsNotIngested).toBe(1);
-    expect(items[3]!.metadata.attachments).toBeUndefined();
     expect(items[4]!.metadata.attachmentsNotIngested).toBe(2);
     // One per message with its count, not one per file read: nothing was read. A file the export left out counts like the rest.
     expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 + 1 + 1 + 1 + 2 });
@@ -888,12 +1002,84 @@ describe('telegram connector: resume', () => {
     expect([...first.items, ...rest.items].map((item) => textOf(item).split('\n')[0])).toEqual(WORDS);
   });
 
-  test('a byte budget ends a pass early; the next pass continues', async () => {
+  test('a byte budget ends a pass early; the passes that follow bring in the rest', async () => {
     const file = exportFile(TEXT);
     const first = await listAll(connectorFor(file.dir, file.name, { pageSize: 100, maxBytesPerListing: 1 }).connector);
     expect(first.done).toBe(false);
-    expect(first.items.length).toBeGreaterThan(0);
     expect(first.items.length).toBeLessThan(WORDS.length);
+    const words: string[] = first.items.map((item) => textOf(item).split('\n')[0]!);
+    let cursor = first.cursors.at(-1);
+    for (let pass = 0; cursor && !cursor.endsWith(':done'); pass += 1) {
+      expect(pass).toBeLessThan(200);
+      const next = await listAll(connectorFor(file.dir, file.name, { pageSize: 100, maxBytesPerListing: 1 }).connector, cursor);
+      words.push(...next.items.map((item) => textOf(item).split('\n')[0]!));
+      cursor = next.cursors.at(-1);
+    }
+    expect(words).toEqual(WORDS);
+  });
+
+  test('a pass can end inside the parts of an account export that are not messages, and each part is still said once', async () => {
+    const file = exportFile(TEXT);
+    const whole = connectorFor(file.dir, file.name, { pageSize: 1 });
+    const all = await listAll(whole.connector);
+    const sectionsOf = (list: readonly ArchiveImportFinding[]) =>
+      list.filter((finding) => finding.kind === ARCHIVE_COMMON_FINDINGS.sectionNotImported).map((finding) => finding.offset);
+    expect(sectionsOf(whole.findings).length).toBeGreaterThan(3);
+    const chatsStart = Buffer.byteLength(TEXT.slice(0, TEXT.indexOf('"chats"')));
+
+    // A budget of one byte ends each pass after the first thing it reads, wherever that is.
+    const items: RawItem[] = [];
+    const sections: number[] = [];
+    let cursor: string | undefined;
+    let done = false;
+    let passes = 0;
+    const cursorsInSections: number[] = [];
+    while (!done) {
+      passes += 1;
+      expect(passes).toBeLessThan(200);
+      const pass = connectorFor(file.dir, file.name, { pageSize: 100, maxBytesPerListing: 1 });
+      const out = await listAll(pass.connector, cursor);
+      if (cursor) for (const finding of pass.findings) expect(finding.offset).toBeGreaterThan(cursorOffset(cursor));
+      items.push(...out.items);
+      sections.push(...sectionsOf(pass.findings));
+      done = out.done;
+      cursor = out.cursors.at(-1);
+      if (!done && cursor && cursorOffset(cursor) < chatsStart) cursorsInSections.push(cursorOffset(cursor));
+      if (passes === 1) {
+        // The first pass stops among the parts, with no message read and a point to go on from.
+        expect(out.items).toEqual([]);
+        expect(done).toBe(false);
+        expect(cursorOffset(cursor!)).toBeLessThan(chatsStart);
+      }
+    }
+    expect(cursorsInSections.length).toBeGreaterThan(3);
+    expect(items.map((item) => item.identity.providerItemId)).toEqual(all.items.map((item) => item.identity.providerItemId));
+    // The same parts at the same places as a pass that never stopped: none twice, none lost.
+    expect(sections).toEqual(sectionsOf(whole.findings));
+  });
+
+  test('a long part of an account export is read in more than one pass when it is longer than the budget', async () => {
+    // The budget counts bytes read, in reads of 1 MiB: a part of 2.5 MiB with a budget just over one read needs several passes.
+    const text = telegramJson(telegramFullExport({ contacts: 16_000, chats: [telegramChat({ messages: telegramTexts(3) })] }));
+    const file = exportFile(text);
+    const chatsStart = Buffer.byteLength(text.slice(0, text.indexOf('"chats"')));
+    expect(chatsStart).toBeGreaterThan(2.5 * 1024 * 1024);
+    let cursor: string | undefined;
+    let passes = 0;
+    let passesEndingInTheParts = 0;
+    let done = false;
+    const items: RawItem[] = [];
+    while (!done) {
+      passes += 1;
+      expect(passes).toBeLessThan(50);
+      const out = await listAll(connectorFor(file.dir, file.name, { maxBytesPerListing: 1024 * 1024 + 1 }).connector, cursor);
+      items.push(...out.items);
+      done = out.done;
+      cursor = out.cursors.at(-1);
+      if (!done && cursor && cursorOffset(cursor) < chatsStart) passesEndingInTheParts += 1;
+    }
+    expect(passesEndingInTheParts).toBeGreaterThanOrEqual(2);
+    expect(items).toHaveLength(3);
   });
 
   test('a finished import resumes to nothing', async () => {
@@ -919,9 +1105,19 @@ describe('telegram connector: resume', () => {
       `${tag}:0:7`,
       `${tag}:2:${serializeJsonResume({ offset: 10, levels: [level('object', 'messages'), level('array', 0)] })}`,
       `${tag}:0:garbage`,
-      // Valid, but not the place after a message: inside a chat header, a section, the root.
+      // Valid, but not the place after a message or after an entry of a part of the account export: inside a chat header, a part's header, the root.
       `${tag}:0:${serializeJsonResume({ offset: 10, levels: [] })}`,
+      `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'contacts')] })}`,
+      `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'contacts'), level('array', 0)] })}`,
+      `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'contacts'), level('object', 'about'), level('array', 0)] })}`,
+      `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'contacts'), level('object', 'list'), level('array', -1)] })}`,
+      `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'personal_information')] })}`,
+      `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'about'), level('object', 'x')] })}`,
+      // After an entry of a part of the account export, but where no entry ends: the reader refuses the place itself.
       `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'contacts'), level('object', 'list'), level('array', 0)] })}`,
+      `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'personal_information'), level('object', 'first_name')] })}`,
+      // After a part's entry, but past the end of the file.
+      `${tag}:0:${serializeJsonResume({ offset: size + 1, levels: [level('object', 'contacts'), level('object', 'list'), level('array', 0)] })}`,
       `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'chats'), level('object', 'list'), level('array', 0)] })}`,
       `${tag}:0:${serializeJsonResume({ offset: 10, levels: [level('object', 'messages'), level('array', -1)] })}`,
       // After a message, but past the end of the file.
@@ -1011,6 +1207,14 @@ describe('telegram findings on the dashboard', () => {
       expect(sentence!.one).not.toBe(gaps.other!.one);
       expect(sentence!.many).toContain('{n}');
       expect(sentence!.one).not.toContain('{n}');
+    }
+  });
+
+  test('a file that was not imported is not said to have been in the archive: some were only referred to, and some the export left out', () => {
+    const sentence = DASHBOARD_ARCHIVE_COPY.gaps.media_not_imported;
+    for (const words of [sentence.one, sentence.many]) {
+      expect(words).not.toMatch(/\bin the archive\b/);
+      expect(words).toContain('the archive refers to');
     }
   });
 });
