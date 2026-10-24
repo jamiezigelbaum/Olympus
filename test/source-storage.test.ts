@@ -190,6 +190,11 @@ describe('storage service: an account named only by its corpus', () => {
       { corpusId: 'secure_local.archive.chat', trustDomain: 'secure_local' },
       [{ corpusId: 'secure_local.archive.chat', sourceId: 'archive.imports' }],
     )).toEqual({ sourceId: 'archive.imports' });
+    // An imported archive's corpus is archive.imports for any family, registered or not.
+    expect(storageAccountForCorpus({ corpusId: 'secure_local.archive.chat', trustDomain: 'secure_local' }))
+      .toEqual({ sourceId: 'archive.imports' });
+    expect(storageAccountForCorpus({ corpusId: 'public_safe.archive.email', trustDomain: 'public_safe' }))
+      .toEqual({ sourceId: 'archive.imports' });
     // Reflect and Roam mount by JSON with no registered corpus: the ids the data lifecycle names them by.
     expect(storageAccountForCorpus({ corpusId: 'secure_local.reflect.notes', trustDomain: 'secure_local' }))
       .toEqual({ sourceId: 'reflect.notes' });
@@ -236,6 +241,31 @@ describe('worker mount decisions', () => {
       expect(existsSync(join(dir, 'reflect-notes.sqlite'))).toBe(false);
     } finally {
       for (const mount of mounts) mount.store.close();
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  test('a JSON mount over a withheld source\'s file, under another corpus id, opens under that source and is refused', () => {
+    const dropboxSecure = join(dir, 'dropbox-files-connector-store.sqlite');
+    markAccount('dropbox.files', 'deleting', ['secure_local.dropbox.files']);
+    const previous = { HOME: process.env.HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
+    process.env.HOME = env.HOME;
+    process.env.XDG_DATA_HOME = env.XDG_DATA_HOME;
+    try {
+      const failures: string[] = [];
+      const mounts = parseConnectorStoreMountsFromEnv(JSON.stringify([
+        { dbPath: dropboxSecure, corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local' },
+      ]), {
+        reportFailure: (message) => failures.push(message),
+        storeOwners: new Map([[dropboxSecure, 'dropbox.files']]),
+      });
+      expect(mounts).toEqual([]);
+      expect(failures[0]).toContain('dropbox.files is not available: its data is being deleted.');
+      expect(existsSync(dropboxSecure)).toBe(false);
+    } finally {
       for (const [key, value] of Object.entries(previous)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;

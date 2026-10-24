@@ -16387,6 +16387,37 @@ var init_local_index = __esm(() => {
   ]);
 });
 
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
 // src/core/source-registry.ts
 var init_source_registry = __esm(() => {
   init_atomic_file();
@@ -16400,6 +16431,7 @@ var init_source_storage = __esm(() => {
   init_sniffer_store();
   init_tier_ledger();
   init_local_index();
+  init_archive_formats();
   init_source_corpus_registry();
   init_source_registry();
 });
@@ -18389,34 +18421,6 @@ var init_store_sync2 = __esm(() => {
   });
 });
 
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
-  CONNECTOR_FACTORIES = new Map;
-});
-
 // src/workers/archive-import/state.ts
 var init_state = __esm(() => {
   init_olympus_layout();
@@ -18425,9 +18429,6 @@ var init_state = __esm(() => {
 });
 
 // src/workers/archive-import/store.ts
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
   init_olympus_layout();

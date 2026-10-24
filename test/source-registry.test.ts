@@ -3,7 +3,7 @@
 // through the file lease and lands whole.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { FileLeaseBusyError, withFileLeaseSync } from '../src/core/file-lease.ts';
@@ -65,6 +65,18 @@ describe('source registry', () => {
     }
     expect(thrown).toBeInstanceOf(SourceRegistryError);
     expect((thrown as Error).message).toContain(path);
+  });
+
+  test('a registry in a folder that cannot be searched is unreadable, not empty', () => {
+    if (process.getuid?.() === 0) return; // root searches any folder
+    writeRaw(JSON.stringify({ schema: 1, accounts: [account('dropbox.files', ['secure_local.dropbox.files'])] }));
+    const folder = dirname(sourceRegistryPath(env));
+    chmodSync(folder, 0o000);
+    try {
+      expect(() => readSourceRegistry(env)).toThrow(SourceRegistryError);
+    } finally {
+      chmodSync(folder, 0o700);
+    }
   });
 
   test('an update cannot overwrite an unreadable registry', () => {

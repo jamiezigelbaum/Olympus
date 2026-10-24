@@ -15,7 +15,7 @@
  */
 import { olympusDataRoot } from '../../core/olympus-layout.ts';
 import { join } from 'node:path';
-import { ARCHIVE_FORMATS, archiveImportFamilies } from '../../core/archive-formats.ts';
+import { ARCHIVE_FORMATS, archiveCorpusId, archiveImportFamilies } from '../../core/archive-formats.ts';
 import {
   withSourceCorpora,
   type SourceCorpusConfig,
@@ -39,12 +39,7 @@ export const ARCHIVE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freez
   secretsInContent: true,
 });
 
-/**
- * The corpus id of one tier store of one family's archives.
- */
-export function archiveCorpusId(trustDomain: SourceTrustDomain, family: SourceFamily): string {
-  return `${trustDomain}.archive.${family}`;
-}
+export { archiveCorpusId };
 
 /**
  * The set id of one family's archive stores in the tier ledger.

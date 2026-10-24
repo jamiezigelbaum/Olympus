@@ -28828,8 +28828,42 @@ var init_file_ingestion_matcher = __esm(() => {
   });
 });
 
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+function isArchiveCorpusId(corpusId, trustDomain) {
+  return corpusId.startsWith(`${trustDomain}.archive.`);
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
 // src/core/source-registry.ts
-import { existsSync as existsSync18, readFileSync as readFileSync17 } from "node:fs";
+import { readFileSync as readFileSync17 } from "node:fs";
 function sourceRegistryPath(env = process.env) {
   return olympusDataPath(env, "registry.json");
 }
@@ -28851,13 +28885,19 @@ function findRegistryAccount(registry, sourceId, slot) {
   return registry.accounts.find((account) => account.source_id === sourceId && account.slot === slot);
 }
 function readSourceRegistryAt(path) {
-  if (!existsSync18(path))
-    return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+  let text2;
+  try {
+    text2 = readFileSync17(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT")
+      return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+    throw new SourceRegistryError(path, "cannot be read");
+  }
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync17(path, "utf8"));
-  } catch (error) {
-    throw new SourceRegistryError(path, error instanceof SyntaxError ? "not JSON" : "cannot be read");
+    parsed = JSON.parse(text2);
+  } catch {
+    throw new SourceRegistryError(path, "not JSON");
   }
   return validateRegistry(parsed, path);
 }
@@ -28922,6 +28962,8 @@ function storageAccountForCorpus(corpus, registered2 = []) {
   const known = [...registered2, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
   if (known)
     return { sourceId: known.sourceId };
+  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain))
+    return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
   const prefix = `${corpus.trustDomain}.`;
   const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
   return { sourceId: unprefixed || corpus.corpusId };
@@ -28952,12 +28994,13 @@ function adopt(env, sourceId, slot, corpusId) {
     }
   });
 }
-var DEFAULT_STORAGE_SLOT = "1", SourceStorageUnavailableError, adoptionEnabled = false;
+var DEFAULT_STORAGE_SLOT = "1", ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", SourceStorageUnavailableError, adoptionEnabled = false;
 var init_source_storage = __esm(() => {
   init_secret_locations();
   init_sniffer_store();
   init_tier_ledger();
   init_local_index();
+  init_archive_formats();
   init_source_corpus_registry();
   init_source_registry();
   SourceStorageUnavailableError = class SourceStorageUnavailableError extends Error {
@@ -39676,34 +39719,6 @@ var init_tier_set3 = __esm(() => {
   init_connector3();
 });
 
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
-  CONNECTOR_FACTORIES = new Map;
-});
-
 // src/workers/archive-import/state.ts
 var init_state = __esm(() => {
   init_olympus_layout();
@@ -39712,9 +39727,6 @@ var init_state = __esm(() => {
 });
 
 // src/workers/archive-import/store.ts
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
   init_olympus_layout();
@@ -39871,7 +39883,7 @@ var init_delphi = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync23, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync22 } from "node:fs";
+import { existsSync as existsSync22, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync22 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname25, join as join30 } from "node:path";
 function permissionHostKind(env) {
@@ -40075,7 +40087,7 @@ class MacPermissions {
     if (this.memory)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync23(this.memoryPath)) {
+    if (this.memoryPath && existsSync22(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync22(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -40474,7 +40486,7 @@ init_secret_store();
 init_worker_auth();
 init_dropbox_files();
 import { createHash as createHash26 } from "node:crypto";
-import { existsSync as existsSync27, lstatSync as lstatSync12, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync26, lstatSync as lstatSync12, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname28, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
@@ -40996,7 +41008,7 @@ init_worker_transport();
 init_package_root();
 
 // src/core/messaging-runtime.ts
-import { existsSync as existsSync19 } from "node:fs";
+import { existsSync as existsSync18 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
 import { join as join25 } from "node:path";
 function telegramPythonExecutable(options = {}) {
@@ -41005,7 +41017,7 @@ function telegramPythonExecutable(options = {}) {
   const env = options.env ?? process.env;
   const home = options.homeDir ?? env.HOME ?? homedir11();
   const isolated = join25(env.XDG_CACHE_HOME ?? join25(home, ".cache"), "olympus", "telegram-python", "bin", "python");
-  return existsSync19(isolated) ? isolated : Bun.which("python3") ?? undefined;
+  return existsSync18(isolated) ? isolated : Bun.which("python3") ?? undefined;
 }
 
 // src/core/messaging-capture.ts
@@ -41013,7 +41025,7 @@ init_atomic_file();
 init_secret_store();
 init_unpaired_sources();
 init_connected_handles();
-import { closeSync as closeSync9, constants as constants2, existsSync as existsSync20, fstatSync as fstatSync2, openSync as openSync9, readFileSync as readFileSync19, rmSync as rmSync6 } from "node:fs";
+import { closeSync as closeSync9, constants as constants2, existsSync as existsSync19, fstatSync as fstatSync2, openSync as openSync9, readFileSync as readFileSync19, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
 import { dirname as dirname22, join as join26 } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -41140,7 +41152,7 @@ async function observeChildExit(child, timeoutMs) {
   return observed;
 }
 function readGrant(path) {
-  if (!existsSync20(path))
+  if (!existsSync19(path))
     return { kind: "missing" };
   let descriptor;
   try {
@@ -41182,7 +41194,7 @@ function handleAllowsCapture(handle, source) {
   return source === "telegram" ? handle.provider === "telegram" && handle.allowedCapabilities.includes("telegram.messages.sync") : handle.provider === "whatsapp_personal" && handle.allowedCapabilities.includes("whatsapp.personal.messages.sync");
 }
 function sessionExists(grant) {
-  return grant.source === "telegram" ? existsSync20(`${grant.sessionPath.replace(/\.session$/, "")}.session`) : existsSync20(join26(grant.sessionPath, "session.db"));
+  return grant.source === "telegram" ? existsSync19(`${grant.sessionPath.replace(/\.session$/, "")}.session`) : existsSync19(join26(grant.sessionPath, "session.db"));
 }
 function spawnCapture(input) {
   const child = Bun.spawn([input.executable, ...input.args], {
@@ -41858,7 +41870,7 @@ init_analyst();
 init_model_transport();
 init_venice_models();
 import {
-  existsSync as existsSync21,
+  existsSync as existsSync20,
   mkdirSync as mkdirSync14,
   readFileSync as readFileSync20,
   renameSync as renameSync5,
@@ -42048,7 +42060,7 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync21(path))
+  if (!existsSync20(path))
     return;
   let payload2;
   try {
@@ -43222,7 +43234,7 @@ init_scope();
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire5 } from "node:module";
-import { existsSync as existsSync22, readFileSync as readFileSync21 } from "node:fs";
+import { existsSync as existsSync21, readFileSync as readFileSync21 } from "node:fs";
 import { dirname as dirname24, join as join29 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
@@ -43282,7 +43294,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync22(snapshotPath))
+    if (!existsSync21(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -43412,7 +43424,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join29(dir, "node_modules");
-    if (!existsSync22(join29(candidate, "@parcel", "watcher")))
+    if (!existsSync21(join29(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire5(join29(dirname24(candidate), "package.json"));
@@ -44942,7 +44954,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync24, lstatSync as lstatSync10, readFileSync as readFileSync23, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync10, readFileSync as readFileSync23, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -45175,7 +45187,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync24(dir))
+    if (!existsSync23(dir))
       return result;
     for (const name of readdirSync3(dir)) {
       try {
@@ -45461,7 +45473,7 @@ init_scope();
 // src/workers/local-files/mac-settings.ts
 init_mac_permissions();
 import { spawn as spawn3 } from "node:child_process";
-import { existsSync as existsSync25 } from "node:fs";
+import { existsSync as existsSync24 } from "node:fs";
 import { homedir as homedir15 } from "node:os";
 import { join as join31 } from "node:path";
 function helperAppPathForHome(home = homedir15()) {
@@ -45472,7 +45484,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn3(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync25)(helper))
+  if ((deps.exists ?? existsSync24)(helper))
     run("/usr/bin/open", ["-R", helper]);
   run("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -46357,7 +46369,7 @@ init_secrets_disposition();
 init_tier_image_content_sweep();
 init_tier_media_judgment_sweep();
 init_tier_ledger();
-import { existsSync as existsSync26 } from "node:fs";
+import { existsSync as existsSync25 } from "node:fs";
 var DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1000;
 var DEFAULT_AUTO_MOVES_PER_PASS = 25;
 var DEFAULT_TIER_SNIFFER_MAX_PASS_MS = 15 * 60000;
@@ -46441,7 +46453,7 @@ class TierSnifferService {
         db = new Database6(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync26(path);
+        const hasQueue = existsSync25(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -46642,11 +46654,11 @@ class TierSnifferService {
         continue;
       try {
         const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ":memory:" && existsSync26(bound.ledgerPath))
+        if (bound && bound.ledgerPath !== ":memory:" && existsSync25(bound.ledgerPath))
           paths.add(bound.ledgerPath);
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync26(own3))
+      if (existsSync25(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -48066,7 +48078,7 @@ function secureLocalBackfillDryRunFromEnv(env = process.env) {
   ];
   const force = env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_FORCE === "true";
   const corpora = configs.flatMap((config) => {
-    if (!config.dbPath || !existsSync27(config.dbPath))
+    if (!config.dbPath || !existsSync26(config.dbPath))
       return [];
     const store = openConnectorStore(storageAccountForCorpus(config), { ...config, dbPath: config.dbPath, readOnly: true }, env);
     try {

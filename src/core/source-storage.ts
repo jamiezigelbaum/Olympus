@@ -20,6 +20,7 @@ import { SecretLocationsIndex } from '../workers/classification/secret-locations
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
+import { isArchiveCorpusId } from './archive-formats.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
 import {
@@ -37,6 +38,9 @@ export interface StorageAccount {
 }
 
 export const DEFAULT_STORAGE_SLOT = '1';
+
+// workers/archive-import/state.ts names it too; that module is the worker's.
+const ARCHIVE_IMPORTS_SOURCE_ID = 'archive.imports';
 
 export class SourceStorageUnavailableError extends Error {
   readonly code = 'source_storage_unavailable';
@@ -123,9 +127,10 @@ export function isSourceAccountOpenable(account: StorageAccount, env: LayoutEnv 
 /**
  * The account of a store declared only by its corpus (a connector-store JSON
  * mount, an operator script's `--db`): the corpus registry's source for that
- * corpus, else the corpus id without its trust-domain prefix
- * (`secure_local.reflect.notes` is `reflect.notes`, the id the data
- * lifecycle names it by).
+ * corpus; an imported archive's corpus (any family) is `archive.imports`,
+ * whose corpora are not shipped defaults; else the corpus id without its
+ * trust-domain prefix (`secure_local.reflect.notes` is `reflect.notes`, the
+ * id the data lifecycle names it by).
  */
 export function storageAccountForCorpus(
   corpus: { corpusId: string; trustDomain: string },
@@ -134,6 +139,7 @@ export function storageAccountForCorpus(
   const known = [...registered, ...defaultSourceCorpusRegistryConfig().corpora]
     .find((entry) => entry.corpusId === corpus.corpusId);
   if (known) return { sourceId: known.sourceId };
+  if (isArchiveCorpusId(corpus.corpusId, corpus.trustDomain)) return { sourceId: ARCHIVE_IMPORTS_SOURCE_ID };
   const prefix = `${corpus.trustDomain}.`;
   const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : '';
   return { sourceId: unprefixed || corpus.corpusId };

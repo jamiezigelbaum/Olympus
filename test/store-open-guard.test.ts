@@ -69,21 +69,36 @@ const ALLOWED: Record<string, string> = {
 };
 
 const GUARDED_CLASSES = ['LocalConnectorStore', 'TierLedger', 'SecretLocationsIndex', 'TierSnifferStore'];
-const CONSTRUCTIONS: readonly RegExp[] = [
-  ...GUARDED_CLASSES.map((name) => new RegExp(`\\bnew\\s+${name}\\s*\\(`)),
-  // `new Database(`, `new DatabaseSync(`, `new BunDatabase(`: any constructor named like a database.
-  /\bnew\s+\w*Database\w*\s*\(/,
-  // A guarded class or a database class imported under another name.
-  new RegExp(`import\\s*\\{[^}]*(?<!type\\s)\\b(?:${GUARDED_CLASSES.join('|')}|\\w*Database\\w*)\\s+as\\s+\\w+`),
-];
+// `Database`, `DatabaseSync`, `BunDatabase`: any class named like a database.
+const guarded = (name: string) => GUARDED_CLASSES.includes(name) || /Database/.test(name);
 
-// Parsed and printed without comments, so a comment neither counts as a
-// construction nor hides one.
-const printer = ts.createPrinter({ removeComments: true });
+/** The class a `new` names: `new X(`, `new ns.X(`, `new (X)(`. */
+function constructedName(expression: ts.Expression): string | undefined {
+  if (ts.isIdentifier(expression)) return expression.text;
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+  if (ts.isParenthesizedExpression(expression)) return constructedName(expression.expression);
+  return undefined;
+}
+
+// Walks the parsed file, so a comment neither counts as a construction nor
+// hides one, and a namespace (`new tiers.TierLedger(`) or a guarded class
+// imported under another name is seen too.
 function constructsStore(source: string): boolean {
-  const file = ts.createSourceFile('guard.ts', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
-  const printed = printer.printFile(file);
-  return CONSTRUCTIONS.some((pattern) => pattern.test(printed));
+  const file = ts.createSourceFile('guard.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isNewExpression(node)) {
+      const name = constructedName(node.expression);
+      if (name && guarded(name)) found = true;
+    } else if (ts.isImportSpecifier(node) && node.propertyName && !node.isTypeOnly
+      && !node.parent.parent.isTypeOnly && guarded(node.propertyName.text)) {
+      found = true;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return found;
 }
 
 function sourceFiles(dir: string): string[] {
@@ -109,6 +124,9 @@ describe('store open guard', () => {
       "import { Database as Db } from 'bun:sqlite';",
       "import { type SourceTrustDomain, TierLedger as LedgerClass } from './tier-ledger.ts';",
       "import {\n  LocalConnectorStore as Store,\n} from './local-index.ts';",
+      "import * as tiers from './tier-ledger.ts';\nconst ledger = new tiers.TierLedger(options);",
+      'const db = new sqlite.Database(path);',
+      'const store = new (LocalConnectorStore)(options);',
     ]) expect(constructsStore(spelling), spelling).toBe(true);
   });
 
@@ -120,6 +138,8 @@ describe('store open guard', () => {
       'const store = openConnectorStore({ sourceId }, options);',
       'let store: LocalConnectorStore | undefined;',
       "import { type TierLedger as Ledger } from './tier-ledger.ts';",
+      "import type { TierLedger as Ledger } from './tier-ledger.ts';",
+      'const map = new Map<string, TierLedger>();',
     ]) expect(constructsStore(spelling), spelling).toBe(false);
   });
 

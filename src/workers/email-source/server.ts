@@ -320,6 +320,7 @@ import {
   storageAccountForCorpus,
   type StorageAccount,
 } from '../../core/source-storage.ts';
+import { lifecycleSourceSpecs } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
@@ -3005,7 +3006,11 @@ export async function main(): Promise<void> {
   // second time.
   const configuredConnectorStoreMounts = parseConnectorStoreMountsFromEnv(
     process.env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON,
-    { collidingStores: laneConnectorStores, registeredCorpora: sourceCorpusRegistry.list() },
+    {
+      collidingStores: laneConnectorStores,
+      registeredCorpora: sourceCorpusRegistry.list(),
+      storeOwners: lifecycleStoreOwners(process.env),
+    },
   );
   const configuredConnectorStores = configuredConnectorStoreMounts.map((mount) => mount.store);
   const connectorStores = mergeConnectorStores([
@@ -6287,6 +6292,15 @@ export function sourceIndexLaneStorageDecision(
   };
 }
 
+/** Each known store file's source, by path, from the data lifecycle's inventory. */
+function lifecycleStoreOwners(env: Record<string, string | undefined>): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const spec of lifecycleSourceSpecs()) {
+    for (const path of spec.connectorStorePaths?.({ env }) ?? []) owners.set(path, spec.sourceId);
+  }
+  return owners;
+}
+
 /**
  * Whether an account's stores may be mounted at worker boot. One that may not
  * (its data being deleted or deleted, or an unreadable registry) is left
@@ -6995,6 +7009,13 @@ export interface ConnectorStoreMountParsingOptions {
    * account is the source registered for its corpus (`storageAccountForCorpus`).
    */
   registeredCorpora?: ReadonlyArray<{ corpusId: string; sourceId: string }>;
+  /**
+   * The source each known store file belongs to, by path (the data
+   * lifecycle's inventory). A declaration over another source's file opens
+   * under that source's account, so a lane withheld because its account is
+   * being deleted cannot be reopened under another corpus id.
+   */
+  storeOwners?: ReadonlyMap<string, string>;
 }
 
 interface ValidatedConnectorStoreMountDeclaration {
@@ -7065,7 +7086,9 @@ export function parseConnectorStoreMountsFromEnv(
       }
       // An account that may not be opened throws here, and the declaration
       // is skipped and reported like any other that cannot mount.
-      const store = collidingStore ?? openConnectorStore(storageAccountForCorpus(declaration, options.registeredCorpora), {
+      const owner = options.storeOwners?.get(declaration.dbPath);
+      const account = owner ? { sourceId: owner } : storageAccountForCorpus(declaration, options.registeredCorpora);
+      const store = collidingStore ?? openConnectorStore(account, {
         dbPath: declaration.dbPath,
         corpusId: declaration.corpusId,
         family: declaration.family,

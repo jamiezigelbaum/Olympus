@@ -11,7 +11,7 @@
  * Deliberately light (no SQLite, no workers): the storage service reads it
  * before every store open.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import { withFileLeaseSync } from './file-lease.ts';
 import { olympusDataPath, type LayoutEnv } from './olympus-layout.ts';
@@ -83,12 +83,20 @@ export function findRegistryAccount(
 }
 
 function readSourceRegistryAt(path: string): SourceRegistry {
-  if (!existsSync(path)) return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    // Only a file that is not there is an empty registry. A folder that cannot
+    // be searched hides a registry that may mark an account as being deleted.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { schema: SOURCE_REGISTRY_SCHEMA, accounts: [] };
+    throw new SourceRegistryError(path, 'cannot be read');
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (error) {
-    throw new SourceRegistryError(path, error instanceof SyntaxError ? 'not JSON' : 'cannot be read');
+    parsed = JSON.parse(text);
+  } catch {
+    throw new SourceRegistryError(path, 'not JSON');
   }
   return validateRegistry(parsed, path);
 }
