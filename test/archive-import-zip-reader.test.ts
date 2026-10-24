@@ -17,6 +17,7 @@ import {
   readZipMemberHead,
   stoppableZipSource,
   zipFindingOffset,
+  reportZipOverlap,
   zipOverlapAssumption,
   type ZipEntry,
 } from '../src/workers/archive-import/zip-reader.ts';
@@ -884,7 +885,7 @@ describe('a large directory is checked in bounded memory', () => {
     expect(result.start).toBe(64 * (cap - 1 - 7) + 39);
   });
 
-  test('out of file order and over the bound: no array grows with the directory, one assumption is reported, the zip still reads', () => {
+  test('out of file order and over the bound: no array grows with the directory, one unchecked-overlap finding is reported, the zip still reads', () => {
     const count = cap + 1;
     const source = virtualZip(count, (index) => count - 1 - index, (slot) => count - 1 - slot);
     const { result, floats, ints } = countingTypedArrays(() => {
@@ -895,9 +896,19 @@ describe('a large directory is checked in bounded memory', () => {
     expect(Math.max(0, ...floats, ...ints)).toBeLessThanOrEqual(4096);
     expect(result.start).toBe(64 * (count - 1 - 7) + 39);
     expect(result.archive.overlapsUnchecked()).toBe(true);
-    expect(zipOverlapAssumption(result.archive, 3)).toEqual({ kind: 'assumption', class: 'gap', fileIndex: 3, offset: 0, count: 1 });
+    expect(zipOverlapAssumption(result.archive, 3)).toEqual({ kind: 'zip_overlap_unchecked', class: 'gap', fileIndex: 3, offset: 0, count: 1 });
     // The archive is not refused: its members open.
     expect(ZipMemberReader.open(result.archive, result.entry).entry.name).toBe('m00000007');
+  });
+
+  test('the helper every format calls tells the report once for an unchecked zip and nothing for a checked one', () => {
+    const unchecked = ZipArchive.open(virtualZip(cap + 1, (index) => cap - index, (slot) => cap - slot));
+    const told: unknown[] = [];
+    reportZipOverlap(unchecked, 2, (finding) => told.push(finding));
+    expect(told).toEqual([{ kind: 'zip_overlap_unchecked', class: 'gap', fileIndex: 2, offset: 0, count: 1 }]);
+    const checked = ZipArchive.open(memoryRangeReader(buildZip([{ name: 'a.txt', data: 'a' }, { name: 'b.txt', data: 'b' }])));
+    reportZipOverlap(checked, 2, (finding) => told.push(finding));
+    expect(told).toHaveLength(1);
   });
 
   test('over the bound but in file order: the whole directory is checked in a fixed amount of state', () => {

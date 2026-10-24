@@ -309,7 +309,7 @@ describe('the fixtures, read by the product', () => {
     expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
     expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
     expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
-    expect(fixture.expect.gaps).toEqual([{ kind: 'media_not_imported', count: 1 }, { kind: 'assumption', count: 1 }]);
+    expect(fixture.expect.gaps).toEqual([{ kind: 'media_not_imported', count: 1 }, { kind: 'time_zone_assumed', count: 1 }]);
     expect(fixture.expect.leftOut).toEqual([{ kind: 'system_message', count: 1 }]);
     // The picture is named in its message and not imported; the message is still an item. The notice is the earliest line, and is not counted in the days.
     expect(items.filter((item) => item.content.kind === 'text' && item.content.text.includes('<attached:'))).toHaveLength(1);

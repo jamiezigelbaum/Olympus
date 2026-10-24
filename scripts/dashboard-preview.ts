@@ -711,6 +711,7 @@ function localFilesPreview(state: string) {
  *   archives-chat        a Telegram Desktop export imported: its items are messages, with what a chat export leaves out or cannot carry
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
  *   archives-chat-whatsapp  a WhatsApp chat export imported: messages, a snapshot (not updated), and what was left out in plain words
+ *   archives-notes-reflect  a Reflect export (a zip of Markdown notes) imported: notes, and what a notes export left out or could not read
  *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not read, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
@@ -721,7 +722,7 @@ const ARCHIVE_STATES = [
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
-  'archives-chat-whatsapp',
+  'archives-chat-whatsapp', 'archives-notes-reflect',
   'archives-nothing-imported',
 ] as const;
 
@@ -864,7 +865,6 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
         { kind: 'item_truncated', count: 4 },
         { kind: 'note_date_assumed', count: 12 },
         { kind: 'note_too_large', count: 1 },
-        { kind: 'assumption', count: 1 },
         { kind: 'section_not_imported', count: 2 },
         { kind: 'file_damaged', count: 1 },
       ],
@@ -889,7 +889,7 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
         { kind: 'section_not_imported', count: 6 },
         { kind: 'message_content_unsupported', count: 12 },
         { kind: 'item_truncated', count: 1 },
-        { kind: 'assumption', count: 1 },
+        { kind: 'time_zone_assumed', count: 1 },
         { kind: 'file_damaged', count: 1 },
       ],
       skipped: [{ kind: 'service_message', count: 3_071 }, { kind: 'message_without_text', count: 54 }],
@@ -911,7 +911,9 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       gaps: [
         { kind: 'media_not_imported', count: 1_870 },
         { kind: 'item_truncated', count: 2 },
-        { kind: 'assumption', count: 2 },
+        { kind: 'time_zone_assumed', count: 1 },
+        { kind: 'date_order_assumed', count: 1 },
+        { kind: 'item_start_assumed', count: 3 },
         { kind: 'file_damaged', count: 1 },
       ],
       skipped: [
@@ -921,6 +923,28 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
         { kind: 'item_repeated', count: 112 },
         { kind: 'files_unconfirmed', count: 1 },
       ],
+    });
+  } else if (state === 'archives-notes-reflect') {
+    // An invented Reflect export: a zip of Markdown notes that also held pictures, one note with no date.
+    archives.push({
+      ...takeout,
+      id: '5d7f9b31-6c3e-4a8b-9d0f-2e3c4b5a6d7f',
+      name: 'Reflect export.zip',
+      format: 'Reflect notes (Markdown zip)',
+      family: 'note',
+      where: '~/Downloads',
+      items: 1_208,
+      judged: 1_200,
+      held: 8,
+      earliest: '2021-01-04',
+      latest: '2026-10-17',
+      gaps: [
+        { kind: 'media_not_imported', count: 94 },
+        { kind: 'item_truncated', count: 1 },
+        { kind: 'note_date_assumed', count: 3 },
+        { kind: 'note_unreadable', count: 2 },
+      ],
+      skipped: [{ kind: 'note_empty', count: 17 }],
     });
   } else if (state === 'archives-empty') {
     const { earliest: _earliest, latest: _latest, ...dated } = takeout;
