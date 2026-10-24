@@ -132,6 +132,7 @@ Inside the data root:
       "source_id": "dropbox.files",
       "slot": "1",
       "state": "active",
+      "layout": "folder",
       "corpus_ids": ["dropbox.files.secure", "dropbox.files.internal", "dropbox.files.public"],
       "provider_account_hash": "…",
       "created_at": "…"
@@ -142,6 +143,11 @@ Inside the data root:
 
 - `state` is `active`, `deleting`, or `deleted` (kept briefly so the
   dashboard can say so, then dropped).
+- `layout` is `legacy` (files still at today's paths, as step 2 adopts
+  existing accounts) or `folder` (inside `sources/<source_id>/<slot>/`).
+  Whether an account exists and where its files are are tracked apart: the
+  storage service resolves an account's paths from `layout`, and migration
+  selects on it.
 - The registry is the only list of accounts. Export, Delete, uninstall,
   `ingestion status`, the tier commands, the dashboard and the scheduler
   read it; `lifecycleSourceSpecs`, `localConnectorStores` and the tier
@@ -238,6 +244,11 @@ stopped, credentials removed) and the worker can restart itself.
 3. Remove `.trash/*` in the background; leftovers are removed at the next
    boot.
 
+An account still on the `legacy` layout (its migration failed verify, or a
+file sits on another volume) is deleted the same way, except that step 2.1
+renames each of its legacy paths, as the layout module's legacy resolvers
+name them, into `.trash/<uuid>/` instead of one folder.
+
 If a step fails, the entry stays `deleting`. The storage service never
 opens a `deleting` account, so nothing reads or writes a half-deleted
 store, and the registry state is what the Delete feature reports and
@@ -280,13 +291,15 @@ One-time, at worker boot, holding the owner lock, before mounting:
 
 1. Read the legacy locations through the layout module's legacy resolvers
    (named in step 1, used for this purpose only).
-2. For each source with files there and no registry entry, and whose
-   capture process (Telegram reader, WhatsApp bridge) is confirmed stopped,
-   not merely not yet started: create the entry
-   (slot `1`), write a move plan into the registry, rename each file
-   (stores, sidecars, `-wal`/`-shm` together, spools, sessions, watch
-   snapshots, settings) into the account folder, verify (same file set and
-   sizes, `PRAGMA quick_check`, store opens), then mark the plan done. A
+2. For each account whose `layout` is `legacy` (the entries step 2
+   adopted, plus an entry created now, slot `1`, for any source with legacy
+   files and none yet), and whose capture process (Telegram reader,
+   WhatsApp bridge) is confirmed stopped, not merely not yet started: write
+   a move plan into the entry, rename each file (stores, sidecars,
+   `-wal`/`-shm` together, spools, sessions, watch snapshots, settings) into
+   the account folder, verify (same file set and sizes, `PRAGMA
+   quick_check`, store opens), then set `layout` to `folder` and mark the
+   plan done. A
    crash mid-move resumes from the plan; a failed verify moves the files
    back and leaves the source on its legacy paths with a Needs you row. A
    source whose capture is still running stays on its legacy paths until

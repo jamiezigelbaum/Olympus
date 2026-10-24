@@ -6,6 +6,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import ts from 'typescript';
 import {
   legacyCaptureDataRoot,
   legacyTelegramGatewayStateDir,
@@ -90,10 +91,12 @@ const ALLOWED: Record<string, string> = {
 // segments split across lines or written as one path.
 const DATA_ROOT_EXPRESSION = /XDG_DATA_HOME|(['"`])(?:openclaw|share)\1\s*,\s*(['"`])olympus\2|(?:openclaw|share)\/olympus\b/;
 
-/** Source text without comment lines, so a split `join(` still reads as one expression. */
+// Parsed and printed without comments, so no comment, inline or whole-line,
+// can split an expression or hide one.
+const printer = ts.createPrinter({ removeComments: true });
 function buildsDataRoot(source: string): boolean {
-  const code = source.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
-  return DATA_ROOT_EXPRESSION.test(code);
+  const file = ts.createSourceFile('guard.ts', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  return DATA_ROOT_EXPRESSION.test(printer.printFile(file));
 }
 
 function sourceFiles(dir: string): string[] {
@@ -114,6 +117,8 @@ describe('data root guard', () => {
       "join(home, '.local', 'share', 'olympus', 'whatsapp-live')",
       "const DEFAULT = '.local/share/olympus/whatsapp-live';",
       'env.XDG_DATA_HOME?.trim()',
+      "join(home, '.local', 'share', 'openclaw', // namespace\n  'olympus')",
+      "join(home, '.local', 'share', /* legacy */ 'olympus')",
     ]) expect(buildsDataRoot(spelling), spelling).toBe(true);
     expect(buildsDataRoot("// join(home, 'openclaw', 'olympus')")).toBe(false);
     expect(buildsDataRoot("join(home, '.config', 'olympus')")).toBe(false);
