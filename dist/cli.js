@@ -35545,6 +35545,56 @@ function startsWithFromLine(head) {
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
 }
+function archiveHeadText(head) {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
+}
+function isJunkArchiveMember(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
+}
+function reflectDailyNoteDate(fileName) {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match)
+    return;
+  const weekday = match[1].slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function jsonKey(names) {
+  return new RegExp(`"(?:${names})"\\s*:`);
+}
+function looksLikeReflectJson(head) {
+  const text2 = archiveHeadText(head);
+  const notesObject = JSON_NOTES_OBJECT.test(text2);
+  if (!notesObject && !JSON_LIST_OF_OBJECTS.test(text2))
+    return false;
+  if (ROAM_JSON_KEYS.test(text2))
+    return false;
+  return notesObject || REFLECT_JSON_KEYS.test(text2);
+}
+function looksLikeRoamJson(head) {
+  const text2 = archiveHeadText(head);
+  return JSON_LIST_OF_OBJECTS.test(text2) && ROAM_JSON_KEYS.test(text2) && !REFLECT_JSON_KEYS.test(text2);
+}
+function detectFile(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0].relPath] : undefined;
+}
+function zipJsonMembers(entry) {
+  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+function readsJsonExport(entry, isThisFormat) {
+  if (entry.members)
+    return zipJsonMembers(entry).some((member) => isThisFormat(member.head));
+  return isThisFormat(entry.head);
+}
 function getArchiveFormat(formatId) {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
 }
@@ -35637,7 +35687,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_JSON_KEYS, ROAM_JSON_KEYS, JSON_LIST_OF_OBJECTS, JSON_NOTES_OBJECT, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -35656,7 +35706,67 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  leniencyDecoder = new TextDecoder("utf-8");
+  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\.(?:md|markdown)$/i;
+  REFLECT_JSON_KEYS = jsonKey("subject|document_json|documentJson|created_at|createdAt|updated_at|updatedAt|content|body");
+  ROAM_JSON_KEYS = jsonKey("children|create-time|edit-time|create-email|edit-email");
+  JSON_LIST_OF_OBJECTS = /^\s*\[\s*\{/;
+  JSON_NOTES_OBJECT = /^\s*\{\s*"notes"\s*:\s*\[/;
+  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-json",
+    label: "Reflect notes (JSON)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeReflectJson))
+  });
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-markdown",
+    label: "Reflect notes (Markdown zip)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export as Markdown (the .zip file)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*, *, ????.md"]),
+    detect: (probe) => detectFile(probe, (entry) => {
+      if (!entry.members || /^roam/i.test(entry.name))
+        return false;
+      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
+      if (files.some((member) => /\.json$/i.test(member.name)))
+        return false;
+      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+      if (notes.length === 0)
+        return false;
+      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+    })
+  });
+  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "roam-json",
+    label: "Roam notes (JSON)",
+    family: "note",
+    provider: "roam",
+    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
+    citationLabel: "Roam",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson))
+  });
+  ARCHIVE_FORMATS = Object.freeze([
+    MBOX_ARCHIVE_FORMAT,
+    REFLECT_JSON_ARCHIVE_FORMAT,
+    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+    ROAM_JSON_ARCHIVE_FORMAT
+  ]);
+  ARCHIVE_COMMON_FINDINGS = {
+    mediaNotImported: "media_not_imported",
+    itemTruncated: "item_truncated",
+    assumption: "assumption",
+    sectionNotImported: "section_not_imported",
+    fileDamaged: "file_damaged"
+  };
   ArchiveImportStoppedError = class ArchiveImportStoppedError extends Error {
     code;
     relPath;
@@ -50067,8 +50177,88 @@ var init_browser = __esm(() => {
     tds = 1;
   } catch (e) {}
 });
+
+// node_modules/@streamparser/json/dist/mjs/utils/bufferedString.js
+class NonBufferedString {
+  constructor() {
+    this.decoder = new TextDecoder("utf-8", { fatal: true });
+    this.pending = [];
+    this.string = "";
+    this.byteLength = 0;
+  }
+  appendChar(char) {
+    this.pending.push(String.fromCharCode(char));
+    this.byteLength += 1;
+  }
+  appendBuf(buf, start = 0, end = buf.length) {
+    this.pending.push(this.decoder.decode(buf.subarray(start, end)));
+    this.byteLength += end - start;
+  }
+  appendCharCode(code) {
+    this.pending.push(String.fromCharCode(code));
+  }
+  reset() {
+    this.pending = [];
+    this.string = "";
+    this.byteLength = 0;
+  }
+  toString() {
+    if (this.pending.length > 0) {
+      this.string += this.pending.join("");
+      this.pending = [];
+    }
+    return this.string;
+  }
+}
+
+class BufferedString {
+  constructor(bufferSize) {
+    this.decoder = new TextDecoder("utf-8", { fatal: true });
+    this.bufferOffset = 0;
+    this.string = "";
+    this.byteLength = 0;
+    this.buffer = new Uint8Array(bufferSize);
+  }
+  appendChar(char) {
+    if (this.bufferOffset >= this.buffer.length)
+      this.flushStringBuffer();
+    this.buffer[this.bufferOffset++] = char;
+    this.byteLength += 1;
+  }
+  appendBuf(buf, start = 0, end = buf.length) {
+    const size = end - start;
+    if (this.bufferOffset + size > this.buffer.length)
+      this.flushStringBuffer();
+    if (size > this.buffer.length) {
+      this.string += this.decoder.decode(buf.subarray(start, end));
+      this.byteLength += size;
+      return;
+    }
+    this.buffer.set(buf.subarray(start, end), this.bufferOffset);
+    this.bufferOffset += size;
+    this.byteLength += size;
+  }
+  appendCharCode(code) {
+    this.flushStringBuffer();
+    this.string += String.fromCharCode(code);
+  }
+  flushStringBuffer() {
+    this.string += this.decoder.decode(this.buffer.subarray(0, this.bufferOffset));
+    this.bufferOffset = 0;
+  }
+  reset() {
+    this.string = "";
+    this.bufferOffset = 0;
+    this.byteLength = 0;
+  }
+  toString() {
+    this.flushStringBuffer();
+    return this.string;
+  }
+}
+
 // node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
-var TokenType;
+var TokenType, tokenType_default;
 var init_tokenType = __esm(() => {
   (function(TokenType2) {
     TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
@@ -50084,10 +50274,11 @@ var init_tokenType = __esm(() => {
     TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
     TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
   })(TokenType || (TokenType = {}));
+  tokenType_default = TokenType;
 });
 
 // node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
-var charset;
+var charset, escapedSequences;
 var init_utf_8 = __esm(() => {
   (function(charset2) {
     charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
@@ -50191,10 +50382,710 @@ var init_utf_8 = __esm(() => {
     charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
     charset2[charset2["TILDE"] = 126] = "TILDE";
   })(charset || (charset = {}));
+  escapedSequences = {
+    [34]: 34,
+    [92]: 92,
+    [47]: 47,
+    [98]: 8,
+    [102]: 12,
+    [110]: 10,
+    [114]: 13,
+    [116]: 9
+  };
 });
 
 // node_modules/@streamparser/json/dist/mjs/tokenizer.js
-var TokenizerStates;
+function TokenizerStateToString(tokenizerState) {
+  return [
+    "START",
+    "ENDED",
+    "ERROR",
+    "TRUE1",
+    "TRUE2",
+    "TRUE3",
+    "FALSE1",
+    "FALSE2",
+    "FALSE3",
+    "FALSE4",
+    "NULL1",
+    "NULL2",
+    "NULL3",
+    "STRING_DEFAULT",
+    "STRING_AFTER_BACKSLASH",
+    "STRING_UNICODE_DIGIT_1",
+    "STRING_UNICODE_DIGIT_2",
+    "STRING_UNICODE_DIGIT_3",
+    "STRING_UNICODE_DIGIT_4",
+    "STRING_INCOMPLETE_CHAR",
+    "NUMBER_AFTER_INITIAL_MINUS",
+    "NUMBER_AFTER_INITIAL_ZERO",
+    "NUMBER_AFTER_INITIAL_NON_ZERO",
+    "NUMBER_AFTER_FULL_STOP",
+    "NUMBER_AFTER_DECIMAL",
+    "NUMBER_AFTER_E",
+    "NUMBER_AFTER_E_AND_SIGN",
+    "NUMBER_AFTER_E_AND_DIGIT",
+    "SEPARATOR",
+    "BOM_OR_START",
+    "BOM"
+  ][tokenizerState];
+}
+function validateBufferSize(name, size) {
+  if (size === undefined)
+    return;
+  if (!Number.isInteger(size) || size < 0) {
+    throw new TokenizerError(`Invalid "${name}": ${size}. Expected a non-negative integer.`);
+  }
+}
+function utf8SequenceLength(leadByte) {
+  if (leadByte >= 194 && leadByte <= 223)
+    return 2;
+  if (leadByte <= 239)
+    return 3;
+  return 4;
+}
+function multiByteRunEnd(buffer, start) {
+  let j = start;
+  while (j < buffer.length && buffer[j] >= 128) {
+    const seqLength = utf8SequenceLength(buffer[j]);
+    if (j + seqLength > buffer.length)
+      break;
+    j += seqLength;
+  }
+  return j;
+}
+
+class Tokenizer {
+  constructor(opts) {
+    this.state = 29;
+    this.bomIndex = 0;
+    this.separatorIndex = 0;
+    this.escapedCharsByteLength = 0;
+    this.bytes_remaining = 0;
+    this.bytes_in_sequence = 0;
+    this.char_split_buffer = new Uint8Array(4);
+    this.encoder = new TextEncoder;
+    this.offset = -1;
+    this.streamByteLength = 0;
+    opts = Object.assign(Object.assign({}, defaultOpts), opts);
+    validateBufferSize("stringBufferSize", opts.stringBufferSize);
+    validateBufferSize("numberBufferSize", opts.numberBufferSize);
+    this.emitPartialTokens = opts.emitPartialTokens === true;
+    this.bufferedString = opts.stringBufferSize && opts.stringBufferSize > 4 ? new BufferedString(opts.stringBufferSize) : new NonBufferedString;
+    this.bufferedNumber = opts.numberBufferSize && opts.numberBufferSize > 0 ? new BufferedString(opts.numberBufferSize) : new NonBufferedString;
+    this.separator = opts.separator;
+    this.separatorBytes = opts.separator ? this.encoder.encode(opts.separator) : undefined;
+  }
+  get isEnded() {
+    return this.state === 1;
+  }
+  appendUnicodeCodeUnit(intVal) {
+    if (this.highSurrogate !== undefined) {
+      if (intVal >= 56320 && intVal <= 57343) {
+        const unicodeString2 = String.fromCharCode(this.highSurrogate, intVal);
+        const unicodeBuffer2 = this.encoder.encode(unicodeString2);
+        this.bufferedString.appendBuf(unicodeBuffer2);
+        this.escapedCharsByteLength += 6 - unicodeBuffer2.byteLength;
+        this.highSurrogate = undefined;
+        return;
+      }
+      this.flushPendingHighSurrogate();
+    }
+    if (intVal >= 55296 && intVal <= 56319) {
+      this.highSurrogate = intVal;
+      this.escapedCharsByteLength += 6;
+      return;
+    }
+    if (intVal >= 56320 && intVal <= 57343) {
+      this.bufferedString.appendCharCode(intVal);
+      this.escapedCharsByteLength += 6;
+      return;
+    }
+    const unicodeString = String.fromCharCode(intVal);
+    const unicodeBuffer = this.encoder.encode(unicodeString);
+    this.bufferedString.appendBuf(unicodeBuffer);
+    this.escapedCharsByteLength += 6 - unicodeBuffer.byteLength;
+  }
+  flushPendingHighSurrogate() {
+    if (this.highSurrogate !== undefined) {
+      this.bufferedString.appendCharCode(this.highSurrogate);
+      this.highSurrogate = undefined;
+    }
+  }
+  startIncompleteChar(buffer, start) {
+    this.bytes_in_sequence = utf8SequenceLength(buffer[start]);
+    this.bytes_remaining = start + this.bytes_in_sequence - buffer.length;
+    this.char_split_buffer.set(buffer.subarray(start));
+    this.state = 19;
+  }
+  write(input) {
+    try {
+      let buffer;
+      if (input instanceof Uint8Array) {
+        buffer = input;
+      } else if (typeof input === "string") {
+        if (this.pendingStringSurrogate !== undefined) {
+          input = this.pendingStringSurrogate + input;
+          this.pendingStringSurrogate = undefined;
+        }
+        const lastCharCode = input.charCodeAt(input.length - 1);
+        if (lastCharCode >= 55296 && lastCharCode <= 56319) {
+          this.pendingStringSurrogate = input[input.length - 1];
+          input = input.slice(0, -1);
+        }
+        buffer = this.encoder.encode(input);
+      } else if (ArrayBuffer.isView(input)) {
+        buffer = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      } else if (input !== null && typeof input === "object" && typeof input[Symbol.iterator] === "function") {
+        buffer = Uint8Array.from(input);
+      } else {
+        throw new TypeError("Unexpected type. The `write` function only accepts Iterables (e.g. Arrays, Sets, Generators), TypedArrays and Strings.");
+      }
+      for (let i2 = 0;i2 < buffer.length; i2 += 1) {
+        const n = buffer[i2];
+        switch (this.state) {
+          case 29:
+            if (n === 239) {
+              this.bom = [239, 187, 191];
+              this.bomIndex += 1;
+              this.state = 30;
+              continue;
+            }
+            if (input instanceof Uint16Array) {
+              if (n === 254) {
+                this.bom = [254, 255];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+              if (n === 255) {
+                this.bom = [255, 254];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+            }
+            if (input instanceof Uint32Array) {
+              if (n === 0) {
+                this.bom = [0, 0, 254, 255];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+              if (n === 255) {
+                this.bom = [255, 254, 0, 0];
+                this.bomIndex += 1;
+                this.state = 30;
+                continue;
+              }
+            }
+          case 0:
+            this.offset += 1;
+            if (this.separatorBytes && n === this.separatorBytes[0]) {
+              if (this.separatorBytes.length === 1) {
+                this.state = 0;
+                this.onToken({
+                  token: tokenType_default.SEPARATOR,
+                  value: this.separator,
+                  offset: this.offset + this.separatorBytes.length - 1
+                });
+                continue;
+              }
+              this.state = 28;
+              continue;
+            }
+            if (n === 32 || n === 10 || n === 13 || n === 9) {
+              continue;
+            }
+            if (n === 123) {
+              this.onToken({
+                token: tokenType_default.LEFT_BRACE,
+                value: "{",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 125) {
+              this.onToken({
+                token: tokenType_default.RIGHT_BRACE,
+                value: "}",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 91) {
+              this.onToken({
+                token: tokenType_default.LEFT_BRACKET,
+                value: "[",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 93) {
+              this.onToken({
+                token: tokenType_default.RIGHT_BRACKET,
+                value: "]",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 58) {
+              this.onToken({
+                token: tokenType_default.COLON,
+                value: ":",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 44) {
+              this.onToken({
+                token: tokenType_default.COMMA,
+                value: ",",
+                offset: this.offset
+              });
+              continue;
+            }
+            if (n === 116) {
+              this.state = 3;
+              continue;
+            }
+            if (n === 102) {
+              this.state = 6;
+              continue;
+            }
+            if (n === 110) {
+              this.state = 10;
+              continue;
+            }
+            if (n === 34) {
+              this.bufferedString.reset();
+              this.escapedCharsByteLength = 0;
+              this.state = 13;
+              continue;
+            }
+            if (n >= 49 && n <= 57) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 22;
+              continue;
+            }
+            if (n === 48) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 21;
+              continue;
+            }
+            if (n === 45) {
+              this.bufferedNumber.reset();
+              this.bufferedNumber.appendChar(n);
+              this.state = 20;
+              continue;
+            }
+            break;
+          case 13:
+            if (n === 34) {
+              this.flushPendingHighSurrogate();
+              const string = this.bufferedString.toString();
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.STRING,
+                value: string,
+                offset: this.offset
+              });
+              this.offset += this.escapedCharsByteLength + this.bufferedString.byteLength + 1;
+              continue;
+            }
+            if (n === 92) {
+              this.state = 14;
+              continue;
+            }
+            if (n >= 128) {
+              this.flushPendingHighSurrogate();
+              const runEnd = multiByteRunEnd(buffer, i2);
+              if (runEnd > i2) {
+                this.bufferedString.appendBuf(buffer, i2, runEnd);
+                i2 = runEnd - 1;
+              }
+              if (runEnd < buffer.length && buffer[runEnd] >= 128) {
+                this.startIncompleteChar(buffer, runEnd);
+                i2 = buffer.length - 1;
+              }
+              continue;
+            }
+            if (n >= 32) {
+              this.flushPendingHighSurrogate();
+              let j = i2;
+              while (j < buffer.length) {
+                const b = buffer[j];
+                if (b < 32 || b >= 128 || b === 34 || b === 92)
+                  break;
+                j += 1;
+              }
+              if (j - i2 >= 16) {
+                this.bufferedString.appendBuf(buffer, i2, j);
+              } else {
+                for (let k = i2;k < j; k += 1)
+                  this.bufferedString.appendChar(buffer[k]);
+              }
+              i2 = j - 1;
+              continue;
+            }
+            break;
+          case 19: {
+            const available = Math.min(this.bytes_remaining, buffer.length - i2);
+            this.char_split_buffer.set(buffer.subarray(i2, i2 + available), this.bytes_in_sequence - this.bytes_remaining);
+            this.bytes_remaining -= available;
+            if (this.bytes_remaining > 0) {
+              i2 = buffer.length - 1;
+              continue;
+            }
+            this.bufferedString.appendBuf(this.char_split_buffer, 0, this.bytes_in_sequence);
+            i2 += available - 1;
+            this.state = 13;
+            continue;
+          }
+          case 14: {
+            const controlChar = escapedSequences[n];
+            if (controlChar) {
+              this.flushPendingHighSurrogate();
+              this.bufferedString.appendChar(controlChar);
+              this.escapedCharsByteLength += 1;
+              this.state = 13;
+              continue;
+            }
+            if (n === 117) {
+              this.unicode = "";
+              this.state = 15;
+              continue;
+            }
+            break;
+          }
+          case 15:
+          case 16:
+          case 17:
+            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
+              this.unicode += String.fromCharCode(n);
+              this.state += 1;
+              continue;
+            }
+            break;
+          case 18:
+            if (n >= 48 && n <= 57 || n >= 65 && n <= 70 || n >= 97 && n <= 102) {
+              const intVal = parseInt(this.unicode + String.fromCharCode(n), 16);
+              this.appendUnicodeCodeUnit(intVal);
+              this.state = 13;
+              continue;
+            }
+            break;
+          case 20:
+            if (n === 48) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 21;
+              continue;
+            }
+            if (n >= 49 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 22;
+              continue;
+            }
+            break;
+          case 21:
+            if (n === 46) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 23;
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i2 -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 22:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            if (n === 46) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 23;
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i2 -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 23:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 24;
+              continue;
+            }
+            break;
+          case 24:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            if (n === 101 || n === 69) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 25;
+              continue;
+            }
+            i2 -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 25:
+            if (n === 43 || n === 45) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 26;
+              continue;
+            }
+          case 26:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              this.state = 27;
+              continue;
+            }
+            break;
+          case 27:
+            if (n >= 48 && n <= 57) {
+              this.bufferedNumber.appendChar(n);
+              continue;
+            }
+            i2 -= 1;
+            this.state = 0;
+            this.emitNumber();
+            continue;
+          case 3:
+            if (n === 114) {
+              this.state = 4;
+              continue;
+            }
+            break;
+          case 4:
+            if (n === 117) {
+              this.state = 5;
+              continue;
+            }
+            break;
+          case 5:
+            if (n === 101) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.TRUE,
+                value: true,
+                offset: this.offset
+              });
+              this.offset += 3;
+              continue;
+            }
+            break;
+          case 6:
+            if (n === 97) {
+              this.state = 7;
+              continue;
+            }
+            break;
+          case 7:
+            if (n === 108) {
+              this.state = 8;
+              continue;
+            }
+            break;
+          case 8:
+            if (n === 115) {
+              this.state = 9;
+              continue;
+            }
+            break;
+          case 9:
+            if (n === 101) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.FALSE,
+                value: false,
+                offset: this.offset
+              });
+              this.offset += 4;
+              continue;
+            }
+            break;
+          case 10:
+            if (n === 117) {
+              this.state = 11;
+              continue;
+            }
+            break;
+          case 11:
+            if (n === 108) {
+              this.state = 12;
+              continue;
+            }
+            break;
+          case 12:
+            if (n === 108) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.NULL,
+                value: null,
+                offset: this.offset
+              });
+              this.offset += 3;
+              continue;
+            }
+            break;
+          case 28:
+            this.separatorIndex += 1;
+            if (!this.separatorBytes || n !== this.separatorBytes[this.separatorIndex]) {
+              break;
+            }
+            if (this.separatorIndex === this.separatorBytes.length - 1) {
+              this.state = 0;
+              this.onToken({
+                token: tokenType_default.SEPARATOR,
+                value: this.separator,
+                offset: this.offset + this.separatorIndex
+              });
+              this.separatorIndex = 0;
+            }
+            continue;
+          case 30:
+            if (n === this.bom[this.bomIndex]) {
+              if (this.bomIndex === this.bom.length - 1) {
+                this.state = 0;
+                this.bom = undefined;
+                this.bomIndex = 0;
+                continue;
+              }
+              this.bomIndex += 1;
+              continue;
+            }
+            break;
+          case 1:
+            if (n === 32 || n === 10 || n === 13 || n === 9) {
+              continue;
+            }
+        }
+        throw new TokenizerError(`Unexpected "${String.fromCharCode(n)}" at chunk position "${i2}" (absolute position "${this.streamByteLength + i2}") in state ${TokenizerStateToString(this.state)}`);
+      }
+      this.streamByteLength += buffer.length;
+      if (this.emitPartialTokens) {
+        switch (this.state) {
+          case 3:
+          case 4:
+          case 5:
+            this.onToken({
+              token: tokenType_default.TRUE,
+              value: true,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 6:
+          case 7:
+          case 8:
+          case 9:
+            this.onToken({
+              token: tokenType_default.FALSE,
+              value: false,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 10:
+          case 11:
+          case 12:
+            this.onToken({
+              token: tokenType_default.NULL,
+              value: null,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          case 13: {
+            const string = this.bufferedString.toString();
+            this.onToken({
+              token: tokenType_default.STRING,
+              value: string,
+              offset: this.offset,
+              partial: true
+            });
+            break;
+          }
+          case 21:
+          case 22:
+          case 24:
+          case 27:
+            try {
+              this.onToken({
+                token: tokenType_default.NUMBER,
+                value: this.parseNumber(this.bufferedNumber.toString()),
+                offset: this.offset,
+                partial: true
+              });
+            } catch (_a3) {}
+        }
+      }
+    } catch (err2) {
+      this.error(err2);
+    }
+  }
+  emitNumber() {
+    this.onToken({
+      token: tokenType_default.NUMBER,
+      value: this.parseNumber(this.bufferedNumber.toString()),
+      offset: this.offset
+    });
+    this.offset += this.bufferedNumber.byteLength - 1;
+  }
+  parseNumber(numberStr) {
+    return Number(numberStr);
+  }
+  error(err2) {
+    if (this.state !== 1) {
+      this.state = 2;
+    }
+    this.onError(err2);
+  }
+  end() {
+    switch (this.state) {
+      case 21:
+      case 22:
+      case 24:
+      case 27:
+        this.state = 1;
+        this.emitNumber();
+        this.onEnd();
+        break;
+      case 29:
+      case 0:
+      case 2:
+        this.state = 1;
+        this.onEnd();
+        break;
+      default:
+        this.error(new TokenizerError(`Tokenizer ended in the middle of a token (state: ${TokenizerStateToString(this.state)}). Either not all the data was received or the data was invalid.`));
+    }
+  }
+  onToken(parsedToken) {
+    throw new TokenizerError(`Can't emit tokens before the "onToken" callback has been set up.`);
+  }
+  onError(err2) {
+    throw err2;
+  }
+  onEnd() {}
+}
+var TokenizerStates, defaultOpts, TokenizerError;
 var init_tokenizer = __esm(() => {
   init_tokenType();
   init_utf_8();
@@ -50231,10 +51122,746 @@ var init_tokenizer = __esm(() => {
     TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
     TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
   })(TokenizerStates || (TokenizerStates = {}));
+  defaultOpts = {
+    stringBufferSize: 0,
+    numberBufferSize: 0,
+    separator: undefined,
+    emitPartialTokens: false
+  };
+  TokenizerError = class TokenizerError extends Error {
+    constructor(message2) {
+      super(message2);
+      Object.setPrototypeOf(this, TokenizerError.prototype);
+    }
+  };
 });
 
 // src/workers/archive-import/json-stream.ts
-var JsonStreamError, EMPTY_FRAME, MAX_SAFE_DIGITS;
+function isHexDigit(byte) {
+  return byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102;
+}
+function isEscapeByte(byte) {
+  return byte === 34 || byte === 92 || byte === 47 || byte === 98 || byte === 102 || byte === 110 || byte === 114 || byte === 116;
+}
+function isSpaceOrStructure(byte) {
+  return byte === 32 || byte === 10 || byte === 13 || byte === 9 || byte === 44 || byte === 58 || byte === 91 || byte === 93 || byte === 123 || byte === 125;
+}
+function isValueStart(type) {
+  return type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET || type === tokenType_default.STRING || type === tokenType_default.NUMBER || type === tokenType_default.TRUE || type === tokenType_default.FALSE || type === tokenType_default.NULL || type === OVERSIZE;
+}
+function invalid() {
+  return new JsonStreamError("invalid_json", "This file is not valid JSON.");
+}
+function classify(kind, phase, type) {
+  if (kind === "root") {
+    if (phase === "root" && isValueStart(type))
+      return "value";
+    throw invalid();
+  }
+  if (kind === "object") {
+    if (phase === "first") {
+      if (type === tokenType_default.STRING)
+        return "key";
+      if (type === tokenType_default.RIGHT_BRACE)
+        return "close";
+    } else if (phase === "next") {
+      if (type === tokenType_default.STRING)
+        return "key";
+    } else if (phase === "colon") {
+      if (type === tokenType_default.COLON)
+        return "colon";
+    } else if (phase === "value") {
+      if (isValueStart(type))
+        return "value";
+    } else if (phase === "after") {
+      if (type === tokenType_default.COMMA)
+        return "comma";
+      if (type === tokenType_default.RIGHT_BRACE)
+        return "close";
+    }
+    throw invalid();
+  }
+  if (phase === "first") {
+    if (isValueStart(type))
+      return "value";
+    if (type === tokenType_default.RIGHT_BRACKET)
+      return "close";
+  } else if (phase === "next") {
+    if (isValueStart(type))
+      return "value";
+  } else if (phase === "after") {
+    if (type === tokenType_default.COMMA)
+      return "comma";
+    if (type === tokenType_default.RIGHT_BRACKET)
+      return "close";
+  }
+  throw invalid();
+}
+function setOwn(target, key2, value) {
+  Object.defineProperty(target, key2, { value, enumerable: true, writable: true, configurable: true });
+}
+function copyFrame(frame) {
+  const out = {};
+  for (const key2 of Object.keys(frame))
+    setOwn(out, key2, frame[key2]);
+  return out;
+}
+function serializeJsonResume(point) {
+  return JSON.stringify({
+    o: point.offset,
+    l: point.levels.map((level) => [level.kind === "object" ? "o" : "a", level.pointer, level.frame])
+  });
+}
+function parseJsonResume(text2) {
+  let raw;
+  try {
+    raw = JSON.parse(text2);
+  } catch {
+    return;
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return;
+  const { o, l } = raw;
+  if (typeof o !== "number" || !Number.isSafeInteger(o) || o < 0)
+    return;
+  if (!Array.isArray(l) || l.length === 0 || l.length > JSON_STREAM_MAX_DEPTH)
+    return;
+  const levels = [];
+  for (const entry of l) {
+    if (!Array.isArray(entry) || entry.length !== 3)
+      return;
+    const [code, pointer, frame] = entry;
+    if (code !== "o" && code !== "a")
+      return;
+    if (code === "a") {
+      if (typeof pointer !== "number" || !Number.isSafeInteger(pointer) || pointer < 0)
+        return;
+    } else if (typeof pointer !== "string" || pointer.length > JSON_STREAM_MAX_KEY_CHARS) {
+      return;
+    }
+    if (typeof frame !== "object" || frame === null || Array.isArray(frame))
+      return;
+    const keys = Object.keys(frame);
+    if (keys.length > JSON_STREAM_MAX_FRAME_KEYS)
+      return;
+    const clean2 = {};
+    for (const key2 of keys) {
+      const value = frame[key2];
+      if (value !== null && typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean")
+        return;
+      if (typeof value === "string" && value.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
+        return;
+      setOwn(clean2, key2, value);
+    }
+    levels.push({ kind: code === "o" ? "object" : "array", pointer, frame: clean2 });
+  }
+  return { offset: o, levels };
+}
+
+class JsonStreamReader {
+  source;
+  itemPaths;
+  maxItemBytes;
+  queue = [];
+  queueAt = 0;
+  peakQueued = 0;
+  levels = [];
+  phase = "root";
+  capture;
+  pending;
+  merged;
+  tokenizer;
+  base = 0;
+  inbox;
+  inboxAt = 0;
+  inboxBase = 0;
+  lex = LEX_OUT;
+  hexLeft = 0;
+  utfLeft = 0;
+  utfLow = 128;
+  utfHigh = 191;
+  stringStart = 0;
+  stringLimit = 0;
+  runStart = -1;
+  stop = STOP_END;
+  skipping = false;
+  failure;
+  resuming;
+  started = false;
+  head;
+  finished = false;
+  constructor(source, options) {
+    this.source = source;
+    this.itemPaths = options.itemPaths;
+    this.maxItemBytes = Math.max(1, options.maxItemBytes);
+    this.resuming = options.resume !== undefined;
+    if (options.resume) {
+      const resume = options.resume;
+      if (source.position !== resume.offset || resume.levels.length === 0 || resume.levels.length > JSON_STREAM_MAX_DEPTH) {
+        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
+      }
+      this.levels = resume.levels.map((level) => ({ kind: level.kind, pointer: level.pointer, frame: level.frame }));
+      this.phase = "after";
+      this.started = true;
+    }
+  }
+  get position() {
+    return this.source.position;
+  }
+  get peakQueuedEvents() {
+    return this.peakQueued;
+  }
+  next() {
+    for (;; ) {
+      if (this.queueAt < this.queue.length) {
+        const event = this.queue[this.queueAt];
+        this.queueAt += 1;
+        if (this.queueAt === this.queue.length) {
+          this.queue.length = 0;
+          this.queueAt = 0;
+        }
+        return event;
+      }
+      if (this.failure)
+        throw this.failure;
+      if (this.inbox) {
+        this.pump();
+        continue;
+      }
+      if (this.finished)
+        return;
+      const chunk = this.source.next();
+      if (chunk === undefined) {
+        if (this.head) {
+          this.inbox = this.head;
+          this.inboxAt = 0;
+          this.inboxBase = 0;
+          this.head = undefined;
+          this.started = true;
+          continue;
+        }
+        this.finished = true;
+        this.finish();
+        continue;
+      }
+      this.feed(chunk);
+    }
+  }
+  startTokenizer(base) {
+    const tokenizer = new ExactNumberTokenizer;
+    this.base = base;
+    tokenizer.onToken = (info) => {
+      if (this.failure)
+        return;
+      try {
+        this.handle(info.token, info.value, this.base + info.offset);
+      } catch (error) {
+        this.failure = error instanceof JsonStreamError ? error : invalid();
+        throw this.failure;
+      }
+    };
+    tokenizer.onError = () => {
+      this.failure ??= this.resuming ? new JsonStreamError("resume_invalid", "No item ends where this import was to resume.") : invalid();
+    };
+    this.tokenizer = tokenizer;
+    return tokenizer;
+  }
+  feed(chunk) {
+    let data2 = chunk;
+    let at = this.source.position - chunk.length;
+    if (!this.started) {
+      const joined = this.head ? concat(this.head, data2) : data2;
+      at -= this.head ? this.head.length : 0;
+      if (joined.length < 3) {
+        this.head = joined;
+        return;
+      }
+      this.head = undefined;
+      this.started = true;
+      data2 = joined;
+      if (data2[0] === 239 && data2[1] === 187 && data2[2] === 191) {
+        data2 = data2.subarray(3);
+        at += 3;
+      }
+    }
+    if (data2.length === 0)
+      return;
+    this.inbox = data2;
+    this.inboxAt = 0;
+    this.inboxBase = at;
+  }
+  pump() {
+    const inbox = this.inbox;
+    try {
+      while (this.inboxAt < inbox.length && !this.failure && this.queue.length <= JSON_STREAM_MAX_QUEUED_EVENTS) {
+        const begin = this.inboxAt;
+        const end = Math.min(inbox.length, begin + JSON_STREAM_FEED_SLICE_BYTES);
+        this.inboxAt = end;
+        this.consume(inbox, begin, end, this.inboxBase);
+        if (this.queue.length > this.peakQueued)
+          this.peakQueued = this.queue.length;
+      }
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+    if (this.failure || this.inboxAt >= inbox.length)
+      this.inbox = undefined;
+  }
+  consume(data2, begin, end, base) {
+    let index = begin;
+    let fed = begin;
+    while (index < end) {
+      if (this.skipping) {
+        const stopped2 = this.skipScan(data2, index, end);
+        if (this.stop === STOP_END) {
+          index = end;
+          fed = end;
+          break;
+        }
+        if (this.stop === STOP_BAD) {
+          this.failure ??= invalid();
+          return;
+        }
+        const start = this.stringStart;
+        this.skipping = false;
+        index = stopped2 + 1;
+        fed = index;
+        this.deliver(OVERSIZE, undefined, start);
+        continue;
+      }
+      const stopped = this.scanNormal(data2, index, end, base);
+      if (this.stop === STOP_END) {
+        index = end;
+        break;
+      }
+      if (this.stop === STOP_BAD) {
+        this.write(data2.subarray(fed, stopped), base + fed);
+        this.failure ??= invalid();
+        return;
+      }
+      const quote = this.stringStart - base;
+      if (quote >= fed)
+        this.write(data2.subarray(fed, quote + 1), base + fed);
+      if (this.failure)
+        return;
+      this.tokenizer = undefined;
+      this.skipping = true;
+      fed = stopped;
+      index = stopped;
+    }
+    if (!this.skipping && fed < end && !this.failure)
+      this.write(data2.subarray(fed, end), base + fed);
+  }
+  write(piece, offset) {
+    if (piece.length === 0)
+      return;
+    const tokenizer = this.tokenizer ?? this.startTokenizer(offset);
+    try {
+      tokenizer.write(piece);
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+  }
+  scanNormal(data2, from, to, at) {
+    const max2 = this.maxItemBytes;
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let runStart = this.runStart;
+    let index = from;
+    this.stop = STOP_END;
+    for (;index < to; index += 1) {
+      const byte = data2[index];
+      if (lex === LEX_OUT) {
+        if (byte === 34) {
+          lex = LEX_STRING;
+          this.stringStart = at + index;
+          this.stringLimit = at + index + max2;
+          runStart = -1;
+          utfLeft = 0;
+        } else if (isSpaceOrStructure(byte)) {
+          runStart = -1;
+        } else if (runStart < 0) {
+          runStart = at + index;
+        } else if (at + index + 1 - runStart > max2) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        continue;
+      }
+      if (at + index === this.stringLimit) {
+        this.stop = STOP_OVERSIZE;
+        break;
+      }
+      if (lex === LEX_STRING) {
+        if (byte < 128) {
+          utfLeft = 0;
+          if (byte === 34)
+            lex = LEX_OUT;
+          else if (byte === 92)
+            lex = LEX_ESCAPE;
+        } else if (utfLeft > 0 && byte >= this.utfLow && byte <= this.utfHigh) {
+          utfLeft -= 1;
+          this.utfLow = 128;
+          this.utfHigh = 191;
+        } else {
+          utfLeft = this.utfLead(byte);
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 117) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else {
+          lex = LEX_STRING;
+        }
+      } else {
+        hexLeft -= 1;
+        if (hexLeft === 0)
+          lex = LEX_STRING;
+      }
+    }
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = runStart;
+    return index;
+  }
+  utfLead(byte) {
+    this.utfLow = 128;
+    this.utfHigh = 191;
+    if (byte >= 194 && byte <= 223)
+      return 1;
+    if (byte >= 224 && byte <= 239) {
+      if (byte === 224)
+        this.utfLow = 160;
+      else if (byte === 237)
+        this.utfHigh = 159;
+      return 2;
+    }
+    if (byte >= 240 && byte <= 244) {
+      if (byte === 240)
+        this.utfLow = 144;
+      else if (byte === 244)
+        this.utfHigh = 143;
+      return 3;
+    }
+    return 0;
+  }
+  skipScan(data2, from, to) {
+    let lex = this.lex;
+    let hexLeft = this.hexLeft;
+    let utfLeft = this.utfLeft;
+    let index = from;
+    this.stop = STOP_END;
+    for (;index < to; index += 1) {
+      const byte = data2[index];
+      if (utfLeft > 0) {
+        if (byte < this.utfLow || byte > this.utfHigh) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        utfLeft -= 1;
+        this.utfLow = 128;
+        this.utfHigh = 191;
+        continue;
+      }
+      if (lex === LEX_STRING) {
+        if (byte === 34) {
+          lex = LEX_OUT;
+          this.stop = STOP_CLOSED;
+          break;
+        }
+        if (byte === 92) {
+          lex = LEX_ESCAPE;
+        } else if (byte < 32) {
+          this.stop = STOP_BAD;
+          break;
+        } else if (byte >= 128) {
+          utfLeft = this.utfLead(byte);
+          if (utfLeft === 0) {
+            this.stop = STOP_BAD;
+            break;
+          }
+        }
+      } else if (lex === LEX_ESCAPE) {
+        if (byte === 117) {
+          lex = LEX_HEX;
+          hexLeft = 4;
+        } else if (isEscapeByte(byte)) {
+          lex = LEX_STRING;
+        } else {
+          this.stop = STOP_BAD;
+          break;
+        }
+      } else {
+        if (!isHexDigit(byte)) {
+          this.stop = STOP_BAD;
+          break;
+        }
+        hexLeft -= 1;
+        if (hexLeft === 0)
+          lex = LEX_STRING;
+      }
+    }
+    this.lex = lex;
+    this.hexLeft = hexLeft;
+    this.utfLeft = utfLeft;
+    this.runStart = -1;
+    return index;
+  }
+  finish() {
+    try {
+      if (this.lex !== LEX_OUT || this.skipping) {
+        throw new JsonStreamError("truncated", "This file ends inside a piece of text.");
+      }
+      if (this.tokenizer) {
+        try {
+          this.tokenizer.end();
+        } catch (error) {
+          throw this.failure ?? (error instanceof JsonStreamError ? error : invalid());
+        }
+        if (this.failure)
+          throw this.failure;
+      }
+      if (this.capture || this.pending || this.levels.length > 0 || this.phase === "first" || this.phase === "next" || this.phase === "colon" || this.phase === "value") {
+        throw new JsonStreamError("truncated", "This file ends before its last item does.");
+      }
+      if (this.phase === "root")
+        throw new JsonStreamError("empty", "This file holds no JSON.");
+    } catch (error) {
+      this.failure ??= error instanceof JsonStreamError ? error : invalid();
+    }
+  }
+  deliver(type, value, start) {
+    try {
+      this.handle(type, value, start);
+    } catch (error) {
+      this.failure = error instanceof JsonStreamError ? error : invalid();
+      throw this.failure;
+    }
+  }
+  handle(type, value, start) {
+    if (this.resuming) {
+      this.resuming = false;
+      const top2 = this.levels[this.levels.length - 1];
+      const fits = type === tokenType_default.COMMA || (top2.kind === "object" ? type === tokenType_default.RIGHT_BRACE : type === tokenType_default.RIGHT_BRACKET);
+      if (!fits)
+        throw new JsonStreamError("resume_invalid", "No item ends where this import was to resume.");
+    }
+    if (this.capture) {
+      this.captureToken(this.capture, type, value, start);
+      return;
+    }
+    const top = this.levels[this.levels.length - 1];
+    const role = classify(top ? top.kind : "root", this.phase, type);
+    switch (role) {
+      case "key": {
+        const key2 = value;
+        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
+          throw invalid();
+        this.levels[this.levels.length - 1] = { kind: "object", pointer: key2, frame: top.frame };
+        this.phase = "colon";
+        return;
+      }
+      case "colon":
+        this.phase = "value";
+        return;
+      case "comma":
+        this.flush(start);
+        this.phase = "next";
+        return;
+      case "close":
+        this.flush(start);
+        this.levels.pop();
+        this.merged = undefined;
+        this.phase = this.levels.length === 0 ? "done" : "after";
+        return;
+      case "value":
+        this.beginValue(type, value, start);
+        return;
+    }
+  }
+  beginValue(type, value, start) {
+    let top = this.levels[this.levels.length - 1];
+    if (top && top.kind === "array") {
+      top = { kind: "array", pointer: typeof top.pointer === "number" ? top.pointer + 1 : 0, frame: top.frame };
+      this.levels[this.levels.length - 1] = top;
+    }
+    if (top) {
+      const index = this.matchingPath();
+      if (index >= 0) {
+        const path = this.levels.map((level) => level.pointer);
+        const capture = {
+          start,
+          pathIndex: index,
+          path,
+          frame: this.mergedFrame(),
+          oversize: false,
+          depth: 0,
+          build: [],
+          result: undefined
+        };
+        this.capture = capture;
+        this.captureToken(capture, type, value, start);
+        return;
+      }
+    }
+    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+      if (this.levels.length >= JSON_STREAM_MAX_DEPTH)
+        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
+      this.levels.push({
+        kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
+        pointer: undefined,
+        frame: EMPTY_FRAME
+      });
+      this.merged = undefined;
+      this.phase = "first";
+      return;
+    }
+    if (top && top.kind === "object" && type !== OVERSIZE)
+      this.recordFrame(top, value);
+    this.phase = top ? "after" : "done";
+  }
+  recordFrame(top, value) {
+    if (typeof value === "string" && value.length > JSON_STREAM_MAX_FRAME_VALUE_CHARS)
+      return;
+    const key2 = top.pointer;
+    if (!Object.prototype.hasOwnProperty.call(top.frame, key2) && Object.keys(top.frame).length >= JSON_STREAM_MAX_FRAME_KEYS)
+      return;
+    const frame = copyFrame(top.frame);
+    setOwn(frame, key2, value);
+    this.levels[this.levels.length - 1] = { kind: "object", pointer: top.pointer, frame };
+    this.merged = undefined;
+  }
+  matchingPath() {
+    const depth = this.levels.length - 1;
+    for (let index = 0;index < this.itemPaths.length; index += 1) {
+      const path = this.itemPaths[index];
+      if (path.length !== depth)
+        continue;
+      let all = true;
+      for (let at = 0;at < depth; at += 1) {
+        const wanted = path[at];
+        if (wanted !== JSON_STREAM_ANY && wanted !== this.levels[at].pointer) {
+          all = false;
+          break;
+        }
+      }
+      if (all)
+        return index;
+    }
+    return -1;
+  }
+  mergedFrame() {
+    if (this.merged)
+      return this.merged;
+    const out = {};
+    for (const level of this.levels) {
+      for (const key2 of Object.keys(level.frame))
+        setOwn(out, key2, level.frame[key2]);
+    }
+    this.merged = Object.keys(out).length === 0 ? EMPTY_FRAME : out;
+    return this.merged;
+  }
+  captureToken(capture, type, value, start) {
+    if (!capture.oversize && (type === OVERSIZE || start - capture.start > this.maxItemBytes)) {
+      capture.oversize = true;
+      capture.result = undefined;
+      for (const level of capture.build)
+        level.value = undefined;
+    }
+    if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+      capture.depth += 1;
+      if (capture.depth > JSON_STREAM_MAX_DEPTH)
+        throw new JsonStreamError("too_deep", "This file nests deeper than Olympus reads.");
+    } else if (type === tokenType_default.RIGHT_BRACE || type === tokenType_default.RIGHT_BRACKET) {
+      capture.depth -= 1;
+      if (capture.depth < 0)
+        throw invalid();
+    }
+    this.build(capture, capture.build, type, value);
+    if (capture.depth === 0) {
+      this.capture = undefined;
+      this.pending = capture;
+      this.phase = "after";
+    }
+  }
+  build(capture, stack, type, value) {
+    const top = stack[stack.length - 1];
+    const role = classify(top ? top.kind : "root", top ? top.phase : "root", type);
+    const place = (placed) => {
+      const parent = stack[stack.length - 1];
+      if (!parent) {
+        capture.result = capture.oversize ? undefined : placed;
+        return;
+      }
+      if (!capture.oversize) {
+        if (parent.kind === "array")
+          parent.value.push(placed);
+        else
+          setOwn(parent.value, parent.key, placed);
+      }
+      parent.phase = "after";
+    };
+    switch (role) {
+      case "key": {
+        const key2 = value;
+        if (key2.length > JSON_STREAM_MAX_KEY_CHARS)
+          throw invalid();
+        top.key = key2;
+        top.phase = "colon";
+        return;
+      }
+      case "colon":
+        top.phase = "value";
+        return;
+      case "comma":
+        top.phase = "next";
+        return;
+      case "close": {
+        const closed = stack.pop();
+        place(closed.value);
+        return;
+      }
+      case "value":
+        if (type === tokenType_default.LEFT_BRACE || type === tokenType_default.LEFT_BRACKET) {
+          stack.push({
+            kind: type === tokenType_default.LEFT_BRACE ? "object" : "array",
+            phase: "first",
+            key: undefined,
+            value: capture.oversize ? undefined : type === tokenType_default.LEFT_BRACE ? {} : []
+          });
+        } else {
+          place(value);
+        }
+        return;
+    }
+  }
+  flush(delimiterAt) {
+    const capture = this.pending;
+    if (!capture)
+      return;
+    this.pending = undefined;
+    const oversize = capture.oversize || delimiterAt - capture.start > this.maxItemBytes;
+    this.queue.push({
+      kind: oversize ? "oversize" : "item",
+      path: capture.path,
+      pathIndex: capture.pathIndex,
+      value: oversize ? undefined : capture.result,
+      frame: capture.frame,
+      start: capture.start,
+      end: delimiterAt,
+      resume: { offset: delimiterAt, levels: this.levels.slice() }
+    });
+  }
+}
+function concat(first, second) {
+  const out = new Uint8Array(first.length + second.length);
+  out.set(first);
+  out.set(second, first.length);
+  return out;
+}
+var JSON_STREAM_ANY = "*", JSON_STREAM_MAX_DEPTH = 512, JSON_STREAM_MAX_KEY_CHARS = 1024, JSON_STREAM_MAX_FRAME_VALUE_CHARS = 1024, JSON_STREAM_MAX_FRAME_KEYS = 64, JSON_STREAM_FEED_SLICE_BYTES = 1024, JSON_STREAM_MAX_QUEUED_EVENTS = 64, JsonStreamError, OVERSIZE = -1, LEX_OUT = 0, LEX_STRING = 1, LEX_ESCAPE = 2, LEX_HEX = 3, STOP_END = 0, STOP_OVERSIZE = 1, STOP_BAD = 2, STOP_CLOSED = 3, EMPTY_FRAME, MAX_SAFE_DIGITS, ExactNumberTokenizer;
 var init_json_stream = __esm(() => {
   init_tokenizer();
   init_tokenType();
@@ -50248,6 +51875,27 @@ var init_json_stream = __esm(() => {
   };
   EMPTY_FRAME = Object.freeze({});
   MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+  ExactNumberTokenizer = class ExactNumberTokenizer extends Tokenizer {
+    parseNumber(numberStr) {
+      const value = Number(numberStr);
+      if (Number.isSafeInteger(value) || !Number.isFinite(value))
+        return value;
+      const digits = numberStr.startsWith("-") ? numberStr.slice(1) : numberStr;
+      let wholeNumber = digits.length > 0;
+      for (let index = 0;index < digits.length; index += 1) {
+        const code = digits.charCodeAt(index);
+        if (code < 48 || code > 57) {
+          wholeNumber = false;
+          break;
+        }
+      }
+      if (!wholeNumber)
+        return value;
+      if (digits.length < MAX_SAFE_DIGITS.length)
+        return value;
+      return numberStr;
+    }
+  };
 });
 
 // src/workers/archive-import/stop-errors.ts
@@ -50296,6 +51944,47 @@ function crc32Update(value, data2) {
   if (data2.length === 0)
     return value >>> 0;
   return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
+}
+function fileByteSource(reader, options = {}) {
+  const end = Math.min(reader.size, options.end ?? reader.size);
+  const chunkBytes = Math.max(1, options.chunkBytes ?? ARCHIVE_SOURCE_CHUNK_BYTES);
+  let readFrom = Math.max(0, options.start ?? 0);
+  let position = readFrom;
+  let pending;
+  let last = new Uint8Array(0);
+  let held = 0;
+  return {
+    get position() {
+      return position;
+    },
+    next() {
+      let chunk;
+      if (pending) {
+        chunk = pending;
+        pending = undefined;
+      } else {
+        if (readFrom >= end)
+          return;
+        chunk = reader.readAt(readFrom, Math.min(chunkBytes, end - readFrom));
+        readFrom += chunk.length;
+        if (chunk.length === 0)
+          return;
+      }
+      last = chunk;
+      held = chunk.length;
+      position += chunk.length;
+      return chunk;
+    },
+    unread(count) {
+      if (!Number.isInteger(count) || count < 0 || count > held)
+        throw new RangeError("unread past the last chunk");
+      if (count === 0)
+        return;
+      held -= count;
+      position -= count;
+      pending = last.subarray(held);
+    }
+  };
 }
 var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
 var init_byte_source = __esm(() => {
@@ -50666,6 +52355,20 @@ function sameBytes(a, b) {
       return false;
   return true;
 }
+function stoppableZipSource(reader, relPath) {
+  return {
+    get size() {
+      return reader.size;
+    },
+    readAt(offset, length) {
+      try {
+        return reader.readAt(offset, length);
+      } catch (error) {
+        throw archiveStopFromScopeError(error, relPath);
+      }
+    }
+  };
+}
 function memberKey(entry) {
   return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
 }
@@ -50966,6 +52669,9 @@ function readZipMemberHead(archive, entry, maxBytes) {
     at += part.length;
   }
   return out;
+}
+function zipFindingOffset(memberIndex, offsetInMember) {
+  return memberIndex * 8589934592 + Math.min(Math.max(0, offsetInMember), 8589934591);
 }
 var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
@@ -52027,34 +53733,34 @@ function mailScopeFromDraft(draft) {
   };
 }
 function parseMailScopeDraft(value) {
-  const invalid = (message2) => {
+  const invalid2 = (message2) => {
     throw new OperationError("invalid_request", message2);
   };
   if (!value || typeof value !== "object" || Array.isArray(value))
-    invalid("The mail scope draft must be an object.");
+    invalid2("The mail scope draft must be an object.");
   const record = value;
   if (!isMailScopeWindow(record.window))
-    invalid("Choose a valid mail time window.");
+    invalid2("Choose a valid mail time window.");
   const strings = (field, max2) => {
     const list = record[field];
     if (!Array.isArray(list) || list.length > max2 || list.some((entry) => typeof entry !== "string" || entry.length > 320)) {
-      invalid(`${field} must be a list of at most ${max2} strings.`);
+      invalid2(`${field} must be a list of at most ${max2} strings.`);
     }
     return list;
   };
   const categories = strings("skipped_categories", GMAIL_SCOPE_CATEGORIES.length);
   if (categories.some((category) => !isGmailScopeCategory(category)))
-    invalid("Every skipped category must be a Gmail category.");
+    invalid2("Every skipped category must be a Gmail category.");
   const labels = record.skipped_labels;
   if (!Array.isArray(labels) || labels.length > 500)
-    invalid("skipped_labels must be a list of at most 500 labels.");
+    invalid2("skipped_labels must be a list of at most 500 labels.");
   return {
     window: record.window,
     skipped_categories: categories,
     skipped_labels: labels.map((label) => {
       const entry = label && typeof label === "object" && !Array.isArray(label) ? label : {};
       if (typeof entry.id !== "string" || typeof entry.name !== "string" || entry.id.length > 256 || entry.name.length > 256) {
-        return invalid("Every skipped label needs its Gmail id and name.");
+        return invalid2("Every skipped label needs its Gmail id and name.");
       }
       return { id: entry.id, name: entry.name };
     }),
@@ -64320,7 +66026,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates"]
     },
     {
       source_id: "x.bookmarks",
@@ -71510,10 +73216,10 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
   if (onStatus) {
     const stream = statusChannel?.reader ?? child.stdio[3];
     let pending = "";
-    let invalid = false;
+    let invalid2 = false;
     const reject = () => {
-      if (!invalid) {
-        invalid = true;
+      if (!invalid2) {
+        invalid2 = true;
         onStatus({ event: "refused", code: "no_status_event" });
       }
     };
@@ -71521,7 +73227,7 @@ function supervise(role, watchdog, argv, env, onLine, onExit, onStatus, onStatus
       reject();
     stream?.setEncoding("utf8");
     stream?.on("data", (chunk) => {
-      if (invalid)
+      if (invalid2)
         return;
       pending += chunk;
       if (pending.length > 65536) {
@@ -77577,6 +79283,10 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
+      note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
+      note_too_large: { one: "1 note too large to read", many: "{n} notes too large to read" },
+      note_date_assumed: { one: "1 note has no date in the archive: Olympus used the day the file was saved", many: "{n} notes have no date in the archive: Olympus used the day the file was saved" },
       media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
       assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones)" },
@@ -83544,18 +85254,18 @@ function questionModel(subQuestions) {
     const variants = [viewTokens, viewTokens.map((token) => /\p{L}/u.test(token) ? mapCharacters(token, LEET) : token)];
     for (const variant of variants) {
       for (let start = 0;start < variant.length; start += 1) {
-        let concat = "";
+        let concat2 = "";
         let onlyFunctionWords = true;
         for (let end = start;end < variant.length && end - start < CONSULT_GATE_COMPACT_WINDOW_TOKENS; end += 1) {
-          concat += variant[end];
+          concat2 += variant[end];
           onlyFunctionWords &&= FUNCTION_WORDS.has(viewTokens[end] ?? "");
-          if (concat.length > CONSULT_GATE_COMPACT_WINDOW_CHARS)
+          if (concat2.length > CONSULT_GATE_COMPACT_WINDOW_CHARS)
             break;
-          if (!forms.has(concat))
-            forms.set(concat, source);
+          if (!forms.has(concat2))
+            forms.set(concat2, source);
           if (onlyFunctionWords)
             continue;
-          const reversed = [...concat].reverse().join("");
+          const reversed = [...concat2].reverse().join("");
           if (!forms.has(reversed))
             forms.set(reversed, source);
         }
@@ -86090,12 +87800,12 @@ function parseConsultSettingsText(text2) {
   try {
     parsed = JSON.parse(text2);
   } catch {
-    return invalid("malformed_json");
+    return invalid2("malformed_json");
   }
   if (hasDuplicateObjectKey(text2))
-    return invalid("duplicate_key");
+    return invalid2("duplicate_key");
   const settings = parseConsultSettings(parsed);
-  return settings ? { state: "valid", settings } : invalid("invalid_shape");
+  return settings ? { state: "valid", settings } : invalid2("invalid_shape");
 }
 function readConsultSettings(location = {}) {
   try {
@@ -86110,20 +87820,20 @@ function readConsultSettings(location = {}) {
       if (code === "ENOENT" || code === "ENOTDIR")
         return { state: "absent", settings: DEFAULT_CONSULT_SETTINGS };
       if (code === "ELOOP" || code === "EMLINK")
-        return invalid("not_a_regular_file");
-      return invalid("unreadable");
+        return invalid2("not_a_regular_file");
+      return invalid2("unreadable");
     }
     try {
       __consultSettingsTestHooks.afterOpen?.(path);
       const stats = fstatSync5(descriptor);
       if (!stats.isFile())
-        return invalid("not_a_regular_file");
+        return invalid2("not_a_regular_file");
       if ((stats.mode & 18) !== 0)
-        return invalid("insecure_permissions");
+        return invalid2("insecure_permissions");
       if (typeof process.getuid === "function" && stats.uid !== process.getuid())
-        return invalid("insecure_permissions");
+        return invalid2("insecure_permissions");
       if (stats.size > CONSULT_SETTINGS_MAX_BYTES)
-        return invalid("too_large");
+        return invalid2("too_large");
       __consultSettingsTestHooks.afterStat?.(path);
       const buffer = Buffer.alloc(CONSULT_SETTINGS_MAX_BYTES + 1);
       let length = 0;
@@ -86135,19 +87845,19 @@ function readConsultSettings(location = {}) {
       }
       __consultSettingsTestHooks.afterRead?.(length);
       if (length > CONSULT_SETTINGS_MAX_BYTES)
-        return invalid("too_large");
+        return invalid2("too_large");
       let text2;
       try {
         text2 = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, length));
       } catch {
-        return invalid("invalid_utf8");
+        return invalid2("invalid_utf8");
       }
       return parseConsultSettingsText(text2);
     } finally {
       closeSync17(descriptor);
     }
   } catch {
-    return invalid("unreadable");
+    return invalid2("unreadable");
   }
 }
 function consultGateOptionsFromSettings(settings) {
@@ -86163,7 +87873,7 @@ function consultWriterIdentity(choice) {
     return "built-in";
   return JSON.stringify([choice.baseUrl, choice.model, choice.secretRef ?? null, choice.timeoutMs ?? null]);
 }
-function invalid(reason) {
+function invalid2(reason) {
   return { state: "invalid", reason, settings: DEFAULT_CONSULT_SETTINGS };
 }
 function hasDuplicateObjectKey(text2) {
@@ -89683,6 +91393,7 @@ var init_operations = __esm(() => {
       description: [
         "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
+        "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
         "Never open, read or copy the file yourself, and never retry to get around the approval.",
         `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
         "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
@@ -90124,28 +91835,28 @@ function privacyOwnerContext(options = {}) {
 function parsePrivacyProfileInput(raw) {
   const record2 = asRecord12(raw);
   if (!record2)
-    throw invalid2("The privacy settings must be an object.");
+    throw invalid3("The privacy settings must be an object.");
   const unknownKeys = Object.keys(record2).filter((key2) => key2 !== "description" && key2 !== "rules");
   if (unknownKeys.length > 0)
-    throw invalid2("The privacy settings have unknown fields.");
+    throw invalid3("The privacy settings have unknown fields.");
   const out = {};
   if (record2.description !== undefined) {
     if (typeof record2.description !== "string")
-      throw invalid2("description must be text.");
+      throw invalid3("description must be text.");
     const description = record2.description.replace(/\r\n/g, `
 `).trim();
     if (description.length > PRIVACY_DESCRIPTION_MAX_CHARS) {
-      throw invalid2(`description may be at most ${PRIVACY_DESCRIPTION_MAX_CHARS} characters.`);
+      throw invalid3(`description may be at most ${PRIVACY_DESCRIPTION_MAX_CHARS} characters.`);
     }
     if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(description))
-      throw invalid2("description has control characters.");
+      throw invalid3("description has control characters.");
     out.description = description;
   }
   if (record2.rules !== undefined) {
     if (!Array.isArray(record2.rules))
-      throw invalid2("rules must be a list.");
+      throw invalid3("rules must be a list.");
     if (record2.rules.length > PRIVACY_RULES_MAX)
-      throw invalid2(`At most ${PRIVACY_RULES_MAX} rules.`);
+      throw invalid3(`At most ${PRIVACY_RULES_MAX} rules.`);
     const seen = new Set;
     out.rules = [];
     for (const entry of record2.rules) {
@@ -90162,47 +91873,47 @@ function parsePrivacyProfileInput(raw) {
 function parsePrivacyRule(raw) {
   const record2 = asRecord12(raw);
   if (!record2)
-    throw invalid2("Each rule must be an object.");
+    throw invalid3("Each rule must be an object.");
   const unknownKeys = Object.keys(record2).filter((key3) => !["kind", "source_id", "key", "value", "display"].includes(key3));
   if (unknownKeys.length > 0)
-    throw invalid2("A rule has unknown fields.");
+    throw invalid3("A rule has unknown fields.");
   const kind = record2.kind;
   if (typeof kind !== "string" || !PRIVACY_RULE_KINDS.includes(kind)) {
-    throw invalid2("A rule kind must be folder, label or sender.");
+    throw invalid3("A rule kind must be folder, label or sender.");
   }
   const sources = RULE_SOURCES[kind];
   const sourceId = record2.source_id;
   if (typeof sourceId !== "string" || !Object.prototype.hasOwnProperty.call(sources, sourceId)) {
-    throw invalid2("A rule names a source that kind of rule does not apply to.");
+    throw invalid3("A rule names a source that kind of rule does not apply to.");
   }
   const display = record2.display === undefined ? undefined : boundedName(record2.display, "display");
   if (kind === "sender") {
     if (record2.key !== undefined)
-      throw invalid2("A sender rule takes value, not key.");
+      throw invalid3("A sender rule takes value, not key.");
     const value2 = typeof record2.value === "string" ? record2.value.trim().toLowerCase() : "";
     if (value2.length > 240 || !/^(?:[^\s<>"(),;:@]+)?@[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(value2)) {
-      throw invalid2("A sender rule needs an address (name@example.com) or a whole domain (@example.com).");
+      throw invalid3("A sender rule needs an address (name@example.com) or a whole domain (@example.com).");
     }
     return { kind, source_id: sourceId, value: value2 };
   }
   const key2 = typeof record2.key === "string" ? record2.key.trim() : "";
   if (!key2 || key2.length > PRIVACY_KEY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(key2)) {
-    throw invalid2(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
+    throw invalid3(`A folder or label rule needs its key (at most ${PRIVACY_KEY_MAX_CHARS} characters).`);
   }
   if (sources[sourceId].match === "pathPrefix" && !key2.startsWith("/"))
-    throw invalid2("A folder key for this source is a path.");
+    throw invalid3("A folder key for this source is a path.");
   if (kind === "label") {
     const value2 = boundedName(record2.value, "value");
     return { kind, source_id: sourceId, key: key2, value: value2 };
   }
   if (record2.value !== undefined)
-    throw invalid2("A folder rule takes key, not value.");
+    throw invalid3("A folder rule takes key, not value.");
   return { kind, source_id: sourceId, key: key2, ...display ? { display } : {} };
 }
 function boundedName(value2, field) {
   const name = typeof value2 === "string" ? value2.trim() : "";
   if (!name || name.length > PRIVACY_DISPLAY_MAX_CHARS || /[\u0000-\u001f\u007f]/.test(name)) {
-    throw invalid2(`A rule's ${field} must be a name of at most ${PRIVACY_DISPLAY_MAX_CHARS} characters.`);
+    throw invalid3(`A rule's ${field} must be a name of at most ${PRIVACY_DISPLAY_MAX_CHARS} characters.`);
   }
   return name;
 }
@@ -90243,7 +91954,7 @@ function writePrivacyProfile(update, options = {}) {
 `);
   return next;
 }
-function invalid2(message2) {
+function invalid3(message2) {
   return new OperationError("invalid_params", message2);
 }
 function asRecord12(value2) {
@@ -108057,8 +109768,8 @@ var require_multipleOf = __commonJS((exports) => {
       const { gen, data: data2, schemaCode, it } = cxt;
       const prec = it.opts.multipleOfPrecision;
       const res = gen.let("res");
-      const invalid3 = prec ? (0, codegen_1._)`Math.abs(Math.round(${res}) - ${res}) > 1e-${prec}` : (0, codegen_1._)`${res} !== parseInt(${res})`;
-      cxt.fail$data((0, codegen_1._)`(${schemaCode} === 0 || (${res} = ${data2}/${schemaCode}, ${invalid3}))`);
+      const invalid4 = prec ? (0, codegen_1._)`Math.abs(Math.round(${res}) - ${res}) > 1e-${prec}` : (0, codegen_1._)`${res} !== parseInt(${res})`;
+      cxt.fail$data((0, codegen_1._)`(${schemaCode} === 0 || (${res} = ${data2}/${schemaCode}, ${invalid4}))`);
     }
   };
   exports.default = def;
@@ -116913,14 +118624,14 @@ import { chmodSync as chmodSync27, mkdirSync as mkdirSync48 } from "node:fs";
 import { createHash as createHash65, randomUUID as randomUUID27 } from "node:crypto";
 import { dirname as dirname70 } from "node:path";
 import { Database as Database17 } from "bun:sqlite";
-function settleUnreadable(candidates, classify) {
+function settleUnreadable(candidates, classify2) {
   const items = [];
   let blocked = 0;
   for (const candidate of candidates) {
     let verdict = "unreadable";
-    if (classify) {
+    if (classify2) {
       try {
-        verdict = classify(candidate);
+        verdict = classify2(candidate);
       } catch {
         verdict = "blocked_policy";
       }
@@ -128377,7 +130088,7 @@ function outsideHelpBlockerWords(code) {
 }
 function shortDate(iso2) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso2);
-  const month = match ? MONTHS[Number(match[2]) - 1] : undefined;
+  const month = match ? MONTHS2[Number(match[2]) - 1] : undefined;
   return match && month ? `${Number(match[3])} ${month}` : iso2;
 }
 function shortTime(iso2) {
@@ -128455,14 +130166,14 @@ function outsideHelpScriptConfig(csrfToken) {
 function renderStatusBlock(status, summary, access) {
   const route = status.route;
   const on = status.settings.state === "on";
-  const invalid3 = status.settings.state === "invalid";
+  const invalid4 = status.settings.state === "invalid";
   const unavailable2 = summary.state === "unavailable";
-  const blockedReason = invalid3 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
-  const button = access === "read" || unavailable2 && !on ? "" : access === "unlock" ? unlockFirst(invalid3 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid3 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
+  const blockedReason = invalid4 ? undefined : route.state === "not_configured" ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedRoute : !route.acknowledgements.complete ? DASHBOARD_OUTSIDE_HELP_COPY.enableBlockedAcks : undefined;
+  const button = access === "read" || unavailable2 && !on ? "" : access === "unlock" ? unlockFirst(invalid4 ? DASHBOARD_OUTSIDE_HELP_COPY.replaceFile : on ? DASHBOARD_OUTSIDE_HELP_COPY.turnOff : DASHBOARD_OUTSIDE_HELP_COPY.turnOn, !on) : invalid4 ? `<button type="submit" class="btn primary" data-outside-replace>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.replaceFile)}</button>` : on ? `<button type="submit" class="btn" data-outside-enabled="false">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOff)}</button>` : blockedReason ? `<span class="blocked"><button type="button" class="btn primary" disabled aria-disabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button><span class="hint">${escapeHtml2(blockedReason)}</span></span>` : `<button type="submit" class="btn primary" data-outside-enabled="true">${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.turnOn)}</button>`;
   const tone = summary.state === "on" ? "on" : summary.state === "off" || summary.state === "unavailable" ? "off" : "attn";
   const usage = !unavailable2 && route.state === "configured" && route.readiness ? usageLine(route.readiness) : "";
   const head = `<div class="ohhead"><div class="ohstatewrap"><p class="ohstate"><span class="dot ${tone}" aria-hidden="true"></span>` + `<span data-outside-state-text data-outside-state="${escapeHtml2(summary.state)}">${escapeHtml2(outsideHelpStateLine(summary))}</span></p>` + (usage ? `<p class="ohline" data-outside-usage>${escapeHtml2(usage)}</p>` : "") + (!unavailable2 && route.state === "configured" && route.readiness?.torMode === "off" ? `<p class="ohline attn" data-outside-address-visible>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.addressVisible)}</p>` : "") + `</div>${button ? `<div class="pbuttons">${button}</div>` : ""}</div>`;
-  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid3 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  return `<form class="ohpanel" data-outside-form="enable" data-outside-current="${on ? "on" : "off"}" data-outside-invalid="${invalid4 ? "yes" : "no"}">` + head + `<span class="actmsg" data-action-message role="status"></span></form>`;
 }
 function usageLine(ready) {
   const count = ready.requestsToday.count;
@@ -128586,14 +130297,14 @@ function renderBeforeTurningOn() {
   });
 }
 function renderLevel(status, canEdit) {
-  const invalid3 = status.settings.state === "invalid";
+  const invalid4 = status.settings.state === "invalid";
   const current2 = status.settings.level;
-  const blocked = !canEdit || invalid3 ? ' disabled aria-disabled="true"' : "";
+  const blocked = !canEdit || invalid4 ? ' disabled aria-disabled="true"' : "";
   const options = ["unnamed", "general"].map((level) => {
     const copy = DASHBOARD_OUTSIDE_HELP_COPY.levels[level];
     return `<label class="ohack ohlevel"><input type="radio" name="level" value="${level}"${level === current2 ? " checked" : ""}${blocked}>` + `<span><strong>${escapeHtml2(copy.title)}</strong> ${escapeHtml2(copy.body)}</span></label>`;
   }).join("");
-  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid3 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
+  const body = `<form class="ohform" data-outside-form="level" data-outside-level="${escapeHtml2(current2)}" data-outside-current="${status.settings.state === "on" ? "on" : "off"}">` + options + (canEdit && !invalid4 ? `<div class="pbuttons"><button type="submit" class="btn" data-outside-level-save>${escapeHtml2(DASHBOARD_OUTSIDE_HELP_COPY.levelSave)}</button></div>` : "") + `<span class="actmsg" data-action-message role="status"></span></form>`;
   return renderSection({ id: "level", title: DASHBOARD_OUTSIDE_HELP_COPY.levelTitle, summary: DASHBOARD_OUTSIDE_HELP_COPY.levels[current2].short, body });
 }
 function renderStandard(standard, level, canEdit) {
@@ -128934,7 +130645,7 @@ function outsideHelpClientScript(config2) {
   });
 })();`;
 }
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS2, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
 var init_outside_help = __esm(() => {
   init_zkapi_consult_settings();
   init_components();
@@ -128963,7 +130674,7 @@ var init_outside_help = __esm(() => {
     de: "German",
     it: "Italian"
   };
-  MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
   FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
   SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
@@ -134978,7 +136689,7 @@ function calendarDate(iso2) {
   const date4 = new Date(iso2);
   if (Number.isNaN(date4.getTime()))
     return "on an unknown date";
-  return `${MONTHS2[date4.getUTCMonth()]} ${date4.getUTCDate()}, ${date4.getUTCFullYear()}`;
+  return `${MONTHS3[date4.getUTCMonth()]} ${date4.getUTCDate()}, ${date4.getUTCFullYear()}`;
 }
 function relativeDay(iso2, now) {
   const at = new Date(iso2);
@@ -135002,7 +136713,7 @@ function hostOf(url) {
     return url;
   }
 }
-var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS2;
+var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS3;
 var init_agents = __esm(() => {
   init_agent_connections();
   init_agent_instructions();
@@ -135083,7 +136794,7 @@ var init_agents = __esm(() => {
     'args = ["serve"]'
   ].join(`
 `);
-  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  MONTHS3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 });
 
 // src/workers/dashboard/static-styles.ts
@@ -151205,12 +152916,1043 @@ var init_connector6 = __esm(() => {
   decodableCharsets = new Map;
 });
 
+// src/workers/archive-import/continuation-cache.ts
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
+var init_continuation_cache = __esm(() => {
+  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+  archiveContinuations = new ContinuationCache;
+});
+
+// src/workers/archive-import/notes/note.ts
+import { createHash as createHash78 } from "node:crypto";
+function isRecord9(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+}
+function firstString(...values) {
+  for (const value2 of values) {
+    if (typeof value2 === "string" && value2.trim() !== "")
+      return value2.trim();
+  }
+  return;
+}
+function idText(value2) {
+  if (typeof value2 === "string" && value2.trim() !== "")
+    return value2.trim().slice(0, 200);
+  if (typeof value2 === "number" && Number.isFinite(value2))
+    return String(value2);
+  return;
+}
+function isoTime(value2) {
+  let ms;
+  if (typeof value2 === "number" && Number.isFinite(value2)) {
+    ms = Math.abs(value2) < 100000000000 ? value2 * 1000 : value2;
+  } else if (typeof value2 === "string" && value2.trim() !== "") {
+    const text3 = value2.trim();
+    ms = /^-?\d+(?:\.\d+)?$/.test(text3) ? Math.abs(Number(text3)) < 100000000000 ? Number(text3) * 1000 : Number(text3) : Date.parse(text3);
+  }
+  if (ms === undefined || !Number.isFinite(ms))
+    return;
+  const date4 = new Date(ms);
+  return Number.isNaN(date4.getTime()) ? undefined : date4.toISOString();
+}
+function earliestIso(...times) {
+  const known = times.filter((time3) => time3 !== undefined);
+  return known.length === 0 ? undefined : known.reduce((a, b) => a <= b ? a : b);
+}
+function latestIso2(...times) {
+  const known = times.filter((time3) => time3 !== undefined);
+  return known.length === 0 ? undefined : known.reduce((a, b) => a >= b ? a : b);
+}
+function cleanTags(tags) {
+  const out = [];
+  const seen = new Set;
+  for (const tag of tags) {
+    const text3 = tag.trim().replace(/^#+/, "").trim().slice(0, MAX_TAG_CHARS);
+    if (text3 === "" || seen.has(text3))
+      continue;
+    seen.add(text3);
+    out.push(text3);
+    if (out.length >= MAX_TAGS)
+      break;
+  }
+  return out;
+}
+function sha2568(value2) {
+  return createHash78("sha256").update(value2).digest("hex");
+}
+function buildNoteItem(input, draft, place, savedAt) {
+  const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
+  const given = draft.createdAt ?? draft.updatedAt ?? draft.titleDate;
+  const authoredAt = given ?? savedAt;
+  const lines = [
+    title,
+    draft.tags.length > 0 ? `Tags: ${draft.tags.join(", ")}` : undefined,
+    draft.createdAt ? `Created: ${draft.createdAt.slice(0, 10)}` : given ? `Date: ${given.slice(0, 10)}` : undefined,
+    draft.updatedAt && draft.updatedAt !== draft.createdAt ? `Updated: ${draft.updatedAt.slice(0, 10)}` : undefined
+  ].filter((line) => line !== undefined && line !== "");
+  let text3 = [lines.join(`
+`), draft.body].filter((part) => part !== "").join(`
+
+`);
+  let truncated = false;
+  if (text3.length > NOTE_MAX_TEXT_CHARS) {
+    text3 = text3.slice(0, NOTE_MAX_TEXT_CHARS);
+    truncated = true;
+  }
+  const providerItemId = sha2568(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
+  const contentHash = sha2568(text3);
+  const item = {
+    identity: {
+      family: input.format.family,
+      provider: input.format.provider,
+      accountScope: input.accountScope,
+      providerItemId,
+      localItemId: `${input.accountScope}:${providerItemId}`,
+      sourceVersion: contentHash.slice(0, 32)
+    },
+    mimeType: "text/markdown",
+    content: { kind: "text", text: text3 },
+    metadata: Object.freeze({
+      title: title || "(untitled)",
+      tags: draft.tags,
+      authoredAt,
+      ...draft.createdAt ? { createdAt: draft.createdAt } : {},
+      ...draft.updatedAt ? { updatedAt: draft.updatedAt } : {},
+      ...draft.blockCount !== undefined ? { blockCount: draft.blockCount } : {},
+      contentHash
+    }),
+    fetchedAt: new Date().toISOString()
+  };
+  return { item, truncated, dateAssumed: given === undefined };
+}
+function noteClassificationSignals(item) {
+  return compactClassificationSignals({
+    title: signalText(item.metadata, "title"),
+    labels: signalTexts(item.metadata, "tags")
+  });
+}
+var NOTE_MAX_TEXT_CHARS = 1e6, NOTE_MAX_RECORD_BYTES, MAX_TAGS = 100, MAX_TAG_CHARS = 200, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
+var init_note = __esm(() => {
+  NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
+  NOTE_FINDINGS = {
+    empty: "note_empty",
+    unreadable: "note_unreadable",
+    tooLarge: "note_too_large",
+    dateAssumed: "note_date_assumed"
+  };
+});
+
+// src/workers/archive-import/notes/archive.ts
+function rootKindOf(head) {
+  if (!head)
+    return;
+  let at = head[0] === 239 && head[1] === 187 && head[2] === 191 ? 3 : 0;
+  while (at < head.length && (head[at] === 32 || head[at] === 9 || head[at] === 10 || head[at] === 13))
+    at += 1;
+  if (head[at] === 91)
+    return "array";
+  if (head[at] === 123)
+    return "object";
+  return;
+}
+function createNoteArchiveConnector(input, spec) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? NOTES_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? NOTES_DEFAULT_MAX_BYTES_PER_LISTING);
+  const tag = input.manifestSha256.slice(0, 16);
+  const prefix = `${spec.cursorPrefix}${tag}:`;
+  const source = spec.source;
+  const DONE2 = { file: input.files.length, member: -1, offset: 0, done: true };
+  const startOfFile = (file) => file >= input.files.length ? DONE2 : { file, member: -1, offset: 0, done: false };
+  const invalid4 = (message2) => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const encode3 = (cursor) => {
+    if (cursor.done)
+      return `${prefix}done`;
+    const resume = cursor.resume ? Buffer.from(serializeJsonResume(cursor.resume)).toString("base64url") : "";
+    return `${prefix}${cursor.file}:${cursor.member}:${cursor.offset}:${cursor.crc ?? ""}:${resume}`;
+  };
+  const decode3 = (text3) => {
+    if (!text3)
+      return startOfFile(0);
+    if (!text3.startsWith(prefix))
+      throw invalid4("The resume point belongs to other files than this archive's.");
+    const rest = text3.slice(prefix.length);
+    if (rest === "done")
+      return DONE2;
+    const parts = rest.split(":");
+    if (parts.length !== 5)
+      throw invalid4("The resume point is not a position in this archive.");
+    const [fileText, memberText, offsetText, crcText, resumeText] = parts;
+    const file = Number(fileText);
+    const member = Number(memberText);
+    const offset = Number(offsetText);
+    const crc = crcText === "" ? undefined : Number(crcText);
+    if (!Number.isSafeInteger(file) || file < 0 || file >= input.files.length || !Number.isSafeInteger(member) || member < -1 || !Number.isSafeInteger(offset) || offset < 0 || crc !== undefined && (!Number.isSafeInteger(crc) || crc < 0 || crc > 4294967295)) {
+      throw invalid4("The resume point is not a position in this archive.");
+    }
+    let resume;
+    if (resumeText !== "") {
+      resume = parseJsonResume(Buffer.from(resumeText, "base64url").toString("utf8"));
+      if (!resume || resume.offset !== offset)
+        throw invalid4("The resume point is not a position in this archive.");
+    }
+    if (offset > 0 !== (resume !== undefined))
+      throw invalid4("The resume point is not a position in this archive.");
+    return { file, member, offset, ...crc !== undefined ? { crc } : {}, ...resume ? { resume } : {}, done: false };
+  };
+  const stoppedFrom2 = (error2, relPath) => archiveStopFromReaderError(error2, relPath);
+  const report = (kind, findingClass, fileIndex, offset, count) => {
+    input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
+  };
+  const takeNote = (segment, outcome, place, offset, savedAt, cut = false) => {
+    segment.consumed += 1;
+    if (outcome.kind === "empty") {
+      report(NOTE_FINDINGS.empty, "skipped", place.fileIndex, offset);
+      return;
+    }
+    if (outcome.kind === "unreadable") {
+      report(NOTE_FINDINGS.unreadable, "gap", place.fileIndex, offset);
+      return;
+    }
+    const built = buildNoteItem(input, outcome.note, place, savedAt);
+    segment.items.push(built.item);
+    if (built.truncated || cut)
+      report(ARCHIVE_COMMON_FINDINGS.itemTruncated, "gap", place.fileIndex, offset);
+    if (built.dateAssumed)
+      report(NOTE_FINDINGS.dateAssumed, "gap", place.fileIndex, offset);
+  };
+  const plainUnit = (reader) => ({
+    member: -1,
+    posOf: (offset) => offset,
+    progressOf: (offset) => offset,
+    head: () => reader.readAt(0, ROOT_PEEK_BYTES),
+    open: (offset) => fileByteSource(reader, { start: offset }),
+    checkpoint: () => ({}),
+    end: () => {
+      return;
+    },
+    close: () => {
+      return;
+    }
+  });
+  const zipUnit = (archive, entry, fileIndex) => {
+    let reader;
+    const key2 = { archiveId: input.archiveId, manifestTag: tag, fileIndex, memberIndex: entry.index };
+    return {
+      member: entry.index,
+      posOf: (offset) => zipFindingOffset(entry.index, offset),
+      progressOf: (offset) => entry.localHeaderOffset + Math.floor(entry.compressedSize * Math.min(1, offset / Math.max(1, entry.uncompressedSize))),
+      head: () => readZipMemberHead(archive, entry, ROOT_PEEK_BYTES),
+      open(offset, crc) {
+        const continuation = offset > 0 ? archiveContinuations.take(key2, offset) : undefined;
+        reader = ZipMemberReader.open(archive, entry, {
+          start: offset,
+          ...crc !== undefined ? { startCrc: crc } : {},
+          ...continuation ? { continuation } : {}
+        });
+        return reader;
+      },
+      checkpoint(endOffset) {
+        const member = reader;
+        if (!member)
+          return {};
+        try {
+          const back = member.position - endOffset;
+          if (back > 0)
+            member.unread(back);
+        } catch {
+          member.close();
+          return {};
+        }
+        const crc = member.crc32;
+        const continuation = member.suspend();
+        if (continuation)
+          archiveContinuations.put(key2, continuation);
+        return crc !== undefined ? { crc } : {};
+      },
+      end: () => reader?.end,
+      close: () => reader?.close()
+    };
+  };
+  const readJsonUnit = (unit, unitCursor, fileIndex, relPath, limits, segment, savedAt) => {
+    if (source.kind !== "json")
+      return "ended";
+    const damaged = (offset) => report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, unit.posOf(offset));
+    let root;
+    if (unitCursor.resume) {
+      root = unitCursor.resume.levels[0]?.kind;
+    } else {
+      try {
+        root = rootKindOf(unit.head());
+      } catch (error2) {
+        throw stoppedFrom2(error2, relPath);
+      }
+      if (!root) {
+        damaged(0);
+        return "ended";
+      }
+    }
+    const itemPaths = root ? source.itemPaths(root) : undefined;
+    if (!itemPaths) {
+      report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", fileIndex, unit.posOf(0));
+      return "ended";
+    }
+    let bytes;
+    try {
+      bytes = unit.open(unitCursor.offset, unitCursor.crc);
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError) {
+        if (unitCursor.offset > 0)
+          throw invalid4("Nothing starts where this import was to resume.");
+        damaged(0);
+        return "ended";
+      }
+      throw stoppedFrom2(error2, relPath);
+    }
+    let reader;
+    try {
+      reader = new JsonStreamReader(bytes, {
+        itemPaths,
+        maxItemBytes: NOTE_MAX_RECORD_BYTES,
+        ...unitCursor.resume ? { resume: unitCursor.resume } : {}
+      });
+    } catch (error2) {
+      unit.close();
+      throw stoppedFrom2(error2, relPath);
+    }
+    let last;
+    const pause = () => {
+      if (!last) {
+        unit.close();
+        segment.next = unitCursor;
+        segment.position = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+        return "paused";
+      }
+      segment.bytes += last.end - unitCursor.offset;
+      const { crc } = unit.checkpoint(last.end);
+      segment.next = {
+        file: fileIndex,
+        member: unit.member,
+        offset: last.end,
+        ...crc !== undefined ? { crc } : {},
+        resume: last.resume,
+        done: false
+      };
+      segment.position = { fileIndex, offset: unit.progressOf(last.end) };
+      return "paused";
+    };
+    for (;; ) {
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        return pause();
+      }
+      if (segment.items.length >= limits.items || segment.consumed >= limits.units)
+        return pause();
+      let event;
+      try {
+        event = reader.next();
+      } catch (error2) {
+        unit.close();
+        if (error2 instanceof ArchiveImportStoppedError)
+          throw error2;
+        if (error2 instanceof ZipMemberError || error2 instanceof JsonStreamError && error2.code !== "resume_invalid") {
+          segment.bytes += (last?.end ?? unitCursor.offset) - unitCursor.offset;
+          damaged(last?.end ?? unitCursor.offset);
+          return "ended";
+        }
+        throw stoppedFrom2(error2, relPath);
+      }
+      if (!event) {
+        unit.close();
+        segment.bytes += (last?.end ?? unitCursor.offset) - unitCursor.offset;
+        const end = unit.end();
+        if (end && (end.crcOk === false || !end.sizeOk))
+          damaged(end.bytes);
+        return "ended";
+      }
+      last = event;
+      const offset = unit.posOf(event.start);
+      if (event.kind === "oversize") {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.tooLarge, "gap", fileIndex, offset);
+        continue;
+      }
+      const index = event.path[event.path.length - 1];
+      const place = { fileIndex, member: unit.member, ordinal: typeof index === "number" ? index : event.start };
+      takeNote(segment, source.parse(event.value), place, offset, savedAt);
+    }
+  };
+  const readMarkdownMember = (archive, entry) => {
+    let member;
+    try {
+      member = ZipMemberReader.open(archive, entry);
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError)
+        return;
+      throw error2;
+    }
+    const parts = [];
+    let kept = 0;
+    let cut = false;
+    try {
+      for (;; ) {
+        const chunk = member.next();
+        if (!chunk)
+          break;
+        if (kept < MARKDOWN_MAX_BYTES) {
+          const take = chunk.subarray(0, MARKDOWN_MAX_BYTES - kept);
+          parts.push(take);
+          kept += take.length;
+          if (take.length < chunk.length)
+            cut = true;
+        } else {
+          cut = true;
+        }
+      }
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError)
+        return;
+      throw error2;
+    } finally {
+      member.close();
+    }
+    const joined = new Uint8Array(kept);
+    let at = 0;
+    for (const part of parts) {
+      joined.set(part, at);
+      at += part.length;
+    }
+    return { text: new TextDecoder("utf-8").decode(joined), cut, end: member.end };
+  };
+  const readMarkdownZip = (archive, fileIndex, cursor, limits, segment, savedAt) => {
+    if (source.kind !== "markdown")
+      return;
+    const from = Math.max(0, cursor.member);
+    for (const entry of archive.entries()) {
+      if (entry.index < from || entry.isDirectory || isJunkArchiveMember(entry.name) || !source.isNote(entry.name))
+        continue;
+      const here = { file: fileIndex, member: entry.index, offset: 0, done: false };
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        segment.next = here;
+        return;
+      }
+      if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
+      const offset = zipFindingOffset(entry.index, 0);
+      const fileName = entry.name.slice(entry.name.lastIndexOf("/") + 1);
+      const read = readMarkdownMember(archive, entry);
+      segment.bytes += entry.uncompressedSize;
+      if (!read) {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.unreadable, "gap", fileIndex, offset);
+      } else {
+        const place = { fileIndex, member: entry.index, ordinal: entry.index };
+        takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt, read.cut);
+        if (read.end && (read.end.crcOk === false || !read.end.sizeOk)) {
+          report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, zipFindingOffset(entry.index, entry.uncompressedSize));
+        }
+      }
+      segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+      segment.position = { fileIndex, offset: entry.localHeaderOffset };
+    }
+    segment.next = startOfFile(fileIndex + 1);
+    finishZip(archive, fileIndex);
+  };
+  const readJsonZip = (archive, file, fileIndex, cursor, limits, segment, savedAt) => {
+    if (source.kind !== "json")
+      return;
+    const from = Math.max(0, cursor.member);
+    let foundResume = cursor.offset === 0;
+    for (const entry of archive.entries()) {
+      if (entry.index < from || entry.isDirectory || isJunkArchiveMember(entry.name) || !/\.json$/i.test(entry.name))
+        continue;
+      const resuming = entry.index === cursor.member && cursor.offset > 0;
+      if (resuming)
+        foundResume = true;
+      const unitCursor = resuming ? cursor : { file: fileIndex, member: entry.index, offset: 0, done: false };
+      const unit = zipUnit(archive, entry, fileIndex);
+      const result = readJsonUnit(unit, unitCursor, fileIndex, file.relPath, limits, segment, savedAt);
+      if (result === "paused")
+        return;
+      segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+      segment.position = { fileIndex, offset: entry.localHeaderOffset + entry.compressedSize };
+    }
+    if (!foundResume)
+      throw invalid4("Nothing starts where this import was to resume.");
+    segment.next = startOfFile(fileIndex + 1);
+    finishZip(archive, fileIndex);
+  };
+  const finishZip = (archive, fileIndex) => {
+    let other = 0;
+    for (const entry of archive.entries()) {
+      if (entry.isDirectory || isJunkArchiveMember(entry.name))
+        continue;
+      const read = source.kind === "json" ? /\.json$/i.test(entry.name) : source.isNote(entry.name);
+      if (!read)
+        other += 1;
+    }
+    if (other > 0)
+      report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", fileIndex, zipFindingOffset(archive.entryCount, 0), other);
+  };
+  const readSegment = (cursor, limits) => {
+    const file = input.files[cursor.file];
+    const segment = { items: [], next: cursor, consumed: 0, bytes: 0, stopped: false };
+    let reader;
+    try {
+      reader = input.root.openFile(file.relPath, { expected: file.version });
+    } catch (error2) {
+      throw stoppedFrom2(error2, file.relPath);
+    }
+    try {
+      const savedAt = new Date(Number.isFinite(file.version.mtimeMs) ? file.version.mtimeMs : 0).toISOString();
+      let head;
+      try {
+        head = reader.readAt(0, 4);
+      } catch (error2) {
+        throw stoppedFrom2(error2, file.relPath);
+      }
+      if (ZipArchive.looksLikeZip(head)) {
+        let archive;
+        try {
+          archive = ZipArchive.open(stoppableZipSource(reader, file.relPath));
+        } catch (error2) {
+          if (!(error2 instanceof ZipFormatError))
+            throw stoppedFrom2(error2, file.relPath);
+          report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+          segment.next = startOfFile(cursor.file + 1);
+          return segment;
+        }
+        try {
+          if (source.kind === "json")
+            readJsonZip(archive, file, cursor.file, cursor, limits, segment, savedAt);
+          else
+            readMarkdownZip(archive, cursor.file, cursor, limits, segment, savedAt);
+        } catch (error2) {
+          if (error2 instanceof ZipFormatError) {
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, zipFindingOffset(archive.entryCount, 0));
+            segment.next = startOfFile(cursor.file + 1);
+          } else {
+            throw stoppedFrom2(error2, file.relPath);
+          }
+        }
+      } else if (source.kind === "json") {
+        const result = readJsonUnit(plainUnit(reader), cursor, cursor.file, file.relPath, limits, segment, savedAt);
+        if (result === "ended")
+          segment.next = startOfFile(cursor.file + 1);
+      } else {
+        report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+        segment.next = startOfFile(cursor.file + 1);
+      }
+      try {
+        reader.assertCurrent();
+      } catch (error2) {
+        throw stoppedFrom2(error2, file.relPath);
+      }
+      return segment;
+    } finally {
+      reader.close();
+    }
+  };
+  return {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        let cursor = decode3(options?.cursor);
+        if (cursor.done) {
+          yield { items: [], nextCursor: encode3(DONE2), done: true };
+          return;
+        }
+        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
+        let emitted = 0;
+        let bytesRead = 0;
+        let page2 = [];
+        let units = 0;
+        let pending = false;
+        let position;
+        for (;; ) {
+          const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page2.length);
+          const segment = readSegment(cursor, { items: room, units: Math.max(1, NOTES_MAX_UNITS_PER_PAGE - units) });
+          page2.push(...segment.items);
+          cursor = segment.next;
+          units += segment.consumed;
+          bytesRead += segment.bytes;
+          if (segment.consumed > 0 || segment.items.length > 0)
+            pending = true;
+          if (segment.position)
+            position = segment.position;
+          if (segment.stopped) {
+            if (pending) {
+              if (position)
+                input.reportPosition?.(position);
+              yield { items: page2, nextCursor: encode3(cursor), done: false };
+            }
+            return;
+          }
+          if (cursor.done) {
+            yield { items: page2, nextCursor: encode3(DONE2), done: true };
+            return;
+          }
+          const full = page2.length >= Math.min(pageSizeDefault, limit - emitted);
+          if (full || bytesRead >= byteBudget || units >= NOTES_MAX_UNITS_PER_PAGE) {
+            if (position)
+              input.reportPosition?.(position);
+            yield { items: page2, nextCursor: encode3(cursor), done: false };
+            emitted += page2.length;
+            page2 = [];
+            units = 0;
+            pending = false;
+            if (emitted >= limit || bytesRead >= byteBudget)
+              return;
+          }
+        }
+      }();
+    },
+    async fetchItem() {
+      throw new Error("An imported note is read only while its archive is listed.");
+    },
+    classificationSignals(item) {
+      return noteClassificationSignals(item);
+    }
+  };
+}
+var NOTES_DEFAULT_PAGE_SIZE = 100, NOTES_DEFAULT_MAX_BYTES_PER_LISTING, NOTES_MAX_UNITS_PER_PAGE = 5000, MARKDOWN_MAX_BYTES, ROOT_PEEK_BYTES = 1024;
+var init_archive = __esm(() => {
+  init_archive_formats();
+  init_byte_source();
+  init_continuation_cache();
+  init_json_stream();
+  init_stop_errors();
+  init_zip_reader();
+  init_note();
+  NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
+});
+
+// src/workers/archive-import/reflect/markdown.ts
+function unquote2(value2) {
+  const text3 = value2.trim();
+  if (text3.length >= 2 && (text3.startsWith('"') && text3.endsWith('"') || text3.startsWith("'") && text3.endsWith("'"))) {
+    return text3.slice(1, -1);
+  }
+  return text3;
+}
+function splitFrontMatter(text3) {
+  const plain = text3.charCodeAt(0) === 65279 ? text3.slice(1) : text3;
+  const lines = plain.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---")
+    return { meta: new Map, body: plain };
+  let close = -1;
+  for (let index = 1;index < lines.length && index <= MAX_FRONT_MATTER_LINES; index += 1) {
+    const line = lines[index].trim();
+    if (line === "---" || line === "...") {
+      close = index;
+      break;
+    }
+  }
+  if (close < 0)
+    return { meta: new Map, body: plain };
+  const meta2 = new Map;
+  let listKey;
+  for (const line of lines.slice(1, close)) {
+    const item = /^\s*-\s+(.*)$/.exec(line);
+    if (item && listKey !== undefined) {
+      const current2 = meta2.get(listKey);
+      if (Array.isArray(current2))
+        current2.push(unquote2(item[1]));
+      continue;
+    }
+    const pair = /^([A-Za-z_][\w -]*?)\s*:\s*(.*)$/.exec(line);
+    if (!pair) {
+      listKey = undefined;
+      continue;
+    }
+    const key2 = pair[1].toLowerCase();
+    const value2 = pair[2].trim();
+    if (value2 === "") {
+      meta2.set(key2, []);
+      listKey = key2;
+    } else {
+      meta2.set(key2, value2);
+      listKey = undefined;
+    }
+  }
+  return { meta: meta2, body: lines.slice(close + 1).join(`
+`) };
+}
+function metaText(meta2, ...keys) {
+  for (const key2 of keys) {
+    const value2 = meta2.get(key2);
+    if (typeof value2 === "string" && value2.trim() !== "")
+      return unquote2(value2);
+  }
+  return;
+}
+function metaTags(meta2) {
+  const value2 = meta2.get("tags") ?? meta2.get("tag");
+  if (Array.isArray(value2))
+    return cleanTags(value2);
+  if (typeof value2 !== "string")
+    return [];
+  const inner = value2.trim().replace(/^\[/, "").replace(/\]$/, "");
+  return cleanTags(inner.split(",").map(unquote2));
+}
+function parseReflectMarkdown(text3, fileName) {
+  const { meta: meta2, body: rest } = splitFrontMatter(text3);
+  let body = rest.trim();
+  const heading = /^#\s+(.+?)(?:\s+#+)?\s*$/m.exec(body);
+  const baseName = fileName.replace(/\.(?:md|markdown)$/i, "").trim();
+  const fromHeading = body.startsWith("# ") && heading ? heading[1].trim() : undefined;
+  const title = metaText(meta2, "title", "subject") ?? fromHeading ?? baseName;
+  if (fromHeading !== undefined && title === fromHeading) {
+    body = body.slice(body.indexOf(`
+`) < 0 ? body.length : body.indexOf(`
+`) + 1).trim();
+  }
+  if (body === "")
+    return { kind: "empty" };
+  const createdAt = isoTime(metaText(meta2, "created", "created_at", "createdat", "created-at", "date"));
+  const updatedAt = isoTime(metaText(meta2, "updated", "updated_at", "updatedat", "updated-at", "modified"));
+  const titleDate = reflectDailyNoteDate(fileName);
+  return {
+    kind: "note",
+    note: {
+      title,
+      body,
+      tags: metaTags(meta2),
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {}
+    }
+  };
+}
+var MAX_FRONT_MATTER_LINES = 100;
+var init_markdown = __esm(() => {
+  init_archive_formats();
+  init_note();
+});
+
+// src/workers/archive-import/reflect/parse.ts
+function isBlockEditorNode(node) {
+  if (!isRecord9(node))
+    return false;
+  const type = typeof node.type === "string" ? node.type.toLowerCase().replace(/[_-]/g, "") : "";
+  return BLOCK_EDITOR_NODE_TYPES.has(type);
+}
+function editorNodeChildren(node) {
+  if (Array.isArray(node.content))
+    return node.content;
+  if (Array.isArray(node.children))
+    return node.children;
+  return [];
+}
+function flattenEditorNodes(nodes, depth2) {
+  let flattened = "";
+  let previousWasBlock = false;
+  let first = true;
+  for (const node of nodes) {
+    const text3 = flattenEditorNode(node, depth2 + 1);
+    if (!text3)
+      continue;
+    const block = isBlockEditorNode(node);
+    if (!first && (block || previousWasBlock))
+      flattened += `
+`;
+    flattened += text3;
+    previousWasBlock = block;
+    first = false;
+  }
+  return flattened;
+}
+function flattenEditorNode(node, depth2 = 0) {
+  if (typeof node === "string")
+    return node;
+  if (depth2 > MAX_EDITOR_DEPTH)
+    return "";
+  if (Array.isArray(node))
+    return flattenEditorNodes(node, depth2);
+  if (!isRecord9(node))
+    return "";
+  const ownText = typeof node.text === "string" ? node.text : "";
+  const childText = flattenEditorNodes(editorNodeChildren(node), depth2);
+  if (ownText && childText)
+    return `${ownText}
+${childText}`;
+  return ownText || childText;
+}
+function reflectBodyText(value2) {
+  if (typeof value2 === "string") {
+    const trimmed2 = value2.trim();
+    if (trimmed2.startsWith("{") || trimmed2.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed2);
+        if (Array.isArray(parsed) || isRecord9(parsed))
+          return flattenEditorNode(parsed);
+      } catch {}
+    }
+    return value2;
+  }
+  if (Array.isArray(value2) || isRecord9(value2))
+    return flattenEditorNode(value2);
+  return "";
+}
+function reflectTags(value2) {
+  const entries = Array.isArray(value2) ? value2 : typeof value2 === "string" ? value2.split(",") : [];
+  const tags = [];
+  for (const entry of entries) {
+    const tag = typeof entry === "string" ? firstString(entry) : isRecord9(entry) ? firstString(entry.name, entry.tag, entry.title) : undefined;
+    if (tag !== undefined)
+      tags.push(tag);
+  }
+  return cleanTags(tags);
+}
+function parseReflectNote(record5) {
+  if (!isRecord9(record5))
+    return { kind: "unreadable" };
+  let body = "";
+  for (const candidate of [record5.content, record5.body, record5.document_json, record5.documentJson]) {
+    body = reflectBodyText(candidate).trim();
+    if (body !== "")
+      break;
+  }
+  if (body === "")
+    return { kind: "empty" };
+  const key2 = idText(record5.id ?? record5.uid);
+  const createdAt = isoTime(record5.created_at ?? record5.createdAt);
+  const updatedAt = isoTime(record5.updated_at ?? record5.updatedAt);
+  return {
+    kind: "note",
+    note: {
+      ...key2 !== undefined ? { key: key2 } : {},
+      title: firstString(record5.subject, record5.title) ?? "",
+      body,
+      tags: reflectTags(record5.tags),
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {}
+    }
+  };
+}
+var MAX_EDITOR_DEPTH = 200, BLOCK_EDITOR_NODE_TYPES;
+var init_parse4 = __esm(() => {
+  init_note();
+  BLOCK_EDITOR_NODE_TYPES = new Set([
+    "blockquote",
+    "bulletlist",
+    "checklist",
+    "checklistitem",
+    "codeblock",
+    "doc",
+    "heading",
+    "horizontalrule",
+    "listitem",
+    "orderedlist",
+    "paragraph",
+    "table",
+    "tablecell",
+    "tableheader",
+    "tablerow",
+    "taskitem",
+    "tasklist"
+  ]);
+});
+
+// src/workers/archive-import/reflect/connector.ts
+function createReflectJsonArchiveConnector(input) {
+  return createNoteArchiveConnector(input, REFLECT_JSON_SPEC);
+}
+function createReflectMarkdownArchiveConnector(input) {
+  return createNoteArchiveConnector(input, REFLECT_MARKDOWN_SPEC);
+}
+function registerReflectArchiveConnectors() {
+  registerArchiveFormatConnector("reflect-json", createReflectJsonArchiveConnector);
+  registerArchiveFormatConnector("reflect-markdown", createReflectMarkdownArchiveConnector);
+}
+var REFLECT_JSON_CURSOR_PREFIX = "reflect1:", REFLECT_MARKDOWN_CURSOR_PREFIX = "reflectmd1:", REFLECT_JSON_SPEC, REFLECT_MARKDOWN_SPEC;
+var init_connector7 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_markdown();
+  init_parse4();
+  REFLECT_JSON_SPEC = {
+    cursorPrefix: REFLECT_JSON_CURSOR_PREFIX,
+    source: {
+      kind: "json",
+      itemPaths: (root) => root === "array" ? [[]] : [["notes"]],
+      parse: parseReflectNote
+    }
+  };
+  REFLECT_MARKDOWN_SPEC = {
+    cursorPrefix: REFLECT_MARKDOWN_CURSOR_PREFIX,
+    source: {
+      kind: "markdown",
+      isNote: (name) => /\.(?:md|markdown)$/i.test(name),
+      parse: parseReflectMarkdown
+    }
+  };
+});
+
+// src/workers/archive-import/roam/parse.ts
+function roamDailyPageDate(title) {
+  const match = DAILY_PAGE_TITLE.exec(title.trim());
+  if (!match)
+    return;
+  const month = MONTHS4.indexOf(match[1].toLowerCase());
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  if (month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function flattenBlocks(children) {
+  const out = { lines: [], blockCount: 0, created: undefined, edited: undefined, hasText: false };
+  const walk = (nodes, depth2) => {
+    if (!Array.isArray(nodes) || depth2 > MAX_BLOCK_DEPTH)
+      return;
+    for (const node of nodes) {
+      if (!isRecord9(node))
+        continue;
+      out.blockCount += 1;
+      const text3 = typeof node.string === "string" ? node.string.trimEnd() : "";
+      if (text3.trim() !== "") {
+        out.lines.push(`${"  ".repeat(depth2)}- ${text3}`);
+        out.hasText = true;
+      }
+      out.created = earliestIso(out.created, isoTime(node["create-time"]));
+      out.edited = latestIso2(out.edited, isoTime(node["edit-time"]));
+      walk(node.children, depth2 + 1);
+    }
+  };
+  walk(children, 0);
+  return out;
+}
+function parseRoamPage(record5) {
+  if (!isRecord9(record5))
+    return { kind: "unreadable" };
+  const flat2 = flattenBlocks(record5.children);
+  if (!flat2.hasText)
+    return { kind: "empty" };
+  const title = typeof record5.title === "string" ? record5.title.trim() : "";
+  const key2 = idText(record5.uid);
+  const createdAt = earliestIso(isoTime(record5["create-time"]), flat2.created);
+  const updatedAt = latestIso2(isoTime(record5["edit-time"]), flat2.edited);
+  const titleDate = roamDailyPageDate(title);
+  return {
+    kind: "note",
+    note: {
+      ...key2 !== undefined ? { key: key2 } : {},
+      title: firstString(title) ?? "",
+      body: flat2.lines.join(`
+`),
+      tags: [],
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {},
+      blockCount: flat2.blockCount
+    }
+  };
+}
+var MAX_BLOCK_DEPTH = 256, MONTHS4, DAILY_PAGE_TITLE;
+var init_parse5 = __esm(() => {
+  init_note();
+  MONTHS4 = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  DAILY_PAGE_TITLE = /^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th),?\s+(\d{4})$/;
+});
+
+// src/workers/archive-import/roam/connector.ts
+function createRoamArchiveConnector(input) {
+  return createNoteArchiveConnector(input, ROAM_SPEC);
+}
+function registerRoamArchiveConnector() {
+  registerArchiveFormatConnector("roam-json", createRoamArchiveConnector);
+}
+var ROAM_CURSOR_PREFIX = "roam1:", ROAM_SPEC;
+var init_connector8 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_parse5();
+  ROAM_SPEC = {
+    cursorPrefix: ROAM_CURSOR_PREFIX,
+    source: {
+      kind: "json",
+      itemPaths: (root) => root === "array" ? [[]] : undefined,
+      parse: parseRoamPage
+    }
+  };
+});
+
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
+  registerReflectArchiveConnectors();
+  registerRoamArchiveConnector();
 }
 var init_format_connectors = __esm(() => {
   init_connector6();
+  init_connector7();
+  init_connector8();
 });
 
 // src/workers/archive-import/start.ts
@@ -151700,71 +154442,6 @@ var init_agent = __esm(() => {
       failed: "It was not imported: {reason}"
     }
   };
-});
-
-// src/workers/archive-import/continuation-cache.ts
-function sameKey(a, b) {
-  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
-}
-
-class ContinuationCache {
-  entries = [];
-  maxEntries;
-  maxBytes;
-  maxIdleMs;
-  now;
-  constructor(options = {}) {
-    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
-    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
-    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
-    this.now = options.now ?? Date.now;
-  }
-  get size() {
-    this.expire();
-    return this.entries.length;
-  }
-  get retainedBytes() {
-    this.expire();
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  put(key2, continuation) {
-    this.expire();
-    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
-    if (continuation.retainedBytes > this.maxBytes)
-      return;
-    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
-    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
-      this.entries.shift();
-  }
-  take(key2, offset) {
-    this.expire();
-    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
-    if (index < 0)
-      return;
-    const [parked] = this.entries.splice(index, 1);
-    return parked.continuation.position === offset ? parked.continuation : undefined;
-  }
-  dropArchive(archiveId) {
-    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
-  }
-  clear() {
-    this.entries = [];
-  }
-  retainedTotal() {
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  expire() {
-    const cutoff = this.now() - this.maxIdleMs;
-    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
-      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
-    }
-  }
-}
-var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
-var init_continuation_cache = __esm(() => {
-  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
-  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
-  archiveContinuations = new ContinuationCache;
 });
 
 // src/workers/archive-import/removal.ts
@@ -152438,7 +155115,7 @@ var init_dashboard2 = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash78 } from "node:crypto";
+import { createHash as createHash79 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -152464,7 +155141,7 @@ function receiptOf(record5, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash78("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash79("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -152866,7 +155543,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash79 } from "node:crypto";
+import { createHash as createHash80 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { existsSync as existsSync73, lstatSync as lstatSync39, readFileSync as readFileSync73, readdirSync as readdirSync16, realpathSync as realpathSync20 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
@@ -153030,7 +155707,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash79("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash80("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -154412,7 +157089,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash80 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -154445,7 +157122,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash80("sha256").update(`${accessToken}
+    const key2 = createHash81("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -154476,7 +157153,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash80("sha256").update(session.token).digest("hex");
+    const key2 = createHash81("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -170255,7 +172932,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash81, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash82, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -170381,7 +173058,7 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
-    const transaction = sha2568(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    const transaction = sha2569(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
       if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
@@ -170427,7 +173104,7 @@ function createRemoteOAuthHandler(options) {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes27(32).toString("base64url");
-    codes.set(sha2568(code), {
+    codes.set(sha2569(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -170606,7 +173283,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha2568(code);
+      const hash2 = sha2569(code);
       const issued = codes.get(hash2);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash2);
@@ -170623,7 +173300,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash81("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash82("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -170889,8 +173566,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha2568(value2) {
-  return createHash81("sha256").update(value2).digest("hex");
+function sha2569(value2) {
+  return createHash82("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -172293,7 +174970,7 @@ import { randomBytes as randomBytes29 } from "node:crypto";
 function gone2() {
   return { status: 410, body: { status: "gone" } };
 }
-function invalid3() {
+function invalid4() {
   return { status: 400, body: { status: "invalid" } };
 }
 
@@ -172353,7 +175030,7 @@ class PrivateQuestionJobs {
       return gone2();
     const panel = await importPanelPublicKey(body.publicKey);
     if (!panel)
-      return invalid3();
+      return invalid4();
     if (this.jobs.get(jobId) !== job)
       return gone2();
     if (job.claimKey !== undefined && job.claimKey !== panel.raw)
@@ -172364,11 +175041,11 @@ class PrivateQuestionJobs {
     try {
       text5 = await openPrivateQuestion(jobId, job.enginePrivateKey, panel.key, { iv: body.iv, ciphertext: body.ciphertext });
     } catch {
-      return invalid3();
+      return invalid4();
     }
     const plaintext = parseQuestion(text5);
     if (!plaintext)
-      return invalid3();
+      return invalid4();
     if (this.jobs.get(jobId) !== job || job.state !== "open")
       return this.jobs.get(jobId) === job ? this.outcome(job) : gone2();
     if (!this.originActive(job))
@@ -172386,7 +175063,7 @@ class PrivateQuestionJobs {
       return gone2();
     const panel = await importPanelPublicKey(publicKey);
     if (!panel)
-      return invalid3();
+      return invalid4();
     if (this.jobs.get(jobId) !== job)
       return gone2();
     if (job.claimKey !== undefined && job.claimKey !== panel.raw)
@@ -172402,7 +175079,7 @@ class PrivateQuestionJobs {
       return gone2();
     const panel = await importPanelPublicKey(publicKey);
     if (!panel)
-      return invalid3();
+      return invalid4();
     if (this.jobs.get(jobId) !== job)
       return gone2();
     if (job.claimKey === undefined || job.claimKey !== panel.raw)
@@ -173005,7 +175682,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash82 } from "node:crypto";
+import { createHash as createHash83 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -173022,7 +175699,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text5 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text5, etag: `"${createHash82("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text5, etag: `"${createHash83("sha256").update(text5).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -173398,7 +176075,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash83 } from "node:crypto";
+import { createHash as createHash84 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -173422,7 +176099,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest3 = createHash83("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest3 = createHash84("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest3.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -173963,12 +176640,12 @@ function createDashboardConsultAdapter(options) {
     policy = update.config;
     return;
   };
-  const invalid4 = (message2, code = "invalid_params") => ({ ok: false, httpStatus: 400, code, message: message2 });
+  const invalid5 = (message2, code = "invalid_params") => ({ ok: false, httpStatus: 400, code, message: message2 });
   const confinementUnavailable = () => ({ ok: false, httpStatus: 409, code: "confinement_unavailable", message: MESSAGES2.confinementUnavailable });
   return {
     async installTools(update) {
       if (update.confirm !== true)
-        return invalid4(MESSAGES2.confirm, "confirmation_required");
+        return invalid5(MESSAGES2.confirm, "confirmation_required");
       if (toolsJob.start() === "running")
         return { ok: false, httpStatus: 409, code: "install_running", message: MESSAGES2.installRunning };
       return { ok: true, status_message: MESSAGES2.installStarted };
@@ -173996,15 +176673,15 @@ function createDashboardConsultAdapter(options) {
     async saveStandard(update) {
       const revision = update.revision;
       if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
-        return invalid4(MESSAGES2.needsRevision, "needs_revision");
+        return invalid5(MESSAGES2.needsRevision, "needs_revision");
       const mode = update.standard_mode;
       if (typeof mode !== "string" || !CONSULT_STANDARD_MODES.includes(mode))
-        return invalid4(MESSAGES2.standardInvalid, "standard_invalid");
+        return invalid5(MESSAGES2.standardInvalid, "standard_invalid");
       let instruction;
       if (mode === "custom") {
         const raw = update.standard_instruction;
         if (typeof raw !== "string" || !raw.trim() || raw.length > CONSULT_STANDARD_INSTRUCTION_MAX_CHARS)
-          return invalid4(MESSAGES2.standardInvalid, "standard_invalid");
+          return invalid5(MESSAGES2.standardInvalid, "standard_invalid");
         instruction = raw.replace(/\r\n?/g, `
 `);
       }
@@ -174053,7 +176730,7 @@ function createDashboardConsultAdapter(options) {
     async saveWriter(update) {
       const revision = update.revision;
       if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
-        return invalid4(MESSAGES2.needsRevision, "needs_revision");
+        return invalid5(MESSAGES2.needsRevision, "needs_revision");
       const current2 = readConsultSettings(location);
       if (current2.state === "invalid")
         return writeRefusal("invalid_current", 0);
@@ -174064,7 +176741,7 @@ function createDashboardConsultAdapter(options) {
       } else if (update.writer !== undefined) {
         const raw = update.writer;
         if (typeof raw !== "object" || Array.isArray(raw))
-          return invalid4(MESSAGES2.writerInvalid, "writer_invalid");
+          return invalid5(MESSAGES2.writerInvalid, "writer_invalid");
         const record5 = raw;
         const text5 = (value2) => typeof value2 === "string" && value2.trim() ? value2.trim() : undefined;
         const baseUrl = text5(record5.base_url);
@@ -174077,7 +176754,7 @@ function createDashboardConsultAdapter(options) {
           ...base.writer?.timeoutMs !== undefined ? { timeoutMs: base.writer.timeoutMs } : {}
         });
         if (!parsed)
-          return invalid4(MESSAGES2.writerInvalid, "writer_invalid");
+          return invalid5(MESSAGES2.writerInvalid, "writer_invalid");
         writer = parsed;
       }
       const frontierModel = (raw, current3) => {
@@ -174092,7 +176769,7 @@ function createDashboardConsultAdapter(options) {
       const chatgpt = frontierModel(update.chatgpt_frontier_model, base.chatgptFrontierModel);
       const claude = frontierModel(update.claude_frontier_model, base.claudeFrontierModel);
       if (!chatgpt.ok || !claude.ok)
-        return invalid4(MESSAGES2.frontierModelInvalid, "frontier_model_invalid");
+        return invalid5(MESSAGES2.frontierModelInvalid, "frontier_model_invalid");
       const result = writeConsultSettings({
         enabled: base.enabled,
         languages: [...base.languages],
@@ -174115,7 +176792,7 @@ function createDashboardConsultAdapter(options) {
     },
     async testWriter(update) {
       if (update.confirm !== true)
-        return invalid4(MESSAGES2.confirm, "confirmation_required");
+        return invalid5(MESSAGES2.confirm, "confirmation_required");
       if (!options.writerCheck)
         return { ok: false, httpStatus: 501, code: "writer_test_unavailable", message: MESSAGES2.writerTestUnavailable };
       if (writerCheck.state === "running")
@@ -174140,26 +176817,26 @@ function createDashboardConsultAdapter(options) {
     async setEnabled(update) {
       const enabled = update.enabled;
       if (typeof enabled !== "boolean")
-        return invalid4("Say whether anonymous answers should be on or off.");
+        return invalid5("Say whether anonymous answers should be on or off.");
       const revision = update.revision;
       if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0)
-        return invalid4(MESSAGES2.needsRevision, "needs_revision");
+        return invalid5(MESSAGES2.needsRevision, "needs_revision");
       const replaceInvalid = update.replace_invalid === true;
       const current2 = readConsultSettings(location);
       const base = current2.state === "valid" ? current2.settings : DEFAULT_CONSULT_SETTINGS;
       let chosen = [...base.languages];
       if (enabled && update.languages !== undefined) {
         if (!Array.isArray(update.languages) || update.languages.length === 0)
-          return invalid4(MESSAGES2.languagesEmpty, "languages_empty");
+          return invalid5(MESSAGES2.languagesEmpty, "languages_empty");
         if (!update.languages.every((item) => typeof item === "string" && ALL_LANGUAGES.includes(item))) {
-          return invalid4("An unknown language was chosen.", "language_unknown");
+          return invalid5("An unknown language was chosen.", "language_unknown");
         }
         chosen = [...new Set(update.languages)];
       }
       let level = current2.state === "invalid" ? CONSULT_LEVEL_FOR_REPAIR : base.level;
       if (update.level !== undefined) {
         if (typeof update.level !== "string" || !CONSULT_LEVELS.includes(update.level))
-          return invalid4(MESSAGES2.levelUnknown, "level_unknown");
+          return invalid5(MESSAGES2.levelUnknown, "level_unknown");
         level = update.level;
       }
       const acknowledgementsComplete = () => acknowledgementsCurrent(zkapiProfile()?.profile.zkapi?.acknowledgements);
@@ -174176,7 +176853,7 @@ function createDashboardConsultAdapter(options) {
       if (enabled && (turningOn || update.languages !== undefined)) {
         const installed2 = new Set(languages().filter((entry) => entry.installed).map((entry) => entry.language));
         if (!chosen.every((language) => installed2.has(language)))
-          return invalid4(MESSAGES2.languageMissing, "language_pack_missing");
+          return invalid5(MESSAGES2.languageMissing, "language_pack_missing");
       }
       const result = writeConsultSettings({
         enabled,
@@ -174204,15 +176881,15 @@ function createDashboardConsultAdapter(options) {
       const cleared = [];
       if (acknowledged !== undefined) {
         if (!Array.isArray(acknowledged) || !acknowledged.every((item) => typeof item === "string"))
-          return invalid4(MESSAGES2.tickAll, "acknowledgements_incomplete");
+          return invalid5(MESSAGES2.tickAll, "acknowledgements_incomplete");
         const accepted = new Set(acknowledged);
         if (!ACKNOWLEDGEMENT_IDS.every((id) => accepted.has(id)))
-          return invalid4(MESSAGES2.tickAll, "acknowledgements_incomplete");
+          return invalid5(MESSAGES2.tickAll, "acknowledgements_incomplete");
         zkapi.acknowledgements = { version: ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION, accepted: [...ACKNOWLEDGEMENT_IDS] };
       }
       if (update.funding_date !== undefined && update.funding_date !== null && update.funding_date !== "") {
         if (typeof update.funding_date !== "string" || parseIsoDate(update.funding_date) === undefined)
-          return invalid4(MESSAGES2.fundingDate, "funding_date_invalid");
+          return invalid5(MESSAGES2.fundingDate, "funding_date_invalid");
         zkapi.fundingDate = update.funding_date;
       }
       for (const [field, key2] of [["daily_request_cap", "dailyRequestCap"], ["daily_spend_cap_usd", "dailySpendCapUsd"], ["deposit_usd", "depositUsd"]]) {
@@ -174224,7 +176901,7 @@ function createDashboardConsultAdapter(options) {
           continue;
         }
         if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || key2 === "dailyRequestCap" && !Number.isInteger(raw))
-          return invalid4(MESSAGES2.caps, "cap_invalid");
+          return invalid5(MESSAGES2.caps, "cap_invalid");
         zkapi[key2] = raw;
       }
       try {
@@ -174252,7 +176929,7 @@ function createDashboardConsultAdapter(options) {
       if (!await confined())
         return confinementUnavailable();
       if (update.confirm !== true)
-        return invalid4(MESSAGES2.confirm, "confirmation_required");
+        return invalid5(MESSAGES2.confirm, "confirmation_required");
       if (zkapiProfile())
         return { ok: false, httpStatus: 409, code: "route_exists", message: MESSAGES2.routeExists };
       try {
@@ -174283,7 +176960,7 @@ function createDashboardConsultAdapter(options) {
     },
     async recover(update) {
       if (update.confirm !== true)
-        return invalid4(MESSAGES2.confirm, "confirmation_required");
+        return invalid5(MESSAGES2.confirm, "confirmation_required");
       const transportOptions = transport();
       if (!transportOptions)
         return { ok: false, httpStatus: 409, code: "route_not_configured", message: MESSAGES2.routeMissing };
@@ -174309,9 +176986,9 @@ function createDashboardConsultAdapter(options) {
     },
     async abandon(update) {
       if (update.confirm !== true)
-        return invalid4(MESSAGES2.confirm, "confirmation_required");
+        return invalid5(MESSAGES2.confirm, "confirmation_required");
       if (typeof update.scope !== "string" || !/^[0-9a-f]{32}$/.test(update.scope))
-        return invalid4(MESSAGES2.scope, "scope_invalid");
+        return invalid5(MESSAGES2.scope, "scope_invalid");
       let found;
       try {
         found = abandonZkapiFence(statePath, update.scope, now());
