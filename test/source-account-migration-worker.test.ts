@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { publishLinuxEngineReceipt, resolveLinuxEngineLayout } from '../src/core/linux-engine-layout.ts';
 import { accountFolder, legacyAccountFiles, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { MIGRATE_ACCOUNT_FOLDERS_ENV } from '../src/core/source-account-migration.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -191,6 +192,32 @@ describe('the boot migration, in a real worker', () => {
     for (const tier of ['internal', 'secure_local'] as const) {
       expect(snapshotStore(join(folder, 'stores', `${tier}.sqlite`)).items.length, tier).toBe(itemsBefore[tier]);
     }
+  }, 180_000);
+
+  // The standalone Linux engine finds its data folder in the install receipt, not in a switch or in the shell it was started from.
+  test.skipIf(process.platform !== 'linux')('through an install receipt: the worker moves the files inside the folder the receipt names', async () => {
+    const env = freshHome();
+    const layout = resolveLinuxEngineLayout(env);
+    publishLinuxEngineReceipt(layout);
+    mkdirSync(layout.dataDir, { recursive: true, mode: 0o700 });
+    expect(olympusDataRoot(env)).toBe(layout.dataDir);
+    const paths = await seedLegacyDropbox(env);
+    const inodes = Object.fromEntries(Object.entries(paths).map(([tier, path]) => [tier, lstatSync(path).ino]));
+    const folder = accountFolder({ source_id: 'dropbox.files', slot: '1' }, env);
+    expect(folder.startsWith(`${layout.dataDir}/sources/`)).toBe(true);
+
+    const worker = await boot(env, { [MIGRATE_ACCOUNT_FOLDERS_ENV]: '1' });
+    try {
+      expect(worker.output(), `the worker did not listen (exit ${worker.exitCode()}): ${worker.errors().slice(0, 2000)}`).toContain('worker listening');
+      expect(worker.output()).toContain('[storage] dropbox.files moved into its account folder.');
+    } finally {
+      await worker.stop();
+    }
+
+    expect(atOldPlaces(env)).toEqual([]);
+    for (const tier of ['internal', 'secure_local'] as const) expect(lstatSync(join(folder, 'stores', `${tier}.sqlite`)).ino, tier).toBe(inodes[tier]!);
+    expect(olympusDataRoot(env)).toBe(layout.dataDir);
+    expect(registryOf(env).accounts.find((account) => account.source_id === 'dropbox.files')).toMatchObject({ layout: 'folder', migration: { state: 'done' } });
   }, 180_000);
 
   test('a registry that cannot be read leaves the migration out and the worker boots as it always did', async () => {

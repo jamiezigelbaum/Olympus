@@ -212,6 +212,11 @@ export function replaceEmptyLegacyAccounts(env: LayoutEnv = process.env): string
   const eligible = (account: SourceRegistry['accounts'][number]): boolean =>
     account.state === 'active'
     && account.layout === 'legacy'
+    // A move under way (the boot migration creates an entry that lists no corpus,
+    // and a crash after its last rename leaves no file at a legacy location) is
+    // the migration's to end: a re-placement here would make an account that a
+    // roll-back then restores to the old places a folder with nothing in it.
+    && !sourceAccountMovePending(account)
     && account.corpus_ids.length === 0
     && hasFolderLayout(account.source_id)
     && decideAccountLayout(account.source_id, env).layout === 'folder';
@@ -339,9 +344,6 @@ function adoptedLayout(env: LayoutEnv, sourceId: string, slot: string, dbPath: s
 // these are the only opens, and they sit here because this is the only place
 // a store file is opened (test/store-open-guard.test.ts).
 
-/** Largest store `PRAGMA quick_check` is run on; a bigger one is not checked, since it cannot be interrupted. */
-export const QUICK_CHECK_MAX_BYTES = 512 * 1024 * 1024;
-
 /** Whether a store file opens read-only and its schema reads. Creates and changes nothing but SQLite's own `-shm`. */
 export function storeFileReads(path: string): boolean {
   let db: Database | undefined;
@@ -357,7 +359,10 @@ export function storeFileReads(path: string): boolean {
   }
 }
 
-/** `PRAGMA quick_check` on a store file, read-only: `ok`, or `damaged` for anything else, a file that will not open included. */
+/**
+ * `PRAGMA quick_check` on a store file, read-only: `ok`, or `damaged` for anything else, a file that will not open
+ * included. It is synchronous and cannot be interrupted, so the caller bounds it by size beforehand.
+ */
 export function storeFileQuickCheck(path: string): 'ok' | 'damaged' {
   let db: Database | undefined;
   try {

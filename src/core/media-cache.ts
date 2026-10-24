@@ -30,9 +30,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -41,8 +44,10 @@ import {
   rmdirSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { syncDirectorySync } from './atomic-file.ts';
 import { olympusDataDir } from './remote-access.ts';
 import { SIPS_PATH } from '../workers/file-extraction/extractors/image-preparers.ts';
 import { readyStillImageFormats } from './still-image-readiness.ts';
@@ -175,36 +180,127 @@ export function mediaHolderDigests(holder: string): string[] {
   return [...new Set([holderDigest(mediaHolderNameNear(holder)), holderDigest(holder)])];
 }
 
-/**
- * Hands the markers of a store that is moving to its new path (the boot
- * migration, docs/design/source-storage.md, "Migration of existing installs"):
- * for every cache file one of `fromDigests` holds, the marker under the new
- * path's name is written first and the old one removed after, so the file is
- * never without a holder. Without it the sweep would read the old path as a
- * store that is gone and drop its pictures. Idempotent. Returns how many
- * markers were handed over.
- */
-export function rekeyMediaCacheHolder(dir: string, fromDigests: readonly string[], toHolder: string): number {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return 0;
-    throw error;
+/** Thrown by `addMediaCacheHolder` when `stop` says to leave off; what was done stays done. */
+export class MediaCacheRekeyStopped extends Error {
+  constructor(readonly handed: number) {
+    super('The media cache hand-over was stopped before it finished.');
+    this.name = 'MediaCacheRekeyStopped';
   }
+}
+
+export interface MediaCacheRekeyOptions {
+  /**
+   * Asked every few pictures: true leaves off (`addMediaCacheHolder` throws
+   * `MediaCacheRekeyStopped`; `dropMediaCacheHolder` simply returns). Both are
+   * safe to cut short at that point, and a later call goes on.
+   */
+  stop?: () => boolean;
+  /** Makes a path durable: a marker file, then its folder. Replaces the real `fsync`, for tests. */
+  sync?: (path: string) => void;
+}
+
+/** How often the pictures of a big cache are interrupted by a question about time: every this many. */
+const STOP_CHECK_EVERY = 64;
+
+/** Makes a marker exist with `name` in it and be on disk: the file's bytes, then the folder entry that names it. */
+function ensureMarkerDurable(marker: string, name: string, sync: ((path: string) => void) | undefined): void {
+  // A marker with these bytes may be a stopped run's, not on disk yet: it is synced either way (cheap when it is).
+  const present = readMarker(marker) === name;
+  const descriptor = openSync(marker, present ? 'r' : 'w', 0o600);
+  try {
+    if (!present) writeSync(descriptor, name);
+    if (sync) sync(marker);
+    else fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  if (sync) sync(dirname(marker));
+  else syncDirectorySync(dirname(marker));
+}
+
+/**
+ * The first half of handing a store's pictures to a new path: for every cache
+ * file one of `fromDigests` holds, a marker under the new path's name is written
+ * and made durable (the file and its folder are fsynced), the old marker left
+ * where it is. Nothing is without a holder at any point, whichever way the
+ * machine stops, and it can be repeated or cut short (`options.stop`) at will,
+ * so it is done BEFORE the store moves, while the old holder is still real.
+ * Returns how many pictures it covered.
+ */
+export function addMediaCacheHolder(
+  dir: string,
+  fromDigests: readonly string[],
+  toHolder: string,
+  options: MediaCacheRekeyOptions = {},
+): number {
+  const entries = cacheRefsFolders(dir);
   const name = mediaHolderNameNear(toHolder);
   const target = holderDigest(name);
-  let handed = 0;
-  for (const entry of entries) {
-    if (!entry.endsWith('.jpg.refs')) continue;
+  let covered = 0;
+  entries.forEach((entry, index) => {
+    if (index % STOP_CHECK_EVERY === 0 && options.stop?.()) throw new MediaCacheRekeyStopped(covered);
     const refs = join(dir, entry);
-    const old = fromDigests.filter((digest) => digest !== target && existsSync(join(refs, digest)));
-    if (old.length === 0) continue;
-    if (readMarker(join(refs, target)) !== name) writeFileSync(join(refs, target), name, { mode: 0o600 });
-    for (const digest of old) rmSync(join(refs, digest), { force: true });
-    handed += old.length;
+    if (!fromDigests.some((digest) => digest !== target && existsSync(join(refs, digest)))) return;
+    ensureMarkerDurable(join(refs, target), name, options.sync);
+    covered += 1;
+  });
+  return covered;
+}
+
+/**
+ * The second half, after the store has moved: the old markers of every picture
+ * that now has the new path's marker are removed. Not durable on purpose: an
+ * old marker that comes back after a crash names a store that is gone, and the
+ * sweep removes it. Cut short by `options.stop` (the rest are swept later).
+ * Returns how many markers it removed.
+ */
+export function dropMediaCacheHolder(
+  dir: string,
+  fromDigests: readonly string[],
+  toHolder: string,
+  options: Pick<MediaCacheRekeyOptions, 'stop'> = {},
+): number {
+  const entries = cacheRefsFolders(dir);
+  const target = holderDigest(mediaHolderNameNear(toHolder));
+  let handed = 0;
+  for (const [index, entry] of entries.entries()) {
+    if (index % STOP_CHECK_EVERY === 0 && options.stop?.()) break;
+    const refs = join(dir, entry);
+    if (!existsSync(join(refs, target))) continue;
+    for (const digest of fromDigests) {
+      if (digest === target || !existsSync(join(refs, digest))) continue;
+      rmSync(join(refs, digest), { force: true });
+      handed += 1;
+    }
   }
   return handed;
+}
+
+/**
+ * Hands the markers of a store that is moving to its new path, both halves one
+ * after the other (the boot migration does them on either side of the move; see
+ * docs/design/source-storage.md, "Migration of existing installs"). Without it
+ * the sweep would read the old path as a store that is gone and drop its
+ * pictures. Idempotent. Returns how many markers were handed over.
+ */
+export function rekeyMediaCacheHolder(
+  dir: string,
+  fromDigests: readonly string[],
+  toHolder: string,
+  options: MediaCacheRekeyOptions = {},
+): number {
+  addMediaCacheHolder(dir, fromDigests, toHolder, options);
+  return dropMediaCacheHolder(dir, fromDigests, toHolder, options);
+}
+
+/** The `.refs` folders of a cache, or none when it is not there. */
+function cacheRefsFolders(dir: string): string[] {
+  try {
+    return readdirSync(dir).filter((entry) => entry.endsWith('.jpg.refs'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
+    throw error;
+  }
 }
 
 /**

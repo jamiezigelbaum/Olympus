@@ -11,6 +11,9 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, sy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  MediaCacheRekeyStopped,
+  addMediaCacheHolder,
+  dropMediaCacheHolder,
   mediaHolderDigests,
   nearRealPath,
   rekeyMediaCacheHolder,
@@ -186,5 +189,108 @@ describe('a store that moves keeps its pictures', () => {
     const { dir, cache } = workspace();
     expect(rekeyMediaCacheHolder(join(dir, 'no-cache'), ['0'.repeat(32)], join(dir, 'a.sqlite'))).toBe(0);
     expect(rekeyMediaCacheHolder(cache, ['0'.repeat(32)], join(dir, 'a.sqlite'))).toBe(0);
+  });
+});
+
+describe('the hand-over in two halves, either side of the move', () => {
+  function moved(dir: string, cache: string, name: string, count: number): { oldStore: string; newStore: string; pictures: Array<{ path: string; sha256: string }>; digests: string[] } {
+    const oldStore = join(dir, 'legacy', `${name}.sqlite`);
+    const newStore = join(dir, 'sources', name, '1', 'stores', 'a.sqlite');
+    const pictures = Array.from({ length: count }, (_, index) => holding(cache, index === 0 ? oldStore : join(dir, 'scratch', `${name}-${index}.sqlite`), `${name} picture ${index}`));
+    // The holders of one store: every picture gets the old store's marker as well.
+    for (const picture of pictures.slice(1)) {
+      expect(retainMediaCacheFile(picture.path, picture.sha256, oldStore, cache)).toBe(true);
+    }
+    return { oldStore, newStore, pictures, digests: mediaHolderDigests(oldStore) };
+  }
+
+  test('each new marker is on disk (file, then its folder) while the old one is still there', () => {
+    const { dir, cache } = workspace();
+    const { oldStore, newStore, pictures, digests } = moved(dir, cache, 'a', 3);
+    mkdirSync(join(newStore, '..'), { recursive: true });
+    const synced: string[] = [];
+    const oldStillThere: boolean[] = [];
+
+    expect(addMediaCacheHolder(cache, digests, newStore, {
+      sync: (path) => {
+        synced.push(path);
+        for (const picture of pictures) oldStillThere.push(digests.some((digest) => existsSync(join(`${picture.path}.refs`, digest))));
+      },
+    })).toBe(3);
+
+    // For every picture: its new marker, then the folder that names it.
+    expect(synced.filter((path) => path.endsWith('.refs'))).toHaveLength(3);
+    expect(synced.filter((path) => !path.endsWith('.refs'))).toHaveLength(3);
+    for (const picture of pictures) {
+      const marker = synced.findIndex((path) => path.startsWith(`${picture.path}.refs/`));
+      expect(marker, picture.path).toBeGreaterThanOrEqual(0);
+      expect(synced[marker + 1], picture.path).toBe(`${picture.path}.refs`);
+    }
+    expect(oldStillThere.every(Boolean)).toBe(true);
+    // The store has not moved yet in this test, and nothing is dropped by the sweep either way.
+    expect(sweepMediaCache(cache, FAR_FUTURE)).toBe(0);
+    expect(oldStore).toBeTruthy();
+  });
+
+  test('the old markers go only in the second half, and only where the new one is', () => {
+    const { dir, cache } = workspace();
+    const { newStore, pictures, digests } = moved(dir, cache, 'a', 2);
+    mkdirSync(join(newStore, '..'), { recursive: true });
+    // Nothing added yet: nothing is dropped.
+    expect(dropMediaCacheHolder(cache, digests, newStore)).toBe(0);
+    for (const picture of pictures) expect(markers(cache, picture).length).toBeGreaterThan(0);
+
+    addMediaCacheHolder(cache, digests, newStore);
+    const both = pictures.map((picture) => markers(cache, picture).length);
+    expect(both.every((count) => count >= 2)).toBe(true);
+
+    expect(dropMediaCacheHolder(cache, digests, newStore)).toBeGreaterThanOrEqual(2);
+    for (const picture of pictures) {
+      for (const digest of digests) expect(existsSync(join(`${picture.path}.refs`, digest)), picture.path).toBe(false);
+    }
+  });
+
+  test('a hand-over that is told to stop throws, keeps every old marker, and the next call goes on from where it stopped', () => {
+    const { dir, cache } = workspace();
+    const { oldStore, newStore, pictures, digests } = moved(dir, cache, 'a', 130);
+    mkdirSync(join(newStore, '..'), { recursive: true });
+    let asked = 0;
+
+    let stopped: unknown;
+    try {
+      addMediaCacheHolder(cache, digests, newStore, { stop: () => (asked += 1) > 1 });
+    } catch (error) {
+      stopped = error;
+    }
+
+    expect(stopped).toBeInstanceOf(MediaCacheRekeyStopped);
+    expect((stopped as MediaCacheRekeyStopped).handed).toBeGreaterThan(0);
+    expect((stopped as MediaCacheRekeyStopped).handed).toBeLessThan(130);
+    // Nothing lost: the old marker is on every picture, whether or not the new one is yet.
+    for (const picture of pictures) expect(digests.some((digest) => existsSync(join(`${picture.path}.refs`, digest))), picture.path).toBe(true);
+
+    expect(addMediaCacheHolder(cache, digests, newStore)).toBe(130);
+    renameSync(oldStore, newStore);
+    expect(dropMediaCacheHolder(cache, digests, newStore)).toBeGreaterThanOrEqual(130);
+    expect(sweepMediaCache(cache, FAR_FUTURE)).toBe(0);
+    for (const picture of pictures) expect(existsSync(picture.path), picture.path).toBe(true);
+  });
+
+  test('a drop that is told to stop leaves the rest for later, and removes nothing it should not', () => {
+    const { dir, cache } = workspace();
+    const { oldStore, newStore, pictures, digests } = moved(dir, cache, 'a', 130);
+    mkdirSync(join(newStore, '..'), { recursive: true });
+    addMediaCacheHolder(cache, digests, newStore);
+    renameSync(oldStore, newStore);
+    let asked = 0;
+
+    const first = dropMediaCacheHolder(cache, digests, newStore, { stop: () => (asked += 1) > 1 });
+
+    expect(first).toBeGreaterThan(0);
+    expect(first).toBeLessThan(130);
+    // Every picture is still held: the new marker everywhere, the old one where the drop had not got to.
+    for (const picture of pictures) expect(markers(cache, picture).length, picture.path).toBeGreaterThan(0);
+    expect(dropMediaCacheHolder(cache, digests, newStore)).toBeGreaterThan(0);
+    expect(sweepMediaCache(cache, FAR_FUTURE)).toBe(0);
   });
 });
