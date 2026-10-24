@@ -2098,6 +2098,8 @@ export const DASHBOARD_ARCHIVE_COPY = {
     attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    service_message: { one: '1 service message (a join, a call or a pin) left out', many: '{n} service messages (joins, calls or pins) left out' },
+    message_without_text: { one: '1 message with nothing to read (no text, picture or file) left out', many: '{n} messages with nothing to read (no text, picture or file) left out' },
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
     media_not_imported: { one: '1 picture, recording or other file in the archive was not imported', many: '{n} pictures, recordings or other files in the archive were not imported' },
     item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },

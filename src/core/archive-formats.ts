@@ -145,9 +145,10 @@ export const TELEGRAM_EXPORT_SECTIONS = Object.freeze([
 ] as const);
 // A whole-account export opens with `about` and then its first section; a
 // single-chat export opens with the chat's header (name, type, id) and then
-// `messages`. The writer is fixed, so the first keys decide, whatever follows.
+// `messages`. The writer is fixed, so the first keys decide, whatever follows;
+// every section is an object or a list.
 const TELEGRAM_FULL_HEAD = new RegExp(
-  String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join('|')})"\s*:`,
+  String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join('|')})"\s*:\s*[\[{]`,
 );
 const TELEGRAM_CHAT_HEAD = new RegExp(
   String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`,
