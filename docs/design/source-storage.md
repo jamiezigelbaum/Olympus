@@ -91,6 +91,7 @@ Inside the data root:
 ```
 <data>/
   registry.json                  the account registry (below)
+  data-owner.lock                the owner lock (never removed, even by Delete all)
   sources/<source_id>/<slot>/
     stores/<tier>.sqlite         one per trust tier, sidecars beside it
     raw/                         spools, watch snapshots, capture cursors
@@ -145,6 +146,18 @@ Inside the data root:
   migration lane list are deleted.
 - Connecting creates the entry and the folder. A different provider account
   for the same source gets a new slot, not the old folder (owner decision 1).
+- **Corpus ids are per slot.** Shared files, the scheduler
+  (`source-scheduler-state.ts`, key `(source_id, corpus_id, task_id)`) and
+  retrieval routing (`source-index/router.ts`, keyed by corpus id) know an
+  account only by its corpus ids. Slot `1` keeps today's corpus ids, so
+  existing installs migrate with no id change. Slot `2` and later get
+  account-scoped ids (`<corpus_id>~<slot>`), recorded in the registry, so two
+  accounts of one source schedule, search and forget independently.
+  Before slot `2` can exist, every corpus-id consumer must accept those ids
+  (a test drives a two-slot source through sync, search, the dashboard and
+  Delete). Until then, connecting a different account while the previous
+  account's data is kept is refused with "Delete the previous account's
+  data first".
 
 ## Storage service
 
@@ -165,7 +178,11 @@ that opens files inside an account folder:
 
 **Owner lock.** The worker takes an exclusive kernel lock
 (`file-lease.ts`'s `BEGIN EXCLUSIVE`, released by the kernel on death) on
-`<state>/data-owner.lock` for its lifetime. Every other opener of a store:
+`<data>/data-owner.lock` for its lifetime. The lock sits in the data root
+itself, not the state root, so any two processes that resolve the same data
+root contend on the same lock even with different `XDG_STATE_HOME` values;
+it is outside every directory that Delete or Delete all removes, so its
+inode never changes while held. Every other opener of a store:
 
 | Opener | After this change |
 |---|---|
@@ -258,6 +275,8 @@ outside it to find and nobody else to fence.
 **Delete all** (`data delete --all`) removes the data root's `sources/`,
 `shared/`, `.trash/`, `media-cache/`, the registry and the known legacy
 leftovers (below), under the owner lock, with the engine stopped as today.
+It never removes `data-owner.lock`; uninstall removes it last, after
+everything else.
 
 ## Export and uninstall
 
@@ -362,7 +381,10 @@ proven on Mac, standalone Linux and OpenClaw-hosted.
 
 1. **One folder per account, with slots.** Connecting a different account
    for the same source creates a new folder; the old one stays as
-   "Disconnected · indexed data kept" until deleted. Recommended: yes.
+   "Disconnected · indexed data kept" until deleted. Recommended: yes, in
+   two parts: the folder shape and per-slot corpus ids now; a second slot
+   only once every corpus-id consumer is proven with two (see Registry).
+   Until then a different account needs the previous data deleted first.
 2. **Delete forgets that account's choices too** (folder picks, ingestion
    policy, scope approvals), so reconnecting starts clean; Disconnect keeps
    them. Recommended: yes.
