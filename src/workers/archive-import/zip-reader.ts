@@ -711,7 +711,7 @@ export interface ZipContinuation {
 }
 
 interface ContinuationState extends ZipContinuation {
-  /** How far the inflater has got: `position`, or less while it is still catching up. */
+  // How far the inflater has got: `position`, or less while it is still catching up.
   readonly reached: number;
   readonly memberKey: string;
   readonly crc: number;

@@ -35,7 +35,7 @@ import {
 } from '../connector-store/tiered-store-set.ts';
 import type { ArchiveTierLane } from './lane.ts';
 
-/** Where an item is in the archive: the coordinates findings use. */
+// Where an item is in the archive: the coordinates findings use.
 type ItemPosition = { fileIndex: number; offset: number };
 import {
   archiveFileDigestSteps,
@@ -239,7 +239,7 @@ function observeListing(
   complete: () => Promise<boolean>,
   repeats?: {
     holds(identity: RawItem['identity']): boolean;
-    /** The positions the connector told for the page just listed, once. */
+    // The positions the connector told for the page just listed, once.
     positions(): readonly ItemPosition[] | undefined;
     add(count: number, at?: { repeatedAt: ItemPosition[]; through: ItemPosition | undefined }): void;
   },

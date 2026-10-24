@@ -37,7 +37,7 @@ import {
 } from './manifest.ts';
 import type { ArchiveImportRecord, ArchiveImportStateStore, NewArchiveImportRecord } from './state.ts';
 
-/** Said beside a refusal when the first look did not reach every file it was asked to. */
+// Said beside a refusal when the first look did not reach every file it was asked to.
 const NOT_LOOKED_AT_ADVICE = 'Some files in what you chose were not looked at, so the export may be among them; choose the export file itself.';
 
 export type ArchiveImportStart =
