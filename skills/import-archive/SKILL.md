@@ -22,7 +22,9 @@ WhatsApp shares, or a folder of them. A chat export is a snapshot: later
 messages are not added. In a folder, only files named the way WhatsApp names
 an export (or zips holding one) are taken; a chat saved under another name
 imports when the user chooses that file by itself. Messages that appear in two
-export files of the same chat are imported once.
+export files of the same chat are imported once. When a folder holds more files
+than the first look takes in, Olympus says some files were not looked at; ask
+the user to choose the export file itself.
 
 A Telegram Desktop export works too: its `result.json` (or the folder that
 holds it), exported as Machine-readable JSON. Messages are imported as text;

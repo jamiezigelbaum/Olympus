@@ -90,16 +90,17 @@ const failedIds = (report: Report): string[] => checksOf(report).filter((c) => c
 describe('the archive-import leg in a run', () => {
   test('runs after the install checks, in the order the machine needs, and tells each verb what to do', async () => {
     const report = await runReleaseCheck(options());
-    expect(verbs()).toEqual(['archive-import', 'archive-import', 'archive-import', 'archive-model', 'archive-model', 'archive-remove', 'archive-changed', 'archive-cleanup', 'archive-collect']);
-    const [picker, agent, telegram, off, on, remove, changed] = archiveCalls();
+    expect(verbs()).toEqual(['archive-import', 'archive-import', 'archive-import', 'archive-import', 'archive-model', 'archive-model', 'archive-remove', 'archive-changed', 'archive-cleanup', 'archive-collect']);
+    const [picker, agent, telegram, whatsapp, off, on, remove, changed] = archiveCalls();
     // The picker goes first, on an empty list, with the folder reset; the agent path waits for the model to judge, then searches.
     expect(picker).toMatch(/^archive-import --role picker --format mbox --seed \S+ --via picker --reset-folder --clean$/);
     expect(agent).toMatch(/^archive-import --role agent --format mbox --seed \S+ --via request --drain-s \d+ --search$/);
     // Each other format follows the mail one, by the same agent path, and is told its own format.
     expect(telegram).toMatch(/^archive-import --role agent --format telegram_json --seed \S+ --via request --drain-s \d+ --search$/);
+    expect(whatsapp).toMatch(/^archive-import --role agent --format whatsapp_chat --seed \S+ --via request --drain-s \d+ --search$/);
     expect(off).toBe('archive-model --mode off');
     expect(on).toBe('archive-model --mode on');
-    expect(remove).toMatch(/^archive-remove --targets '?agent:mbox,agent:telegram_json,picker:mbox,held:mbox'? --seed \S+$/);
+    expect(remove).toMatch(/^archive-remove --targets '?agent:mbox,agent:telegram_json,agent:whatsapp_chat,picker:mbox,held:mbox'? --seed \S+$/);
     expect(changed).toMatch(/^archive-changed --seed \S+ --sizes \d+(,\d+)*$/);
     // One seed for the whole leg: every archive of the run has its own token and file from it.
     const seeds = new Set(archiveCalls().map((line) => /--seed '?(\w+)'?/.exec(line)?.[1]).filter(Boolean));
@@ -111,7 +112,7 @@ describe('the archive-import leg in a run', () => {
     const report = await runReleaseCheck(options());
     expect(report.verdict).toBe('fail');
     const failed = failedIds(report);
-    for (const id of ['archive.picker.mbox.ran', 'archive.agent.mbox.ran', 'archive.agent.telegram_json.ran']) expect(failed).toContain(id);
+    for (const id of ['archive.picker.mbox.ran', 'archive.agent.mbox.ran', 'archive.agent.telegram_json.ran', 'archive.agent.whatsapp_chat.ran']) expect(failed).toContain(id);
     // The held archive was not imported because the private model could not be turned off, and said so.
     const held = checksOf(report).find((c) => c.id === 'archive.held.mbox.ran')!;
     expect(held.status).toBe('fail');

@@ -58,6 +58,21 @@ export interface ArchiveImportFindings {
    * The last position counted: a finding at or before it was counted already.
    */
   through?: { file_index: number; offset: number };
+  /**
+   * The position of the last item whose repeat or not was counted, for
+   * connectors that tell where each item is: an item at or before it was
+   * judged on an earlier pass, whatever pages the replay cuts.
+   */
+  listed_through?: { file_index: number; offset: number };
+}
+
+/**
+ * Items of a page whose positions the connector told: where the repeats are,
+ * and where the page's last item is.
+ */
+export interface ArchiveRepeatedItems {
+  repeatedAt: ReadonlyArray<{ fileIndex: number; offset: number }>;
+  through?: { fileIndex: number; offset: number };
 }
 
 export interface ArchiveImportRecord {
@@ -268,17 +283,29 @@ export class ArchiveImportStateStore {
     findings: readonly ArchiveImportFinding[],
     position?: { fileIndex: number; offset: number },
     repeated = 0,
+    items?: ArchiveRepeatedItems,
   ): void {
-    if (findings.length === 0 && !position) return;
+    if (findings.length === 0 && !position && !items) return;
     this.update(archiveId, (record) => {
       // How far the import read, for its progress: only forward, and only while it imports.
       const read = record.read_position;
       const movesOn = position !== undefined && record.status === 'importing'
         && (!read || position.fileIndex > read.file_index
           || (position.fileIndex === read.file_index && position.offset > read.offset));
-      if (findings.length === 0 && !movesOn) return false;
+      const listed = record.findings.listed_through;
+      const after = (at: { fileIndex: number; offset: number }): boolean => !listed || at.fileIndex > listed.file_index
+        || (at.fileIndex === listed.file_index && at.offset > listed.offset);
+      const freshRepeats = record.status === 'importing' && items ? items.repeatedAt.filter(after).length : 0;
+      const itemsMoveOn = record.status === 'importing' && items?.through !== undefined && after(items.through);
+      if (findings.length === 0 && !movesOn && freshRepeats === 0 && !itemsMoveOn) return false;
       if (movesOn) record.read_position = { file_index: position!.fileIndex, offset: position!.offset };
       const tally = record.findings;
+      // Items whose positions are known: each repeat is counted once, when the import reads past
+      // the last item it judged, however the pages of a replay are cut.
+      if (freshRepeats > 0) {
+        tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] = (tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] ?? 0) + freshRepeats;
+      }
+      if (itemsMoveOn) tally.listed_through = { file_index: items!.through!.fileIndex, offset: items!.through!.offset };
       // Items the stores already held from earlier in the archive. Counted only when the import
       // reads past where it had read: a page listed again after a restart finds its own items
       // stored, and they are not repeats.

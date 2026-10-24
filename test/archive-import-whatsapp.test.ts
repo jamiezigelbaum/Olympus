@@ -42,6 +42,7 @@ import {
   createWhatsAppArchiveConnector,
 } from '../src/workers/archive-import/whatsapp/connector.ts';
 import { WHATSAPP_MAX_ITEM_TEXT_CHARS } from '../src/workers/archive-import/whatsapp/messages.ts';
+import { ZIP_INFLATE_PUSH_BYTES, ZipMemberReader } from '../src/workers/archive-import/zip-reader.ts';
 import { referenceCrc32 } from './helpers/zip-fixture.ts';
 import {
   chatText,
@@ -79,10 +80,14 @@ function localIso(at: string): string {
 
 // --- Detection ----------------------------------------------------------------
 
-function detect(dir: string, chosen = '') {
+/** `listedByName`: the folder is listed in name order (code units), as some systems list it, so where a name falls in the listing does not depend on the machine the test runs on. */
+function detect(dir: string, chosen = '', options: { listedByName?: boolean } = {}) {
   const root = ScopeRoot.open(dir);
+  const listed = options.listedByName
+    ? Object.assign(Object.create(root) as ScopeRoot, { list: (relDir: string) => root.list(relDir).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) })
+    : root;
   try {
-    const probe = probeArchivePath(root, chosen);
+    const probe = probeArchivePath(listed, chosen);
     return detectArchiveFormat(probe);
   } finally {
     root.close();
@@ -247,6 +252,31 @@ describe('whatsapp export detection', () => {
     expect(detect(dir, 'WhatsApp Chat with Big.zip')).toMatchObject({ kind: 'match', files: [''] });
   });
 
+  test('ordinary text files ahead of the chat in a zip do not hide it: the names that say what an export is are read first', () => {
+    const dir = workDir();
+    const notes = Array.from({ length: 40 }, (_, index) => ({ name: `attachments/note-${String(index).padStart(2, '0')}.txt`, data: `shopping list ${index}\nmilk\n` }));
+    put(dir, 'Notes from the trip.zip', buildZip([...notes, { name: '_chat.txt', data: chat, method: 'deflate' as const }]));
+    expect(detect(dir, 'Notes from the trip.zip')).toMatchObject({ kind: 'match', files: [''] });
+    // The same zip found in a folder.
+    expect(detect(dir)).toMatchObject({ kind: 'match', files: ['Notes from the trip.zip'] });
+    // And with more ordinary text files ahead of the chat than the probe lists past its usual bound.
+    const many = workDir();
+    const memos = Array.from({ length: ARCHIVE_PROBE_MAX_CHILDREN + ARCHIVE_PROBE_MAX_NAMED + 20 }, (_, index) => ({ name: `memos/memo-${String(index).padStart(5, '0')}.txt`, data: 'x\n' }));
+    put(many, 'Memos.zip', buildZip([...memos, { name: 'WhatsApp Chat with Pal.txt', data: chat, method: 'deflate' as const }]));
+    expect(detect(many, 'Memos.zip')).toMatchObject({ kind: 'match', files: [''] });
+  });
+
+  test('a folder with more ordinary text files than the probe lists still finds the exports named for WhatsApp', () => {
+    const dir = workDir();
+    for (let index = 0; index < ARCHIVE_PROBE_MAX_CHILDREN + ARCHIVE_PROBE_MAX_NAMED + 20; index += 1) put(dir, `Aaa-memo-${String(index).padStart(5, '0')}.txt`, 'x\n');
+    put(dir, '_chat.txt', chat);
+    put(dir, 'WhatsApp Chat with Pal.txt', androidChat);
+    // Listed by name, the two exports come last: past the probe's usual bound and past the room for more ordinary names.
+    const found = detect(dir, '', { listedByName: true });
+    expect(found).toMatchObject({ kind: 'match' });
+    if (found.kind === 'match') expect([...found.files]).toEqual(['WhatsApp Chat with Pal.txt', '_chat.txt']);
+  });
+
   test('mail is still mail, and a text file that starts with From is not a chat', () => {
     const dir = workDir();
     put(dir, 'Inbox.mbox', 'From sender@example.invalid Mon Jan  5 10:00:00 2015\nSubject: x\n\nbody\n');
@@ -313,7 +343,7 @@ async function listInPasses(
   dir: string,
   names: readonly string[],
   limit: number,
-  options: { pageSize?: number; maxBytesPerListing?: number; dropParked?: boolean } = {},
+  options: { pageSize?: number; maxBytesPerListing?: number; dropParked?: boolean | 'once' } = {},
 ) {
   const items: RawItem[] = [];
   const findings: ArchiveImportFinding[] = [];
@@ -328,11 +358,38 @@ async function listInPasses(
     items.push(...listed.items);
     passes += 1;
     parked.push(archiveContinuations.size);
-    if (options.dropParked) archiveContinuations.clear();
+    // A restart loses what was parked: after every pass, or once (after the first).
+    if (options.dropParked === true || (options.dropParked === 'once' && passes === 1)) archiveContinuations.clear();
     if (listed.done) return { items, findings, passes, parked };
     cursor = listed.cursors.at(-1);
     if (!cursor || passes > 400) throw new Error('the listing did not finish');
   }
+}
+
+/**
+ * Adds up what every zip member reader inflated and threw away to reach the place it was entered at, from now until `stop()`.
+ * Each reader is counted once, when it is suspended or closed.
+ */
+function trackReplay(): { total(): number; stop(): void } {
+  const proto = ZipMemberReader.prototype as unknown as { suspend(): unknown; close(): void };
+  const realSuspend = proto.suspend;
+  const realClose = proto.close;
+  const counted = new WeakSet<object>();
+  let total = 0;
+  const count = (reader: ZipMemberReader): void => {
+    if (counted.has(reader)) return;
+    counted.add(reader);
+    total += reader.replayedBytes;
+  };
+  proto.suspend = function (this: ZipMemberReader): unknown {
+    count(this);
+    return realSuspend.call(this);
+  };
+  proto.close = function (this: ZipMemberReader): void {
+    count(this);
+    realClose.call(this);
+  };
+  return { total: () => total, stop: () => { proto.suspend = realSuspend; proto.close = realClose; } };
 }
 
 function textOf(item: RawItem): string {
@@ -753,15 +810,92 @@ describe('whatsapp connector resumes', () => {
     const names = ['WhatsApp Chat with Harbour crew.zip'];
     const options = { pageSize: 1000, maxBytesPerListing: 6_000_000 };
     archiveContinuations.clear();
-    const warm = await listInPasses(dir, names, 10_000, options);
+    const warmReplay = trackReplay();
+    const warm = await listInPasses(dir, names, 10_000, options).finally(() => warmReplay.stop());
     archiveContinuations.clear();
-    const cold = await listInPasses(dir, names, 10_000, { ...options, dropParked: true });
+    // A restart after the first pass loses the parked inflater: the next pass runs through the member again.
+    const coldReplay = trackReplay();
+    const cold = await listInPasses(dir, names, 10_000, { ...options, dropParked: 'once' }).finally(() => coldReplay.stop());
     expect(cold.items.map((item) => item.identity.providerItemId)).toEqual(warm.items.map((item) => item.identity.providerItemId));
     expect(cold.items).toHaveLength(100);
-    // The parked inflater means a pass reads only new bytes; without it, a pass spends the budget getting back to where it was
-    // and, once the member is past the budget, reads one message each.
+    // The parked inflater means a pass reads only new bytes; without it, a pass runs through the member to where it was,
+    // and what it ran through is what its budget was spent on.
     expect(warm.passes).toBeLessThan(10);
-    expect(cold.passes).toBeGreaterThan(warm.passes + 15);
+    expect(coldReplay.total()).toBeGreaterThan(warmReplay.total() + 1_000_000);
+    expect(cold.passes).toBeGreaterThanOrEqual(warm.passes);
+    expect(cold.passes).toBeLessThanOrEqual(warm.passes + 3);
+  }, 120_000);
+
+  test('a deflated member resumed cold is caught up to over several passes, no step of it larger than the budget, and the messages are the same', async () => {
+    const dir = workDir();
+    let seed = 4242;
+    const noise = (length: number): string => {
+      let out = '';
+      while (out.length < length) {
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        out += (seed >>> 8).toString(16).padStart(6, '0');
+      }
+      return out.slice(0, length);
+    };
+    const messages = syntheticChat(40).map((message, index) => ({
+      ...message,
+      text: `${index}\n${Array.from({ length: 500 }, () => noise(100)).join('\n')}`,
+    }));
+    put(dir, 'WhatsApp Chat with Harbour crew.zip', chatZip(chatText(messages, { style: 'android-24-dmy' }), { textName: 'WhatsApp Chat with Harbour crew.txt' }));
+    const names = ['WhatsApp Chat with Harbour crew.zip'];
+    archiveContinuations.clear();
+    const whole = await listAll(connectorFor(dir, names).connector);
+    expect(whole.items).toHaveLength(40);
+    // A resume point deep in the member, as an earlier pass left it; then the process restarts and nothing is parked.
+    archiveContinuations.clear();
+    const early = await listAll(connectorFor(dir, names).connector, { limit: 34 });
+    const deep = early.cursors.at(-1)!;
+    expect(cursorState(deep).o).toBeGreaterThan(1_500_000);
+    archiveContinuations.clear();
+
+    const budget = 400_000;
+    const proto = ZipMemberReader.prototype as unknown as { next(): unknown; catchUp(): unknown };
+    const realNext = proto.next;
+    const realCatchUp = proto.catchUp;
+    let worstCall = 0;
+    let calls = 0;
+    const measured = (real: () => unknown) => function (this: ZipMemberReader): unknown {
+      const before = this.replayedBytes;
+      try {
+        return real.call(this);
+      } finally {
+        calls += 1;
+        worstCall = Math.max(worstCall, this.replayedBytes - before);
+      }
+    };
+    proto.next = measured(realNext);
+    proto.catchUp = measured(realCatchUp);
+    const items: RawItem[] = [];
+    const perPass: number[] = [];
+    let cursor = deep;
+    let manifest: string | undefined;
+    let passes = 0;
+    try {
+      for (; passes < 60; passes += 1) {
+        const built = connectorFor(dir, names, { maxBytesPerListing: budget, ...(manifest ? { manifestSha256: manifest } : {}) });
+        manifest = archiveManifestSha256(built.files);
+        const listed = await listAll(built.connector, { cursor });
+        items.push(...listed.items);
+        perPass.push(listed.items.length);
+        if (listed.done) break;
+        cursor = listed.cursors.at(-1)!;
+      }
+    } finally {
+      proto.next = realNext;
+      proto.catchUp = realCatchUp;
+    }
+    expect(calls).toBeGreaterThan(0);
+    expect(items.map((item) => item.identity.providerItemId)).toEqual(whole.items.slice(34).map((item) => item.identity.providerItemId));
+    // Getting back to the place took several passes, the first of them with no message to give.
+    expect(passes).toBeGreaterThanOrEqual(4);
+    expect(perPass[0]).toBe(0);
+    // No single read inflated more than a step of the budget and the push that was in progress.
+    expect(worstCall).toBeLessThanOrEqual(budget + 4 * ZIP_INFLATE_PUSH_BYTES);
   }, 120_000);
 
   test('a deflated member of lines longer than the reads that inflate it still stops at its budget', async () => {
@@ -843,6 +977,33 @@ describe('whatsapp connector resumes', () => {
       const passes = await listInPasses(dir, ['_chat.txt'], limit, { pageSize: 2 });
       expect(passes.items.map((item) => item.identity.providerItemId)).toEqual(ids);
     }
+  });
+
+  test('two real messages alike in everything, a pasted older header between them, keep their own identities; overlapping copies still import each once', async () => {
+    const dir = workDir();
+    const lines = [
+      '14/05/2026, 10:00 - Sam Example: ok',
+      '14/05/2026, 10:00 - Pat Example: here is what she wrote last spring',
+      '12/03/2026, 09:00 - Alex Example: pasted from an older chat',
+      '14/05/2026, 10:00 - Sam Example: ok',
+      '14/05/2026, 10:01 - Sam Example: after',
+    ];
+    const text = `${lines.join('\n')}\n`;
+    put(dir, 'WhatsApp Chat with Harbour crew.txt', text);
+    const single = await listAll(connectorFor(dir, ['WhatsApp Chat with Harbour crew.txt']).connector);
+    const ids = single.items.map((item) => item.identity.providerItemId);
+    expect(single.items.map(textOf)).toEqual(['ok', 'here is what she wrote last spring', 'pasted from an older chat', 'ok', 'after']);
+    expect(new Set(ids).size).toBe(5);
+    // Pages and restarts change nothing.
+    for (const limit of [1, 2]) {
+      const passes = await listInPasses(dir, ['WhatsApp Chat with Harbour crew.txt'], limit, { pageSize: 1 });
+      expect(passes.items.map((item) => item.identity.providerItemId)).toEqual(ids);
+    }
+    // A zip of the same export: the real messages share their identities with the text file's, so each is imported once.
+    put(dir, 'WhatsApp Chat with Harbour crew.zip', chatZip(text, { textName: 'WhatsApp Chat with Harbour crew.txt' }));
+    const both = await listAll(connectorFor(dir, ['WhatsApp Chat with Harbour crew.txt', 'WhatsApp Chat with Harbour crew.zip']).connector);
+    const fromZip = both.items.slice(5).map((item) => item.identity.providerItemId);
+    for (const index of [0, 1, 3, 4]) expect(fromZip[index]).toBe(ids[index]);
   });
 
   test('a resume point belongs to these files only and to a place where a message starts', async () => {
@@ -1263,6 +1424,62 @@ describe('whatsapp archive on the shared spine', () => {
     expect(record.status).toBe('imported');
     expect(rowsOf(f.env, archiveId)).toHaveLength(12);
     expect(record.findings.skipped).toEqual({ [ARCHIVE_COMMON_FINDINGS.itemRepeated]: 10 });
+  });
+
+  test('a crash after some of the overlap was counted, and a restart that cuts its pages differently, count each repeat once', async () => {
+    const f = fixture();
+    const folder = join(f.exports, 'both');
+    mkdirSync(folder);
+    const base = syntheticChat(10);
+    put(folder, 'WhatsApp Chat with Harbour crew.txt', chatText(base, { style: 'android-24-dmy' }));
+    put(folder, 'WhatsApp Chat with Harbour crew.zip', chatZip(chatText(base.concat(syntheticChat(2, { start: '2026-03-01T10:00:00', label: 'new' })), { style: 'android-24-dmy' })));
+    const archiveId = f.start(folder);
+    const dying = (): ((formatId: string) => ArchiveConnectorFactory) => () => (input) => {
+      const real = createWhatsAppArchiveConnector(input);
+      const connector: SourceConnector = {
+        ...real,
+        listItems(options) {
+          return (async function* (): AsyncGenerator<SourceConnectorListPage> {
+            let pages = 0;
+            for await (const page of real.listItems(options)) {
+              // The text file is three pages (4, 4, 2); the zip's first two pages, eight messages, are counted before the crash.
+              if (pages > 4) throw new Error('synthetic crash');
+              pages += 1;
+              yield page;
+            }
+          })();
+        },
+      };
+      return connector;
+    };
+    await expect(pull(f.runtime, archiveId, { pageSize: 4, connectorFactory: dying() })).rejects.toThrow('synthetic crash');
+    expect(f.runtime.state.get(archiveId)!.findings.skipped).toEqual({ [ARCHIVE_COMMON_FINDINGS.itemRepeated]: 8 });
+    // The restart cuts the same messages into pages of five: two more of the overlap are met, not five.
+    // One pass with room for all of it, so no pass boundary happens to fall where the counted overlap ends.
+    await importAll(f.runtime, archiveId, { pageSize: 5 });
+    const record = f.runtime.state.get(archiveId)!;
+    expect(record.status).toBe('imported');
+    expect(rowsOf(f.env, archiveId)).toHaveLength(12);
+    expect(record.findings.skipped).toEqual({ [ARCHIVE_COMMON_FINDINGS.itemRepeated]: 10 });
+  });
+
+  test('a zip whose text files the first look did not all read says how many it did not, when nothing there names the export', async () => {
+    const f = fixture();
+    // A chat saved under another name among 43 other text files: the first look reads 32 text files of a zip.
+    const memos = (count: number, from: number) => Array.from({ length: count }, (_, index) => ({ name: `memos/memo-${String(from + index).padStart(2, '0')}.txt`, data: 'shopping list\nmilk\n' }));
+    put(f.exports, 'Saved chats.zip', buildZip([...memos(3, 0), { name: 'my chat.txt', data: chatText(syntheticChat(4), { style: 'ios-24-dmy' }), method: 'deflate' as const }, ...memos(40, 3)]));
+    const archiveId = f.start(join(f.exports, 'Saved chats.zip'));
+    // 44 text files, 32 of them read.
+    expect(f.runtime.state.get(archiveId)!.findings.skipped).toEqual({ [ARCHIVE_COMMON_FINDINGS.filesNotLookedAt]: 12 });
+    // When the export is among those not read, the refusal says the look was not complete.
+    put(f.exports, 'Hidden chat.zip', buildZip([...memos(40, 0), { name: 'my chat.txt', data: chatText(syntheticChat(4), { style: 'ios-24-dmy' }), method: 'deflate' as const }]));
+    const refused = f.runtime.start(join(f.exports, 'Hidden chat.zip'));
+    expect(refused.kind).toBe('unsupported');
+    if (refused.kind === 'unsupported') expect(refused.advice).toContain('were not looked at');
+    // A zip with the export named as WhatsApp names it says nothing of the files beside it.
+    put(f.exports, 'Named chat.zip', buildZip([...memos(40, 0), { name: '_chat.txt', data: chatText(syntheticChat(4), { style: 'ios-24-dmy' }), method: 'deflate' as const }]));
+    const named = f.start(join(f.exports, 'Named chat.zip'));
+    expect(f.runtime.state.get(named)!.findings.skipped).toEqual({});
   });
 
   test('files that look like exports but are not named like one are left out and counted on the record', async () => {

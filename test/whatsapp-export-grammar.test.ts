@@ -487,6 +487,24 @@ describe('whatsapp date order scan', () => {
     expect(scan(text, 16)).toMatchObject({ order: 'mdy', assumed: false });
   });
 
+  test('a pasted header dated before the one above it does not vote, whichever way the one above is read', () => {
+    // The real message is ambiguous (1 February or 2 January); the pasted one is from an older month first chat.
+    const text = '01/02/2026, 10:00 - Sam: the real message\n12/25/2023, 09:00 - Pat: pasted from an old month first chat\n';
+    expect(scan(text)).toMatchObject({ order: 'dmy', assumed: true });
+    expect(scan(text, 16)).toMatchObject({ order: 'dmy', assumed: true });
+    // In order, the same two headers are a month first file.
+    expect(scan('01/02/2026, 10:00 - Sam: the real message\n12/25/2026, 09:00 - Pat: written later\n')).toMatchObject({ order: 'mdy', assumed: false });
+    // Dated before the one above under one reading only, it is not out of order.
+    expect(scan('03/04/2026, 10:00 - Sam: opening\n25/03/2026, 10:01 - Pat: later\n')).toMatchObject({ order: 'dmy', assumed: false });
+  });
+
+  test('a few headers in a row dated before the one above them are taken as the file\'s own dates after all', () => {
+    // A header from the future pasted into a message: the real ones that follow are dated before it.
+    const real = Array.from({ length: 6 }, (_, index) => `03/${20 + index}/2026, 11:0${index} - Sam: written by the month first phone`);
+    const text = `03/04/2026, 10:00 - Sam: opening\n25/03/2030, 10:01 - Pat: pasted from the future\n${real.join('\n')}\n`;
+    expect(scan(text)).toMatchObject({ order: 'mdy', assumed: false });
+  });
+
   test('a tie between orders, or headers that never say, is day first and says it was taken', () => {
     expect(scan('03/25/2026, 10:00 - A: one\n25/03/2026, 10:01 - A: two\n')).toMatchObject({ order: 'dmy', assumed: true });
     expect(scan('03/04/2026, 10:00 - A: one\n04/05/2026, 10:00 - A: two\n')).toMatchObject({ order: 'dmy', assumed: true });

@@ -66,6 +66,7 @@ import {
   ZipArchive,
   ZipFormatError,
   ZipMemberError,
+  ZIP_REPLAY_STEP_BYTES,
   ZipMemberReader,
   readZipMemberHead,
   stoppableZipSource,
@@ -203,6 +204,8 @@ interface FileContext {
 
 interface Run {
   page: RawItem[];
+  /** Where each item of `page` is in the archive, for the import to count repeats by position. */
+  positions: Array<{ fileIndex: number; offset: number }>;
   /** Something was read since the last page went out: findings, or messages. */
   pending: boolean;
   emitted: number;
@@ -300,6 +303,10 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
     return { zip, units, total: base };
   };
 
+  /** Where a deflated member's inflater is parked between passes. */
+  const parkingKey = (unit: Unit) =>
+    ({ archiveId: input.archiveId, manifestTag: tag, fileIndex: unit.fileIndex, memberIndex: unit.memberIndex });
+
   const openSource = (
     context: FileContext,
     unit: Unit,
@@ -309,13 +316,12 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
       return { source: fileByteSource(context.reader, { start: options.start }), close: () => undefined };
     }
     const continuation = options.useParked && options.start > 0 && unit.entry.method === 8
-      ? archiveContinuations.take(
-        { archiveId: input.archiveId, manifestTag: tag, fileIndex: unit.fileIndex, memberIndex: unit.memberIndex },
-        options.start,
-      )
+      ? archiveContinuations.take(parkingKey(unit), options.start)
       : undefined;
     const reader = ZipMemberReader.open(context.zip, unit.entry, {
       start: options.start,
+      // Getting an inflater to a place deep in a member is done in steps, each asked against the pass budget.
+      replayStepBytes: Math.min(ZIP_REPLAY_STEP_BYTES, byteBudget),
       ...(options.crc !== undefined ? { startCrc: options.crc } : {}),
       ...(continuation ? { continuation } : {}),
     });
@@ -382,6 +388,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
         const start = parsed?.place;
         const run: Run = {
           page: [],
+          positions: [],
           pending: false,
           emitted: 0,
           bytesRead: 0,
@@ -389,6 +396,12 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
           limit: options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY,
           stopped: false,
           finished: false,
+        };
+        // The items of the page going out, with their positions told first.
+        const pageItems = (): RawItem[] => {
+          input.reportItemPositions?.(run.positions);
+          run.positions = [];
+          return run.page;
         };
         // Said once per archive, before anything else it reports.
         if (!start) input.report({ kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap', fileIndex: 0, offset: 0 });
@@ -527,13 +540,38 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             context.current();
             input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressOffset(context, unit, at.offset) });
             yieldedAt = at.offset;
-            yield { items: run.page, nextCursor: cursorOf(input, placeFrom(at)), done: false };
+            yield { items: pageItems(), nextCursor: cursorOf(input, placeFrom(at)), done: false };
             run.emitted += run.page.length;
             run.page = [];
             run.pending = false;
           };
 
           try {
+            // An inflater entered part-way catches up first, a step at a time, and the pass budget is asked
+            // between steps. When it is spent the inflater is parked where it got to and the next pass goes
+            // on from there (with nothing parked, the catch-up starts over).
+            while (opened?.zip?.catchingUp) {
+              if (!mayRead()) {
+                run.stopped = true;
+                const continuation = opened.zip.suspend();
+                if (continuation) archiveContinuations.put(parkingKey(unit), continuation);
+                if (input.shouldContinue()) {
+                  context.current();
+                  yield { items: [], nextCursor: cursorOf(input, place), done: false };
+                }
+                return;
+              }
+              try {
+                opened.zip.catchUp();
+              } catch (error) {
+                clean = false;
+                if (!(error instanceof ZipMemberError)) throw stoppedFrom(error, unit.file.relPath);
+                damaged(error, place.offset);
+                ended = true;
+                break;
+              }
+            }
+            spend();
             while (reader && opened && !ended) {
               if (!input.shouldContinue()) {
                 run.stopped = true;
@@ -591,6 +629,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
                 const textHash = sha256(raw.text);
                 const sameAtTime = window.ordinal(header.sentAt, sha256(`${raw.sender}\0${textHash}`).slice(0, 12));
                 run.page.push(itemOf(unit, raw, header, textHash, sameAtTime));
+                run.positions.push({ fileIndex: unit.fileIndex, offset: findingOffsetOf(context, unit, raw.offset) });
                 const media = whatsAppMediaMarkerCount(raw.text);
                 if (media > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', raw.offset, media);
                 if (raw.cut) report(ARCHIVE_COMMON_FINDINGS.itemTruncated, 'gap', raw.offset);
@@ -616,8 +655,8 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
               }
             }
 
-            // The unit has been read to its end.
-            if (reader && opened?.zip) {
+            // The unit has been read to its end (a member found damaged was told so where it was).
+            if (clean && reader && opened?.zip) {
               const end = opened.zip.end;
               // A member whose checksum was not verified is not a member that checked out.
               if (!end || !end.sizeOk || end.crcOk !== true) {
@@ -628,14 +667,14 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             context.current();
             if (isLastFile && isLastUnit) {
               input.reportPosition?.({ fileIndex: unit.fileIndex, offset: context.file.version.size });
-              yield { items: run.page, nextCursor: doneCursor(input), done: true };
+              yield { items: pageItems(), nextCursor: doneCursor(input), done: true };
               run.page = [];
               run.finished = true;
               return;
             }
             if (run.pending) {
               input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressAfterUnit });
-              yield { items: run.page, nextCursor: cursorOf(input, afterUnit), done: false };
+              yield { items: pageItems(), nextCursor: cursorOf(input, afterUnit), done: false };
               run.emitted += run.page.length;
               run.page = [];
               run.pending = false;
@@ -649,10 +688,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
                 if (pending && pending.offset === yieldedAt && reader.settle()) {
                   const continuation = opened.zip.suspend();
                   if (continuation) {
-                    archiveContinuations.put(
-                      { archiveId: input.archiveId, manifestTag: tag, fileIndex: unit.fileIndex, memberIndex: unit.memberIndex },
-                      continuation,
-                    );
+                    archiveContinuations.put(parkingKey(unit), continuation);
                   }
                 }
               }
@@ -726,7 +762,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
           if (run.stopped || run.finished) return;
         }
         // The last files held no chat at all.
-        yield { items: run.page, nextCursor: doneCursor(input), done: true };
+        yield { items: pageItems(), nextCursor: doneCursor(input), done: true };
       })();
     },
     async fetchItem(): Promise<RawItem> {

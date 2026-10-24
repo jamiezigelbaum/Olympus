@@ -42,6 +42,13 @@ export interface ArchiveProbeEntry {
    * them), each with its first bytes where they could be read.
    */
   members?: readonly ArchiveProbeEntry[];
+  /**
+   * A zip with no member a format names as a signature (`signatureNames`)
+   * and more members a format asks for (`probeNames`) than the probe read the
+   * first bytes of: how many it did not. Absent when it read them all, or
+   * when a signature member says what the zip is.
+   */
+  membersNotLookedAt?: number;
 }
 
 export interface ArchiveProbe {
@@ -58,6 +65,16 @@ export interface ArchiveProbe {
    * ARCHIVE_PROBE_MAX_NAMED of them. Zero when it looked at all.
    */
   notLookedAt?: number;
+  /**
+   * For a chosen folder: how many files nobody asked for by name the probe did
+   * not read the first bytes of (more than it reads, or past the first
+   * ARCHIVE_PROBE_MAX_CHILDREN entries), and zips among the files it read
+   * that it did not open. A format that detects from the first bytes alone
+   * can have its export among them, whatever the format: when nothing is
+   * detected, the refusal says the look was not complete. Zero or absent when
+   * it read them all.
+   */
+  othersNotLookedAt?: number;
 }
 
 export interface ArchiveFormatDefinition {
@@ -82,6 +99,14 @@ export interface ArchiveFormatDefinition {
    * bytes before any other file's. Absent: only the usual look.
    */
   probeNames?: readonly string[];
+  /**
+   * The few `probeNames` that say what the export is by themselves (`result.json`,
+   * `_chat.txt`), as against patterns that match any file of a kind (`*.txt`).
+   * The probe lists and reads these before the broad ones, so a hundred
+   * ordinary text files ahead of `_chat.txt` in a zip or a folder cannot hide
+   * it. They count as asked names without being listed in `probeNames` too.
+   */
+  signatureNames?: readonly string[];
   /**
    * Other forms of this format's export that cannot be read, recognised by the
    * same cheap probe, with what the person can do instead. Only consulted when
@@ -224,7 +249,9 @@ export const WHATSAPP_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   chooseHint: 'a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)',
   citationLabel: 'WhatsApp',
   // Every text file and every zip is looked at, however it is named: the evidence is inside (see above).
+  // The names WhatsApp gives its exports are looked at before the rest, so ordinary files ahead of them cannot hide them.
   probeNames: Object.freeze(['*.txt', '*.zip']),
+  signatureNames: Object.freeze(['_chat.txt', 'WhatsApp Chat with *.txt', 'WhatsApp Chat - *.txt', 'WhatsApp Chat*.zip']),
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return whatsAppIsExport(probe.chosen, false) ? [''] : undefined;
     const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
@@ -355,7 +382,15 @@ export function archiveFormatsOfFamily(
  * Every name pattern the formats ask the probe to look for, once each.
  */
 export function archiveProbeNames(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): readonly string[] {
-  return [...new Set(formats.flatMap((format) => format.probeNames ?? []))];
+  return [...new Set(formats.flatMap((format) => [...(format.probeNames ?? []), ...(format.signatureNames ?? [])]))];
+}
+
+/**
+ * Every signature name pattern the formats have, once each: the names the
+ * probe looks for before any other.
+ */
+export function archiveSignatureNames(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): readonly string[] {
+  return [...new Set(formats.flatMap((format) => format.signatureNames ?? []))];
 }
 
 /**
@@ -501,7 +536,7 @@ export const ARCHIVE_COMMON_FINDINGS = {
   fileDamaged: 'file_damaged',
   /** Skipped: items the listing produced that the archive's stores already held from an earlier file, so they were imported once. */
   itemRepeated: 'item_repeated',
-  /** Skipped: files in a chosen folder the first look did not reach, so any export among them was not imported. */
+  /** Skipped: files in a chosen folder or zip the first look did not reach, so any export among them was not imported. */
   filesNotLookedAt: 'files_not_looked_at',
   /** Skipped: files in a chosen folder that look like exports but were not taken, because their names do not say so. */
   filesUnconfirmed: 'files_unconfirmed',
@@ -525,6 +560,16 @@ export interface ArchiveConnectorInput {
    * page's cursor, never this.
    */
   reportPosition?(position: { fileIndex: number; offset: number }): void;
+  /**
+   * Where each item of the page about to go out is in the archive, in the
+   * order of the page's items and in the coordinates findings use (`fileIndex`
+   * and `offset`, strictly increasing over the archive's items). Told just
+   * before the page goes out. With it the import counts the items the stores
+   * already hold from another file once each, by position, however the same
+   * items are cut into pages when a listing is replayed after a restart. A
+   * connector that does not tell has such items counted by whole pages.
+   */
+  reportItemPositions?(positions: ReadonlyArray<{ fileIndex: number; offset: number }>): void;
   /** Bytes read per listing before it pauses with a resume point. */
   maxBytesPerListing?: number;
   pageSize?: number;

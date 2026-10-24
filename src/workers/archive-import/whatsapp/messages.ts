@@ -30,6 +30,7 @@ import {
   normalizeWhatsAppLine,
   splitWhatsAppSender,
   startsWithWhatsAppHeader,
+  whatsAppHeaderSpan,
   whatsAppOrderEvidence,
   type WhatsAppDateOrder,
   type WhatsAppHeaderMatch,
@@ -45,6 +46,8 @@ export const WHATSAPP_MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 export const WHATSAPP_ORDER_SCAN_MAX_BYTES = 16 * 1024 * 1024;
 /** Headers that say which part of a date is the day: once this many are counted the order is settled. */
 export const WHATSAPP_ORDER_VOTES_ENOUGH = 25;
+/** Headers dated before the one above them in a row that the date scan leaves out before it takes the new dates as the file's. */
+export const WHATSAPP_ORDER_BACKWARDS_LEFT_OUT = 2;
 
 const utf8 = new TextDecoder('utf-8');
 
@@ -501,7 +504,10 @@ export interface WhatsAppDateOrderScan {
  * day, a second part above 12 is a day, a first part of four digits is a year.
  * Each header that says counts one vote, and the order with the most votes
  * wins, so one header pasted into a message by hand cannot decide a file.
- * Headers written in another style than the first header's do not vote. The
+ * Headers written in another style than the first header's do not vote, and
+ * neither do those dated before the header above them whichever way that one
+ * is read (a pasted old conversation): the file's headers come in time order.
+ * A few of those in a row are taken as the file's own dates after all. The
  * scan stops after WHATSAPP_ORDER_VOTES_ENOUGH votes or WHATSAPP_ORDER_SCAN_MAX_BYTES.
  *
  * A file whose headers never say (and could be read both ways), or whose
@@ -518,6 +524,9 @@ export function scanWhatsAppDateOrder(
   let total = 0;
   let style: string | undefined;
   let ambiguous = false;
+  // The times the last header that counted can be, and how many headers in a row came before it in time.
+  let above: { earliest: number; latest: number } | undefined;
+  let backwards = 0;
   for (;;) {
     // Lines that are not headers are dropped inside `next`, so the bound is held at its reads.
     const step = lines.next({ headersOnly: true, mayRead: () => source.position < maxBytes });
@@ -527,6 +536,13 @@ export function scanWhatsAppDateOrder(
     if (!header) continue;
     style ??= header.style;
     if (header.style !== style) continue;
+    const span = whatsAppHeaderSpan(header);
+    if (span && above && span.latest < above.earliest && backwards < WHATSAPP_ORDER_BACKWARDS_LEFT_OUT) {
+      backwards += 1;
+      continue;
+    }
+    backwards = 0;
+    if (span) above = span;
     const evidence = whatsAppOrderEvidence(header);
     if (evidence) {
       votes[evidence] += 1;

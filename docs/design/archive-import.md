@@ -182,6 +182,19 @@ Both are in scope. They come after mail because they reuse the same spine
   itself to import it"). Detection asks for every `.txt` and `.zip` in the
   folder, past the usual 256-entry bound, up to 1,024 more; the
   files past that are counted (`files_not_looked_at`) instead of vanishing.
+  The names that say what an export is by themselves (`_chat.txt`, `WhatsApp
+  Chat with ….txt`, `WhatsApp Chat - ….txt`, `WhatsApp Chat….zip`) are kept
+  apart from that broad pattern (`signatureNames` in the format definition)
+  and are listed and read first, in a folder and inside a zip, so ordinary
+  text files ahead of the chat cannot hide it. A zip with no signature member
+  whose text files the first look (32 members) did not all read says how many
+  it did not (`files_not_looked_at`, "in what you chose"); when nothing is
+  detected, the refusal says the look was not complete. That refusal is
+  generic, for every format: files nobody asked for by name that the folder
+  look did not read (`othersNotLookedAt` on the probe) count toward it, so a
+  format that detects from the first bytes alone is never refused silently.
+  Residual: when another format is detected, such an unread file is not
+  reported on the record (a media folder would otherwise show thousands).
 - **A pass is bounded in bytes, not only in items.** A pass reads at most
   `maxBytesPerListing` (256 MiB) of the archive: the date-order scan, every
   line read or dropped inside a long message, and the re-inflating of a
@@ -189,20 +202,36 @@ Both are in scope. They come after mail because they reuse the same spine
   ends with a resume point, and the next pass goes on from it. A resume point
   can sit inside a message that was cut (dropping lines until the next
   header), so a message of any length costs bounded work per pass.
+- **Catching up in a deflated member is stepped, not one call.** A deflated
+  member cannot be entered in the middle, so a cold resume re-inflates from
+  its start. The shared zip reader does that in steps of at most 16 MiB of
+  output (one inflate push, 16 KiB in, can add up to about 17 MiB for highly
+  compressible data): `next()` returns an empty chunk and `catchingUp` stays
+  true while it is still catching up. The connector calls `catchUp()` in a
+  loop against the pass budget; when the budget is spent it parks the
+  inflater in the continuation cache and ends the pass with the resume point
+  it started from (an empty page, not done). The next pass takes the
+  inflater from the cache and goes on; if the cache was lost (a restart), the
+  catch-up starts over, which the budget counts again. Any other reader of
+  zip members wires it the same way (the header comment of `zip-reader.ts`
+  gives the recipe); mbox and Telegram read no zip members.
 - **Stored zip members keep their checksum.** The CRC-32 of everything before
   each message header travels in the resume point, so a stored member resumed
   at a header that straddled a read still verifies to its end. A member that
   ends with a checksum that did not match, or that was not read to its end, is
   reported as `file_damaged`, because what was read of it may be wrong. A deflated member resumes from a parked inflater when the resume
   point is in the last chunk read, and otherwise by re-inflating from the
-  start of the member, which the byte budget counts.
+  start of the member in budgeted steps (above).
 - **Dates.** The export writes wall time with no zone and in the phone's
   locale order. The order is decided per file from its own headers: the order
   most headers of the file's own style say wins (up to 25 votes, within the
   first 16 MiB) (a day above
   12 settles it for that header), so one header pasted into a message cannot
-  decide a file. When nothing says, or the votes tie, it is read day first and
-  reported as an `assumption`. The time is read in this computer's zone and
+  decide a file. A header dated before the one above it is left out of the
+  vote when it cannot be read as on or after it (up to two in a row; more are
+  taken as the file's own dates), so a pasted older date after an ambiguous
+  `01/02/2026` cannot turn the file month first. When nothing says, or the
+  votes tie, it is read day first and reported as an `assumption`. The time is read in this computer's zone and
   reported once per archive. Dates with a weekday or month name, non-Latin
   digits and non-UTF-8 files are not read.
 - **Pasted headers.** A line inside a message body that looks like a header
@@ -219,7 +248,12 @@ Both are in scope. They come after mail because they reuse the same spine
   copy is counted (`item_repeated`, "in more than one export file"). Which
   file a message came from is metadata (`sourceFile`, `sourceMember`). More
   than 24 different messages in one written time are told apart by their
-  place in the file instead of a number.
+  place in the file instead of a number, and so is a message dated before the
+  one above it (a pasted older header between two real, identical messages
+  cannot give both the same id); such a message is not shared across
+  overlapping copies. `item_repeated` is counted by each message's position in
+  the files beyond the position already counted, not by the page it is in, so
+  a restart that cuts its pages differently counts each repeat once.
 - **Left out, and counted.** Notices from WhatsApp itself (`system_message`),
   messages with no text (`message_empty`) and the status updates chat
   (`status_updates`) are skipped and counted. Media stays in the message text

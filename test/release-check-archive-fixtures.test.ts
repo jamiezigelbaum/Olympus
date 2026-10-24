@@ -11,14 +11,16 @@ import {
   ArchiveImportStoppedError,
   MBOX_ARCHIVE_FORMAT,
   TELEGRAM_JSON_ARCHIVE_FORMAT,
+  WHATSAPP_ARCHIVE_FORMAT,
   detectArchiveFormat,
   getArchiveFormat,
   type ArchiveImportFinding,
 } from '../src/core/archive-formats.ts';
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
-import { archiveFileEntries, archiveManifestSha256, buildArchiveManifest } from '../src/workers/archive-import/manifest.ts';
+import { archiveFileEntries, archiveManifestSha256, buildArchiveManifest, probeArchivePath } from '../src/workers/archive-import/manifest.ts';
 import { createMboxArchiveConnector } from '../src/workers/archive-import/mbox/connector.ts';
 import { createTelegramArchiveConnector } from '../src/workers/archive-import/telegram/connector.ts';
+import { createWhatsAppArchiveConnector } from '../src/workers/archive-import/whatsapp/connector.ts';
 import {
   ARCHIVE_FORMATS,
   EXTRA_FORMATS,
@@ -49,12 +51,14 @@ function readFixture(root: string, fixture: LegFixture, options: { pageSize?: nu
   cleanups.push(() => scope.close());
   const files = buildArchiveManifest(scope, [fixture.fileName]);
   const findings: ArchiveImportFinding[] = [];
-  const telegram = fixture.format === TELEGRAM_JSON_ARCHIVE_FORMAT.id;
-  const connector = (telegram ? createTelegramArchiveConnector : createMboxArchiveConnector)({
+  const [create, format] = fixture.format === TELEGRAM_JSON_ARCHIVE_FORMAT.id ? [createTelegramArchiveConnector, TELEGRAM_JSON_ARCHIVE_FORMAT] as const
+    : fixture.format === WHATSAPP_ARCHIVE_FORMAT.id ? [createWhatsAppArchiveConnector, WHATSAPP_ARCHIVE_FORMAT] as const
+    : [createMboxArchiveConnector, MBOX_ARCHIVE_FORMAT] as const;
+  const connector = create({
     archiveId: 'rc-fixture',
     connectorId: 'archive.rc-fixture',
     accountScope: 'rc-fixture',
-    format: telegram ? TELEGRAM_JSON_ARCHIVE_FORMAT : MBOX_ARCHIVE_FORMAT,
+    format,
     root: scope,
     files: archiveFileEntries(files),
     manifestSha256: archiveManifestSha256(files),
@@ -95,7 +99,7 @@ describe('fixture tokens', () => {
   });
 
   test('a format besides the first has its own token and file under the same role, and the formats the leg adds are exactly the registry\'s other ones', () => {
-    expect(EXTRA_FORMATS).toEqual(['telegram_json']);
+    expect(EXTRA_FORMATS).toEqual(['telegram_json', 'whatsapp_chat']);
     const mail = legFixture('agent', 'seed-1');
     const chat = legFixture('agent', 'seed-1', 'telegram_json');
     expect(chat.token).not.toBe(mail.token);
@@ -103,6 +107,9 @@ describe('fixture tokens', () => {
     expect(chat.fileName).not.toBe(mail.fileName);
     expect(chat.relPath).toBe(`${FIXTURE_FOLDER}/rc-agent-telegram_json.json`);
     expect(chat.token).toMatch(/^rcarch[0-9a-f]{14}$/);
+    const whatsapp = legFixture('agent', 'seed-1', 'whatsapp_chat');
+    expect(whatsapp.fileName).toBe('rc-agent-whatsapp_chat.zip');
+    expect(new Set([mail.token, chat.token, whatsapp.token]).size).toBe(3);
   });
 });
 
@@ -135,6 +142,21 @@ describe('the fixtures, read by the product', () => {
     const detected = detectArchiveFormat(probe);
     expect(detected.kind).toBe('match');
     if (detected.kind === 'match') expect(detected.format.id).toBe('telegram_json');
+  });
+
+  test('the WhatsApp archive is a zip the product\'s own probe and detector take for a WhatsApp chat export, as the agent chooses it by path', () => {
+    const root = home();
+    const fixture = legFixture('agent', 'seed-detect', 'whatsapp_chat');
+    expect(fixture.fileName).toBe('rc-agent-whatsapp_chat.zip');
+    writeFixture(root, fixture);
+    const scope = ScopeRoot.open(join(root, FIXTURE_FOLDER));
+    cleanups.push(() => scope.close());
+    const detected = detectArchiveFormat(probeArchivePath(scope, fixture.fileName));
+    expect(detected.kind).toBe('match');
+    if (detected.kind === 'match') {
+      expect(detected.format.id).toBe('whatsapp_chat');
+      expect(detected.format.label).toBe(fixture.expect.label);
+    }
   });
 
   test('the small archive reads as its expectation says: items, days, one unread attachment, one message left out', async () => {
@@ -192,6 +214,41 @@ describe('the fixtures, read by the product', () => {
   test('the Telegram word is in message bodies only, never in the chat\'s name, a sender or a title', async () => {
     const root = home();
     const fixture = legFixture('agent', 'seed-telegram-token', 'telegram_json');
+    writeFixture(root, fixture);
+    const items = await readAll(readFixture(root, fixture).connector);
+    const withToken = items.filter((item) => item.content.kind === 'text' && item.content.text.includes(fixture.token));
+    expect(withToken.length).toBeGreaterThanOrEqual(2);
+    for (const item of items) {
+      expect(String(item.metadata.title)).not.toContain(fixture.token);
+      expect(String(item.metadata.sender)).not.toContain(fixture.token);
+    }
+    expect(fixture.fileName).not.toContain(fixture.token);
+  });
+
+  test('the WhatsApp archive reads as its expectation says: messages, days, one picture not imported, one assumed zone, one notice left out', async () => {
+    const root = home();
+    const fixture = legFixture('agent', 'seed-whatsapp', 'whatsapp_chat');
+    writeFixture(root, fixture);
+    const { connector, findings } = readFixture(root, fixture);
+    const items = await readAll(connector);
+    expect(items).toHaveLength(fixture.expect.messages);
+    expect(fixture.expect.messages).toBe(5);
+    const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
+    expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
+    expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
+    expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
+    expect(fixture.expect.gaps).toEqual([{ kind: 'media_not_imported', count: 1 }, { kind: 'assumption', count: 1 }]);
+    expect(fixture.expect.leftOut).toEqual([{ kind: 'system_message', count: 1 }]);
+    // The picture is named in its message and not imported; the message is still an item. The notice is the earliest line, and is not counted in the days.
+    expect(items.filter((item) => item.content.kind === 'text' && item.content.text.includes('<attached:'))).toHaveLength(1);
+    expect(days).not.toContain('2023-12-30');
+    // One chat, from the one text file.
+    expect(new Set(items.map((item) => item.identity.providerThreadId)).size).toBe(1);
+  });
+
+  test('the WhatsApp word is in message bodies only, never in the zip\'s name, the chat\'s title or a sender', async () => {
+    const root = home();
+    const fixture = legFixture('agent', 'seed-whatsapp-token', 'whatsapp_chat');
     writeFixture(root, fixture);
     const items = await readAll(readFixture(root, fixture).connector);
     const withToken = items.filter((item) => item.content.kind === 'text' && item.content.text.includes(fixture.token));

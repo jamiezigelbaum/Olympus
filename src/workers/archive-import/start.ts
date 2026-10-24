@@ -20,6 +20,7 @@ import { posix } from 'node:path';
 import {
   ARCHIVE_COMMON_FINDINGS,
   archiveProbeNames,
+  archiveSignatureNames,
   detectArchiveFormat,
   type ArchiveFormatDefinition,
 } from '../../core/archive-formats.ts';
@@ -35,6 +36,9 @@ import {
   verifyArchiveManifest,
 } from './manifest.ts';
 import type { ArchiveImportRecord, ArchiveImportStateStore, NewArchiveImportRecord } from './state.ts';
+
+/** Said beside a refusal when the first look did not reach every file it was asked to. */
+const NOT_LOOKED_AT_ADVICE = 'Some files in what you chose were not looked at, so the export may be among them; choose the export file itself.';
 
 export type ArchiveImportStart =
   | { kind: 'started'; archive: ArchiveImportRecord }
@@ -95,10 +99,18 @@ export function prepareArchiveImport(input: {
   }
   let handedOver = false;
   try {
-    const probe = probeArchivePath(root, chosenRelPath, { probeNames: archiveProbeNames(input.formats) });
+    const probe = probeArchivePath(root, chosenRelPath, {
+      probeNames: archiveProbeNames(input.formats),
+      signatureNames: archiveSignatureNames(input.formats),
+    });
     const detection = detectArchiveFormat(probe, input.formats);
+    // Files the first look did not reach, in the folder or in a zip: counted, never silent.
+    const notLookedAt = (probe.notLookedAt ?? 0)
+      + [probe.chosen, ...probe.children].reduce((sum, entry) => sum + (entry.membersNotLookedAt ?? 0), 0);
     if (detection.kind === 'none') {
-      return { kind: 'unsupported', supported: detection.supported, ...(detection.advice ? { advice: detection.advice } : {}) };
+      // Nothing was detected: whatever the look did not reach, of any format, may be the export.
+      const advice = [detection.advice, notLookedAt + (probe.othersNotLookedAt ?? 0) > 0 ? NOT_LOOKED_AT_ADVICE : undefined].filter(Boolean).join(' ');
+      return { kind: 'unsupported', supported: detection.supported, ...(advice ? { advice } : {}) };
     }
     if (detection.kind === 'ambiguous') return { kind: 'ambiguous', formats: detection.formats };
     const relPaths = detection.files.map((file) => (file === '' ? chosenRelPath : joinRelative(chosenRelPath, file)));
@@ -106,7 +118,7 @@ export function prepareArchiveImport(input: {
     // without saying so: neither is silent, both are counted on the record.
     const unconfirmed = detection.format.unconfirmed?.(probe) ?? 0;
     const skipped: Record<string, number> = {
-      ...(probe.notLookedAt ? { [ARCHIVE_COMMON_FINDINGS.filesNotLookedAt]: probe.notLookedAt } : {}),
+      ...(notLookedAt > 0 ? { [ARCHIVE_COMMON_FINDINGS.filesNotLookedAt]: notLookedAt } : {}),
       ...(unconfirmed > 0 ? { [ARCHIVE_COMMON_FINDINGS.filesUnconfirmed]: unconfirmed } : {}),
     };
     const files = buildArchiveManifest(root, relPaths);

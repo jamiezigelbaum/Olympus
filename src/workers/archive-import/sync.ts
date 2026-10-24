@@ -34,6 +34,9 @@ import {
   type TieredLaneReceiptCounts,
 } from '../connector-store/tiered-store-set.ts';
 import type { ArchiveTierLane } from './lane.ts';
+
+/** Where an item is in the archive: the coordinates findings use. */
+type ItemPosition = { fileIndex: number; offset: number };
 import {
   archiveFileDigestSteps,
   archiveFileEntries,
@@ -215,12 +218,12 @@ async function digestArchiveFiles(
  * after its whole listing was read, so the stores cannot say what this pass has
  * listed so far.
  */
-function countRepeats(items: readonly RawItem[], holds: (identity: RawItem['identity']) => boolean, seen: Set<string>): number {
-  let repeated = 0;
-  for (const item of items) {
-    if (seen.has(item.identity.localItemId) || holds(item.identity)) repeated += 1;
+function repeatedIndexes(items: readonly RawItem[], holds: (identity: RawItem['identity']) => boolean, seen: Set<string>): number[] {
+  const repeated: number[] = [];
+  items.forEach((item, index) => {
+    if (seen.has(item.identity.localItemId) || holds(item.identity)) repeated.push(index);
     seen.add(item.identity.localItemId);
-  }
+  });
   return repeated;
 }
 
@@ -234,7 +237,12 @@ function observeListing(
   pending: ArchiveImportFinding[],
   flush: () => void,
   complete: () => Promise<boolean>,
-  repeats?: { holds(identity: RawItem['identity']): boolean; add(count: number): void },
+  repeats?: {
+    holds(identity: RawItem['identity']): boolean;
+    /** The positions the connector told for the page just listed, once. */
+    positions(): readonly ItemPosition[] | undefined;
+    add(count: number, at?: { repeatedAt: ItemPosition[]; through: ItemPosition | undefined }): void;
+  },
 ): { connector: SourceConnector; completed(): boolean; dates(): { earliest?: string; latest?: string } } {
   let completed = false;
   const seenThisPass = new Set<string>();
@@ -253,7 +261,16 @@ function observeListing(
         }
         // The same message in two files imports once, and is counted here: it is a repeat of an item
         // an earlier pass stored, or of one this pass listed before this page.
-        if (repeats) repeats.add(countRepeats(page.items, repeats.holds, seenThisPass));
+        if (repeats) {
+          const repeated = repeatedIndexes(page.items, repeats.holds, seenThisPass);
+          const where = repeats.positions();
+          // With each item's position, a repeat is counted by where it is; without, by the page it is in.
+          if (where && where.length === page.items.length) {
+            repeats.add(repeated.length, { repeatedAt: repeated.map((index) => where[index]!), through: where[where.length - 1] });
+          } else {
+            repeats.add(repeated.length);
+          }
+        }
         flush();
         if (page.done) {
           if (!(await complete())) return;
@@ -320,14 +337,20 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
     const pending: ArchiveImportFinding[] = [];
     let position: { fileIndex: number; offset: number } | undefined;
     let repeated = 0;
+    let itemPositions: readonly ItemPosition[] | undefined;
+    let repeatedAt: ItemPosition[] = [];
+    let listedThrough: ItemPosition | undefined;
     const flush = (): void => {
       const moved = position;
       position = undefined;
       const repeats = repeated;
       repeated = 0;
-      if (pending.length === 0 && !moved) return;
+      const items = repeatedAt.length > 0 || listedThrough ? { repeatedAt, ...(listedThrough ? { through: listedThrough } : {}) } : undefined;
+      repeatedAt = [];
+      listedThrough = undefined;
+      if (pending.length === 0 && !moved && !items) return;
       const batch = pending.splice(0, pending.length);
-      options.state.recordFindings(record.archive_id, batch, moved, repeats);
+      options.state.recordFindings(record.archive_id, batch, moved, repeats, items);
     };
     const connectorId = archiveConnectorId(record.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
@@ -341,6 +364,7 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       manifestSha256: record.manifest_sha256,
       report: (finding) => { pending.push(finding); },
       reportPosition: (next) => { position = next; },
+      reportItemPositions: (positions) => { itemPositions = positions; },
       shouldContinue,
       ...(options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {}),
       ...(options.pageSize !== undefined ? { pageSize: options.pageSize } : {}),
@@ -352,7 +376,19 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       return digests !== undefined;
     }, {
       holds: (identity) => options.lane.set.anyLegHasRow(identity),
-      add: (count) => { repeated += count; },
+      positions: () => {
+        const told = itemPositions;
+        itemPositions = undefined;
+        return told;
+      },
+      add: (count, at) => {
+        if (at) {
+          repeatedAt.push(...at.repeatedAt);
+          if (at.through) listedThrough = at.through;
+        } else {
+          repeated += count;
+        }
+      },
     });
 
     // The Private store first: with no store yet, the set would route nothing.

@@ -17,7 +17,11 @@
  * - Identity window: two messages alike in chat, sender, text and time are
  *   told apart by their number among the alike, counted within one time (a
  *   minute on Android, a second on iOS). That count needs only the messages
- *   of the time being read, so it is a short list that travels in the cursor.
+ *   of the latest time read, so it is a short list that travels in the
+ *   cursor. A message dated before the latest time (a header pasted into a
+ *   message, a clock set back) is not numbered: it is told apart by where it
+ *   is, and the window is left as it was, so the alike messages on either
+ *   side of it are still numbered one after the other.
  */
 import {
   ArchiveImportStoppedError,
@@ -165,10 +169,11 @@ export function parseCursor(input: ArchiveConnectorInput, cursor: string | undef
 }
 
 /**
- * The messages of the time being read, so that alike ones are numbered 0, 1,
+ * The messages of the latest time read, so that alike ones are numbered 0, 1,
  * 2 in the order they come. The list is short because messages come in
  * time order: a time with more distinct messages than the window keeps
- * (`undefined` ordinal) is told apart by position, which is stable too.
+ * (`undefined` ordinal) is told apart by position, which is stable too, and
+ * so is a message dated before the latest time.
  */
 export class IdentityWindow {
   private sentAt = '';
@@ -183,9 +188,15 @@ export class IdentityWindow {
     return window;
   }
 
-  /** The number of this message among the alike at its time, or undefined when it cannot be kept. */
+  /**
+   * The number of this message among the alike at its time, or undefined when
+   * it is told apart by position instead: its time is before the latest one
+   * read (so it may not come in order), or the time is too crowded to keep.
+   * The times are the phone's own writing (`YYYY-MM-DDTHH:MM:SS`), which sorts as written.
+   */
   ordinal(sentAt: string, key: string): number | undefined {
-    if (sentAt !== this.sentAt) {
+    if (sentAt < this.sentAt) return undefined;
+    if (sentAt > this.sentAt) {
       this.sentAt = sentAt;
       this.keys.clear();
     }

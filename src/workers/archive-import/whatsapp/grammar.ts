@@ -139,6 +139,21 @@ function dateOf(year: number, month: number, day: number): { year: number; month
 }
 
 /**
+ * The earliest and latest wall time (as `YYYYMMDDHHMMSS` figures, to compare)
+ * a header can be, over the readings of its date that exist: a header with a
+ * four-digit year first has one, the others a day-first and a month-first
+ * one. Undefined for a header no reading makes a date.
+ */
+export function whatsAppHeaderSpan(match: WhatsAppHeaderMatch): { earliest: number; latest: number } | undefined {
+  const dates = match.yearFirst
+    ? [dateOf(match.p1, match.p2, match.p3)]
+    : [dateOf(match.lastYear, match.p2, match.p1), dateOf(match.lastYear, match.p1, match.p2)];
+  const clock = match.hour * 10_000 + match.minute * 100 + match.second;
+  const times = dates.flatMap((date) => (date ? [(date.year * 10_000 + date.month * 100 + date.day) * 1_000_000 + clock] : []));
+  return times.length > 0 ? { earliest: Math.min(...times), latest: Math.max(...times) } : undefined;
+}
+
+/**
  * What the date of one header says about the file's date order, when it is
  * certain: a first part above 12 can only be a day, a second part above 12
  * only a day, a first part of four digits a year. Undefined when both
