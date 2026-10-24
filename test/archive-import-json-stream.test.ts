@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
+import Tokenizer from '@streamparser/json/tokenizer.js';
 import { ArchiveImportStoppedError } from '../src/core/archive-formats.ts';
 import { ScopeSafeError } from '../src/core/scope-safe-fs.ts';
-import { fileByteSource } from '../src/workers/archive-import/byte-source.ts';
+import { fileByteSource, type ArchiveByteSource } from '../src/workers/archive-import/byte-source.ts';
 import { archiveStopFromReaderError } from '../src/workers/archive-import/stop-errors.ts';
 import {
+  JSON_STREAM_FEED_SLICE_BYTES,
   JSON_STREAM_MAX_DEPTH,
+  JSON_STREAM_MAX_QUEUED_EVENTS,
   JsonStreamError,
   JsonStreamReader,
   parseJsonResume,
@@ -40,6 +43,48 @@ function code(run: () => unknown): string {
     throw error;
   }
   return 'no error';
+}
+
+/** A source that hands out exactly the chunks given, so a test can end each one where it likes. */
+function chunkedSource(chunks: readonly Uint8Array[]): ArchiveByteSource {
+  let index = 0;
+  let position = 0;
+  return {
+    get position() {
+      return position;
+    },
+    next(): Uint8Array | undefined {
+      const chunk = chunks[index];
+      if (!chunk) return undefined;
+      index += 1;
+      position += chunk.length;
+      return chunk;
+    },
+    unread(): void {
+      throw new Error('not used');
+    },
+  };
+}
+
+/** Runs `run` while counting the bytes handed to the tokenizer. */
+function countingTokenizerBytes<T>(run: () => T): { result: T; bytes: number } {
+  const original = Tokenizer.prototype.write;
+  let bytes = 0;
+  Tokenizer.prototype.write = function patched(this: Tokenizer, input: Parameters<Tokenizer['write']>[0]): void {
+    bytes += (input as Uint8Array).length;
+    return original.call(this, input);
+  };
+  try {
+    return { result: run(), bytes };
+  } finally {
+    Tokenizer.prototype.write = original;
+  }
+}
+
+function drainReader(reader: JsonStreamReader): JsonStreamEvent[] {
+  const events: JsonStreamEvent[] = [];
+  for (let event = reader.next(); event; event = reader.next()) events.push(event);
+  return events;
 }
 
 const CHAT = JSON.stringify({
@@ -225,7 +270,7 @@ describe('json stream bounds', () => {
   });
 
   test('a text far larger than the bound never sits in memory (resident size)', () => {
-    const blobBytes = 96 * 1024 * 1024;
+    const blobBytes = 256 * 1024 * 1024;
     const head = encoder.encode('{"title":"kept","blob":"');
     const tail = encoder.encode('","list":[1,2]}');
     const piece = new Uint8Array(1024 * 1024).fill(0x61);
@@ -254,12 +299,13 @@ describe('json stream bounds', () => {
       },
       unread(): void { throw new Error('not used'); },
     };
-    const reader = new JsonStreamReader(source, { itemPaths: [['list']], maxItemBytes: 1024 * 1024 });
+    const reader = new JsonStreamReader(source, { itemPaths: [['list']], maxItemBytes: 64 * 1024 });
     const values: unknown[] = [];
     for (let event = reader.next(); event; event = reader.next()) values.push(event.value);
     expect(values).toEqual([1, 2]);
-    // Held whole it would add the size of the text (measured: about 114 MB for 96 MiB).
-    expect(peak - baseline).toBeLessThan(48 * 1024 * 1024);
+    // Held whole it would add the size of the text (measured: about 114 MB for 96 MiB), here 256 MiB; what the
+    // engine itself adds while it warms up (measured: up to about 55 MB) does not grow with the text.
+    expect(peak - baseline).toBeLessThan(100 * 1024 * 1024);
   });
 
   test('a backslash that falls on the end of a chunk does not end the skipped text early', () => {
@@ -277,6 +323,194 @@ describe('json stream bounds', () => {
     const deep = `${'['.repeat(JSON_STREAM_MAX_DEPTH + 5)}${']'.repeat(JSON_STREAM_MAX_DEPTH + 5)}`;
     expect(code(() => readAll(`{"list":[${deep}]}`, { itemPaths: [['list']] }))).toBe('too_deep');
     expect(code(() => readAll(deep, { itemPaths: [['nothing']] }))).toBe('too_deep');
+  });
+});
+
+describe('json stream bounds hold whatever the chunks', () => {
+  const max = 10_000;
+
+  // A text far over the bound whose every chunk ends inside an escape, a \u escape or a multi-byte character.
+  const endings: Array<{ name: string; body: Uint8Array; tail: Uint8Array; end: Uint8Array }> = [
+    { name: 'right after a backslash', body: encoder.encode('n' + 'a'.repeat(1000)), tail: encoder.encode('n'), end: encoder.encode('\\') },
+    { name: 'inside a \\u escape', body: encoder.encode('00e9' + 'a'.repeat(1000)), tail: encoder.encode('e9'), end: encoder.encode('\\u00') },
+    { name: 'inside a multi-byte character', body: Uint8Array.of(0xa9, ...encoder.encode('a'.repeat(1000))), tail: Uint8Array.of(0xa9), end: Uint8Array.of(0xc3) },
+  ];
+
+  for (const ending of endings) {
+    test(`a huge text whose every chunk ends ${ending.name} is not held, and the items after it still come out`, () => {
+      const chunks: Uint8Array[] = [];
+      const first = new Uint8Array([...encoder.encode('{"blob":"'), ...encoder.encode('a'.repeat(1000)), ...ending.end]);
+      chunks.push(first);
+      for (let index = 0; index < 2500; index += 1) chunks.push(new Uint8Array([...ending.body, ...ending.end]));
+      chunks.push(new Uint8Array([...ending.tail, ...encoder.encode('","list":[1,2]}')]));
+      const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      expect(total).toBeGreaterThan(2_000_000);
+      const { result, bytes } = countingTokenizerBytes(() => drainReader(new JsonStreamReader(chunkedSource(chunks), { itemPaths: [['list']], maxItemBytes: max })));
+      expect(result.map((event) => event.value)).toEqual([1, 2]);
+      // Only the document around the text and the first `max` bytes of the text ever reach the tokenizer.
+      expect(bytes).toBeLessThan(max + 1024);
+    });
+  }
+
+  test('where a text ends being allowed does not depend on the chunking', () => {
+    for (const [length, kind] of [[100, 'item'], [101, 'oversize']] as const) {
+      // A text of `length` bytes counting both quotes, as a list item of its own.
+      const doc = `{"list":["${'x'.repeat(length - 2)}",1]}`;
+      for (const chunk of [1, 2, 7, 100, 1 << 20]) {
+        const events = readAll(doc, { itemPaths: [['list']], maxItemBytes: 100 }, chunk);
+        expect(events.map((event) => event.kind)).toEqual([kind, 'item']);
+        expect(events[1]!.value).toBe(1);
+      }
+    }
+  });
+
+  test('a number or word longer than the bound is damage, whatever the chunking', () => {
+    for (const chunk of [1, 9, 1 << 20]) {
+      expect(code(() => readAll(`{"list":[${'1'.repeat(300)}]}`, { itemPaths: [['list']], maxItemBytes: 100 }, chunk))).toBe('invalid_json');
+      expect(readAll(`{"list":[${'1'.repeat(90)}]}`, { itemPaths: [['list']], maxItemBytes: 100 }, chunk).length).toBe(1);
+    }
+  });
+});
+
+describe('json stream feeds in bounded slices', () => {
+  const bound = JSON_STREAM_MAX_QUEUED_EVENTS + JSON_STREAM_FEED_SLICE_BYTES / 2;
+
+  test('a whole chunk of tiny items never has more than a fixed number of finished items waiting', () => {
+    const count = 300_000;
+    const doc = encoder.encode(`{"list":[${'1,'.repeat(count)}1]}`);
+    const reader = new JsonStreamReader(chunkedSource([doc]), { itemPaths: [['list']], maxItemBytes: 1000 });
+    const events = drainReader(reader);
+    expect(events.length).toBe(count + 1);
+    expect(events[count]!.path).toEqual(['list', count]);
+    expect(reader.peakQueuedEvents).toBeGreaterThan(0);
+    expect(reader.peakQueuedEvents).toBeLessThanOrEqual(bound);
+  });
+
+  test('one very large chunk is not turned into events before the first item is taken', () => {
+    const doc = new Uint8Array(16 * 1024 * 1024);
+    const head = encoder.encode('{"list":[');
+    doc.set(head);
+    for (let index = head.length; index < doc.length - 4; index += 2) {
+      doc[index] = 0x30;
+      doc[index + 1] = 0x2c;
+    }
+    const reader = new JsonStreamReader(chunkedSource([doc]), { itemPaths: [['list']], maxItemBytes: 1000 });
+    const started = performance.now();
+    expect(reader.next()?.value).toBe(0);
+    expect(reader.next()?.value).toBe(0);
+    expect(reader.peakQueuedEvents).toBeLessThanOrEqual(bound);
+    // Only the slices needed to finish a few items were read, not the 16 MiB.
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});
+
+describe('json stream keeps checking what it discards', () => {
+  const long = 'q'.repeat(400);
+
+  test('a syntax error after an oversize field of an item still stops the read', () => {
+    const bad = [
+      `{"list":[{"a":"${long}","b" 123}]}`,
+      `{"list":[{"a":"${long}","c":[1,2}]}`,
+      `{"list":[{"a":"${long}","c":{"x":1],"d":2}]}`,
+      `{"list":[{"a":"${long}" "b":1}]}`,
+      `{"list":[{"a":"${long}",,"b":1}]}`,
+      `{"list":[{"a":"${long}","b":}]}`,
+      `{"list":[{"a":[1,${long.length}${'0'.repeat(500)},,2]}]}`,
+      `{"list":[{"a":"${long}"}}]}`,
+    ];
+    for (const doc of bad) {
+      for (const chunk of [3, 50, 1 << 20]) {
+        expect(code(() => readAll(doc, { itemPaths: [['list']], maxItemBytes: 100 }, chunk))).toBe('invalid_json');
+      }
+    }
+    // Well-formed damage-free discarding still gives an oversize item and goes on.
+    const good = `{"list":[{"a":"${long}","c":[1,{"x":[]}],"d":{"e":null}},{"n":2}]}`;
+    expect(readAll(good, { itemPaths: [['list']], maxItemBytes: 100 }, 5).map((event) => event.kind)).toEqual(['oversize', 'item']);
+  });
+
+  test('a skipped text is checked for escapes, control characters and UTF-8', () => {
+    const wrap = (inside: Uint8Array): Uint8Array => new Uint8Array([
+      ...encoder.encode(`{"skip":"${'z'.repeat(300)}`), ...inside, ...encoder.encode('z","list":[1,2]}'),
+    ]);
+    const bytes = (...values: number[]): Uint8Array => Uint8Array.from(values);
+    const bad: Array<[string, Uint8Array]> = [
+      ['an escape that does not exist', encoder.encode('\\x')],
+      ['a short \\u escape', encoder.encode('\\u12g4')],
+      ['a raw line break', bytes(0x0a)],
+      ['a raw control character', bytes(0x01)],
+      ['a byte that can never be UTF-8', bytes(0xff)],
+      ['a continuation byte alone', bytes(0x80)],
+      ['an overlong character', bytes(0xc0, 0x80)],
+      ['a surrogate in UTF-8', bytes(0xed, 0xa0, 0x80)],
+      ['a character cut short by the closing quote', bytes(0xe2, 0x82)],
+      ['a character past the last code point', bytes(0xf4, 0x90, 0x80, 0x80)],
+    ];
+    for (const [name, inside] of bad) {
+      for (const chunk of [1, 4, 64, 1 << 20]) {
+        expect([name, code(() => readAll(wrap(inside), { itemPaths: [['list']], maxItemBytes: 100 }, chunk))]).toEqual([name, 'invalid_json']);
+      }
+    }
+    const good: Array<[string, Uint8Array]> = [
+      ['every escape', encoder.encode('\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9\\uD83D\\uDE00')],
+      ['two, three and four byte characters', encoder.encode('é€😀')],
+      ['the edges of the ranges', bytes(0xe0, 0xa0, 0x80, 0xed, 0x9f, 0xbf, 0xf0, 0x90, 0x80, 0x80, 0xf4, 0x8f, 0xbf, 0xbf)],
+    ];
+    for (const [name, inside] of good) {
+      for (const chunk of [1, 2, 3, 5, 64, 1 << 20]) {
+        const events = readAll(wrap(inside), { itemPaths: [['list']], maxItemBytes: 100 }, chunk);
+        expect([name, events.map((event) => event.value)]).toEqual([name, [1, 2]]);
+      }
+    }
+  });
+});
+
+describe('json stream errors come after the items before them', () => {
+  const options = { itemPaths: [[]] as Array<Array<string | number>>, maxItemBytes: 1000 };
+
+  function outcome(bytes: Uint8Array, chunkBytes: number): { values: unknown[]; error: string } {
+    const reader = new JsonStreamReader(fileByteSource(memoryRangeReader(bytes), { chunkBytes }), options);
+    const values: unknown[] = [];
+    for (;;) {
+      try {
+        const event = reader.next();
+        if (!event) return { values, error: 'none' };
+        values.push(event.value);
+      } catch (error) {
+        if (!(error instanceof JsonStreamError)) throw error;
+        // The same error again, every time.
+        expect(() => reader.next()).toThrow(error);
+        return { values, error: error.code };
+      }
+    }
+  }
+
+  test('items finished before a syntax error are returned, in one chunk or byte by byte', () => {
+    const cases: Array<[string, unknown[], string]> = [
+      ['[1,2,x]', [1, 2], 'invalid_json'],
+      ['[{"a":1},{"b":2},]', [{ a: 1 }, { b: 2 }], 'invalid_json'],
+      ['[1,2,3 4]', [1, 2], 'invalid_json'],
+      ['[1,"two",[3],tru]', [1, 'two', [3]], 'invalid_json'],
+      ['[1,2,{"a" 3}]', [1, 2], 'invalid_json'],
+      ['[1,2,"bad \\q escape"]', [1, 2], 'invalid_json'],
+      ['[1,2,3', [1, 2], 'truncated'],
+      ['[1,2,]]', [1, 2], 'invalid_json'],
+    ];
+    for (const [text, values, error] of cases) {
+      const bytes = encoder.encode(text);
+      for (const chunkBytes of [1, 2, 3, 1 << 20]) {
+        expect([text, chunkBytes, outcome(bytes, chunkBytes)]).toEqual([text, chunkBytes, { values, error }]);
+      }
+    }
+  });
+
+  test('the same holds across the slices of one large chunk', () => {
+    const items = Array.from({ length: 3000 }, (_, index) => index);
+    const text = `[${items.join(',')},x]`;
+    const bytes = encoder.encode(text);
+    expect(bytes.length).toBeGreaterThan(JSON_STREAM_FEED_SLICE_BYTES * 4);
+    for (const chunkBytes of [1, 997, 1 << 20]) {
+      expect(outcome(bytes, chunkBytes)).toEqual({ values: items, error: 'invalid_json' });
+    }
   });
 });
 
