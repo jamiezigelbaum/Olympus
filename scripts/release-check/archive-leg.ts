@@ -219,7 +219,7 @@ export function startViewOf(json: unknown, token: string): StartView {
     code: optText(record.code) ?? (record.ok === true ? 'started' : ''),
     ...(optText(record.request_id) ? { requestId: optText(record.request_id)! } : {}),
     hasOpenTarget: typeof open.url === 'string' && open.url.length > 0 && typeof open.page === 'string' && open.page.length > 0,
-    carriesContent: JSON.stringify(json ?? null).includes(token),
+    carriesContent: token.length > 0 && JSON.stringify(json ?? null).includes(token),
   };
 }
 
@@ -248,7 +248,7 @@ export function statusViewOf(json: unknown, token: string): StatusView {
     archives,
     requestStates: asList(record.requests).map((request) => optText(asRecord(request).state) ?? '').filter(Boolean),
     ...(optText(record.private_model) ? { privateModel: optText(record.private_model)! } : {}),
-    carriesContent: JSON.stringify(json ?? null).includes(token),
+    carriesContent: token.length > 0 && JSON.stringify(json ?? null).includes(token),
   };
 }
 

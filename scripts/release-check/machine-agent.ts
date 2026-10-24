@@ -40,6 +40,9 @@ import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seed
 import { explorePages } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
+import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
+import type { StoreView } from './archive-leg.ts';
+import { changedStage, drainStage, importStage, modelStage, removeAllStage, removeStage, type ArchiveBrowserSession, type ArchiveHost } from './archive-stages.ts';
 
 export { ISOLATED_BROWSER_FLAGS } from './browser.ts';
 import type { AskView, CardView, DestinationId, EgressView, EntryView, FixView, InboxObservation, PageView, ShotView } from './inbox.ts';
@@ -1408,6 +1411,215 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
 }
 
 // ---------------------------------------------------------------------------
+// Archive import (archive-leg.ts holds the checks, archive-stages.ts the stages; this is the machine they stand on)
+
+const ARCHIVE_DEBUG_PORT = 9337;
+const ARCHIVE_OUT = join(WORKDIR, 'archive');
+
+/** The JSON an `olympus` command printed: the whole of stdout, else the JSON object that starts at its first brace (stdout, then stderr). */
+function jsonFrom(...texts: string[]): unknown {
+  for (const text of texts) {
+    const trimmed = text.trim();
+    if (!trimmed) continue;
+    for (const candidate of [trimmed, trimmed.slice(Math.max(0, trimmed.indexOf('{')))]) {
+      try { return JSON.parse(candidate); } catch { /* not the whole of it: try the next form */ }
+    }
+  }
+  return undefined;
+}
+
+/** The engine's MCP token, made once for a machine that has none yet (the smoke leg makes it first on a full run). */
+function ensureMcpToken(): void {
+  if (existsSync(TOKEN_PATH)) return;
+  const created = olympus(['connections', 'add', 'release-check-archive']);
+  const parsed = jsonFrom(created.stdout) as { token?: string } | undefined;
+  if (created.code !== 0 || !parsed?.token) throw new Error('connections add did not give a token');
+  mkdirSync(WORKDIR, { recursive: true });
+  writeFileSync(TOKEN_PATH, parsed.token, { mode: 0o600 });
+  chmodSync(TOKEN_PATH, 0o600);
+}
+
+/** `olympus_search` on the engine's MCP endpoint, the way a connected agent asks. */
+async function archiveSearch(question: string): Promise<{ ok: boolean; isError: boolean; structured: unknown; error?: string }> {
+  ensureMcpToken();
+  const session = await mcpSession();
+  const called = await mcpRpc(session, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'olympus_search', arguments: { question, limit: 10 } } });
+  const message = parseRpc(called.text);
+  const result = message.result ?? {};
+  return {
+    ok: called.status === 200 && !message.error,
+    isError: result.isError === true || Boolean(message.error),
+    structured: result.structuredContent ?? null,
+    ...(message.error?.message ? { error: String(message.error.message).slice(0, 160) } : {}),
+  };
+}
+
+/**
+ * The three tier stores an archive family writes to (Private, Personal, Public), read-only: how many live items an archive has in each, and
+ * how many rows (items, chunks, search rows) carry its word. The word is only in message bodies, so a row that holds it holds content.
+ */
+function readArchiveStores(spec: { family: string; provider: string }, archiveId: string | undefined, token: string): StoreView[] {
+  const dir = platform().dataDir;
+  const files: Array<[StoreView['tier'], string]> = [
+    ['private', `archive-${spec.family}-connector-store.sqlite`],
+    ['personal', `archive-${spec.family}-internal-connector-store.sqlite`],
+    ['public', `archive-${spec.family}-public-connector-store.sqlite`],
+  ];
+  const like = `%${token}%`;
+  return files.map(([tier, file]): StoreView => {
+    const path = join(dir, file);
+    if (!existsSync(path)) return { tier, exists: false, live: 0, tokenRows: 0 };
+    try {
+      const db = new Database(path, { readonly: true });
+      try {
+        db.exec('PRAGMA busy_timeout = 10000;');
+        const count = (sql: string, ...params: string[]): number => Number((db.query(sql).get(...params) as { n: number } | null)?.n ?? 0);
+        const tokenRows = count('select count(*) as n from items where title like ? or search_text like ?', like, like)
+          + count('select count(*) as n from chunks where bounded_text like ?', like)
+          + count('select count(*) as n from connector_store_fts where bounded_text like ?', like);
+        // An archive's own items when its id is known; otherwise the items whose text carries its word.
+        const live = archiveId !== undefined
+          ? count('select count(*) as n from items where provider = ? and account_scope = ? and tombstoned = 0', spec.provider, archiveId)
+          : count('select count(distinct i.item_pk) as n from items i join chunks c on c.item_pk = i.item_pk where i.provider = ? and i.tombstoned = 0 and c.bounded_text like ?', spec.provider, like);
+        return { tier, exists: true, live, tokenRows };
+      } finally { db.close(); }
+    } catch (error) {
+      return { tier, exists: true, live: 0, tokenRows: 0, error: (error instanceof Error ? error.message : String(error)).slice(0, 160) };
+    }
+  });
+}
+
+/** One signed-in browser for the whole of `work`: a fresh profile, the owner's opening link and Unlock, the dashboard open. */
+async function withArchiveBrowser<T>(work: (session: ArchiveBrowserSession) => Promise<T>): Promise<T> {
+  const browser = findBrowser();
+  if (!browser) throw new Error('no headless browser on the machine');
+  mkdirSync(ARCHIVE_OUT, { recursive: true });
+  rmSync(join(WORKDIR, 'chrome-profile-archive'), { recursive: true, force: true });
+  let stopBridge: () => void = () => undefined;
+  let bridgeStarted = false;
+  const opened = await openBrowser(browser, 'chrome-profile-archive', ARCHIVE_DEBUG_PORT, true);
+  try {
+    const requests: string[] = [];
+    opened.cdp.on('Network.requestWillBeSent', (params) => { requests.push(String(params?.request?.url ?? '')); });
+    await opened.cdp.send('Network.enable');
+    const driver = new CdpJourneyDriver({
+      cdp: opened.cdp,
+      debugPort: ARCHIVE_DEBUG_PORT,
+      outDir: ARCHIVE_OUT,
+      mintLink: async (place) => {
+        const minted = olympus(['dashboard', '--no-open', '--target', place], { timeoutMs: 60_000 });
+        const url = /https?:\/\/[^\s"]+/.exec(minted.stdout + minted.stderr)?.[0];
+        if (!url) throw new Error(`olympus dashboard --no-open --target ${place} printed no opening link`);
+        return url;
+      },
+      onOrigin: (origin) => {
+        if (!bridgeStarted) { stopBridge = startBridge(Number(new URL(origin).port || 80)); bridgeStarted = true; }
+      },
+    });
+    await driver.start();
+    // Archive approval, browsing and removal are for an unlocked browser on this computer: the opening link, then Unlock.
+    await driver.open('private');
+    await driver.go('/dashboard');
+    return await work({ driver, pid: opened.pid, requests });
+  } finally {
+    opened.close();
+    stopBridge();
+  }
+}
+
+function archiveHost(): ArchiveHost {
+  const p = platform();
+  return {
+    os: p.os,
+    home: homedir(),
+    workDir: WORKDIR,
+    workerEnvPath: p.workerEnvPath,
+    say,
+    sleep,
+    now: () => Date.now(),
+    cli(args) {
+      const result = olympus(['archive', ...args], { timeoutMs: 120_000 });
+      return { code: result.code, json: jsonFrom(result.stdout, result.stderr), stderr: result.stderr };
+    },
+    withBrowser: withArchiveBrowser,
+    watchEgress: async (browserPid) => startEgressWatch(await relayAddresses(readConfig().relay), browserPid),
+    search: archiveSearch,
+    readStores: readArchiveStores,
+    async restartEngine(timeoutMs) {
+      const started = Date.now();
+      const restart = olympus(['engine', 'restart'], { timeoutMs: 180_000 });
+      if (restart.code !== 0) return { ok: false, ms: Date.now() - started, detail: `engine restart exited ${restart.code}: ${restart.stderr.slice(0, 200)}` };
+      try {
+        await waitForEngine(timeoutMs);
+        return { ok: true, ms: Date.now() - started };
+      } catch (error) {
+        return { ok: false, ms: Date.now() - started, detail: error instanceof Error ? error.message : String(error) };
+      }
+    },
+  };
+}
+
+const ROLES: readonly FixtureRole[] = ['agent', 'picker', 'held', 'bulk'];
+const roleOf = (value: string): FixtureRole => {
+  if (!(ROLES as readonly string[]).includes(value)) throw new Error(`--role must be one of ${ROLES.join(', ')} (got "${value}")`);
+  return value as FixtureRole;
+};
+
+async function archiveImportCommand(args: { role: string; format: string; via: string; seed: string; resetFolder: boolean; clean: boolean; drainS?: number; search: boolean; watchEgress: boolean; settleS?: number }): Promise<never> {
+  if (args.via !== 'request' && args.via !== 'picker') throw new Error(`--via must be request or picker (got "${args.via}")`);
+  const observation = await importStage(archiveHost(), {
+    role: roleOf(args.role), format: args.format, via: args.via, seed: args.seed,
+    resetFolder: args.resetFolder, clean: args.clean, search: args.search, watchEgress: args.watchEgress,
+    ...(args.drainS !== undefined ? { drainS: args.drainS } : {}),
+    ...(args.settleS !== undefined ? { settleS: args.settleS } : {}),
+  });
+  emit({ ...observation });
+}
+
+async function archiveDrainCommand(args: { role: string; format: string; seed: string; search: boolean; boundS?: number }): Promise<never> {
+  const observation = await drainStage(archiveHost(), {
+    role: roleOf(args.role), format: args.format, seed: args.seed, os: platform().os, search: args.search,
+    ...(args.boundS !== undefined ? { boundS: args.boundS } : {}),
+  });
+  emit({ ...observation });
+}
+
+async function archiveRemoveCommand(args: { targets: string; seed: string }): Promise<never> {
+  const targets = args.targets.split(',').map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+    const [role = '', format = STRESS_FORMAT] = entry.split(':');
+    const fx = legFixture(roleOf(role), args.seed, format);
+    return { role: fx.role, format: fx.format, fileName: fx.fileName, token: fx.token };
+  });
+  emit({ ...(await removeStage(archiveHost(), { targets })) });
+}
+
+async function archiveModelCommand(mode: string): Promise<never> {
+  if (mode !== 'off' && mode !== 'on') throw new Error(`--mode must be off or on (got "${mode}")`);
+  emit({ ...(await modelStage(archiveHost(), mode)) });
+}
+
+async function archiveChangedCommand(seed: string, sizes: number[]): Promise<never> {
+  emit({ ...(await changedStage(archiveHost(), { seed, sizes })) });
+}
+
+/** The last step of the leg, run whatever came before: every archive off the Archives line and the fixtures folder gone. */
+async function archiveCleanupCommand(): Promise<never> {
+  const host = archiveHost();
+  const removed = await removeAllStage(host);
+  rmSync(join(homedir(), FIXTURE_FOLDER), { recursive: true, force: true });
+  emit({ ...removed });
+}
+
+/** The leg's pictures and traces in one archive for the harness to fetch. */
+function archiveCollectCommand(): never {
+  mkdirSync(ARCHIVE_OUT, { recursive: true });
+  const archive = join(WORKDIR, 'archive.tgz');
+  const packed = spawnSync('tar', ['-czf', archive, '-C', ARCHIVE_OUT, '.'], { encoding: 'utf8' });
+  if (packed.status !== 0) emit({ ok: false, detail: `the archive files could not be packed: ${packed.stderr.slice(0, 160)}` });
+  emit({ ok: true, archive });
+}
+
+// ---------------------------------------------------------------------------
 // Logs
 
 function collectLogs(outDir: string): never {
@@ -1620,6 +1832,21 @@ async function main(): Promise<void> {
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
     case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'));
     case 'explore': return await exploreCommand(flag('--out'), flag('--inventory'), process.argv.includes('--pages-inventory') ? flag('--pages-inventory') : undefined);
+    case 'archive-import': return await archiveImportCommand({
+      role: flag('--role'), format: flag('--format', STRESS_FORMAT), via: flag('--via'), seed: flag('--seed'),
+      resetFolder: rest.includes('--reset-folder'), clean: rest.includes('--clean'), search: rest.includes('--search'), watchEgress: rest.includes('--watch-egress'),
+      ...(rest.includes('--drain-s') ? { drainS: Number(flag('--drain-s')) } : {}),
+      ...(rest.includes('--settle-s') ? { settleS: Number(flag('--settle-s')) } : {}),
+    });
+    case 'archive-drain': return await archiveDrainCommand({
+      role: flag('--role'), format: flag('--format', STRESS_FORMAT), seed: flag('--seed'), search: rest.includes('--search'),
+      ...(rest.includes('--bound-s') ? { boundS: Number(flag('--bound-s')) } : {}),
+    });
+    case 'archive-remove': return await archiveRemoveCommand({ targets: flag('--targets'), seed: flag('--seed') });
+    case 'archive-model': return await archiveModelCommand(flag('--mode'));
+    case 'archive-changed': return await archiveChangedCommand(flag('--seed'), flag('--sizes').split(',').map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0));
+    case 'archive-cleanup': return await archiveCleanupCommand();
+    case 'archive-collect': return archiveCollectCommand();
     case 'collect-logs': return collectLogs(flag('--out'));
     case 'engine-build': return await engineBuild();
     case 'snapshot-state': return await snapshotState();
@@ -1627,7 +1854,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
       process.exit(2);
   }
 }

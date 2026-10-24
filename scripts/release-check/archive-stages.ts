@@ -415,7 +415,7 @@ export function envWith(text: string, key: string, value: string | null): string
 
 interface EnvBackup { existed: boolean; text: string }
 
-export async function modelStage(host: ArchiveHost, mode: 'off' | 'on', token: string): Promise<ModelObservation> {
+export async function modelStage(host: ArchiveHost, mode: 'off' | 'on'): Promise<ModelObservation> {
   const backupPath = join(host.workDir, 'worker.env.before-archive.json');
   const obs: ModelObservation = { ok: false, mode };
   try {
@@ -450,7 +450,7 @@ export async function modelStage(host: ArchiveHost, mode: 'off' | 'on', token: s
       obs.readyMs = restarted.ms;
       if (!restarted.ok) { obs.detail = restarted.detail ?? 'the engine did not come back ready'; return obs; }
     }
-    const status = await statusNow(host, token, 60_000);
+    const status = await statusNow(host, '', 60_000);
     if (status?.privateModel) obs.privateModel = status.privateModel;
     obs.ok = true;
   } catch (error) {
