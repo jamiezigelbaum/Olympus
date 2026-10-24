@@ -1,10 +1,10 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Content-free source_answer latency ledger.
 //
 // Schema v1 remains additive for one release. Schema v2 records request-scoped
 // timing and failure outcomes, but both schemas use strict field-by-field
 // construction: no question, answer, document content, paths, or citations.
 
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import {
   chmod,
   mkdir,
@@ -13,7 +13,6 @@ import {
   stat,
   unlink,
 } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type {
   AnalystBackend,
@@ -342,8 +341,7 @@ export function resolveSourceAnswerLatencyLogPath(
     }
     return raw;
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'source-answer-latency.jsonl');
+  return olympusDataPath(env, 'source-answer-latency.jsonl');
 }
 
 async function makeExistingLedgerPrivate(path: string): Promise<void> {

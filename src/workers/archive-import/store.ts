@@ -13,7 +13,7 @@
  * Every store is created on first need, so an install that never imported
  * anything has none.
  */
-import { homedir } from 'node:os';
+import { olympusDataRoot } from '../../core/olympus-layout.ts';
 import { join } from 'node:path';
 import {
   ARCHIVE_FORMATS,
@@ -21,7 +21,6 @@ import {
   archiveImportFamilies,
   type ArchiveFormatDefinition,
 } from '../../core/archive-formats.ts';
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import {
   withSourceCorpora,
   type SourceCorpusConfig,
@@ -58,8 +57,7 @@ export function archiveTierSetId(family: SourceFamily): string {
 }
 
 function dataDir(env: Record<string, string | undefined>): string {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus');
+  return olympusDataRoot(env);
 }
 
 const FILE_LABEL: Readonly<Record<string, string>> = {

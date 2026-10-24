@@ -8,9 +8,8 @@
  * - `internal.local.files` and `public_safe.local.files`: created only when a
  *   file is first routed to them.
  */
-import { homedir } from 'node:os';
+import { olympusDataRoot } from '../../core/olympus-layout.ts';
 import { join } from 'node:path';
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import { defineSourceIndexCorpus, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import {
@@ -79,8 +78,7 @@ export function defineLocalFilesCorpus(): SourceIndexCorpusDefinition {
 }
 
 function dataDir(env: Record<string, string | undefined>): string {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus');
+  return olympusDataRoot(env);
 }
 
 export function defaultLocalFilesConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {

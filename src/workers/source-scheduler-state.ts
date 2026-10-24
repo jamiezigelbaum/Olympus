@@ -1,6 +1,5 @@
-import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../core/olympus-layout.ts';
 import { chmodSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import {
@@ -199,8 +198,7 @@ interface SchedulerUnparkRow {
 export function defaultSourceSchedulerStateDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'source-scheduler.sqlite');
+  return olympusDataPath(env, 'source-scheduler.sqlite');
 }
 
 /**

@@ -1,7 +1,6 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
+import { defaultXBookmarksApiUsageDbPath } from './live-control.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import {
@@ -286,8 +285,9 @@ export function defaultXBookmarksReconcileStateDbPath(
   if (configured) return configured;
   if (usageDbPath === ':memory:') return ':memory:';
   if (usageDbPath?.trim()) return `${usageDbPath.trim()}.reconcile`;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'x-bookmarks-reconcile-state.sqlite');
+  // Beside the API usage store, where the worker keeps it: a caller without a
+  // usage path (the CLI's recovery command) must open the same file.
+  return `${defaultXBookmarksApiUsageDbPath(env)}.reconcile`;
 }
 
 /**

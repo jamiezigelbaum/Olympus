@@ -1,4 +1,4 @@
-import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../core/olympus-layout.ts';
 import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
@@ -6,7 +6,6 @@ import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
 import { ARCHIVE_NEUTRAL_PROVIDER, isArchiveProvider } from '../core/archive-formats.ts';
 import { mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { currentStoreMigrations, runSqliteMigrations } from '../core/sqlite-migrations.ts';
@@ -1898,8 +1897,7 @@ const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
 };
 
 export function defaultSourceDashboardHistoryDbPath(env: Record<string, string | undefined> = process.env): string {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'source-dashboard.sqlite');
+  return olympusDataPath(env, 'source-dashboard.sqlite');
 }
 
 /**
