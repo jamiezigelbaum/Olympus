@@ -726,7 +726,16 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
     }
     // Anonymous model settings have their own controller. A refreshed document
     // rebinds it; inert body replacement would leave those controls disconnected.
-    if (query('[data-outside-help]')) { options.navigate(options.returnUrl); return; }
+    if (query('[data-outside-help]')) {
+      // The reload would close a Connect or Set up sheet the owner just opened (and with it the answer
+      // their press started): keep the open sheets for the page that loads next.
+      try {
+        const ids = queryAll<HTMLElement>('.sheet.on').map((sheet) => sheet.id).filter(Boolean);
+        if (ids.length > 0) root.ownerDocument.defaultView?.sessionStorage.setItem('olympus-open-sheets', JSON.stringify(ids));
+      } catch { /* no storage: the sheet closes, as before */ }
+      options.navigate(options.returnUrl);
+      return;
+    }
     const openSheets = queryAll<HTMLElement>('.sheet.on').map((sheet) => sheet.id);
     const open = new Set(queryAll<HTMLDetailsElement>('details[open]').map((node) =>
       node.dataset.pollKey || node.querySelector('summary')?.textContent?.trim() || ''));
@@ -1024,6 +1033,18 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   root.ownerDocument.addEventListener('visibilitychange', onVisibilityReturn);
   applyWriteCapability();
   applyOpenTarget();
+  // Sheets that were open when the page reloaded itself (see replaceBody) open again, once.
+  try {
+    const storage = view.sessionStorage;
+    const kept = JSON.parse(storage.getItem('olympus-open-sheets') || '[]') as unknown;
+    storage.removeItem('olympus-open-sheets');
+    if (Array.isArray(kept)) {
+      for (const id of kept) {
+        const sheet = typeof id === 'string' ? queryAll<HTMLElement>('.sheet').find((candidate) => candidate.id === id) : undefined;
+        if (sheet) setSheetOpen(sheet, true);
+      }
+    }
+  } catch { /* no storage */ }
   restartPoll();
 
   const dispose = (): void => {

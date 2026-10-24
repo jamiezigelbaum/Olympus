@@ -836,6 +836,39 @@ describe('dashboard controller DOM lifetime', () => {
   });
 });
 
+test('a sheet open when the Keys page reloads itself is open again on the page that loads next', async () => {
+  const store = new Map<string, string>();
+  const storage = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); }, removeItem: (key: string) => { store.delete(key); } };
+  Object.defineProperty(happyWindow, 'sessionStorage', { configurable: true, value: storage });
+  const page = '<section data-outside-help>card</section><button data-sheet-toggle="#connect-dropbox-files" aria-expanded="false">Connect</button><div class="sheet" id="connect-dropbox-files" aria-hidden="true">sheet</div>';
+  const first = document.createElement('div');
+  first.innerHTML = page;
+  document.body.append(first);
+  const navigations: string[] = [];
+  const controller = mountDashboardController({
+    root: first, transport: { control: noControl },
+    navigate: (href) => navigations.push(href), returnUrl: '/dashboard?keys', canWrite: true,
+    signal: new AbortController().signal, signature: 'old', pollIntervalMs: -1,
+    refresh: async () => ({ status: 200, title: 'Keys', body: page.replace('card', 'card changed'), controller: 'dashboard', can_write: true, signature: 'new', poll_interval_ms: -1 }),
+  });
+  first.querySelector<HTMLElement>('[data-sheet-toggle]')!.click();
+  expect(first.querySelector('#connect-dropbox-files')!.classList.contains('on')).toBe(true);
+  await controller.refresh(); controller.dispose();
+  expect(navigations).toEqual(['/dashboard?keys']);
+  // The reloaded page: a fresh document with the same markup, closed.
+  const second = document.createElement('div');
+  second.innerHTML = page;
+  document.body.append(second);
+  mountDashboardController({
+    root: second, transport: { control: noControl }, navigate() {}, returnUrl: '/dashboard?keys', canWrite: true,
+    signal: new AbortController().signal, signature: 'new', pollIntervalMs: -1, async refresh() { return undefined; },
+  });
+  const sheet = second.querySelector('#connect-dropbox-files')!;
+  expect(sheet.classList.contains('on')).toBe(true);
+  expect(second.querySelector('[data-sheet-toggle]')!.getAttribute('aria-expanded')).toBe('true');
+  expect(store.size).toBe(0);
+});
+
 test('changed model settings reload their document so anonymous controls stay bound', async () => {
   const root = document.createElement('div');
   root.innerHTML = '<section data-outside-help><button>Turn on</button></section>';

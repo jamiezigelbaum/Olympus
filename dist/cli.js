@@ -125088,6 +125088,10 @@ function mountDashboardController(options) {
       await refreshAgentList();
       return;
     }
+    if (params.action === "mint_agent_pairing_code" || params.action === "create_agent_key") {
+      say(form, params.action === "create_agent_key" ? "Olympus did not return a key. Try again; if it keeps happening, restart Olympus." : "Olympus did not return a pairing code. Try again; if it keeps happening, restart Olympus.");
+      return;
+    }
     const statusMessage = result.body.status_message;
     say(form, typeof statusMessage === "string" ? statusMessage : "Revoked.");
     form.querySelectorAll("button").forEach((button) => {
@@ -125152,6 +125156,11 @@ function mountDashboardController(options) {
       return;
     }
     if (query("[data-outside-help]")) {
+      try {
+        const ids = queryAll(".sheet.on").map((sheet) => sheet.id).filter(Boolean);
+        if (ids.length > 0)
+          root.ownerDocument.defaultView?.sessionStorage.setItem("olympus-open-sheets", JSON.stringify(ids));
+      } catch {}
       options.navigate(options.returnUrl);
       return;
     }
@@ -125240,6 +125249,16 @@ function mountDashboardController(options) {
     submittedFormValues.set(form, submittedValues);
     const tab = form.dataset.connectKind === "oauth" ? openAuthorizationTab() : null;
     submitControl(form, tab, submittedValues);
+  }
+  function onInvalid(event) {
+    const field = event.target instanceof HTMLInputElement ? event.target : null;
+    const form = field ? field.form : null;
+    if (!field || !form || !root.contains(form) || !form.hasAttribute("data-connect-kind"))
+      return;
+    const first = Array.from(form.elements).find((element) => element instanceof HTMLInputElement && !element.validity.valid);
+    if (first !== field)
+      return;
+    say(form, `${field.getAttribute("aria-label") || field.getAttribute("placeholder") || "A value"} is needed.`);
   }
   function onClick(event) {
     const target = event.target instanceof Element ? event.target : null;
@@ -125405,6 +125424,7 @@ function mountDashboardController(options) {
     focus.focus();
   }
   root.addEventListener("submit", onSubmit);
+  root.addEventListener("invalid", onInvalid, true);
   root.addEventListener("click", onClick);
   const refreshOnReturn = () => {
     if (disposed || options.signal.aborted || !awaitingAuthorizationReturn)
@@ -125422,6 +125442,18 @@ function mountDashboardController(options) {
   root.ownerDocument.addEventListener("visibilitychange", onVisibilityReturn);
   applyWriteCapability();
   applyOpenTarget();
+  try {
+    const storage3 = view2.sessionStorage;
+    const kept = JSON.parse(storage3.getItem("olympus-open-sheets") || "[]");
+    storage3.removeItem("olympus-open-sheets");
+    if (Array.isArray(kept)) {
+      for (const id of kept) {
+        const sheet = typeof id === "string" ? queryAll(".sheet").find((candidate) => candidate.id === id) : undefined;
+        if (sheet)
+          setSheetOpen(sheet, true);
+      }
+    }
+  } catch {}
   restartPoll();
   const dispose = () => {
     if (disposed)
@@ -125432,6 +125464,7 @@ function mountDashboardController(options) {
     view2.removeEventListener("focus", refreshOnReturn);
     root.ownerDocument.removeEventListener("visibilitychange", onVisibilityReturn);
     root.removeEventListener("submit", onSubmit);
+    root.removeEventListener("invalid", onInvalid, true);
     root.removeEventListener("click", onClick);
   };
   options.signal.addEventListener("abort", dispose, { once: true });
@@ -126923,6 +126956,22 @@ function outsideHelpClientScript(config2) {
     }
     setTimeout(poll, delay);
   }
+  // A save redraws the card with a reload, which would take the confirmation (and the section it sat in)
+  // with it. The confirmation is kept for the reload: the page shows it again, in the same section.
+  var savedKey = 'olympus-outside-help-saved';
+  function rememberSaved(form, text) {
+    try { sessionStorage.setItem(savedKey, JSON.stringify({ kind: form.getAttribute('data-outside-form'), text: text })); } catch (error) { /* no storage: the reload shows the new state only */ }
+  }
+  (function showSaved() {
+    var saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(savedKey) || 'null'); sessionStorage.removeItem(savedKey); } catch (error) { saved = null; }
+    if (!saved || typeof saved.kind !== 'string' || typeof saved.text !== 'string' || saved.text === '') return;
+    var target = root.querySelector('form[data-outside-form="' + saved.kind + '"]');
+    if (!target) return;
+    var section = target.closest('details');
+    if (section) section.open = true;
+    message(target, saved.text, false);
+  })();
   var paths = { unlock: config.paths.unlock, enable: config.paths.enable, level: config.paths.enable, route: config.paths.route, 'add-route': config.paths.addRoute, recover: config.paths.recover, abandon: config.paths.abandon, writer: config.paths.writer, 'writer-test': config.paths.writerTest, standard: config.paths.standard };
   // While the writer check runs (only after the owner's click), the page re-reads itself.
   if (root.querySelector('[data-outside-writer-check="running"]') && config.writerPollMs) {
@@ -126978,8 +127027,10 @@ function outsideHelpClientScript(config2) {
         if (typeof result.revision === 'number') root.setAttribute('data-revision', String(result.revision));
         if (result.restarting) {
           message(form, text + ' ' + config.copy.restarting, false);
+          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
           reloadWhenBack(4000, form);
         } else {
+          if (kind !== 'enable' && kind !== 'unlock') rememberSaved(form, text);
           reloadWhenBack(900, form);
         }
       } catch (error) {
@@ -132518,12 +132569,15 @@ function renderComputerHostPage(input) {
     `<style>${HOST_CSS}</style>`,
     "</head>",
     `<body data-olympus-host="computer" data-locked="${locked2 ? "true" : "false"}">`,
+    "<main>",
+    '<h1 class="sr-only">Olympus dashboard</h1>',
     ...installer ? [
       `<section class="update" data-update-notice${update ? "" : " hidden"}><p data-update-text>${update ? text2(DASHBOARD_UPDATE_COPY.notice(update.version)) : ""}</p>` + `<p><code id="update-command">${text2(installer.command)}</code> ` + `<button class="btn" type="button" data-update-copy>${text2(DASHBOARD_UPDATE_COPY.copy)}</button> ` + `<span class="status" data-update-copy-status aria-live="polite"></span></p></section>`
     ] : [],
     lockedGate(!locked2),
     ...input.modelReadiness ? [`<details class="gate"><summary>Built-in models on this computer</summary>${input.modelReadiness.map((model) => `<p><strong>${text2(model.name)} — ${text2(model.state)}</strong>: ${text2(model.detail)} (${(model.downloadBytes / 1e9).toFixed(2)} GB download)</p>`).join("")}</details>`] : [],
     `<iframe class="panel" id="olympus-panel" title="Olympus dashboard" sandbox="allow-scripts" srcdoc="${attribute2(input.panelHtml)}"></iframe>`,
+    "</main>",
     `<script>${program}</script>`,
     "</body>",
     "</html>",
@@ -132555,6 +132609,8 @@ body{overflow-wrap:anywhere;margin:0;display:flex;flex-direction:column;backgrou
 .update p{margin:0 0 0.5rem}
 .update code{overflow-wrap:anywhere;white-space:pre-wrap}
 .panel{flex:1 1 auto;width:100%;min-height:0;border:0;display:block;background:var(--bg)}
+main{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
 .gate[hidden]{display:none}
 .gate{flex:none;max-width:48rem;width:calc(100% - 2rem);margin:1rem auto 0;padding:0.75rem 1rem;background:var(--warn-bg);border-left:4px solid var(--warn);border-radius:8px}
 .gate p{margin:0}
@@ -132934,7 +132990,7 @@ function agentBody(agent, access, host) {
   if (needsOwnTunnel(agent, access))
     return tunnelNeeded(host) + instructionsStep(agent, false);
   if (access.state !== "on")
-    return remoteUnavailable(access) + instructionsStep(agent, false);
+    return remoteUnavailable(access, host) + instructionsStep(agent, false);
   if (agent.method === "oauth" && !ownTunnel(access) && agent.approveViaRelay) {
     return `<ol class="steps">` + `<li>${escapeHtml2(agent.add ?? "")}${copyBox(`agent-${agent.id}-url`, access.mcpUrl, "Copy address")}</li>` + `<li>${approvalStep(agent, host)}</li>` + `<li>${instructionsStep(agent, true)}</li>` + `</ol>`;
   }
@@ -132966,9 +133022,10 @@ function tunnelNeeded(host) {
   const text3 = (host.platform === "linux" ? "Olympus's relay connects ChatGPT, Claude, Grok, Grok Bot and Cursor, so this agent needs a tunnel you run yourself. " : "Olympus's relay connects only ChatGPT, Claude and Grok, so this agent needs a tunnel you run yourself. ") + "Advanced: set remote.publicBaseUrl in Olympus's settings to your tunnel's https address and turn on remote access; this agent's steps then appear here. " + "Claude Code and Codex on this computer need no tunnel.";
   return `<p class="why" data-agent-needs-tunnel>${escapeHtml2(text3)}</p>`;
 }
-function remoteUnavailable(access) {
+function remoteUnavailable(access, host) {
   const text3 = access.state === "not_connected" ? "Remote access is on but not connected, so this agent cannot reach Olympus right now. The Remote access line above says why." : access.state === "invalid" ? `Remote access is not set up correctly, so this agent cannot reach Olympus yet. ${access.detail}` : "This agent runs in the cloud, and remote access is off, so it cannot reach Olympus on this computer yet. Turn on remote access above first. Claude Code and Codex on this computer work now.";
-  return `<p class="why" data-remote-unavailable>${escapeHtml2(text3)}</p>`;
+  const fix = access.state === "off" && host.platform === "linux" ? `<form class="rowform" data-agent-kind="remote-on" data-remote-unavailable-fix>` + `<button class="btn primary" type="submit">Turn on remote access</button>` + `<span class="actmsg" data-action-message role="status"></span>` + `</form>` : "";
+  return `<p class="why" data-remote-unavailable>${escapeHtml2(text3)}</p>${fix}`;
 }
 function instructionsStep(agent, inStep) {
   const lead = inStep ? `Tell it when to ask Olympus. ${agent.instructionsWhere}` : `To have it ask Olympus on its own, ${agent.instructionsWhere.charAt(0).toLowerCase()}${agent.instructionsWhere.slice(1)}`;
