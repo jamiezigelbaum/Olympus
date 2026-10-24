@@ -59,9 +59,9 @@ describe('probe name patterns', () => {
     expect(archiveProbeNameMatches('anything', [])).toBe(false);
     expect(archiveProbeNameMatches('anything', undefined)).toBe(false);
     expect(archiveProbeNames([
-      { probeNames: ['a.json', 'b.json'] } as ArchiveFormatDefinition,
-      { probeNames: ['b.json'] } as ArchiveFormatDefinition,
-      {} as ArchiveFormatDefinition,
+      { probeNames: ['a.json', 'b.json'] } as unknown as ArchiveFormatDefinition,
+      { probeNames: ['b.json'] } as unknown as ArchiveFormatDefinition,
+      {} as unknown as ArchiveFormatDefinition,
     ])).toEqual(['a.json', 'b.json']);
   });
 });

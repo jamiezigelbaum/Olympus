@@ -27,6 +27,7 @@ import { existsSync } from 'node:fs';
 import type { WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
+import { archiveContinuations } from './continuation-cache.ts';
 import { archiveLaneLegs, archiveLaneStores, type ArchiveTierLane } from './lane.ts';
 import { archiveConnectorId, type ArchiveImportRecord, type ArchiveImportStateStore } from './state.ts';
 import { archiveTierSetId } from './store.ts';
@@ -132,6 +133,9 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   const lane = options.lane;
   const corpusIds = archiveLaneLegs(lane).map((leg) => leg.corpusId);
   const counts = emptyCounts();
+
+  // An inflater parked for a member of this archive has nothing left to serve.
+  archiveContinuations.dropArchive(record.archive_id);
 
   // 2: hidden everywhere, and out of every later pass's reach.
   const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);

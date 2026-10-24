@@ -152,6 +152,7 @@ const ARCHIVE: ComputerArchiveEntry = {
   id: '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60',
   name: 'Old work mail.mbox',
   format: 'Mail (mbox)',
+  family: 'email',
   where: '~/Exports',
   status: 'imported',
   items: 1_250,
@@ -268,7 +269,7 @@ describe('each archive under the Archives row', () => {
     const item = archiveItem(page, 'importing');
     expect(item.querySelector('.archive-name')!.textContent).toBe(ARCHIVE.name);
     expect(item.textContent).toContain(`${ARCHIVE.format} · ${ARCHIVE.where} · ${fill(A.dates, { earliest: '2011-02-03', latest: '2019-12-30' })}`);
-    expect(item.textContent).toContain(fill(A.importingLine, { percent: '42', items: fill(A.items.many, { n: '20,340' }) }));
+    expect(item.textContent).toContain(fill(A.importingLine, { percent: '42', items: fill(A.nouns.email.many, { n: '20,340' }) }));
     expect(item.querySelector('[role="progressbar"]')).not.toBeNull();
     expect(item.textContent).toContain(fill(A.judgedLine, { judged: '12,900', held: '7,440' }));
     expect(item.textContent).toContain(A.heldWhy.ready);
@@ -340,6 +341,50 @@ describe('each archive under the Archives row', () => {
       fill(A.gapInFile, { file: 'Inbox', gap: fill(A.gaps.message_too_large.many, { n: '2' }) }),
       fill(A.gapInFile, { file: 'Sent', gap: A.gaps.message_unreadable.one }),
     ]);
+  });
+
+  test('a notes archive counts notes, and every kind of gap any format reports has its own plain sentence', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-notes') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.note.many, { n: '3,412' }));
+    expect(item.textContent).not.toContain('messages');
+    expect(item.textContent).not.toContain(fill(A.nouns.other.many, { n: '3,412' }));
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '287' }),
+      fill(A.gaps.item_truncated.many, { n: '4' }),
+      A.gaps.assumption.one,
+      fill(A.gaps.section_not_imported.many, { n: '2' }),
+      A.gaps.file_damaged.one,
+    ]);
+    // Every kind has both a one and a many sentence, none of them the catch-all.
+    for (const kind of ['media_not_imported', 'item_truncated', 'assumption', 'section_not_imported', 'file_damaged'] as const) {
+      expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
+      expect(A.gaps[kind].many).toContain('{n}');
+    }
+  });
+
+  test('an archive from an engine that sends no family says items, and an empty import says it found nothing', async () => {
+    const { family: _family, ...old } = ARCHIVE;
+    const unknown = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });
+    expect(archiveItem(unknown, 'imported').textContent).toContain(fill(A.nouns.other.many, { n: '1,250' }));
+
+    const empty = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-empty') });
+    const item = archiveItem(empty, 'imported');
+    expect(item.textContent).toContain('no notes found in this archive');
+    expect(item.textContent).not.toContain(A.countsUnavailable.why);
+    expect(item.textContent).not.toContain(fill(A.nouns.note.many, { n: '0' }));
+    expect(item.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
+    // Without a time to say, the same sentence reads on its own.
+    const { importedAt: _at, ...untimed } = { ...ARCHIVE, family: 'note', items: 0, judged: 0, held: 0 };
+    const bare = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([untimed])) });
+    expect(archiveItem(bare, 'imported').textContent).toContain(fill(A.emptyImport, { none: A.nouns.note.none }));
+  });
+
+  test('the picker names the formats the engine registers, from the registry', async () => {
+    expect(A.pick.intro).toContain('an .mbox file from Google Takeout or Thunderbird');
+    expect(A.pick.intro.startsWith('Choose a file or folder on this computer: ')).toBe(true);
+    expect(A.pick.intro.endsWith('Olympus reads it where it is and never changes it.')).toBe(true);
   });
 
   test('stopped: which file, what happened, and what to do', async () => {
@@ -544,7 +589,7 @@ describe('Needs you for imports', () => {
     const archive = archiveItem(page, 'imported');
     expect(archive.textContent).toContain(A.countsUnavailable.why);
     expect(archive.textContent).toContain(A.countsUnavailable.fix);
-    expect(archive.textContent).not.toContain(fill(A.items.many, { n: '0' }));
+    expect(archive.textContent).not.toContain(fill(A.nouns.email.many, { n: '0' }));
     expect(archive.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
     const line = needsYou(page).get(fill(A.needsYou.counts, { name: TAKEOUT }));
     expect(line).toBeDefined();
@@ -577,7 +622,7 @@ describe('Needs you for imports', () => {
     expect(archive.getAttribute('data-not-running')).toBe('disabled');
     expect(archive.querySelector('.ftag')!.textContent).toBe(A.status.notRunning);
     expect(archive.querySelector('[role="progressbar"]')).toBeNull();
-    expect(archive.textContent).toContain(fill(A.notRunningLine, { percent: '0', items: fill(A.items.many, { n: '0' }) }));
+    expect(archive.textContent).toContain(fill(A.notRunningLine, { percent: '0', items: fill(A.nouns.email.many, { n: '0' }) }));
     expect(archivesRow(page).textContent).not.toContain(A.status.importing);
     const remove = Array.from(archive.querySelectorAll('button')).find((node) => node.textContent === A.remove) as HTMLButtonElement;
     expect(remove.disabled).toBe(true);

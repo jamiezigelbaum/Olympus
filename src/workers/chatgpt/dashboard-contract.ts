@@ -563,6 +563,12 @@ export interface ComputerArchiveEntry {
   name: string;
   /** The format's own label ("Mail (mbox)"). */
   format: string;
+  /**
+   * The source family of the format ("email", "note", "chat"): what its items
+   * are called (a message, a note). Absent from an older engine's entry; the
+   * page then says items.
+   */
+  family?: string;
   /** The folder it is in, home folder shown as ~. */
   where: string;
   status: 'importing' | 'imported' | 'stopped' | 'removing';

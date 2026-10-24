@@ -27,6 +27,7 @@ import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger
 import { secretLocationsPathForStore, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { tierRowVisible } from '../src/workers/connector-store/local-index.ts';
 import { createMboxArchiveConnector } from '../src/workers/archive-import/mbox/connector.ts';
+import { archiveContinuations } from '../src/workers/archive-import/continuation-cache.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
 import {
@@ -407,6 +408,11 @@ describe('removing an archive', () => {
     expect(lane.ledger.accountScopeCounts('mbox', removed).items).toBe(5);
     expect(lane.ledger.accountScopeCounts('mbox', kept).items).toBe(4);
 
+    // An inflater parked for each archive's zip member: the removed archive's is dropped with it.
+    const memberOf = (archiveId: string) => ({ archiveId, manifestTag: 'tag', fileIndex: 0, memberIndex: 1 });
+    archiveContinuations.put(memberOf(removed), { position: 10, retainedBytes: 100 });
+    archiveContinuations.put(memberOf(kept), { position: 10, retainedBytes: 100 });
+
     // Side stores, seeded for both archives.
     const snifferPath = tierSnifferPathForLedger(lane.ledger.dbPath);
     const sniffer = new TierSnifferStore({ dbPath: snifferPath });
@@ -476,6 +482,8 @@ describe('removing an archive', () => {
       });
     }
     expect(outcome.kind).toBe('removed');
+    expect(archiveContinuations.take(memberOf(removed), 10)).toBeUndefined();
+    expect(archiveContinuations.take(memberOf(kept), 10)).toBeDefined();
 
     const items = itemsByArchive(f.env);
     expect(items.has(removed)).toBe(false);

@@ -27,7 +27,7 @@
  */
 import { createHash } from 'node:crypto';
 import { Inflate } from 'fflate/browser';
-import { archiveStopFromScopeError } from '../../core/archive-formats.ts';
+import { archiveStopFromScopeError } from './stop-errors.ts';
 import { crc32Update, type ArchiveByteSource } from './byte-source.ts';
 
 /**

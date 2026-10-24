@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { ArchiveImportStoppedError } from '../src/core/archive-formats.ts';
+import { ScopeSafeError } from '../src/core/scope-safe-fs.ts';
 import { fileByteSource } from '../src/workers/archive-import/byte-source.ts';
+import { archiveStopFromReaderError } from '../src/workers/archive-import/stop-errors.ts';
 import {
   JSON_STREAM_MAX_DEPTH,
   JsonStreamError,
@@ -334,5 +337,33 @@ describe('json stream inside a zip member', () => {
     expect(full[10]!.frame).toEqual({ name: 'inside' });
     const rest = run(full[2999]!.resume);
     expect(rest.map((event) => event.value)).toEqual(items.slice(3000));
+  });
+});
+
+describe('a JSON reader failure as the import stopping', () => {
+  const failure = (run: () => unknown): unknown => {
+    try {
+      run();
+    } catch (error) {
+      return archiveStopFromReaderError(error, 'export/result.json');
+    }
+    throw new Error('expected a failure');
+  };
+
+  test('a resume point that is not in the file is the resume point not belonging to it; a damaged or cut-short file could not be read', () => {
+    const point = readAll(CHAT, { itemPaths: [['messages']] })[1]!.resume;
+    const notAtBoundary: JsonResumePoint = { ...point, offset: point.offset + 1 };
+    const stoppedFor = (error: unknown) => (error instanceof ArchiveImportStoppedError ? [error.code, error.relPath] : error);
+    expect(stoppedFor(failure(() => readAll(CHAT, { itemPaths: [['messages']], resume: notAtBoundary })))).toEqual(['resume_point_invalid', 'export/result.json']);
+    expect(stoppedFor(failure(() => readAll('{"list": [1, 2', { itemPaths: [['list']] })))).toEqual(['file_unreadable', 'export/result.json']);
+    expect(stoppedFor(failure(() => readAll('{"list": [1 2]}', { itemPaths: [['list']] })))).toEqual(['file_unreadable', 'export/result.json']);
+  });
+
+  test('anything else is returned as it is, and a scope error keeps its own reasons', () => {
+    const other = new Error('not a reader error');
+    expect(archiveStopFromReaderError(other, 'a')).toBe(other);
+    const changed = archiveStopFromReaderError(new ScopeSafeError('changed', 'the file changed'), 'a');
+    expect(changed).toBeInstanceOf(ArchiveImportStoppedError);
+    expect((changed as ArchiveImportStoppedError).code).toBe('file_changed');
   });
 });

@@ -11,7 +11,7 @@
  * (`registerArchiveFormatConnector`), so this module imports no worker code.
  */
 import type { SourceConnector } from './contracts.ts';
-import { ScopeSafeError, type ScopeFileVersion, type ScopeRoot } from './scope-safe-fs.ts';
+import type { ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
 import type { SourceFamily } from './source-index/types.ts';
 
 /** How many first bytes the probe reads from a file. */
@@ -60,6 +60,12 @@ export interface ArchiveFormatDefinition {
   family: SourceFamily;
   /** The provider name every item of this format carries. */
   provider: string;
+  /**
+   * How the person is told to choose this kind of export, in the sentence
+   * "Choose a file or folder on this computer: <hint>." ("a mail export (an
+   * .mbox file ...)"). Absent: the format's label.
+   */
+  chooseHint?: string;
   /** How an answer's citation names this format's items ("Imported mail"); absent: the family's word. */
   citationLabel?: string;
   /**
@@ -99,6 +105,7 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   label: 'Mail (mbox)',
   family: 'email',
   provider: 'mbox',
+  chooseHint: 'a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)',
   citationLabel: 'Imported mail',
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return startsWithFromLine(probe.chosen.head) ? [''] : undefined;
@@ -121,6 +128,36 @@ export function archiveFormatForProvider(
   formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
 ): ArchiveFormatDefinition | undefined {
   return formats.find((format) => format.provider === provider);
+}
+
+/**
+ * The provider name on a family's stores when its formats do not share one:
+ * a store set belongs to the family, not to whichever format came first.
+ */
+export const ARCHIVE_NEUTRAL_PROVIDER = 'archive';
+
+/**
+ * The provider a family's stores carry: the formats' own when they all share
+ * it, else the neutral one. Items keep their own format's provider either
+ * way; this only names the store set.
+ */
+export function archiveFamilyProvider(
+  family: SourceFamily,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): string {
+  const providers = new Set(archiveFormatsOfFamily(family, formats).map((format) => format.provider));
+  const only = providers.size === 1 ? [...providers][0] : undefined;
+  return only ?? ARCHIVE_NEUTRAL_PROVIDER;
+}
+
+/**
+ * Whether a provider name is an archive's: a format's own, or the neutral one.
+ */
+export function isArchiveProvider(
+  provider: string,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): boolean {
+  return provider === ARCHIVE_NEUTRAL_PROVIDER || archiveFormatForProvider(provider, formats) !== undefined;
 }
 
 /** The formats of one family, in the order they are registered. */
@@ -181,8 +218,8 @@ function wildcardMatches(pattern: string, text: string): boolean {
 }
 
 /** The source families archive imports store, one store set per family. */
-export function archiveImportFamilies(): SourceFamily[] {
-  return [...new Set(ARCHIVE_FORMATS.map((format) => format.family))];
+export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): SourceFamily[] {
+  return [...new Set(formats.map((format) => format.family))];
 }
 
 /**
@@ -293,21 +330,6 @@ export class ArchiveImportStoppedError extends Error {
     this.code = code;
     this.relPath = relPath;
   }
-}
-
-/**
- * A scope error from reading one file of the archive, as the import stopping
- * with the reason a person is told; anything else is returned as it is.
- */
-export function archiveStopFromScopeError(error: unknown, relPath: string): unknown {
-  if (!(error instanceof ScopeSafeError)) return error;
-  if (error.code === 'not_found') {
-    return new ArchiveImportStoppedError('file_missing', 'A file of this archive is no longer there.', relPath);
-  }
-  if (error.code === 'changed' || error.code === 'escape' || error.code === 'not_regular') {
-    return new ArchiveImportStoppedError('file_changed', 'A file of this archive changed since the import started.', relPath);
-  }
-  return new ArchiveImportStoppedError('file_unreadable', 'A file of this archive could not be read.', relPath);
 }
 
 const CONNECTOR_FACTORIES = new Map<string, ArchiveConnectorFactory>();

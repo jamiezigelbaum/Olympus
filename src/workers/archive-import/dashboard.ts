@@ -534,6 +534,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       id: record.archive_id,
       name: named(record.label),
       format: getArchiveFormat(record.format)?.label ?? record.format,
+      family: record.family,
       where: where(posix.join(record.root_path, record.chosen_rel_path || '.')),
       status: record.status,
       items,

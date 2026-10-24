@@ -1335,9 +1335,16 @@ export function chatgptDashboardClient(
     return typeof value === 'number' && isFinite(value) && value > 0 ? Math.floor(value) : 0;
   }
 
-  function messageCount(n: number): string {
-    const A = H.copy.archives;
-    return fill(n === 1 ? A.items.one : A.items.many, { n: count(n) });
+  /** What an archive's items are called, by its family; items when the family is not one with its own word. */
+  function archiveNouns(archive: Any): Any {
+    const nouns = H.copy.archives.nouns as Any;
+    const family = archive && typeof archive.family === 'string' ? archive.family : '';
+    return Object.prototype.hasOwnProperty.call(nouns, family) ? nouns[family] : nouns.other;
+  }
+
+  function itemCount(archive: Any, n: number): string {
+    const nouns = archiveNouns(archive);
+    return fill(n === 1 ? nouns.one : nouns.many, { n: count(n) });
   }
 
   /**
@@ -1462,16 +1469,22 @@ export function chatgptDashboardClient(
     const uncounted = archive.countsUnavailable === true && archive.status !== 'removing';
     if (halted && archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
-      add(item, el('p', 'muted', uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: messageCount(items) })));
+      add(item, el('p', 'muted', uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
     } else if (halted) {
       add(item, el('p', 'muted', A.removingNotRunningLine));
     } else if (archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
-      const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
     } else if (archive.status === 'imported') {
       const when = typeof archive.importedAt === 'string' ? ago(archive.importedAt) : '';
-      if (!uncounted) add(item, el('p', 'muted', when ? fill(A.importedLine, { items: messageCount(items), when }) : fill(A.importedLineNoTime, { items: messageCount(items) })));
+      if (!uncounted && items === 0) {
+        // Nothing found is said as that: the import finished, and this is what it found.
+        const none = archiveNouns(archive).none;
+        add(item, el('p', 'muted', when ? fill(A.emptyImportWhen, { none, when }) : fill(A.emptyImport, { none })));
+      } else if (!uncounted) {
+        add(item, el('p', 'muted', when ? fill(A.importedLine, { items: itemCount(archive, items), when }) : fill(A.importedLineNoTime, { items: itemCount(archive, items) })));
+      }
     } else if (archive.status === 'removing') {
       const line = el('p', 'muted', A.removingLine);
       line.setAttribute('role', 'status');

@@ -4,6 +4,7 @@ import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
+import { ARCHIVE_NEUTRAL_PROVIDER, isArchiveProvider } from '../core/archive-formats.ts';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1476,6 +1477,10 @@ export interface DashboardSupportedSourceDefinition {
   // which is cloud-answerable. Usually one entry equal to source_id; more when
   // the registry and this page disagree, which the corpus-claim test pins.
   corpus_source_ids: readonly string[];
+  // A corpus that belongs on this card although the registry names no source
+  // for it (a store set of a family the registry was not built with). Declared
+  // per capability, read by corpusMatchesDefinition; never a branch on a name.
+  owns_corpus?: (corpus: SourceIndexStatusCorpus) => boolean;
   // Key this card's row is filed under in the ingestion ledger. The ledger
   // keys rows by its own short source id, which is NOT always the provider —
   // WhatsApp is `whatsapp` there and `whatsapp_personal` here.
@@ -1790,9 +1795,12 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     source_id: 'archive.imports',
     primary_corpus_id: 'secure_local.archive.email',
     corpus_source_ids: ['archive.imports'],
+    // Every family's tier stores (`<tier>.archive.<family>`) and every
+    // archive format's provider, so a format added later is on this card.
+    owns_corpus: (corpus) => corpus.corpus_id.split('.')[1] === 'archive' || isArchiveProvider(corpus.provider),
     ingestion_ledger_source_id: 'archive_imports',
     label: 'Archives',
-    provider: 'mbox',
+    provider: ARCHIVE_NEUTRAL_PROVIDER,
     family: 'email',
     trust_domain: 'secure_local',
     connect_kind: 'local',
@@ -3118,6 +3126,7 @@ function corpusMatchesDefinition(
   sourceIdByCorpusId: Map<string, string>,
 ): boolean {
   if (corpus.corpus_id === definition.primary_corpus_id) return true;
+  if (definition.owns_corpus?.(corpus) === true) return true;
   const registrySourceId = registrySourceIdForCorpus(corpus.corpus_id, sourceIdByCorpusId);
   return registrySourceId !== undefined && definition.corpus_source_ids.includes(registrySourceId);
 }

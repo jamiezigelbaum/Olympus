@@ -28,11 +28,11 @@ import PostalMime, { decodeWords, type Email } from 'postal-mime';
 import type { RawItem, SourceClassificationSignals, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../../core/contracts.ts';
 import {
   ArchiveImportStoppedError,
-  archiveStopFromScopeError,
   registerArchiveFormatConnector,
   type ArchiveConnectorInput,
 } from '../../../core/archive-formats.ts';
 import type { ScopeFileReader } from '../../../core/scope-safe-fs.ts';
+import { archiveStopFromReaderError } from '../stop-errors.ts';
 import { MAX_FROM_HEADER_CHARS } from '../../../core/sender-rules.ts';
 import { MBOX_DEFAULT_MAX_MESSAGE_BYTES, MboxFormatError, MboxSplitter, type MboxMessageSpan } from './split.ts';
 
@@ -94,7 +94,7 @@ function stoppedFrom(error: unknown, relPath: string): unknown {
   if (error instanceof MboxFormatError) {
     return new ArchiveImportStoppedError('resume_point_invalid', 'No message starts where this import was to resume.', relPath);
   }
-  return archiveStopFromScopeError(error, relPath);
+  return archiveStopFromReaderError(error, relPath);
 }
 
 function sha256(value: Uint8Array | string): string {

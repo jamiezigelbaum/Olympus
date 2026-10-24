@@ -250,6 +250,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/archive-import/scheduler-source.ts',
   'src/workers/archive-import/start.ts',
   'src/workers/archive-import/state.ts',
+  'src/workers/archive-import/stop-errors.ts',
   'src/workers/archive-import/store.ts',
   'src/workers/archive-import/sync.ts',
   'src/workers/archive-import/zip-reader.ts',
