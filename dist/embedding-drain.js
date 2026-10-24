@@ -16100,9 +16100,12 @@ var init_remote_access = __esm(() => {
 import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
 import {
   chmodSync as chmodSync3,
+  closeSync as closeSync7,
   existsSync as existsSync11,
+  fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync10,
   lstatSync as lstatSync6,
+  openSync as openSync7,
   readFileSync as readFileSync14,
   readdirSync as readdirSync2,
   realpathSync as realpathSync3,
@@ -16110,7 +16113,9 @@ import {
   rmSync as rmSync5,
   rmdirSync,
   statSync as statSync7,
-  writeFileSync as writeFileSync4
+  utimesSync,
+  writeFileSync as writeFileSync4,
+  writeSync as writeSync3
 } from "node:fs";
 import { basename as basename2, dirname as dirname14, isAbsolute as isAbsolute7, join as join15, resolve as resolve5 } from "node:path";
 function mediaCacheDir(env = process.env) {
@@ -16272,19 +16277,21 @@ function ensureOwnerOnlyDir(dir) {
   mkdirSync10(dir, { recursive: true, mode: 448 });
   chmodSync3(dir, 448);
 }
-var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", MEDIA_CACHE_ORPHAN_AGE_MS, MEDIA_CACHE_DIR_NAMES;
+var MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", MEDIA_CACHE_ORPHAN_AGE_MS, MEDIA_CACHE_DIR_NAMES, STAGING_FRESH_MS;
 var init_media_cache = __esm(() => {
+  init_atomic_file();
   init_remote_access();
   init_image_preparers();
   init_still_image_readiness();
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
+  STAGING_FRESH_MS = 6 * 60 * 60000;
 });
 
 // src/workers/classification/secret-locations.ts
 import { Database as Database2 } from "bun:sqlite";
 import { createHash as createHash8 } from "node:crypto";
-import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync7 } from "node:fs";
+import { chmodSync as chmodSync4, closeSync as closeSync8, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync8 } from "node:fs";
 import { dirname as dirname15 } from "node:path";
 function screenedSecretLocator(locator) {
   return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
@@ -16306,7 +16313,7 @@ class SecretLocationsIndex {
     if (onDisk) {
       mkdirSync11(dirname15(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync12(this.dbPath))
-        closeSync7(openSync7(this.dbPath, "a", 384));
+        closeSync8(openSync8(this.dbPath, "a", 384));
       chmodSync4(this.dbPath, 384);
     }
     this.db = new Database2(this.dbPath, { create: true });
@@ -28816,7 +28823,7 @@ var init_archive_formats = __esm(() => {
 });
 
 // src/core/messaging-capture-grant-file.ts
-import { closeSync as closeSync8, constants as constants2, fstatSync, lstatSync as lstatSync8, openSync as openSync8, readFileSync as readFileSync16 } from "node:fs";
+import { closeSync as closeSync9, constants as constants2, fstatSync, lstatSync as lstatSync8, openSync as openSync9, readFileSync as readFileSync16 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname21, join as join20 } from "node:path";
 function captureGrantPathBeside(source, handleRegistryPath) {
@@ -28835,7 +28842,7 @@ function readCaptureGrantFile(path) {
   }
   let descriptor;
   try {
-    descriptor = openSync8(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
+    descriptor = openSync9(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
     const info = fstatSync(descriptor);
     const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
     if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
@@ -28853,7 +28860,7 @@ function readCaptureGrantFile(path) {
     return { kind: "invalid" };
   } finally {
     if (descriptor !== undefined)
-      closeSync8(descriptor);
+      closeSync9(descriptor);
   }
 }
 function captureGrantSessionEvidence(source, grantPath) {
@@ -29222,7 +29229,7 @@ function adoptedLayout(env, sourceId, slot, dbPath) {
     return "legacy";
   return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? "folder" : "legacy";
 }
-var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false, QUICK_CHECK_MAX_BYTES;
+var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false;
 var init_source_storage = __esm(() => {
   init_secret_locations();
   init_sniffer_store();
@@ -29245,7 +29252,6 @@ var init_source_storage = __esm(() => {
       this.state = state;
     }
   };
-  QUICK_CHECK_MAX_BYTES = 512 * 1024 * 1024;
 });
 
 // src/workers/dropbox-files/corpus-adapter.ts
@@ -34243,7 +34249,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync10, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync11, openSync as openSync10, readFileSync as readFileSync18 } from "node:fs";
+import { closeSync as closeSync11, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync11, openSync as openSync11, readFileSync as readFileSync18 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -34270,7 +34276,7 @@ function readRecordText(path) {
   const flags = constants4.O_RDONLY | (constants4.O_NOFOLLOW ?? 0) | (constants4.O_NONBLOCK ?? 0);
   let fd;
   try {
-    fd = openSync10(path, flags);
+    fd = openSync11(path, flags);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -34288,7 +34294,7 @@ function readRecordText(path) {
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   } finally {
     try {
-      closeSync10(fd);
+      closeSync11(fd);
     } catch {}
   }
 }
@@ -41904,7 +41910,7 @@ init_linux_desktop_opener();
 
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash18, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
-import { closeSync as closeSync9, openSync as openSync9, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
+import { closeSync as closeSync10, openSync as openSync10, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname23, join as join23 } from "node:path";
 init_worker_transport();
 init_linux_desktop_opener();
@@ -42172,11 +42178,11 @@ class LinuxOwnerBridge {
  location.replace(${JSON.stringify(url)});
  }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
 })();</script>`;
-    const fd = openSync9(path, "wx", 384);
+    const fd = openSync10(path, "wx", 384);
     try {
       writeFileSync5(fd, html2);
     } finally {
-      closeSync9(fd);
+      closeSync10(fd);
     }
     const ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
     this.tickets.set(lane, ticket);
@@ -47384,19 +47390,26 @@ init_source_storage();
 
 // src/core/source-account-migration.ts
 init_archive_formats();
+init_atomic_file();
 init_media_cache();
 init_olympus_layout();
 init_source_placement();
 init_source_storage();
 init_source_registry();
+var ASSUMED_BYTES_PER_SECOND = 10 * 1024 * 1024;
+var QUICK_CHECK_STORE_MAX_BYTES = 64 * 1024 * 1024;
+var QUICK_CHECK_TOTAL_MAX_BYTES = 128 * 1024 * 1024;
+var ACCOUNT_LOG_MAX_BYTES = 32 * 1024 * 1024;
 var SKIP_REASONS = new Set([
   "pinned",
   "unreadable",
   "unexpected_file",
   "destination_exists",
   "other_device",
-  "files_elsewhere"
+  "files_elsewhere",
+  "log_large"
 ]);
+var NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
 
 // src/workers/email-source/server.ts
 init_data_owner_lock();

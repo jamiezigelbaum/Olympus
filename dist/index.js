@@ -17128,13 +17128,15 @@ var init_keyword_expansion = __esm(() => {
 });
 
 // src/core/media-cache.ts
-var MEDIA_CACHE_ORPHAN_AGE_MS, MEDIA_CACHE_DIR_NAMES;
+var MEDIA_CACHE_ORPHAN_AGE_MS, MEDIA_CACHE_DIR_NAMES, STAGING_FRESH_MS;
 var init_media_cache = __esm(() => {
+  init_atomic_file();
   init_remote_access();
   init_image_preparers();
   init_still_image_readiness();
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
+  STAGING_FRESH_MS = 6 * 60 * 60000;
 });
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
@@ -17581,7 +17583,6 @@ var init_local_index = __esm(() => {
 });
 
 // src/core/source-storage.ts
-var QUICK_CHECK_MAX_BYTES;
 var init_source_storage = __esm(() => {
   init_secret_locations();
   init_sniffer_store();
@@ -17589,7 +17590,6 @@ var init_source_storage = __esm(() => {
   init_local_index();
   init_source_placement();
   init_source_registry();
-  QUICK_CHECK_MAX_BYTES = 512 * 1024 * 1024;
 });
 
 // src/workers/readwise/connector.ts
