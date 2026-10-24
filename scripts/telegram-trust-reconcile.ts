@@ -6,11 +6,13 @@
 // content is emitted.
 
 import { lstatSync } from 'node:fs';
-import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
+import { openConnectorStore } from '../src/core/source-storage.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
+  TELEGRAM_MESSAGES_SOURCE_ID,
   TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID,
   defaultInternalTelegramConnectorStoreDbPath,
   defaultProtectedTelegramConnectorStoreDbPath,
@@ -105,15 +107,16 @@ export function runTelegramTrustReconcile(
   if (files[0]!.dev === files[1]!.dev && files[0]!.ino === files[1]!.ino) {
     throw new Error('Telegram trust reconciliation refuses one database as both stores.');
   }
+  const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
   const stores: TelegramConnectorStores = {
-    internal: new LocalConnectorStore({
+    internal: openConnectorStore(account, {
       dbPath: args.internalDb,
       corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'internal',
       readOnly: !args.execute,
     }),
-    secureLocal: new LocalConnectorStore({
+    secureLocal: openConnectorStore(account, {
       dbPath: args.protectedDb,
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
@@ -193,7 +196,9 @@ export function runTelegramTrustReconcile(
 
 if (import.meta.main) {
   try {
-    console.log(JSON.stringify(runTelegramTrustReconcile(process.argv.slice(2)), null, 2));
+    // Held for the run: it refuses while Olympus runs (core/data-owner-lock.ts).
+    const summary = withDataOwnerLock(process.env, () => runTelegramTrustReconcile(process.argv.slice(2)));
+    console.log(JSON.stringify(summary, null, 2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

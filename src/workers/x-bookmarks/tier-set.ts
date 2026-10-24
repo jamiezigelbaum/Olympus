@@ -10,11 +10,12 @@
 
 import { olympusDataPath } from '../../core/olympus-layout.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import { createExistingStoreTierLane, type ExistingStoreTierLane } from '../connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import { X_BOOKMARKS_STORE_PLACEMENT } from './connector.ts';
+import { X_BOOKMARKS_SOURCE_ID, X_BOOKMARKS_STORE_PLACEMENT } from './connector.ts';
 
 export const X_BOOKMARKS_SECURE_CORPUS_ID = 'secure_local.x.bookmarks';
 export const X_BOOKMARKS_TIER_SET_ID = 'x.bookmarks';
@@ -49,13 +50,13 @@ export function createXBookmarksTierLane(options: {
       secure_local: {
         corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
         dbPath: secureDbPath,
-        create: (ledger) => new LocalConnectorStore({
+        create: (ledger) => openConnectorStore({ sourceId: X_BOOKMARKS_SOURCE_ID }, {
           dbPath: secureDbPath,
           corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
           family: 'x',
           trustDomain: 'secure_local',
           tierLedger: ledger,
-        }),
+        }, env),
         ...(options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}),
       },
     },

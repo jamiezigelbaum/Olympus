@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
 import {
@@ -13,6 +13,8 @@ import {
   createSourceCorpusRegistry,
   defaultSourceCorpusRegistryConfig,
 } from '../src/core/source-corpus-registry.ts';
+import { updateSourceRegistry } from '../src/core/source-registry.ts';
+import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
 import { createSourceExclusionMatcherFromPrefixes } from '../src/core/source-ingestion-exclusions.ts';
 import { assessContentExtractionThroughput } from '../src/core/ingestion-throughput.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
@@ -272,6 +274,76 @@ describe('source ingestion ledger', () => {
         items: 1,
         corpus_ids: expect.arrayContaining([PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID]),
       });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('an account being deleted is left out, under any corpus or path spelling, and the rest still reports', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-deleting-'));
+    const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'data') };
+    const telegram = new LocalConnectorStore({
+      dbPath: defaultProtectedTelegramConnectorStoreDbPath(env),
+      corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
+      family: 'chat',
+      trustDomain: 'secure_local',
+    });
+    const whatsappPath = lifecycleSourceSpecs()
+      .find((spec) => spec.sourceId === 'whatsapp.personal.messages')!
+      .connectorStorePaths!({ env })[0]!;
+    const whatsapp = new LocalConnectorStore({
+      dbPath: whatsappPath,
+      corpusId: 'secure_local.whatsapp.messages',
+      family: 'chat',
+      trustDomain: 'secure_local',
+    });
+    try {
+      await telegram.syncFromConnector(whatsappConnector([whatsappItem({
+        id: 'telegram-ledger-2',
+        text: 'Protected Telegram ledger fixture.',
+        updatedAt: '2026-07-08T19:02:00.000Z',
+      })]), { fetchContent: true });
+      await whatsapp.syncFromConnector(whatsappConnector([whatsappItem({
+        id: 'wamid-ledger-deleting',
+        text: 'A WhatsApp message whose account is being deleted.',
+        updatedAt: '2026-07-08T19:02:00.000Z',
+      })]), { fetchContent: true });
+    } finally {
+      telegram.close();
+      whatsapp.close();
+    }
+    updateSourceRegistry(env, (registry) => {
+      registry.accounts.push({
+        source_id: 'whatsapp.personal.messages',
+        slot: '1',
+        state: 'deleting',
+        layout: 'legacy',
+        corpus_ids: ['secure_local.whatsapp.messages'],
+        created_at: '2026-07-08T19:00:00.000Z',
+      });
+    });
+
+    try {
+      const snapshot = await collectLocalSourceIngestionLedger({
+        env: {
+          ...env,
+          OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([
+            { dbPath: whatsappPath, corpusId: 'secure_local.whatsapp.messages', family: 'chat', trustDomain: 'secure_local' },
+            // The same file under another source's corpus, spelled another way.
+            {
+              dbPath: join(dirname(whatsappPath), '.', basename(whatsappPath)),
+              corpusId: 'secure_local.reflect.notes',
+              family: 'chat',
+              trustDomain: 'secure_local',
+            },
+          ]),
+        },
+        dashboardDbPath: join(dir, 'source-dashboard.sqlite'),
+        now: new Date('2026-07-08T20:00:00.000Z'),
+      });
+      expect(snapshot.rows.find((row) => row.source_id === 'telegram')).toMatchObject({ configured: true, items: 1 });
+      expect(snapshot.rows.find((row) => row.source_id === 'whatsapp')?.items ?? 0).toBe(0);
+      expect(snapshot.rows.reduce((total, row) => total + (row.items ?? 0), 0)).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

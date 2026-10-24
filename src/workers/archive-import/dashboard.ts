@@ -287,6 +287,17 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
   };
 
+  // A removal shares its archive's scheduler task, whose schedule says the
+  // next pass is 30 minutes after the import's last: tell the scheduler there
+  // is work now, once it has the task (after refresh).
+  const wakeScheduler = (): void => {
+    try {
+      options.runtime.notifyWork();
+    } catch (error) {
+      console.warn(`[archive-import] the scheduler was not woken: ${error instanceof Error ? error.name : 'error'}`);
+    }
+  };
+
   const refusal = (code: string, message: string): ArchiveApproveResult => ({ ok: false, code, message });
 
   const outcome = (requestId: string, result: ArchiveImportStart): void => {
@@ -611,6 +622,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       if (request.archive_id === archiveId) requests.remove(request.request_id);
     }
     refresh();
+    wakeScheduler();
     return { ok: true };
   };
 

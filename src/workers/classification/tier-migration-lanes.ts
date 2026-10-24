@@ -13,7 +13,8 @@
 import { existsSync } from 'node:fs';
 import type { SourceFamily, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { READWISE_LIBRARY_CORPUS_ID } from '../../core/source-corpus-registry.ts';
-import { LocalConnectorStore } from '../connector-store/local-index.ts';
+import type { LocalConnectorStore } from '../connector-store/local-index.ts';
+import { openConnectorStore, openSecretLocations, openTierLedger } from '../../core/source-storage.ts';
 import {
   createTieredLaneSet,
   onDemandTierStore,
@@ -77,8 +78,8 @@ import { X_BOOKMARKS_STORE_PLACEMENT, defaultXBookmarksConnectorStoreDbPath } fr
 import { X_BOOKMARKS_CORPUS_ID } from '../x-bookmarks/corpus-adapter.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, X_BOOKMARKS_TIER_SET_ID, defaultXBookmarksSecureConnectorStoreDbPath } from '../x-bookmarks/tier-set.ts';
 import { archiveTierMigrationLaneSpecs } from '../archive-import/lane.ts';
-import { SecretLocationsIndex, secretLocationsPathForStore } from './secret-locations.ts';
-import { TierLedger } from './tier-ledger.ts';
+import { secretLocationsPathForStore } from './secret-locations.ts';
+import type { TierLedger } from './tier-ledger.ts';
 import type { TierMigrationLane } from './tier-migration.ts';
 
 export type TierMigrationLaneMode = 'read' | 'write';
@@ -260,9 +261,10 @@ export function openTierMigrationLanes(
       const legs = Object.entries(spec.legs) as Array<[SourceTrustDomain, TierMigrationLegSpec]>;
       if (!legs.some(([, leg]) => leg.dbPath !== ':memory:' && existsSync(leg.dbPath))) continue;
       const secure = spec.legs.secure_local;
-      const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(secure.dbPath) });
+      const account = { sourceId: spec.sourceId };
+      const ledger = openTierLedger(account, { dbPath: tieredStoreSetLedgerPath(secure.dbPath) });
       opened.push(ledger);
-      const secretLocations = readOnly ? undefined : new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(secure.dbPath) });
+      const secretLocations = readOnly ? undefined : openSecretLocations(account, { dbPath: secretLocationsPathForStore(secure.dbPath) });
       if (secretLocations) opened.push(secretLocations);
       const laneLegs: Partial<Record<SourceTrustDomain, TieredLaneLeg>> = {};
       for (const [domain, leg] of legs) {
@@ -272,7 +274,7 @@ export function openTierMigrationLanes(
           create: () => {
             const created = leg.open
               ? leg.open({ readOnly, tierLedger: ledger })
-              : new LocalConnectorStore({
+              : openConnectorStore(account, {
                   dbPath: leg.dbPath,
                   corpusId: leg.corpusId,
                   family: leg.family,

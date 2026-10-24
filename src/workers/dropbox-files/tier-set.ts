@@ -15,7 +15,8 @@
 // lifecycle path that finds the secure store finds it.
 
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { TierLedger } from '../classification/tier-ledger.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import { openTierLedger } from '../../core/source-storage.ts';
 import type { SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
@@ -52,7 +53,7 @@ export function createDropboxTierLane(options: {
 }): DropboxTierLane {
   const env = options.env ?? process.env;
   const ledger = options.secureStore.tierLedger()
-    ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+    ?? openTierLedger({ sourceId: DROPBOX_FILES_SOURCE_ID }, { dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) }, env);
   const leg = (domain: 'internal' | 'public_safe'): OnDemandTierStore => onDemandTierStore({
     corpusId: DROPBOX_TIER_CORPUS_IDS[domain],
     dbPath: domain === 'internal'

@@ -15,6 +15,7 @@
 // Output is counts and identifiers only: no chunk text, no locators.
 
 import { Database } from 'bun:sqlite';
+import { withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import {
   repairEmbeddingIdentities,
   repairEmbeddingWriteAuthorities,
@@ -135,7 +136,8 @@ function runEmbeddingIdentityRepair(argv: readonly string[]): {
 
 if (import.meta.main) {
   try {
-    const { args, report, authorityRows } = runEmbeddingIdentityRepair(process.argv.slice(2));
+    // Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+    const { args, report, authorityRows } = withDataOwnerLock(process.env, () => runEmbeddingIdentityRepair(process.argv.slice(2)));
     const authorityRefused = authorityRows.filter((row) => row.decision === 'refused').length;
     console.log(args.json
       ? JSON.stringify({ kind: 'embedding_identity_repair', ...report, authorityRepair: authorityRows }, null, 2)

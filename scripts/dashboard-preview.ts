@@ -32,6 +32,7 @@ import {
 } from '../src/core/sovereignty.ts';
 import {
   buildSourceDashboardViewModel,
+  type DashboardCaptureRuntime,
   type DashboardImportAttention,
   type DashboardImportedArchives,
   type SourceDashboardViewModel,
@@ -57,6 +58,7 @@ import {
 import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
 import { ARCHIVE_FORMATS } from '../src/core/archive-formats.ts';
 import { ARCHIVE_APPROVE_COPY } from '../src/workers/archive-import/dashboard.ts';
+import { captureFreshness, captureFreshnessCounts } from '../src/workers/connector-store/capture-freshness.ts';
 import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
 import { displayText } from '../src/workers/dashboard/display-text.ts';
 import { dashboardResourceHtml } from '../src/workers/chatgpt/dashboard-resource.ts';
@@ -467,6 +469,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
     view.model_setup = new ModelSetupService({ config: loadSovereigntyPreset('private-cloud-only'), credentialState: () => 'ready' }).getStatus();
     return view;
   }
+  if (state.startsWith('capture-')) return capturePreview(state);
   if (state.startsWith('local-files')) return localFilesPreview(state.startsWith('local-files-picker') ? 'local-files-connected' : state);
   if (state === 'delete-data' || state === 'delete-data-done') return deleteDataPreview(state === 'delete-data-done');
   if (state.startsWith('archives-')) return archivesPreview(state);
@@ -900,6 +903,119 @@ export function previewArchiveApprove(args: { key?: unknown }) {
 }
 
 /**
+ * Live capture freshness (2026-10-24): WhatsApp and Telegram, whose messages
+ * arrive through a helper holding a linked session. Both pulls succeed a few
+ * minutes ago in every state; what differs is what the newest captured message
+ * says, and whether the helper runs. The cards sit in sync evidence alone (no
+ * handle), like the chat sources in 'full'.
+ *   capture-stale        WhatsApp's newest message is 3 days old with the helper
+ *                        running over 3 chats; Telegram's is 20 hours old (past
+ *                        the 18-hour threshold) with the helper stopped on
+ *                        purpose: both under Needs you with Check capture
+ *   capture-unavailable  neither has captured a message yet: a quiet row that
+ *                        says so, nothing under Needs you
+ *   capture-blocked      fresh messages, but WhatsApp's linked session is gone
+ *                        and Telegram's saved sign-in key is missing: the
+ *                        helpers cannot start, under Needs you
+ *   capture-awaiting     both accounts were linked again ten minutes ago:
+ *                        WhatsApp over three days of messages kept from the
+ *                        earlier link, Telegram over nothing. Waiting for the
+ *                        first live message, not under Needs you
+ *   capture-helper-down  fresh messages, but WhatsApp's helper keeps exiting
+ *                        and Telegram's approval is gone: both under Needs you
+ *                        with the reason and Check capture
+ *   capture-late         WhatsApp's newest message is 3 days old and its pull is
+ *                        late too: one row says both, with Check capture
+ *   capture-restarting   fresh messages, but WhatsApp's helper has just exited
+ *                        and is about to be started again: a quiet row that
+ *                        says capture restarting, nothing under Needs you
+ */
+function capturePreview(state: string): SourceDashboardViewModel {
+  const stale = state === 'capture-stale';
+  const unavailable = state === 'capture-unavailable';
+  const blocked = state === 'capture-blocked';
+  const awaiting = state === 'capture-awaiting';
+  const helperDown = state === 'capture-helper-down';
+  const late = state === 'capture-late';
+  const restarting = state === 'capture-restarting';
+  const status = emptyStatus();
+  status.corpora = [
+    corpus('internal.telegram.messages', 'chat', 'internal', 'telegram', 4_200, 4_200, { withText: 4_200, embedded: 4_200 }),
+    corpus('secure_local.whatsapp.messages', 'chat', 'secure_local', 'whatsapp', 18_900, 18_900, { withText: 18_900, embedded: 18_900 }),
+  ];
+  const pulledAt = at(5 * 60);
+  const threshold = 18 * 3_600;
+  const verdictCounts = (newestAgeSeconds: number | undefined) => ({
+    items_seen: 40,
+    items_indexed: 40,
+    items_changed: 0,
+    ...captureFreshnessCounts(captureFreshness(
+      newestAgeSeconds === undefined ? undefined : at(newestAgeSeconds + 5 * 60),
+      NOW.getTime() - 5 * 60 * 1000,
+      threshold,
+    )),
+  });
+  const captureSource = (sourceId: string, corpusId: string, taskId: string, newestAgeSeconds: number | undefined, lateRefresh = false) => ({
+    ...schedulerSource(sourceId, corpusId, lateRefresh ? 30 : 0.1),
+    ...(lateRefresh ? { stale_sync_anomaly: true } : {}),
+    tasks: [{
+      id: taskId,
+      kind: 'sync' as const,
+      running: false,
+      consecutive_failures: 0,
+      last_success_at: pulledAt,
+      last_attempt_at: pulledAt,
+      last_result: { status: 'idle' as const, counts: verdictCounts(newestAgeSeconds) },
+    }] as unknown as ReturnType<typeof schedulerSource>['tasks'],
+  });
+  const linkedTenMinutesAgo = new Date(NOW.getTime() - 10 * 60 * 1000).toISOString();
+  const captureRuntime: Record<string, DashboardCaptureRuntime> = blocked
+    ? {
+        'whatsapp.personal.messages': { supervisor: { state: 'blocked', reason: 'session_missing' }, scope: { kind: 'whole_account' } },
+        'telegram.messages': { supervisor: { state: 'blocked', reason: 'secret_missing' }, scope: { kind: 'chats', count: 5 } },
+      }
+    : awaiting
+      ? {
+          'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: { kind: 'chats', count: 3 }, paired_at: linkedTenMinutesAgo },
+          'telegram.messages': { supervisor: { state: 'running' }, scope: { kind: 'chats', count: 5 }, paired_at: linkedTenMinutesAgo },
+        }
+    : helperDown
+      ? {
+          'whatsapp.personal.messages': { supervisor: { state: 'blocked', reason: 'helper_exited' }, scope: { kind: 'whole_account' } },
+          'telegram.messages': { supervisor: { state: 'stopped', reason: 'grant_missing' } },
+        }
+    : late
+      ? { 'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: { kind: 'chats', count: 3 } } }
+    : restarting
+      ? {
+          'whatsapp.personal.messages': { supervisor: { state: 'stopped', reason: 'restarting' }, scope: { kind: 'whole_account' } },
+          'telegram.messages': { supervisor: { state: 'running' }, scope: { kind: 'chats', count: 5 } },
+        }
+    : {
+        'whatsapp.personal.messages': { supervisor: { state: 'running' }, scope: stale ? { kind: 'chats', count: 3 } : { kind: 'whole_account' } },
+        'telegram.messages': { supervisor: { state: stale ? 'stopped' : 'running' }, scope: { kind: 'chats', count: 5 } },
+      };
+  return buildSourceDashboardViewModel({
+    sourceIndexStatus: status,
+    schedulerStatus: scheduler([
+      captureSource('whatsapp.personal.messages', 'secure_local.whatsapp.messages', 'whatsapp.personal.messages_store_pull',
+        unavailable ? undefined : stale || awaiting || late ? 3 * 86_400 : 2 * 60, late),
+      captureSource('telegram.messages', 'internal.telegram.messages', 'telegram.messages_store_pull',
+        unavailable || awaiting ? undefined : stale ? 20 * 3_600 : 4 * 60),
+    ]),
+    sovereigntyEngine: engine,
+    connectedHandleRegistry: registry([]),
+    apiKeyAvailability: {},
+    oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID },
+    oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
+    googlePilotClientConfigured: true,
+    oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+    captureRuntime,
+    now: NOW,
+  });
+}
+
+/**
  * Delete indexed data (owner, 2026-10-23). Readwise connected and fresh;
  * Dropbox disconnected with its index still on the computer
  * ('delete-data': the ⋯ menu offers Delete indexed data), or after the delete
@@ -1085,6 +1201,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'local-files-finding', 'local-files-finding-page', 'local-files-sync-checking', 'local-files-sync-checked',
   'local-files-picker', 'local-files-picker-waiting', 'local-files-picker-denied', 'local-files-picker-helper',
   'delete-data', 'delete-data-done',
+  'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late', 'capture-restarting',
   ...ARCHIVE_STATES,
 ] as const;
 

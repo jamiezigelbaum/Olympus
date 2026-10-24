@@ -140,7 +140,8 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
       populated: () => populated(),
       // The chosen folder is gone: the source cannot read it, and the row has to say so and offer a way to fix it.
       failed: async () => {
-        const first = await populated();
+        // Not strict: when the crawl reaches this state again the folder was already gone once, and the card goes on listing it as missing until the engine's next recovery check (ten minutes on), although it is back and indexed. It is about to be moved away again either way.
+        const first = await populated(false);
         if (!first.ok) return first;
         renameSync(folder, away);
         let card: any;
