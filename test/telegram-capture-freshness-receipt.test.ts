@@ -280,4 +280,77 @@ describe('readTelegramCaptureSpoolNewestCapturedAt', () => {
       f.close();
     }
   });
+
+  // The importer skips a record its own validation rejects, so such a record
+  // must not make a feed that imports nothing read fresh. Each of these parses
+  // as JSON and carries a current captured_at.
+  const withChange = (change: (value: Record<string, any>) => void, messageId = '9'): string => {
+    const value = JSON.parse(record(messageId, '2026-10-20T12:55:00.000Z')) as Record<string, any>;
+    change(value);
+    return JSON.stringify(value) + '\n';
+  };
+  const invalidRecords: Record<string, string> = {
+    'no message at all': withChange((value) => { delete value.message; }),
+    'a message with no id': withChange((value) => { delete value.message.id; }),
+    'a capture identity that does not match its message': withChange((value) => { value.capture_id = 'f'.repeat(64); }),
+    'a conversation that is not the one it declares': withChange((value) => { value.chat_scope = `${ACCOUNT}:chat:other`; }),
+    'an unsupported schema version': withChange((value) => { value.schema_version = 2; }),
+    'a classification that disagrees with its trust domain': withChange((value) => { value.classification.trust_domain = 'secure_local'; }),
+  };
+
+  for (const [name, line] of Object.entries(invalidRecords)) {
+    test(`a record with ${name} is not a capture, whatever its timestamp says`, () => {
+      const f = fixture({ '2026-10-20.jsonl': line });
+      try {
+        expect(readTelegramCaptureSpoolNewestCapturedAt(f.spoolDir)).toBeUndefined();
+      } finally {
+        f.close();
+      }
+    });
+
+    test(`a spool of nothing but records with ${name} reads unavailable on the receipt, not fresh`, async () => {
+      const f = fixture({ '2026-10-20.jsonl': line + line.replace('"9"', '"10"') });
+      try {
+        const sync = createTelegramConnectorStoreSyncHandler({
+          stores: f.stores,
+          spoolDir: f.spoolDir,
+          now: at('2026-10-20T13:00:00.000Z'),
+        });
+        const receipt = await sync.pull();
+        expect(receipt.capture).toEqual({ status: 'unavailable', threshold_seconds: DEFAULT_CAPTURE_STALE_THRESHOLD_SECONDS });
+        expect(receipt.counts).toMatchObject({ capture_fresh: 0, capture_unavailable: 1 });
+      } finally {
+        f.close();
+      }
+    });
+  }
+
+  test('a newer invalid record does not hide an older good one: the age is the good one\'s', () => {
+    const f = fixture({
+      '2026-10-20.jsonl': record('1', CAPTURED_AT) + invalidRecords['no message at all'],
+      '2026-10-21.jsonl': invalidRecords['a message with no id']!,
+    });
+    try {
+      expect(readTelegramCaptureSpoolNewestCapturedAt(f.spoolDir)).toBe(CAPTURED_AT);
+    } finally {
+      f.close();
+    }
+  });
+
+  test('repeated invalid records keep a broken feed stale rather than fresh', async () => {
+    const f = fixture({
+      '2026-10-20.jsonl': record('1', CAPTURED_AT) + Object.values(invalidRecords).join(''),
+    });
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({
+        stores: f.stores,
+        spoolDir: f.spoolDir,
+        spoolStaleThresholdSeconds: 3_600,
+        now: at('2026-10-20T13:00:00.000Z'),
+      });
+      expect((await sync.pull()).capture).toEqual({ status: 'stale', threshold_seconds: 3_600, age_seconds: 10_800 });
+    } finally {
+      f.close();
+    }
+  });
 });

@@ -343,13 +343,15 @@ export function readTelegramCaptureSpool(options: {
 }
 
 /**
- * When the newest complete record in the spool was captured, or undefined when
- * no record carries a readable time. The helper only appends and names files
- * by date, so the last complete, parseable record of the newest file that has
- * one is the newest capture (the helper's own gateway report takes the same
- * `captured_at` over every record). Never throws: a missing, unreadable or
- * empty spool simply has no time, which the freshness verdict reads as
- * "unavailable", and a damaged record is skipped as the product pull skips it.
+ * When the newest record the importer would accept was captured, or undefined
+ * when no such record exists. The helper only appends and names files by
+ * date, so the last complete record of the newest file that has one is the
+ * newest capture. A record counts only if the connector's own validation
+ * accepts it (schema, declared conversation, classification, capture
+ * identity): the pull skips anything else as malformed, so a damaged record
+ * with a current timestamp must not make a feed that imports nothing read
+ * fresh. Never throws: a missing, unreadable or empty spool simply has no
+ * time, which the freshness verdict reads as "unavailable".
  */
 export function readTelegramCaptureSpoolNewestCapturedAt(spoolDir: string): string | undefined {
   let names: string[];
@@ -372,25 +374,16 @@ export function readTelegramCaptureSpoolNewestCapturedAt(spoolDir: string): stri
     // A final fragment without its newline is a write in progress.
     const lines = payload.slice(0, payload.lastIndexOf('\n') + 1).split('\n');
     for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const capturedAt = spoolLineCapturedAt(lines[index]!);
-      if (capturedAt !== undefined) return capturedAt;
+      const line = lines[index]!;
+      if (!line.trim()) continue;
+      try {
+        return parseTelegramCaptureSpoolRecord(line).capturedAt;
+      } catch {
+        // Skipped exactly as the product pull skips it.
+      }
     }
   }
   return undefined;
-}
-
-function spoolLineCapturedAt(line: string): string | undefined {
-  if (!line.trim()) return undefined;
-  try {
-    const record = JSON.parse(line) as unknown;
-    if (!record || typeof record !== 'object' || Array.isArray(record)) return undefined;
-    const { provider, captured_at: capturedAt } = record as Record<string, unknown>;
-    if (provider !== 'telegram' || typeof capturedAt !== 'string') return undefined;
-    const at = Date.parse(capturedAt);
-    return Number.isFinite(at) ? new Date(at).toISOString() : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 /**
