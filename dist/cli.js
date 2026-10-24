@@ -15861,6 +15861,36 @@ function startsWithFromLine(head) {
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
 }
+function lastNameOf(name) {
+  return name.split("/").pop() ?? name;
+}
+function whatsAppNoiseName(name) {
+  const base = lastNameOf(name);
+  return name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/") || base.startsWith("._") || base === ".DS_Store";
+}
+function whatsAppNamed(name) {
+  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
+}
+function startsLikeWhatsAppChat(head) {
+  if (!head || head.length < 10 || head.includes(0))
+    return false;
+  for (const raw of new TextDecoder("utf-8").decode(head).split(`
+`).slice(0, 8)) {
+    const line = raw.replace(WHATSAPP_LINE_NOISE, "").replace(WHATSAPP_NARROW_SPACES, " ").replace(/\r$/, "");
+    if (line.trim() === "")
+      continue;
+    return WHATSAPP_FIRST_LINE.test(line);
+  }
+  return false;
+}
+function whatsAppIsExport(entry, needName) {
+  if (entry.kind !== "file")
+    return false;
+  if (entry.members) {
+    return entry.members.some((member) => member.kind === "file" && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
+  }
+  return entry.name.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
+}
 function archiveHeadText(head) {
   return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
 }
@@ -16054,7 +16084,10 @@ function archiveFormatsOfFamily(family, formats = ARCHIVE_FORMATS) {
   return formats.filter((format) => format.family === family);
 }
 function archiveProbeNames(formats = ARCHIVE_FORMATS) {
-  return [...new Set(formats.flatMap((format) => format.probeNames ?? []))];
+  return [...new Set(formats.flatMap((format) => [...format.probeNames ?? [], ...format.signatureNames ?? []]))];
+}
+function archiveSignatureNames(formats = ARCHIVE_FORMATS) {
+  return [...new Set(formats.flatMap((format) => format.signatureNames ?? []))];
 }
 function archiveProbeNameMatches(name, patterns) {
   if (!patterns || patterns.length === 0)
@@ -16102,16 +16135,20 @@ function isArchiveCorpusId(corpusId, trustDomain) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
+function archiveFilesNotLookedAt(probe) {
+  return (probe.notLookedAt ?? 0) + [probe.chosen, ...probe.children].reduce((sum, entry) => sum + (entry.membersNotLookedAt ?? 0), 0);
+}
 function detectArchiveFormat(probe, formats = ARCHIVE_FORMATS) {
   const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
   const settled = new Set(onHeads.flatMap((match) => match.files));
   const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled, formats), formats);
-  const incomplete = probe.readsRanOut?.() === true;
-  if (matches.length === 1 && !incomplete)
+  const ranOut = probe.readsRanOut?.() === true;
+  if (matches.length === 1 && !ranOut)
     return { kind: "match", format: matches[0].format, files: matches[0].files };
   if (matches.length > 1)
     return { kind: "ambiguous", formats: matches.map((match) => match.format.id) };
   const supported = formats.map((format) => format.label);
+  const incomplete = ranOut || archiveFilesNotLookedAt(probe) + (probe.othersNotLookedAt ?? 0) > 0;
   const advice = [unsupportedAdvice(probe, formats), incomplete ? ARCHIVE_LOOK_INCOMPLETE_ADVICE : undefined].filter((said) => said !== undefined).join(" ");
   return advice ? { kind: "none", supported, advice } : { kind: "none", supported };
 }
@@ -16171,7 +16208,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through everything you chose to see which parts are exports, because there is a lot of it or some parts are very large. Choose just the export file, or a folder or zip that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -16188,6 +16225,33 @@ var init_archive_formats = __esm(() => {
         return;
       const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
       return inner ? [inner.relPath] : undefined;
+    }
+  });
+  WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
+  WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
+  WHATSAPP_FIRST_LINE = new RegExp(`^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`, "i");
+  WHATSAPP_LINE_NOISE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  WHATSAPP_NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
+  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
+    id: "whatsapp_chat",
+    label: "WhatsApp chat export",
+    family: "chat",
+    provider: "whatsapp_export",
+    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
+    citationLabel: "WhatsApp",
+    probeNames: Object.freeze(["*.txt", "*.zip"]),
+    signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
+      const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
+      return found.length > 0 ? found : undefined;
+    },
+    unconfirmed(probe) {
+      if (probe.chosen.kind === "file")
+        return 0;
+      return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
     }
   });
   leniencyDecoder = new TextDecoder("utf-8");
@@ -16282,6 +16346,7 @@ var init_archive_formats = __esm(() => {
   });
   ARCHIVE_FORMATS = Object.freeze([
     MBOX_ARCHIVE_FORMAT,
+    WHATSAPP_ARCHIVE_FORMAT,
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
@@ -16292,7 +16357,10 @@ var init_archive_formats = __esm(() => {
     itemTruncated: "item_truncated",
     assumption: "assumption",
     sectionNotImported: "section_not_imported",
-    fileDamaged: "file_damaged"
+    fileDamaged: "file_damaged",
+    itemRepeated: "item_repeated",
+    filesNotLookedAt: "files_not_looked_at",
+    filesUnconfirmed: "files_unconfirmed"
   };
   ArchiveImportStoppedError = class ArchiveImportStoppedError extends Error {
     code;
@@ -16426,7 +16494,7 @@ function placedAccount(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT)
   } catch (error) {
     if (error instanceof SourceRegistryError)
       return { source_id: sourceId, slot, layout: hasAccountFolderOnDisk(sourceId, slot, env) ? "folder" : "legacy" };
-    throw error;
+    return { source_id: sourceId, slot, layout: "legacy" };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
 }
@@ -16487,7 +16555,12 @@ function pinnedLegacyBy(sourceId, env) {
   return;
 }
 function dataRootState(env) {
-  const root = olympusDataRoot(env);
+  let root;
+  try {
+    root = olympusDataRoot(env);
+  } catch {
+    return "unreadable";
+  }
   try {
     const link = lstatSync14(root);
     const target = link.isSymbolicLink() ? statSync12(root) : link;
@@ -36595,21 +36668,40 @@ function openConnectorStore(account, options, env = process.env) {
   if (adoptionEnabled && options.readOnly !== true) {
     const entry = findRegistryAccount(registry, account.sourceId, slot);
     if (!entry?.corpus_ids.includes(options.corpusId))
-      adopt(env, account.sourceId, slot, options.corpusId, options.dbPath);
+      adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
   }
   return new LocalConnectorStore(options);
 }
 function openTierLedger(account, options, env = process.env) {
-  assertOpenable(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeSidecar(env, account, options.dbPath);
   return new TierLedger(options);
 }
 function openSecretLocations(account, options, env = process.env) {
-  assertOpenable(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeSidecar(env, account, options.dbPath, options.readOnly);
   return new SecretLocationsIndex(options);
 }
 function openTierSniffer(account, options, env = process.env) {
-  assertOpenable(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeSidecar(env, account, options.dbPath, options.readOnly);
   return new TierSnifferStore(options);
+}
+function recordAccountPlacement(account, path, env = process.env) {
+  if (!adoptionEnabled)
+    return;
+  placeBeforeFirstFile(env, readSourceRegistry(env), account, path);
+}
+function placeSidecar(env, account, path, readOnly) {
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  if (readOnly !== true)
+    placeBeforeFirstFile(env, registry, account, path);
+}
+function placeBeforeFirstFile(env, registry, account, path) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  if (!adoptionEnabled || path === ":memory:")
+    return;
+  if (findRegistryAccount(registry, account.sourceId, slot))
+    return;
+  adopt(env, account.sourceId, slot, path);
 }
 function sourceAccountUnavailableReason(account, env = process.env) {
   let registry;
@@ -36645,7 +36737,7 @@ function assertOpenable(registry, sourceId, slot) {
   if (state !== undefined && state !== "active")
     throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
-function adopt(env, sourceId, slot, corpusId, dbPath) {
+function adopt(env, sourceId, slot, dbPath, corpusId) {
   updateSourceRegistry(env, (registry) => {
     assertOpenable(registry, sourceId, slot);
     const entry = findRegistryAccount(registry, sourceId, slot);
@@ -36655,10 +36747,10 @@ function adopt(env, sourceId, slot, corpusId, dbPath) {
         slot,
         state: "active",
         layout: adoptedLayout(env, sourceId, slot, dbPath),
-        corpus_ids: [corpusId],
+        corpus_ids: corpusId === undefined ? [] : [corpusId],
         created_at: new Date().toISOString()
       });
-    } else if (!entry.corpus_ids.includes(corpusId)) {
+    } else if (corpusId !== undefined && !entry.corpus_ids.includes(corpusId)) {
       entry.corpus_ids.push(corpusId);
     }
   });
@@ -41564,10 +41656,10 @@ var init_vocabulary = __esm(() => {
   };
   ARCHIVE_PICK_INTRO = archivePickIntro();
   DASHBOARD_ARCHIVE_NOUNS = {
-    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
-    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes" },
-    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items" }
+    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
+    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "Snapshot, not updated" },
+    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes", snapshot: "" },
+    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
   };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
@@ -41641,6 +41733,9 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+      message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
       note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
       note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
       note_too_large: { one: "1 note too large to read", many: "{n} notes too large to read" },
@@ -41650,9 +41745,12 @@ var init_vocabulary = __esm(() => {
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
       media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, which part of a date is the day, that a line shaped like the start of a message is one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, which parts of dates are the day, that lines shaped like the start of a message are one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
+      item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      files_not_looked_at: { one: "1 file in what you chose was not looked at, so it was not imported if it is an export", many: "{n} files in what you chose were not looked at, so any of them that are exports were not imported" },
+      files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
@@ -56940,10 +57038,12 @@ function defaultXBookmarksReconcileStateDbPath(env = process.env, usageDbPath) {
 class LocalXBookmarksReconcileStateStore {
   dbPath;
   db;
-  constructor(dbPath = defaultXBookmarksReconcileStateDbPath()) {
+  constructor(dbPath = defaultXBookmarksReconcileStateDbPath(), env = process.env) {
     this.dbPath = dbPath;
-    if (dbPath !== ":memory:")
+    if (dbPath !== ":memory:") {
+      recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
       mkdirSync27(dirname43(dbPath), { recursive: true, mode: 448 });
+    }
     this.db = new Database11(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync14(dbPath, 384);
@@ -59273,6 +59373,7 @@ function validDate4(value) {
 var X_BOOKMARKS_RECONCILE_STATE_STORE_ID = "x-bookmarks-reconcile-state", X_BOOKMARKS_RECONCILE_STATE_SCHEMA_VERSION = 11, MAX_ACCOUNT_LENGTH3 = 256, MAX_TOKEN_LENGTH = 4096, MAX_FOLDER_ID_LENGTH = 512, MAX_FOLDER_NAME_LENGTH = 4096, MAX_POST_ID_LENGTH = 256, MAX_POST_JSON_BYTES = 1e6, MAX_PROVIDER_USER_ID_LENGTH = 256, RECONCILE_ALGORITHM_VERSION = 6, X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2, PRESERVATION_FLOOR_MAX_UNREVIEWED_REMOVAL_BPS = 2500, PRESERVATION_FLOOR_MIN_UNREVIEWED_REMOVALS = 20, FOLDER_FACET_REFRESH_LEASE_MS, ReconcileStageLimitError, ReconcilePaginationCycleError, ReconcileStagedRecoveryRequiredError, ReconcilePreservationFloorError, ReconcileWindowBoundaryMismatchError;
 var init_reconcile_state = __esm(() => {
   init_source_placement();
+  init_source_storage();
   init_connector2();
   init_sqlite_migrations();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
@@ -60169,7 +60270,7 @@ function stagedRecoveryRequiredError(input) {
 }
 async function withReconcileStateStore(options, env, run) {
   const provided = options.reconcileStateStore;
-  const store = provided ?? new LocalXBookmarksReconcileStateStore(defaultXBookmarksReconcileStateDbPath(env, options.usageStore.dbPath));
+  const store = provided ?? new LocalXBookmarksReconcileStateStore(defaultXBookmarksReconcileStateDbPath(env, options.usageStore.dbPath), env);
   try {
     return await run(store);
   } finally {
@@ -66491,9 +66592,11 @@ function readState6(path) {
 class ArchiveImportStateStore {
   path;
   now;
+  env;
   constructor(options) {
     this.path = options.path;
     this.now = options.now ?? (() => new Date);
+    this.env = options.env ?? process.env;
   }
   list() {
     return readState6(this.path).archives;
@@ -66503,13 +66606,14 @@ class ArchiveImportStateStore {
   }
   create(input) {
     const at = this.now().toISOString();
+    const { skipped, ...rest } = input;
     const record = {
       archive_id: randomUUID16(),
-      ...input,
+      ...rest,
       status: "importing",
       created_at: at,
       updated_at: at,
-      findings: emptyArchiveFindings()
+      findings: { ...emptyArchiveFindings(), skipped: { ...skipped ?? {} } }
     };
     this.mutate((state) => {
       state.archives.push(record);
@@ -66533,36 +66637,68 @@ class ArchiveImportStateStore {
     });
     return updated;
   }
-  recordFindings(archiveId, findings, position) {
-    if (findings.length === 0 && !position)
+  recordFindings(archiveId, findings, position, repeated = 0, items) {
+    if (findings.length === 0 && !position && !items)
       return;
     this.update(archiveId, (record) => {
       const read = record.read_position;
       const movesOn = position !== undefined && record.status === "importing" && (!read || position.fileIndex > read.file_index || position.fileIndex === read.file_index && position.offset > read.offset);
-      if (findings.length === 0 && !movesOn)
+      const listed = record.findings.listed_through;
+      const after = (at) => !listed || at.fileIndex > listed.file_index || at.fileIndex === listed.file_index && at.offset > listed.offset;
+      const freshRepeats = record.status === "importing" && items ? items.repeatedAt.filter(after).length : 0;
+      const itemsMoveOn = record.status === "importing" && items?.through !== undefined && after(items.through);
+      if (findings.length === 0 && !movesOn && freshRepeats === 0 && !itemsMoveOn)
         return false;
       if (movesOn)
         record.read_position = { file_index: position.fileIndex, offset: position.offset };
       const tally = record.findings;
+      if (freshRepeats > 0) {
+        tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] = (tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] ?? 0) + freshRepeats;
+      }
+      if (itemsMoveOn)
+        tally.listed_through = { file_index: items.through.fileIndex, offset: items.through.offset };
+      if (movesOn && repeated > 0) {
+        tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] = (tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] ?? 0) + repeated;
+      }
       const through = tally.through;
       const before = (fileIndex, offset) => through !== undefined && (fileIndex < through.file_index || fileIndex === through.file_index && offset <= through.offset);
       let last = through;
+      const reach = (fileIndex, offset) => {
+        if (!last || fileIndex > last.file_index || fileIndex === last.file_index && offset > last.offset) {
+          last = { file_index: fileIndex, offset };
+        }
+      };
       for (const finding of findings) {
-        if (before(finding.fileIndex, finding.offset))
+        let counted = Math.max(1, finding.count ?? 1);
+        let firstCounted = finding.offset;
+        let lastCounted = finding.offset;
+        if (finding.at) {
+          counted = 0;
+          for (const offset of finding.at) {
+            if (before(finding.fileIndex, offset))
+              continue;
+            if (counted === 0 || offset < firstCounted)
+              firstCounted = offset;
+            if (counted === 0 || offset > lastCounted)
+              lastCounted = offset;
+            counted += 1;
+          }
+        } else if (before(finding.fileIndex, finding.offset)) {
+          continue;
+        }
+        if (counted === 0)
           continue;
         const bucket = finding.class === "gap" ? tally.gaps : tally.skipped;
-        bucket[finding.kind] = (bucket[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+        bucket[finding.kind] = (bucket[finding.kind] ?? 0) + counted;
         if (finding.class === "gap") {
           const byFile = tally.gaps_by_file ??= {};
           const inFile = byFile[String(finding.fileIndex)] ??= {};
-          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + counted;
         }
         if (finding.class === "gap" && tally.samples.length < ARCHIVE_FINDING_SAMPLES_MAX) {
-          tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: finding.offset });
+          tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: firstCounted });
         }
-        if (!last || finding.fileIndex > last.file_index || finding.fileIndex === last.file_index && finding.offset > last.offset) {
-          last = { file_index: finding.fileIndex, offset: finding.offset };
-        }
+        reach(finding.fileIndex, lastCounted);
       }
       if (last)
         tally.through = last;
@@ -66579,6 +66715,7 @@ class ArchiveImportStateStore {
     return removed;
   }
   mutate(change) {
+    recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
     mkdirSync29(dirname45(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readState6(this.path);
@@ -66592,7 +66729,9 @@ class ArchiveImportStateStore {
 var ARCHIVE_IMPORTS_SOURCE_ID2 = "archive.imports", ARCHIVE_FINDING_SAMPLES_MAX = 50, ArchiveRecordFormError;
 var init_state = __esm(() => {
   init_source_placement();
+  init_source_storage();
   init_atomic_file();
+  init_archive_formats();
   init_file_lease();
   ArchiveRecordFormError = class ArchiveRecordFormError extends Error {
     constructor(detail) {
@@ -68171,12 +68310,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -74838,6 +74977,9 @@ class ZipMemberReader {
   compressedOffset = 0;
   inflateFinished = false;
   failure;
+  replayed = 0;
+  replayStep;
+  catchUpEnded = false;
   constructor(archive, entry, dataStart, options) {
     this.archive = archive;
     this.entry = entry;
@@ -74847,6 +74989,10 @@ class ZipMemberReader {
       throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
     }
     this.startAt = start;
+    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
+      throw new RangeError("replayStepBytes must be a positive whole number");
+    }
+    this.replayStep = options.replayStepBytes;
     this.crcKnown = start === 0;
     if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
       this.inflateFinished = true;
@@ -74871,7 +75017,7 @@ class ZipMemberReader {
       this.compressedOffset = 0;
       this.out = [...kept.out];
       this.inflateFinished = kept.inflateFinished;
-      this.pos = start;
+      this.pos = kept.reached;
       this.runningCrc = kept.crc;
       this.crcKnown = kept.crcKnown;
       return;
@@ -74904,36 +75050,32 @@ class ZipMemberReader {
     return Math.max(this.pos, this.startAt);
   }
   get crc32() {
-    return this.crcKnown ? this.runningCrc : undefined;
+    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
+  }
+  get catchingUp() {
+    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
+  }
+  get replayedBytes() {
+    return this.replayed;
   }
   get end() {
     return this.result;
   }
   next() {
-    if (this.closed)
-      throw new Error("This member reader was suspended or closed.");
-    if (this.failure)
-      throw this.failure;
+    this.assertUsable();
+    if (!this.replay()) {
+      this.heldLast = 0;
+      this.lastChunk = new Uint8Array(0);
+      return this.lastChunk;
+    }
     for (;; ) {
-      let chunk = this.out.shift();
+      const chunk = this.out.shift();
       if (chunk === undefined) {
         if (!this.fillOrFail()) {
           this.conclude();
           return;
         }
         continue;
-      }
-      if (this.pos < this.startAt) {
-        const skip = this.startAt - this.pos;
-        if (chunk.length <= skip) {
-          this.runningCrc = crc32Update(this.runningCrc, chunk);
-          this.pos += chunk.length;
-          continue;
-        }
-        const head = chunk.subarray(0, skip);
-        this.runningCrc = crc32Update(this.runningCrc, head);
-        this.pos += head.length;
-        chunk = chunk.subarray(skip);
       }
       this.crcBeforeLast = this.runningCrc;
       if (this.crcKnown)
@@ -74943,6 +75085,39 @@ class ZipMemberReader {
       this.pos += chunk.length;
       return chunk;
     }
+  }
+  catchUp() {
+    this.assertUsable();
+    return this.replay();
+  }
+  assertUsable() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
+  }
+  replay() {
+    const stepFrom = this.replayed;
+    while (this.pos < this.startAt && !this.catchUpEnded) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep)
+          return false;
+        if (!this.fillOrFail()) {
+          this.catchUpEnded = true;
+          break;
+        }
+        continue;
+      }
+      const skip = this.startAt - this.pos;
+      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
+      this.runningCrc = crc32Update(this.runningCrc, head);
+      this.pos += head.length;
+      this.replayed += head.length;
+      if (head.length < chunk.length)
+        this.out.unshift(chunk.subarray(head.length));
+    }
+    return true;
   }
   unread(count) {
     if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
@@ -74964,11 +75139,12 @@ class ZipMemberReader {
     if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
       return;
     const pending = this.out.reduce((sum2, chunk) => sum2 + chunk.length, 0);
-    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES || this.pos < this.startAt)
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES)
       return;
     const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
     const state = {
-      position: this.pos,
+      position: Math.max(this.pos, this.startAt),
+      reached: this.pos,
       retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
       memberKey: memberKey(this.entry),
       crc: this.runningCrc,
@@ -75117,7 +75293,7 @@ function readZipMemberHead(archive, entry, maxBytes) {
 function zipFindingOffset(memberIndex, offsetInMember) {
   return memberIndex * 8589934592 + Math.min(Math.max(0, offsetInMember), 8589934591);
 }
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, ZIP_OVERLAP_SORT_MAX_ENTRIES = 262144, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, ZIP_OVERLAP_SORT_MAX_ENTRIES = 262144, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
   init_browser();
   init_archive_formats();
@@ -75126,6 +75302,7 @@ var init_zip_reader = __esm(() => {
   ZIP_READ_CHUNK_BYTES = 1024 * 1024;
   ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
   ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
   ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
   ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
   ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
@@ -75226,7 +75403,7 @@ function lastSegment(name) {
   const parts = name.split("/").filter((part) => part !== "");
   return parts[parts.length - 1] ?? name;
 }
-function probeZipMembers(root, relPath, probeNames, allowance) {
+function probeZipMembers(root, relPath, probeNames, signatureNames, allowance) {
   let reader;
   try {
     reader = root.openFile(relPath);
@@ -75238,31 +75415,51 @@ function probeZipMembers(root, relPath, probeNames, allowance) {
   try {
     const archive = ZipArchive.open(reader);
     const first = [];
-    const named = [];
+    const signaturePast = [];
+    const askedPast = [];
+    let signatureTotal = 0;
+    let askedTotal = 0;
     for (const entry of archive.entries()) {
+      const signature = !entry.isDirectory && archiveProbeNameMatches(entry.name, signatureNames);
+      const asked2 = !signature && !entry.isDirectory && archiveProbeNameMatches(entry.name, probeNames);
+      if (signature)
+        signatureTotal += 1;
+      if (asked2)
+        askedTotal += 1;
       if (first.length < ARCHIVE_PROBE_MAX_CHILDREN)
         first.push(entry);
-      else if (named.length < ARCHIVE_PROBE_MAX_NAMED && archiveProbeNameMatches(entry.name, probeNames))
-        named.push(entry);
+      else if (signature) {
+        if (signaturePast.length < ARCHIVE_PROBE_MAX_NAMED)
+          signaturePast.push(entry);
+      } else if (asked2 && askedPast.length < ARCHIVE_PROBE_MAX_NAMED)
+        askedPast.push(entry);
     }
-    const asked = [...first, ...named].filter((entry) => !entry.isDirectory && archiveProbeNameMatches(entry.name, probeNames));
-    const others = first.filter((entry) => !entry.isDirectory && !asked.includes(entry));
+    const members = [...first, ...signaturePast, ...askedPast];
+    const files = members.filter((entry) => !entry.isDirectory);
+    const signatures = files.filter((entry) => archiveProbeNameMatches(entry.name, signatureNames));
+    const asked = files.filter((entry) => !signatures.includes(entry) && archiveProbeNameMatches(entry.name, probeNames));
+    const others = first.filter((entry) => !entry.isDirectory && !signatures.includes(entry) && !asked.includes(entry));
+    const readOrder = [...signatures, ...asked, ...others].slice(0, PROBE_MAX_MEMBER_HEADS);
     const heads = new Map;
-    for (const entry of [...asked, ...others].slice(0, PROBE_MAX_MEMBER_HEADS)) {
+    for (const entry of readOrder) {
       const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
       if (head)
         heads.set(entry.index, head);
     }
-    return [...first, ...named].map((entry) => {
-      const head = heads.get(entry.index);
-      return {
-        relPath: entry.name,
-        name: lastSegment(entry.name),
-        kind: entry.isDirectory ? "directory" : "file",
-        ...head ? { head } : {},
-        ...head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}
-      };
-    });
+    const askedRead = readOrder.filter((entry) => asked.includes(entry)).length;
+    return {
+      members: members.map((entry) => {
+        const head = heads.get(entry.index);
+        return {
+          relPath: entry.name,
+          name: lastSegment(entry.name),
+          kind: entry.isDirectory ? "directory" : "file",
+          ...head ? { head } : {},
+          ...head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}
+        };
+      }),
+      notLookedAt: signatureTotal > 0 ? 0 : Math.max(0, askedTotal - askedRead)
+    };
   } catch (error) {
     if (error instanceof ZipFormatError || error instanceof ScopeSafeError)
       return;
@@ -75275,34 +75472,42 @@ function matchesAnyName(entry, probeNames) {
   return archiveProbeNameMatches(entry.name, probeNames);
 }
 function probeArchivePath(root, chosenRelPath, options = {}) {
-  const probeNames = options.probeNames ?? archiveProbeNames();
+  const signatureNames = options.signatureNames ?? archiveSignatureNames();
+  const probeNames = [...new Set([...options.probeNames ?? archiveProbeNames(), ...signatureNames])];
   const stat2 = chosenRelPath === "" ? root.statRelative("") : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat2.kind === "file") {
     const alone = scanAllowance(options.scanBytes);
     const zipShare = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.document ?? RECORD_PROBE_MAX_SCAN_BYTES));
     const head = fileHead(root, chosenRelPath);
-    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, zipShare) : undefined;
+    const zip = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, signatureNames, zipShare) : undefined;
     return {
       chosen: {
         relPath: "",
         name,
         kind: "file",
         ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath, alone) } : {},
-        ...members ? { members } : {}
+        ...zip ? { members: zip.members } : {},
+        ...zip && zip.notLookedAt > 0 ? { membersNotLookedAt: zip.notLookedAt } : {}
       },
       children: [],
-      ...members ? { readsRanOut: zipShare.sharedRanOut } : {}
+      ...zip ? { readsRanOut: zipShare.sharedRanOut } : {}
     };
   }
   if (stat2.kind !== "directory")
     throw new ScopeSafeError("not_regular", "neither a file nor a folder");
   const folderAllowance = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES));
   const everything = root.list(chosenRelPath);
+  const beyond = everything.slice(ARCHIVE_PROBE_MAX_CHILDREN).filter((entry) => entry.kind !== "directory" && matchesAnyName(entry, probeNames));
+  const askedBeyond = [
+    ...beyond.filter((entry) => archiveProbeNameMatches(entry.name, signatureNames)),
+    ...beyond.filter((entry) => !archiveProbeNameMatches(entry.name, signatureNames))
+  ];
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
-    ...everything.slice(ARCHIVE_PROBE_MAX_CHILDREN).filter((entry) => matchesAnyName(entry, probeNames)).slice(0, ARCHIVE_PROBE_MAX_NAMED)
+    ...askedBeyond.slice(0, ARCHIVE_PROBE_MAX_NAMED)
   ];
+  const notLookedAt = Math.max(0, askedBeyond.length - ARCHIVE_PROBE_MAX_NAMED);
   const children = [];
   const kinds = [];
   for (const entry of listed) {
@@ -75318,33 +75523,48 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   }
   const heads = new Map;
   const wanted = listed.map((entry, index) => index).filter((index) => kinds[index] === "file");
+  const asked = wanted.filter((index) => matchesAnyName(listed[index], probeNames));
   const ordered = [
-    ...wanted.filter((index) => matchesAnyName(listed[index], probeNames)),
+    ...asked,
     ...wanted.filter((index) => !matchesAnyName(listed[index], probeNames))
-  ].slice(0, PROBE_MAX_FILE_HEADS);
+  ].slice(0, Math.max(PROBE_MAX_FILE_HEADS, asked.length));
   for (const index of ordered) {
     const head = fileHead(root, joinRelative(chosenRelPath, listed[index].name));
     if (head)
       heads.set(index, head);
   }
-  const zips = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index))).slice(0, PROBE_MAX_ZIPS);
+  const askedSet = new Set(asked);
+  const zipsAmongHeads = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index)));
+  const zips = new Set([
+    ...zipsAmongHeads.filter((index) => askedSet.has(index)),
+    ...zipsAmongHeads.filter((index) => !askedSet.has(index)).slice(0, PROBE_MAX_ZIPS)
+  ]);
+  const unlistedOthers = everything.slice(ARCHIVE_PROBE_MAX_CHILDREN).filter((entry) => (entry.kind === "file" || entry.kind === undefined) && !matchesAnyName(entry, probeNames)).length;
+  const othersNotLookedAt = wanted.length - ordered.length + unlistedOthers + (zipsAmongHeads.length - zips.size);
   listed.forEach((entry, index) => {
     const kind = kinds[index];
     if (kind === "directory") {
       children.push({ relPath: entry.name, name: entry.name, kind: "directory" });
     } else if (kind === "file") {
       const head = heads.get(index);
-      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, folderAllowance) : undefined;
+      const zip = zips.has(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, signatureNames, folderAllowance) : undefined;
       children.push({
         relPath: entry.name,
         name: entry.name,
         kind: "file",
         ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name), folderAllowance) } : {},
-        ...members ? { members } : {}
+        ...zip ? { members: zip.members } : {},
+        ...zip && zip.notLookedAt > 0 ? { membersNotLookedAt: zip.notLookedAt } : {}
       });
     }
   });
-  return { chosen: { relPath: "", name, kind: "directory" }, children, readsRanOut: folderAllowance.sharedRanOut };
+  return {
+    chosen: { relPath: "", name, kind: "directory" },
+    children,
+    ...notLookedAt > 0 ? { notLookedAt } : {},
+    ...othersNotLookedAt > 0 ? { othersNotLookedAt } : {},
+    readsRanOut: folderAllowance.sharedRanOut
+  };
 }
 function sha2563(bytes) {
   return createHash47("sha256").update(bytes).digest("hex");
@@ -75515,7 +75735,7 @@ function validApprovedFile(value) {
 function validApproval(value) {
   if (!isRecord6(value) || !isRecord6(value.root_identity) || !Array.isArray(value.files) || value.files.length === 0)
     return false;
-  return typeof value.format === "string" && typeof value.provider === "string" && typeof value.family === "string" && typeof value.label === "string" && typeof value.root_path === "string" && value.root_path.startsWith("/") && typeof value.root_identity.dev === "string" && typeof value.root_identity.ino === "string" && typeof value.chosen_rel_path === "string" && value.files.every(validApprovedFile) && value.manifest_sha256 === archiveManifestSha256(value.files);
+  return typeof value.format === "string" && typeof value.provider === "string" && typeof value.family === "string" && typeof value.label === "string" && typeof value.root_path === "string" && value.root_path.startsWith("/") && typeof value.root_identity.dev === "string" && typeof value.root_identity.ino === "string" && typeof value.chosen_rel_path === "string" && value.files.every(validApprovedFile) && (value.skipped === undefined || isRecord6(value.skipped) && Object.values(value.skipped).every((count) => Number.isSafeInteger(count) && count > 0)) && value.manifest_sha256 === archiveManifestSha256(value.files);
 }
 function validRequest(value) {
   if (!isRecord6(value))
@@ -75547,9 +75767,11 @@ function archivePathLabel(path) {
 class ArchiveImportRequestStore {
   path;
   now;
+  env;
   constructor(options) {
     this.path = options.path;
     this.now = options.now ?? (() => new Date);
+    this.env = options.env ?? process.env;
   }
   list() {
     return readRequests(this.path).requests;
@@ -75674,6 +75896,7 @@ class ArchiveImportRequestStore {
     return changed;
   }
   mutate(change) {
+    recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, this.path, this.env);
     mkdirSync33(dirname49(this.path), { recursive: true, mode: 448 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readRequests(this.path);
@@ -75688,13 +75911,11 @@ var ARCHIVE_IMPORT_PENDING_REQUESTS_MAX = 20, ARCHIVE_IMPORT_OUTCOMES_MAX = 20, 
 var init_requests = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_source_storage();
   init_manifest2();
   init_state();
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
 });
-
-// src/workers/whatsapp/connector.ts
-var init_connector4 = () => {};
 
 // src/core/file-extraction-source.ts
 import { createHash as createHash48 } from "node:crypto";
@@ -75872,7 +76093,6 @@ var init_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/index.ts
 var init_whatsapp = __esm(() => {
-  init_connector4();
   init_live_connector();
   init_store_sync2();
   init_extraction_source();
@@ -76210,6 +76430,7 @@ function deleteOlympusData(options) {
   const missing = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
   assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
+  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
   for (const target of uniqueDeleteTargets) {
     if (existsSync50(target.path))
       assertDeleteTargetSafe(target);
@@ -76950,7 +77171,8 @@ function isStrictlyInside(path, root) {
 }
 function assertRawStateTargetsContained(targets, context2, selectedSource) {
   const stateTargets = targets.filter((target) => target.kind === "source_state_path" && target.allowRecursive);
-  if (stateTargets.length === 0)
+  const overlapTargets = selectedSource ? [...stateTargets, ...targets.filter((target) => target.kind === "account_folder")] : stateTargets;
+  if (overlapTargets.length === 0)
     return;
   const roots = knownOlympusDataRoots(context2).map((root) => ({ lexical: resolve13(root), real: canonicalPath(root) }));
   const refuse2 = (path, why) => {
@@ -76996,14 +77218,33 @@ function assertRawStateTargetsContained(targets, context2, selectedSource) {
   ])
     protectedPaths.add(path);
   const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve13(path), canonicalPath(path)]);
-  for (const target of stateTargets) {
+  for (const target of overlapTargets) {
     const candidates = [resolve13(target.path), canonicalPath(target.path)];
     for (const protectedPath of protectedCanonical) {
       for (const candidate of candidates) {
         if (candidate === protectedPath || isStrictlyInside(protectedPath, candidate) || isStrictlyInside(candidate, protectedPath)) {
+          if (target.kind === "account_folder") {
+            throw new OperationError("invalid_params", `Refusing to delete the account folder because it overlaps another source's or shared Olympus data (${protectedPath}): ${target.path}`, "Check the OLYMPUS_* path overrides, move that data out of this folder or remove the folder by hand. Nothing was deleted.");
+          }
           refuse2(target.path, `because it overlaps another source's or shared Olympus data (${protectedPath})`);
         }
       }
+    }
+  }
+}
+function assertSourcesFolderTargetsUnlinked(targets, context2) {
+  const env = envForContext(context2);
+  const owned = resolve13(olympusDataRoot(env));
+  const sources = resolve13(accountFoldersRoot(env));
+  const ownedReal = canonicalPath(owned);
+  for (const target of targets) {
+    if (target.kind === "account_folder")
+      continue;
+    const lexical = resolve13(target.path);
+    if (!isStrictlyInside(lexical, sources))
+      continue;
+    if (canonicalPath(lexical) !== join60(ownedReal, relative7(owned, lexical))) {
+      throw new OperationError("invalid_params", `Refusing to delete inside the account folders because it, or a folder above it, is a symbolic link: ${target.path}`, "Check the Olympus data folder, then remove what the link points at by hand. Nothing was deleted.");
     }
   }
 }
@@ -93133,7 +93374,7 @@ var init_operations = __esm(() => {
       enum: ["start", "status", "remove"],
       description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).'
     },
-    path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
+    path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, a WhatsApp chat export: its .txt or .zip, or a folder of them, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
     archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
   };
   operations = [
@@ -93568,7 +93809,7 @@ var init_operations = __esm(() => {
     {
       name: "archive_import",
       description: [
-        "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
+        "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.",
         "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
         "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
@@ -133899,8 +134140,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
     const latest = typeof archive.latest === "string" ? archive.latest : "";
-    if (earliest && latest)
+    if (earliest && latest) {
       facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill2(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(archive).snapshot;
+      if (typeof snapshot === "string" && snapshot)
+        facts.push(el("span", "archive-snapshot", snapshot));
+    }
     if (facts.length) {
       const line2 = el("p", "muted archive-facts");
       facts.forEach((fact, index) => {
@@ -147064,7 +147309,7 @@ function createLocalFilesSourceConnector(options) {
   };
 }
 var LOCAL_FILES_CURSOR_PREFIX = "lf1:", LOCAL_FILES_POLL_CURSOR, DEFAULT_MAX_FETCH_BYTES2 = 64000000, DEFAULT_PAGE_SIZE2 = 500, DELETED_DESCENDANT_BATCH = 2000, DELETED_DESCENDANT_MAX_BATCHES = 200, MAX_FOLDER_KEYS = 32, MAX_EVENT_PATHS = 200000, ABSENCE_SCAN_LIMIT = 250000, LocalFilesRootMissingError, LocalFilesRootPermissionError, LocalFilesHistoryResetError;
-var init_connector5 = __esm(() => {
+var init_connector4 = __esm(() => {
   init_file_extraction_source();
   init_file_mime();
   init_scope_safe_fs();
@@ -147311,7 +147556,7 @@ var LOCAL_FILES_PROVIDER_STORE_RECEIPT_KIND = "local_files_provider_connector_st
 var init_provider_store_sync2 = __esm(() => {
   init_embeddings();
   init_tiered_store_set();
-  init_connector5();
+  init_connector4();
   init_paths();
   init_scope();
   init_store();
@@ -149582,7 +149827,7 @@ var init_scheduler_source = __esm(() => {
   init_embeddings();
   init_source_scheduler();
   init_mac_permissions();
-  init_connector5();
+  init_connector4();
   init_locations();
   init_paths();
   init_scope();
@@ -155063,7 +155308,7 @@ function registerMboxArchiveConnector() {
   registerArchiveFormatConnector("mbox", createMboxArchiveConnector);
 }
 var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MBOX_MAX_ITEM_TEXT_CHARS = 1e6, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS, SKIPPED_LABELS, decodableCharsets;
-var init_connector6 = __esm(() => {
+var init_connector5 = __esm(() => {
   init_postal_mime();
   init_archive_formats();
   init_stop_errors();
@@ -155145,6 +155390,1268 @@ var init_continuation_cache = __esm(() => {
   CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
   CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
   archiveContinuations = new ContinuationCache;
+});
+
+// src/workers/archive-import/whatsapp/grammar.ts
+function normalizeWhatsAppLine(line2) {
+  return line2.replace(INVISIBLE, "").replace(NARROW_SPACES, " ");
+}
+function matchWhatsAppHeader(line2) {
+  const bracketed = BRACKETED.exec(line2);
+  const found = bracketed ?? DASHED.exec(line2);
+  if (!found)
+    return;
+  const [, g1, dateSep, g2, g3, hourText, timeSep, minuteText, secondText, meridiem, rest = ""] = found;
+  if (g1 === undefined || g2 === undefined || g3 === undefined || hourText === undefined || minuteText === undefined)
+    return;
+  if (g1.length === 3)
+    return;
+  const yearFirst = g1.length === 4;
+  if (yearFirst) {
+    if (g3.length > 2)
+      return;
+  } else if (g3.length !== 2 && g3.length !== 4) {
+    return;
+  }
+  let hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = secondText === undefined ? 0 : Number(secondText);
+  if (meridiem !== undefined) {
+    if (hour < 1 || hour > 12)
+      return;
+    const pm = meridiem.toLowerCase() === "p";
+    hour = hour === 12 ? pm ? 12 : 0 : pm ? hour + 12 : hour;
+  }
+  if (hour > 23 || minute > 59 || second > 59)
+    return;
+  const p1 = Number(g1);
+  const p2 = Number(g2);
+  const p3 = Number(g3);
+  const match = {
+    p1,
+    p2,
+    p3,
+    yearFirst,
+    lastYear: g3.length === 2 ? 2000 + p3 : p3,
+    hour,
+    minute,
+    second,
+    rest,
+    style: `${bracketed ? "b" : "d"}${dateSep}${yearFirst ? "Y" : g3.length === 4 ? "4" : "2"}${timeSep}${secondText !== undefined ? "s" : "n"}${meridiem !== undefined ? "m" : "h"}`
+  };
+  return resolveWhatsAppHeader(match, "dmy") || resolveWhatsAppHeader(match, "mdy") ? match : undefined;
+}
+function daysIn(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+function two(value2) {
+  return String(value2).padStart(2, "0");
+}
+function dateOf(year, month, day) {
+  if (year < 1990 || year > 2199 || month < 1 || month > 12 || day < 1 || day > daysIn(year, month))
+    return;
+  return { year, month, day };
+}
+function whatsAppHeaderSpan(match) {
+  const dates = match.yearFirst ? [dateOf(match.p1, match.p2, match.p3)] : [dateOf(match.lastYear, match.p2, match.p1), dateOf(match.lastYear, match.p1, match.p2)];
+  const clock2 = match.hour * 1e4 + match.minute * 100 + match.second;
+  const times = dates.flatMap((date4) => date4 ? [(date4.year * 1e4 + date4.month * 100 + date4.day) * 1e6 + clock2] : []);
+  return times.length > 0 ? { earliest: Math.min(...times), latest: Math.max(...times) } : undefined;
+}
+function whatsAppOrderEvidence(match) {
+  if (match.yearFirst)
+    return "ymd";
+  if (match.p1 > 12 && match.p2 <= 12)
+    return "dmy";
+  if (match.p2 > 12 && match.p1 <= 12)
+    return "mdy";
+  return;
+}
+function resolveWhatsAppHeader(match, order) {
+  let date4;
+  if (match.yearFirst) {
+    date4 = dateOf(match.p1, match.p2, match.p3);
+  } else {
+    const dayFirst = dateOf(match.lastYear, match.p2, match.p1);
+    const monthFirst = dateOf(match.lastYear, match.p1, match.p2);
+    date4 = order === "mdy" ? monthFirst ?? dayFirst : dayFirst ?? monthFirst;
+  }
+  if (!date4)
+    return;
+  return {
+    ...match,
+    ...date4,
+    sentAt: `${String(date4.year).padStart(4, "0")}-${two(date4.month)}-${two(date4.day)}T${two(match.hour)}:${two(match.minute)}:${two(match.second)}`
+  };
+}
+function splitWhatsAppSender(rest) {
+  for (let at = rest.indexOf(":");at >= 0; at = rest.indexOf(":", at + 1)) {
+    if (at > WHATSAPP_MAX_SENDER_CHARS)
+      break;
+    if (at + 1 < rest.length && rest[at + 1] !== " ")
+      continue;
+    const sender = rest.slice(0, at).trim();
+    if (!sender)
+      break;
+    return { sender, text: rest.slice(at + 1).trim() };
+  }
+  return { text: rest.trim() };
+}
+function whatsAppAttachedFileName(line2) {
+  const text3 = normalizeWhatsAppLine(line2).trim();
+  const angle = /^<[^<>:\uff1a\n]{1,40}[:\uff1a]\s*([^<>\n]+\.\w{1,8})>$/.exec(text3);
+  if (angle?.[1])
+    return angle[1].trim();
+  const paren = /^((?:IMG|VID|PTT|AUD|DOC|STK|PHOTO|VIDEO|AUDIO|GIF|DOCUMENT|STICKER)-[\w-]+\.\w{1,8}) \([^()\n]{3,40}\)$/.exec(text3);
+  return paren?.[1];
+}
+function isWhatsAppMediaOmitted(text3) {
+  const line2 = normalizeWhatsAppLine(text3).trim();
+  if (line2.length < 4 || line2.length > 48 || line2.includes(`
+`))
+    return false;
+  if (/^<[^<>:\uff1a]{3,40}>$/.test(line2))
+    return !/\b(?:edited|deleted)\b/i.test(line2);
+  return /^[A-Za-z][A-Za-z ]{1,24} omitted$/.test(line2);
+}
+function whatsAppMediaMarkerCount(text3) {
+  if (isWhatsAppMediaOmitted(text3))
+    return 1;
+  let count = 0;
+  for (const line2 of text3.split(`
+`)) {
+    if (line2.length <= 400 && whatsAppAttachedFileName(line2) !== undefined)
+      count += 1;
+  }
+  return count;
+}
+function hasWhatsAppExportName(name) {
+  if (isWhatsAppZipNoise(name))
+    return false;
+  const last = (name.split("/").pop() ?? name).toLowerCase();
+  return last === "_chat.txt" || /^whatsapp chat (?:with|-)\s+\S.*\.txt$/.test(last);
+}
+function whatsAppChatNameFromStem(stem) {
+  const chat = EXPORT_FILENAME.exec(stem.trim())?.[1]?.trim();
+  return chat ? chat : undefined;
+}
+function whatsAppStem(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  const last = parts[parts.length - 1] ?? name;
+  return last.replace(/\.(?:txt|zip)$/i, "");
+}
+function isWhatsAppStatusChat(chat) {
+  return chat.trim().toLowerCase() === "status@broadcast";
+}
+function isWhatsAppZipNoise(name) {
+  if (name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/"))
+    return true;
+  const base = name.split("/").pop() ?? name;
+  return base.startsWith("._") || base === ".DS_Store";
+}
+function looksLikeWhatsAppChat(head) {
+  if (!head || head.length < 10)
+    return false;
+  if (head.includes(0))
+    return false;
+  const text3 = lenientUtf82.decode(head);
+  for (const raw of text3.split(`
+`).slice(0, 8)) {
+    const line2 = normalizeWhatsAppLine(raw.endsWith("\r") ? raw.slice(0, -1) : raw);
+    if (line2.trim() === "")
+      continue;
+    return matchWhatsAppHeader(line2) !== undefined;
+  }
+  return false;
+}
+function startsWithWhatsAppHeader(lineStart) {
+  const prefix = lineStart.length > WHATSAPP_HEADER_PREFIX_BYTES ? lineStart.subarray(0, WHATSAPP_HEADER_PREFIX_BYTES) : lineStart;
+  return matchWhatsAppHeader(normalizeWhatsAppLine(prefixDecoder.decode(prefix))) !== undefined;
+}
+var WHATSAPP_HEAD_BYTES = 4096, INVISIBLE, NARROW_SPACES, DATE = "(\\d{1,4})([./-])\\s?(\\d{1,2})[./-]\\s?(\\d{1,4})", TIME = "(\\d{1,2})([:.])(\\d{2})(?:[:.](\\d{2}))?(?:\\s?([ap])\\.?\\s?m\\.?)?", BRACKETED, DASHED, WHATSAPP_MAX_SENDER_CHARS = 128, EXPORT_FILENAME, lenientUtf82, WHATSAPP_HEADER_PREFIX_BYTES = 160, prefixDecoder;
+var init_grammar = __esm(() => {
+  INVISIBLE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  BRACKETED = new RegExp(`^\\[\\s?${DATE},?\\s+${TIME}\\s?\\]\\s?(.*)$`, "is");
+  DASHED = new RegExp(`^${DATE},?\\s+${TIME}\\s[-\\u2013]\\s(.*)$`, "is");
+  EXPORT_FILENAME = /^WhatsApp Chat (?:with|-)\s*(.+)$/i;
+  lenientUtf82 = new TextDecoder("utf-8");
+  prefixDecoder = new TextDecoder("utf-8");
+});
+
+// src/workers/archive-import/whatsapp/messages.ts
+class WhatsAppLineReader {
+  source;
+  chunk;
+  chunkStart = 0;
+  at = 0;
+  crcRun;
+  foldedTo = 0;
+  line;
+  ended = false;
+  constructor(source, options = {}) {
+    this.source = source;
+    if (options.midLine) {
+      this.line = { start: source.position, crc: undefined, parts: [], bytes: 0, cut: true, mode: "drop" };
+    }
+  }
+  get atEnd() {
+    return this.ended;
+  }
+  get lastChunk() {
+    return this.chunk && !this.ended ? { start: this.chunkStart, end: this.chunkStart + this.chunk.length } : undefined;
+  }
+  readPoint() {
+    if (this.ended)
+      return;
+    const line2 = this.line;
+    if (line2 && line2.mode !== "drop") {
+      return { offset: line2.start, midLine: false, ...line2.crc !== undefined ? { crc: line2.crc } : {} };
+    }
+    const midLine = line2 !== undefined;
+    if (!this.chunk) {
+      const crc2 = this.source.crc32;
+      return { offset: this.source.position, midLine, ...crc2 !== undefined ? { crc: crc2 } : {} };
+    }
+    const crc = this.crcAt(this.at);
+    return { offset: this.chunkStart + this.at, midLine, ...crc !== undefined ? { crc } : {} };
+  }
+  giveBackFrom(offset) {
+    const chunk = this.chunk;
+    if (!chunk || this.ended || offset < this.chunkStart || offset > this.chunkStart + chunk.length)
+      return false;
+    this.source.unread(this.chunkStart + chunk.length - offset);
+    this.ended = true;
+    return true;
+  }
+  next(options = {}) {
+    const headersOnly = options.headersOnly === true;
+    for (;; ) {
+      if (this.ended)
+        return { kind: "end" };
+      if (!this.chunk || this.at >= this.chunk.length) {
+        const dropping = this.line === undefined || this.line.mode !== "keep";
+        if (dropping && options.mayRead && !options.mayRead())
+          return { kind: "paused" };
+        const crcBefore = this.source.crc32;
+        const chunk2 = this.source.next();
+        if (!chunk2) {
+          this.ended = true;
+          return this.endOfStream();
+        }
+        this.chunk = chunk2;
+        this.chunkStart = this.source.position - chunk2.length;
+        this.crcRun = crcBefore;
+        this.foldedTo = 0;
+        this.at = 0;
+        continue;
+      }
+      const chunk = this.chunk;
+      if (!this.line) {
+        this.line = {
+          start: this.chunkStart + this.at,
+          crc: this.crcAt(this.at),
+          parts: [],
+          bytes: 0,
+          cut: false,
+          mode: headersOnly ? "undecided" : "keep"
+        };
+      }
+      const line2 = this.line;
+      const newline = chunk.indexOf(10, this.at);
+      const segmentEnd = newline < 0 ? chunk.length : newline;
+      const whole = chunk.subarray(this.at, segmentEnd);
+      let segment = whole;
+      const copy = newline < 0;
+      if (line2.mode === "undecided") {
+        const head = segment.subarray(0, Math.max(0, WHATSAPP_HEADER_PREFIX_BYTES - line2.bytes));
+        this.keep(line2, head, true);
+        segment = segment.subarray(head.length);
+        if (line2.bytes >= WHATSAPP_HEADER_PREFIX_BYTES || newline >= 0)
+          this.decide(line2);
+      }
+      if (line2.mode === "keep" && segment.length > 0) {
+        const room = WHATSAPP_LINE_BYTES_KEPT - line2.bytes;
+        if (segment.length > room) {
+          this.keep(line2, segment.subarray(0, room), true);
+          line2.cut = true;
+          line2.mode = "drop";
+          this.at += whole.length - segment.length + room;
+          return { kind: "line", line: this.take(line2) };
+        }
+        this.keep(line2, segment, copy);
+      }
+      if (newline < 0) {
+        this.at = chunk.length;
+        continue;
+      }
+      this.at = newline + 1;
+      this.line = undefined;
+      if (line2.mode === "keep")
+        return { kind: "line", line: this.take(line2) };
+    }
+  }
+  decide(line2) {
+    if (startsWithWhatsAppHeader(this.join(line2))) {
+      line2.mode = "keep";
+    } else {
+      line2.mode = "drop";
+      line2.parts = [];
+      line2.bytes = 0;
+    }
+  }
+  endOfStream() {
+    const line2 = this.line;
+    this.line = undefined;
+    if (!line2)
+      return { kind: "end" };
+    if (line2.mode === "undecided")
+      this.decide(line2);
+    return line2.mode === "keep" ? { kind: "line", line: this.take(line2) } : { kind: "end" };
+  }
+  keep(line2, bytes, copy) {
+    if (bytes.length === 0)
+      return;
+    line2.parts.push(copy ? bytes.slice() : bytes);
+    line2.bytes += bytes.length;
+  }
+  join(line2) {
+    if (line2.parts.length === 1)
+      return line2.parts[0];
+    const bytes = new Uint8Array(line2.bytes);
+    let at = 0;
+    for (const part of line2.parts) {
+      bytes.set(part, at);
+      at += part.length;
+    }
+    return bytes;
+  }
+  take(line2) {
+    let bytes = this.join(line2);
+    line2.parts = [];
+    if (!line2.cut && bytes.length > 0 && bytes[bytes.length - 1] === 13)
+      bytes = bytes.subarray(0, bytes.length - 1);
+    return { bytes, offset: line2.start, ...line2.crc !== undefined ? { crc: line2.crc } : {}, cut: line2.cut };
+  }
+  crcAt(index) {
+    const chunk = this.chunk;
+    if (!chunk || this.crcRun === undefined)
+      return;
+    if (index > this.foldedTo) {
+      this.crcRun = crc32Update(this.crcRun, chunk.subarray(this.foldedTo, index));
+      this.foldedTo = index;
+    }
+    return index === this.foldedTo ? this.crcRun : undefined;
+  }
+}
+function whatsAppLineText(line2) {
+  return normalizeWhatsAppLine(utf83.decode(line2.bytes));
+}
+
+class WhatsAppMessageReader {
+  source;
+  lines;
+  maxTextChars;
+  maxMessageBytes;
+  building;
+  dropping;
+  expectHeader;
+  finished = false;
+  constructor(source, entry = { kind: "start" }, options = {}) {
+    this.source = source;
+    this.lines = new WhatsAppLineReader(source, { midLine: entry.kind === "skip" && entry.midLine });
+    this.dropping = entry.kind !== "message";
+    this.expectHeader = entry.kind === "message";
+    this.maxTextChars = options.maxTextChars ?? WHATSAPP_MAX_ITEM_TEXT_CHARS;
+    this.maxMessageBytes = options.maxMessageBytes ?? WHATSAPP_MAX_MESSAGE_BYTES;
+  }
+  get position() {
+    return this.source.position;
+  }
+  resume() {
+    if (this.finished)
+      return;
+    const building = this.building;
+    if (building) {
+      return { kind: "message", offset: building.offset, ...building.crc !== undefined ? { crc: building.crc } : {} };
+    }
+    const at = this.lines.readPoint();
+    return at ? { kind: "skip", offset: at.offset, midLine: at.midLine, ...at.crc !== undefined ? { crc: at.crc } : {} } : undefined;
+  }
+  canSettle() {
+    const chunk = this.lines.lastChunk;
+    const at = this.resume();
+    return chunk !== undefined && at !== undefined && at.offset >= chunk.start;
+  }
+  settle() {
+    const at = this.resume();
+    if (!at || !this.lines.giveBackFrom(at.offset))
+      return false;
+    this.finished = true;
+    this.building = undefined;
+    return true;
+  }
+  next(mayRead) {
+    for (;; ) {
+      if (this.finished)
+        return { kind: "end" };
+      if (this.building?.cut)
+        return { kind: "message", message: this.cutOff() };
+      const step = this.lines.next({
+        headersOnly: this.dropping && !this.expectHeader,
+        ...this.dropping && mayRead ? { mayRead } : {}
+      });
+      if (step.kind === "paused")
+        return { kind: "paused" };
+      if (step.kind === "end") {
+        this.finished = true;
+        const last = this.building;
+        this.building = undefined;
+        return last ? { kind: "message", message: this.finish(last) } : { kind: "end" };
+      }
+      const line2 = step.line;
+      const text3 = whatsAppLineText(line2);
+      const header = matchWhatsAppHeader(text3);
+      if (this.expectHeader) {
+        this.expectHeader = false;
+        if (!header)
+          throw new WhatsAppFormatError("No message starts where this import was to resume.");
+      }
+      if (header) {
+        const done = this.building;
+        const first = splitWhatsAppSender(header.rest);
+        this.building = {
+          offset: line2.offset,
+          crc: line2.crc,
+          header,
+          sender: first.sender,
+          parts: [],
+          chars: 0,
+          bytes: line2.bytes.length + 1,
+          cut: line2.cut
+        };
+        this.dropping = false;
+        this.append(this.building, first.text);
+        if (done)
+          return { kind: "message", message: this.finish(done) };
+        continue;
+      }
+      const building = this.building;
+      if (!building)
+        continue;
+      building.bytes += line2.bytes.length + 1;
+      if (line2.cut)
+        building.cut = true;
+      this.append(building, text3);
+      if (building.bytes >= this.maxMessageBytes)
+        building.cut = true;
+      if (building.cut)
+        return { kind: "message", message: this.cutOff() };
+    }
+  }
+  cutOff() {
+    const message2 = this.building;
+    this.building = undefined;
+    this.dropping = true;
+    return this.finish(message2);
+  }
+  append(message2, text3) {
+    if (message2.chars >= this.maxTextChars) {
+      if (text3.length > 0)
+        message2.cut = true;
+      return;
+    }
+    const separator = message2.parts.length > 0 ? 1 : 0;
+    const room = this.maxTextChars - message2.chars - separator;
+    if (text3.length > room) {
+      message2.parts.push(text3.slice(0, Math.max(0, room)));
+      message2.chars = this.maxTextChars;
+      message2.cut = true;
+      return;
+    }
+    message2.parts.push(text3);
+    message2.chars += separator + text3.length;
+  }
+  finish(message2) {
+    return {
+      offset: message2.offset,
+      header: message2.header,
+      ...message2.sender !== undefined ? { sender: message2.sender } : {},
+      text: message2.parts.join(`
+`).replace(/\s+$/u, ""),
+      cut: message2.cut
+    };
+  }
+}
+function scanWhatsAppDateOrder(source, options = {}) {
+  const lines = new WhatsAppLineReader(source);
+  const maxBytes = options.maxBytes ?? WHATSAPP_ORDER_SCAN_MAX_BYTES;
+  const votesEnough = options.votesEnough ?? WHATSAPP_ORDER_VOTES_ENOUGH;
+  const votes = { dmy: 0, mdy: 0, ymd: 0 };
+  let total = 0;
+  let style;
+  let ambiguous = false;
+  let above;
+  let backwards = 0;
+  for (;; ) {
+    const step = lines.next({ headersOnly: true, mayRead: () => source.position < maxBytes });
+    if (step.kind !== "line")
+      break;
+    if (step.line.offset > maxBytes)
+      break;
+    const header = matchWhatsAppHeader(normalizeWhatsAppLine(utf83.decode(step.line.bytes.subarray(0, WHATSAPP_HEADER_PREFIX_BYTES))));
+    if (!header)
+      continue;
+    style ??= header.style;
+    if (header.style !== style)
+      continue;
+    const span = whatsAppHeaderSpan(header);
+    if (span && above && span.latest < above.earliest && backwards < WHATSAPP_ORDER_BACKWARDS_LEFT_OUT) {
+      backwards += 1;
+      continue;
+    }
+    backwards = 0;
+    if (span)
+      above = span;
+    const evidence = whatsAppOrderEvidence(header);
+    if (evidence) {
+      votes[evidence] += 1;
+      total += 1;
+      if (total >= votesEnough)
+        break;
+    } else if (header.p1 !== header.p2) {
+      ambiguous = true;
+    }
+  }
+  const bytesRead = source.position;
+  const ranked = Object.entries(votes).sort((a, b) => b[1] - a[1]);
+  const [top, runnerUp] = ranked;
+  if (!top || top[1] === 0)
+    return { order: "dmy", assumed: ambiguous, style, bytesRead };
+  if (runnerUp && runnerUp[1] === top[1])
+    return { order: "dmy", assumed: true, style, bytesRead };
+  return { order: top[0], assumed: false, style, bytesRead };
+}
+var WHATSAPP_MAX_ITEM_TEXT_CHARS = 1048576, WHATSAPP_LINE_BYTES_KEPT, WHATSAPP_MAX_MESSAGE_BYTES, WHATSAPP_ORDER_SCAN_MAX_BYTES, WHATSAPP_ORDER_VOTES_ENOUGH = 25, WHATSAPP_ORDER_BACKWARDS_LEFT_OUT = 2, utf83, WhatsAppFormatError;
+var init_messages = __esm(() => {
+  init_byte_source();
+  init_grammar();
+  WHATSAPP_LINE_BYTES_KEPT = 4 * 1024 * 1024;
+  WHATSAPP_MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
+  WHATSAPP_ORDER_SCAN_MAX_BYTES = 16 * 1024 * 1024;
+  utf83 = new TextDecoder("utf-8");
+  WhatsAppFormatError = class WhatsAppFormatError extends Error {
+    constructor(message2) {
+      super(message2);
+      this.name = "WhatsAppFormatError";
+    }
+  };
+});
+
+// src/workers/archive-import/whatsapp/place.ts
+function manifestTag2(input) {
+  return input.manifestSha256.slice(0, 16);
+}
+function cursorOf(input, place) {
+  const json2 = {
+    f: place.fileIndex,
+    m: place.memberIndex,
+    o: place.offset,
+    k: place.mode,
+    d: place.order,
+    ...place.style ? { s: place.style } : {},
+    ...place.prev ? { p: place.prev } : {},
+    ...place.window && place.window.keys.length > 0 ? { w: [place.window.sentAt, place.window.keys] } : {},
+    ...place.crc !== undefined ? { c: place.crc >>> 0 } : {}
+  };
+  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag2(input)}:${JSON.stringify(json2)}`;
+}
+function doneCursor2(input) {
+  return `${WHATSAPP_CURSOR_PREFIX}${manifestTag2(input)}:done`;
+}
+function isWhole(value2, max2 = Number.MAX_SAFE_INTEGER) {
+  return typeof value2 === "number" && Number.isInteger(value2) && value2 >= 0 && value2 <= max2;
+}
+function isRecord10(value2) {
+  return Boolean(value2) && typeof value2 === "object" && !Array.isArray(value2);
+}
+function parseCursor2(input, cursor) {
+  if (!cursor)
+    return;
+  const invalid4 = (message2 = "The resume point is not a position in this archive.") => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const prefix = `${WHATSAPP_CURSOR_PREFIX}${manifestTag2(input)}:`;
+  if (!cursor.startsWith(prefix))
+    throw invalid4("The resume point belongs to other files than this archive's.");
+  const rest = cursor.slice(prefix.length);
+  if (rest === "done")
+    return { done: true };
+  let json2;
+  try {
+    json2 = JSON.parse(rest);
+  } catch {
+    throw invalid4();
+  }
+  if (!isRecord10(json2))
+    throw invalid4();
+  const { f, m, o, k, d, s, p, w, c } = json2;
+  if (!isWhole(f, 4294967295) || !isWhole(m, 4294967295) || !isWhole(o) || typeof k !== "string" || !PLACE_MODES.includes(k) || typeof d !== "string" || !ORDER_MARKS.includes(d))
+    throw invalid4();
+  const file = input.files[f];
+  if (!file)
+    throw invalid4();
+  if (!file.members && (m !== 0 || o > file.version.size))
+    throw invalid4();
+  const mode = k;
+  if (mode === "start" !== (d === "?") || mode === "start" && o !== 0)
+    throw invalid4();
+  if (s !== undefined && (typeof s !== "string" || !STYLE.test(s)))
+    throw invalid4();
+  if (p !== undefined && (typeof p !== "string" || !SENT_AT.test(p)))
+    throw invalid4();
+  if (mode === "start" && (s !== undefined || p !== undefined || w !== undefined))
+    throw invalid4();
+  let window2;
+  if (w !== undefined) {
+    if (!Array.isArray(w) || w.length !== 2 || typeof w[0] !== "string" || !SENT_AT.test(w[0]) || !Array.isArray(w[1]) || w[1].length === 0 || w[1].length > WHATSAPP_WINDOW_MAX_KEYS)
+      throw invalid4();
+    const keys = [];
+    for (const entry of w[1]) {
+      if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || !WINDOW_KEY.test(entry[0]) || !isWhole(entry[1], 4294967295) || entry[1] < 1)
+        throw invalid4();
+      keys.push([entry[0], entry[1]]);
+    }
+    window2 = { sentAt: w[0], keys };
+  }
+  if (c !== undefined && (!isWhole(c, 4294967295) || !file.members))
+    throw invalid4();
+  return {
+    done: false,
+    place: {
+      fileIndex: f,
+      memberIndex: m,
+      offset: o,
+      mode,
+      order: d,
+      style: typeof s === "string" ? s : "",
+      prev: typeof p === "string" ? p : "",
+      ...window2 ? { window: window2 } : {},
+      ...typeof c === "number" ? { crc: c } : {}
+    }
+  };
+}
+
+class IdentityWindow {
+  sentAt = "";
+  keys = new Map;
+  static restore(state) {
+    const window2 = new IdentityWindow;
+    if (state) {
+      window2.sentAt = state.sentAt;
+      for (const [key2, count] of state.keys)
+        window2.keys.set(key2, count);
+    }
+    return window2;
+  }
+  ordinal(sentAt, key2) {
+    if (sentAt < this.sentAt)
+      return;
+    if (sentAt > this.sentAt) {
+      this.sentAt = sentAt;
+      this.keys.clear();
+    }
+    const seen = this.keys.get(key2);
+    if (seen === undefined) {
+      if (this.keys.size >= WHATSAPP_WINDOW_MAX_KEYS)
+        return;
+      this.keys.set(key2, 1);
+      return 0;
+    }
+    this.keys.set(key2, seen + 1);
+    return seen;
+  }
+  state() {
+    return this.keys.size > 0 ? { sentAt: this.sentAt, keys: [...this.keys.entries()] } : undefined;
+  }
+}
+var WHATSAPP_CURSOR_PREFIX = "wa1:", WHATSAPP_WINDOW_MAX_KEYS = 24, ORDER_MARKS, PLACE_MODES, SENT_AT, STYLE, WINDOW_KEY;
+var init_place = __esm(() => {
+  init_archive_formats();
+  ORDER_MARKS = ["d", "m", "y", "a", "?"];
+  PLACE_MODES = ["start", "message", "skip", "mid"];
+  SENT_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+  STYLE = /^[\x21-\x7e]{0,16}$/;
+  WINDOW_KEY = /^[0-9a-f]{12}$/;
+});
+
+// src/workers/archive-import/whatsapp/connector.ts
+import { createHash as createHash78 } from "node:crypto";
+function sha2568(value2) {
+  return createHash78("sha256").update(value2).digest("hex");
+}
+function stoppedFrom2(error2, relPath) {
+  if (error2 instanceof WhatsAppFormatError) {
+    return new ArchiveImportStoppedError("resume_point_invalid", "No message starts where this import was to resume.", relPath);
+  }
+  return archiveStopFromScopeError(error2, relPath);
+}
+function localTimeIso(header) {
+  const time3 = new Date(header.year, header.month - 1, header.day, header.hour, header.minute, header.second).getTime();
+  return Number.isFinite(time3) ? new Date(time3).toISOString() : undefined;
+}
+function dateOrderOf(mark) {
+  return mark === "m" ? "mdy" : mark === "y" ? "ymd" : "dmy";
+}
+function orderMarkOf(order, assumed) {
+  if (assumed)
+    return "a";
+  return order === "mdy" ? "m" : order === "ymd" ? "y" : "d";
+}
+function parentFolderName(relPath) {
+  const parts = relPath.split("/").filter((part) => part !== "");
+  return parts.length >= 2 ? parts[parts.length - 2] : undefined;
+}
+function chatNameOf(file, entry, severalChatFiles = false) {
+  const fileStem = whatsAppStem(file.relPath);
+  let chat;
+  if (entry) {
+    const memberStem = whatsAppStem(entry.name);
+    const chatFile = memberStem.toLowerCase() === "_chat";
+    const folder = chatFile ? parentFolderName(entry.name) : undefined;
+    chat = whatsAppChatNameFromStem(memberStem) ?? (folder ? whatsAppChatNameFromStem(folder) : undefined) ?? (severalChatFiles ? folder : undefined) ?? whatsAppChatNameFromStem(fileStem) ?? (chatFile ? fileStem : memberStem);
+  } else {
+    const parent = parentFolderName(file.relPath);
+    chat = whatsAppChatNameFromStem(fileStem) ?? (fileStem.toLowerCase() === "_chat" ? (parent ? whatsAppChatNameFromStem(parent) : undefined) ?? GENERIC_CHAT_NAME : fileStem);
+  }
+  const trimmed2 = chat.trim().slice(0, MAX_CHAT_NAME_CHARS).trim();
+  return trimmed2 || GENERIC_CHAT_NAME;
+}
+function unitSize(unit) {
+  return unit.entry ? unit.entry.uncompressedSize : unit.file.version.size;
+}
+function isStored(unit) {
+  return unit.entry !== undefined && unit.entry.method === 0;
+}
+function entryFor(mode) {
+  return mode === "start" ? { kind: "start" } : mode === "message" ? { kind: "message" } : { kind: "skip", midLine: mode === "mid" };
+}
+function createWhatsAppArchiveConnector(input) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? WHATSAPP_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING);
+  const tag = manifestTag2(input);
+  const unitFor = (file, fileIndex, entry, base, severalChatFiles = false) => {
+    const chat = chatNameOf(file, entry, severalChatFiles);
+    return {
+      fileIndex,
+      file,
+      memberIndex: entry ? entry.index : 0,
+      ...entry ? { entry } : {},
+      chat,
+      conversationId: `chat:${sha2568(chat).slice(0, 24)}`,
+      sourceKey: sha2568(`${file.relPath}\x00${entry ? entry.name : ""}`).slice(0, 16),
+      statusUpdates: isWhatsAppStatusChat(chat),
+      base
+    };
+  };
+  const chatEntries = (zip) => {
+    const all = [...zip.entries()].filter((entry) => !entry.isDirectory);
+    const startsLikeChat = (entry) => looksLikeWhatsAppChat(readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES));
+    const readAndNotChat = (entry) => {
+      const head = readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES);
+      return head !== undefined && !looksLikeWhatsAppChat(head);
+    };
+    const named = all.filter((entry) => hasWhatsAppExportName(entry.name));
+    const namedChats = named.filter((entry) => !readAndNotChat(entry));
+    if (namedChats.length > 0)
+      return namedChats;
+    const others = all.filter((entry) => !hasWhatsAppExportName(entry.name) && !isWhatsAppZipNoise(entry.name) && entry.name.toLowerCase().endsWith(".txt")).slice(0, MAX_UNNAMED_MEMBER_PROBES).filter(startsLikeChat);
+    return others.length > 0 ? others : named;
+  };
+  const openZip = (reader, file, fileIndex) => {
+    let zip;
+    let entries;
+    try {
+      zip = ZipArchive.open(stoppableZipSource(reader, file.relPath));
+      const table = zip.memberTable();
+      if (file.members && (table.count !== file.members.count || table.sha256 !== file.members.sha256)) {
+        throw new ArchiveImportStoppedError("file_changed", "A file of this archive changed since the import started.", file.relPath);
+      }
+      entries = chatEntries(zip);
+    } catch (error2) {
+      if (error2 instanceof ZipFormatError) {
+        throw new ArchiveImportStoppedError("file_unreadable", "A file of this archive could not be read.", file.relPath);
+      }
+      throw stoppedFrom2(error2, file.relPath);
+    }
+    let base = 0;
+    const severalChatFiles = entries.filter((entry) => whatsAppStem(entry.name).toLowerCase() === "_chat").length > 1;
+    const units = entries.map((entry) => {
+      const unit = unitFor(file, fileIndex, entry, base, severalChatFiles);
+      base += entry.uncompressedSize;
+      return unit;
+    });
+    return { zip, units, total: base };
+  };
+  const parkingKey = (unit) => ({ archiveId: input.archiveId, manifestTag: tag, fileIndex: unit.fileIndex, memberIndex: unit.memberIndex });
+  const openSource = (context2, unit, options) => {
+    if (!context2.zip || !unit.entry) {
+      return { source: fileByteSource(context2.reader, { start: options.start }), close: () => {
+        return;
+      } };
+    }
+    const continuation = options.useParked && options.start > 0 && unit.entry.method === 8 ? archiveContinuations.take(parkingKey(unit), options.start) : undefined;
+    const reader = ZipMemberReader.open(context2.zip, unit.entry, {
+      start: options.start,
+      replayStepBytes: Math.min(ZIP_REPLAY_STEP_BYTES, byteBudget),
+      ...options.crc !== undefined ? { startCrc: options.crc } : {},
+      ...continuation ? { continuation } : {}
+    });
+    return { source: reader, zip: reader, close: () => reader.close() };
+  };
+  const findingOffsetOf = (context2, unit, offset) => context2.zip ? zipFindingOffset(unit.memberIndex, offset) : offset;
+  const progressOffset = (context2, unit, offset) => {
+    if (!context2.zip)
+      return Math.min(offset, context2.file.version.size);
+    const done = Math.min(unit.base + Math.min(offset, unitSize(unit)), context2.total);
+    return Math.floor(context2.file.version.size * done / Math.max(1, context2.total));
+  };
+  const itemOf = (unit, raw, header, textHash, sameAtTime) => {
+    const sender = raw.sender;
+    const apart = sameAtTime !== undefined ? `#${sameAtTime}` : `@${unit.sourceKey}:${raw.offset}`;
+    const providerItemId = sha2568([unit.chat, header.sentAt, sender, textHash, apart].join("\x00")).slice(0, 32);
+    const authoredAt = localTimeIso(header);
+    return {
+      identity: {
+        family: input.format.family,
+        provider: input.format.provider,
+        accountScope: input.accountScope,
+        providerItemId,
+        providerThreadId: unit.conversationId,
+        providerConversationId: unit.conversationId,
+        localItemId: `${input.accountScope}:${providerItemId}`,
+        sourceVersion: textHash.slice(0, 32)
+      },
+      mimeType: "text/plain",
+      content: { kind: "text", text: raw.text },
+      metadata: Object.freeze({
+        chat: unit.chat,
+        sender,
+        senderLabel: sender,
+        ...authoredAt ? { authoredAt } : {},
+        contentHash: textHash,
+        sourceFile: unit.file.relPath,
+        ...unit.entry ? { sourceMember: unit.entry.name } : {}
+      }),
+      fetchedAt: new Date().toISOString()
+    };
+  };
+  return {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        const parsed = parseCursor2(input, options?.cursor);
+        if (parsed?.done) {
+          yield { items: [], nextCursor: doneCursor2(input), done: true };
+          return;
+        }
+        const start = parsed?.place;
+        const run2 = {
+          page: [],
+          positions: [],
+          pending: false,
+          emitted: 0,
+          bytesRead: 0,
+          progressed: false,
+          limit: options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY,
+          stopped: false,
+          finished: false
+        };
+        const pageItems2 = () => {
+          input.reportItemPositions?.(run2.positions);
+          run2.positions = [];
+          return run2.page;
+        };
+        if (!start)
+          input.report({ kind: ARCHIVE_COMMON_FINDINGS.assumption, class: "gap", fileIndex: 0, offset: 0 });
+        async function* readUnit(context2, index, place) {
+          const unit = context2.units[index];
+          const report = (kind, findingClass, offset, count) => {
+            input.report({
+              kind,
+              class: findingClass,
+              fileIndex: unit.fileIndex,
+              offset: findingOffsetOf(context2, unit, offset),
+              ...count !== undefined ? { count } : {}
+            });
+          };
+          const tallies = new Map;
+          const note = (kind, findingClass, offset) => {
+            const key2 = `${findingClass}:${kind}`;
+            const place2 = findingOffsetOf(context2, unit, offset);
+            const seen = tallies.get(key2);
+            if (seen)
+              seen.at.push(place2);
+            else
+              tallies.set(key2, { kind, findingClass, at: [place2] });
+          };
+          const flushTallies = () => {
+            for (const seen of tallies.values()) {
+              input.report({
+                kind: seen.kind,
+                class: seen.findingClass,
+                fileIndex: unit.fileIndex,
+                offset: seen.at[0],
+                count: seen.at.length,
+                ...seen.at.length > 1 ? { at: seen.at } : {}
+              });
+            }
+            tallies.clear();
+          };
+          const isLastFile = unit.fileIndex === input.files.length - 1;
+          const isLastUnit = index === context2.units.length - 1;
+          const afterUnit = index + 1 < context2.units.length ? { fileIndex: unit.fileIndex, memberIndex: context2.units[index + 1].memberIndex, offset: 0, mode: "start", order: "?", style: "", prev: "" } : { fileIndex: unit.fileIndex + 1, memberIndex: 0, offset: 0, mode: "start", order: "?", style: "", prev: "" };
+          const progressAfterUnit = index + 1 < context2.units.length ? progressOffset(context2, context2.units[index + 1], 0) : context2.file.version.size;
+          const damaged = (error2, offset) => {
+            report(error2.code === "damaged" ? ARCHIVE_COMMON_FINDINGS.fileDamaged : ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", offset);
+          };
+          let unreadable = false;
+          let order = place.order;
+          let style = place.style;
+          let prev = place.prev;
+          const window2 = IdentityWindow.restore(place.window);
+          if (place.mode === "start") {
+            if (!input.shouldContinue()) {
+              run2.stopped = true;
+              return;
+            }
+            let scanSource;
+            try {
+              scanSource = openSource(context2, unit, { start: 0, useParked: false });
+              const scanned = scanWhatsAppDateOrder(scanSource.source);
+              run2.bytesRead += scanned.bytesRead;
+              run2.progressed = true;
+              order = orderMarkOf(scanned.order, scanned.assumed);
+              style = scanned.style ?? "";
+              if (scanned.assumed)
+                report(ARCHIVE_COMMON_FINDINGS.assumption, "gap", 0);
+            } catch (error2) {
+              if (!(error2 instanceof ZipMemberError))
+                throw stoppedFrom2(error2, unit.file.relPath);
+              damaged(error2, 0);
+              unreadable = true;
+            } finally {
+              scanSource?.close();
+            }
+          }
+          let opened;
+          let reader;
+          if (!unreadable) {
+            try {
+              opened = openSource(context2, unit, {
+                start: place.offset,
+                ...place.crc !== undefined ? { crc: place.crc } : {},
+                useParked: place.mode !== "start"
+              });
+              reader = new WhatsAppMessageReader(opened.source, entryFor(place.mode));
+            } catch (error2) {
+              opened?.close();
+              opened = undefined;
+              if (!(error2 instanceof ZipMemberError))
+                throw stoppedFrom2(error2, unit.file.relPath);
+              damaged(error2, place.offset);
+            }
+          }
+          const source = opened?.source;
+          let mark = source?.position ?? 0;
+          let replayCounted = 0;
+          const spend = () => {
+            if (!source)
+              return;
+            run2.bytesRead += Math.max(0, source.position - mark);
+            mark = source.position;
+            const replayed = opened?.zip?.replayedBytes ?? 0;
+            run2.bytesRead += replayed - replayCounted;
+            replayCounted = replayed;
+          };
+          const mayRead = () => {
+            spend();
+            if (!input.shouldContinue())
+              return false;
+            if (run2.bytesRead >= byteBudget && run2.progressed)
+              return false;
+            run2.progressed = true;
+            return true;
+          };
+          const dateOrder = dateOrderOf(order);
+          let yieldedAt;
+          let clean2 = true;
+          let ended = reader === undefined;
+          const placeFrom = (point) => {
+            const crc = isStored(unit) ? point.crc : undefined;
+            if (isStored(unit) && crc === undefined) {
+              throw new ArchiveImportStoppedError("resume_point_invalid", "The checksum of a stored file could not be followed to this place.", unit.file.relPath);
+            }
+            const state = window2.state();
+            return {
+              fileIndex: unit.fileIndex,
+              memberIndex: unit.memberIndex,
+              offset: point.offset,
+              mode: point.kind === "message" ? "message" : point.midLine ? "mid" : "skip",
+              order,
+              style,
+              prev,
+              ...state ? { window: state } : {},
+              ...crc !== undefined ? { crc } : {}
+            };
+          };
+          const handOver = function* (at) {
+            flushTallies();
+            context2.current();
+            input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressOffset(context2, unit, at.offset) });
+            yieldedAt = at.offset;
+            yield { items: pageItems2(), nextCursor: cursorOf(input, placeFrom(at)), done: false };
+            run2.emitted += run2.page.length;
+            run2.page = [];
+            run2.pending = false;
+          };
+          try {
+            while (opened?.zip?.catchingUp) {
+              if (!mayRead()) {
+                run2.stopped = true;
+                const continuation = opened.zip.suspend();
+                if (continuation)
+                  archiveContinuations.put(parkingKey(unit), continuation);
+                if (input.shouldContinue()) {
+                  context2.current();
+                  yield { items: [], nextCursor: cursorOf(input, place), done: false };
+                }
+                return;
+              }
+              try {
+                opened.zip.catchUp();
+              } catch (error2) {
+                clean2 = false;
+                if (!(error2 instanceof ZipMemberError))
+                  throw stoppedFrom2(error2, unit.file.relPath);
+                damaged(error2, place.offset);
+                ended = true;
+                break;
+              }
+            }
+            spend();
+            while (reader && opened && !ended) {
+              if (!input.shouldContinue()) {
+                run2.stopped = true;
+                const at2 = reader.resume();
+                if (run2.pending && at2)
+                  yield* handOver(at2);
+                return;
+              }
+              let step;
+              try {
+                step = reader.next(mayRead);
+              } catch (error2) {
+                if (error2 instanceof ZipMemberError) {
+                  clean2 = false;
+                  damaged(error2, reader.resume()?.offset ?? mark);
+                  ended = true;
+                  break;
+                }
+                clean2 = false;
+                throw stoppedFrom2(error2, unit.file.relPath);
+              }
+              spend();
+              if (step.kind === "end") {
+                ended = true;
+                break;
+              }
+              if (step.kind === "paused") {
+                const at2 = reader.resume();
+                run2.stopped = true;
+                if (at2)
+                  yield* handOver(at2);
+                return;
+              }
+              const raw = step.message;
+              run2.progressed = true;
+              run2.pending = true;
+              const header = resolveWhatsAppHeader(raw.header, dateOrder);
+              const otherStyle = style !== "" && raw.header.style !== style;
+              if (otherStyle || header && prev !== "" && header.sentAt < prev) {
+                note(ARCHIVE_COMMON_FINDINGS.assumption, "gap", raw.offset);
+              }
+              if (header && !otherStyle)
+                prev = header.sentAt;
+              if (unit.statusUpdates) {
+                note(WHATSAPP_FINDINGS.statusUpdates, "skipped", raw.offset);
+              } else if (raw.sender === undefined) {
+                note(WHATSAPP_FINDINGS.systemMessage, "skipped", raw.offset);
+              } else if (raw.text.trim() === "" || !header) {
+                note(WHATSAPP_FINDINGS.messageEmpty, "skipped", raw.offset);
+              } else {
+                const textHash = sha2568(raw.text);
+                const sameAtTime = window2.ordinal(header.sentAt, sha2568(`${raw.sender}\x00${textHash}`).slice(0, 12));
+                run2.page.push(itemOf(unit, raw, header, textHash, sameAtTime));
+                run2.positions.push({ fileIndex: unit.fileIndex, offset: findingOffsetOf(context2, unit, raw.offset) });
+                const media = whatsAppMediaMarkerCount(raw.text);
+                if (media > 0)
+                  report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", raw.offset, media);
+                if (raw.cut)
+                  report(ARCHIVE_COMMON_FINDINGS.itemTruncated, "gap", raw.offset);
+              }
+              const at = reader.resume();
+              if (!at)
+                continue;
+              const room = run2.limit - run2.emitted;
+              const full = run2.page.length >= Math.min(pageSizeDefault, room);
+              const spent = run2.bytesRead >= byteBudget;
+              if (!full && !spent)
+                continue;
+              const last = spent || run2.page.length >= room;
+              yield* handOver(at);
+              if (last) {
+                run2.stopped = true;
+                return;
+              }
+            }
+            if (clean2 && reader && opened?.zip) {
+              const end = opened.zip.end;
+              if (!end || !end.sizeOk || end.crcOk !== true) {
+                report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", unitSize(unit));
+              }
+            }
+            flushTallies();
+            context2.current();
+            if (isLastFile && isLastUnit) {
+              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: context2.file.version.size });
+              yield { items: pageItems2(), nextCursor: doneCursor2(input), done: true };
+              run2.page = [];
+              run2.finished = true;
+              return;
+            }
+            if (run2.pending) {
+              input.reportPosition?.({ fileIndex: unit.fileIndex, offset: progressAfterUnit });
+              yield { items: pageItems2(), nextCursor: cursorOf(input, afterUnit), done: false };
+              run2.emitted += run2.page.length;
+              run2.page = [];
+              run2.pending = false;
+              if (run2.emitted >= run2.limit || run2.bytesRead >= byteBudget)
+                run2.stopped = true;
+            }
+          } finally {
+            try {
+              if (clean2 && !ended && reader && opened?.zip && yieldedAt !== undefined) {
+                const pending = reader.resume();
+                if (pending && pending.offset === yieldedAt && reader.settle()) {
+                  const continuation = opened.zip.suspend();
+                  if (continuation) {
+                    archiveContinuations.put(parkingKey(unit), continuation);
+                  }
+                }
+              }
+            } finally {
+              opened?.close();
+            }
+          }
+        }
+        async function* readFile12(fileIndex, at) {
+          const file = input.files[fileIndex];
+          let reader;
+          try {
+            reader = input.root.openFile(file.relPath, { expected: file.version });
+          } catch (error2) {
+            throw stoppedFrom2(error2, file.relPath);
+          }
+          try {
+            const context2 = {
+              fileIndex,
+              file,
+              reader,
+              units: [],
+              total: 0,
+              current: () => {
+                try {
+                  reader.assertCurrent();
+                } catch (error2) {
+                  throw stoppedFrom2(error2, file.relPath);
+                }
+              }
+            };
+            if (file.members) {
+              const opened = openZip(reader, file, fileIndex);
+              context2.zip = opened.zip;
+              context2.units = opened.units;
+              context2.total = opened.total;
+            } else {
+              context2.units = [unitFor(file, fileIndex, undefined, 0)];
+              context2.total = file.version.size;
+            }
+            let first = 0;
+            if (at) {
+              const exact = at.mode !== "start";
+              first = context2.units.findIndex((unit2) => exact ? unit2.memberIndex === at.memberIndex : unit2.memberIndex >= at.memberIndex);
+              if (first < 0) {
+                if (exact)
+                  throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.", file.relPath);
+                first = context2.units.length;
+              }
+              const unit = context2.units[first];
+              if (exact && unit && (at.offset > unitSize(unit) || isStored(unit) && at.crc === undefined)) {
+                throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point is not a position in this archive.", file.relPath);
+              }
+            }
+            for (let index = first;index < context2.units.length; index += 1) {
+              const place = at && index === first && at.mode !== "start" ? at : { fileIndex, memberIndex: context2.units[index].memberIndex, offset: 0, mode: "start", order: "?", style: "", prev: "" };
+              yield* readUnit(context2, index, place);
+              if (run2.stopped || run2.finished)
+                return;
+            }
+            context2.current();
+          } finally {
+            reader.close();
+          }
+        }
+        for (let fileIndex = start?.fileIndex ?? 0;fileIndex < input.files.length; fileIndex += 1) {
+          yield* readFile12(fileIndex, start && start.fileIndex === fileIndex ? start : undefined);
+          if (run2.stopped || run2.finished)
+            return;
+        }
+        yield { items: pageItems2(), nextCursor: doneCursor2(input), done: true };
+      }();
+    },
+    async fetchItem() {
+      throw new Error("An imported message is read only while its archive is listed.");
+    },
+    classificationSignals(item) {
+      const chat = typeof item.metadata.chat === "string" && item.metadata.chat ? item.metadata.chat : undefined;
+      const sender = typeof item.metadata.sender === "string" && item.metadata.sender ? item.metadata.sender : undefined;
+      return {
+        ...chat ? { title: chat } : {},
+        ...sender ? { sender } : {}
+      };
+    }
+  };
+}
+function registerWhatsAppArchiveConnector() {
+  registerArchiveFormatConnector(WHATSAPP_ARCHIVE_FORMAT_ID, createWhatsAppArchiveConnector);
+}
+var WHATSAPP_ARCHIVE_FORMAT_ID = "whatsapp_chat", WHATSAPP_DEFAULT_PAGE_SIZE = 100, WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING, MAX_CHAT_NAME_CHARS = 200, GENERIC_CHAT_NAME = "WhatsApp chat", MAX_UNNAMED_MEMBER_PROBES = 64, WHATSAPP_FINDINGS;
+var init_connector6 = __esm(() => {
+  init_archive_formats();
+  init_byte_source();
+  init_continuation_cache();
+  init_stop_errors();
+  init_zip_reader();
+  init_grammar();
+  init_messages();
+  init_place();
+  WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  WHATSAPP_FINDINGS = {
+    systemMessage: "system_message",
+    messageEmpty: "message_empty",
+    statusUpdates: "status_updates"
+  };
 });
 
 // src/workers/archive-import/resume-crc.ts
@@ -155231,8 +156738,8 @@ var init_resume_crc = __esm(() => {
 });
 
 // src/workers/archive-import/notes/note.ts
-import { createHash as createHash78 } from "node:crypto";
-function isRecord10(value2) {
+import { createHash as createHash79 } from "node:crypto";
+function isRecord11(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
 function firstString(...values) {
@@ -155284,8 +156791,8 @@ function cleanTags(tags) {
   }
   return out;
 }
-function sha2568(value2) {
-  return createHash78("sha256").update(value2).digest("hex");
+function sha2569(value2) {
+  return createHash79("sha256").update(value2).digest("hex");
 }
 function buildNoteItem(input, draft, place, savedAt) {
   const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
@@ -155306,8 +156813,8 @@ function buildNoteItem(input, draft, place, savedAt) {
     text3 = text3.slice(0, NOTE_MAX_TEXT_CHARS);
     truncated = true;
   }
-  const providerItemId = sha2568(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
-  const contentHash = sha2568(text3);
+  const providerItemId = sha2569(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
+  const contentHash = sha2569(text3);
   const item = {
     identity: {
       family: input.format.family,
@@ -155407,7 +156914,7 @@ function createNoteArchiveConnector(input, spec) {
       throw invalid4("The resume point is not a position in this archive.");
     return { file, member, offset, ...crc !== undefined ? { crc } : {}, ...resume ? { resume } : {}, done: false };
   };
-  const stoppedFrom2 = (error2, relPath) => archiveStopFromReaderError(error2, relPath);
+  const stoppedFrom3 = (error2, relPath) => archiveStopFromReaderError(error2, relPath);
   const report = (kind, findingClass, fileIndex, offset, count) => {
     input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
   };
@@ -155440,6 +156947,11 @@ function createNoteArchiveConnector(input, spec) {
     progressOf: (offset) => offset,
     head: () => reader.readAt(0, ROOT_PEEK_BYTES),
     open: (offset) => fileByteSource(reader, { start: offset }),
+    catchingUp: () => false,
+    catchUp: () => 0,
+    park: () => {
+      return;
+    },
     mark: () => {
       return;
     },
@@ -155473,11 +156985,25 @@ function createNoteArchiveConnector(input, spec) {
         const continuation = offset > 0 ? archiveContinuations.take(key2, offset) : undefined;
         reader = ZipMemberReader.open(archive, entry, {
           start: offset,
+          replayStepBytes: Math.min(ZIP_REPLAY_STEP_BYTES, byteBudget),
           ...startCrc !== undefined && offset > 0 ? { startCrc } : {},
           ...continuation ? { continuation } : {}
         });
         tracked = trackBoundaries(reader, offset === 0 || entry.method === 0 ? startCrc : undefined);
         return tracked;
+      },
+      catchingUp: () => reader?.catchingUp === true,
+      catchUp() {
+        if (!reader)
+          return 0;
+        const before = reader.replayedBytes;
+        reader.catchUp();
+        return reader.replayedBytes - before;
+      },
+      park() {
+        const continuation = reader?.suspend();
+        if (continuation)
+          archiveContinuations.put(key2, continuation);
       },
       mark: (offset) => tracked?.markBoundary(offset),
       checkpoint(endOffset) {
@@ -155526,7 +157052,7 @@ function createNoteArchiveConnector(input, spec) {
       } catch (error2) {
         if (error2 instanceof ZipMemberError)
           return true;
-        throw stoppedFrom2(error2, relPath);
+        throw stoppedFrom3(error2, relPath);
       }
       let found = false;
       try {
@@ -155548,7 +157074,7 @@ function createNoteArchiveConnector(input, spec) {
           throw error2;
         if (error2 instanceof ZipMemberError || error2 instanceof JsonStreamError)
           return true;
-        throw stoppedFrom2(error2, relPath);
+        throw stoppedFrom3(error2, relPath);
       }
       unit.close();
       if (found)
@@ -155568,7 +157094,7 @@ function createNoteArchiveConnector(input, spec) {
       try {
         root = rootKindOf(unit.head());
       } catch (error2) {
-        throw stoppedFrom2(error2, relPath);
+        throw stoppedFrom3(error2, relPath);
       }
       if (!root) {
         damaged(0);
@@ -155596,7 +157122,38 @@ function createNoteArchiveConnector(input, spec) {
         damaged(0);
         return "ended";
       }
-      throw stoppedFrom2(error2, relPath);
+      throw stoppedFrom3(error2, relPath);
+    }
+    let stepped = false;
+    while (unit.catchingUp()) {
+      const here = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        unit.park();
+        segment.next = unitCursor;
+        segment.position = here;
+        return "paused";
+      }
+      if (segment.bytes >= limits.bytes && (stepped || segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        unit.park();
+        segment.next = unitCursor;
+        segment.position = here;
+        return "paused";
+      }
+      stepped = true;
+      try {
+        segment.bytes += unit.catchUp();
+      } catch (error2) {
+        unit.close();
+        if (error2 instanceof ArchiveImportStoppedError)
+          throw error2;
+        if (error2 instanceof ZipMemberError) {
+          damaged(unitCursor.offset);
+          return "ended";
+        }
+        throw stoppedFrom3(error2, relPath);
+      }
     }
     let reader;
     try {
@@ -155607,7 +157164,7 @@ function createNoteArchiveConnector(input, spec) {
       });
     } catch (error2) {
       unit.close();
-      throw stoppedFrom2(error2, relPath);
+      throw stoppedFrom3(error2, relPath);
     }
     let last;
     const pause = () => {
@@ -155658,7 +157215,7 @@ function createNoteArchiveConnector(input, spec) {
           damaged(last?.end ?? unitCursor.offset);
           return "ended";
         }
-        throw stoppedFrom2(error2, relPath);
+        throw stoppedFrom3(error2, relPath);
       }
       if (!event) {
         unit.close();
@@ -155906,7 +157463,7 @@ function createNoteArchiveConnector(input, spec) {
     try {
       reader = input.root.openFile(file.relPath, { expected: file.version });
     } catch (error2) {
-      throw stoppedFrom2(error2, file.relPath);
+      throw stoppedFrom3(error2, file.relPath);
     }
     try {
       const savedAt = new Date(Number.isFinite(file.version.mtimeMs) ? file.version.mtimeMs : 0).toISOString();
@@ -155914,7 +157471,7 @@ function createNoteArchiveConnector(input, spec) {
       try {
         head = reader.readAt(0, 4);
       } catch (error2) {
-        throw stoppedFrom2(error2, file.relPath);
+        throw stoppedFrom3(error2, file.relPath);
       }
       if (ZipArchive.looksLikeZip(head)) {
         let archive;
@@ -155922,7 +157479,7 @@ function createNoteArchiveConnector(input, spec) {
           archive = ZipArchive.open(stoppableZipSource(reader, file.relPath));
         } catch (error2) {
           if (!(error2 instanceof ZipFormatError))
-            throw stoppedFrom2(error2, file.relPath);
+            throw stoppedFrom3(error2, file.relPath);
           report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
           segment.next = startOfFile(cursor.file + 1);
           return segment;
@@ -155937,7 +157494,7 @@ function createNoteArchiveConnector(input, spec) {
             report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, zipFindingOffset(archive.entryCount, 0));
             segment.next = startOfFile(cursor.file + 1);
           } else {
-            throw stoppedFrom2(error2, file.relPath);
+            throw stoppedFrom3(error2, file.relPath);
           }
         }
       } else if (source.kind === "json") {
@@ -155951,7 +157508,7 @@ function createNoteArchiveConnector(input, spec) {
       try {
         reader.assertCurrent();
       } catch (error2) {
-        throw stoppedFrom2(error2, file.relPath);
+        throw stoppedFrom3(error2, file.relPath);
       }
       return segment;
     } finally {
@@ -156172,7 +157729,7 @@ var init_markdown = __esm(() => {
 
 // src/workers/archive-import/reflect/parse.ts
 function nodeType(node) {
-  return isRecord10(node) && typeof node.type === "string" ? node.type.toLowerCase().replace(/[_-]/g, "") : "";
+  return isRecord11(node) && typeof node.type === "string" ? node.type.toLowerCase().replace(/[_-]/g, "") : "";
 }
 function isBlockEditorNode(node) {
   return BLOCK_EDITOR_NODE_TYPES.has(nodeType(node));
@@ -156185,14 +157742,14 @@ function isPresent(value2) {
   return value2 !== undefined && value2 !== null;
 }
 function isEditorNode(value2) {
-  if (!isRecord10(value2) || !isKnownEditorNode(value2))
+  if (!isRecord11(value2) || !isKnownEditorNode(value2))
     return false;
   return typeof value2.text === "string" || CHILD_KEYS.some((key2) => isPresent(value2[key2]));
 }
 function isEditorDocument(value2) {
   if (Array.isArray(value2))
     return value2.some(isEditorNode);
-  if (!isRecord10(value2))
+  if (!isRecord11(value2))
     return false;
   if (isEditorNode(value2))
     return true;
@@ -156230,7 +157787,7 @@ function flattenNode(node, depth2) {
     return { text: "", unsupported: 1 };
   if (Array.isArray(node))
     return flattenEditorNodes(node, depth2);
-  if (!isRecord10(node))
+  if (!isRecord11(node))
     return { text: "", unsupported: 1 };
   let unsupported = 0;
   let ownText = "";
@@ -156283,14 +157840,14 @@ function reflectTags(value2) {
   const entries = Array.isArray(value2) ? value2 : typeof value2 === "string" ? value2.split(",") : [];
   const tags = [];
   for (const entry of entries) {
-    const tag = typeof entry === "string" ? firstString(entry) : isRecord10(entry) ? firstString(entry.name, entry.tag, entry.title) : undefined;
+    const tag = typeof entry === "string" ? firstString(entry) : isRecord11(entry) ? firstString(entry.name, entry.tag, entry.title) : undefined;
     if (tag !== undefined)
       tags.push(tag);
   }
   return cleanTags(tags);
 }
 function parseReflectNote(record5) {
-  if (!isRecord10(record5))
+  if (!isRecord11(record5))
     return { kind: "unreadable" };
   let body = "";
   let unsupported = 0;
@@ -156420,7 +157977,7 @@ function flattenBlocks(children) {
       return;
     }
     for (const node of nodes) {
-      if (!isRecord10(node)) {
+      if (!isRecord11(node)) {
         out.unsupported += 1;
         continue;
       }
@@ -156442,7 +157999,7 @@ function flattenBlocks(children) {
   return out;
 }
 function parseRoamPage(record5) {
-  if (!isRecord10(record5))
+  if (!isRecord11(record5))
     return { kind: "unreadable" };
   const flat2 = flattenBlocks(record5.children);
   if (!flat2.hasText)
@@ -156605,7 +158162,7 @@ function telegramJsonSource(source) {
 var BACKSLASH = 92, LOWER_X = 120, SPACE = 32, ESCAPE_LENGTH = 4;
 
 // src/workers/archive-import/telegram/message.ts
-function isRecord11(value2) {
+function isRecord12(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
 function text3(value2) {
@@ -156630,7 +158187,7 @@ function flattenTelegramText(value2) {
   for (const part of value2) {
     if (typeof part === "string") {
       out += part;
-    } else if (isRecord11(part)) {
+    } else if (isRecord12(part)) {
       const label = typeof part.text === "string" ? part.text : "";
       const href = typeof part.href === "string" ? part.href.trim() : "";
       out += part.type === "text_link" && href !== "" && href !== label ? label !== "" ? `${label} (${href})` : href : label;
@@ -156682,7 +158239,7 @@ function mediaLine(message2, content, lines) {
 }
 function factLines(message2, lines) {
   const contact = message2.contact_information;
-  if (isRecord11(contact)) {
+  if (isRecord12(contact)) {
     const name = [text3(contact.first_name), text3(contact.last_name)].filter(Boolean).join(" ");
     const detail = [name || undefined, text3(contact.phone_number)].filter(Boolean).join(", ");
     if (detail)
@@ -156692,17 +158249,17 @@ function factLines(message2, lines) {
   if (place)
     lines.push(`Place: ${cut(place)}`);
   const location = message2.location_information;
-  if (isRecord11(location) && typeof location.latitude === "number" && typeof location.longitude === "number") {
+  if (isRecord12(location) && typeof location.latitude === "number" && typeof location.longitude === "number") {
     lines.push(`Location: ${location.latitude}, ${location.longitude}`);
   }
   const poll = message2.poll;
-  if (isRecord11(poll)) {
+  if (isRecord12(poll)) {
     const question = flattenTelegramText(poll.question).trim();
     if (question)
       lines.push(`Poll: ${cut(question)}`);
     if (Array.isArray(poll.answers)) {
       for (const answer of poll.answers.slice(0, MAX_LIST_ENTRIES)) {
-        if (!isRecord11(answer))
+        if (!isRecord12(answer))
           continue;
         const label = flattenTelegramText(answer.text).trim();
         if (!label)
@@ -156713,12 +158270,12 @@ function factLines(message2, lines) {
     }
   }
   const todo = message2.todo_list;
-  if (isRecord11(todo)) {
+  if (isRecord12(todo)) {
     const title = flattenTelegramText(todo.title).trim();
     const tasks = [];
     if (Array.isArray(todo.answers)) {
       for (const task of todo.answers.slice(0, MAX_LIST_ENTRIES)) {
-        const label = isRecord11(task) ? flattenTelegramText(task.text).trim() : "";
+        const label = isRecord12(task) ? flattenTelegramText(task.text).trim() : "";
         if (label)
           tasks.push(`- ${cut(label)}`);
       }
@@ -156727,7 +158284,7 @@ function factLines(message2, lines) {
       lines.push(title ? `To-do list: ${cut(title)}` : "To-do list:", ...tasks);
   }
   const invoice = message2.invoice_information;
-  if (isRecord11(invoice)) {
+  if (isRecord12(invoice)) {
     const detail = [text3(invoice.title), text3(invoice.description)].filter(Boolean).map((part) => cut(part)).join(", ");
     if (detail)
       lines.push(`Invoice: ${detail}`);
@@ -156807,8 +158364,8 @@ var init_message = __esm(() => {
 });
 
 // src/workers/archive-import/telegram/connector.ts
-import { createHash as createHash79 } from "node:crypto";
-function manifestTag2(input) {
+import { createHash as createHash80 } from "node:crypto";
+function manifestTag3(input) {
   return input.manifestSha256.slice(0, 16);
 }
 function slimResume(point) {
@@ -156825,10 +158382,10 @@ function slimResume(point) {
   };
 }
 function cursorAt2(input, point, assumedZone) {
-  return `${TELEGRAM_CURSOR_PREFIX}${manifestTag2(input)}:${assumedZone ? 1 : 0}:${serializeJsonResume(slimResume(point))}`;
+  return `${TELEGRAM_CURSOR_PREFIX}${manifestTag3(input)}:${assumedZone ? 1 : 0}:${serializeJsonResume(slimResume(point))}`;
 }
-function doneCursor2(input) {
-  return `${TELEGRAM_CURSOR_PREFIX}${manifestTag2(input)}:done`;
+function doneCursor3(input) {
+  return `${TELEGRAM_CURSOR_PREFIX}${manifestTag3(input)}:done`;
 }
 function isIndex(value2) {
   return typeof value2 === "number" && Number.isSafeInteger(value2) && value2 >= 0;
@@ -156856,10 +158413,10 @@ function sectionOfResume(point) {
   const entry = levels[1];
   return entry.kind === "object" && typeof entry.pointer === "string" || entry.kind === "array" && isIndex(entry.pointer) ? root.pointer : undefined;
 }
-function parseCursor2(input, cursor) {
+function parseCursor3(input, cursor) {
   if (!cursor)
     return { resume: undefined, assumedZone: false, done: false };
-  const prefix = `${TELEGRAM_CURSOR_PREFIX}${manifestTag2(input)}:`;
+  const prefix = `${TELEGRAM_CURSOR_PREFIX}${manifestTag3(input)}:`;
   if (!cursor.startsWith(prefix)) {
     throw new ArchiveImportStoppedError("resume_point_invalid", "The resume point belongs to other files than this archive's.");
   }
@@ -156873,8 +158430,8 @@ function parseCursor2(input, cursor) {
   }
   return { resume, assumedZone: flag === "1:", done: false };
 }
-function sha2569(value2) {
-  return createHash79("sha256").update(value2).digest("hex");
+function sha25610(value2) {
+  return createHash80("sha256").update(value2).digest("hex");
 }
 function placeOf(event) {
   const path = event.path;
@@ -156924,7 +158481,7 @@ function messageOutcome2(input, event, fetchedAt) {
   const messageId = telegramScalar(record5.id);
   const reply = telegramScalar(record5.reply_to_message_id);
   const forwarded = typeof record5.forwarded_from === "string" && record5.forwarded_from.trim() !== "" ? record5.forwarded_from : undefined;
-  const providerItemId = sha2569(`${place.section}\x00${place.chatIndex}\x00${place.ordinal}\x00${messageId ?? ""}`).slice(0, 32);
+  const providerItemId = sha25610(`${place.section}\x00${place.chatIndex}\x00${place.ordinal}\x00${messageId ?? ""}`).slice(0, 32);
   const item = {
     identity: {
       family: input.format.family,
@@ -156934,7 +158491,7 @@ function messageOutcome2(input, event, fetchedAt) {
       providerThreadId: conversationId,
       providerConversationId: conversationId,
       localItemId: `${input.accountScope}:${providerItemId}`,
-      sourceVersion: sha2569(body).slice(0, 32)
+      sourceVersion: sha25610(body).slice(0, 32)
     },
     mimeType: "text/plain; charset=utf-8",
     content: { kind: "text", text: body },
@@ -156953,7 +158510,7 @@ function messageOutcome2(input, event, fetchedAt) {
       ...forwarded ? { forwardSource: forwarded } : {},
       ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
       attachmentsNotIngested: content.mediaFiles,
-      contentHash: sha2569(body)
+      contentHash: sha25610(body)
     }),
     fetchedAt
   };
@@ -156974,9 +158531,9 @@ function createTelegramArchiveConnector(input) {
     async authenticate() {},
     listItems(options) {
       return async function* () {
-        const start = parseCursor2(input, options?.cursor);
+        const start = parseCursor3(input, options?.cursor);
         if (start.done) {
-          yield { items: [], nextCursor: doneCursor2(input), done: true };
+          yield { items: [], nextCursor: doneCursor3(input), done: true };
           return;
         }
         const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
@@ -157074,7 +158631,7 @@ function createTelegramArchiveConnector(input) {
             }
           }
           current2();
-          yield { items: page2, nextCursor: doneCursor2(input), done: true };
+          yield { items: page2, nextCursor: doneCursor3(input), done: true };
         } finally {
           reader.close();
         }
@@ -157157,11 +158714,13 @@ var init_connector9 = __esm(() => {
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
+  registerWhatsAppArchiveConnector();
   registerReflectArchiveConnectors();
   registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
 }
 var init_format_connectors = __esm(() => {
+  init_connector5();
   init_connector6();
   init_connector7();
   init_connector8();
@@ -157200,14 +158759,23 @@ function prepareArchiveImport(input) {
   }
   let handedOver = false;
   try {
-    const probe = probeArchivePath(root, chosenRelPath, { probeNames: archiveProbeNames(input.formats) });
+    const probe = probeArchivePath(root, chosenRelPath, {
+      probeNames: archiveProbeNames(input.formats),
+      signatureNames: archiveSignatureNames(input.formats)
+    });
     const detection = detectArchiveFormat(probe, input.formats);
+    const notLookedAt = archiveFilesNotLookedAt(probe);
     if (detection.kind === "none") {
       return { kind: "unsupported", supported: detection.supported, ...detection.advice ? { advice: detection.advice } : {} };
     }
     if (detection.kind === "ambiguous")
       return { kind: "ambiguous", formats: detection.formats };
     const relPaths = detection.files.map((file) => file === "" ? chosenRelPath : joinRelative(chosenRelPath, file));
+    const unconfirmed = detection.format.unconfirmed?.(probe) ?? 0;
+    const skipped2 = {
+      ...notLookedAt > 0 ? { [ARCHIVE_COMMON_FINDINGS.filesNotLookedAt]: notLookedAt } : {},
+      ...unconfirmed > 0 ? { [ARCHIVE_COMMON_FINDINGS.filesUnconfirmed]: unconfirmed } : {}
+    };
     const files = buildArchiveManifest(root, relPaths);
     const records = input.state.list();
     const same = findSameVersionImport(records, files);
@@ -157227,7 +158795,8 @@ function prepareArchiveImport(input) {
         root_identity: { dev: root.identity.dev, ino: root.identity.ino },
         chosen_rel_path: chosenRelPath,
         files,
-        manifest_sha256: archiveManifestSha256(files)
+        manifest_sha256: archiveManifestSha256(files),
+        ...Object.keys(skipped2).length > 0 ? { skipped: skipped2 } : {}
       }
     };
   } catch (error2) {
@@ -157287,7 +158856,7 @@ import { existsSync as existsSync76 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
-  const state = new ArchiveImportStateStore({ path: options.statePath ?? defaultArchiveImportStatePath(env) });
+  const state = new ArchiveImportStateStore({ path: options.statePath ?? defaultArchiveImportStatePath(env), env });
   const families = archiveImportFamilies();
   const lanes = new Map;
   const lane = (family) => {
@@ -157397,6 +158966,10 @@ function kindLine(kinds, entry) {
     line: entry.file ? fill2(DASHBOARD_ARCHIVE_COPY.gapInFile, { file: entry.file, gap }) : gap
   };
 }
+function snapshotOf(entry) {
+  const snapshot = dashboardArchiveNouns(entry.family).snapshot;
+  return snapshot ? ` ${snapshot}.` : "";
+}
 function summaryOf2(entry, stopped) {
   const copy = DASHBOARD_ARCHIVE_COPY;
   if (entry.countsUnavailable && entry.status !== "stopped" && entry.status !== "removing") {
@@ -157416,7 +158989,7 @@ function summaryOf2(entry, stopped) {
           return `${fill2(copy.nothingImported, { None: none2.charAt(0).toUpperCase() + none2.slice(1) })} ${reasons.join("; ")}.`;
         return fill2(copy.emptyImport, { none: none2 });
       }
-      return `${fill2(copy.importedLineNoTime, { items })}.${held}`;
+      return `${fill2(copy.importedLineNoTime, { items })}.${snapshotOf(entry)}${held}`;
     case "stopped":
       return `Stopped: ${stopped?.why ?? ""} ${stopped?.fix ?? ""}`.trim();
     case "removing":
@@ -157825,6 +159398,7 @@ function createArchiveImportDashboard(options) {
   const state = options.runtime.state;
   const requests = new ArchiveImportRequestStore({
     path: options.requestsPath ?? archiveImportRequestsPath(state.path),
+    env: state.env,
     ...options.now ? { now: options.now } : {}
   });
   const pause = options.pause ?? (() => new Promise((resolve19) => setImmediate(resolve19)));
@@ -158361,7 +159935,7 @@ var init_dashboard2 = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash80 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -158387,7 +159961,7 @@ function receiptOf(record5, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash80("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash81("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -158442,8 +160016,18 @@ async function digestArchiveFiles(root, files, shouldContinue) {
   }
   return digests;
 }
-function observeListing(connector, pending, flush, complete) {
+function repeatedIndexes(items, holds, seen) {
+  const repeated = [];
+  items.forEach((item, index) => {
+    if (seen.has(item.identity.localItemId) || holds(item.identity))
+      repeated.push(index);
+    seen.add(item.identity.localItemId);
+  });
+  return repeated;
+}
+function observeListing(connector, pending, flush, complete, repeats) {
   let completed = false;
+  const seenThisPass = new Set;
   let earliest;
   let latest;
   const wrapped = Object.create(connector);
@@ -158459,6 +160043,15 @@ function observeListing(connector, pending, flush, complete) {
             earliest = authoredAt;
           if (!latest || authoredAt > latest)
             latest = authoredAt;
+        }
+        if (repeats) {
+          const repeated = repeatedIndexes(page2.items, repeats.holds, seenThisPass);
+          const where2 = repeats.positions();
+          if (where2 && where2.length === page2.items.length) {
+            repeats.add(repeated.length, { repeatedAt: repeated.map((index) => where2[index]), through: where2[where2.length - 1] });
+          } else {
+            repeats.add(repeated.length);
+          }
         }
         flush();
         if (page2.done) {
@@ -158523,13 +160116,22 @@ async function pullArchiveImport(options) {
       return stop(stopFrom(check, now().toISOString()));
     const pending = [];
     let position;
+    let repeated = 0;
+    let itemPositions;
+    let repeatedAt = [];
+    let listedThrough;
     const flush = () => {
       const moved = position;
       position = undefined;
-      if (pending.length === 0 && !moved)
+      const repeats = repeated;
+      repeated = 0;
+      const items = repeatedAt.length > 0 || listedThrough ? { repeatedAt, ...listedThrough ? { through: listedThrough } : {} } : undefined;
+      repeatedAt = [];
+      listedThrough = undefined;
+      if (pending.length === 0 && !moved && !items)
         return;
       const batch = pending.splice(0, pending.length);
-      options.state.recordFindings(record5.archive_id, batch, moved);
+      options.state.recordFindings(record5.archive_id, batch, moved, repeats, items);
     };
     const connectorId = archiveConnectorId(record5.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
@@ -158547,6 +160149,9 @@ async function pullArchiveImport(options) {
       reportPosition: (next) => {
         position = next;
       },
+      reportItemPositions: (positions) => {
+        itemPositions = positions;
+      },
       shouldContinue,
       ...options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {},
       ...options.pageSize !== undefined ? { pageSize: options.pageSize } : {}
@@ -158557,6 +160162,22 @@ async function pullArchiveImport(options) {
       if (digests)
         completion.digests = digests;
       return digests !== undefined;
+    }, {
+      holds: (identity2) => options.lane.set.anyLegHasRow(identity2),
+      positions: () => {
+        const told = itemPositions;
+        itemPositions = undefined;
+        return told;
+      },
+      add: (count, at) => {
+        if (at) {
+          repeatedAt.push(...at.repeatedAt);
+          if (at.through)
+            listedThrough = at.through;
+        } else {
+          repeated += count;
+        }
+      }
     });
     const set2 = options.lane.set;
     set2.store("secure_local", { create: true });
@@ -158790,7 +160411,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash81 } from "node:crypto";
+import { createHash as createHash82 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { existsSync as existsSync78, lstatSync as lstatSync40, readFileSync as readFileSync75, readdirSync as readdirSync17, realpathSync as realpathSync21 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
@@ -158954,7 +160575,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash81("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash82("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -160336,7 +161957,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash82 } from "node:crypto";
+import { createHash as createHash83 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -160369,7 +161990,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash82("sha256").update(`${accessToken}
+    const key2 = createHash83("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -160400,7 +162021,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash82("sha256").update(session.token).digest("hex");
+    const key2 = createHash83("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -163545,7 +165166,7 @@ function chatgptPrivateAnswerProgram(config2) {
       render();
   }
   const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
-  const utf83 = (text4) => new TextEncoder().encode(text4);
+  const utf84 = (text4) => new TextEncoder().encode(text4);
   function fromB64url(text4) {
     if (typeof text4 !== "string" || !text4 || !/^[A-Za-z0-9_-]+$/.test(text4))
       return null;
@@ -163700,8 +165321,8 @@ function chatgptPrivateAnswerProgram(config2) {
     const macKey = await subtle.importKey("raw", macRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
     const shared = await subtle.deriveBits({ name: "ECDH", public: macKey }, privateKey, 256);
     const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    const key2 = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
+    const key2 = await subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf84(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
   function readOpen(value2) {
@@ -164926,7 +166547,7 @@ function chatgptPrivateQuestionProgram(config2) {
     }
   }
   const subtle = window.crypto && window.crypto.subtle ? window.crypto.subtle : null;
-  const utf83 = (text4) => new TextEncoder().encode(text4);
+  const utf84 = (text4) => new TextEncoder().encode(text4);
   function fromB64url(text4) {
     if (typeof text4 !== "string" || !text4 || !/^[A-Za-z0-9_-]+$/.test(text4))
       return null;
@@ -164964,7 +166585,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const peer = await subtle.importKey("raw", peerRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
     const shared = await subtle.deriveBits({ name: "ECDH", public: peer }, privateKey, 256);
     const ikm = await subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    return subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
+    return subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf84(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
   }
   async function seal(jobId, privateKey, askKey, plaintext) {
     const engineRaw = fromB64url(askKey);
@@ -164972,7 +166593,7 @@ function chatgptPrivateQuestionProgram(config2) {
       throw new Error("malformed");
     const key2 = await aesKey(privateKey, engineRaw, jobId, "encrypt");
     const iv = window.crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, utf83(plaintext));
+    const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, utf84(plaintext));
     return { iv: toB64url(iv), ciphertext: toB64url(new Uint8Array(ciphertext)) };
   }
   async function open6(jobId, privateKey, sealed) {
@@ -164982,7 +166603,7 @@ function chatgptPrivateQuestionProgram(config2) {
     if (!macRaw || macRaw.length !== 65 || !iv || iv.length !== 12 || !ciphertext)
       throw new Error("malformed");
     const key2 = await aesKey(privateKey, macRaw, jobId, "decrypt");
-    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
+    const plain = await subtle.decrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, ciphertext);
     return JSON.parse(new TextDecoder().decode(plain).replace(/\s+$/, ""));
   }
   const KS = config2.keyStore;
@@ -176179,7 +177800,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash83, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash84, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -176305,7 +177926,7 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
-    const transaction = sha25610(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    const transaction = sha25611(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
       if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
@@ -176351,7 +177972,7 @@ function createRemoteOAuthHandler(options) {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes27(32).toString("base64url");
-    codes.set(sha25610(code), {
+    codes.set(sha25611(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -176530,7 +178151,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha25610(code);
+      const hash2 = sha25611(code);
       const issued = codes.get(hash2);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash2);
@@ -176547,7 +178168,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash83("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash84("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -176813,8 +178434,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha25610(value2) {
-  return createHash83("sha256").update(value2).digest("hex");
+function sha25611(value2) {
+  return createHash84("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -176936,10 +178557,10 @@ async function importPanelPublicKey(value2) {
 async function aesKey(privateKey, peerPublicKey, jobId, usage) {
   const shared = await subtle().deriveBits({ name: "ECDH", public: peerPublicKey }, privateKey, 256);
   const ikm = await subtle().importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-  return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf83(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
+  return subtle().deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: utf84(jobId) }, ikm, { name: "AES-GCM", length: 256 }, false, [usage]);
 }
 function padPrivateAnswerPlaintext(json2) {
-  const bytes = utf83(json2).byteLength;
+  const bytes = utf84(json2).byteLength;
   const largest = PRIVATE_ANSWER_PAD_BUCKETS[PRIVATE_ANSWER_PAD_BUCKETS.length - 1];
   const target = PRIVATE_ANSWER_PAD_BUCKETS.find((bucket) => bytes <= bucket) ?? Math.ceil(bytes / largest) * largest;
   return json2 + " ".repeat(target - bytes);
@@ -176948,7 +178569,7 @@ async function sealPrivateAnswer(jobId, panelPublicKey, plaintext) {
   const mac2 = await subtle().generateKey({ name: "ECDH", namedCurve: PRIVATE_ANSWER_CURVE }, false, ["deriveBits"]);
   const key2 = await aesKey(mac2.privateKey, panelPublicKey, jobId, "encrypt");
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_BYTES));
-  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, utf83(plaintext));
+  const ciphertext = await subtle().encrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, utf84(plaintext));
   const macPublicKey = new Uint8Array(await subtle().exportKey("raw", mac2.publicKey));
   return { macPublicKey: toBase64Url(macPublicKey), iv: toBase64Url(iv), ciphertext: toBase64Url(new Uint8Array(ciphertext)) };
 }
@@ -176965,10 +178586,10 @@ async function openPrivateQuestion(jobId, enginePrivateKey, panelKey, sealed) {
   if (!iv || !ciphertext || ciphertext.byteLength > 32768)
     throw new Error("malformed sealed question");
   const key2 = await aesKey(enginePrivateKey, panelKey, jobId, "decrypt");
-  const plaintext = await subtle().decrypt({ name: "AES-GCM", iv, additionalData: utf83(jobId) }, key2, ciphertext);
+  const plaintext = await subtle().decrypt({ name: "AES-GCM", iv, additionalData: utf84(jobId) }, key2, ciphertext);
   return new TextDecoder().decode(plaintext);
 }
-var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf83 = (value2) => new TextEncoder().encode(value2), PRIVATE_ANSWER_PAD_BUCKETS;
+var PRIVATE_ANSWER_CURVE = "P-256", RAW_PUBLIC_KEY_BYTES = 65, IV_BYTES = 12, subtle = () => globalThis.crypto.subtle, utf84 = (value2) => new TextEncoder().encode(value2), PRIVATE_ANSWER_PAD_BUCKETS;
 var init_private_answer_crypto = __esm(() => {
   PRIVATE_ANSWER_PAD_BUCKETS = [1024, 4096, 16384, 65536];
 });
@@ -178929,7 +180550,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash84 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -178946,7 +180567,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash84("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash85("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -179322,7 +180943,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash85 } from "node:crypto";
+import { createHash as createHash86 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -179346,7 +180967,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest3 = createHash85("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest3 = createHash86("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest3.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {
@@ -182249,6 +183870,7 @@ async function main() {
     const key2 = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key2)
       return localFilesSyncCache.handler;
+    recordAccountPlacement({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesWatchDir(process.env));
     const handler = createLocalFilesProviderStoreSyncHandler({
       ...localFilesTierLane ? { tierSet: localFilesTierLane.set } : {},
       store: localFilesConnectorStore,
@@ -184866,7 +186488,7 @@ function createRefreshableXBookmarksConnectorStoreRuntime(options) {
       if (cachedKey === key2 && cachedRuntime)
         return cachedRuntime;
       usageStore ??= new LocalXBookmarksApiUsageStore;
-      reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath));
+      reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath), env);
       cachedRuntime = bindXBookmarksConnectorStoreRuntime({
         ...binding,
         store,
@@ -185246,7 +186868,7 @@ var init_server5 = __esm(async () => {
   init_store2();
   init_state();
   init_scheduler_source2();
-  init_connector5();
+  init_connector4();
   init_approved_scope_filter2();
   init_open_target2();
   init_paths();

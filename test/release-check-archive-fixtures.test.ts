@@ -98,7 +98,7 @@ describe('fixture tokens', () => {
   });
 
   test('a format besides the first has its own token and file under the same role, and the formats the leg adds are exactly the registry\'s other ones', () => {
-    expect(EXTRA_FORMATS).toEqual(['telegram_json', 'reflect-json', 'roam-json']);
+    expect(EXTRA_FORMATS).toEqual(['telegram_json', 'whatsapp_chat', 'reflect-json', 'roam-json']);
     expect(EXTRA_FORMATS).toEqual(Object.keys(ARCHIVE_FORMATS).filter((format) => format !== 'mbox'));
     const mail = legFixture('agent', 'seed-1');
     const chat = legFixture('agent', 'seed-1', 'telegram_json');
@@ -107,6 +107,9 @@ describe('fixture tokens', () => {
     expect(chat.fileName).not.toBe(mail.fileName);
     expect(chat.relPath).toBe(`${FIXTURE_FOLDER}/rc-agent-telegram_json.json`);
     expect(chat.token).toMatch(/^rcarch[0-9a-f]{14}$/);
+    const whatsapp = legFixture('agent', 'seed-1', 'whatsapp_chat');
+    expect(whatsapp.fileName).toBe('rc-agent-whatsapp_chat.zip');
+    expect(new Set([mail.token, chat.token, whatsapp.token]).size).toBe(3);
   });
 });
 
@@ -292,6 +295,27 @@ describe('the fixtures, read by the product', () => {
     // The page with a block that has no text keeps the text it has.
     const walk = items.find((item) => item.metadata.title === 'Harbour walk');
     expect(walk?.content.kind === 'text' ? walk.content.text : '').toContain('The harbour walk is flat and takes an hour.');
+  });
+
+  test('the WhatsApp archive reads as its expectation says: messages, days, one picture not imported, one assumed zone, one notice left out', async () => {
+    const root = home();
+    const fixture = legFixture('agent', 'seed-whatsapp', 'whatsapp_chat');
+    writeFixture(root, fixture);
+    const { connector, findings } = readFixture(root, fixture);
+    const items = await readAll(connector);
+    expect(items).toHaveLength(fixture.expect.messages);
+    expect(fixture.expect.messages).toBe(5);
+    const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
+    expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
+    expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
+    expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
+    expect(fixture.expect.gaps).toEqual([{ kind: 'media_not_imported', count: 1 }, { kind: 'assumption', count: 1 }]);
+    expect(fixture.expect.leftOut).toEqual([{ kind: 'system_message', count: 1 }]);
+    // The picture is named in its message and not imported; the message is still an item. The notice is the earliest line, and is not counted in the days.
+    expect(items.filter((item) => item.content.kind === 'text' && item.content.text.includes('<attached:'))).toHaveLength(1);
+    expect(days).not.toContain('2023-12-30');
+    // One chat, from the one text file.
+    expect(new Set(items.map((item) => item.identity.providerThreadId)).size).toBe(1);
   });
 
   test('the plain archive has nothing unread and nothing left out', async () => {

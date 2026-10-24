@@ -48,6 +48,7 @@ Dropbox by assumption.
 | Trigger | Skill |
 | --- | --- |
 | User mentions an old mail export, a Google Takeout download, an `.mbox` file, or an Apple Mail export they want searchable | `skills/import-archive/SKILL.md` |
+| User mentions an exported WhatsApp chat (a `_chat.txt`, a "WhatsApp Chat with" file, or the zip WhatsApp shares) they want searchable | `skills/import-archive/SKILL.md` |
 | User asks to remove an archive they imported, or how an archive import is going | `skills/import-archive/SKILL.md` |
 
 `archive_import` only asks. The user approves every import and removal on the

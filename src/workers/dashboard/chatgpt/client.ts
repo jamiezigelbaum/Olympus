@@ -1455,7 +1455,12 @@ export function chatgptDashboardClient(
     const earliest = typeof archive.earliest === 'string' ? archive.earliest : '';
     const latest = typeof archive.latest === 'string' ? archive.latest : '';
     // A date never breaks at its hyphens.
-    if (earliest && latest) facts.push(el('span', 'archive-dates', earliest === latest ? earliest : fill(A.dates, { earliest, latest })));
+    if (earliest && latest) {
+      facts.push(el('span', 'archive-dates', earliest === latest ? earliest : fill(A.dates, { earliest, latest })));
+      // A chat export is the conversation as it was on the day it was exported.
+      const snapshot = archiveNouns(archive).snapshot;
+      if (typeof snapshot === 'string' && snapshot) facts.push(el('span', 'archive-snapshot', snapshot));
+    }
     if (facts.length) {
       const line = el('p', 'muted archive-facts');
       facts.forEach((fact, index) => {

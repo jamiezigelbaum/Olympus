@@ -30,7 +30,8 @@ export interface ArchiveByteSource {
    */
   readonly position: number;
   /**
-   * The next chunk (never empty), or undefined once the stream has ended.
+   * The next chunk (never empty, but for a source that is `catchingUp`), or
+   * undefined once the stream has ended.
    */
   next(): Uint8Array | undefined;
   /**
@@ -43,6 +44,13 @@ export interface ArchiveByteSource {
    * The CRC-32 of the bytes before `position`, when this source keeps one.
    */
   readonly crc32?: number | undefined;
+  /**
+   * True while the source is still working its way to `position` in bounded
+   * steps (a deflated zip member entered part-way, opened with a step size):
+   * `next()` then returns an empty chunk, and the caller may stop and come
+   * back. Absent or false for every other source.
+   */
+  readonly catchingUp?: boolean | undefined;
 }
 
 type Crc32Fn = (data: Uint8Array, value?: number) => number;

@@ -74,6 +74,7 @@ import {
 import { probeFirstRecordKeys, probeListIsEmpty, recordProbeBudget } from '../record-probe.ts';
 import { recoverZipMemberCrc, trackBoundaries, type BoundaryTrackedSource } from '../resume-crc.ts';
 import {
+  ZIP_REPLAY_STEP_BYTES,
   ZipArchive,
   ZipFormatError,
   ZipMemberError,
@@ -185,6 +186,12 @@ interface JsonUnit {
   head(): Uint8Array | undefined;
   /** Throws `ReadInterrupted` when the import is told to stop while the member is read to find its checksum. */
   open(offset: number, crc: number | undefined): ArchiveByteSource;
+  /** A deflated member entered part-way inflates its way there in steps first: whether it still has steps to take. */
+  catchingUp(): boolean;
+  /** One such step: the bytes inflated and thrown away in it. A damaged member throws `ZipMemberError`. */
+  catchUp(): number;
+  /** Leaves the inflater where the catch-up got to, for the next pass to go on from. */
+  park(): void;
   /** A whole record ends at `offset`: its place and the member's CRC there are kept, however much is read after it. */
   mark(offset: number): void;
   /** After the last note read: give back what was read past it; the member's CRC there. */
@@ -289,6 +296,9 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     progressOf: (offset) => offset,
     head: () => reader.readAt(0, ROOT_PEEK_BYTES),
     open: (offset) => fileByteSource(reader, { start: offset }),
+    catchingUp: () => false,
+    catchUp: () => 0,
+    park: () => undefined,
     mark: () => undefined,
     checkpoint: () => ({}),
     end: () => undefined,
@@ -316,12 +326,25 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
         const continuation = offset > 0 ? archiveContinuations.take(key, offset) : undefined;
         reader = ZipMemberReader.open(archive, entry, {
           start: offset,
+          // Getting an inflater to a place deep in a member is done in steps, each asked against the listing's budget.
+          replayStepBytes: Math.min(ZIP_REPLAY_STEP_BYTES, byteBudget),
           ...(startCrc !== undefined && offset > 0 ? { startCrc } : {}),
           ...(continuation ? { continuation } : {}),
         });
         // A deflated member entered part-way is inflated from its start (or continued), and its checksum never comes from the resume point.
         tracked = trackBoundaries(reader, offset === 0 || entry.method === 0 ? startCrc : undefined);
         return tracked;
+      },
+      catchingUp: () => reader?.catchingUp === true,
+      catchUp() {
+        if (!reader) return 0;
+        const before = reader.replayedBytes;
+        reader.catchUp();
+        return reader.replayedBytes - before;
+      },
+      park() {
+        const continuation = reader?.suspend();
+        if (continuation) archiveContinuations.put(key, continuation);
       },
       mark: (offset) => tracked?.markBoundary(offset),
       checkpoint(endOffset) {
@@ -457,6 +480,40 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
         return 'ended';
       }
       throw stoppedFrom(error, relPath);
+    }
+    // A deflated member entered part-way catches up first, a step at a time, and the listing's budget is asked
+    // between steps. When it is spent the inflater is parked where it got to and the next pass goes on from
+    // there (with nothing parked, the catch-up starts over). The first step of a listing is always taken.
+    let stepped = false;
+    while (unit.catchingUp()) {
+      const here = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        unit.park();
+        segment.next = unitCursor;
+        segment.position = here;
+        return 'paused';
+      }
+      if (segment.bytes >= limits.bytes && (stepped || segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        unit.park();
+        segment.next = unitCursor;
+        segment.position = here;
+        return 'paused';
+      }
+      stepped = true;
+      try {
+        segment.bytes += unit.catchUp();
+      } catch (error) {
+        unit.close();
+        if (error instanceof ArchiveImportStoppedError) throw error;
+        if (error instanceof ZipMemberError) {
+          // The member gave out on the way to where this import was to resume: it cannot be read on from there.
+          damaged(unitCursor.offset);
+          return 'ended';
+        }
+        throw stoppedFrom(error, relPath);
+      }
     }
     let reader: JsonStreamReader;
     try {

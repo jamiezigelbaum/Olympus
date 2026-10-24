@@ -368,6 +368,32 @@ describe('each archive under the Archives row', () => {
     }
   });
 
+  test('a chat archive counts messages, says Snapshot, not updated beside its dates, and names what it left out in plain words', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat-whatsapp') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.chat.many, { n: '12,644' }));
+    const facts = item.querySelector('.archive-facts')!;
+    expect(facts.textContent).toContain('WhatsApp chat export');
+    expect(facts.textContent).toContain(fill(A.dates, { earliest: '2019-06-08', latest: '2026-09-30' }));
+    expect(facts.querySelector('.archive-snapshot')!.textContent).toBe('Snapshot, not updated');
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '1,870' }),
+      fill(A.gaps.item_truncated.many, { n: '2' }),
+      fill(A.gaps.assumption.many, { n: '2' }),
+      A.gaps.file_damaged.one,
+      fill(A.gaps.system_message.many, { n: '318' }),
+      fill(A.gaps.message_empty.many, { n: '6' }),
+      fill(A.gaps.status_updates.many, { n: '41' }),
+      fill(A.gaps.item_repeated.many, { n: '112' }),
+      A.gaps.files_unconfirmed.one,
+    ]);
+    // A mail archive is not a snapshot.
+    const mail = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-imported') });
+    expect(archiveItem(mail, 'imported').textContent).not.toContain('Snapshot');
+    expect(archiveItem(mail, 'imported').querySelector('.archive-snapshot')).toBeNull();
+  });
+
   test('a Telegram archive counts messages, and what it leaves out or cannot carry has its own plain sentence', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat') });
     const item = archiveItem(page, 'imported');

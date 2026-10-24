@@ -1,9 +1,9 @@
 # Import an archive
 
 Status: owner direction 2026-10-23. Step 1 (mail with the shared spine),
-step 2 (Reflect and Roam) and step 4 (Telegram Desktop), the last two on
-2026-10-24, are built; step 3 (WhatsApp) is not. Where this page and the code
-differ, the code is current.
+step 2 (Reflect and Roam), step 3 (WhatsApp chat exports) and step 4
+(Telegram Desktop), the last three on 2026-10-24, are built. Where this page
+and the code differ, the code is current.
 
 ## Outcome
 
@@ -45,7 +45,7 @@ same way, with the same privacy and the same status.
 | Format | Today |
 |---|---|
 | Mail (mbox) | Built in step 1 (2026-10-23): the shared spine in `workers/archive-import/`, and a thin mbox connector (`workers/archive-import/mbox/`) that splits the file itself and parses each message with `postal-mime`. Gmail items come from the Gmail API's JSON, so Gmail shares none of it. |
-| WhatsApp chat export | Parser and connector exist (`workers/whatsapp/connector.ts`, `parseWhatsAppChatExport`) and are tested, but nothing in the product calls them. Live WhatsApp capture is wired separately. |
+| WhatsApp chat export | Built in step 3 (2026-10-24): one format (`whatsapp_chat`, family `chat`, provider `whatsapp_export`) over `_chat.txt`, `WhatsApp Chat with <name>.txt` and the zip WhatsApp shares, in `workers/archive-import/whatsapp/`, with the line grammar in `workers/archive-import/whatsapp/grammar.ts` (core keeps only the small detection signature). The old export connector (`workers/whatsapp/connector.ts`) is deleted. Live WhatsApp capture is wired separately and untouched. |
 | Telegram Desktop export | Built in step 4 (2026-10-24): a thin connector (`workers/archive-import/telegram/`) that streams a JSON `result.json`, whole-account or single-chat, as family `chat`, provider `telegram_export`. Live Telegram capture (`telegram-messages/`) is a different provider in different stores, and the import never opens it. |
 | Reflect export | Built in step 2 (2026-10-24): JSON (a list of notes, or `{"notes": [...]}`, either key style, in a `.json` file or a zip) and Markdown (a zip of `.md` files), as formats `reflect-json` and `reflect-markdown` with thin connectors in `workers/archive-import/reflect/` over the shared notes engine in `workers/archive-import/notes/`. The old connector is deleted. CSV and HTML exports are not read; choosing one gets the supported-formats answer. |
 | Roam export | Built in step 2 (2026-10-24): "Export All" as JSON (a list of pages with nested blocks, in a `.json` file or a zip), format `roam-json`, `workers/archive-import/roam/`, same engine. The old connector is deleted. Roam's Markdown and EDN exports are not read. |
@@ -67,7 +67,7 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Piece | What it is |
 |---|---|
 | Format registry | One registry of archive formats (`core/archive-formats.ts`, pure data like `core/file-scope-sources.ts`). Each entry: format id, label, a `detect(path)` probe, the source family, and a connector factory. Adding a format adds one entry and one thin connector. Nothing downstream branches on format. |
-| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect JSON and Roam JSON by the keys of the records at the start of the `.json` file (or of a JSON member of a zip), never by a word in a note's text: a Reflect note has a body key (`content`, `body`, `document_json`) and a title or date key, a Roam page has a `title` and one of Roam's time or author keys (or `children` with a `uid`), and a file that shows only one key of the kind, or both kinds, is not guessed at (a zip with one JSON file of each is refused too). The first 4 KB decide when they can. When they end inside the first record, before the keys that would tell, the probe reads on through the shared JSON reader (`record-probe.ts`, a generic helper that learns no format's keys) to the end of that record, skipping every value and keeping the key names: memory is the names and one chunk, work is that record (and the first field after it), it stops early once the keys so far decide, and a scan that does not decide is a file that is not told by it, never a refusal for size. When the file is an object and its list of notes has not shown yet (earlier keys with long values), the same read walks the object's top-level keys, skipping their values, until it reaches the list's key (named by the format) and then reads the first note's keys; an object that never has the key is read in constant memory until the allowance runs out. The look is for a picker that must stay fast: a file a format matched on the first bytes alone is never read further (a Telegram `result.json` never gets it), but every other file of the pick is, and so is every member of a zip that no format takes for its own file on its first bytes, so a second export in a chosen folder or zip whose first bytes do not tell it is found beside one that does (two exports are then refused or asked about exactly as when both are told at once, never one imported and one dropped); one document is read for at most 64 MiB in all (`RECORD_PROBE_MAX_SCAN_BYTES`, shared by the passes over it), and past that the answer is "no match", which with nothing else matching is the supported-formats answer. The files of one chosen folder also share 256 MiB between them (`RECORD_PROBE_MAX_FOLDER_SCAN_BYTES`), as do the members of a zip picked on its own (one document's worth, 64 MiB; a zip inside a picked folder draws on the folder's); when that runs out before every file or member was looked through, nothing is imported and the refusal says so in plain words (`ARCHIVE_LOOK_INCOMPLETE_ADVICE`: choose just the export file, or a folder or zip that holds only the export), because an unchecked file could be a second export. A zip's JSON member gets the same read, and the formats that ask about one file share one scan. When a zip member's notes list was not reached and the first-record read found no record, one more read asks whether the list is there and empty, so an empty list after long earlier keys reads as an export with no notes. A zip's other JSON files are not read as that format: they are left out and counted (`section_not_imported`); Reflect Markdown by a zip of `.md` files that shows Reflect's hand (Reflect in the file name, a daily-note file name such as `Tue, March 21st, 2023.md`, or a reflect.app link) and holds no JSON, so a Roam Markdown zip is not mistaken for it. No match: say so and list what is supported. Two matches: ask. |
+| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is a text file (or a zip holding one) that starts with a message line, and, in a chosen folder, is named as WhatsApp names it; Telegram Desktop is `result.json` with its export keys; Reflect JSON and Roam JSON by the keys of the records at the start of the `.json` file (or of a JSON member of a zip), never by a word in a note's text: a Reflect note has a body key (`content`, `body`, `document_json`) and a title or date key, a Roam page has a `title` and one of Roam's time or author keys (or `children` with a `uid`), and a file that shows only one key of the kind, or both kinds, is not guessed at (a zip with one JSON file of each is refused too). The first 4 KB decide when they can. When they end inside the first record, before the keys that would tell, the probe reads on through the shared JSON reader (`record-probe.ts`, a generic helper that learns no format's keys) to the end of that record, skipping every value and keeping the key names: memory is the names and one chunk, work is that record (and the first field after it), it stops early once the keys so far decide, and a scan that does not decide is a file that is not told by it, never a refusal for size. When the file is an object and its list of notes has not shown yet (earlier keys with long values), the same read walks the object's top-level keys, skipping their values, until it reaches the list's key (named by the format) and then reads the first note's keys; an object that never has the key is read in constant memory until the allowance runs out. The look is for a picker that must stay fast: a file a format matched on the first bytes alone is never read further (a Telegram `result.json` never gets it), but every other file of the pick is, and so is every member of a zip that no format takes for its own file on its first bytes, so a second export in a chosen folder or zip whose first bytes do not tell it is found beside one that does (two exports are then refused or asked about exactly as when both are told at once, never one imported and one dropped); one document is read for at most 64 MiB in all (`RECORD_PROBE_MAX_SCAN_BYTES`, shared by the passes over it), and past that the answer is "no match", which with nothing else matching is the supported-formats answer. The files of one chosen folder also share 256 MiB between them (`RECORD_PROBE_MAX_FOLDER_SCAN_BYTES`), as do the members of a zip picked on its own (one document's worth, 64 MiB; a zip inside a picked folder draws on the folder's); when that runs out before every file or member was looked through, nothing is imported and the refusal says so in plain words (`ARCHIVE_LOOK_INCOMPLETE_ADVICE`: choose just the export file, or a folder or zip that holds only the export), because an unchecked file could be a second export. A zip's JSON member gets the same read, and the formats that ask about one file share one scan. When a zip member's notes list was not reached and the first-record read found no record, one more read asks whether the list is there and empty, so an empty list after long earlier keys reads as an export with no notes. A zip's other JSON files are not read as that format: they are left out and counted (`section_not_imported`); Reflect Markdown by a zip of `.md` files that shows Reflect's hand (Reflect in the file name, a daily-note file name such as `Tue, March 21st, 2023.md`, or a reflect.app link) and holds no JSON, so a Roam Markdown zip is not mistaken for it. No match: say so and list what is supported. Two matches: ask. |
 | Connectors | Thin `SourceConnector`s (contracts.ts), one per format. Pages honour the `done` / `truncated` rule in contracts.ts. |
 | Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. The old Reflect connector used one constant connector id and the store keyed resume on it; moving Reflect onto the registry (step 2) retired that. |
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
@@ -171,7 +171,13 @@ make its reason true.
   asked about (its first bytes, and the first record's keys when those do not
   say) under the same limits: the unit limit is checked before each member is
   asked, and the bytes read to ask are charged to the byte budget whether the
-  member is taken or not.
+  member is taken or not. A deflated member resumed deep inside it (a restart
+  empties the parked inflater) is inflated up to the resume point in steps of
+  at most 16 MiB or the listing's budget, whichever is smaller, charged to
+  the budget; when it is spent the inflater is parked where it got to and the
+  next pass goes on, so no pass spends more than a budget catching up. (The
+  detection reads and the first-record probes open a member at its start, so
+  they have nothing to catch up to.)
 - **Checksums.** A stored member's CRC-32 is kept at every whole record as the
   records are handed out (`resume-crc.ts`, generic), so a stop in the middle
   of a record longer than a chunk still resumes with the sum at the last
@@ -246,25 +252,122 @@ import, only a single note over the per-record bound is left out.
 Both are in scope. They come after mail because they reuse the same spine
 (identity, resume, removal), not because they are optional.
 
-- **WhatsApp chat export** (`_chat.txt`, or the zip WhatsApp shares). The
-  existing parser (`parseWhatsAppChatExport`) is reused, but the connector
-  cannot join as is: it reads every `.txt` and `.zip` in a folder
-  (`whatsapp/connector.ts:321`), so pointing it at one chat's parent folder
-  would import neighbouring chats, and its plain reads bypass the scope-safe
-  reader. It changes to read exactly the selected files through the
-  scope-safe reader. Picking a folder of exports imports each chat in it, as
-  the user chose.
-- **WhatsApp message identity.** Today an id hashes chat, time, sender and
-  position only (`whatsapp/connector.ts:298`), so a `.txt` and a `.zip`
-  export of the same chat in one folder can overwrite messages whose text
-  differs. Ids gain the source file (or zip member) identity and a hash of
-  the message text. Test with an overlapping-export fixture.
-- **Bounded parsing.** The parser splits the whole text and keeps every
-  message (`whatsapp/connector.ts:155`), and zip entries are inflated whole
-  (`whatsapp/connector.ts:397`). Both become incremental: line-by-line
-  parsing, streaming inflate, with limits on expanded bytes and zip members.
-  Hitting a limit fails visibly, naming the file. The same rule applies to
-  Telegram's `result.json` (streaming JSON) and to any zip a format accepts.
+- **WhatsApp chat export** (built, step 3). One format reads the chat text
+  file of "Export Chat" (`_chat.txt` from an iPhone, `WhatsApp Chat with
+  <name>.txt` from an Android phone, or any `.txt` the person chooses that
+  starts with a message line) and the zip WhatsApp shares, which holds that
+  file and the media. Only the approved files are read, through the
+  scope-safe reader. The text is read as a stream (and a zip member by
+  streaming inflate), never loaded whole.
+- **What counts as an export.** It depends on who chose the file. A file the
+  person chose themselves is an export when it starts like a chat, whatever
+  its name. In a chosen folder a file needs more: a `.txt` named as WhatsApp
+  names it, or a zip holding such a file, and the start of a chat inside; a
+  header-shaped first line alone is not enough, because a build log or a debug
+  dump can start the same way. Files that start like a chat but are not named
+  like one are left alone and counted (`files_unconfirmed`, "choose it by
+  itself to import it"). Detection asks for every `.txt` and `.zip` in the
+  folder, past the usual 256-entry bound, up to 1,024 more; the
+  files past that are counted (`files_not_looked_at`) instead of vanishing.
+  The names that say what an export is by themselves (`_chat.txt`, `WhatsApp
+  Chat with ….txt`, `WhatsApp Chat - ….txt`, `WhatsApp Chat….zip`) are kept
+  apart from that broad pattern (`signatureNames` in the format definition)
+  and are listed and read first, in a folder and inside a zip, so ordinary
+  text files ahead of the chat cannot hide it. A zip with no signature member
+  whose text files the first look (32 members) did not all read says how many
+  it did not (`files_not_looked_at`, "in what you chose"); when nothing is
+  detected, the refusal says the look was not complete, in the one sentence
+  every format shares (`ARCHIVE_LOOK_INCOMPLETE_ADVICE`, also what a look
+  that ran out of its byte allowance says: choose just the export file, or a
+  folder or zip that holds only the export). That refusal is
+  generic, for every format: files nobody asked for by name that the folder
+  look did not read (`othersNotLookedAt` on the probe) count toward it, so a
+  format that detects from the first bytes alone is never refused silently.
+  Residual: when another format is detected, such an unread file is not
+  reported on the record (a media folder would otherwise show thousands).
+- **A pass is bounded in bytes, not only in items.** A pass reads at most
+  `maxBytesPerListing` (256 MiB) of the archive: the date-order scan, every
+  line read or dropped inside a long message, and the re-inflating of a
+  zip member to a resume point all count. When the budget is spent the pass
+  ends with a resume point, and the next pass goes on from it. A resume point
+  can sit inside a message that was cut (dropping lines until the next
+  header), so a message of any length costs bounded work per pass.
+- **Catching up in a deflated member is stepped, not one call.** A deflated
+  member cannot be entered in the middle, so a cold resume re-inflates from
+  its start. The shared zip reader does that in steps of at most 16 MiB of
+  output (one inflate push, 16 KiB in, can add up to about 17 MiB for highly
+  compressible data): `next()` returns an empty chunk and `catchingUp` stays
+  true while it is still catching up. The connector calls `catchUp()` in a
+  loop against the pass budget; when the budget is spent it parks the
+  inflater in the continuation cache and ends the pass with the resume point
+  it started from (an empty page, not done). The next pass takes the
+  inflater from the cache and goes on; if the cache was lost (a restart), the
+  catch-up starts over, which the budget counts again. Any other reader of
+  zip members wires it the same way (the header comment of `zip-reader.ts`
+  gives the recipe); mbox and Telegram read no zip members.
+- **Stored zip members keep their checksum.** The CRC-32 of everything before
+  each message header travels in the resume point, so a stored member resumed
+  at a header that straddled a read still verifies to its end. A member that
+  ends with a checksum that did not match, or that was not read to its end, is
+  reported as `file_damaged`, because what was read of it may be wrong. A deflated member resumes from a parked inflater when the resume
+  point is in the last chunk read, and otherwise by re-inflating from the
+  start of the member in budgeted steps (above).
+- **Dates.** The export writes wall time with no zone and in the phone's
+  locale order. The order is decided per file from its own headers: the order
+  most headers of the file's own style say wins (up to 25 votes, within the
+  first 16 MiB) (a day above
+  12 settles it for that header), so one header pasted into a message cannot
+  decide a file. A header dated before the one above it is left out of the
+  vote when it cannot be read as on or after it (up to two in a row; more are
+  taken as the file's own dates), so a pasted older date after an ambiguous
+  `01/02/2026` cannot turn the file month first. When nothing says, or the
+  votes tie, it is read day first and reported as an `assumption`. The time is read in this computer's zone and
+  reported once per archive. Dates with a weekday or month name, non-Latin
+  digits and non-UTF-8 files are not read.
+- **Pasted headers.** A line inside a message body that looks like a header
+  starts a new message, in its own style, because the format cannot say
+  otherwise. Each one in a style other than the file's, or dated before the
+  header before it, is counted in an `assumption` finding, so the person is
+  told the import took it as a message.
+- **Items and identity.** One item per message; the chat is the thread, named
+  from the export's file name (the zip's, or its folder's, for a `_chat.txt`).
+  The id hashes the chat, the written time, the sender and a hash of the text,
+  plus the number of the message among identical ones at that time. The file
+  and member are not in it, so a `.txt` and a `.zip` of one chat, or two
+  exports that overlap, give one item per message, imported once; the second
+  copy is counted (`item_repeated`, "in more than one export file"). Which
+  file a message came from is metadata (`sourceFile`, `sourceMember`). More
+  than 24 different messages in one written time are told apart by their
+  place in the file instead of a number, and so is a message dated before the
+  one above it (a pasted older header between two real, identical messages
+  cannot give both the same id); such a message is not shared across
+  overlapping copies. `item_repeated` is counted by each message's position in
+  the files beyond the position already counted, not by the page it is in, so
+  a restart that cuts its pages differently counts each repeat once.
+- **Left out, and counted.** Notices from WhatsApp itself (`system_message`),
+  messages with no text (`message_empty`) and the status updates chat
+  (`status_updates`) are skipped and counted. Media stays in the message text
+  as the phone's marker and is counted as `media_not_imported` ("the archive
+  refers to" it); a message over 1,048,576 characters (or 8 MiB) is cut and
+  reported as `item_truncated`. The notices, empty messages and assumptions
+  of a page are told as one finding per kind, and each carries the place of
+  every occurrence (`ArchiveImportFinding.at`); the state store counts only
+  the occurrences past the position it counted before, so a restart whose
+  pages are longer than the first pass's counts each once, and none is lost
+  to a tally that started at an occurrence already counted. The other
+  archive connectors tell each finding at its own message or record, so need
+  nothing more.
+- **Real exports.** The shapes above come from the open-source parsers of
+  real exports and from the synthetic builders in
+  `test/support/archive-fixtures-whatsapp.ts`; no real export was read here.
+  Localized export file names (`WhatsApp Chat with` in other languages), exports
+  with the chat text in a subfolder of a chosen folder, and right-to-left
+  locales are unverified. The open-source parsers report that newer iOS
+  exports put a narrow no-break space before AM/PM and a left-to-right mark
+  before each line; both are handled.
+- **Imported chats are a snapshot.** The dashboard says "Snapshot, not
+  updated" beside a chat archive's date range (by family, so another chat
+  format gets it too).
 - **Telegram Desktop export** (JSON only: "Export Telegram data" or "Export
   chat history" with the format set to Machine-readable JSON; `result.json`
   plus media folders). A thin connector, built from Telegram Desktop's own
@@ -329,7 +432,7 @@ Both are in scope. They come after mail because they reuse the same spine
 2. Reflect and Roam onto the registry, with streaming reads and no prior
    (each note judged per item, held Private until then); their allowlist
    entries removed. Built 2026-10-24.
-3. WhatsApp chat export, with the selected-file, scope-safe reads.
+3. WhatsApp chat export, with the selected-file, scope-safe reads (built).
 4. Telegram Desktop export.
 
 Each step is one PR with focused tests on synthetic fixtures (never real

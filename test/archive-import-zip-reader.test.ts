@@ -6,6 +6,7 @@ import { ScopeSafeError } from '../src/core/scope-safe-fs.ts';
 import { crc32Update, crc32UpdateByTable, fileByteSource } from '../src/workers/archive-import/byte-source.ts';
 import {
   ZIP_COMPRESSED_BLOCK_BYTES,
+  ZIP_INFLATE_PUSH_BYTES,
   ZIP_OVERLAP_SORT_MAX_ENTRIES,
   ZIP_READ_CHUNK_BYTES,
   ZipArchive,
@@ -29,6 +30,21 @@ function sample(size: number, seed = 1): Uint8Array<ArrayBufferLike> {
   for (let index = 0; index < size; index += 1) {
     state = (state * 1103515245 + 12345) & 0x7fffffff;
     out[index] = state >>> 16;
+  }
+  return out;
+}
+
+/** Bytes that deflate barely shrinks, so a push of compressed bytes inflates to about as many. */
+function noise(size: number, seed = 1): Uint8Array<ArrayBufferLike> {
+  const out: Uint8Array<ArrayBufferLike> = new Uint8Array(size);
+  let state = (seed * 2654435761) >>> 0 || 1;
+  for (let index = 0; index < size; index += 1) {
+    state ^= state << 13;
+    state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state >>>= 0;
+    out[index] = state & 0xff;
   }
   return out;
 }
@@ -362,6 +378,98 @@ describe('reading members', () => {
     expect(drain(wrongOffset).bytes).toEqual(data.subarray(chunk.length + 5));
     const wrongMember = ZipMemberReader.open(archive, entryNamed(archive, 'n.bin'), { start: 0, continuation });
     expect(drain(wrongMember).bytes).toEqual(sample(1000, 2));
+  });
+
+  test('a deflated member entered deep inside is caught up to in steps: no call inflates more than a step, and the content is the same', () => {
+    const step = 128 * 1024;
+    const data = noise(6_000_000, 31);
+    const { archive } = open([{ name: 'm.bin', data, method: 'deflate' }]);
+    const start = 5_000_000;
+    const member = ZipMemberReader.open(archive, entryNamed(archive, 'm.bin'), { start, replayStepBytes: step });
+    expect(member.catchingUp).toBe(true);
+    expect(member.position).toBe(start);
+    const parts: Uint8Array[] = [];
+    let empty = 0;
+    let worst = 0;
+    for (;;) {
+      const before = member.replayedBytes;
+      const chunk = member.next();
+      worst = Math.max(worst, member.replayedBytes - before);
+      if (!chunk) break;
+      if (chunk.length === 0) {
+        // Still catching up: nothing delivered, and no checksum yet for the bytes before the position.
+        empty += 1;
+        expect(member.catchingUp).toBe(true);
+        expect(member.crc32).toBeUndefined();
+        expect(member.position).toBe(start);
+        continue;
+      }
+      parts.push(chunk);
+    }
+    expect(worst).toBeLessThanOrEqual(step + 2 * ZIP_INFLATE_PUSH_BYTES);
+    expect(empty).toBeGreaterThan(30);
+    expect(member.catchingUp).toBe(false);
+    expect(member.replayedBytes).toBe(start);
+    expect(Buffer.concat(parts).equals(data.subarray(start))).toBe(true);
+    expect(member.end).toEqual({ bytes: data.length, sizeOk: true, crcOk: true });
+  });
+
+  test('catchUp() steps through the same work, and without a step size the first next() catches up in one go as before', () => {
+    const data = noise(1_500_000, 33);
+    const { archive } = open([{ name: 'm.bin', data, method: 'deflate' }, { name: 's.bin', data, method: 'stored' }]);
+    const stepped = ZipMemberReader.open(archive, entryNamed(archive, 'm.bin'), { start: 1_000_000, replayStepBytes: 100_000 });
+    let steps = 0;
+    while (!stepped.catchUp()) steps += 1;
+    expect(steps).toBeGreaterThan(5);
+    expect(stepped.catchingUp).toBe(false);
+    expect(stepped.catchUp()).toBe(true);
+    expect(stepped.crc32).toBeDefined();
+    expect(drain(stepped).bytes).toEqual(data.subarray(1_000_000));
+    expect(stepped.end).toEqual({ bytes: data.length, sizeOk: true, crcOk: true });
+    // No step size: one call, a real chunk, the whole replay counted.
+    const whole = ZipMemberReader.open(archive, entryNamed(archive, 'm.bin'), { start: 1_000_000 });
+    expect(whole.catchingUp).toBe(true);
+    const first = whole.next()!;
+    expect(first.length).toBeGreaterThan(0);
+    expect(whole.replayedBytes).toBe(1_000_000);
+    expect(whole.catchingUp).toBe(false);
+    // A stored member has nothing to catch up to.
+    const stored = ZipMemberReader.open(archive, entryNamed(archive, 's.bin'), { start: 1_000_000, replayStepBytes: 100_000 });
+    expect(stored.catchingUp).toBe(false);
+    expect(stored.catchUp()).toBe(true);
+    expect(() => ZipMemberReader.open(archive, entryNamed(archive, 'm.bin'), { start: 10, replayStepBytes: 0 })).toThrow();
+  });
+
+  test('a catch-up stopped part-way parks the inflater, and the next reader goes on from there: no byte is inflated twice', () => {
+    const step = 128 * 1024;
+    const data = noise(4_000_000, 37);
+    const { archive } = open([{ name: 'm.bin', data, method: 'deflate' }]);
+    const entry = entryNamed(archive, 'm.bin');
+    const start = 3_500_000;
+    const first = ZipMemberReader.open(archive, entry, { start, replayStepBytes: step });
+    for (let steps = 0; steps < 5; steps += 1) expect(first.catchUp()).toBe(false);
+    const gotTo = first.replayedBytes;
+    expect(gotTo).toBeGreaterThan(0);
+    expect(gotTo).toBeLessThan(start);
+    const parked = first.suspend();
+    // It is opened again at the offset the member was entered at, not where the inflater got to.
+    expect(parked?.position).toBe(start);
+    expect(() => first.next()).toThrow();
+    const second = ZipMemberReader.open(archive, entry, { start, replayStepBytes: step, continuation: parked! });
+    expect(second.catchingUp).toBe(true);
+    expect(second.crc32).toBeUndefined();
+    const rest = drain(second);
+    expect(second.replayedBytes + gotTo).toBe(start);
+    expect(rest.bytes).toEqual(data.subarray(start));
+    expect(second.end).toEqual({ bytes: data.length, sizeOk: true, crcOk: true });
+    // A parked catch-up is for the offset it was entered at only; any other starts over.
+    const again = ZipMemberReader.open(archive, entry, { start, replayStepBytes: step });
+    again.catchUp();
+    const parkedAgain = again.suspend()!;
+    const elsewhere = ZipMemberReader.open(archive, entry, { start: start + 1, replayStepBytes: step, continuation: parkedAgain });
+    elsewhere.catchUp();
+    expect(elsewhere.replayedBytes).toBeLessThanOrEqual(step + 2 * ZIP_INFLATE_PUSH_BYTES);
+    expect(elsewhere.replayedBytes).toBeGreaterThan(0);
   });
 
   test('the head of a member: shorter members, damaged members and empty ones', () => {

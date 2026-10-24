@@ -21,6 +21,7 @@ import {
   ARCHIVE_PROBE_MAX_NAMED,
   archiveProbeNameMatches,
   archiveProbeNames,
+  archiveSignatureNames,
   type ArchiveFileEntry,
   type ArchiveProbe,
   type ArchiveProbeEntry,
@@ -201,15 +202,19 @@ function lastSegment(name: string): string {
 /**
  * What a zip holds, as the probe shows it: its first members in directory
  * order, then members a format asks for by name however far down the
- * directory they are, each with its first bytes where they could be read.
- * Undefined when the file turns out not to be a zip.
+ * directory they are (signature names first: a hundred ordinary text files
+ * ahead of `_chat.txt` cannot hide it), each with its first bytes where they
+ * could be read. Also how many members a format asks for the probe left
+ * unread when no signature member says what the zip is. Undefined when the
+ * file turns out not to be a zip.
  */
 function probeZipMembers(
   root: ScopeRoot,
   relPath: string,
   probeNames: readonly string[],
+  signatureNames: readonly string[],
   allowance: ScanAllowance,
-): readonly ArchiveProbeEntry[] | undefined {
+): { members: readonly ArchiveProbeEntry[]; notLookedAt: number } | undefined {
   let reader: ScopeFileReader;
   try {
     reader = root.openFile(relPath);
@@ -220,29 +225,47 @@ function probeZipMembers(
   try {
     const archive = ZipArchive.open(reader);
     const first: ZipEntry[] = [];
-    const named: ZipEntry[] = [];
+    const signaturePast: ZipEntry[] = [];
+    const askedPast: ZipEntry[] = [];
+    let signatureTotal = 0;
+    let askedTotal = 0;
     for (const entry of archive.entries()) {
+      const signature = !entry.isDirectory && archiveProbeNameMatches(entry.name, signatureNames);
+      const asked = !signature && !entry.isDirectory && archiveProbeNameMatches(entry.name, probeNames);
+      if (signature) signatureTotal += 1;
+      if (asked) askedTotal += 1;
       if (first.length < ARCHIVE_PROBE_MAX_CHILDREN) first.push(entry);
-      else if (named.length < ARCHIVE_PROBE_MAX_NAMED && archiveProbeNameMatches(entry.name, probeNames)) named.push(entry);
+      else if (signature) {
+        if (signaturePast.length < ARCHIVE_PROBE_MAX_NAMED) signaturePast.push(entry);
+      } else if (asked && askedPast.length < ARCHIVE_PROBE_MAX_NAMED) askedPast.push(entry);
     }
-    // The members a format asked for have their first bytes read before any other member's.
-    const asked = [...first, ...named].filter((entry) => !entry.isDirectory && archiveProbeNameMatches(entry.name, probeNames));
-    const others = first.filter((entry) => !entry.isDirectory && !asked.includes(entry));
+    const members = [...first, ...signaturePast, ...askedPast];
+    // The members a format asked for have their first bytes read before any other member's, signatures before the rest.
+    const files = members.filter((entry) => !entry.isDirectory);
+    const signatures = files.filter((entry) => archiveProbeNameMatches(entry.name, signatureNames));
+    const asked = files.filter((entry) => !signatures.includes(entry) && archiveProbeNameMatches(entry.name, probeNames));
+    const others = first.filter((entry) => !entry.isDirectory && !signatures.includes(entry) && !asked.includes(entry));
+    const readOrder = [...signatures, ...asked, ...others].slice(0, PROBE_MAX_MEMBER_HEADS);
     const heads = new Map<number, Uint8Array>();
-    for (const entry of [...asked, ...others].slice(0, PROBE_MAX_MEMBER_HEADS)) {
+    for (const entry of readOrder) {
       const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
       if (head) heads.set(entry.index, head);
     }
-    return [...first, ...named].map((entry) => {
-      const head = heads.get(entry.index);
-      return {
-        relPath: entry.name,
-        name: lastSegment(entry.name),
-        kind: entry.isDirectory ? 'directory' as const : 'file' as const,
-        ...(head ? { head } : {}),
-        ...(head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}),
-      };
-    });
+    const askedRead = readOrder.filter((entry) => asked.includes(entry)).length;
+    return {
+      members: members.map((entry) => {
+        const head = heads.get(entry.index);
+        return {
+          relPath: entry.name,
+          name: lastSegment(entry.name),
+          kind: entry.isDirectory ? 'directory' as const : 'file' as const,
+          ...(head ? { head } : {}),
+          ...(head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}),
+        };
+      }),
+      // A signature member says what the zip is; the ordinary files beside it are not candidates.
+      notLookedAt: signatureTotal > 0 ? 0 : Math.max(0, askedTotal - askedRead),
+    };
   } catch (error) {
     if (error instanceof ZipFormatError || error instanceof ScopeSafeError) return undefined;
     throw error;
@@ -273,6 +296,7 @@ export function probeArchivePath(
   chosenRelPath: string,
   options: {
     probeNames?: readonly string[];
+    signatureNames?: readonly string[];
     /**
      * Test seam: the bytes one document may be read on through, and the
      * files of a chosen folder (or the members of a chosen zip: a document's
@@ -281,33 +305,43 @@ export function probeArchivePath(
     scanBytes?: ScanBytes;
   } = {},
 ): ArchiveProbe {
-  const probeNames = options.probeNames ?? archiveProbeNames();
+  const signatureNames = options.signatureNames ?? archiveSignatureNames();
+  const probeNames = [...new Set([...(options.probeNames ?? archiveProbeNames()), ...signatureNames])];
   const stat = chosenRelPath === '' ? root.statRelative('') : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat.kind === 'file') {
     const alone = scanAllowance(options.scanBytes);
     const zipShare = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.document ?? RECORD_PROBE_MAX_SCAN_BYTES));
     const head = fileHead(root, chosenRelPath);
-    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, zipShare) : undefined;
+    const zip = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, signatureNames, zipShare) : undefined;
     return {
       chosen: {
         relPath: '',
         name,
         kind: 'file',
         ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath, alone) } : {}),
-        ...(members ? { members } : {}),
+        ...(zip ? { members: zip.members } : {}),
+        ...(zip && zip.notLookedAt > 0 ? { membersNotLookedAt: zip.notLookedAt } : {}),
       },
       children: [],
-      ...(members ? { readsRanOut: zipShare.sharedRanOut } : {}),
+      ...(zip ? { readsRanOut: zipShare.sharedRanOut } : {}),
     };
   }
   if (stat.kind !== 'directory') throw new ScopeSafeError('not_regular', 'neither a file nor a folder');
   const folderAllowance = scanAllowance(options.scanBytes, recordProbeBudget(options.scanBytes?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES));
   const everything = root.list(chosenRelPath);
+  // Names a format asks for are looked at past the usual bound, up to a larger one; what is past that is counted.
+  // The names that say what an export is by themselves come first, so ordinary files ahead of them cannot hide them.
+  const beyond = everything.slice(ARCHIVE_PROBE_MAX_CHILDREN).filter((entry) => entry.kind !== 'directory' && matchesAnyName(entry, probeNames));
+  const askedBeyond = [
+    ...beyond.filter((entry) => archiveProbeNameMatches(entry.name, signatureNames)),
+    ...beyond.filter((entry) => !archiveProbeNameMatches(entry.name, signatureNames)),
+  ];
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
-    ...everything.slice(ARCHIVE_PROBE_MAX_CHILDREN).filter((entry) => matchesAnyName(entry, probeNames)).slice(0, ARCHIVE_PROBE_MAX_NAMED),
+    ...askedBeyond.slice(0, ARCHIVE_PROBE_MAX_NAMED),
   ];
+  const notLookedAt = Math.max(0, askedBeyond.length - ARCHIVE_PROBE_MAX_NAMED);
   const children: ArchiveProbeEntry[] = [];
   const kinds: Array<'file' | 'directory' | undefined> = [];
   for (const entry of listed) {
@@ -321,35 +355,57 @@ export function probeArchivePath(
     }
     kinds.push(kind === 'directory' || kind === 'file' ? kind : undefined);
   }
-  // First bytes: the files a format asked for by name, then the rest in listing order.
+  // First bytes: the files a format asked for by name, then the rest in listing
+  // order. The first few files are always looked at; every file a format asked
+  // for by name is, however many there are (the listing already bounds them).
   const heads = new Map<number, Uint8Array>();
   const wanted = listed.map((entry, index) => index).filter((index) => kinds[index] === 'file');
+  const asked = wanted.filter((index) => matchesAnyName(listed[index]!, probeNames));
   const ordered = [
-    ...wanted.filter((index) => matchesAnyName(listed[index]!, probeNames)),
+    ...asked,
     ...wanted.filter((index) => !matchesAnyName(listed[index]!, probeNames)),
-  ].slice(0, PROBE_MAX_FILE_HEADS);
+  ].slice(0, Math.max(PROBE_MAX_FILE_HEADS, asked.length));
   for (const index of ordered) {
     const head = fileHead(root, joinRelative(chosenRelPath, listed[index]!.name));
     if (head) heads.set(index, head);
   }
-  const zips = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index))).slice(0, PROBE_MAX_ZIPS);
+  // Every zip a format asked for by name is opened (each is an export of its own); of the others, only the first few.
+  const askedSet = new Set(asked);
+  const zipsAmongHeads = ordered.filter((index) => ZipArchive.looksLikeZip(heads.get(index)));
+  const zips = new Set([
+    ...zipsAmongHeads.filter((index) => askedSet.has(index)),
+    ...zipsAmongHeads.filter((index) => !askedSet.has(index)).slice(0, PROBE_MAX_ZIPS),
+  ]);
+  // Files nobody asked for by name that this look did not reach: the first bytes of those past the few it reads, the
+  // entries past the bound, and the zips past the few it opens. A format that tells its export from the first bytes
+  // alone could have it among them, so a refusal says the look was not complete.
+  const unlistedOthers = everything.slice(ARCHIVE_PROBE_MAX_CHILDREN)
+    .filter((entry) => (entry.kind === 'file' || entry.kind === undefined) && !matchesAnyName(entry, probeNames)).length;
+  const othersNotLookedAt = (wanted.length - ordered.length) + unlistedOthers + (zipsAmongHeads.length - zips.size);
   listed.forEach((entry, index) => {
     const kind = kinds[index];
     if (kind === 'directory') {
       children.push({ relPath: entry.name, name: entry.name, kind: 'directory' });
     } else if (kind === 'file') {
       const head = heads.get(index);
-      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, folderAllowance) : undefined;
+      const zip = zips.has(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, signatureNames, folderAllowance) : undefined;
       children.push({
         relPath: entry.name,
         name: entry.name,
         kind: 'file',
         ...(head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name), folderAllowance) } : {}),
-        ...(members ? { members } : {}),
+        ...(zip ? { members: zip.members } : {}),
+        ...(zip && zip.notLookedAt > 0 ? { membersNotLookedAt: zip.notLookedAt } : {}),
       });
     }
   });
-  return { chosen: { relPath: '', name, kind: 'directory' }, children, readsRanOut: folderAllowance.sharedRanOut };
+  return {
+    chosen: { relPath: '', name, kind: 'directory' },
+    children,
+    ...(notLookedAt > 0 ? { notLookedAt } : {}),
+    ...(othersNotLookedAt > 0 ? { othersNotLookedAt } : {}),
+    readsRanOut: folderAllowance.sharedRanOut,
+  };
 }
 
 function sha256(bytes: Uint8Array): string {
