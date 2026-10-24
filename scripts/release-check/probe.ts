@@ -5,8 +5,8 @@
  * DOM in the tests (test/release-check-journeys.test.ts).
  *
  * Finding: a control is named by its role and its accessible name (aria-labelledby, aria-label, its label, its visible text, the
- * placeholder, the title), or by its visible text. A hidden element (no box, `visibility:hidden`) is never found. A `css` selector is
- * the last resort for a control that has no name.
+ * placeholder, the title), or by its visible text. A hidden element (no box, `visibility:hidden`, or inside a closed `<details>` other
+ * than as its summary) is never found. A `css` selector is the last resort for a control that has no name.
  */
 
 /** A target as the page-side script takes it: regular expressions arrive as { re, flags }. */
@@ -36,12 +36,19 @@ export const PROBE_SOURCE = String.raw`(() => {
     tab: '[role="tab"]',
   };
   const INTERACTIVE = [ROLE_SELECTORS.button, ROLE_SELECTORS.link, ROLE_SELECTORS.textbox, ROLE_SELECTORS.checkbox, ROLE_SELECTORS.radio, ROLE_SELECTORS.combobox, ROLE_SELECTORS.tab, '[tabindex]', 'label'].join(', ');
+  // A closed <details> shows only its own summary. Chrome still gives what is inside it a box and a visible style.
+  const insideClosed = (el) => {
+    for (let d = el.parentElement ? el.parentElement.closest('details') : null; d; d = d.parentElement ? d.parentElement.closest('details') : null) {
+      if (!d.open && !(el.tagName === 'SUMMARY' && el.parentElement === d)) return true;
+    }
+    return false;
+  };
   const isVisible = (el) => {
     if (!el || !el.getBoundingClientRect) return false;
     const box = el.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) return false;
     const style = getComputedStyle(el);
-    return style.visibility !== 'hidden' && style.display !== 'none';
+    return style.visibility !== 'hidden' && style.display !== 'none' && !insideClosed(el);
   };
   const nameOf = (el) => {
     const labelled = el.getAttribute && el.getAttribute('aria-labelledby');
@@ -129,6 +136,8 @@ export const PROBE_SOURCE = String.raw`(() => {
 
   window.__rc = {
     clean,
+    /** Whether a person could see the element: it has a box, it isn't hidden, and no closed section holds it. */
+    visible: isVisible,
     /** The first match itself (for the tests' DOM, which has no mouse). */
     element: (target) => pick(target),
     count: (target) => all(target).length,

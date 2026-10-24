@@ -42,6 +42,8 @@ interface State {
   reloadsOnRevoke?: boolean;
   /** The Build a connector page has no Lock, as in the product. */
   noLockOnConnector?: boolean;
+  /** A closed section and an open one, each holding a button (the box stub gives both a box, as Chrome does). */
+  sections?: boolean;
 }
 
 class PagesDriver implements JourneyDriver {
@@ -73,6 +75,7 @@ class PagesDriver implements JourneyDriver {
       <div id="sheet" ${s.sheetOpen ? '' : 'hidden'}><p>Paste this into your agent.</p><button type="button" class="btn" data-copy-target="#sheet">Copy prompt</button></div>
       ${s.deadButton ? '<button type="button" class="btn">Check readiness</button>' : ''}
       ${s.silentDisabled ? '<button type="button" class="btn" disabled>Wait</button>' : ''}
+      ${s.sections ? '<details><summary>Add it yourself instead</summary><button type="button" class="btn">Copy the address</button></details><details open><summary>Advanced</summary><button type="button" class="btn">Show advanced</button></details>' : ''}
       ${s.secret ? secret : ''}
       <ul>${rows}</ul>
       ${s.noLockOnConnector && this.path.endsWith('connector') ? '' : s.locked ? '<form data-control-session-kind="unlock"><button type="submit">Unlock</button></form>' : '<form data-control-session-kind="lock"><button type="submit">Lock</button></form>'}
@@ -208,6 +211,14 @@ describe('exploring the other pages', () => {
     const driver = new PagesDriver();
     const { steps } = await run(driver, [PAGES[0]!]);
     expect(steps.find((step) => step.name === 'Connect')).toMatchObject({ ok: true, actual: 'nothing was sent' });
+  });
+
+  test('a control inside a closed section is not pressed, since a person cannot press it; its summary and an open section\'s controls are', async () => {
+    const { steps } = await run(new PagesDriver({ sections: true }), [PAGES[0]!]);
+    const names = steps.map((step) => step.name);
+    expect(names).not.toContain('Copy the address');
+    expect(names).toContain('Add it yourself instead');
+    expect(names).toContain('Show advanced');
   });
 
   test('a button that does nothing fails', async () => {
