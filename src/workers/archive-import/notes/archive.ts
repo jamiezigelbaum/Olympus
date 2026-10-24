@@ -46,13 +46,13 @@ import { archiveContinuations, type ContinuationKey } from '../continuation-cach
 import {
   JsonStreamError,
   JsonStreamReader,
+  archiveStopFromReaderError,
   parseJsonResume,
   serializeJsonResume,
   type JsonPathSegment,
   type JsonResumePoint,
   type JsonStreamEvent,
 } from '../json-stream.ts';
-import { archiveStopFromReaderError } from '../stop-errors.ts';
 import {
   ZipArchive,
   ZipFormatError,
