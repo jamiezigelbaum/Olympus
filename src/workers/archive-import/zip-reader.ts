@@ -27,6 +27,7 @@
  */
 import { createHash } from 'node:crypto';
 import { Inflate } from 'fflate/browser';
+import { ARCHIVE_COMMON_FINDINGS, type ArchiveImportFinding } from '../../core/archive-formats.ts';
 import { archiveStopFromScopeError } from './stop-errors.ts';
 import { crc32Update, type ArchiveByteSource } from './byte-source.ts';
 
@@ -64,6 +65,18 @@ export const ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
  * More members than this sharing bytes with others and the whole zip is damaged.
  */
 const ZIP_MAX_NAMED_OVERLAPS = 4096;
+/**
+ * A zip whose directory is not in file order has its members sorted in memory
+ * to check them for overlap, up to this many. That costs 28 bytes a member
+ * while it runs (7 MiB at the bound) and keeps 8 bytes a member (2 MiB) for
+ * the life of the archive object. A larger directory in that state is not
+ * sorted and not checked for overlap (`ZipArchive.overlapsUnchecked`).
+ */
+export const ZIP_OVERLAP_SORT_MAX_ENTRIES = 262_144;
+/**
+ * Bytes read to find the member after the one being opened.
+ */
+const ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
 /**
  * The end record is searched for in this much of the file's end.
  */
@@ -124,6 +137,10 @@ export interface ZipEntry {
    * member's own header must say too. Absent on an entry made by hand.
    */
   rawName?: Uint8Array;
+  /**
+   * Where this entry's record starts in the file; absent on an entry made by hand.
+   */
+  directoryAt?: number;
 }
 
 /**
@@ -258,7 +275,7 @@ export class ZipArchive {
   readonly source: ZipByteSource;
   readonly entryCount: number;
   private readonly directory: CentralDirectory;
-  private overlaps: ReadonlySet<number> | 'all' | undefined;
+  private cachedLayout: ZipLayout | undefined;
 
   private constructor(source: ZipByteSource, directory: CentralDirectory) {
     this.source = source;
@@ -285,16 +302,24 @@ export class ZipArchive {
    * Every member in directory order, read from the directory in bounded chunks.
    */
   *entries(): Generator<ZipEntry> {
+    yield* this.readEntries(this.directory.offset, 0, ZIP_READ_CHUNK_BYTES);
+  }
+
+  /**
+   * The entries from the one at `firstIndex`, whose record starts at file offset `from`, read `chunkBytes` at a time.
+   */
+  private *readEntries(from: number, firstIndex: number, chunkBytes: number): Generator<ZipEntry> {
     const { offset, size, entries } = this.directory;
     const end = offset + size;
+    if (!Number.isSafeInteger(from) || from < offset || from > end) throw new ZipFormatError('damaged', 'An entry of the zip\'s directory is not where it says.');
     let buffer = new Uint8Array(0);
     let at = 0;
-    let nextRead = offset;
+    let nextRead = from;
     const need = (length: number): void => {
       if (buffer.length - at >= length) return;
       const remaining = end - nextRead;
       if (remaining <= 0) throw new ZipFormatError('damaged', 'The zip\'s directory ends before its entries do.');
-      const part = readExact(this.source, nextRead, Math.min(ZIP_READ_CHUNK_BYTES, remaining));
+      const part = readExact(this.source, nextRead, Math.min(chunkBytes, remaining));
       nextRead += part.length;
       const joined = new Uint8Array(buffer.length - at + part.length);
       joined.set(buffer.subarray(at));
@@ -303,8 +328,9 @@ export class ZipArchive {
       at = 0;
       if (buffer.length < length) need(length);
     };
-    for (let index = 0; index < entries; index += 1) {
+    for (let index = firstIndex; index < entries; index += 1) {
       need(46);
+      const recordAt = nextRead - buffer.length + at;
       const header = view(buffer.subarray(at, at + 46));
       if (header.getUint32(0, true) !== SIG_CENTRAL) throw new ZipFormatError('damaged', 'The zip\'s directory has an entry that is not one.');
       const nameLength = header.getUint16(28, true);
@@ -355,6 +381,7 @@ export class ZipArchive {
         localHeaderOffset,
         isDirectory: name.endsWith('/'),
         rawName: rawName.slice(),
+        directoryAt: recordAt,
       };
       at += total;
     }
@@ -402,11 +429,19 @@ export class ZipArchive {
 
   /**
    * Where the member's data starts in the file, after checking its local
-   * header against the directory's entry: the same method, encryption flag
-   * and name, the same checksum and sizes when the header carries them, data
-   * that stays between the start of the file and the directory, and no other
-   * member sharing any of its bytes. The directory is the authority; a member
-   * that disagrees with it is damaged, not read as one or the other.
+   * record against the directory's entry. The directory is the authority; a
+   * member that disagrees with it is damaged, not read as one or the other.
+   * - The header says what the directory says: method, encryption flag, name,
+   *   checksum and sizes (ZIP64 sizes resolved from the header's own extra
+   *   field). Zeros stand for "after the data" only when the header says it
+   *   has a descriptor.
+   * - The record's true extent is its header, name, extra field, data and
+   *   (if it has one) descriptor. It must end before the directory, and
+   *   before the start of the next member in the file.
+   * - No member's start may fall inside another's lower-bound extent (see
+   *   `layout`).
+   * Only the member being opened has its header read; the members around it
+   * are checked from the directory, which costs a few small reads each.
    */
   dataStart(entry: ZipEntry): number {
     try {
@@ -418,28 +453,37 @@ export class ZipArchive {
       const extraLength = data.getUint16(28, true);
       if (data.getUint16(8, true) !== entry.method) throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on how it is compressed.');
       if (((flags & 0x1) !== 0) !== entry.encrypted) throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on whether it is encrypted.');
-      if (entry.rawName) {
-        const localName = nameLength === 0 ? new Uint8Array(0) : readExact(this.source, entry.localHeaderOffset + 30, nameLength);
-        if (!sameBytes(localName, entry.rawName)) throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on its name.');
-      }
-      if ((flags & 0x8) === 0) {
-        const crc = data.getUint32(14, true);
-        const compressed = data.getUint32(18, true);
-        const uncompressed = data.getUint32(22, true);
-        // A header with all three left at zero says nothing; one that says something must say what the directory says.
-        if (crc !== 0 || compressed !== 0 || uncompressed !== 0) {
-          if (crc !== entry.crc32
-            || (compressed !== 0xffffffff && compressed !== entry.compressedSize)
-            || (uncompressed !== 0xffffffff && uncompressed !== entry.uncompressedSize)) {
-            throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on its checksum or size.');
-          }
+      const tail = nameLength + extraLength === 0 ? new Uint8Array(0) : readExact(this.source, entry.localHeaderOffset + 30, nameLength + extraLength);
+      if (entry.rawName && !sameBytes(tail.subarray(0, nameLength), entry.rawName)) throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on its name.');
+      let zip64: { uncompressed: number; compressed: number } | undefined;
+      for (const field of extraFields(tail.subarray(nameLength))) {
+        if (field.id === 0x0001 && field.data.length >= 16) {
+          const sizes = view(field.data);
+          zip64 = { uncompressed: u64(sizes, 0), compressed: u64(sizes, 8) };
+          break;
         }
       }
+      const hasDescriptor = (flags & 0x8) !== 0;
+      let compressed = data.getUint32(18, true);
+      let uncompressed = data.getUint32(22, true);
+      if (compressed === 0xffffffff || uncompressed === 0xffffffff) {
+        if (!zip64) throw new ZipFormatError('damaged', 'A member\'s header points to a zip64 size it does not have.');
+        if (compressed === 0xffffffff) compressed = zip64.compressed;
+        if (uncompressed === 0xffffffff) uncompressed = zip64.uncompressed;
+      }
+      const agrees = (local: number, wanted: number): boolean => local === wanted || (hasDescriptor && local === 0);
+      if (!agrees(data.getUint32(14, true), entry.crc32) || !agrees(compressed, entry.compressedSize) || !agrees(uncompressed, entry.uncompressedSize)) {
+        throw new ZipFormatError('damaged', 'A member\'s header and the directory disagree on its checksum or size.');
+      }
       const start = entry.localHeaderOffset + 30 + nameLength + extraLength;
-      if (start + entry.compressedSize > this.source.size) throw new ZipFormatError('damaged', 'A member runs past the end of the file.');
-      if (start + entry.compressedSize > this.directory.offset) throw new ZipFormatError('damaged', 'A member runs into the zip\'s directory.');
-      const overlapping = this.overlappingMembers();
-      if (overlapping === 'all' || overlapping.has(entry.index)) throw new ZipFormatError('damaged', 'Members of this zip share bytes.');
+      let end = start + entry.compressedSize;
+      if (hasDescriptor) end += this.descriptorLength(end, zip64 !== undefined);
+      if (end > this.source.size) throw new ZipFormatError('damaged', 'A member runs past the end of the file.');
+      if (end > this.directory.offset) throw new ZipFormatError('damaged', 'A member runs into the zip\'s directory.');
+      const layout = this.layout();
+      if (layout.flagged === 'all' || layout.flagged.has(entry.index)) throw new ZipFormatError('damaged', 'Members of this zip share bytes.');
+      const next = this.nextStartAfter(entry, layout);
+      if (next !== undefined && end > next) throw new ZipFormatError('damaged', 'Members of this zip share bytes.');
       return start;
     } catch (error) {
       if (error instanceof ZipFormatError) throw new ZipMemberError('damaged', entry.name, error.message);
@@ -448,13 +492,38 @@ export class ZipArchive {
   }
 
   /**
-   * The members whose bytes (from their header to the end of their data, at
-   * least) overlap another's, or `'all'` when too many do to name them. One
-   * pass over the directory, held only as long as it is in order; a directory
-   * out of file order is sorted first.
+   * Bytes of the data descriptor that follows data ending at `dataEnd`: its
+   * checksum and two sizes (eight bytes each with a zip64 record, else four),
+   * and the optional signature in front, looked for where it would be.
    */
-  private overlappingMembers(): ReadonlySet<number> | 'all' {
-    if (this.overlaps) return this.overlaps;
+  private descriptorLength(dataEnd: number, zip64: boolean): number {
+    const signed = dataEnd + 4 <= this.source.size && view(readExact(this.source, dataEnd, 4)).getUint32(0, true) === 0x08074b50;
+    return (signed ? 4 : 0) + 4 + (zip64 ? 16 : 8);
+  }
+
+  /**
+   * Whether the directory is out of file order and has too many members to
+   * sort (`ZIP_OVERLAP_SORT_MAX_ENTRIES`), so that members were not all
+   * checked against each other for overlap. A format that reads such a zip
+   * reports it (`zipOverlapAssumption`). Reads the directory once.
+   */
+  overlapsUnchecked(): boolean {
+    return this.layout().kind === 'unchecked';
+  }
+
+  /**
+   * What the directory alone says about members sharing bytes, found once.
+   * A member's lower-bound extent runs from its header to the end of its name
+   * and data (the local extra field and descriptor are not known without
+   * reading the header; `dataStart` adds them for the member it opens). One
+   * pass over the directory in order keeps a fixed amount of state. A
+   * directory out of file order is sorted in memory up to
+   * `ZIP_OVERLAP_SORT_MAX_ENTRIES`; a larger one is not sorted and its
+   * out-of-order part is not checked. The members named are at most
+   * `ZIP_MAX_NAMED_OVERLAPS`; beyond that the answer is `'all'`.
+   */
+  private layout(): ZipLayout {
+    if (this.cachedLayout) return this.cachedLayout;
     const found = new Set<number>();
     let all = false;
     const mark = (index: number): void => {
@@ -485,11 +554,16 @@ export class ZipArchive {
         break;
       }
       sweep(entry.index, entry.localHeaderOffset, extent(entry));
+      if (all) break;
     }
-    if (!ordered) {
-      // Out of file order: sort positions held in typed arrays (about 20 bytes a member), then sweep again.
+    let layout: ZipLayout;
+    if (all) {
+      layout = { kind: 'ordered', flagged: 'all' };
+    } else if (ordered) {
+      layout = { kind: 'ordered', flagged: found };
+    } else if (this.directory.entries <= ZIP_OVERLAP_SORT_MAX_ENTRIES) {
+      // Out of file order: sort positions held in typed arrays (28 bytes a member while this runs), then sweep again.
       found.clear();
-      all = false;
       const count = this.directory.entries;
       const offsets = new Float64Array(count);
       const ends = new Float64Array(count);
@@ -503,12 +577,51 @@ export class ZipArchive {
       sweepEnd = 0;
       sweepIndex = -1;
       previousOffset = -1;
-      for (const index of order) sweep(index, offsets[index]!, ends[index]!);
+      const starts = new Float64Array(count);
+      for (let position = 0; position < count; position += 1) {
+        const index = order[position]!;
+        starts[position] = offsets[index]!;
+        if (!all) sweep(index, offsets[index]!, ends[index]!);
+      }
+      layout = { kind: 'sorted', flagged: all ? 'all' : found, starts };
+    } else {
+      // Too many to sort: what the ordered start of the directory found stands, the rest is not checked.
+      layout = { kind: 'unchecked', flagged: found };
     }
-    this.overlaps = all ? 'all' : found;
-    return this.overlaps;
+    this.cachedLayout = layout;
+    return layout;
+  }
+
+  /**
+   * The smallest start of any other member after this one's, from the
+   * directory; undefined when there is none or it cannot be known (a
+   * directory too large to sort and out of order, an entry made by hand).
+   */
+  private nextStartAfter(entry: ZipEntry, layout: ZipLayout): number | undefined {
+    if (layout.kind === 'sorted') {
+      let low = 0;
+      let high = layout.starts.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (layout.starts[middle]! <= entry.localHeaderOffset) low = middle + 1;
+        else high = middle;
+      }
+      return low < layout.starts.length ? layout.starts[low]! : undefined;
+    }
+    if (layout.kind !== 'ordered' || entry.directoryAt === undefined) return undefined;
+    // In file order the next member is the next record; this one has no twin (it would have been named), so it starts later.
+    for (const following of this.readEntries(entry.directoryAt, entry.index, ZIP_NEIGHBOR_READ_BYTES)) {
+      if (following.index === entry.index) continue;
+      return following.localHeaderOffset > entry.localHeaderOffset ? following.localHeaderOffset : undefined;
+    }
+    return undefined;
   }
 }
+
+type ZipLayout =
+  | { kind: 'ordered'; flagged: ReadonlySet<number> | 'all' }
+  | { kind: 'sorted'; flagged: ReadonlySet<number> | 'all'; starts: Float64Array }
+  | { kind: 'unchecked'; flagged: ReadonlySet<number> | 'all' };
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
@@ -950,4 +1063,16 @@ export function readZipMemberHead(archive: ZipArchive, entry: ZipEntry, maxBytes
  */
 export function zipFindingOffset(memberIndex: number, offsetInMember: number): number {
   return memberIndex * 0x200000000 + Math.min(Math.max(0, offsetInMember), 0x1ffffffff);
+}
+
+/**
+ * The finding a format reports for a zip it read whose members could not all
+ * be checked against each other for overlap, so that the import took it as
+ * given that no two members share bytes (`ArchiveImportFinding`, kind
+ * `assumption`, the dashboard's words say what it means); undefined when they
+ * were all checked.
+ */
+export function zipOverlapAssumption(archive: ZipArchive, fileIndex: number): ArchiveImportFinding | undefined {
+  if (!archive.overlapsUnchecked()) return undefined;
+  return { kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap', fileIndex, offset: zipFindingOffset(0, 0), count: 1 };
 }

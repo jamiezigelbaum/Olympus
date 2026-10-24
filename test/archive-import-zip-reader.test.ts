@@ -6,6 +6,7 @@ import { ScopeSafeError } from '../src/core/scope-safe-fs.ts';
 import { crc32Update, crc32UpdateByTable, fileByteSource } from '../src/workers/archive-import/byte-source.ts';
 import {
   ZIP_COMPRESSED_BLOCK_BYTES,
+  ZIP_OVERLAP_SORT_MAX_ENTRIES,
   ZIP_READ_CHUNK_BYTES,
   ZipArchive,
   ZipFormatError,
@@ -15,9 +16,12 @@ import {
   readZipMemberHead,
   stoppableZipSource,
   zipFindingOffset,
+  zipOverlapAssumption,
   type ZipEntry,
 } from '../src/workers/archive-import/zip-reader.ts';
 import { buildZip, memoryRangeReader, referenceCrc32, type ZipFixtureEntry } from './helpers/zip-fixture.ts';
+
+const encoder = new TextEncoder();
 
 function sample(size: number, seed = 1): Uint8Array<ArrayBufferLike> {
   const out: Uint8Array<ArrayBufferLike> = new Uint8Array(size);
@@ -645,6 +649,283 @@ describe('a member and the directory must agree', () => {
     view.setUint16(endAt + 8, 60_000, true);
     view.setUint16(endAt + 10, 60_000, true);
     expect(() => ZipArchive.open(memoryRangeReader(bytes))).toThrow(ZipFormatError);
+  });
+});
+
+/**
+ * A zip that is only described, never held: `count` members of no bytes, the member at directory index i
+ * in slot `slotOf(i)` of the file, read on demand like a file on disk.
+ */
+function virtualZip(
+  count: number,
+  slotOf: (index: number) => number,
+  indexAt: (slot: number) => number,
+): { size: number; readAt(offset: number, length: number): Uint8Array } {
+  const SLOT = 64;
+  const RECORD = 55;
+  const directoryAt = SLOT * count;
+  const recordsEnd = directoryAt + RECORD * count;
+  const size = recordsEnd + 56 + 20 + 22;
+  const nameOf = (index: number): Uint8Array => encoder.encode(`m${String(index).padStart(8, '0')}`);
+  const localHeader = (index: number): Uint8Array => {
+    const out = new Uint8Array(39);
+    const data = new DataView(out.buffer);
+    data.setUint32(0, 0x04034b50, true);
+    data.setUint16(4, 20, true);
+    data.setUint16(26, 9, true);
+    out.set(nameOf(index), 30);
+    return out;
+  };
+  const record = (index: number): Uint8Array => {
+    const out = new Uint8Array(RECORD);
+    const data = new DataView(out.buffer);
+    data.setUint32(0, 0x02014b50, true);
+    data.setUint16(4, 20, true);
+    data.setUint16(6, 20, true);
+    data.setUint16(28, 9, true);
+    data.setUint32(42, SLOT * slotOf(index), true);
+    out.set(nameOf(index), 46);
+    return out;
+  };
+  // The end of a zip with more than 65,535 members: zip64 end record, its locator, then the ordinary end record.
+  const end = new Uint8Array(56 + 20 + 22);
+  const endData = new DataView(end.buffer);
+  endData.setUint32(0, 0x06064b50, true);
+  endData.setBigUint64(4, 44n, true);
+  endData.setBigUint64(24, BigInt(count), true);
+  endData.setBigUint64(32, BigInt(count), true);
+  endData.setBigUint64(40, BigInt(RECORD * count), true);
+  endData.setBigUint64(48, BigInt(directoryAt), true);
+  endData.setUint32(56, 0x07064b50, true);
+  endData.setBigUint64(56 + 8, BigInt(recordsEnd), true);
+  endData.setUint32(56 + 16, 1, true);
+  endData.setUint32(76, 0x06054b50, true);
+  endData.setUint16(76 + 8, 0xffff, true);
+  endData.setUint16(76 + 10, 0xffff, true);
+  endData.setUint32(76 + 12, 0xffffffff, true);
+  endData.setUint32(76 + 16, 0xffffffff, true);
+  return {
+    size,
+    readAt(offset: number, length: number): Uint8Array {
+      const out = new Uint8Array(Math.max(0, Math.min(length, size - offset)));
+      const copy = (piece: Uint8Array, pieceAt: number): void => {
+        const from = Math.max(offset, pieceAt);
+        const to = Math.min(offset + out.length, pieceAt + piece.length);
+        if (to > from) out.set(piece.subarray(from - pieceAt, to - pieceAt), from - offset);
+      };
+      if (offset < directoryAt) {
+        for (let slot = Math.floor(offset / SLOT); slot * SLOT < Math.min(directoryAt, offset + out.length); slot += 1) copy(localHeader(indexAt(slot)), slot * SLOT);
+      }
+      if (offset + out.length > directoryAt && offset < recordsEnd) {
+        const first = Math.max(0, Math.floor((offset - directoryAt) / RECORD));
+        for (let index = first; index < count && directoryAt + index * RECORD < offset + out.length; index += 1) copy(record(index), directoryAt + index * RECORD);
+      }
+      copy(end, recordsEnd);
+      return out;
+    },
+  };
+}
+
+/** Runs `run` while recording the length of every Float64Array and Uint32Array made. */
+function countingTypedArrays<T>(run: () => T): { result: T; floats: number[]; ints: number[] } {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const Float = globalThis.Float64Array;
+  const Int = globalThis.Uint32Array;
+  const floats: number[] = [];
+  const ints: number[] = [];
+  class CountedFloat extends Float {
+    constructor(...args: ConstructorParameters<typeof Float64Array>) {
+      super(...args);
+      floats.push(this.length);
+    }
+  }
+  class CountedInt extends Int {
+    constructor(...args: ConstructorParameters<typeof Uint32Array>) {
+      super(...args);
+      ints.push(this.length);
+    }
+  }
+  globals.Float64Array = CountedFloat;
+  globals.Uint32Array = CountedInt;
+  try {
+    return { result: run(), floats, ints };
+  } finally {
+    globals.Float64Array = Float;
+    globals.Uint32Array = Int;
+  }
+}
+
+describe('a large directory is checked in bounded memory', () => {
+  const cap = ZIP_OVERLAP_SORT_MAX_ENTRIES;
+
+  test('out of file order and at the bound: sorted in memory, 28 bytes a member while it runs', () => {
+    const source = virtualZip(cap, (index) => cap - 1 - index, (slot) => cap - 1 - slot);
+    const { result, floats, ints } = countingTypedArrays(() => {
+      const archive = ZipArchive.open(source);
+      const entry = archive.entryAt(7)!;
+      const start = archive.dataStart(entry);
+      return { archive, start, entry };
+    });
+    // The instrument sees the arrays: offsets, ends, order, and the sorted starts that stay.
+    expect(floats.filter((length) => length === cap).length).toBe(3);
+    expect(ints.filter((length) => length === cap).length).toBe(1);
+    const bytes = floats.reduce((sum, length) => sum + length * 8, 0) + ints.reduce((sum, length) => sum + length * 4, 0);
+    expect(bytes).toBeLessThanOrEqual(28 * cap + 1024 * 1024);
+    expect(result.archive.overlapsUnchecked()).toBe(false);
+    expect(zipOverlapAssumption(result.archive, 0)).toBeUndefined();
+    expect(result.start).toBe(64 * (cap - 1 - 7) + 39);
+  });
+
+  test('out of file order and over the bound: no array grows with the directory, one assumption is reported, the zip still reads', () => {
+    const count = cap + 1;
+    const source = virtualZip(count, (index) => count - 1 - index, (slot) => count - 1 - slot);
+    const { result, floats, ints } = countingTypedArrays(() => {
+      const archive = ZipArchive.open(source);
+      const entry = archive.entryAt(7)!;
+      return { archive, entry, start: archive.dataStart(entry) };
+    });
+    expect(Math.max(0, ...floats, ...ints)).toBeLessThanOrEqual(4096);
+    expect(result.start).toBe(64 * (count - 1 - 7) + 39);
+    expect(result.archive.overlapsUnchecked()).toBe(true);
+    expect(zipOverlapAssumption(result.archive, 3)).toEqual({ kind: 'assumption', class: 'gap', fileIndex: 3, offset: 0, count: 1 });
+    // The archive is not refused: its members open.
+    expect(ZipMemberReader.open(result.archive, result.entry).entry.name).toBe('m00000007');
+  });
+
+  test('over the bound but in file order: the whole directory is checked in a fixed amount of state', () => {
+    const count = cap + 1000;
+    const source = virtualZip(count, (index) => index, (slot) => slot);
+    const { result, floats, ints } = countingTypedArrays(() => {
+      const archive = ZipArchive.open(source);
+      const entry = archive.entryAt(count - 1)!;
+      return { archive, start: archive.dataStart(entry) };
+    });
+    expect(Math.max(0, ...floats, ...ints)).toBeLessThanOrEqual(4096);
+    expect(result.archive.overlapsUnchecked()).toBe(false);
+    expect(zipOverlapAssumption(result.archive, 0)).toBeUndefined();
+    expect(result.start).toBe(64 * (count - 1) + 39);
+  });
+
+  test('members sharing bytes are named without keeping more than a fixed number of them', () => {
+    // 20,000 entries that all say they start at the first slot.
+    const source = virtualZip(20_000, () => 0, () => 0);
+    const added: number[] = [];
+    const original = Set.prototype.add;
+    Set.prototype.add = function counted(this: Set<unknown>, value: unknown): Set<unknown> {
+      if (typeof value === 'number') added.push(value);
+      return original.call(this, value);
+    };
+    try {
+      const archive = ZipArchive.open(source);
+      const error = (() => {
+        try {
+          archive.dataStart(archive.entryAt(0)!);
+        } catch (caught) {
+          return caught as ZipMemberError;
+        }
+        return undefined;
+      })();
+      expect(error?.code).toBe('damaged');
+      expect(error?.message).toContain('share bytes');
+    } finally {
+      Set.prototype.add = original;
+    }
+    expect(new Set(added).size).toBeLessThanOrEqual(4096);
+    expect(new Set(added).size).toBeGreaterThan(0);
+  });
+});
+
+describe('a member\'s true extent', () => {
+  const payload = encoder.encode('SHARED PAYLOAD');
+
+  function hiddenHeader(name: string, extraLength: number): Uint8Array {
+    const nameBytes = encoder.encode(name);
+    const out = new Uint8Array(30 + nameBytes.length + extraLength);
+    const data = new DataView(out.buffer);
+    data.setUint32(0, 0x04034b50, true);
+    data.setUint16(4, 20, true);
+    data.setUint32(14, referenceCrc32(payload), true);
+    data.setUint32(18, payload.length, true);
+    data.setUint32(22, payload.length, true);
+    data.setUint16(26, nameBytes.length, true);
+    data.setUint16(28, extraLength, true);
+    out.set(nameBytes, 30);
+    return out;
+  }
+
+  test('a second member whose header hides in the first one\'s extra field is found when the first is opened', () => {
+    // a.bin: header (35 bytes), a 65-byte extra field that holds b.bin's whole header at its offset 20, then the payload.
+    const extra = new Uint8Array(65);
+    extra.set(hiddenHeader('b.bin', 10), 20);
+    const { archive } = open([
+      { name: 'a.bin', data: payload, localHeader: { extra } },
+      { name: 'b.bin', data: payload, directoryOffset: 35 + 20 },
+    ]);
+    const a = entryNamed(archive, 'a.bin');
+    const b = entryNamed(archive, 'b.bin');
+    // Neither starts inside the other's name and data, so the directory alone shows nothing wrong.
+    expect(b.localHeaderOffset).toBe(55);
+    expect(openError(archive, 'a.bin').message).toContain('share bytes');
+    // The hidden member is a well-formed record of its own; it is the first that is refused.
+    expect(drain(ZipMemberReader.open(archive, b)).bytes).toEqual(payload);
+    expect(a.compressedSize).toBe(payload.length);
+  });
+
+  test('a descriptor counts: a member that starts inside the one before it\'s descriptor shares bytes', () => {
+    const { archive } = open([
+      { name: 'a.bin', data: payload, descriptor: true },
+      { name: 'b.bin', data: payload, directoryOffset: 35 + payload.length + 4 },
+    ]);
+    expect(openError(archive, 'a.bin').message).toContain('share bytes');
+    // Without the second member the same record is fine, descriptor and all.
+    const alone = open([{ name: 'a.bin', data: payload, descriptor: true }, { name: 'c.bin', data: 'later', descriptor: true }]);
+    expect(drain(ZipMemberReader.open(alone.archive, entryNamed(alone.archive, 'a.bin'))).bytes).toEqual(payload);
+  });
+
+  test('extra fields and descriptors that stay clear of the next member are not overlap', () => {
+    const { archive } = open([
+      { name: 'a.bin', data: payload, localHeader: { extra: new Uint8Array(40) } },
+      { name: 'b.bin', data: payload, descriptor: true, localHeader: { extra: new Uint8Array(7) } },
+      { name: 'c.bin', data: payload, zip64: true, descriptor: true },
+      { name: 'd.bin', data: payload },
+    ]);
+    for (const name of ['a.bin', 'b.bin', 'c.bin', 'd.bin']) {
+      expect(drain(ZipMemberReader.open(archive, entryNamed(archive, name))).bytes).toEqual(payload);
+    }
+  });
+});
+
+describe('a member\'s header and the directory agree on checksum and sizes', () => {
+  const text = 'the same bytes in the header and the directory';
+
+  test('zeros stand in for the real values only when the header says a descriptor follows', () => {
+    const zeros = { crc: 0, compressedSize: 0, uncompressedSize: 0 };
+    const { archive } = open([
+      { name: 'plain.txt', data: text, localHeader: zeros },
+      { name: 'later.txt', data: text, descriptor: true },
+      { name: 'later-wrong.txt', data: text, descriptor: true, localHeader: { crc: 12345 } },
+      { name: 'later-size.txt', data: text, descriptor: true, localHeader: { uncompressedSize: 3 } },
+      { name: 'later-real.txt', data: text, descriptor: true, localHeader: { crc: referenceCrc32(encoder.encode(text)) } },
+    ]);
+    expect(openError(archive, 'plain.txt').code).toBe('damaged');
+    expect(openError(archive, 'later-wrong.txt').code).toBe('damaged');
+    expect(openError(archive, 'later-size.txt').code).toBe('damaged');
+    for (const name of ['later.txt', 'later-real.txt']) {
+      expect(new TextDecoder().decode(drain(ZipMemberReader.open(archive, entryNamed(archive, name))).bytes)).toBe(text);
+    }
+  });
+
+  test('sizes behind 0xffffffff are read from the header\'s zip64 record and compared', () => {
+    const { archive } = open([
+      { name: 'ok.txt', data: text, zip64: true },
+      { name: 'big-uncompressed.txt', data: text, zip64: true, localHeader: { uncompressedSize: 5 } },
+      { name: 'big-compressed.txt', data: text, zip64: true, localHeader: { compressedSize: 5 } },
+      { name: 'missing.txt', data: text, localHeader: { compressedSize: 0xffffffff } },
+    ]);
+    expect(drain(ZipMemberReader.open(archive, entryNamed(archive, 'ok.txt'))).bytes.length).toBe(text.length);
+    for (const name of ['big-uncompressed.txt', 'big-compressed.txt', 'missing.txt']) {
+      expect([name, openError(archive, name).code]).toEqual([name, 'damaged']);
+    }
   });
 });
 
