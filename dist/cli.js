@@ -75028,6 +75028,16 @@ function readZipMemberHead(archive, entry, maxBytes) {
 function zipFindingOffset(memberIndex, offsetInMember) {
   return memberIndex * 8589934592 + Math.min(Math.max(0, offsetInMember), 8589934591);
 }
+function zipOverlapAssumption(archive, fileIndex) {
+  if (!archive.overlapsUnchecked())
+    return;
+  return { kind: ARCHIVE_COMMON_FINDINGS.zipOverlapUnchecked, class: "gap", fileIndex, offset: zipFindingOffset(0, 0), count: 1 };
+}
+function reportZipOverlap(archive, fileIndex, report) {
+  const finding = zipOverlapAssumption(archive, fileIndex);
+  if (finding)
+    report(finding);
+}
 var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, ZIP_OVERLAP_SORT_MAX_ENTRIES = 262144, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
   init_browser();
@@ -156240,6 +156250,7 @@ function createWhatsAppArchiveConnector(input) {
             };
             if (file.members) {
               const opened = openZip(reader, file, fileIndex);
+              reportZipOverlap(opened.zip, fileIndex, (finding) => input.report(finding));
               context2.zip = opened.zip;
               context2.units = opened.units;
               context2.total = opened.total;
@@ -157144,6 +157155,7 @@ function createNoteArchiveConnector(input, spec) {
           segment.next = startOfFile(cursor.file + 1);
           return segment;
         }
+        reportZipOverlap(archive, cursor.file, (finding) => input.report(finding));
         try {
           if (source.kind === "json")
             readJsonZip(archive, file, cursor.file, cursor, limits, segment, savedAt);
