@@ -434,7 +434,7 @@ Both are in scope. They come after mail because they reuse the same spine
    (each note judged per item, held Private until then); their allowlist
    entries removed. Built 2026-10-24.
 3. WhatsApp chat export, with the selected-file, scope-safe reads (built).
-4. Telegram Desktop export.
+4. Telegram Desktop export (built 2026-10-24).
 
 Each step is one PR with focused tests on synthetic fixtures (never real
 exports), plus the held-out eval where the step changes the source pipeline.
@@ -463,3 +463,10 @@ connection (`V0_4_RELEASE.md`, "Qualification action"): the dashboard shows
 the connected scope and the history the export covers, tells stale live
 capture apart from a successful empty import, and removing the archive leaves
 live capture running and its items in place.
+
+Status 2026-10-24: the first paragraph is met for all five formats on fresh
+Mac and Linux installs of main `1e043925` (the release check's archive leg,
+55 of 55 checks). Each format is imported through the agent tool with the
+dashboard's approval; the picker, the private-model-off test and the
+changed-file stop run on the mbox fixture, since the spine they exercise is
+shared. The second paragraph waits for an owner canary with a paired phone.
