@@ -346,7 +346,9 @@ export function createLocalPrivateAnswers(options: LocalPrivateAnswersOptions): 
       if (action === 'list') return { status: 200, body: { ok: true, ...api.waiting(), destinations: api.destinations() } };
       if (action === 'ask_anonymous') {
         if (!options.anonymousAsk) return refused(503, 'unavailable', W.anonymousNotSetUp);
-        const result = await options.anonymousAsk({ question: typeof body.question === 'string' ? body.question : '' });
+        // Strict or Standard for this question (owner, 2026-10-24); absent: the saved setting.
+        if (body.level !== undefined && body.level !== 'strict' && body.level !== 'standard') return refused(400, 'invalid_params', W.levelInvalid);
+        const result = await options.anonymousAsk({ question: typeof body.question === 'string' ? body.question : '', ...(body.level !== undefined ? { level: body.level } : {}) });
         return result.ok
           ? { status: 200, body: { ok: true, status: 'answered', answer: result.reply, sent: result.sent, citations: [] } }
           : refused(400, result.code, result.message);

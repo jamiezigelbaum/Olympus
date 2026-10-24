@@ -107,6 +107,14 @@ the transport's final authorization refuses the send as stale if any changed.
 The dashboard's own question box was retired on 2026-10-10 (design step 3):
 the card is for setup only.
 
+**Strict or Standard per question (owner decision, 2026-10-24).** The level
+is chosen with each question, not only in settings. The Ask page's zkAPI row
+and ChatGPT's private question panel each offer Strict and Standard, starting
+at the saved setting, and send the pick with that question; the agent tool
+takes `level` per call as before (asked once, then remembered). The card's
+setting stays as the default for new questions ("What may zkAPI send by
+default?").
+
 The rulings below (words of the question ChatGPT sent, copied document
 wording and their residuals) governed Standard's full gate and now apply
 only where that gate still runs; they are kept as the record.
