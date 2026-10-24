@@ -50428,7 +50428,7 @@ class ZipArchive {
   source;
   entryCount;
   directory;
-  overlaps;
+  cachedLayout;
   constructor(source, directory) {
     this.source = source;
     this.directory = directory;
@@ -50441,18 +50441,23 @@ class ZipArchive {
     return new ZipArchive(source, locateCentralDirectory(source));
   }
   *entries() {
+    yield* this.readEntries(this.directory.offset, 0, ZIP_READ_CHUNK_BYTES);
+  }
+  *readEntries(from, firstIndex, chunkBytes) {
     const { offset, size, entries } = this.directory;
     const end = offset + size;
+    if (!Number.isSafeInteger(from) || from < offset || from > end)
+      throw new ZipFormatError("damaged", "An entry of the zip's directory is not where it says.");
     let buffer = new Uint8Array(0);
     let at = 0;
-    let nextRead = offset;
+    let nextRead = from;
     const need = (length) => {
       if (buffer.length - at >= length)
         return;
       const remaining = end - nextRead;
       if (remaining <= 0)
         throw new ZipFormatError("damaged", "The zip's directory ends before its entries do.");
-      const part = readExact(this.source, nextRead, Math.min(ZIP_READ_CHUNK_BYTES, remaining));
+      const part = readExact(this.source, nextRead, Math.min(chunkBytes, remaining));
       nextRead += part.length;
       const joined = new Uint8Array(buffer.length - at + part.length);
       joined.set(buffer.subarray(at));
@@ -50462,8 +50467,9 @@ class ZipArchive {
       if (buffer.length < length)
         need(length);
     };
-    for (let index = 0;index < entries; index += 1) {
+    for (let index = firstIndex;index < entries; index += 1) {
       need(46);
+      const recordAt = nextRead - buffer.length + at;
       const header = view2(buffer.subarray(at, at + 46));
       if (header.getUint32(0, true) !== SIG_CENTRAL)
         throw new ZipFormatError("damaged", "The zip's directory has an entry that is not one.");
@@ -50518,7 +50524,8 @@ class ZipArchive {
         uncompressedSize,
         localHeaderOffset,
         isDirectory: name.endsWith("/"),
-        rawName: rawName.slice()
+        rawName: rawName.slice(),
+        directoryAt: recordAt
       };
       at += total;
     }
@@ -50568,28 +50575,45 @@ class ZipArchive {
         throw new ZipFormatError("damaged", "A member's header and the directory disagree on how it is compressed.");
       if ((flags & 1) !== 0 !== entry.encrypted)
         throw new ZipFormatError("damaged", "A member's header and the directory disagree on whether it is encrypted.");
-      if (entry.rawName) {
-        const localName = nameLength === 0 ? new Uint8Array(0) : readExact(this.source, entry.localHeaderOffset + 30, nameLength);
-        if (!sameBytes(localName, entry.rawName))
-          throw new ZipFormatError("damaged", "A member's header and the directory disagree on its name.");
-      }
-      if ((flags & 8) === 0) {
-        const crc = data2.getUint32(14, true);
-        const compressed = data2.getUint32(18, true);
-        const uncompressed = data2.getUint32(22, true);
-        if (crc !== 0 || compressed !== 0 || uncompressed !== 0) {
-          if (crc !== entry.crc32 || compressed !== 4294967295 && compressed !== entry.compressedSize || uncompressed !== 4294967295 && uncompressed !== entry.uncompressedSize) {
-            throw new ZipFormatError("damaged", "A member's header and the directory disagree on its checksum or size.");
-          }
+      const tail = nameLength + extraLength === 0 ? new Uint8Array(0) : readExact(this.source, entry.localHeaderOffset + 30, nameLength + extraLength);
+      if (entry.rawName && !sameBytes(tail.subarray(0, nameLength), entry.rawName))
+        throw new ZipFormatError("damaged", "A member's header and the directory disagree on its name.");
+      let zip64;
+      for (const field of extraFields(tail.subarray(nameLength))) {
+        if (field.id === 1 && field.data.length >= 16) {
+          const sizes = view2(field.data);
+          zip64 = { uncompressed: u64(sizes, 0), compressed: u64(sizes, 8) };
+          break;
         }
       }
+      const hasDescriptor = (flags & 8) !== 0;
+      let compressed = data2.getUint32(18, true);
+      let uncompressed = data2.getUint32(22, true);
+      if (compressed === 4294967295 || uncompressed === 4294967295) {
+        if (!zip64)
+          throw new ZipFormatError("damaged", "A member's header points to a zip64 size it does not have.");
+        if (compressed === 4294967295)
+          compressed = zip64.compressed;
+        if (uncompressed === 4294967295)
+          uncompressed = zip64.uncompressed;
+      }
+      const agrees = (local, wanted) => local === wanted || hasDescriptor && local === 0;
+      if (!agrees(data2.getUint32(14, true), entry.crc32) || !agrees(compressed, entry.compressedSize) || !agrees(uncompressed, entry.uncompressedSize)) {
+        throw new ZipFormatError("damaged", "A member's header and the directory disagree on its checksum or size.");
+      }
       const start = entry.localHeaderOffset + 30 + nameLength + extraLength;
-      if (start + entry.compressedSize > this.source.size)
+      let end = start + entry.compressedSize;
+      if (hasDescriptor)
+        end += this.descriptorLength(end, zip64 !== undefined);
+      if (end > this.source.size)
         throw new ZipFormatError("damaged", "A member runs past the end of the file.");
-      if (start + entry.compressedSize > this.directory.offset)
+      if (end > this.directory.offset)
         throw new ZipFormatError("damaged", "A member runs into the zip's directory.");
-      const overlapping = this.overlappingMembers();
-      if (overlapping === "all" || overlapping.has(entry.index))
+      const layout = this.layout();
+      if (layout.flagged === "all" || layout.flagged.has(entry.index))
+        throw new ZipFormatError("damaged", "Members of this zip share bytes.");
+      const next = this.nextStartAfter(entry, layout);
+      if (next !== undefined && end > next)
         throw new ZipFormatError("damaged", "Members of this zip share bytes.");
       return start;
     } catch (error) {
@@ -50598,9 +50622,16 @@ class ZipArchive {
       throw error;
     }
   }
-  overlappingMembers() {
-    if (this.overlaps)
-      return this.overlaps;
+  descriptorLength(dataEnd, zip64) {
+    const signed = dataEnd + 4 <= this.source.size && view2(readExact(this.source, dataEnd, 4)).getUint32(0, true) === 134695760;
+    return (signed ? 4 : 0) + 4 + (zip64 ? 16 : 8);
+  }
+  overlapsUnchecked() {
+    return this.layout().kind === "unchecked";
+  }
+  layout() {
+    if (this.cachedLayout)
+      return this.cachedLayout;
     const found = new Set;
     let all = false;
     const mark = (index) => {
@@ -50633,10 +50664,16 @@ class ZipArchive {
         break;
       }
       sweep(entry.index, entry.localHeaderOffset, extent(entry));
+      if (all)
+        break;
     }
-    if (!ordered) {
+    let layout;
+    if (all) {
+      layout = { kind: "ordered", flagged: "all" };
+    } else if (ordered) {
+      layout = { kind: "ordered", flagged: found };
+    } else if (this.directory.entries <= ZIP_OVERLAP_SORT_MAX_ENTRIES) {
       found.clear();
-      all = false;
       const count = this.directory.entries;
       const offsets = new Float64Array(count);
       const ends = new Float64Array(count);
@@ -50651,11 +50688,41 @@ class ZipArchive {
       sweepEnd = 0;
       sweepIndex = -1;
       previousOffset = -1;
-      for (const index of order)
-        sweep(index, offsets[index], ends[index]);
+      const starts = new Float64Array(count);
+      for (let position = 0;position < count; position += 1) {
+        const index = order[position];
+        starts[position] = offsets[index];
+        if (!all)
+          sweep(index, offsets[index], ends[index]);
+      }
+      layout = { kind: "sorted", flagged: all ? "all" : found, starts };
+    } else {
+      layout = { kind: "unchecked", flagged: found };
     }
-    this.overlaps = all ? "all" : found;
-    return this.overlaps;
+    this.cachedLayout = layout;
+    return layout;
+  }
+  nextStartAfter(entry, layout) {
+    if (layout.kind === "sorted") {
+      let low = 0;
+      let high = layout.starts.length;
+      while (low < high) {
+        const middle = low + high >>> 1;
+        if (layout.starts[middle] <= entry.localHeaderOffset)
+          low = middle + 1;
+        else
+          high = middle;
+      }
+      return low < layout.starts.length ? layout.starts[low] : undefined;
+    }
+    if (layout.kind !== "ordered" || entry.directoryAt === undefined)
+      return;
+    for (const following of this.readEntries(entry.directoryAt, entry.index, ZIP_NEIGHBOR_READ_BYTES)) {
+      if (following.index === entry.index)
+        continue;
+      return following.localHeaderOffset > entry.localHeaderOffset ? following.localHeaderOffset : undefined;
+    }
+    return;
   }
 }
 function sameBytes(a, b) {
@@ -50967,9 +51034,10 @@ function readZipMemberHead(archive, entry, maxBytes) {
   }
   return out;
 }
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, ZIP_OVERLAP_SORT_MAX_ENTRIES = 262144, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
   init_browser();
+  init_archive_formats();
   init_stop_errors();
   init_byte_source();
   ZIP_READ_CHUNK_BYTES = 1024 * 1024;
@@ -50977,6 +51045,7 @@ var init_zip_reader = __esm(() => {
   ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
   ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
   ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
   MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
   ZipFormatError = class ZipFormatError extends Error {
     code;
@@ -77579,7 +77648,7 @@ var init_vocabulary = __esm(() => {
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
       media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }

@@ -13523,7 +13523,7 @@ var init_vocabulary = __esm(() => {
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
       media_not_imported: { one: "1 picture, recording or other file in the archive was not imported", many: "{n} pictures, recordings or other files in the archive were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say (such as a time zone)", many: "{n} things Olympus had to assume because the archive does not say (such as time zones)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
@@ -19383,9 +19383,10 @@ function readBlock(source, offset, length, name) {
     throw error;
   }
 }
-var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
   init_browser();
+  init_archive_formats();
   init_stop_errors();
   init_byte_source();
   ZIP_READ_CHUNK_BYTES = 1024 * 1024;
@@ -19393,6 +19394,7 @@ var init_zip_reader = __esm(() => {
   ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
   ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
   ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
   MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
   ZipFormatError = class ZipFormatError extends Error {
     code;
