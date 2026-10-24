@@ -149909,6 +149909,14 @@ function createArchiveImportRuntime(options = {}) {
       options.onStoreOpened?.(store, built);
     return built;
   };
+  const subscribers = new Set;
+  const removalWaiting = () => {
+    try {
+      return state.list().some((record5) => record5.status === "removing");
+    } catch {
+      return false;
+    }
+  };
   const hasData = (family) => {
     if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync71(path)))
       return true;
@@ -149927,7 +149935,22 @@ function createArchiveImportRuntime(options = {}) {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
       return existsSync71(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
-    start: (path) => startArchiveImport({ state, path })
+    start: (path) => startArchiveImport({ state, path }),
+    subscribeWork: (wake) => {
+      subscribers.add(wake);
+      if (removalWaiting())
+        wake();
+      return () => {
+        subscribers.delete(wake);
+      };
+    },
+    notifyWork: () => {
+      for (const wake of [...subscribers]) {
+        try {
+          wake();
+        } catch {}
+      }
+    }
   };
 }
 var init_runtime2 = __esm(() => {
@@ -150422,6 +150445,13 @@ function createArchiveImportDashboard(options) {
       console.warn(`[archive-import] the scheduler was not updated: ${error2 instanceof Error ? error2.name : "error"}`);
     }
   };
+  const wakeScheduler = () => {
+    try {
+      options.runtime.notifyWork();
+    } catch (error2) {
+      console.warn(`[archive-import] the scheduler was not woken: ${error2 instanceof Error ? error2.name : "error"}`);
+    }
+  };
   const refusal3 = (code, message2) => ({ ok: false, code, message: message2 });
   const outcome = (requestId, result) => {
     if (result.kind === "started") {
@@ -150691,6 +150721,7 @@ function createArchiveImportDashboard(options) {
         requests.remove(request.request_id);
     }
     refresh();
+    wakeScheduler();
     return { ok: true };
   };
   const api2 = {
@@ -151277,7 +151308,8 @@ function createArchiveImportsSchedulerSource(input) {
     cadence: "continuous",
     intervalMs: input.config.worker.scheduler.syncIntervalSeconds * 1000,
     freshnessThresholdHours: input.config.worker.scheduler.freshnessThresholdHours,
-    tasks
+    tasks,
+    subscribeChanges: input.runtime.subscribeWork
   };
 }
 var ARCHIVE_IMPORTS_CONCURRENCY_KEY = "archive.imports", ARCHIVE_IMPORT_STATUS_CHECK_MS = 1000;
