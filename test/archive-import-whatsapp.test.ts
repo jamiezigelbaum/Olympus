@@ -1662,9 +1662,10 @@ describe('whatsapp archive on the shared spine', () => {
     expect(liveFiles()).toEqual(liveBefore.files);
     expect(createHash('sha256').update(readFileSync(liveDb)).digest('hex')).toBe(liveBefore.digest);
     expect(statSync(liveDb).size).toBe(liveBefore.size);
-    // The archive's stores are its own: the lane's paths are the archive family's, not the live ones.
+    // The archive's stores are its own: the lane's paths are the archive family's, not the live ones
+    // (the legacy archive-chat store, or the archive account's own folder on a fresh install).
     for (const path of archiveConnectorStoreDbPaths(['chat'], f.env)) {
-      expect(path).toContain('archive-chat');
+      expect(/archive-chat|[\\/]archive\.imports[\\/]/.test(path)).toBe(true);
       expect(resolve(path)).not.toBe(resolve(liveDb));
     }
   }, 60_000);

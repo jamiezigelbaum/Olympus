@@ -11,7 +11,7 @@
 // `public_safe.readwise.library` id is still an input alias of the internal
 // corpus).
 
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { openConnectorStore } from '../../core/source-storage.ts';
@@ -26,9 +26,7 @@ export const READWISE_TIER_SET_ID = 'readwise.library';
 export function defaultReadwiseSecureConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env.OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH?.trim();
-  if (configured) return configured;
-  return olympusDataPath(env, 'readwise-secure-connector-store.sqlite');
+  return resolvedStorePath(READWISE_SOURCE_ID, 'secure_local', env);
 }
 
 export function createReadwiseTierLane(options: {

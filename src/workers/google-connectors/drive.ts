@@ -1,4 +1,5 @@
 import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import { createHash } from 'node:crypto';
 import type {
   RawItem,
@@ -1009,24 +1010,15 @@ export function googleDriveIngestionExclusionMatcher(
 }
 
 export function defaultGoogleDriveConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, 'google-drive-connector-store.sqlite');
+  return resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'internal', env);
 }
 
 export function defaultGoogleDriveSecureConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, 'google-drive-secure-connector-store.sqlite');
+  return resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'secure_local', env);
 }
 
 export function defaultGoogleDrivePublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  if (env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, 'google-drive-public-connector-store.sqlite');
+  return resolvedStorePath(GOOGLE_DRIVE_SOURCE_ID, 'public_safe', env);
 }
 
 class RestGoogleDriveApiClient implements GoogleDriveApiClient {

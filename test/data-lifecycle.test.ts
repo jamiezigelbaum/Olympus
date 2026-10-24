@@ -406,6 +406,7 @@ describe('Olympus data lifecycle', () => {
       const dropboxPath = dropbox.connectorStorePaths!({ homeDir })[0]!;
       const gmailPath = gmail.connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(dirname(dropboxPath), { recursive: true });
+      mkdirSync(dirname(gmailPath), { recursive: true });
       writeFileSync(dropboxPath, 'dropbox');
       writeFileSync(gmailPath, 'gmail');
       mkdirSync(join(homeDir, '.olympus', 'sources'), { recursive: true });
@@ -416,6 +417,8 @@ describe('Olympus data lifecycle', () => {
       expect(result.mode).toBe('source');
       expect(existsSync(dropboxPath)).toBe(false);
       expect(existsSync(join(homeDir, '.olympus', 'sources', 'dropbox.personal.ingestion.json'))).toBe(false);
+      // The account's whole folder goes; another source's stays.
+      expect(existsSync(dirname(dirname(dropboxPath)))).toBe(false);
       expect(existsSync(gmailPath)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -714,21 +717,24 @@ describe('a source with no credential', () => {
       const [watchDir] = local.rawStatePaths!({ homeDir });
       mkdirSync(watchDir!, { recursive: true });
       writeFileSync(join(watchDir!, 'snapshot-1'), 'snapshot');
+      // The watch snapshots sit in the account's own folder, which the delete takes whole.
+      const accountDir = dirname(dirname(localStores[0]!));
+      expect(watchDir!.startsWith(`${accountDir}/`)).toBe(true);
 
       const connectedRegistry = { version: 1 as const, handles: [] };
       const preview = deleteOlympusDataWithCustody({
         sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: [], dryRun: true,
       });
       expect(preview.dryRun).toBe(true);
-      expect(preview.removed).toEqual(expect.arrayContaining([...localStores, watchDir!]));
+      expect(preview.removed).toEqual(expect.arrayContaining([...localStores, accountDir]));
       expect(preview.removed).not.toContain(dropboxStore);
       for (const path of [...localStores, dropboxStore, watchDir!]) expect(existsSync(path)).toBe(true);
 
       const deleted = deleteOlympusDataWithCustody({
         sourceId: 'local.files', homeDir, connectedRegistry, thisComputerSources: [],
       });
-      expect(deleted.removed).toEqual(expect.arrayContaining([...localStores, watchDir!]));
-      for (const path of [...localStores, `${localStores[0]}-wal`, watchDir!]) expect(existsSync(path)).toBe(false);
+      expect(deleted.removed).toEqual(expect.arrayContaining([...localStores, accountDir]));
+      for (const path of [...localStores, `${localStores[0]}-wal`, watchDir!, accountDir]) expect(existsSync(path)).toBe(false);
       expect(existsSync(dropboxStore)).toBe(true);
       const survivor = new Database(dropboxStore, { readonly: true });
       try {

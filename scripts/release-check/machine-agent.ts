@@ -23,6 +23,11 @@ import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { SourceFamily } from '../../src/core/source-index/types.ts';
+import { archiveConnectorStoreDbPath } from '../../src/workers/archive-import/store.ts';
+import { tierLedgerPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
+import { defaultReadwiseConnectorStoreDbPath } from '../../src/workers/readwise/connector.ts';
+import { defaultReadwiseSecureConnectorStoreDbPath } from '../../src/workers/readwise/tier-set.ts';
 import { desktopSandboxOrigin, runSmoke, type SmokeObservation, privateNoteKind, panelMeta, resultText } from '../chatgpt-live-smoke.ts';
 import { privateNoteKindIn } from './private-note.ts';
 import { FAKE_READWISE_PORT, FAKE_READWISE_TOKEN, startFakeReadwise } from './readwise-fake.ts';
@@ -1459,15 +1464,14 @@ async function archiveSearch(question: string): Promise<{ ok: boolean; isError: 
  * how many rows (items, chunks, search rows) carry its word. The word is only in message bodies, so a row that holds it holds content.
  */
 function readArchiveStores(spec: { family: string; provider: string }, archiveId: string | undefined, token: string): StoreView[] {
-  const dir = platform().dataDir;
+  // Where the engine keeps them, by the same resolvers the engine uses (a new install's are in the archive's account folder).
   const files: Array<[StoreView['tier'], string]> = [
-    ['private', `archive-${spec.family}-connector-store.sqlite`],
-    ['personal', `archive-${spec.family}-internal-connector-store.sqlite`],
-    ['public', `archive-${spec.family}-public-connector-store.sqlite`],
+    ['private', archiveConnectorStoreDbPath('secure_local', spec.family as SourceFamily)],
+    ['personal', archiveConnectorStoreDbPath('internal', spec.family as SourceFamily)],
+    ['public', archiveConnectorStoreDbPath('public_safe', spec.family as SourceFamily)],
   ];
   const like = `%${token}%`;
-  return files.map(([tier, file]): StoreView => {
-    const path = join(dir, file);
+  return files.map(([tier, path]): StoreView => {
     if (!existsSync(path)) return { tier, exists: false, live: 0, tokenRows: 0 };
     try {
       const db = new Database(path, { readonly: true });
@@ -1655,21 +1659,25 @@ function collectLogs(outDir: string): never {
 // ---------------------------------------------------------------------------
 // Upgrade leg: state before and after the installer runs over an existing install
 
-const CONNECTOR_STORES = ['readwise-connector-store', 'readwise-secure-connector-store'];
+/** Readwise's two stores (the second holds the Private items), where the engine keeps them. */
+function readwiseStorePaths(): Array<{ store: string; path: string }> {
+  return [
+    { store: 'readwise-connector-store', path: defaultReadwiseConnectorStoreDbPath() },
+    { store: 'readwise-secure-connector-store', path: defaultReadwiseSecureConnectorStoreDbPath() },
+  ];
+}
 
 /** Stored items and the tier ledger's verdicts for them, read-only. Ids are the stand-in's synthetic ids; no content leaves. */
 function readItems(): { items: ItemRow[] | null; error?: string } {
-  const dir = platform().dataDir;
   const rows: ItemRow[] = [];
   try {
-    for (const store of CONNECTOR_STORES) {
-      const itemsPath = join(dir, `${store}.sqlite`);
+    for (const { store, path: itemsPath } of readwiseStorePaths()) {
       if (!existsSync(itemsPath)) continue;
       const db = new Database(itemsPath, { readonly: true });
       db.exec('PRAGMA busy_timeout = 10000;');
       let ledger = new Map<string, { metadataTier: string | null; contentTier: string | null }>();
       try {
-        const ledgerPath = join(dir, `${store}.tier-ledger.sqlite`);
+        const ledgerPath = tierLedgerPathForStore(itemsPath);
         if (existsSync(ledgerPath)) {
           const ledgerDb = new Database(ledgerPath, { readonly: true });
           ledgerDb.exec('PRAGMA busy_timeout = 10000;');

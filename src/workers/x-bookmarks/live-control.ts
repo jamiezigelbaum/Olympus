@@ -1,4 +1,4 @@
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { xBookmarksApiUsageDbPath } from '../../core/olympus-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -294,10 +294,7 @@ export function defaultXBookmarksLiveSyncConfig(
 export function defaultXBookmarksApiUsageDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  if (env.OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, 'x-bookmarks-api-usage.sqlite');
+  return xBookmarksApiUsageDbPath(env);
 }
 
 /**

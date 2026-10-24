@@ -24,7 +24,16 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath, olympusDataRoot } from './core/olympus-layout.ts';
+import {
+  ACCOUNT_FOLDERS_DIR,
+  accountFolder,
+  accountFoldersRoot,
+  legacyCaptureDataRoot,
+  legacyTelegramGatewayStateDir,
+  olympusDataPath,
+  olympusDataRoot,
+} from './core/olympus-layout.ts';
+import { declaredConnectorStoreMounts, hasFolderLayout, placedAccount } from './core/source-placement.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
 import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
@@ -222,6 +231,8 @@ export interface LifecycleSourceSpec {
 // fence verifies before deleting a store outside a known Olympus root, so a
 // drift here fails closed: the delete refuses rather than removing a stranger.
 const CONNECTOR_STORE_SQLITE_STORE_ID = 'connector-store';
+/** Inside an account's folder, never exported: raw ingest state and session secrets. */
+const ACCOUNT_FOLDER_UNEXPORTED = ['raw', 'session'] as const;
 
 export interface DataExportResult {
   ok: true;
@@ -286,8 +297,10 @@ export interface DataMigrationCheckResult {
 
 interface DeleteTarget {
   path: string;
-  kind: 'known_root' | 'service_unit' | 'source_sqlite' | 'source_sqlite_sidecar' | 'source_state_path' | 'policy_file';
+  kind: 'known_root' | 'service_unit' | 'source_sqlite' | 'source_sqlite_sidecar' | 'source_state_path' | 'policy_file' | 'account_folder';
   allowRecursive: boolean;
+  /** An `account_folder`'s data root: the folder must lie under it, through no link. */
+  ownedRoot?: string;
   sqliteStoreId?: string;
   sqlitePrimaryPath?: string;
   externalSourcePath?: boolean;
@@ -668,6 +681,15 @@ export function exportOlympusData(options: {
     for (const statePath of source.rawStatePaths?.(options) ?? []) skipped.push(statePath);
     for (const state of source.accountStateSqlite?.(options) ?? []) skipped.push(state.path);
     for (const statePath of source.preservationOnlyPaths?.(options) ?? []) skipped.push(statePath);
+    // An account folder's own raw and session folders, whatever the source
+    // names inside them, are never copied either.
+    const folder = sourceAccountFolder(source, options);
+    if (folder) {
+      for (const name of ACCOUNT_FOLDER_UNEXPORTED) {
+        const path = join(folder, name);
+        if (existsSync(path) && !skipped.includes(path)) skipped.push(path);
+      }
+    }
   }
 
   // Remote-agent connections are credentials (token digests), which an export
@@ -768,6 +790,9 @@ export function deleteOlympusData(options: {
   // target must be provably Olympus's own and nobody else's (see
   // assertRawStateTargetsContained). A refusal here deletes nothing.
   assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
+  // The same for everything under the account folders: reached through no
+  // link, so a store inside one account's folder is never another account's.
+  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
   for (const target of uniqueDeleteTargets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
@@ -787,6 +812,13 @@ export function deleteOlympusData(options: {
   // starting with the dependent private answers, before any source bytes go.
   // A failing step fails the delete here, with every store still in place.
   const forgotten = selectedSource ? forgetSharedRows(selectedSource, options) : [];
+  // The media reads and the shared-file work above can wait on SQLite locks,
+  // so the link checks run again right before the first removal: a folder
+  // swapped for a link meanwhile is refused, not followed.
+  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
+  for (const target of uniqueDeleteTargets) {
+    if (target.kind === 'account_folder' && existsSync(target.path)) assertDeleteTargetSafe(target);
+  }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -1196,6 +1228,11 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
       kind: 'known_root',
       allowRecursive: true,
     })),
+    // The folder of every account: inside the default data root it goes with
+    // that root, but a relocated one (XDG_DATA_HOME, the Linux receipt) sits
+    // outside the known roots. Named so nothing under it is left behind; the
+    // data owner lock lives beside it, not inside, and stays.
+    ...accountFoldersTargets(context),
     serviceUnitTarget(workerServicePaths('darwin', home).unitPath),
     serviceUnitTarget(workerServicePaths('linux', home).unitPath),
     ...globExisting(join(home, 'Library', 'LaunchAgents'), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/)
@@ -1339,34 +1376,53 @@ function looksLikeSqlite(path: string): boolean {
   }
 }
 
+/**
+ * The folder of a source's account, when it has one: the registry's `folder`
+ * layout, or a folder left on disk under a registry that cannot be read. The
+ * folder is the account's whole footprint, so a delete takes it whole.
+ */
+function sourceAccountFolder(source: LifecycleSourceSpec, context: LifecyclePathContext | undefined): string | undefined {
+  if (!hasFolderLayout(source.sourceId)) return undefined;
+  const env = envForContext(context);
+  const account = placedAccount(source.sourceId, env);
+  const folder = accountFolder(account, env);
+  return account.layout === 'folder' || existsSync(folder) ? folder : undefined;
+}
+
 function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePathContext): DeleteTarget[] {
   const legacyIndexPath = source.sqlitePath?.(context);
+  const folder = sourceAccountFolder(source, context);
+  // A file inside the account's own folder is Olympus's by construction; the
+  // folder itself is checked below.
+  const inFolder = (path: string): boolean => folder !== undefined && isStrictlyInside(resolve(path), resolve(folder));
+  const sqliteTargets = (path: string, storeId: string): DeleteTarget[] => sqliteDeleteTargets(path, storeId, context, inFolder(path));
   return [
-    ...(legacyIndexPath ? sqliteDeleteTargets(legacyIndexPath, legacyStoreIdFor(source), context) : []),
+    ...(legacyIndexPath ? sqliteTargets(legacyIndexPath, legacyStoreIdFor(source)) : []),
     ...(source.connectorStorePaths?.(context) ?? []).flatMap((storePath) => [
-      ...sqliteDeleteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID, context),
+      ...sqliteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID),
       // Each store's four-tier ledger is co-located with it (tier-ledger-path.ts),
       // so it is found wherever the store is — a *_DB_PATH override, XDG, the
       // WhatsApp state directory — and deleting a source takes its ledger rows.
       ...(storePath === ':memory:'
         ? []
-        : sqliteDeleteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID, context)),
+        : sqliteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID)),
       // A tiered store set keeps its secret-locations index (location only:
       // identity, locator, a scanned title, finding kinds) beside its
       // secure_local store, like the set ledger, so it goes with its source.
       ...(storePath === ':memory:'
         ? []
-        : sqliteDeleteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID, context)),
+        : sqliteTargets(secretLocationsPathForStore(storePath), SECRET_LOCATIONS_SQLITE_STORE_ID)),
       // The sniffer's verdict cache and question queue sit beside it too; the
       // queue holds names and short excerpts, so it goes with the source.
       ...(storePath === ':memory:'
         ? []
-        : sqliteDeleteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID, context)),
+        : sqliteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID)),
     ]),
     ...(source.accountStateSqlite?.(context) ?? []).flatMap((state) => state.path === ':memory:'
       ? []
-      : sqliteDeleteTargets(state.path, state.sqliteStoreId, context)),
-    ...(source.rawStatePaths?.(context) ?? []).map((path): DeleteTarget => ({
+      : sqliteTargets(state.path, state.sqliteStoreId)),
+    // Raw state inside the account's folder goes with the folder.
+    ...(source.rawStatePaths?.(context) ?? []).filter((path) => !inFolder(path)).map((path): DeleteTarget => ({
       path,
       kind: 'source_state_path',
       // Spool and media are directories; the sole point of naming them is to
@@ -1379,7 +1435,20 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
       kind: 'policy_file',
       allowRecursive: false,
     })),
+    // Last, so each store above is reported on its own and the folder takes
+    // whatever else the account kept: raw state, lock files, empty folders.
+    ...(folder ? [accountFolderTarget(folder, context)] : []),
   ];
+}
+
+/** The `<data>/sources` folder, when a relocated data root puts it outside every known root. */
+function accountFoldersTargets(context: LifecyclePathContext): DeleteTarget[] {
+  const root = accountFoldersRoot(envForContext(context));
+  return isInsideKnownOlympusRoot(root, context) ? [] : [accountFolderTarget(root, context)];
+}
+
+function accountFolderTarget(path: string, context: LifecyclePathContext | undefined): DeleteTarget {
+  return { path, kind: 'account_folder', allowRecursive: true, ownedRoot: olympusDataRoot(envForContext(context)) };
 }
 
 /**
@@ -1401,8 +1470,10 @@ function sqliteDeleteTargets(
   sqlitePath: string,
   sqliteStoreId: string,
   context: LifecyclePathContext,
+  /** Inside the account's own folder: Olympus's by construction, never an external path. */
+  inAccountFolder = false,
 ): DeleteTarget[] {
-  const externalSourcePath = !isInsideKnownOlympusRoot(sqlitePath, context);
+  const externalSourcePath = !inAccountFolder && !isInsideKnownOlympusRoot(sqlitePath, context);
   return [
     {
       path: sqlitePath,
@@ -1817,6 +1888,11 @@ function assertDeleteTargetSafe(target: DeleteTarget): void {
     return;
   }
 
+  if (target.kind === 'account_folder') {
+    assertAccountFolderOwned(target);
+    return;
+  }
+
   if (target.kind === 'known_root') {
     if (!lstatSync(target.path).isDirectory()) {
       throw new OperationError(
@@ -1831,6 +1907,33 @@ function assertDeleteTargetSafe(target: DeleteTarget): void {
   if (target.externalSourcePath === true) {
     const primaryPath = target.sqlitePrimaryPath ?? target.path;
     assertVerifiedExternalSqliteStore(primaryPath, target.sqliteStoreId);
+  }
+}
+
+/**
+ * A folder under `<data>/sources` may be removed recursively only when it is
+ * provably Olympus's: a real directory (not a link), strictly inside
+ * `<data>/sources`, with no link between the data root and the folder. A link
+ * means the owner pointed Olympus at storage it may not own, so we refuse
+ * before anything is removed rather than delete through it.
+ */
+function assertAccountFolderOwned(target: DeleteTarget): void {
+  const refuse = (why: string): never => {
+    throw new OperationError(
+      'invalid_params',
+      `Refusing to delete the account folder ${why}: ${target.path}`,
+      'Check the Olympus data folder, then remove that folder by hand. Nothing was deleted.',
+    );
+  };
+  const owned = target.ownedRoot ? resolve(target.ownedRoot) : undefined;
+  const lexical = resolve(target.path);
+  const sources = owned ? join(owned, ACCOUNT_FOLDERS_DIR) : undefined;
+  if (!owned || !sources || !(lexical === sources || isStrictlyInside(lexical, sources))) {
+    refuse('because it is not inside the Olympus sources folder');
+  }
+  if (!lstatSync(target.path).isDirectory()) refuse('because it is not a folder (it may be a symbolic link)');
+  if (canonicalPath(lexical) !== join(canonicalPath(owned!), relative(owned!, lexical))) {
+    refuse('because it, or a folder above it, is a symbolic link');
   }
 }
 
@@ -1931,7 +2034,12 @@ function assertRawStateTargetsContained(
   selectedSource: LifecycleSourceSpec | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
-  if (stateTargets.length === 0) return;
+  // One source's delete also takes its whole account folder recursively, which
+  // is held to the same overlap rule (3): no other source's path may sit in it.
+  const overlapTargets = selectedSource
+    ? [...stateTargets, ...targets.filter((target) => target.kind === 'account_folder')]
+    : stateTargets;
+  if (overlapTargets.length === 0) return;
   const roots = knownOlympusDataRoots(context).map((root) => ({ lexical: resolve(root), real: canonicalPath(root) }));
   const refuse = (path: string, why: string): never => {
     throw new OperationError(
@@ -1965,6 +2073,26 @@ function assertRawStateTargetsContained(
     for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
+  // A store the connector-store mount list places by path (Reflect, Roam, an
+  // operator's own) may sit anywhere, an account folder included: another
+  // source's mounted store and its sidecars are protected where they really are.
+  const mounts = declaredConnectorStoreMounts(envForContext(context));
+  if (mounts === 'unreadable' && overlapTargets.some((target) => target.kind === 'account_folder')) {
+    throw new OperationError(
+      'invalid_params',
+      'Refusing to delete the account folder because OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON cannot be read, so the stores it places cannot be told apart from this account\'s.',
+      'Fix that setting, then delete again. Nothing was deleted.',
+    );
+  }
+  for (const mount of mounts === 'unreadable' ? [] : mounts) {
+    if (own.has(mount.sourceId) || !mount.dbPath || mount.dbPath === ':memory:') continue;
+    for (const path of [
+      mount.dbPath,
+      tierLedgerPathForStore(mount.dbPath),
+      secretLocationsPathForStore(mount.dbPath),
+      tierSnifferPathForStore(mount.dbPath),
+    ]) protectedPaths.add(path);
+  }
   for (const path of [
     join(home, '.olympus', 'config.json'),
     defaultSovereigntyConfigPathForHome(context.homeDir),
@@ -1974,16 +2102,54 @@ function assertRawStateTargetsContained(
     ...mediaCacheDeleteTargets(context).map((target) => target.path),
   ]) protectedPaths.add(path);
   const protectedCanonical = [...protectedPaths].flatMap((path) => [resolve(path), canonicalPath(path)]);
-  for (const target of stateTargets) {
+  for (const target of overlapTargets) {
     const candidates = [resolve(target.path), canonicalPath(target.path)];
     for (const protectedPath of protectedCanonical) {
       for (const candidate of candidates) {
         if (candidate === protectedPath || isStrictlyInside(protectedPath, candidate) || isStrictlyInside(candidate, protectedPath)) {
           // A target legitimately inside its OWN source's other path is not
           // reachable here: own paths are not in the protected set.
+          if (target.kind === 'account_folder') {
+            // Typically another source's retained path override (a legacy
+            // account pinned by OLYMPUS_*_DB_PATH) pointing into this folder.
+            throw new OperationError(
+              'invalid_params',
+              `Refusing to delete the account folder because it overlaps another source's or shared Olympus data (${protectedPath}): ${target.path}`,
+              'Check the OLYMPUS_* path overrides, move that data out of this folder or remove the folder by hand. Nothing was deleted.',
+            );
+          }
           refuse(target.path, `because it overlaps another source's or shared Olympus data (${protectedPath})`);
         }
       }
+    }
+  }
+}
+
+/**
+ * Everything a delete reaches under `<data>/sources` (the account folders) is
+ * reached through no link, the target itself included and every directory
+ * between the data root and it: the real path must equal the lexical path
+ * under the data root's real path. `stores` of one account linked to another
+ * account's `stores` would otherwise send the per-file removals, which pass
+ * their own checks as regular files, into the other account. The account
+ * folder targets have their own check (assertAccountFolderOwned). Runs for
+ * every target before anything is removed; a refusal deletes nothing.
+ */
+function assertSourcesFolderTargetsUnlinked(targets: readonly DeleteTarget[], context: LifecyclePathContext): void {
+  const env = envForContext(context);
+  const owned = resolve(olympusDataRoot(env));
+  const sources = resolve(accountFoldersRoot(env));
+  const ownedReal = canonicalPath(owned);
+  for (const target of targets) {
+    if (target.kind === 'account_folder') continue;
+    const lexical = resolve(target.path);
+    if (!isStrictlyInside(lexical, sources)) continue;
+    if (canonicalPath(lexical) !== join(ownedReal, relative(owned, lexical))) {
+      throw new OperationError(
+        'invalid_params',
+        `Refusing to delete inside the account folders because it, or a folder above it, is a symbolic link: ${target.path}`,
+        'Check the Olympus data folder, then remove what the link points at by hand. Nothing was deleted.',
+      );
     }
   }
 }

@@ -277,7 +277,8 @@ describe('data-delete: the dashboard\'s delete, by id', () => {
       mode: 'source',
       sourceId: 'dropbox.files',
       dryRun: false,
-      removed: [f.store],
+      // The store, then the account folder that held it.
+      removed: [f.store, dirname(dirname(f.store))],
       custody: { requirement: 'source_disconnected', ready: true, observed: 'disconnected' },
       worker_restarting: true,
     });

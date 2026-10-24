@@ -1,4 +1,6 @@
-import { defaultXBookmarksApiUsageDbPath } from './live-control.ts';
+import { resolvedRawPath } from '../../core/source-placement.ts';
+import { recordAccountPlacement } from '../../core/source-storage.ts';
+import { X_BOOKMARKS_SOURCE_ID } from './connector.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -277,17 +279,18 @@ export interface XBookmarksPreservationFloorAssessment {
   requiredAuthorizationSha256: string;
 }
 
+/**
+ * Where X's reconcile state lives. The usage ledger is shared (it is the
+ * quota ledger, kept when X is deleted), so the state no longer derives from
+ * its path: it is the account's own `raw/x-reconcile.sqlite` once X lives in a
+ * folder. A `legacy` account keeps the old rule (core/olympus-layout.ts).
+ * `usageDbPath` is the ledger of a caller that was given one.
+ */
 export function defaultXBookmarksReconcileStateDbPath(
   env: Record<string, string | undefined> = process.env,
   usageDbPath?: string,
 ): string {
-  const configured = env.OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH?.trim();
-  if (configured) return configured;
-  if (usageDbPath === ':memory:') return ':memory:';
-  if (usageDbPath?.trim()) return `${usageDbPath.trim()}.reconcile`;
-  // Beside the API usage store, where the worker keeps it: a caller without a
-  // usage path (the CLI's recovery command) must open the same file.
-  return `${defaultXBookmarksApiUsageDbPath(env)}.reconcile`;
+  return resolvedRawPath(X_BOOKMARKS_SOURCE_ID, 'x-reconcile.sqlite', env, usageDbPath === undefined ? {} : { usageDbPath });
 }
 
 /**
@@ -299,9 +302,13 @@ export class LocalXBookmarksReconcileStateStore {
   readonly dbPath: string;
   private readonly db: Database;
 
-  constructor(dbPath = defaultXBookmarksReconcileStateDbPath()) {
+  constructor(dbPath = defaultXBookmarksReconcileStateDbPath(), env: Record<string, string | undefined> = process.env) {
     this.dbPath = dbPath;
-    if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    if (dbPath !== ':memory:') {
+      // This can be the account's first file, before its store opens.
+      recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
+      mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    }
     this.db = new Database(dbPath, { create: true });
     if (dbPath !== ':memory:') chmodSync(dbPath, 0o600);
     this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
@@ -3445,6 +3452,11 @@ function optionalFailureClass(value: string | null): XBookmarksStagedFailureClas
     || value === 'incompatible_stage'
     || value === 'window_boundary_drift') return value;
   throw new Error('X reconciliation staged failure class is corrupt.');
+}
+
+/** The status of an account whose reconcile state was never created: nothing staged, nothing recovered. */
+export function xBookmarksRecoveryStatusWithoutState(): XBookmarksStagedRecoveryStatus {
+  return { staged: false, staged_recovery: 'not_needed', policy: recoveryPolicy() };
 }
 
 function recoveryPolicy(): XBookmarksStagedRecoveryStatus['policy'] {

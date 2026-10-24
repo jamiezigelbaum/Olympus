@@ -12,9 +12,11 @@
  * `removing` from the moment a removal starts until every derived row is gone,
  * so a removal interrupted by a restart carries on from where it was.
  */
-import { olympusDataRoot } from '../../core/olympus-layout.ts';
+import type { LayoutEnv } from '../../core/olympus-layout.ts';
+import { resolvedRawPath } from '../../core/source-placement.ts';
+import { recordAccountPlacement } from '../../core/source-storage.ts';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { ARCHIVE_COMMON_FINDINGS, type ArchiveImportFinding } from '../../core/archive-formats.ts';
@@ -118,12 +120,8 @@ interface PersistedArchiveImportState {
   archives: ArchiveImportRecord[];
 }
 
-function dataDir(env: Record<string, string | undefined>): string {
-  return olympusDataRoot(env);
-}
-
 export function defaultArchiveImportStatePath(env: Record<string, string | undefined> = process.env): string {
-  return env[ARCHIVE_IMPORTS_STATE_PATH_ENV]?.trim() || join(dataDir(env), 'archive-imports.json');
+  return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID, 'archive-imports.json', env);
 }
 
 export function archiveConnectorId(archiveId: string): string {
@@ -219,10 +217,13 @@ export interface NewArchiveImportRecord {
 export class ArchiveImportStateStore {
   readonly path: string;
   private readonly now: () => Date;
+  // The environment the path was resolved in; it decides where the account's placement is recorded.
+  readonly env: LayoutEnv;
 
-  constructor(options: { path: string; now?: () => Date }) {
+  constructor(options: { path: string; now?: () => Date; env?: LayoutEnv }) {
     this.path = options.path;
     this.now = options.now ?? (() => new Date());
+    this.env = options.env ?? process.env;
   }
 
   list(): ArchiveImportRecord[] {
@@ -371,6 +372,8 @@ export class ArchiveImportStateStore {
   }
 
   private mutate(change: (state: PersistedArchiveImportState) => boolean | void): void {
+    // This can be the account's first file, with no store opened yet.
+    recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, this.path, this.env);
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readState(this.path);
