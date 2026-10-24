@@ -234,8 +234,14 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   // manifest, stores, tier lane, pass, scheduler source, removal and runtime
   // every archive format shares. A format's own reader lives beside it
   // (src/workers/archive-import/<format>/), where this guard does not reach;
-  // nothing here may learn one format's or one source's shapes.
+  // nothing here may learn one format's or one source's shapes. The shared
+  // readers are here too: the zip reader and the JSON reader serve every
+  // format that arrives as a zip or as one large JSON file, so neither may
+  // learn what one export's members or lists are called.
+  'src/workers/archive-import/byte-source.ts',
+  'src/workers/archive-import/continuation-cache.ts',
   'src/workers/archive-import/dashboard.ts',
+  'src/workers/archive-import/json-stream.ts',
   'src/workers/archive-import/lane.ts',
   'src/workers/archive-import/manifest.ts',
   'src/workers/archive-import/removal.ts',
@@ -244,8 +250,10 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/archive-import/scheduler-source.ts',
   'src/workers/archive-import/start.ts',
   'src/workers/archive-import/state.ts',
+  'src/workers/archive-import/stop-errors.ts',
   'src/workers/archive-import/store.ts',
   'src/workers/archive-import/sync.ts',
+  'src/workers/archive-import/zip-reader.ts',
 ];
 
 const FILE_EXTRACTION_FACTORY_GLOB = 'src/workers/file-extraction/**/*.ts';

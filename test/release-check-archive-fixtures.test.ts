@@ -6,10 +6,11 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RawItem } from '../src/core/contracts.ts';
+import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import {
   ArchiveImportStoppedError,
   MBOX_ARCHIVE_FORMAT,
+  TELEGRAM_JSON_ARCHIVE_FORMAT,
   detectArchiveFormat,
   getArchiveFormat,
   type ArchiveImportFinding,
@@ -17,8 +18,10 @@ import {
 import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveFileEntries, archiveManifestSha256, buildArchiveManifest } from '../src/workers/archive-import/manifest.ts';
 import { createMboxArchiveConnector } from '../src/workers/archive-import/mbox/connector.ts';
+import { createTelegramArchiveConnector } from '../src/workers/archive-import/telegram/connector.ts';
 import {
   ARCHIVE_FORMATS,
+  EXTRA_FORMATS,
   FIXTURE_FOLDER,
   MBOX_FIXTURES,
   changeFixture,
@@ -40,17 +43,18 @@ function home(): string {
   return dir;
 }
 
-/** The product's connector over a written fixture, the way an import reads it. */
+/** The product's connector over a written fixture, the way an import reads it: the connector of the fixture's own format. */
 function readFixture(root: string, fixture: LegFixture, options: { pageSize?: number } = {}) {
   const scope = ScopeRoot.open(join(root, FIXTURE_FOLDER));
   cleanups.push(() => scope.close());
   const files = buildArchiveManifest(scope, [fixture.fileName]);
   const findings: ArchiveImportFinding[] = [];
-  const connector = createMboxArchiveConnector({
+  const telegram = fixture.format === TELEGRAM_JSON_ARCHIVE_FORMAT.id;
+  const connector = (telegram ? createTelegramArchiveConnector : createMboxArchiveConnector)({
     archiveId: 'rc-fixture',
     connectorId: 'archive.rc-fixture',
     accountScope: 'rc-fixture',
-    format: MBOX_ARCHIVE_FORMAT,
+    format: telegram ? TELEGRAM_JSON_ARCHIVE_FORMAT : MBOX_ARCHIVE_FORMAT,
     root: scope,
     files: archiveFileEntries(files),
     manifestSha256: archiveManifestSha256(files),
@@ -61,7 +65,7 @@ function readFixture(root: string, fixture: LegFixture, options: { pageSize?: nu
   return { connector, findings };
 }
 
-async function readAll(connector: ReturnType<typeof createMboxArchiveConnector>): Promise<RawItem[]> {
+async function readAll(connector: SourceConnector): Promise<RawItem[]> {
   const items: RawItem[] = [];
   for await (const page of connector.listItems({})) items.push(...page.items);
   return items;
@@ -89,6 +93,17 @@ describe('fixture tokens', () => {
     expect(new Set(fixtures.map((fixture) => fixture.fileName)).size).toBe(roles.length);
     for (const fixture of fixtures) expect(fixture.relPath).toBe(`${FIXTURE_FOLDER}/${fixture.fileName}`);
   });
+
+  test('a format besides the first has its own token and file under the same role, and the formats the leg adds are exactly the registry\'s other ones', () => {
+    expect(EXTRA_FORMATS).toEqual(['telegram_json']);
+    const mail = legFixture('agent', 'seed-1');
+    const chat = legFixture('agent', 'seed-1', 'telegram_json');
+    expect(chat.token).not.toBe(mail.token);
+    expect(chat.fileName).toBe('rc-agent-telegram_json.json');
+    expect(chat.fileName).not.toBe(mail.fileName);
+    expect(chat.relPath).toBe(`${FIXTURE_FOLDER}/rc-agent-telegram_json.json`);
+    expect(chat.token).toMatch(/^rcarch[0-9a-f]{14}$/);
+  });
 });
 
 describe('the fixtures, read by the product', () => {
@@ -109,7 +124,17 @@ describe('the fixtures, read by the product', () => {
       expect(spec.citationLabel).toBe(product!.citationLabel!);
       expect(spec.family).toBe(product!.family);
       expect(spec.provider).toBe(product!.provider);
+      // Every archive of the format carries the family that decides what the dashboard calls its items.
+      expect(legFixture('agent', 'seed-family', spec.format).expect.family).toBe(product!.family);
     }
+  });
+
+  test('the Telegram archive is a file the product\'s detector takes for a Telegram Desktop export, from its first bytes', () => {
+    const fixture = legFixture('agent', 'seed-detect', 'telegram_json');
+    const probe = { chosen: { relPath: '', name: fixture.fileName, kind: 'file' as const, head: fixture.bytes.subarray(0, 4096) }, children: [] };
+    const detected = detectArchiveFormat(probe);
+    expect(detected.kind).toBe('match');
+    if (detected.kind === 'match') expect(detected.format.id).toBe('telegram_json');
   });
 
   test('the small archive reads as its expectation says: items, days, one unread attachment, one message left out', async () => {
@@ -140,6 +165,42 @@ describe('the fixtures, read by the product', () => {
       expect(String(item.metadata.from)).not.toContain(fixture.token);
       expect(String(item.metadata.title)).not.toContain(fixture.token);
     }
+  });
+
+  test('the Telegram archive reads as its expectation says: messages, days, one picture not imported, one part not imported, one service message left out', async () => {
+    const root = home();
+    const fixture = legFixture('agent', 'seed-telegram', 'telegram_json');
+    writeFixture(root, fixture);
+    const { connector, findings } = readFixture(root, fixture);
+    const items = await readAll(connector);
+    expect(items).toHaveLength(fixture.expect.messages);
+    expect(fixture.expect.messages).toBe(5);
+    const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
+    expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
+    expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
+    expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
+    expect(fixture.expect.gaps).toEqual([{ kind: 'media_not_imported', count: 1 }, { kind: 'section_not_imported', count: 1 }]);
+    expect(fixture.expect.leftOut).toEqual([{ kind: 'service_message', count: 1 }]);
+    // The picture is named in its message and not imported; the message is still an item. The join is the earliest message, and is not counted in the days.
+    expect(items.filter((item) => item.metadata.attachmentsNotIngested === 1)).toHaveLength(1);
+    expect(days).not.toContain('2023-12-30');
+    // One chat, and the account's own details are not messages: nothing of them is an item.
+    expect(new Set(items.map((item) => item.identity.providerThreadId)).size).toBe(1);
+    for (const item of items) expect(JSON.stringify(item)).not.toContain('synthetic_sam');
+  });
+
+  test('the Telegram word is in message bodies only, never in the chat\'s name, a sender or a title', async () => {
+    const root = home();
+    const fixture = legFixture('agent', 'seed-telegram-token', 'telegram_json');
+    writeFixture(root, fixture);
+    const items = await readAll(readFixture(root, fixture).connector);
+    const withToken = items.filter((item) => item.content.kind === 'text' && item.content.text.includes(fixture.token));
+    expect(withToken.length).toBeGreaterThanOrEqual(2);
+    for (const item of items) {
+      expect(String(item.metadata.title)).not.toContain(fixture.token);
+      expect(String(item.metadata.sender)).not.toContain(fixture.token);
+    }
+    expect(fixture.fileName).not.toContain(fixture.token);
   });
 
   test('the plain archive has nothing unread and nothing left out', async () => {

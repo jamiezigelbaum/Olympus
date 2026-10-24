@@ -4,7 +4,9 @@
  * with their formats. Idempotent: safe to call from every runtime build.
  */
 import { registerMboxArchiveConnector } from './mbox/connector.ts';
+import { registerTelegramArchiveConnector } from './telegram/connector.ts';
 
 export function registerArchiveFormatConnectors(): void {
   registerMboxArchiveConnector();
+  registerTelegramArchiveConnector();
 }

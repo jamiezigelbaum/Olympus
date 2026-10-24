@@ -12,7 +12,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realp
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
-import type { ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
+import { archiveFamilyProvider, archiveImportFamilies, type ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
 import { defaultConfig } from '../src/core/config.ts';
 import { REMOTE_CONNECTIONS_DB_PATH_ENV } from '../src/core/remote-connections.ts';
 import {
@@ -27,6 +27,7 @@ import { tierLedgerIdentityKey } from '../src/workers/classification/tier-ledger
 import { secretLocationsPathForStore, tierSnifferPathForLedger } from '../src/workers/classification/tier-ledger-path.ts';
 import { tierRowVisible } from '../src/workers/connector-store/local-index.ts';
 import { createMboxArchiveConnector } from '../src/workers/archive-import/mbox/connector.ts';
+import { archiveContinuations } from '../src/workers/archive-import/continuation-cache.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { createArchiveImportRuntime, type ArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
 import {
@@ -407,6 +408,11 @@ describe('removing an archive', () => {
     expect(lane.ledger.accountScopeCounts('mbox', removed).items).toBe(5);
     expect(lane.ledger.accountScopeCounts('mbox', kept).items).toBe(4);
 
+    // An inflater parked for each archive's zip member: the removed archive's is dropped with it.
+    const memberOf = (archiveId: string) => ({ archiveId, manifestTag: 'tag', fileIndex: 0, memberIndex: 1 });
+    archiveContinuations.put(memberOf(removed), { position: 10, retainedBytes: 100 });
+    archiveContinuations.put(memberOf(kept), { position: 10, retainedBytes: 100 });
+
     // Side stores, seeded for both archives.
     const snifferPath = tierSnifferPathForLedger(lane.ledger.dbPath);
     const sniffer = new TierSnifferStore({ dbPath: snifferPath });
@@ -476,6 +482,8 @@ describe('removing an archive', () => {
       });
     }
     expect(outcome.kind).toBe('removed');
+    expect(archiveContinuations.take(memberOf(removed), 10)).toBeUndefined();
+    expect(archiveContinuations.take(memberOf(kept), 10)).toBeDefined();
 
     const items = itemsByArchive(f.env);
     expect(items.has(removed)).toBe(false);
@@ -542,16 +550,18 @@ describe('archive corpora in the registry', () => {
     const shipped = createSourceCorpusRegistry().list().map((corpus) => corpus.corpusId);
     expect(shipped.filter((corpusId) => corpusId.includes('.archive.'))).toEqual([]);
     const withArchives = createSourceCorpusRegistry(withArchiveImportCorpora());
+    // Three stores for each family a registered format imports into, mail first.
+    const families = archiveImportFamilies();
+    expect(families[0]).toBe('email');
     expect(withArchives.list().map((corpus) => corpus.corpusId)).toEqual([
       ...shipped,
-      'secure_local.archive.email',
-      'internal.archive.email',
-      'public_safe.archive.email',
+      ...families.flatMap((family) => ['secure_local', 'internal', 'public_safe'].map((domain) => `${domain}.archive.${family}`)),
     ]);
-    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(['secure_local.archive.email']);
+    expect(withArchives.ids('sync').filter((corpusId) => corpusId.includes('.archive.'))).toEqual(families.map((family) => `secure_local.archive.${family}`));
     for (const corpus of withArchives.list().filter((entry) => entry.sourceId === 'archive.imports')) {
-      expect(corpus).toMatchObject({ provider: 'mbox', family: 'email', createdOnDemand: true });
+      expect(corpus).toMatchObject({ provider: archiveFamilyProvider(corpus.family), family: corpus.family, createdOnDemand: true });
     }
+    expect(withArchives.list().find((corpus) => corpus.corpusId === 'secure_local.archive.email')?.provider).toBe('mbox');
     // Added once, whatever the config already holds.
     expect(withArchiveImportCorpora(withArchiveImportCorpora()).corpora).toHaveLength(withArchives.list().length);
   });

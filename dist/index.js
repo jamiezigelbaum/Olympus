@@ -13068,6 +13068,86 @@ var init_privacy_language = __esm(() => {
   };
 });
 
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function isTelegramJsonHead(head) {
+  if (!head || head.length === 0)
+    return false;
+  const text2 = new TextDecoder("utf-8").decode(head);
+  return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
+  TELEGRAM_EXPORT_SECTIONS = Object.freeze([
+    "personal_information",
+    "profile_pictures",
+    "stories",
+    "profile_music",
+    "contacts",
+    "frequent_contacts",
+    "sessions",
+    "web_sessions",
+    "other_data",
+    "chats",
+    "left_chats"
+  ]);
+  TELEGRAM_FULL_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join("|")})"\s*:\s*[\[{]`);
+  TELEGRAM_CHAT_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`);
+  TELEGRAM_HTML_NAME = /^(?:messages\d*|export_results)\.html?$/i;
+  TELEGRAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "telegram_json",
+    label: "Telegram Desktop export (JSON)",
+    family: "chat",
+    provider: "telegram_export",
+    chooseHint: "a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON)",
+    citationLabel: "Telegram",
+    probeNames: ["result.json", "messages.html", "export_results.html"],
+    unsupportedVariants: Object.freeze([
+      Object.freeze({
+        matches(probe) {
+          if (probe.chosen.kind === "file")
+            return TELEGRAM_HTML_NAME.test(probe.chosen.name);
+          return probe.children.some((entry) => entry.kind === "file" && TELEGRAM_HTML_NAME.test(entry.name));
+        },
+        advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
+      })
+    ]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name.toLowerCase() === "result.json" && isTelegramJsonHead(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
+  CONNECTOR_FACTORIES = new Map;
+});
+
 // src/core/ingestion-throughput.ts
 function dropboxContentExtractionStallHours(env = process.env) {
   const raw = env[DROPBOX_CONTENT_EXTRACTION_STALL_HOURS_ENV];
@@ -13240,9 +13320,13 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+function archivePickIntro(formats = ARCHIVE_FORMATS) {
+  return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
+}
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
+  init_archive_formats();
   init_answer_ready_coverage();
   init_display_text();
   init_scheduler_markers();
@@ -13478,12 +13562,19 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  ARCHIVE_PICK_INTRO = archivePickIntro();
+  DASHBOARD_ARCHIVE_NOUNS = {
+    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
+    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages" },
+    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes" },
+    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items" }
+  };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
     pick: {
       back: "Back to Olympus",
       title: "Import an archive",
-      intro: "Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.",
+      intro: ARCHIVE_PICK_INTRO,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -13494,11 +13585,15 @@ var init_vocabulary = __esm(() => {
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
     dates: "{earliest} to {latest}",
-    items: { one: "1 message", many: "{n} messages" },
+    nouns: DASHBOARD_ARCHIVE_NOUNS,
     importingLine: "{percent}% read · {items} so far",
     importingLineUncounted: "{percent}% read",
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
+    emptyImport: "Imported: {none} found in this archive.",
+    emptyImportWhen: "Imported {when}: {none} found in this archive.",
+    nothingImported: "{None} imported.",
+    nothingImportedWhen: "{None} imported {when}.",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
@@ -13511,7 +13606,7 @@ var init_vocabulary = __esm(() => {
     },
     setUpPrivateModel: "Set up the private model",
     countsUnavailable: {
-      why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
+      why: "Olympus can't count what this archive holds right now: its index could not be opened.",
       fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
     },
     notRunning: {
@@ -13541,10 +13636,18 @@ var init_vocabulary = __esm(() => {
     gaps: {
       message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
       message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
+      message_content_unsupported: { one: "1 message with a kind of content Olympus cannot read yet", many: "{n} messages with a kind of content Olympus cannot read yet" },
       charset_not_decoded: { one: "1 message in a character set Olympus could not read", many: "{n} messages in a character set Olympus could not read" },
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
+      message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
+      media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
+      item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
+      section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
+      file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
@@ -13586,12 +13689,12 @@ var init_vocabulary = __esm(() => {
       request: "An agent asked to import {name}",
       removal: "An agent asked to remove {name}",
       failed: "An import did not start: {name}",
-      counts: "Olympus can't count the messages in {name}",
+      counts: "Olympus can't count what is in {name}",
       scheduler: {
         disabled: "Imports can't run: background syncing is turned off",
         not_selected: "Imports can't run: background syncing leaves out archives"
       },
-      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
       seeWhy: "See why",
       review: "Review",
@@ -16530,37 +16633,6 @@ var init_local_index = __esm(() => {
   ]);
 });
 
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
-  CONNECTOR_FACTORIES = new Map;
-});
-
 // src/core/source-registry.ts
 var init_source_registry = __esm(() => {
   init_atomic_file();
@@ -18346,7 +18418,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -18414,6 +18486,7 @@ var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
   init_publisher_oauth_client();
   init_privacy_language();
+  init_archive_formats();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -18714,11 +18787,679 @@ var init_scope_safe_fs = __esm(() => {
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
+// node_modules/fflate/esm/browser.js
+var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0;i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1;i < 30; ++i) {
+    for (var j = b[i];j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+}, _a, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
+  var s = cd.length;
+  var i2 = 0;
+  var l = new u16(mb);
+  for (;i2 < s; ++i2) {
+    if (cd[i2])
+      ++l[cd[i2] - 1];
+  }
+  var le = new u16(mb);
+  for (i2 = 1;i2 < mb; ++i2) {
+    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+  }
+  var co;
+  if (r) {
+    co = new u16(1 << mb);
+    var rvb = 15 - mb;
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        var sv = i2 << 4 | cd[i2];
+        var r_1 = mb - cd[i2];
+        var v = le[cd[i2] - 1]++ << r_1;
+        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
+          co[rev[v] >> rvb] = sv;
+        }
+      }
+    }
+  } else {
+    co = new u16(s);
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+      }
+    }
+  }
+  return co;
+}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
+  var m = a[0];
+  for (var i2 = 1;i2 < a.length; ++i2) {
+    if (a[i2] > m)
+      m = a[i2];
+  }
+  return m;
+}, bits = function(d, p, m) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+}, bits16 = function(d, p) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+}, shft = function(p) {
+  return (p + 7) / 8 | 0;
+}, slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+}, ec, err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+}, inflt = function(dat, st, buf, dict) {
+  var sl = dat.length, dl = dict ? dict.length : 0;
+  if (!sl || st.f && !st.l)
+    return buf || new u8(0);
+  var noBuf = !buf;
+  var resize = noBuf || st.i != 2;
+  var noSt = st.i;
+  if (noBuf)
+    buf = new u8(sl * 3);
+  var cbuf = function(l2) {
+    var bl = buf.length;
+    if (l2 > bl) {
+      var nbuf = new u8(Math.max(bl * 2, l2));
+      nbuf.set(buf);
+      buf = nbuf;
+    }
+  };
+  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+  var tbts = sl * 8;
+  do {
+    if (!lm) {
+      final = bits(dat, pos, 1);
+      var type = bits(dat, pos + 1, 3);
+      pos += 3;
+      if (!type) {
+        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+        if (t > sl) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + l);
+        buf.set(dat.subarray(s, t), bt);
+        st.b = bt += l, st.p = pos = t * 8, st.f = final;
+        continue;
+      } else if (type == 1)
+        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+      else if (type == 2) {
+        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        pos += 14;
+        var ldt = new u8(tl);
+        var clt = new u8(19);
+        for (var i2 = 0;i2 < hcLen; ++i2) {
+          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+        }
+        pos += hcLen * 3;
+        var clb = max(clt), clbmsk = (1 << clb) - 1;
+        var clm = hMap(clt, clb, 1);
+        for (var i2 = 0;i2 < tl; ) {
+          var r = clm[bits(dat, pos, clbmsk)];
+          pos += r & 15;
+          var s = r >> 4;
+          if (s < 16) {
+            ldt[i2++] = s;
+          } else {
+            var c = 0, n = 0;
+            if (s == 16)
+              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+            else if (s == 17)
+              n = 3 + bits(dat, pos, 7), pos += 3;
+            else if (s == 18)
+              n = 11 + bits(dat, pos, 127), pos += 7;
+            while (n--)
+              ldt[i2++] = c;
+          }
+        }
+        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+        lbt = max(lt);
+        dbt = max(dt);
+        lm = hMap(lt, lbt, 1);
+        dm = hMap(dt, dbt, 1);
+      } else
+        err(1);
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+    }
+    if (resize)
+      cbuf(bt + 131072);
+    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+    var lpos = pos;
+    for (;; lpos = pos) {
+      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+      pos += c & 15;
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+      if (!c)
+        err(2);
+      if (sym < 256)
+        buf[bt++] = sym;
+      else if (sym == 256) {
+        lpos = pos, lm = null;
+        break;
+      } else {
+        var add = sym - 254;
+        if (sym > 264) {
+          var i2 = sym - 257, b = fleb[i2];
+          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+          pos += b;
+        }
+        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+        if (!d)
+          err(3);
+        pos += d & 15;
+        var dt = fd[dsym];
+        if (dsym > 3) {
+          var b = fdeb[dsym];
+          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+        }
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var end = bt + add;
+        if (bt < dt) {
+          var shift = dl - dt, dend = Math.min(dt, end);
+          if (shift + bt < 0)
+            err(3);
+          for (;bt < dend; ++bt)
+            buf[bt] = dict[shift + bt];
+        }
+        for (;bt < end; ++bt)
+          buf[bt] = buf[bt - dt];
+      }
+    }
+    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+    if (lm)
+      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+  } while (!final);
+  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+}, et, Inflate, td, tds = 0;
+var init_browser = __esm(() => {
+  u8 = Uint8Array;
+  u16 = Uint16Array;
+  i32 = Int32Array;
+  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  _a = freb(fleb, 2);
+  fl = _a.b;
+  revfl = _a.r;
+  fl[28] = 258, revfl[258] = 28;
+  _b = freb(fdeb, 0);
+  fd = _b.b;
+  revfd = _b.r;
+  rev = new u16(32768);
+  for (i = 0;i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  flt = new u8(288);
+  for (i = 0;i < 144; ++i)
+    flt[i] = 8;
+  for (i = 144;i < 256; ++i)
+    flt[i] = 9;
+  for (i = 256;i < 280; ++i)
+    flt[i] = 7;
+  for (i = 280;i < 288; ++i)
+    flt[i] = 8;
+  fdt = new u8(32);
+  for (i = 0;i < 32; ++i)
+    fdt[i] = 5;
+  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+  ];
+  et = /* @__PURE__ */ new u8(0);
+  Inflate = /* @__PURE__ */ function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  }();
+  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {}
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data.length; index += 1) {
+    crc = crcTable[(crc ^ data[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data) {
+  if (data.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data, value) >>> 0 : tableCrc32(data, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+
+// src/workers/archive-import/zip-reader.ts
+function readExact(source, offset, length) {
+  if (length < 0 || offset < 0 || offset + length > source.size)
+    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+  if (length <= ZIP_READ_CHUNK_BYTES) {
+    const bytes = source.readAt(offset, length);
+    if (bytes.length !== length)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    return bytes;
+  }
+  const out = new Uint8Array(length);
+  for (let done = 0;done < length; ) {
+    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
+    if (part.length === 0)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    out.set(part, done);
+    done += part.length;
+  }
+  return out;
+}
+function memberKey(entry) {
+  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
+}
+
+class ZipMemberReader {
+  entry;
+  archive;
+  dataStart;
+  startAt;
+  pos = 0;
+  runningCrc = 0;
+  crcKnown;
+  out = [];
+  lastChunk = new Uint8Array(0);
+  crcBeforeLast = 0;
+  heldLast = 0;
+  closed = false;
+  result;
+  storedNext = 0;
+  inflate;
+  compressedNext = 0;
+  compressedBlock = new Uint8Array(0);
+  compressedOffset = 0;
+  inflateFinished = false;
+  failure;
+  constructor(archive, entry, dataStart, options) {
+    this.archive = archive;
+    this.entry = entry;
+    this.dataStart = dataStart;
+    const start = options.start ?? 0;
+    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
+    }
+    this.startAt = start;
+    this.crcKnown = start === 0;
+    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
+      this.inflateFinished = true;
+      this.pos = start;
+      this.crcKnown = true;
+      return;
+    }
+    if (entry.method === 0) {
+      this.storedNext = start;
+      this.pos = start;
+      if (start > 0 && options.startCrc !== undefined) {
+        this.runningCrc = options.startCrc >>> 0;
+        this.crcKnown = true;
+      }
+      return;
+    }
+    const kept = options.continuation;
+    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
+      this.inflate = this.bind(kept.inflate);
+      this.compressedNext = kept.compressedNext;
+      this.compressedBlock = kept.compressedBlock;
+      this.compressedOffset = 0;
+      this.out = [...kept.out];
+      this.inflateFinished = kept.inflateFinished;
+      this.pos = start;
+      this.runningCrc = kept.crc;
+      this.crcKnown = kept.crcKnown;
+      return;
+    }
+    this.inflate = this.bind(new Inflate(() => {
+      return;
+    }));
+    this.crcKnown = true;
+  }
+  bind(inflate) {
+    inflate.ondata = (chunk) => {
+      if (chunk.length > 0)
+        this.out.push(chunk);
+    };
+    return inflate;
+  }
+  static open(archive, entry, options = {}) {
+    if (entry.encrypted)
+      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
+    }
+    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
+    }
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
+    return new ZipMemberReader(archive, entry, dataStart, options);
+  }
+  get position() {
+    return Math.max(this.pos, this.startAt);
+  }
+  get crc32() {
+    return this.crcKnown ? this.runningCrc : undefined;
+  }
+  get end() {
+    return this.result;
+  }
+  next() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
+    for (;; ) {
+      let chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (!this.fillOrFail()) {
+          this.conclude();
+          return;
+        }
+        continue;
+      }
+      if (this.pos < this.startAt) {
+        const skip = this.startAt - this.pos;
+        if (chunk.length <= skip) {
+          this.runningCrc = crc32Update(this.runningCrc, chunk);
+          this.pos += chunk.length;
+          continue;
+        }
+        const head = chunk.subarray(0, skip);
+        this.runningCrc = crc32Update(this.runningCrc, head);
+        this.pos += head.length;
+        chunk = chunk.subarray(skip);
+      }
+      this.crcBeforeLast = this.runningCrc;
+      if (this.crcKnown)
+        this.runningCrc = crc32Update(this.runningCrc, chunk);
+      this.lastChunk = chunk;
+      this.heldLast = chunk.length;
+      this.pos += chunk.length;
+      return chunk;
+    }
+  }
+  unread(count) {
+    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
+      throw new RangeError("unread past the last chunk");
+    if (count === 0)
+      return;
+    this.heldLast -= count;
+    this.pos -= count;
+    if (this.crcKnown)
+      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
+    this.out.unshift(this.lastChunk.subarray(this.heldLast));
+    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
+    this.result = undefined;
+  }
+  suspend() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
+      return;
+    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES || this.pos < this.startAt)
+      return;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
+    const state = {
+      position: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
+      memberKey: memberKey(this.entry),
+      crc: this.runningCrc,
+      crcKnown: this.crcKnown,
+      inflate: this.inflate,
+      compressedNext: this.compressedNext,
+      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
+      out: [...this.out],
+      inflateFinished: this.inflateFinished
+    };
+    this.inflate = undefined;
+    this.out = [];
+    return state;
+  }
+  close() {
+    this.closed = true;
+    this.inflate = undefined;
+    this.out = [];
+  }
+  fillOrFail() {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
+  fill() {
+    if (this.entry.method === 0) {
+      if (this.storedNext >= this.entry.uncompressedSize)
+        return false;
+      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
+      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
+      if (bytes.length === 0)
+        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
+      this.storedNext += bytes.length;
+      this.out.push(bytes);
+      return true;
+    }
+    if (this.inflateFinished || !this.inflate)
+      return false;
+    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
+      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
+      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
+      this.compressedOffset = 0;
+      this.compressedNext += length;
+    }
+    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
+    this.compressedOffset += slice.length;
+    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
+    try {
+      this.inflate.push(slice, final);
+    } catch (error) {
+      if (error instanceof ZipMemberError)
+        throw error;
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
+    }
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
+      }
+      this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
+    }
+    return true;
+  }
+  conclude() {
+    if (this.result)
+      return;
+    const sizeOk = this.pos === this.entry.uncompressedSize;
+    this.result = {
+      bytes: this.pos,
+      sizeOk,
+      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
+    };
+  }
+}
+function inflaterProgress(inflate) {
+  const internal = inflate;
+  const state = internal.s;
+  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
+    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
+}
+function readBlock(source, offset, length, name) {
+  try {
+    return readExact(source, offset, length);
+  } catch (error) {
+    if (error instanceof ZipFormatError)
+      throw new ZipMemberError("damaged", name, error.message);
+    throw error;
+  }
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var init_zip_reader = __esm(() => {
+  init_browser();
+  init_archive_formats();
+  init_stop_errors();
+  init_byte_source();
+  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
+  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
+  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
+  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
+  ZipFormatError = class ZipFormatError extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.name = "ZipFormatError";
+      this.code = code;
+    }
+  };
+  ZipMemberError = class ZipMemberError extends Error {
+    code;
+    memberName;
+    constructor(code, memberName, message) {
+      super(message);
+      this.name = "ZipMemberError";
+      this.code = code;
+      this.memberName = memberName;
+    }
+  };
+  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
 // src/workers/archive-import/manifest.ts
 var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
 var init_manifest2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
+  init_zip_reader();
   ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
   ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
 });
@@ -29274,7 +30015,7 @@ var ARCHIVE_IMPORT_PARAMS = {
     enum: ["start", "status", "remove"],
     description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).'
   },
-  path: { type: "string", description: "start only: the full path of the export (an .mbox file, or an Apple Mail .mbox folder), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
+  path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
   archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
 };
 var operations = [
@@ -29710,6 +30451,7 @@ var operations = [
     name: "archive_import",
     description: [
       "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
+      "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
       "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
       "Never open, read or copy the file yourself, and never retry to get around the approval.",
       `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,

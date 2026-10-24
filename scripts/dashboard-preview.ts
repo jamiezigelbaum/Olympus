@@ -56,7 +56,7 @@ import {
   type ComputerArchivesMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
-import { ARCHIVE_FORMATS } from '../src/core/archive-formats.ts';
+import { ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER } from '../src/core/archive-formats.ts';
 import { ARCHIVE_APPROVE_COPY } from '../src/workers/archive-import/dashboard.ts';
 import { captureFreshness, captureFreshnessCounts } from '../src/workers/connector-store/capture-freshness.ts';
 import { FILES_AND_FOLDERS_URL, FULL_DISK_ACCESS_URL, MAC_ACCESS_COPY } from '../src/workers/local-files/mac-permissions.ts';
@@ -706,6 +706,10 @@ function localFilesPreview(state: string) {
  *   archives-unreadable  the list of imported archives cannot be read: See why, no Import
  *   archives-uncounted   an imported archive whose index cannot be opened now: never "0 messages"
  *   archives-not-running an import waiting while background syncing is turned off: not running, Remove not pressable, See why names the setting
+ *   archives-notes       a notes archive imported: its items are notes, with the kinds of gap any format can report
+ *   archives-chat        a Telegram Desktop export imported: its items are messages, with what a chat export leaves out or cannot carry
+ *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
+ *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not read, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
  * messages no private model can judge are each a Needs you line too.
@@ -714,7 +718,8 @@ const ARCHIVE_STATES = [
   'archives-none', 'archives-picker', 'archives-checking', 'archives-already', 'archives-failed', 'archives-request',
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
-  'archives-unreadable', 'archives-uncounted', 'archives-not-running',
+  'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
+  'archives-nothing-imported',
 ] as const;
 
 function archivesPreview(state: string): SourceDashboardViewModel {
@@ -724,8 +729,10 @@ function archivesPreview(state: string): SourceDashboardViewModel {
   if (items > 0) {
     // Each bounded pass of an import is a completed sync run of its store.
     const embedded = state === 'archives-importing' ? Math.round(items * 0.6) : items;
+    // The store set of the first archive's family: notes sit in the notes set, under the family's neutral name.
+    const family = meta.archives[0]?.family ?? 'email';
     status.corpora = [{
-      ...corpus('secure_local.archive.email', 'email', 'secure_local', 'mbox', items, items * 3, { withText: items, embedded }),
+      ...corpus(`secure_local.archive.${family}`, family, 'secure_local', family === 'email' ? 'mbox' : ARCHIVE_NEUTRAL_PROVIDER, items, items * 3, { withText: items, embedded }),
       last_refresh: { sync_run_id: 'preview-archive-pass', status: 'completed', started_at: at(2 * 3600 + 60), completed_at: at(2 * 3600), items_seen: 2_000, items_indexed: 2_000 },
     }];
   }
@@ -781,6 +788,7 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
     id: '0b9e4c52-7a1d-4d3e-9f0a-3c1b2a4d5e6f',
     name: 'All mail Including Spam and Trash.mbox',
     format: 'Mail (mbox)',
+    family: 'email',
     where: '~/Downloads/Takeout/Mail',
     status: 'imported',
     items: 48_210,
@@ -835,6 +843,64 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
   } else if (state === 'archives-remove-request') {
     archives.push(takeout);
     requests.push({ id: '7d1e2f30-4c5b-4a6d-9e7f-8b9c0d1e2f3a', kind: 'remove', name: takeout.name, where: takeout.where, path: `${takeout.where}/${takeout.name}`, origin: 'agent', status: 'pending', archiveId: takeout.id, archiveName: takeout.name });
+  } else if (state === 'archives-notes') {
+    // An invented export of notes: a stand-in format name, since only mail is registered today.
+    archives.push({
+      ...takeout,
+      id: '3a6c8e10-5b2d-4f7a-8c9e-1d2b3a4c5d6e',
+      name: 'Notes export 2026.zip',
+      format: 'Notes export',
+      family: 'note',
+      items: 3_412,
+      judged: 3_390,
+      held: 22,
+      earliest: '2017-05-02',
+      latest: '2026-10-11',
+      gaps: [
+        { kind: 'media_not_imported', count: 287 },
+        { kind: 'item_truncated', count: 4 },
+        { kind: 'assumption', count: 1 },
+        { kind: 'section_not_imported', count: 2 },
+        { kind: 'file_damaged', count: 1 },
+      ],
+    });
+  } else if (state === 'archives-chat') {
+    // An invented Telegram Desktop export: messages kept, service messages left out, pictures and files counted not read, a kind of content not read said so.
+    archives.push({
+      ...takeout,
+      id: '6c2f8a41-9d3e-4b5a-a7c1-2e4f6a8b0c3d',
+      name: 'Telegram Desktop',
+      format: 'Telegram Desktop export (JSON)',
+      family: 'chat',
+      where: '~/Downloads',
+      items: 18_460,
+      judged: 18_400,
+      held: 60,
+      earliest: '2016-02-11',
+      latest: '2026-10-18',
+      gaps: [
+        { kind: 'media_not_imported', count: 2_318 },
+        { kind: 'section_not_imported', count: 6 },
+        { kind: 'message_content_unsupported', count: 12 },
+        { kind: 'item_truncated', count: 1 },
+        { kind: 'assumption', count: 1 },
+        { kind: 'file_damaged', count: 1 },
+      ],
+      skipped: [{ kind: 'service_message', count: 3_071 }, { kind: 'message_without_text', count: 54 }],
+    });
+  } else if (state === 'archives-empty') {
+    const { earliest: _earliest, latest: _latest, ...dated } = takeout;
+    archives.push({ ...dated, name: 'Empty notes.zip', format: 'Notes export', family: 'note', items: 0, judged: 0, held: 0 });
+  } else if (state === 'archives-nothing-imported') {
+    archives.push({
+      ...takeout,
+      name: 'Spam and Trash only.mbox',
+      items: 0,
+      judged: 0,
+      held: 0,
+      gaps: [{ kind: 'message_too_large', count: 2 }],
+      skipped: [{ kind: 'spam_or_trash', count: 1_204 }],
+    });
   } else if (state === 'archives-uncounted') {
     archives.push({ ...takeout, items: 0, judged: 0, held: 0, countsUnavailable: true });
   } else if (state === 'archives-not-running') {

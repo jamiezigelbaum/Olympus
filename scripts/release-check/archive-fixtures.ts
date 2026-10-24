@@ -12,13 +12,16 @@
  * Adding a format. One entry in `ARCHIVE_FORMATS`: a builder for a small archive that has the same shape of life as the mbox one (a few
  * readable items on known days, something that cannot be read in full, something left out on purpose), and the expectation row that
  * goes with it (the format's label as the dashboard shows it, its citation label, the counts, the dates, the gaps). The leg then
- * imports that archive by the agent path, checks the dashboard against the row, searches for its token, and removes it. Nothing else
- * in the leg names a format. The model-off and changed-file stages use `STRESS_FORMAT`, which also needs a plain archive, a large
+ * imports that archive by the agent path (every format but the stress one: `EXTRA_FORMATS`), checks the dashboard against the row,
+ * searches for its token, and removes it. Nothing else in the leg names a format. The model-off and changed-file stages use `STRESS_FORMAT`, which also needs a plain archive, a large
  * one, and the bytes that change a file (`ArchiveStressSpec`); a later format only has to supply them to be used there too.
  */
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText,
+} from '../../test/support/archive-fixtures-telegram.ts';
 
 /** The folder under the home directory the archives are written to, and the picker's first press. */
 export const FIXTURE_FOLDER = 'rc-archives';
@@ -29,6 +32,8 @@ export interface ArchiveExpectation {
   label: string;
   /** How a search result names the archive's items. */
   citationLabel: string;
+  /** The family of the format, which decides what the dashboard calls the items (messages, notes). */
+  family: string;
   /** Messages (items) stored: what was readable. */
   messages: number;
   /** The first and last day (UTC) of the stored items. */
@@ -163,6 +168,7 @@ function mboxSmall(token: string): BuiltArchive {
     expect: {
       label: MBOX_LABEL,
       citationLabel: MBOX_CITATION,
+      family: 'email',
       messages: 4,
       earliest: '2024-03-04',
       latest: '2024-03-09',
@@ -184,7 +190,7 @@ function mboxPlain(token: string): BuiltArchive {
   ].join('');
   return {
     bytes: bytesOf(text),
-    expect: { label: MBOX_LABEL, citationLabel: MBOX_CITATION, messages: 3, earliest: '2024-04-02', latest: '2024-04-05', gaps: [], leftOut: [] },
+    expect: { label: MBOX_LABEL, citationLabel: MBOX_CITATION, family: 'email', messages: 3, earliest: '2024-04-02', latest: '2024-04-05', gaps: [], leftOut: [] },
   };
 }
 
@@ -224,11 +230,73 @@ export const MBOX_FIXTURES: ArchiveStressSpec = {
   late: mboxLate,
 };
 
+// ---------------------------------------------------------------------------
+// Telegram Desktop export (JSON)
+
+const TELEGRAM_FORMAT = 'telegram_json';
+const TELEGRAM_LABEL = 'Telegram Desktop export (JSON)';
+const TELEGRAM_CITATION = 'Telegram';
+
+/** A message's time, as the writer gives it: the exact Unix time at midday UTC, and the zone-less date beside it. */
+const telegramAt = (day: string) => ({ extra: { date: `${day}T12:00:00`, date_unixtime: String(Date.parse(`${day}T12:00:00Z`) / 1000) } });
+
+/** The parts of a whole-account export but `personal_information`, left out of the file so exactly one part is there to not import. */
+const TELEGRAM_OTHER_PARTS = ['profile_pictures', 'contacts', 'frequent_contacts', 'sessions', 'web_sessions', 'other_data'] as const;
+
+/**
+ * A whole-account export of one chat: five readable messages (one a picture, named and not imported), one join the dashboard counts as a
+ * service message and leaves out, and one part of the account (`personal_information`) that is not messages and is not imported. The
+ * join is the earliest by date, so a date range that counts it is wrong. Names and numbers are made up; the word is in message
+ * bodies only, never in the chat's name.
+ */
+function telegramSmall(token: string): BuiltArchive {
+  const chat = telegramChat({
+    name: 'Release Check Group',
+    type: 'private_group',
+    id: 1_000_001,
+    messages: [
+      telegramService(0, 'join_group_by_link', telegramAt('2023-12-30')),
+      telegramText(1, `Packing for the lake trip: tent, stove, two jackets. The reference word for this trip is ${token}.`, telegramAt('2024-03-04')),
+      telegramText(2, 'The route is the north shore road, then the ferry at noon.', telegramAt('2024-03-05')),
+      telegramPhoto(3, 'The light on the water at the quay was good.', telegramAt('2024-03-06')),
+      telegramText(4, `Lentil soup: onion, carrot, lentils, stock, forty minutes. Same reference word as before: ${token}.`, telegramAt('2024-03-07')),
+      telegramText(5, 'The photos are in the shared album.', telegramAt('2024-03-09')),
+    ],
+  });
+  const text = telegramJson(telegramFullExport({ chats: [chat], omit: TELEGRAM_OTHER_PARTS }));
+  return {
+    bytes: bytesOf(text),
+    expect: {
+      label: TELEGRAM_LABEL,
+      citationLabel: TELEGRAM_CITATION,
+      family: 'chat',
+      messages: 5,
+      earliest: '2024-03-04',
+      latest: '2024-03-09',
+      gaps: [{ kind: 'media_not_imported', count: 1 }, { kind: 'section_not_imported', count: 1 }],
+      leftOut: [{ kind: 'service_message', count: 1 }],
+    },
+  };
+}
+
+export const TELEGRAM_FIXTURES: ArchiveFixtureSpec = {
+  format: TELEGRAM_FORMAT,
+  label: TELEGRAM_LABEL,
+  citationLabel: TELEGRAM_CITATION,
+  extension: '.json',
+  family: 'chat',
+  provider: 'telegram_export',
+  small: telegramSmall,
+};
+
 /** Every format the leg imports by the agent path. A later format adds its entry here. */
-export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = { mbox: MBOX_FIXTURES };
+export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = { mbox: MBOX_FIXTURES, [TELEGRAM_FORMAT]: TELEGRAM_FIXTURES };
 
 /** The format the picker, model-off and changed-file stages use. */
 export const STRESS_FORMAT = 'mbox';
+
+/** The formats imported by the agent path besides the stress format: each is imported, searched, and removed on its own. */
+export const EXTRA_FORMATS: readonly string[] = Object.keys(ARCHIVE_FORMATS).filter((format) => format !== STRESS_FORMAT);
 
 // ---------------------------------------------------------------------------
 // The fixtures of one run
@@ -274,7 +342,7 @@ export function legFixture(role: FixtureRole, seed: string, format: string = STR
   const fileName = role === 'bulk' ? `rc-${role}-${count}${spec.extension}` : `rc-${role}-${format}${spec.extension}`;
   let built: BuiltArchive;
   if (role === 'held') built = stressSpec().plain(token);
-  else if (role === 'bulk') built = { bytes: stressSpec().bulk(token, count), expect: { label: spec.label, citationLabel: spec.citationLabel, messages: count, earliest: '', latest: '', gaps: [], leftOut: [] } };
+  else if (role === 'bulk') built = { bytes: stressSpec().bulk(token, count), expect: { label: spec.label, citationLabel: spec.citationLabel, family: spec.family, messages: count, earliest: '', latest: '', gaps: [], leftOut: [] } };
   else built = spec.small(token);
   return { role, format, fileName, token, relPath: `${FIXTURE_FOLDER}/${fileName}`, expect: built.expect, bytes: built.bytes };
 }

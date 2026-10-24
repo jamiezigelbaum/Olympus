@@ -18,20 +18,39 @@ import type { SourceFamily, SourceTrustDomain } from './source-index/types.ts';
 export const ARCHIVE_PROBE_HEAD_BYTES = 4096;
 /** How many entries of a chosen folder the probe looks at. */
 export const ARCHIVE_PROBE_MAX_CHILDREN = 256;
+/**
+ * How many more entries the probe keeps, past the first ARCHIVE_PROBE_MAX_CHILDREN,
+ * when their names are ones a format asks for (`probeNames`).
+ */
+export const ARCHIVE_PROBE_MAX_NAMED = 1024;
 
 /** One file or folder the probe looked at. */
 export interface ArchiveProbeEntry {
-  /** Relative to the chosen path; '' is the chosen path itself. */
+  /**
+   * Relative to the chosen path; '' is the chosen path itself. For a member
+   * of a zip (`members`) it is the member's name inside the zip, never a
+   * path on disk.
+   */
   relPath: string;
   name: string;
   kind: 'file' | 'directory';
   /** The first ARCHIVE_PROBE_HEAD_BYTES bytes of a file (fewer when it is shorter). */
   head?: Uint8Array;
+  /**
+   * A file that is a zip: the members the probe looked at (the first
+   * ARCHIVE_PROBE_MAX_CHILDREN, and members a format asks for by name past
+   * them), each with its first bytes where they could be read.
+   */
+  members?: readonly ArchiveProbeEntry[];
 }
 
 export interface ArchiveProbe {
   chosen: ArchiveProbeEntry;
-  /** For a chosen folder, the entries directly inside it (at most ARCHIVE_PROBE_MAX_CHILDREN). */
+  /**
+   * For a chosen folder, the entries directly inside it: the first
+   * ARCHIVE_PROBE_MAX_CHILDREN, then up to ARCHIVE_PROBE_MAX_NAMED more whose
+   * names a format asks for (`probeNames`).
+   */
   children: readonly ArchiveProbeEntry[];
 }
 
@@ -41,8 +60,29 @@ export interface ArchiveFormatDefinition {
   family: SourceFamily;
   /** The provider name every item of this format carries. */
   provider: string;
+  /**
+   * How the person is told to choose this kind of export, in the sentence
+   * "Choose a file or folder on this computer: <hint>." ("a mail export (an
+   * .mbox file ...)"). Absent: the format's label.
+   */
+  chooseHint?: string;
   /** How an answer's citation names this format's items ("Imported mail"); absent: the family's word. */
   citationLabel?: string;
+  /**
+   * File and zip-member names (`*` and `?` wildcards, case-insensitive) this
+   * format recognises itself by. A folder of thousands of files, or a zip of
+   * thousands of members, hides the one file that says what it is; the
+   * probe lists these names even past its usual bound and reads their first
+   * bytes before any other file's. Absent: only the usual look.
+   */
+  probeNames?: readonly string[];
+  /**
+   * Other forms of this format's export that cannot be read, recognised by the
+   * same cheap probe, with what the person can do instead. Only consulted when
+   * no format matched: the refusal then carries the advice beside the list of
+   * what is supported.
+   */
+  unsupportedVariants?: readonly ArchiveUnsupportedVariant[];
   /**
    * The files to read, relative to the chosen path and in reading order, when
    * the probe is this format; undefined when it is not.
@@ -50,9 +90,18 @@ export interface ArchiveFormatDefinition {
   detect(probe: ArchiveProbe): readonly string[] | undefined;
 }
 
+/**
+ * An export Olympus recognises and cannot read: `advice` says, in plain words
+ * and without the person's file names, how to get one it can.
+ */
+export interface ArchiveUnsupportedVariant {
+  matches(probe: ArchiveProbe): boolean;
+  advice: string;
+}
+
 export type ArchiveDetection =
   | { kind: 'match'; format: ArchiveFormatDefinition; files: readonly string[] }
-  | { kind: 'none'; supported: readonly string[] }
+  | { kind: 'none'; supported: readonly string[]; advice?: string }
   | { kind: 'ambiguous'; formats: readonly string[] };
 
 const FROM_LINE = [0x46, 0x72, 0x6f, 0x6d, 0x20]; // "From "
@@ -72,6 +121,7 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   label: 'Mail (mbox)',
   family: 'email',
   provider: 'mbox',
+  chooseHint: 'a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)',
   citationLabel: 'Imported mail',
   detect(probe: ArchiveProbe): readonly string[] | undefined {
     if (probe.chosen.kind === 'file') return startsWithFromLine(probe.chosen.head) ? [''] : undefined;
@@ -82,15 +132,166 @@ export const MBOX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   },
 });
 
-export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+// --- Telegram Desktop export -----------------------------------------------------
+
+const JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
+/**
+ * The top-level sections Telegram Desktop's "Export Telegram data" can write
+ * (export_output_json.cpp `JsonWriter`), besides `about`.
+ */
+export const TELEGRAM_EXPORT_SECTIONS = Object.freeze([
+  'personal_information', 'profile_pictures', 'stories', 'profile_music', 'contacts',
+  'frequent_contacts', 'sessions', 'web_sessions', 'other_data', 'chats', 'left_chats',
+] as const);
+// A whole-account export opens with `about` and then its first section; a
+// single-chat export opens with the chat's header (name, type, id) and then
+// `messages`. The writer is fixed, so the first keys decide, whatever follows;
+// every section is an object or a list.
+const TELEGRAM_FULL_HEAD = new RegExp(
+  String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join('|')})"\s*:\s*[\[{]`,
+);
+const TELEGRAM_CHAT_HEAD = new RegExp(
+  String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`,
+);
+const TELEGRAM_HTML_NAME = /^(?:messages\d*|export_results)\.html?$/i;
+
+function isTelegramJsonHead(head: Uint8Array | undefined): boolean {
+  if (!head || head.length === 0) return false;
+  const text = new TextDecoder('utf-8').decode(head);
+  return TELEGRAM_FULL_HEAD.test(text) || TELEGRAM_CHAT_HEAD.test(text);
+}
+
+/**
+ * Telegram Desktop's JSON export: `result.json`, as the whole-account export
+ * ("Export Telegram data") or one chat's ("Export chat history") writes it.
+ * Chosen directly as a file, or as the folder that holds it. Telegram's HTML
+ * form of the same export (`messages.html`) is recognised and turned away
+ * with what to do instead.
+ */
+export const TELEGRAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'telegram_json',
+  label: 'Telegram Desktop export (JSON)',
+  family: 'chat',
+  provider: 'telegram_export',
+  chooseHint: 'a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON)',
+  citationLabel: 'Telegram',
+  probeNames: ['result.json', 'messages.html', 'export_results.html'],
+  unsupportedVariants: Object.freeze([
+    Object.freeze({
+      matches(probe: ArchiveProbe): boolean {
+        if (probe.chosen.kind === 'file') return TELEGRAM_HTML_NAME.test(probe.chosen.name);
+        return probe.children.some((entry) => entry.kind === 'file' && TELEGRAM_HTML_NAME.test(entry.name));
+      },
+      advice: 'This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat\'s menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it.',
+    }),
+  ]),
+  detect(probe: ArchiveProbe): readonly string[] | undefined {
+    if (probe.chosen.kind === 'file') return isTelegramJsonHead(probe.chosen.head) ? [''] : undefined;
+    const inner = probe.children.find((entry) =>
+      entry.kind === 'file' && entry.name.toLowerCase() === 'result.json' && isTelegramJsonHead(entry.head));
+    return inner ? [inner.relPath] : undefined;
+  },
+});
+
+export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze([MBOX_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
 }
 
 /** The format whose items carry this provider name, if any. */
-export function archiveFormatForProvider(provider: string): ArchiveFormatDefinition | undefined {
-  return ARCHIVE_FORMATS.find((format) => format.provider === provider);
+export function archiveFormatForProvider(
+  provider: string,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): ArchiveFormatDefinition | undefined {
+  return formats.find((format) => format.provider === provider);
+}
+
+/**
+ * The provider name on a family's stores when its formats do not share one:
+ * a store set belongs to the family, not to whichever format came first.
+ */
+export const ARCHIVE_NEUTRAL_PROVIDER = 'archive';
+
+/**
+ * The provider a family's stores carry: the formats' own when they all share
+ * it, else the neutral one. Items keep their own format's provider either
+ * way; this only names the store set.
+ */
+export function archiveFamilyProvider(
+  family: SourceFamily,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): string {
+  const providers = new Set(archiveFormatsOfFamily(family, formats).map((format) => format.provider));
+  const only = providers.size === 1 ? [...providers][0] : undefined;
+  return only ?? ARCHIVE_NEUTRAL_PROVIDER;
+}
+
+/**
+ * Whether a provider name is an archive's: a format's own, or the neutral one.
+ */
+export function isArchiveProvider(
+  provider: string,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): boolean {
+  return provider === ARCHIVE_NEUTRAL_PROVIDER || archiveFormatForProvider(provider, formats) !== undefined;
+}
+
+/** The formats of one family, in the order they are registered. */
+export function archiveFormatsOfFamily(
+  family: SourceFamily,
+  formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
+): ArchiveFormatDefinition[] {
+  return formats.filter((format) => format.family === family);
+}
+
+/**
+ * Every name pattern the formats ask the probe to look for, once each.
+ */
+export function archiveProbeNames(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): readonly string[] {
+  return [...new Set(formats.flatMap((format) => format.probeNames ?? []))];
+}
+
+/**
+ * Whether a name matches one of a format's `probeNames`: `*` stands for any
+ * run of characters (none included), `?` for any one, and case does not
+ * matter. A name with folders in it also matches by its last part.
+ */
+export function archiveProbeNameMatches(name: string, patterns: readonly string[] | undefined): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  const full = name.toLowerCase();
+  const slash = full.lastIndexOf('/');
+  const last = slash >= 0 ? full.slice(slash + 1) : full;
+  return patterns.some((pattern) => {
+    const wanted = pattern.toLowerCase();
+    return wildcardMatches(wanted, last) || (last !== full && wildcardMatches(wanted, full));
+  });
+}
+
+function wildcardMatches(pattern: string, text: string): boolean {
+  let p = 0;
+  let t = 0;
+  let star = -1;
+  let resume = 0;
+  while (t < text.length) {
+    const wanted = pattern[p];
+    if (wanted === '*') {
+      star = p;
+      resume = t;
+      p += 1;
+    } else if (wanted === '?' || wanted === text[t]) {
+      p += 1;
+      t += 1;
+    } else if (star >= 0) {
+      p = star + 1;
+      resume += 1;
+      t = resume;
+    } else {
+      return false;
+    }
+  }
+  while (pattern[p] === '*') p += 1;
+  return p === pattern.length;
 }
 
 /** The source families archive imports store, one store set per family. */
@@ -104,8 +305,8 @@ export function isArchiveCorpusId(corpusId: string, trustDomain: string): boolea
   return corpusId.startsWith(`${trustDomain}.archive.`);
 }
 
-export function archiveImportFamilies(): SourceFamily[] {
-  return [...new Set(ARCHIVE_FORMATS.map((format) => format.family))];
+export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): SourceFamily[] {
+  return [...new Set(formats.map((format) => format.family))];
 }
 
 /**
@@ -127,8 +328,25 @@ export function detectArchiveFormat(
     if (files && files.length > 0) matches.push({ format, files });
   }
   if (matches.length === 1) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
-  if (matches.length === 0) return { kind: 'none', supported: formats.map((format) => format.label) };
+  if (matches.length === 0) {
+    const supported = formats.map((format) => format.label);
+    const advice = unsupportedAdvice(probe, formats);
+    return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
+  }
   return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+}
+
+function unsupportedAdvice(probe: ArchiveProbe, formats: readonly ArchiveFormatDefinition[]): string | undefined {
+  for (const format of formats) {
+    for (const variant of format.unsupportedVariants ?? []) {
+      try {
+        if (variant.matches(probe)) return variant.advice;
+      } catch {
+        // A variant that cannot tell is no advice.
+      }
+    }
+  }
+  return undefined;
 }
 
 // --- Connector factories ------------------------------------------------------
@@ -137,6 +355,11 @@ export function detectArchiveFormat(
 export interface ArchiveFileEntry {
   relPath: string;
   version: ScopeFileVersion;
+  /**
+   * A zip: how many members it held when the import was approved, and the
+   * digest of its member table. A reader checks it before it reads a member.
+   */
+  members?: { count: number; sha256: string };
 }
 
 /**
@@ -153,6 +376,24 @@ export interface ArchiveImportFinding {
   offset: number;
   count?: number;
 }
+
+/**
+ * Finding kinds every format can use, whatever it imports. A format's own
+ * kinds (mail's, say) live with its connector; these are the ones the spine
+ * and the shared readers know, each with a sentence in the dashboard's words.
+ */
+export const ARCHIVE_COMMON_FINDINGS = {
+  /** Pictures, audio, video or other files named in the archive that were not read. */
+  mediaNotImported: 'media_not_imported',
+  /** An item longer than the import keeps: the start of it is kept. */
+  itemTruncated: 'item_truncated',
+  /** Something the import had to take as given because the archive does not say. */
+  assumption: 'assumption',
+  /** A whole part of the archive the import does not read. */
+  sectionNotImported: 'section_not_imported',
+  /** A file inside the archive whose bytes did not check out, so what was read of it may be wrong. */
+  fileDamaged: 'file_damaged',
+} as const;
 
 export interface ArchiveConnectorInput {
   archiveId: string;

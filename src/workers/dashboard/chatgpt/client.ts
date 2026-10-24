@@ -1335,9 +1335,16 @@ export function chatgptDashboardClient(
     return typeof value === 'number' && isFinite(value) && value > 0 ? Math.floor(value) : 0;
   }
 
-  function messageCount(n: number): string {
-    const A = H.copy.archives;
-    return fill(n === 1 ? A.items.one : A.items.many, { n: count(n) });
+  /** What an archive's items are called, by its family; items when the family is not one with its own word. */
+  function archiveNouns(archive: Any): Any {
+    const nouns = H.copy.archives.nouns as Any;
+    const family = archive && typeof archive.family === 'string' ? archive.family : '';
+    return Object.prototype.hasOwnProperty.call(nouns, family) ? nouns[family] : nouns.other;
+  }
+
+  function itemCount(archive: Any, n: number): string {
+    const nouns = archiveNouns(archive);
+    return fill(n === 1 ? nouns.one : nouns.many, { n: count(n) });
   }
 
   /**
@@ -1462,16 +1469,28 @@ export function chatgptDashboardClient(
     const uncounted = archive.countsUnavailable === true && archive.status !== 'removing';
     if (halted && archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
-      add(item, el('p', 'muted', uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: messageCount(items) })));
+      add(item, el('p', 'muted', uncounted ? fill(A.notRunningLineUncounted, { percent: percent(pct) }) : fill(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
     } else if (halted) {
       add(item, el('p', 'muted', A.removingNotRunningLine));
     } else if (archive.status === 'importing') {
       const pct = typeof archive.percent === 'number' && isFinite(archive.percent) ? archive.percent : 0;
-      const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      const line = uncounted ? fill(A.importingLineUncounted, { percent: percent(pct) }) : fill(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el('div', 'archive-progress'), progressBar(pct, line), el('p', 'muted', line)));
     } else if (archive.status === 'imported') {
       const when = typeof archive.importedAt === 'string' ? ago(archive.importedAt) : '';
-      if (!uncounted) add(item, el('p', 'muted', when ? fill(A.importedLine, { items: messageCount(items), when }) : fill(A.importedLineNoTime, { items: messageCount(items) })));
+      if (!uncounted && items === 0) {
+        const none = archiveNouns(archive).none;
+        if (archiveHasReasons(archive)) {
+          // Messages were found and left out or not read: nothing was imported, which is not an empty archive.
+          const None = none.charAt(0).toUpperCase() + none.slice(1);
+          add(item, el('p', 'muted', when ? fill(A.nothingImportedWhen, { None, when }) : fill(A.nothingImported, { None })));
+        } else {
+          // Nothing found at all is said as that: the import finished, and this is what it found.
+          add(item, el('p', 'muted', when ? fill(A.emptyImportWhen, { none, when }) : fill(A.emptyImport, { none })));
+        }
+      } else if (!uncounted) {
+        add(item, el('p', 'muted', when ? fill(A.importedLine, { items: itemCount(archive, items), when }) : fill(A.importedLineNoTime, { items: itemCount(archive, items) })));
+      }
     } else if (archive.status === 'removing') {
       const line = el('p', 'muted', A.removingLine);
       line.setAttribute('role', 'status');
@@ -1523,6 +1542,12 @@ export function chatgptDashboardClient(
    * What could not be read fully, per kind (for an archive of several files,
    * which file each is in), then what was left out on purpose.
    */
+  /** Whether the import has anything left out or not read to say (the lines under See what was not read). */
+  function archiveHasReasons(archive: Any): boolean {
+    return archive.gaps.concat(archive.skipped)
+      .some((entry: Any) => entry && typeof entry.kind === 'string' && wholeCount(entry.count) > 0);
+  }
+
   function archiveWhy(archive: Any): HTMLElement | null {
     const A = H.copy.archives;
     const kinds = A.gaps as Any;
