@@ -1168,7 +1168,7 @@ describe('the card section', () => {
     const script = renderOutsideHelpToolsScript(tools({ state: 'idle' }), { canEdit: true, csrfToken: 'csrf-1' });
     expect(script).toContain('csrf-1');
     expect(script).toContain(DASHBOARD_OUTSIDE_HELP_INSTALL_TOOLS_PATH);
-    expect(() => new Function(/<script>([\s\S]*)<\/script>/.exec(script)![1]!)).not.toThrow();
+    expect(() => new Function(/<script[^>]*>([\s\S]*)<\/script>/.exec(script)![1]!)).not.toThrow();
   });
 
   test('read-only: the button is disabled and there is no script', () => {
@@ -1219,7 +1219,7 @@ describe('the card section', () => {
     expect(card.indexOf('data-outside-section="steps"')).toBeGreaterThan(0);
     expect(setup).toBeGreaterThan(card.indexOf('data-outside-section="steps"'));
     expect(setup).toBeLessThan(card.indexOf('data-outside-steps'));
-    expect(card.match(/<script>/g)!.length).toBe(2);
+    expect(card.match(/<script[^>]*>/g)!.length).toBe(2);
     expect(card).not.toContain('Install zkapi-clientd (version');
   });
 

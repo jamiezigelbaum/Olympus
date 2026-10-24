@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { recordRequestPeer } from '../src/core/request-peer.ts';
 import { Window } from 'happy-dom';
+import { DASHBOARD_REDRAW_EVENT } from '../src/control-ui/browser-controller.ts';
 import { buildDashboardPreviewView, DASHBOARD_PREVIEW_NOW } from '../scripts/dashboard-preview.ts';
 import { DEFAULT_CONSULT_DOMAIN_PACKS } from '../src/core/consult-gate.ts';
 import { CONSULT_CHATGPT_FRONTIER_MODEL_DEFAULT, CONSULT_CLAUDE_FRONTIER_MODEL_DEFAULT, CONSULT_LIGHT_CLEANUP_INSTRUCTION, consultChatgptModelUnavailableMessage, readConsultSettings } from '../src/core/consult-settings.ts';
@@ -161,12 +162,12 @@ const LEGACY = /\b(Full ingestion|Metadata only|metadata only|invisible|Public)\
 type CardAnswer = { status: number; body: unknown; bridgeRefusal?: boolean } | 'network';
 
 /** Runs the card's own controller against the parsed card; reloads are recorded, never run. */
-function runCardScript(html: string, answer: (url: string, body: unknown) => CardAnswer | Promise<CardAnswer>) {
+function runCardScript(html: string, answer: (url: string, body: unknown) => CardAnswer | Promise<CardAnswer>, page: Record<string, unknown> = {}) {
   const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?outside-help' });
   const document = window.document;
   const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
-  document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script>[\s\S]*?<\/script>/g, '');
-  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
+  document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+  const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
   const posts: Array<{ url: string; init: { headers: Record<string, string>; body?: string } }> = [];
   const timers: Array<() => void> = [];
   const fetchStub = async (url: string, init: { headers: Record<string, string>; body?: string }) => {
@@ -175,11 +176,14 @@ function runCardScript(html: string, answer: (url: string, body: unknown) => Car
     if (reply === 'network') throw new TypeError('Failed to fetch');
     return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, headers: new Headers(reply.bridgeRefusal ? { 'X-Olympus-Owner-Refused': '1' } : {}), json: async () => reply.body };
   };
-  new Function('window', 'document', 'fetch', 'setTimeout', script)(
-    { confirm: () => true, location: { href: 'http://127.0.0.1:8010/dashboard?outside-help', reload: () => undefined } },
+  // `page` stands for the browser window: the same object across runs is the same page.
+  Object.assign(page, { confirm: () => true, location: { href: 'http://127.0.0.1:8010/dashboard?outside-help', reload: () => { page.reloads = Number(page.reloads ?? 0) + 1; } } });
+  new Function('window', 'document', 'fetch', 'setTimeout', 'CustomEvent', script)(
+    page,
     document,
     fetchStub,
     (fn: () => void) => { timers.push(fn); },
+    window.CustomEvent,
   );
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
   return { window, document, posts, settle, timers };
@@ -479,8 +483,8 @@ describe('the Outside help page: states and copy', () => {
     const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?outside-help' });
     const document = window.document;
     const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
-    document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script>[\s\S]*?<\/script>/g, '');
-    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
+    document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+    const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
     const posts: Array<{ url: string; init: { headers: Record<string, string>; body: string } }> = [];
     const fetchStub = async (url: string, init: { headers: Record<string, string>; body: string }) => {
       posts.push({ url, init });
@@ -633,6 +637,43 @@ describe('the Outside help page: states and copy', () => {
       expect(form.querySelector('[data-action-message]')!.textContent).toBe('Olympus restarted to apply your change. Close this window and open Olympus again.');
     });
   }
+
+  test('a save asks the page to redraw the card, and the redrawn card says the confirmation again in its open section', async () => {
+    const html = page(status({ settings: { level: 'general' } }));
+    const browser: Record<string, unknown> = {};
+    const first = runCardScript(html, () => ({ status: 200, body: { ok: true, status_message: 'Saved what may be sent.', revision: 3 } }), browser);
+    let asked = 0;
+    first.document.addEventListener(DASHBOARD_REDRAW_EVENT, (event) => { asked += 1; event.preventDefault(); });
+    const form = first.document.querySelector('form[data-outside-form="level"]')!;
+    form.dispatchEvent(new first.window.Event('submit', { cancelable: true }));
+    await first.settle();
+    expect(form.querySelector('[data-action-message]')!.textContent).toBe('Saved what may be sent.');
+    // Once the worker answers, the card asks for the redraw; the dashboard claims it, so nothing reloads.
+    first.timers.shift()!();
+    await first.settle();
+    expect(asked).toBe(1);
+    expect(browser.reloads).toBeUndefined();
+    // The dashboard swaps in the fresh card and runs its script again, in the same page.
+    const second = runCardScript(html, () => ({ status: 500, body: {} }), browser);
+    const again = second.document.querySelector('form[data-outside-form="level"]')!;
+    const out = again.querySelector('[data-action-message]')!;
+    expect(out.textContent).toBe('Saved what may be sent.');
+    expect(out.getAttribute('data-state')).toBe('ok');
+    expect((again.closest('details') as unknown as { open: boolean }).open).toBe(true);
+    // Said once: the next redraw starts clean.
+    const third = runCardScript(html, () => ({ status: 500, body: {} }), browser);
+    expect(third.document.querySelector('form[data-outside-form="level"] [data-action-message]')!.textContent).toBe('');
+  });
+
+  test('on a page without the dashboard controller nobody claims the redraw, and the card reloads as before', async () => {
+    const browser: Record<string, unknown> = {};
+    const card = runCardScript(page(status({ settings: { level: 'general' } })), () => ({ status: 200, body: { ok: true, status_message: 'Saved.', revision: 3 } }), browser);
+    card.document.querySelector('form[data-outside-form="level"]')!.dispatchEvent(new card.window.Event('submit', { cancelable: true }));
+    await card.settle();
+    card.timers.shift()!();
+    await card.settle();
+    expect(browser.reloads).toBe(1);
+  });
 
   test('Tor off: the route is said to be direct with the network address visible, whether or not a tor binary exists', () => {
     const off = readiness({ tor: 'off', torPort: 'not_used' });
@@ -1545,8 +1586,8 @@ describe('who writes the question (owner decision 2026-10-10)', () => {
     const window = new Window({ url: 'http://127.0.0.1:8010/dashboard?outside-help' });
     const document = window.document;
     const body = html.slice(html.indexOf('<body'), html.lastIndexOf('</body>'));
-    document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script>[\s\S]*?<\/script>/g, '');
-    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
+    document.body.innerHTML = body.replace(/^<body[^>]*>/, '').replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
+    const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((match) => match[1]!).find((code) => code.includes('[data-outside-help]'))!;
     const posts: Array<{ url: string; init: { body: string } }> = [];
     const fetchStub = async (url: string, init: { body: string }) => {
       posts.push({ url, init });
