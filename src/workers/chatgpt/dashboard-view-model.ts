@@ -624,7 +624,10 @@ function syncFix(
   progress: SourceProgress | undefined,
 ): DashboardFix | undefined {
   if (!SYNC_SOURCE_IDS.has(definition.source_id) || !dashboardIsConnectedSource(card)) return undefined;
-  if (scopePending(card) || missingScope(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
+  // A missing folder does not hide Sync now: the folder may simply be back, and
+  // a press is how a person asks the source to look again (it stays in the menu
+  // behind the row's own Choose folders).
+  if (scopePending(card) || wantsReconnect(card, status, actionKind, degraded, progress)) return undefined;
   return { label: CHATGPT_SETUP_LABELS.syncNow, tool: SYNC_SOURCE_TOOL_NAME, args: { source_id: definition.source_id as ChatGptSyncSourceId } };
 }
 

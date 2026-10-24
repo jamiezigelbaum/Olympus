@@ -35107,7 +35107,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       const hidden = el("span", "sr", fill2(P.moreActions, { source: String(source.label || "") }));
       const box = details("menu:" + id, add(el("span"), glyph, hidden), "menu");
       const panel = el("div", "menu-panel");
-      menu.forEach((fix2, index) => add(panel, fixControl(fix2, "menu:" + id + ":" + index, "plain", true, context2)));
+      const taken = {};
+      menu.forEach((fix2) => {
+        const slug2 = String(fix2 && fix2.label || "action").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "action";
+        taken[slug2] = (taken[slug2] || 0) + 1;
+        add(panel, fixControl(fix2, "menu:" + id + ":" + slug2 + (taken[slug2] > 1 ? "-" + taken[slug2] : ""), "plain", true, context2));
+      });
       menuBox = add(box, panel);
     }
     if (controls.childNodes.length) {

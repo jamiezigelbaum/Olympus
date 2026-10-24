@@ -1300,6 +1300,17 @@ describe('Sync now (olympus_sync_source): start, then the result on a later read
     expect(rowIn(host, 'Dropbox').textContent).not.toContain('Synced');
   });
 
+  test('a menu entry keeps its key when another entry comes or goes (the key names the action, not its place)', () => {
+    const host = mount();
+    const keyOf = (label: string): string | null => host.button(label).getAttribute('data-key');
+    host.push({ structuredContent: model({ sources: [dropbox()] }) });
+    const withSync = { disconnect: keyOf('Disconnect'), folders: keyOf('Choose folders') };
+    expect(withSync.disconnect).toBe('menu:dropbox.files:disconnect');
+    // Without Sync now (a check running, or a source with no lane) nothing shifts onto another action.
+    host.push({ structuredContent: model({ sources: [dropbox({ menu: [FOLDERS, DISCONNECT] })] }) });
+    expect({ disconnect: keyOf('Disconnect'), folders: keyOf('Choose folders') }).toEqual(withSync);
+  });
+
   test('the three results read in #191\'s words, beside a running bar, and never as a pause', () => {
     const host = mount();
     host.push({
