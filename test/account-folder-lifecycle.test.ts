@@ -288,6 +288,47 @@ describe('Delete never reaches into another account', () => {
     for (const store of stores) expect(existsSync(store)).toBe(true);
   });
 
+  // A connector-store mount (Reflect, Roam, an operator's own) places its store by path, which may be inside
+  // Readwise's folder. The mount's declared path is protected, not just Reflect's default.
+  test('a mounted store inside the folder keeps its store, and the delete is refused naming it', () => {
+    const { homeDir, env: base } = fixture();
+    const stores = connectReadwise(base);
+    const mounted = join(readwiseFolder(base), 'stores', 'reflect-custom.sqlite');
+    put(mounted, 'reflect');
+    const env = {
+      ...base,
+      OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: JSON.stringify([
+        { corpusId: 'secure_local.reflect.notes', trustDomain: 'secure_local', family: 'notes', dbPath: mounted },
+      ]),
+    };
+    const before = snapshot(olympusDataRoot(env));
+
+    let message = '';
+    try {
+      deleteOlympusData({ sourceId: 'readwise.library', homeDir, env });
+    } catch (error) {
+      message = error instanceof OperationError ? `${error.message}\n${error.suggestion ?? ''}` : String(error);
+    }
+
+    expect(message).toContain('overlaps another source');
+    expect(message).toContain(mounted);
+    expect(snapshot(olympusDataRoot(env))).toEqual(before);
+    for (const store of stores) expect(existsSync(store)).toBe(true);
+    expect(readFileSync(mounted, 'utf8')).toBe('reflect');
+  });
+
+  test('a mount list that cannot be read refuses the folder delete', () => {
+    const { homeDir, env: base } = fixture();
+    const stores = connectReadwise(base);
+    const env = { ...base, OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: '{not json' };
+    const before = snapshot(olympusDataRoot(env));
+
+    expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env })).toThrow(/cannot be read/);
+
+    expect(snapshot(olympusDataRoot(env))).toEqual(before);
+    for (const store of stores) expect(existsSync(store)).toBe(true);
+  });
+
   test('every account folder deletes cleanly beside the others, so the overlap rule never refuses a normal install', () => {
     const { homeDir, env } = fixture();
     for (const sourceId of FOLDER_LAYOUT_SOURCES) put(join(accountFolder({ source_id: sourceId, slot: '1' }, env), 'raw', 'note.txt'));

@@ -33,7 +33,7 @@ import {
   olympusDataPath,
   olympusDataRoot,
 } from './core/olympus-layout.ts';
-import { hasFolderLayout, placedAccount } from './core/source-placement.ts';
+import { declaredConnectorStoreMounts, hasFolderLayout, placedAccount } from './core/source-placement.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
 import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
@@ -812,6 +812,13 @@ export function deleteOlympusData(options: {
   // starting with the dependent private answers, before any source bytes go.
   // A failing step fails the delete here, with every store still in place.
   const forgotten = selectedSource ? forgetSharedRows(selectedSource, options) : [];
+  // The media reads and the shared-file work above can wait on SQLite locks,
+  // so the link checks run again right before the first removal: a folder
+  // swapped for a link meanwhile is refused, not followed.
+  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
+  for (const target of uniqueDeleteTargets) {
+    if (target.kind === 'account_folder' && existsSync(target.path)) assertDeleteTargetSafe(target);
+  }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
@@ -2066,6 +2073,26 @@ function assertRawStateTargetsContained(
     for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
+  // A store the connector-store mount list places by path (Reflect, Roam, an
+  // operator's own) may sit anywhere, an account folder included: another
+  // source's mounted store and its sidecars are protected where they really are.
+  const mounts = declaredConnectorStoreMounts(envForContext(context));
+  if (mounts === 'unreadable' && overlapTargets.some((target) => target.kind === 'account_folder')) {
+    throw new OperationError(
+      'invalid_params',
+      'Refusing to delete the account folder because OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON cannot be read, so the stores it places cannot be told apart from this account\'s.',
+      'Fix that setting, then delete again. Nothing was deleted.',
+    );
+  }
+  for (const mount of mounts === 'unreadable' ? [] : mounts) {
+    if (own.has(mount.sourceId) || !mount.dbPath || mount.dbPath === ':memory:') continue;
+    for (const path of [
+      mount.dbPath,
+      tierLedgerPathForStore(mount.dbPath),
+      secretLocationsPathForStore(mount.dbPath),
+      tierSnifferPathForStore(mount.dbPath),
+    ]) protectedPaths.add(path);
+  }
   for (const path of [
     join(home, '.olympus', 'config.json'),
     defaultSovereigntyConfigPathForHome(context.homeDir),

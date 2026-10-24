@@ -28725,34 +28725,43 @@ function storageAccountForCorpus(corpus, registered2 = []) {
   const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
   return { sourceId: unprefixed || corpus.corpusId };
 }
+function declaredConnectorStoreMounts(env = process.env) {
+  const mounts = env[MOUNTS_ENV]?.trim();
+  if (!mounts)
+    return [];
+  let declared;
+  try {
+    declared = JSON.parse(mounts);
+  } catch {
+    return "unreadable";
+  }
+  if (!Array.isArray(declared))
+    return "unreadable";
+  const found = [];
+  for (const entry of declared) {
+    const record = entry && typeof entry === "object" ? entry : {};
+    if (typeof record.corpusId !== "string")
+      continue;
+    const corpusId = record.corpusId.trim();
+    const owner = storageAccountForCorpus({
+      corpusId,
+      trustDomain: typeof record.trustDomain === "string" ? record.trustDomain.trim() : ""
+    });
+    const dbPath = typeof record.dbPath === "string" && record.dbPath.trim() ? record.dbPath.trim() : undefined;
+    found.push({ sourceId: owner.sourceId, corpusId, ...dbPath ? { dbPath } : {} });
+  }
+  return found;
+}
 function pinnedLegacyBy(sourceId, env) {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim())
       return name;
   }
-  const mounts = env[MOUNTS_ENV]?.trim();
-  if (!mounts)
-    return;
-  let declared;
-  try {
-    declared = JSON.parse(mounts);
-  } catch {
+  const mounts = declaredConnectorStoreMounts(env);
+  if (mounts === "unreadable")
     return `${MOUNTS_ENV} (unreadable)`;
-  }
-  if (!Array.isArray(declared))
-    return `${MOUNTS_ENV} (unreadable)`;
-  for (const entry of declared) {
-    const record = entry && typeof entry === "object" ? entry : {};
-    if (typeof record.corpusId !== "string")
-      continue;
-    const owner = storageAccountForCorpus({
-      corpusId: record.corpusId.trim(),
-      trustDomain: typeof record.trustDomain === "string" ? record.trustDomain.trim() : ""
-    });
-    if (owner.sourceId === sourceId)
-      return `${MOUNTS_ENV} (${record.corpusId.trim()})`;
-  }
-  return;
+  const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
+  return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
 }
 function dataRootState(env) {
   let root;

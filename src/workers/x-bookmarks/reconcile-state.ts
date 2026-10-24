@@ -3454,6 +3454,11 @@ function optionalFailureClass(value: string | null): XBookmarksStagedFailureClas
   throw new Error('X reconciliation staged failure class is corrupt.');
 }
 
+/** The status of an account whose reconcile state was never created: nothing staged, nothing recovered. */
+export function xBookmarksRecoveryStatusWithoutState(): XBookmarksStagedRecoveryStatus {
+  return { staged: false, staged_recovery: 'not_needed', policy: recoveryPolicy() };
+}
+
 function recoveryPolicy(): XBookmarksStagedRecoveryStatus['policy'] {
   return {
     counts_only: true,

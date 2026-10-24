@@ -16529,34 +16529,43 @@ function storageAccountForCorpus(corpus, registered = []) {
   const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
   return { sourceId: unprefixed || corpus.corpusId };
 }
+function declaredConnectorStoreMounts(env = process.env) {
+  const mounts = env[MOUNTS_ENV]?.trim();
+  if (!mounts)
+    return [];
+  let declared;
+  try {
+    declared = JSON.parse(mounts);
+  } catch {
+    return "unreadable";
+  }
+  if (!Array.isArray(declared))
+    return "unreadable";
+  const found = [];
+  for (const entry of declared) {
+    const record = entry && typeof entry === "object" ? entry : {};
+    if (typeof record.corpusId !== "string")
+      continue;
+    const corpusId = record.corpusId.trim();
+    const owner = storageAccountForCorpus({
+      corpusId,
+      trustDomain: typeof record.trustDomain === "string" ? record.trustDomain.trim() : ""
+    });
+    const dbPath = typeof record.dbPath === "string" && record.dbPath.trim() ? record.dbPath.trim() : undefined;
+    found.push({ sourceId: owner.sourceId, corpusId, ...dbPath ? { dbPath } : {} });
+  }
+  return found;
+}
 function pinnedLegacyBy(sourceId, env) {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim())
       return name;
   }
-  const mounts = env[MOUNTS_ENV]?.trim();
-  if (!mounts)
-    return;
-  let declared;
-  try {
-    declared = JSON.parse(mounts);
-  } catch {
+  const mounts = declaredConnectorStoreMounts(env);
+  if (mounts === "unreadable")
     return `${MOUNTS_ENV} (unreadable)`;
-  }
-  if (!Array.isArray(declared))
-    return `${MOUNTS_ENV} (unreadable)`;
-  for (const entry of declared) {
-    const record = entry && typeof entry === "object" ? entry : {};
-    if (typeof record.corpusId !== "string")
-      continue;
-    const owner = storageAccountForCorpus({
-      corpusId: record.corpusId.trim(),
-      trustDomain: typeof record.trustDomain === "string" ? record.trustDomain.trim() : ""
-    });
-    if (owner.sourceId === sourceId)
-      return `${MOUNTS_ENV} (${record.corpusId.trim()})`;
-  }
-  return;
+  const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
+  return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
 }
 function dataRootState(env) {
   let root;
@@ -59204,6 +59213,9 @@ function optionalFailureClass(value) {
     return value;
   throw new Error("X reconciliation staged failure class is corrupt.");
 }
+function xBookmarksRecoveryStatusWithoutState() {
+  return { staged: false, staged_recovery: "not_needed", policy: recoveryPolicy() };
+}
 function recoveryPolicy() {
   return {
     counts_only: true,
@@ -76456,6 +76468,11 @@ function deleteOlympusData(options) {
   const sourceMedia = selectedSource ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? []) : [];
   const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
   const forgotten = selectedSource ? forgetSharedRows(selectedSource, options) : [];
+  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
+  for (const target of uniqueDeleteTargets) {
+    if (target.kind === "account_folder" && existsSync50(target.path))
+      assertDeleteTargetSafe(target);
+  }
   for (const target of uniqueDeleteTargets) {
     if (!existsSync50(target.path)) {
       missing.push(target.path);
@@ -77226,6 +77243,21 @@ function assertRawStateTargetsContained(targets, context2, selectedSource) {
   }
   for (const path of selectedSource.preservationOnlyPaths?.(context2) ?? [])
     protectedPaths.add(path);
+  const mounts = declaredConnectorStoreMounts(envForContext(context2));
+  if (mounts === "unreadable" && overlapTargets.some((target) => target.kind === "account_folder")) {
+    throw new OperationError("invalid_params", "Refusing to delete the account folder because OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON cannot be read, so the stores it places cannot be told apart from this account's.", "Fix that setting, then delete again. Nothing was deleted.");
+  }
+  for (const mount of mounts === "unreadable" ? [] : mounts) {
+    if (own3.has(mount.sourceId) || !mount.dbPath || mount.dbPath === ":memory:")
+      continue;
+    for (const path of [
+      mount.dbPath,
+      tierLedgerPathForStore(mount.dbPath),
+      secretLocationsPathForStore(mount.dbPath),
+      tierSnifferPathForStore(mount.dbPath)
+    ])
+      protectedPaths.add(path);
+  }
   for (const path of [
     join60(home2, ".olympus", "config.json"),
     defaultSovereigntyConfigPathForHome(context2.homeDir),
@@ -187416,7 +187448,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { readFileSync as readFileSync77, openSync as openSync20, closeSync as closeSync21, writeSync as writeSync6 } from "node:fs";
+import { existsSync as existsSync83, readFileSync as readFileSync77, openSync as openSync20, closeSync as closeSync21, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve19 } from "node:path";
@@ -191089,7 +191121,13 @@ function parseXReconcileRecoveryArgs(args) {
   };
 }
 function runXReconcileRecovery(options) {
-  const store = new LocalXBookmarksReconcileStateStore(options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath());
+  const stateDbPath = options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath();
+  if (stateDbPath !== ":memory:" && !existsSync83(stateDbPath)) {
+    if (!options.execute)
+      return xBookmarksRecoveryStatusWithoutState();
+    throw new Error("X reconciliation has no staged run to recover.");
+  }
+  const store = new LocalXBookmarksReconcileStateStore(stateDbPath);
   try {
     if (!options.execute)
       return store.stagedRecoveryStatus(options.account);

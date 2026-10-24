@@ -163,31 +163,53 @@ export function storageAccountForCorpus(
   return { sourceId: unprefixed || corpus.corpusId };
 }
 
+/** One store the connector-store mount list declares: the source that owns it, and its path when the entry names one. */
+export interface DeclaredConnectorStoreMount {
+  sourceId: string;
+  corpusId: string;
+  dbPath?: string;
+}
+
+/**
+ * The stores `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON` declares, or
+ * `'unreadable'` for a list the worker would refuse. Entries without a corpus
+ * are skipped, as the worker skips them.
+ */
+export function declaredConnectorStoreMounts(env: LayoutEnv = process.env): DeclaredConnectorStoreMount[] | 'unreadable' {
+  const mounts = env[MOUNTS_ENV]?.trim();
+  if (!mounts) return [];
+  let declared: unknown;
+  try {
+    declared = JSON.parse(mounts);
+  } catch {
+    return 'unreadable';
+  }
+  if (!Array.isArray(declared)) return 'unreadable';
+  const found: DeclaredConnectorStoreMount[] = [];
+  for (const entry of declared) {
+    const record = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+    if (typeof record.corpusId !== 'string') continue;
+    const corpusId = record.corpusId.trim();
+    const owner = storageAccountForCorpus({
+      corpusId,
+      trustDomain: typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '',
+    });
+    const dbPath = typeof record.dbPath === 'string' && record.dbPath.trim() ? record.dbPath.trim() : undefined;
+    found.push({ sourceId: owner.sourceId, corpusId, ...(dbPath ? { dbPath } : {}) });
+  }
+  return found;
+}
+
 /** The override or mount that pins this source to the legacy layout, if any. */
 function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim()) return name;
   }
-  const mounts = env[MOUNTS_ENV]?.trim();
-  if (!mounts) return undefined;
-  let declared: unknown;
-  try {
-    declared = JSON.parse(mounts);
-  } catch {
-    // The worker refuses a list it cannot read; until it is fixed nothing may move.
-    return `${MOUNTS_ENV} (unreadable)`;
-  }
-  if (!Array.isArray(declared)) return `${MOUNTS_ENV} (unreadable)`;
-  for (const entry of declared) {
-    const record = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
-    if (typeof record.corpusId !== 'string') continue;
-    const owner = storageAccountForCorpus({
-      corpusId: record.corpusId.trim(),
-      trustDomain: typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '',
-    });
-    if (owner.sourceId === sourceId) return `${MOUNTS_ENV} (${record.corpusId.trim()})`;
-  }
-  return undefined;
+  const mounts = declaredConnectorStoreMounts(env);
+  // The worker refuses a list it cannot read; until it is fixed nothing may move.
+  if (mounts === 'unreadable') return `${MOUNTS_ENV} (unreadable)`;
+  const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
+  return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
 }
 
 /** Whether the legacy data folder can be told apart from a fresh one. */

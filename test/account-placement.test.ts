@@ -31,6 +31,7 @@ import {
   openTierSniffer,
   recordAccountPlacement,
 } from '../src/core/source-storage.ts';
+import { runXReconcileRecovery } from '../src/cli.ts';
 import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
 import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { archiveConnectorStoreDbPath } from '../src/workers/archive-import/store.ts';
@@ -457,6 +458,27 @@ describe('placement is recorded before the first file of an account, whichever f
     expect(existsSync(dbPath)).toBe(true);
     expect(entryFor('x.bookmarks')).toMatchObject({ layout: 'folder', corpus_ids: [] });
     step3Refuses();
+  });
+
+  test('inspecting X reconcile recovery with no state creates nothing, and recovering says there is nothing staged', () => {
+    schemaOneInstall();
+    const dbPath = defaultXBookmarksReconcileStateDbPath(env);
+    expect(existsSync(dbPath)).toBe(false);
+
+    expect(runXReconcileRecovery({ account: 'personal', stateDbPath: dbPath, execute: false })).toMatchObject({
+      staged: false,
+      staged_recovery: 'not_needed',
+    });
+    expect(() => runXReconcileRecovery({
+      account: 'personal',
+      stateDbPath: dbPath,
+      execute: true,
+      expectedStagedDigestSha256: 'a'.repeat(64),
+    })).toThrow(/no staged run/);
+
+    expect(existsSync(dbPath)).toBe(false);
+    expect(existsSync(join(olympusDataRoot(env), 'sources'))).toBe(false);
+    expect(entryFor('x.bookmarks')).toBeUndefined();
   });
 
   test('a tier ledger opened before any store places the account, and the store then joins that entry', () => {
