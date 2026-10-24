@@ -1,4 +1,4 @@
-import { readOpenClawPluginRemote } from './config.ts';
+import { readOpenClawPluginRemote } from './openclaw-plugin-remote.ts';
 import { linuxDesktopEntryPaths } from './linux-desktop-entry.ts';
 /** One Linux layout shared by installers, services and consumers. No OpenClaw dependency. */
 import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';

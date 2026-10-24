@@ -84,8 +84,8 @@
     },
     {
       "path": "src/workers/embedding-ledger-observer.ts",
-      "reason": "Reached only by a repository script that the package does not ship. scripts/source-embedding-drain.ts.",
-      "retire_when": "The script moves to the ops repository or is deleted."
+      "reason": "No runtime importer in src or scripts. Its only caller was the embedding drain's direct mode, removed in step 2b-i of docs/design/source-storage.md; test/embedding-ledger.test.ts still exercises it.",
+      "retire_when": "The worker's embed path records ledger observations through it, or it is deleted."
     },
     {
       "path": "src/workers/file-extraction/http-types.ts",

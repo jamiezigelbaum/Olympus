@@ -1,4 +1,3 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // The X bookmarks lane's per-tier stores (design
 // docs/design/per-item-four-tier-classification.md, sections 2 and 3.2).
 //
@@ -9,14 +8,14 @@ import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // `secure_local.x.bookmarks`, created on first need; one carrying a secret is
 // stored nowhere and only its location is kept. The lane has no Public store.
 
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import type { ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import { createExistingStoreTierLane, type ExistingStoreTierLane } from '../connector-store/tiered-store-set.ts';
 import type { SourceEmbeddingProvider } from '../source-index/embeddings.ts';
-import { X_BOOKMARKS_STORE_PLACEMENT } from './connector.ts';
+import { X_BOOKMARKS_SOURCE_ID, X_BOOKMARKS_STORE_PLACEMENT } from './connector.ts';
 
 export const X_BOOKMARKS_SECURE_CORPUS_ID = 'secure_local.x.bookmarks';
 export const X_BOOKMARKS_TIER_SET_ID = 'x.bookmarks';
@@ -26,8 +25,7 @@ export function defaultXBookmarksSecureConnectorStoreDbPath(
 ): string {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'x-bookmarks-secure-connector-store.sqlite');
+  return olympusDataPath(env, 'x-bookmarks-secure-connector-store.sqlite');
 }
 
 export function createXBookmarksTierLane(options: {
@@ -52,13 +50,13 @@ export function createXBookmarksTierLane(options: {
       secure_local: {
         corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
         dbPath: secureDbPath,
-        create: (ledger) => new LocalConnectorStore({
+        create: (ledger) => openConnectorStore({ sourceId: X_BOOKMARKS_SOURCE_ID }, {
           dbPath: secureDbPath,
           corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
           family: 'x',
           trustDomain: 'secure_local',
           tierLedger: ledger,
-        }),
+        }, env),
         ...(options.secureEmbeddingProvider ? { embeddingProvider: options.secureEmbeddingProvider } : {}),
       },
     },

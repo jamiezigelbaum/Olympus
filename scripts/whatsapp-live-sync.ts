@@ -13,13 +13,12 @@
 // Output is a Castor-safe JSON summary (counts + spool gap diagnostics only,
 // never message text).
 
-import { WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
+import { WHATSAPP_PERSONAL_SOURCE_ID, WHATSAPP_STORE_PLACEMENT } from '../src/workers/whatsapp/store-sync.ts';
+import { runUnderDataOwnerLock } from '../src/core/data-owner-lock.ts';
+import { openConnectorStore } from '../src/core/source-storage.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import {
-  LocalConnectorStore,
-  repairConnectorStoreSendersFromConnector,
-} from '../src/workers/connector-store/index.ts';
+import { repairConnectorStoreSendersFromConnector } from '../src/workers/connector-store/index.ts';
 import {
   WHATSAPP_LIVE_CONNECTOR_ID,
   createWhatsAppLiveSourceConnector,
@@ -48,7 +47,7 @@ async function main(): Promise<void> {
     spoolDir,
     ...(args.account ? { account: args.account } : {}),
   });
-  const store = new LocalConnectorStore({
+  const store = openConnectorStore({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, {
     dbPath,
     corpusId: CORPUS_ID,
     family: 'chat',
@@ -149,4 +148,5 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-await main();
+// Held for the whole run: it refuses while Olympus runs (core/data-owner-lock.ts).
+await runUnderDataOwnerLock(main);

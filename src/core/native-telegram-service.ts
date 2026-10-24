@@ -2,10 +2,10 @@ import { waitForNativeWorkerOwnership } from './native-worker-service.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configFromPluginConfig, type OlympusConfig } from './config.ts';
+import { legacyTelegramGatewayStateDir } from './olympus-layout.ts';
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
@@ -167,8 +167,8 @@ async function prepareTelegramStart(
     );
   }
 
-  const stateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR
-    ?? join(env.HOME ?? homedir(), '.local/state/olympus/telegram-capture-gateway');
+  // Where the reader writes its readiness file, XDG_STATE_HOME included.
+  const stateDir = legacyTelegramGatewayStateDir(env);
   const instanceId = randomUUID();
   env.OLYMPUS_NATIVE_SERVICE_INSTANCE_ID = instanceId;
   return {

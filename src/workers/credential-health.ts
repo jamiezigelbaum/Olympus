@@ -1,4 +1,4 @@
-import { standaloneLinuxDataDir } from '../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../core/olympus-layout.ts';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { homedir, uptime } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -198,7 +198,7 @@ export function defaultCredentialHealthReportPath(): string {
 }
 
 export function defaultCredentialBrokerStatePath(): string {
-  return join(standaloneLinuxDataDir() ?? join(homedir(), '.local', 'share', 'openclaw', 'olympus'), 'credential-broker-state.json');
+  return olympusDataPath(process.env, 'credential-broker-state.json');
 }
 
 export function readCredentialHealthReport(path: string = defaultCredentialHealthReportPath()): CredentialHealthReport | undefined {

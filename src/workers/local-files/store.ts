@@ -8,9 +8,8 @@
  * - `internal.local.files` and `public_safe.local.files`: created only when a
  *   file is first routed to them.
  */
-import { homedir } from 'node:os';
+import { olympusDataRoot } from '../../core/olympus-layout.ts';
 import { join } from 'node:path';
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import { defineSourceIndexCorpus, type SourceIndexCorpusDefinition } from '../../core/source-index/corpus.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
 import {
@@ -23,8 +22,9 @@ import {
   type SourceIngestionPolicy,
 } from '../../core/source-ingestion-policy.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
-import { TierLedger } from '../classification/tier-ledger.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { TierLedger } from '../classification/tier-ledger.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore, openTierLedger } from '../../core/source-storage.ts';
 import { fileLaneIngestionMatcher } from '../connector-store/file-ingestion-matcher.ts';
 import type {
   ConnectorStorePlacementRule,
@@ -79,8 +79,7 @@ export function defineLocalFilesCorpus(): SourceIndexCorpusDefinition {
 }
 
 function dataDir(env: Record<string, string | undefined>): string {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus');
+  return olympusDataRoot(env);
 }
 
 export function defaultLocalFilesConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
@@ -141,14 +140,14 @@ export function createLocalFilesConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? defaultLocalFilesIngestionPolicy();
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: LOCAL_FILES_SOURCE_ID }, {
     dbPath: defaultLocalFilesConnectorStoreDbPath(env),
     corpusId: LOCAL_FILES_CORPUS_ID,
     family: 'file',
     trustDomain: 'secure_local',
     exclusions: localFilesCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
-  });
+  }, env);
 }
 
 export function createLocalFilesTierConnectorStore(
@@ -157,7 +156,7 @@ export function createLocalFilesTierConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy; tierLedger?: TierLedger } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? defaultLocalFilesIngestionPolicy();
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: LOCAL_FILES_SOURCE_ID }, {
     dbPath: trustDomain === 'internal'
       ? defaultLocalFilesInternalConnectorStoreDbPath(env)
       : defaultLocalFilesPublicConnectorStoreDbPath(env),
@@ -167,7 +166,7 @@ export function createLocalFilesTierConnectorStore(
     exclusions: localFilesCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
     ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
-  });
+  }, env);
 }
 
 export interface LocalFilesTierLane {
@@ -188,7 +187,7 @@ export function createLocalFilesTierLane(options: {
 }): LocalFilesTierLane {
   const env = options.env ?? process.env;
   const ledger = options.secureStore.tierLedger()
-    ?? new TierLedger({ dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) });
+    ?? openTierLedger({ sourceId: LOCAL_FILES_SOURCE_ID }, { dbPath: tieredStoreSetLedgerPath(options.secureStore.dbPath) }, env);
   const leg = (domain: 'internal' | 'public_safe'): OnDemandTierStore => onDemandTierStore({
     corpusId: LOCAL_FILES_TIER_CORPUS_IDS[domain],
     dbPath: domain === 'internal'

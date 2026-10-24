@@ -24,7 +24,10 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { legacyCaptureDataRoot, legacyTelegramGatewayStateDir, olympusDataPath, olympusDataRoot } from './core/olympus-layout.ts';
+import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
+import { storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
 import {
@@ -283,6 +286,12 @@ interface DeleteTarget {
 const DELETE_CONFIRMATION_1 = 'DELETE OLYMPUS DATA';
 const DELETE_CONFIRMATION_2 = 'DELETE EVERYTHING';
 
+/** The source each store file in the lifecycle's inventory belongs to, by the file itself. */
+export function lifecycleStoreFileOwner(env: Record<string, string | undefined>): StoreFileOwner {
+  return storeFileOwnerLookup(lifecycleSourceSpecs().flatMap((spec) =>
+    (spec.connectorStorePaths?.({ env }) ?? []).map((path) => [path, spec.sourceId] as const)));
+}
+
 export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
   return [
     {
@@ -526,12 +535,7 @@ function legacySourceIndexPath(
 }
 
 function olympusSharedDataFile(env: Record<string, string | undefined>, fileName: string): string {
-  return join(
-    env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share'),
-    'openclaw',
-    'olympus',
-    fileName,
-  );
+  return olympusDataPath(env, fileName);
 }
 
 /**
@@ -577,13 +581,11 @@ function whatsappRawStatePaths(env: Record<string, string | undefined>): string[
 
 function telegramCaptureStatePaths(env: Record<string, string | undefined>): string[] {
   const home = env.HOME?.trim() || homedir();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(home, '.local', 'share');
   const stateHome = env.XDG_STATE_HOME?.trim() || join(home, '.local', 'state');
   const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
     || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim()
-    || join(dataHome, 'olympus', 'telegram-capture', 'spool');
-  const gatewayStateDir = env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim()
-    || join(stateHome, 'olympus', 'telegram-capture-gateway');
+    || join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool');
+  const gatewayStateDir = legacyTelegramGatewayStateDir(env);
   const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim()
     || join(stateHome, 'olympus', 'telegram-spool-drain');
   const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim()
@@ -745,6 +747,10 @@ export function deleteOlympusData(options: {
   const targets = options.all === true
     ? allDeleteTargets(options)
     : sourceDeleteTargets(selectedSource!, options);
+  // The owner lock to keep, resolved once with the targets: removing the
+  // config folder can change what the data root resolves to (on standalone
+  // Linux its receipt lives there), and the lock held is the one found now.
+  const ownerLockPath = dataOwnerLockPath(envForContext(options));
   const removed: string[] = [];
   const missing: string[] = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
@@ -791,7 +797,7 @@ export function deleteOlympusData(options: {
     }
     removed.push(target.path);
     if (options.dryRun !== true) {
-      rmSync(target.path, { recursive: target.allowRecursive, force: true });
+      rmTargetKeepingOwnerLock(target, ownerLockPath);
     }
   }
   removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
@@ -1069,6 +1075,11 @@ export function deleteAllConfirmationPrompts(): { first: string; second: string 
   return { first: DELETE_CONFIRMATION_1, second: DELETE_CONFIRMATION_2 };
 }
 
+/** The data root this context's paths resolve under (core/olympus-layout.ts). */
+export function lifecycleDataRoot(context: LifecyclePathContext = {}): string {
+  return olympusDataRoot(envForContext(context));
+}
+
 export function knownOlympusDataRoots(context: LifecyclePathContext = {}): string[] {
   return olympusDataRoots({ homeDir: resolveHome(context.homeDir) });
 }
@@ -1098,6 +1109,38 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     ...globExisting(join(home, '.config', 'systemd', 'user'), /^olympus.*\.(service|timer)$/)
       .map(serviceUnitTarget),
   ];
+}
+
+/**
+ * `rmSync` of a delete target, except that the data owner lock stays: a
+ * process may hold it (the CLI under its interim lock, the worker deleting
+ * from the dashboard), and a new file under its name would be a different
+ * lock that a second process could take. When the lock file sits inside a recursive target, everything else in
+ * that target goes and the folders leading to the lock file stay; only
+ * uninstall removes it, after everything else (docs/design/source-storage.md).
+ */
+function rmTargetKeepingOwnerLock(target: DeleteTarget, lockPath: string): void {
+  const lock = canonicalPath(lockPath);
+  const root = canonicalPath(target.path);
+  if (!target.allowRecursive || !isStrictlyInside(lock, root) || !existsSync(lockPath)) {
+    rmSync(target.path, { recursive: target.allowRecursive, force: true });
+    return;
+  }
+  // The lock's path below the target: the folders to keep, then its own name.
+  const keep = relative(root, lock).split(sep);
+  const clear = (directory: string, depth: number): void => {
+    const inLockDirectory = depth === keep.length - 1;
+    for (const name of readdirSync(directory)) {
+      const child = join(directory, name);
+      if (inLockDirectory && isDataOwnerLockName(name)) continue;
+      if (!inLockDirectory && name === keep[depth] && lstatSync(child).isDirectory()) {
+        clear(child, depth + 1);
+        continue;
+      }
+      rmSync(child, { recursive: true, force: true });
+    }
+  };
+  clear(target.path, 0);
 }
 
 function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
@@ -1310,7 +1353,7 @@ function selectSources(sourceId: string | undefined): LifecycleSourceSpec[] {
   return [requireSource(sourceId)];
 }
 
-function requireSource(sourceId: string | undefined): LifecycleSourceSpec {
+export function requireSource(sourceId: string | undefined): LifecycleSourceSpec {
   const normalized = requirePath(sourceId, '--source');
   const source = lifecycleSourceSpecs().find(
     (entry) => entry.sourceId === normalized || entry.sourceAliases?.includes(normalized),

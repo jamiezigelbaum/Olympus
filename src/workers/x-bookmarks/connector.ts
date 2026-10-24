@@ -1,13 +1,11 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Contract 1 normalization for X bookmark snapshots. The real provider-facing
 // SourceConnector lives in api-connector.ts and owns auth, polling, pagination,
 // completeness, fetch, and classification; this module converts its bounded
 // acquisition into stable RawItems for the shared connector store.
 
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -17,7 +15,8 @@ import type {
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
 import { buildSourceSensitivity, type SourceSensitivity } from '../../core/source-index/types.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
 import { X_BOOKMARKS_CORPUS_ID } from './corpus-adapter.ts';
 import type { XBookmarkPost } from './api.ts';
 import {
@@ -27,6 +26,7 @@ import {
 } from './folder-facets.ts';
 
 export const X_BOOKMARKS_LIVE_CONNECTOR_ID = 'x_bookmarks_live';
+export const X_BOOKMARKS_SOURCE_ID = 'x.bookmarks';
 export const X_BOOKMARKS_ARCHIVE_CONNECTOR_ID = 'x_bookmarks_archive';
 export const X_BOOKMARKS_PROVIDER = 'x';
 
@@ -95,13 +95,14 @@ export const X_BOOKMARKS_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.f
 
 export function createXBookmarksConnectorStore(
   dbPath = defaultXBookmarksConnectorStoreDbPath(),
+  env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: X_BOOKMARKS_SOURCE_ID }, {
     dbPath,
     corpusId: X_BOOKMARKS_CORPUS_ID,
     family: 'x',
     trustDomain: 'internal',
-  });
+  }, env);
 }
 
 export function defaultXBookmarksConnectorStoreDbPath(
@@ -109,8 +110,7 @@ export function defaultXBookmarksConnectorStoreDbPath(
 ): string {
   const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'x-bookmarks-connector-store.sqlite');
+  return olympusDataPath(env, 'x-bookmarks-connector-store.sqlite');
 }
 
 export function xBookmarkLocalItemId(account: string, postId: string): string {

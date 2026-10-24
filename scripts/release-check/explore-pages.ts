@@ -128,7 +128,7 @@ const sleepFor = (ms: number): Promise<void> => new Promise((done) => setTimeout
 
 const ENUMERATE = String.raw`(() => {
   const clean = __rc.clean;
-  const vis = (el) => { const b = el.getBoundingClientRect(); if (!b.width || !b.height) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none'; };
+  const vis = __rc.visible;
   const nameOf = (el) => {
     const tag = el.tagName.toLowerCase();
     const aria = el.getAttribute('aria-label');
@@ -432,6 +432,9 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
             const info = via ? await driver.click('host', { css: `[data-rc-n="${via.n}"]` }) : null;
             if (!info) { reachable = false; break; }
             await settle();
+            // A press on the way may reload the page (a section that redraws itself), which takes the question hooks with it.
+            await read(HOOK_CONFIRM(item.answer ?? true));
+            await read('__rc.watchWindows()');
             controls = await enumerate();
           }
           const finalSig = item.path[item.path.length - 1]!;

@@ -12,14 +12,13 @@
  * `removing` from the moment a removal starts until every derived row is gone,
  * so a removal interrupted by a restart carries on from where it was.
  */
+import { olympusDataRoot } from '../../core/olympus-layout.ts';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import type { ArchiveImportFinding } from '../../core/archive-formats.ts';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 import type { ArchiveManifestFile } from './manifest.ts';
 
 export const ARCHIVE_IMPORTS_STATE_PATH_ENV = 'OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH';
@@ -105,8 +104,7 @@ interface PersistedArchiveImportState {
 }
 
 function dataDir(env: Record<string, string | undefined>): string {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus');
+  return olympusDataRoot(env);
 }
 
 export function defaultArchiveImportStatePath(env: Record<string, string | undefined> = process.env): string {

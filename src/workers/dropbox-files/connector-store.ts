@@ -1,4 +1,3 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // Placement of the Dropbox connector stores on the shared spine.
 //
 // Per-tier stores (design docs/design/per-item-four-tier-classification.md,
@@ -12,11 +11,10 @@ import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
 // filter; the secure store's co-located tier ledger governs visibility for
 // all three.
 
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import {
   createSourceExclusionMatcher,
   loadSourceIngestionExclusions,
@@ -27,9 +25,10 @@ import {
   loadDropboxIngestionPolicy,
   type SourceIngestionPolicy,
 } from '../../core/source-ingestion-policy.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { fileLaneIngestionMatcher } from '../connector-store/file-ingestion-matcher.ts';
-import { DROPBOX_FILES_CORPUS_ID } from './corpus-adapter.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
+import { DROPBOX_FILES_CORPUS_ID, DROPBOX_FILES_SOURCE_ID } from './corpus-adapter.ts';
 
 export const DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID = DROPBOX_FILES_CORPUS_ID;
 
@@ -92,8 +91,7 @@ export function defaultDropboxConnectorStoreDbPath(
 ): string {
   const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'dropbox-files-connector-store.sqlite');
+  return olympusDataPath(env, 'dropbox-files-connector-store.sqlite');
 }
 
 export function defaultDropboxInternalConnectorStoreDbPath(
@@ -101,8 +99,7 @@ export function defaultDropboxInternalConnectorStoreDbPath(
 ): string {
   const configured = env[DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'dropbox-files-internal-connector-store.sqlite');
+  return olympusDataPath(env, 'dropbox-files-internal-connector-store.sqlite');
 }
 
 export function defaultDropboxPublicConnectorStoreDbPath(
@@ -110,8 +107,7 @@ export function defaultDropboxPublicConnectorStoreDbPath(
 ): string {
   const configured = env[DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'dropbox-files-public-connector-store.sqlite');
+  return olympusDataPath(env, 'dropbox-files-public-connector-store.sqlite');
 }
 
 /** Every Dropbox tier store's path: the lifecycle deletes all of them with the source. */
@@ -164,14 +160,14 @@ export function createDropboxConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? loadDropboxIngestionPolicy({ env });
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {
     dbPath: defaultDropboxConnectorStoreDbPath(env),
     corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
     family: 'file',
     trustDomain: 'secure_local',
     exclusions: dropboxCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
-  });
+  }, env);
 }
 
 /**
@@ -185,7 +181,7 @@ export function createDropboxTierConnectorStore(
   options: { readOnly?: boolean; policy?: SourceIngestionPolicy; tierLedger?: TierLedger } = {},
 ): LocalConnectorStore {
   const policy = options.policy ?? loadDropboxIngestionPolicy({ env });
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: DROPBOX_FILES_SOURCE_ID }, {
     dbPath: trustDomain === 'internal'
       ? defaultDropboxInternalConnectorStoreDbPath(env)
       : defaultDropboxPublicConnectorStoreDbPath(env),
@@ -195,5 +191,5 @@ export function createDropboxTierConnectorStore(
     exclusions: dropboxCanonicalIngestionMatcher(policy, env),
     ...(options.readOnly === true ? { readOnly: true } : {}),
     ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
-  });
+  }, env);
 }

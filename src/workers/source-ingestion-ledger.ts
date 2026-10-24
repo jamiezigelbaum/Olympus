@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type { ContentExtractionThroughputSignal } from '../core/ingestion-throughput.ts';
@@ -41,14 +40,20 @@ import {
   defaultGoogleDriveConnectorStoreDbPath,
   defaultGoogleDriveSecureConnectorStoreDbPath,
 } from './google-connectors/index.ts';
-import {
+import type {
   LocalConnectorStore,
 } from './connector-store/index.ts';
+import { SourceStorageUnavailableError, openConnectorStore, storageAccountForCorpus } from '../core/source-storage.ts';
+import { lifecycleStoreFileOwner } from '../data-lifecycle.ts';
 import { defaultReadwiseConnectorStoreDbPath } from './readwise/index.ts';
 import { READWISE_SECURE_LIBRARY_CORPUS_ID, defaultReadwiseSecureConnectorStoreDbPath } from './readwise/tier-set.ts';
 import { defaultXBookmarksConnectorStoreDbPath } from './x-bookmarks/index.ts';
 import { X_BOOKMARKS_SECURE_CORPUS_ID, defaultXBookmarksSecureConnectorStoreDbPath } from './x-bookmarks/tier-set.ts';
-import { WHATSAPP_INTERNAL_CORPUS_ID, defaultWhatsAppInternalConnectorStoreDbPath } from './whatsapp/store-sync.ts';
+import {
+  WHATSAPP_INTERNAL_CORPUS_ID,
+  defaultWhatsAppConnectorStoreDbPath,
+  defaultWhatsAppInternalConnectorStoreDbPath,
+} from './whatsapp/store-sync.ts';
 import {
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_INTERNAL_FILES_CORPUS_ID,
@@ -79,7 +84,7 @@ import {
 } from './local-files/store.ts';
 import { closeSqliteStore } from '../core/sqlite-store.ts';
 import { archiveImportFamilies } from '../core/archive-formats.ts';
-import { ARCHIVE_TIER_DOMAINS, archiveConnectorStoreDbPath, archiveCorpusId } from './archive-import/store.ts';
+import { ARCHIVE_TIER_DOMAINS, archiveConnectorStoreDbPath, archiveCorpusId, archiveImportCorpora } from './archive-import/store.ts';
 
 export interface SourceIngestionLedgerSnapshot {
   kind: 'source_ingestion_ledger';
@@ -748,6 +753,13 @@ export async function collectLocalSourceIngestionLedger(
     GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   ]);
   const exclusionSources: SourceIngestionLedgerExclusionSource[] = [];
+  // A declared store over another source's file is read under that source,
+  // as the worker mounts it.
+  const storeOwner = lifecycleStoreFileOwner(env);
+  const storeAccount = (store: { dbPath: string; corpusId: string; trustDomain: string }) => {
+    const owner = storeOwner(store.dbPath);
+    return owner ? { sourceId: owner } : storageAccountForCorpus(store, archiveImportCorpora());
+  };
   for (const store of localConnectorStores(env)) {
     if (!existsSync(store.dbPath)) continue;
     // A folder exclusion is a claim about file storage. Message and bookmark
@@ -757,23 +769,37 @@ export async function collectLocalSourceIngestionLedger(
     // the family keeps the section meaningful rather than merely loud.
     const gated = store.family === 'file';
     const matcher = driveCorpusIds.has(store.corpusId) ? driveExclusions : sharedExclusions;
-    const handle = store.corpusId === DROPBOX_FILES_CORPUS_ID
-      ? createDropboxConnectorStore(env, { readOnly: true })
-      : store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID || store.corpusId === DROPBOX_PUBLIC_FILES_CORPUS_ID
-        ? createDropboxTierConnectorStore(
-          store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID ? 'internal' : 'public_safe',
-          env,
-          { readOnly: true },
-        )
-        : store.corpusId === LOCAL_FILES_CORPUS_ID
-          ? createLocalFilesConnectorStore(env, { readOnly: true })
-          : store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID || store.corpusId === LOCAL_FILES_PUBLIC_CORPUS_ID
-            ? createLocalFilesTierConnectorStore(
-              store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID ? 'internal' : 'public_safe',
-              env,
-              { readOnly: true },
-            )
-            : new LocalConnectorStore({ ...store, ...(gated ? { exclusions: matcher } : {}) });
+    let handle: LocalConnectorStore;
+    try {
+      handle = store.corpusId === DROPBOX_FILES_CORPUS_ID
+        ? createDropboxConnectorStore(env, { readOnly: true })
+        : store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID || store.corpusId === DROPBOX_PUBLIC_FILES_CORPUS_ID
+          ? createDropboxTierConnectorStore(
+            store.corpusId === DROPBOX_INTERNAL_FILES_CORPUS_ID ? 'internal' : 'public_safe',
+            env,
+            { readOnly: true },
+          )
+          : store.corpusId === LOCAL_FILES_CORPUS_ID
+            ? createLocalFilesConnectorStore(env, { readOnly: true })
+            : store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID || store.corpusId === LOCAL_FILES_PUBLIC_CORPUS_ID
+              ? createLocalFilesTierConnectorStore(
+                store.corpusId === LOCAL_FILES_INTERNAL_CORPUS_ID ? 'internal' : 'public_safe',
+                env,
+                { readOnly: true },
+              )
+              : openConnectorStore(
+                storeAccount(store),
+                { ...store, ...(gated ? { exclusions: matcher } : {}) },
+                env,
+              );
+    } catch (error) {
+      // An account being deleted is left out, as the worker leaves it
+      // unmounted. Anything else, an unreadable registry included, is loud,
+      // and the stores already opened are closed first.
+      if (error instanceof SourceStorageUnavailableError) continue;
+      for (const opened of handles.reverse()) opened.close();
+      throw error;
+    }
     handles.push(handle);
     connectorStores.push(handle);
     if (gated) {
@@ -1639,7 +1665,8 @@ function localConnectorStores(env: Record<string, string | undefined>): Array<Co
     },
     {
       corpusId: 'secure_local.whatsapp.messages',
-      dbPath: whatsappConnectorStoreDbPath(env),
+      // The writer's own resolution, so OLYMPUS_WHATSAPP_STATE_DIR is honored here too.
+      dbPath: defaultWhatsAppConnectorStoreDbPath(env),
       family: 'chat',
       trustDomain: 'secure_local',
     },
@@ -1707,13 +1734,6 @@ function mergeConnectorStoreDefinitions(
     if (!byCorpusId.has(store.corpusId)) byCorpusId.set(store.corpusId, store);
   }
   return Array.from(byCorpusId.values());
-}
-
-function whatsappConnectorStoreDbPath(env: Record<string, string | undefined>): string {
-  return env.OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim()
-    || env.OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH?.trim()
-    || env.OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH?.trim()
-    || join(env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share'), 'olympus', 'whatsapp-live', 'connector-store.db');
 }
 
 function number(value: number | undefined): number {

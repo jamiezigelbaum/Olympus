@@ -1,6 +1,5 @@
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
+import { olympusDataPath } from '../../core/olympus-layout.ts';
 import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type {
   RawItem,
@@ -40,6 +39,7 @@ import {
   type GoogleRequestBudgetStatus,
 } from './request-budget.ts';
 
+export const GMAIL_SOURCE_ID = 'gmail.email';
 export const GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = 'internal.email';
 export const GMAIL_SECURE_CONNECTOR_CORPUS_ID = 'secure_local.email.private';
 /** The lane's Public store (P1b per-tier stores), created when its first message is routed there. */
@@ -782,8 +782,7 @@ export function defaultGmailRequestBudgetStatePath(
 ): string {
   const configured = env[GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured) return configured;
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'gmail-daily-request-budget.json');
+  return olympusDataPath(env, 'gmail-daily-request-budget.json');
 }
 
 function budgetedGmailApiClient(
@@ -910,24 +909,21 @@ export function defaultGmailConnectorStoreDbPath(env: Record<string, string | un
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'gmail-connector-store.sqlite');
+  return olympusDataPath(env, 'gmail-connector-store.sqlite');
 }
 
 export function defaultGmailSecureConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'gmail-secure-connector-store.sqlite');
+  return olympusDataPath(env, 'gmail-secure-connector-store.sqlite');
 }
 
 export function defaultGmailPublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
   if (env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
     return env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
   }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus'), 'gmail-public-connector-store.sqlite');
+  return olympusDataPath(env, 'gmail-public-connector-store.sqlite');
 }
 
 class RestGmailApiClient implements GmailApiClient {

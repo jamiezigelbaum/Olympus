@@ -386,13 +386,27 @@ export function evaluateInbox(obs: InboxObservation, ctx: InboxContext): CheckRe
       : `${entry.listed ? 'listed' : 'not listed'} as a ${entry.path ?? 'unknown'} entry (${entry.status ?? 'unreadable'}); the question is the one asked: ${entry.questionMatches ? 'yes' : 'no'}; ${factsLine(entry.factsStated)}; ${entry.citations} source(s)`,
   ));
 
+  const stays = egressVerdict(obs.egress);
   out.push(check(
     'inbox.stays-here',
     'Nothing left the machine while the Ask page was used (the local answer, and the Venice and zkAPI rows)',
-    obs.egress.fresh.length === 0 && obs.egress.pageOutside.length === 0 && obs.egress.samples > 0,
-    obs.egress.fresh.length === 0 && obs.egress.pageOutside.length === 0
-      ? `${obs.egress.samples} samples of the machine's connections, one every ${obs.egress.intervalMs} ms: none new beyond the ${obs.egress.baseline} already open; the page asked for ${obs.egress.pageRequests} address(es), all on this machine`
-      : `new connections: ${obs.egress.fresh.join(', ') || 'none'}; the page also asked for: ${obs.egress.pageOutside.join(', ') || 'nothing outside'}`,
+    stays.ok,
+    stays.detail,
   ));
   return out;
+}
+
+/**
+ * Whether anything left the machine while it was watched: no connection the product newly opened to another machine, no address on
+ * another machine that the page asked for, and a watch that took samples at all (no samples is no evidence). The Ask page and the
+ * archive-import leg judge their windows by this one rule.
+ */
+export function egressVerdict(egress: EgressView): { ok: boolean; detail: string } {
+  const quiet = egress.fresh.length === 0 && egress.pageOutside.length === 0;
+  return {
+    ok: quiet && egress.samples > 0,
+    detail: quiet
+      ? `${egress.samples} samples of the machine's connections, one every ${egress.intervalMs} ms: none new beyond the ${egress.baseline} already open; the page asked for ${egress.pageRequests} address(es), all on this machine`
+      : `new connections: ${egress.fresh.join(', ') || 'none'}; the page also asked for: ${egress.pageOutside.join(', ') || 'nothing outside'}`,
+  };
 }

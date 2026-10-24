@@ -42,6 +42,12 @@ interface State {
   reloadsOnRevoke?: boolean;
   /** The Build a connector page has no Lock, as in the product. */
   noLockOnConnector?: boolean;
+  /** A closed section and an open one, each holding a button (the box stub gives both a box, as Chrome does). */
+  sections?: boolean;
+  /** A closed section whose summary reloads the page (it comes back open), holding a button that asks before it acts. */
+  reloadingSection?: boolean;
+  zkOpen?: boolean;
+  zkAdded?: boolean;
 }
 
 class PagesDriver implements JourneyDriver {
@@ -73,6 +79,8 @@ class PagesDriver implements JourneyDriver {
       <div id="sheet" ${s.sheetOpen ? '' : 'hidden'}><p>Paste this into your agent.</p><button type="button" class="btn" data-copy-target="#sheet">Copy prompt</button></div>
       ${s.deadButton ? '<button type="button" class="btn">Check readiness</button>' : ''}
       ${s.silentDisabled ? '<button type="button" class="btn" disabled>Wait</button>' : ''}
+      ${s.sections ? '<details><summary>Add it yourself instead</summary><button type="button" class="btn">Copy the address</button></details><details open><summary>Advanced</summary><button type="button" class="btn">Show advanced</button></details>' : ''}
+      ${s.reloadingSection ? `<details data-zk-section ${s.zkOpen ? 'open' : ''}><summary>Set up zkAPI</summary><button type="button" class="btn" data-zk-add>Add zkAPI to Olympus</button>${s.zkAdded ? '<p>zkAPI added.</p>' : ''}</details>` : ''}
       ${s.secret ? secret : ''}
       <ul>${rows}</ul>
       ${s.noLockOnConnector && this.path.endsWith('connector') ? '' : s.locked ? '<form data-control-session-kind="unlock"><button type="submit">Unlock</button></form>' : '<form data-control-session-kind="lock"><button type="submit">Lock</button></form>'}
@@ -103,6 +111,20 @@ class PagesDriver implements JourneyDriver {
       if (yes || this.state.ignoresCancel) this.state.connections = this.state.connections.filter((known) => known !== name);
       this.render();
     });
+    on('[data-zk-section] > summary', () => {
+      // The section redraws itself with a page load: it comes back open, and the page's own window state (the hooks) is new.
+      this.state.zkOpen = true;
+      delete (this.host as any).__rcConfirms;
+      delete (this.host as any).__rcOpened;
+      (this.host as any).__rc = undefined;
+      (this.host as any).confirm = (text: string) => { this.events.console.push(`a browser dialog opened (confirm): ${text}`); return false; };
+      this.render();
+    });
+    on('[data-zk-add]', () => {
+      const win = this.host as unknown as { confirm(text: string): boolean };
+      if (win.confirm('This adds zkAPI. Continue?')) this.state.zkAdded = true;
+      this.render();
+    });
     on('form[data-control-session-kind="lock"] button', () => { this.pressed.push('lock'); this.state.locked = true; this.render(); });
     on('button[data-copy-target]', () => { this.pressed.push('copy'); });
     on('a[href="/dashboard"]', () => { this.path = '/dashboard'; this.host.happyDOM.setURL('http://127.0.0.1:8010/dashboard'); });
@@ -122,6 +144,7 @@ class PagesDriver implements JourneyDriver {
   async reload(): Promise<void> { this.reset(); }
   private reset(): void {
     this.state.sheetOpen = false;
+    this.state.zkOpen = false;
     this.state.secret = '';
     (this.host as unknown as { sessionStorage: Storage }).sessionStorage.clear();
     delete (this.host as any).__rcConfirms;
@@ -208,6 +231,22 @@ describe('exploring the other pages', () => {
     const driver = new PagesDriver();
     const { steps } = await run(driver, [PAGES[0]!]);
     expect(steps.find((step) => step.name === 'Connect')).toMatchObject({ ok: true, actual: 'nothing was sent' });
+  });
+
+  test('a control inside a closed section is not pressed, since a person cannot press it; its summary and an open section\'s controls are', async () => {
+    const { steps } = await run(new PagesDriver({ sections: true }), [PAGES[0]!]);
+    const names = steps.map((step) => step.name);
+    expect(names).not.toContain('Copy the address');
+    expect(names).toContain('Add it yourself instead');
+    expect(names).toContain('Show advanced');
+  });
+
+  test('a control reached through a section that reloads the page still has its question answered, not left to the browser', async () => {
+    const driver = new PagesDriver({ reloadingSection: true });
+    const { steps } = await run(driver, [PAGES[0]!]);
+    const add = steps.find((step) => step.name.startsWith('Add zkAPI to Olympus'));
+    expect(add).toMatchObject({ name: 'Add zkAPI to Olympus (after 1 earlier press)', ok: true, consoleErrors: [] });
+    expect(driver.state.zkAdded).toBe(true);
   });
 
   test('a button that does nothing fails', async () => {

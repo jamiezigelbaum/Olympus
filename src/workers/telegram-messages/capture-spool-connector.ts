@@ -4,8 +4,8 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { legacyCaptureDataRoot } from '../../core/olympus-layout.ts';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
@@ -87,11 +87,9 @@ export interface TelegramCaptureSpoolReadResult {
 export function defaultTelegramCaptureSpoolDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const home = env.HOME?.trim() || homedir();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(home, '.local', 'share');
   return env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
     || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim()
-    || join(dataHome, 'olympus', 'telegram-capture', 'spool');
+    || join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool');
 }
 
 export function createTelegramCaptureSpoolConnector(options: {
@@ -340,6 +338,50 @@ export function readTelegramCaptureSpool(options: {
     ...(resumeCursor ? { resumeCursor } : {}),
     exhausted,
   };
+}
+
+/**
+ * When the newest record the importer would accept was captured, or undefined
+ * when no such record exists. The helper only appends and names files by
+ * date, so the last complete record of the newest file that has one is the
+ * newest capture. A record counts only if the connector's own validation
+ * accepts it (schema, declared conversation, classification, capture
+ * identity): the pull skips anything else as malformed, so a damaged record
+ * with a current timestamp must not make a feed that imports nothing read
+ * fresh. Never throws: a missing, unreadable or empty spool simply has no
+ * time, which the freshness verdict reads as "unavailable".
+ */
+export function readTelegramCaptureSpoolNewestCapturedAt(spoolDir: string): string | undefined {
+  let names: string[];
+  try {
+    assertTelegramCaptureSpoolDirectory(spoolDir);
+    names = telegramCaptureSpoolFiles(spoolDir);
+  } catch {
+    return undefined;
+  }
+  for (const name of names.reverse()) {
+    let payload: string;
+    try {
+      const path = join(spoolDir, name);
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_SPOOL_BYTES) continue;
+      payload = readFileSync(path, 'utf8');
+    } catch {
+      continue;
+    }
+    // A final fragment without its newline is a write in progress.
+    const lines = payload.slice(0, payload.lastIndexOf('\n') + 1).split('\n');
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]!;
+      if (!line.trim()) continue;
+      try {
+        return parseTelegramCaptureSpoolRecord(line).capturedAt;
+      } catch {
+        // Skipped exactly as the product pull skips it.
+      }
+    }
+  }
+  return undefined;
 }
 
 /**

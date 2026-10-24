@@ -261,7 +261,9 @@ test('unrelated settings survive block migration and the success log names the b
 });
 
 
-test('direct drain startup uses the standalone migration rule and respects pinned policies', () => {
+// The drain once opened the stores itself and migrated the policy on startup.
+// It embeds through the worker now, so only the worker migrates (the tests above).
+test('drain startup leaves the sovereignty policy alone, pinned or not', () => {
   for (const pinned of [false, true]) {
     const { path: defaultPath, home: defaultHome, env } = policyFile();
     const pinnedDir = mkdtempSync(join(tmpdir(), 'private-meaning-drain-pinned-')); homes.push(pinnedDir);
@@ -270,15 +272,12 @@ test('direct drain startup uses the standalone migration rule and respects pinne
     if (pinned) writeFileSync(path, oldBytes);
     const drainEnv = {
       ...env, OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
-      OLYMPUS_SOURCE_EMBEDDING_DRAIN_MODE: 'direct',
       OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED: 'false',
       ...(pinned ? { OLYMPUS_SOVEREIGNTY_CONFIG_PATH: path } : {}),
     };
-    if (pinned) expect(() => optionsFromEnv(drainEnv)).toThrow('OLYMPUS_SOURCE_INDEX_EMBEDDING_PROVIDER is required');
-    else expect(optionsFromEnv(drainEnv).client).toBeDefined();
-    expect(JSON.parse(readFileSync(path, 'utf8')).retrieval.trustDomains.secure_local.activationMode)
-      .toBe(pinned ? 'metadata_only' : 'hybrid_shadow');
-    expect(readdirSync(home).filter(name => name.includes('backup'))).toHaveLength(pinned ? 0 : 1);
+    expect(optionsFromEnv(drainEnv).client).toBeDefined();
+    expect(readFileSync(path, 'utf8')).toBe(oldBytes);
+    expect(readdirSync(home).filter(name => name.includes('backup'))).toHaveLength(0);
   }
 });
 

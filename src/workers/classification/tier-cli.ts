@@ -68,6 +68,31 @@ export const TIER_CLI_USAGE: Readonly<Record<string, string>> = {
     + 'rollback --batch <id> | purge [--plan <id>] [--approve --expect <digest> --why <reason>] | status',
 };
 
+/**
+ * Whether a `tier` subcommand opens a store or sidecar: `set` and `explain`
+ * read the stores and write or read a ledger, and `migrate` opens every lane.
+ * `rules` and `classifier` read and write config and the classification
+ * ledger only. The CLI takes the data owner lock around the first kind, or
+ * hands it to the running worker (core/cli-via-worker.ts).
+ */
+export function tierCommandOpensStores(args: readonly string[]): boolean {
+  return args[0] === 'set' || args[0] === 'explain' || args[0] === 'migrate';
+}
+
+/**
+ * Whether a `tier` subcommand moves items between the stores the worker's
+ * lanes write: `migrate run` and `rollback`, and `purge --approve` (the
+ * migration's `write` lanes). The worker's lanes keep syncing into those
+ * stores, so these run only with Olympus stopped; the rest of `migrate`
+ * (`plan`, `approve`, `status`, a dry-run `purge`) only reads them, and runs
+ * in the worker while it runs.
+ */
+export function tierCommandRewritesStores(args: readonly string[]): boolean {
+  if (args[0] !== 'migrate') return false;
+  const command = args[1];
+  return command === 'run' || command === 'rollback' || (command === 'purge' && args.includes('--approve'));
+}
+
 export async function runTierCommand(args: readonly string[], context: TierCliContext = {}): Promise<Record<string, unknown>> {
   const [command, ...rest] = args;
   switch (command) {

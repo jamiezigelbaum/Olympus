@@ -169,9 +169,15 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
     // Left as it was: the page offers the same controls as when it was seeded, apart from the question itself (a Cancel that did the action would swap Disconnect for Connect, or remove Delete).
     // Only the source's own row is compared: another source's row can change under the page while it syncs.
     const row = c.control.rowName;
-    const rest = (keys: string[]): string => keys.filter((key) => !key.startsWith(`${base}:`) && (c.before.rows[key] ?? row) === row).sort().join('|');
-    const same = rest(c.before.seeded) === rest(c.after.controls.filter((control) => control.rowName === row).map((control) => control.key));
-    return { ok: gone && same, expected: 'Cancel closes the question and leaves things as they were', actual: !gone ? 'the question is still showing' : same ? 'the question closed' : 'the question closed, but the controls on the page changed: Cancel changed the source' };
+    const rest = (keys: string[]): string[] => keys.filter((key) => !key.startsWith(`${base}:`) && (c.before.rows[key] ?? row) === row).sort();
+    const was = rest(c.before.seeded);
+    const now = rest(c.after.controls.filter((control) => control.rowName === row).map((control) => control.key));
+    const same = was.join('|') === now.join('|');
+    // What changed is named, so a source that moved on by itself (a sync starting) can be told from a Cancel that acted.
+    const added = now.filter((key) => !was.includes(key));
+    const removed = was.filter((key) => !now.includes(key));
+    const change = [added.length ? `now offers ${added.join(', ')}` : '', removed.length ? `no longer offers ${removed.join(', ')}` : ''].filter(Boolean).join('; ');
+    return { ok: gone && same, expected: 'Cancel closes the question and leaves things as they were', actual: !gone ? 'the question is still showing' : same ? 'the question closed' : `the question closed, but the controls on the page changed: Cancel changed the source (${change || 'the same controls, a different number of them'})` };
   },
 };
 
@@ -666,7 +672,7 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
     checks.push({
       id: 'explore.sources', title: 'Every source the machine drives reached the states it has',
       status: 'fail',
-      detail: failures.slice(0, 6).map((failure) => `${failure.source} (${failure.seed}): ${failure.detail.slice(0, 200)}`).join(' | '),
+      detail: failures.slice(0, 6).map((failure) => `${failure.source} (${failure.seed}): ${failure.detail.slice(0, 1200)}`).join(' | '),
     });
   }
   const s = result.summary;

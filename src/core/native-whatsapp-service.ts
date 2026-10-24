@@ -2,9 +2,9 @@ import { waitForNativeWorkerOwnership } from './native-worker-service.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { configFromPluginConfig, type OlympusConfig } from './config.ts';
+import { legacyWhatsAppServiceStateDir } from './olympus-layout.ts';
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
@@ -19,7 +19,6 @@ const SERVICE_LABEL = 'WhatsApp capture service';
 // authenticated startup pending through an outage instead of killing that loop.
 // Unpaired/corrupt sessions still exit promptly; stop always cancels this wait.
 const DEFAULT_STARTUP_TIMEOUT_MS = Number.POSITIVE_INFINITY;
-const DEFAULT_STATE_RELATIVE_PATH = '.local/share/olympus/whatsapp-live';
 const READINESS_FILE = 'native-service-readiness.json';
 const SESSION_FILE = 'session.db';
 
@@ -96,8 +95,7 @@ async function prepareWhatsAppStart(
   assertExecutableFile(capture.binaryPath);
 
   const env = baseEnvironment();
-  const stateDir = capture.stateDir
-    ?? join(env.HOME ?? homedir(), DEFAULT_STATE_RELATIVE_PATH);
+  const stateDir = capture.stateDir ?? legacyWhatsAppServiceStateDir(env);
   assertUsableSession(join(stateDir, SESSION_FILE));
 
   const instanceId = randomUUID();

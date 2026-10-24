@@ -13,10 +13,9 @@
  * Every store is created on first need, so an install that never imported
  * anything has none.
  */
-import { homedir } from 'node:os';
+import { olympusDataRoot } from '../../core/olympus-layout.ts';
 import { join } from 'node:path';
-import { ARCHIVE_FORMATS, archiveImportFamilies } from '../../core/archive-formats.ts';
-import { standaloneLinuxDataDir } from '../../core/linux-engine-layout.ts';
+import { ARCHIVE_FORMATS, archiveCorpusId, archiveImportFamilies } from '../../core/archive-formats.ts';
 import {
   withSourceCorpora,
   type SourceCorpusConfig,
@@ -24,8 +23,10 @@ import {
 } from '../../core/source-corpus-registry.ts';
 import type { SourceFamily, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
-import { LocalConnectorStore } from '../connector-store/index.ts';
+import type { LocalConnectorStore } from '../connector-store/index.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
+import { openConnectorStore } from '../../core/source-storage.ts';
+import { ARCHIVE_IMPORTS_SOURCE_ID } from './state.ts';
 
 export const ARCHIVE_TIER_DOMAINS: readonly SourceTrustDomain[] = ['public_safe', 'internal', 'secure_local'];
 
@@ -38,12 +39,7 @@ export const ARCHIVE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freez
   secretsInContent: true,
 });
 
-/**
- * The corpus id of one tier store of one family's archives.
- */
-export function archiveCorpusId(trustDomain: SourceTrustDomain, family: SourceFamily): string {
-  return `${trustDomain}.archive.${family}`;
-}
+export { archiveCorpusId };
 
 /**
  * The set id of one family's archive stores in the tier ledger.
@@ -53,8 +49,7 @@ export function archiveTierSetId(family: SourceFamily): string {
 }
 
 function dataDir(env: Record<string, string | undefined>): string {
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return standaloneLinuxDataDir(env) ?? join(dataHome, 'openclaw', 'olympus');
+  return olympusDataRoot(env);
 }
 
 const FILE_LABEL: Readonly<Record<string, string>> = {
@@ -89,14 +84,14 @@ export function createArchiveConnectorStore(
   env: Record<string, string | undefined> = process.env,
   options: { readOnly?: boolean; tierLedger?: TierLedger } = {},
 ): LocalConnectorStore {
-  return new LocalConnectorStore({
+  return openConnectorStore({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, {
     dbPath: archiveConnectorStoreDbPath(trustDomain, family, env),
     corpusId: archiveCorpusId(trustDomain, family),
     family,
     trustDomain,
     ...(options.readOnly === true ? { readOnly: true } : {}),
     ...(options.tierLedger ? { tierLedger: options.tierLedger } : {}),
-  });
+  }, env);
 }
 
 const CORPUS_ROLE: Readonly<Record<string, { capabilities: SourceCorpusConfig['capabilities']; description: string }>> = {

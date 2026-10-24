@@ -52,6 +52,19 @@ shared classifier hold is built (`holdContentUntilJudged`, change-logged in
 import lane is the only one that sets it. Design and delivery sequence:
 [archive import](design/archive-import.md).
 
+## Source storage (approved 2026-10-24, in delivery)
+
+Every connected account's data moves into one folder owned by the shared
+engine, with one registry of accounts that Export, Delete, uninstall and
+status read; connectors and ingestion stop naming files, and each shared
+file registers one forget step. Removing a source's data becomes a rename
+at worker restart. This replaces the hand-kept per-source file list in
+`src/data-lifecycle.ts` and the store-custody and fence work in #467, which
+is frozen (owner, 2026-10-24) after eight review rounds traced every finding
+to the unowned, unlisted layout. Owner decisions 1–5 approved 2026-10-24.
+Design, migration, tests and delivery steps:
+[source storage](design/source-storage.md).
+
 ## Olympus 1.0 (ChatGPT)
 
 Status: active, 2026-10-02. Owner decision 2026-10-01 (Decisions, below):
