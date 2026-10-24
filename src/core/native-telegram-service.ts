@@ -1,4 +1,4 @@
-import { waitForNativeWorkerOwnership } from './native-worker-service.ts';
+import { nativeWorkerEnvironment, waitForNativeWorkerOwnership } from './native-worker-service.ts';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync } from 'node:fs';
@@ -6,7 +6,6 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configFromPluginConfig, type OlympusConfig } from './config.ts';
 import {
-  NATIVE_CAPTURE_OWNER_ENV_NAMES,
   TELEGRAM_SOURCE_ID,
   folderCaptureDirs,
   folderCaptureEnv,
@@ -152,7 +151,7 @@ async function prepareTelegramStart(
   }
 
   applyConfiguredPaths(config, env);
-  applyFolderPaths(config, { ...process.env, ...loadedEnv }, env);
+  applyFolderPaths(config, nativeWorkerEnvironment(config, options.workerEnvPath), env);
   const sessionPath = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
   if (!sessionPath || !sessionPath.endsWith('.session')) {
     throw new NativeProcessConfigurationError(
@@ -243,16 +242,16 @@ function applyConfiguredPaths(config: OlympusConfig, env: NodeJS.ProcessEnv): vo
 
 /**
  * An account the registry keeps in a folder has its files there, whatever
- * worker.env says: the worker resolves it the same way, and a folder account
- * honors no path override. The registry is only read, after the worker owns
- * the data; a source this service owns that has no entry is `legacy` (its
- * placement pins on the owner flag set here, since this service runs only when
- * native capture is on), so it keeps the configured paths. Plugin config that
+ * worker.env says about paths: a folder account honors no path override. The
+ * registry is only read, after the worker owns the data, and from the
+ * environment the worker was launched with (`nativeWorkerEnvironment`), so both
+ * look in the same data folder. A source this service owns that has no entry is
+ * `legacy` (its placement pins on the owner flag that environment carries), so
+ * it keeps the configured paths. Plugin config that
  * names a path the folder does not hold contradicts the registry, and is
  * refused rather than left to point the reader at another session.
  */
-function applyFolderPaths(config: OlympusConfig, layoutSource: NodeJS.ProcessEnv, env: NodeJS.ProcessEnv): void {
-  const layoutEnv = { ...layoutSource, [NATIVE_CAPTURE_OWNER_ENV_NAMES.telegram]: 'true' };
+function applyFolderPaths(config: OlympusConfig, layoutEnv: NodeJS.ProcessEnv, env: NodeJS.ProcessEnv): void {
   const account = placedAccount(TELEGRAM_SOURCE_ID, layoutEnv);
   if (account.layout !== 'folder') return;
   const folder = folderCaptureEnv(account, layoutEnv);

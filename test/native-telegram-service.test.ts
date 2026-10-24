@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configFromPluginConfig } from '../src/core/config.ts';
@@ -185,6 +185,53 @@ describe('native Telegram capture service', () => {
       OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: join(folder, 'raw', 'telegram-spool'),
     });
     expect(statSync(join(folder, 'raw', 'telegram-spool')).mode & 0o777).toBe(0o700);
+  });
+
+  /** A registry in the data folder of `dataHome`, listing Telegram as a folder with a paired session in it. */
+  function pairedFolderIn(root: string, dataHome: string): string {
+    const env = { HOME: join(root, 'home'), XDG_DATA_HOME: dataHome };
+    mkdirSync(join(sourceRegistryPath(env), '..'), { recursive: true });
+    writeFileSync(sourceRegistryPath(env), `${JSON.stringify({
+      schema: 2,
+      accounts: [{ source_id: 'telegram.messages', slot: '1', state: 'active', layout: 'folder', corpus_ids: [], created_at: '2026-10-01T00:00:00.000Z' }],
+    })}\n`);
+    const folder = accountFolder({ source_id: 'telegram.messages', slot: '1' }, env);
+    mkdirSync(join(folder, 'session'), { recursive: true });
+    writeFileSync(join(folder, 'session', 'telegram.session'), 'fixture-session');
+    return join(folder, 'session', 'telegram.session');
+  }
+  async function startedSession(fixture: ReturnType<typeof telegramFixture>): Promise<string | undefined> {
+    const config = structuredClone(fixture.pluginConfig) as Record<string, any>;
+    for (const key of ['sessionPath', 'stateDir', 'spoolDir']) delete config.worker.telegramCapture[key];
+    const service = track(createNativeTelegramService({
+      workerIsReady: () => true,
+      initialPluginConfig: config,
+      moduleUrl: new URL('../src/native-plugin.ts', import.meta.url).href,
+      workerEnvPath: fixture.workerEnvPath,
+      startupTimeoutMs: 10_000,
+      readinessPollMs: 10,
+      stopGraceMs: 100,
+    }));
+    await service.start({});
+    return readStarts(fixture.startsPath)[0]!.env.OLYMPUS_TELEGRAM_SESSION_PATH;
+  }
+
+  test('an XDG_DATA_HOME that only worker.env sets places the account where the worker finds it', async () => {
+    const fixture = telegramFixture();
+    process.env.HOME = join(fixture.root, 'home');
+    delete process.env.XDG_DATA_HOME;
+    const session = pairedFolderIn(fixture.root, join(fixture.root, 'data'));
+    appendFileSync(fixture.workerEnvPath, `XDG_DATA_HOME=${join(fixture.root, 'data')}\n`);
+    expect(await startedSession(fixture)).toBe(session);
+  });
+
+  test('an XDG_DATA_HOME in the Gateway\'s environment wins over worker.env, as it does for the worker', async () => {
+    const fixture = telegramFixture();
+    process.env.HOME = join(fixture.root, 'home');
+    process.env.XDG_DATA_HOME = join(fixture.root, 'ambient');
+    const session = pairedFolderIn(fixture.root, join(fixture.root, 'ambient'));
+    appendFileSync(fixture.workerEnvPath, `XDG_DATA_HOME=${join(fixture.root, 'other')}\n`);
+    expect(await startedSession(fixture)).toBe(session);
   });
 
   test('plugin-config paths that are not the folder contradict the registry and are refused before anything starts', async () => {

@@ -234,18 +234,31 @@ function assertNativeWorkerScopeConfigSupported(pluginConfig: unknown): void {
   }
 }
 
+/**
+ * The environment the Gateway launches the worker with: the Gateway's own, then
+ * worker.env beneath it (an ambient value wins), then the plugin config's
+ * settings. The one place it is built; the native capture services resolve
+ * their account's layout from this same environment (a worker that finds its
+ * account in one data folder and a capture child that looks in another would
+ * pair a session the child cannot see).
+ */
+export function nativeWorkerEnvironment(config: OlympusConfig, workerEnvPath?: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  applyWorkerSetupEnv({ env, ...(workerEnvPath ? { workerEnvPath } : {}) });
+  stripGatewayBootstrapSecrets(env);
+  for (const [name, value] of Object.entries(config.worker.service.credentials)) env[name] = value;
+  if (config.worker.authToken) env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
+  applyNativeWorkerConfigEnv(config, env);
+  return env;
+}
+
 function workerLaunchSettings(
   config: OlympusConfig,
   moduleUrl: string,
   workerEnvPath?: string,
 ): Omit<WorkerLaunchSettings, 'command' | 'args' | 'endpointOccupied' | 'readinessProbe' | 'startupTimeoutMs'> {
   const service = config.worker.service;
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  applyWorkerSetupEnv({ env, ...(workerEnvPath ? { workerEnvPath } : {}) });
-  stripGatewayBootstrapSecrets(env);
-  for (const [name, value] of Object.entries(service.credentials)) env[name] = value;
-  if (config.worker.authToken) env.OLYMPUS_WORKER_AUTH_TOKEN = config.worker.authToken;
-  applyNativeWorkerConfigEnv(config, env);
+  const env = nativeWorkerEnvironment(config, workerEnvPath);
   const authToken = workerAuthTokenFromConfig(config, {
     env,
     ...(workerEnvPath ? { workerEnvPath } : {}),
