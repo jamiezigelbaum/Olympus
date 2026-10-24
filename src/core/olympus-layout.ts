@@ -13,8 +13,8 @@
  * lifecycle module both resolve through it.
  */
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { resolveLinuxEngineLayout, standaloneLinuxDataDir } from './linux-engine-layout.ts';
 
 export type LayoutEnv = Record<string, string | undefined>;
 
@@ -358,4 +358,103 @@ export function legacyAccountPaths(
   if (sourceId === 'x.bookmarks') raw.push(`${olympusDataPath(env, 'x-bookmarks-api-usage.sqlite')}.reconcile`);
   if (sourceId === ARCHIVE_IMPORTS) raw.push(olympusDataPath(env, 'archive-imports.json'), olympusDataPath(env, 'archive-import-requests.json'));
   return { stores, raw };
+}
+
+// ---------------------------------------------------------------------------
+// Everything Olympus itself writes
+//
+// Files on this computer never index Olympus's own folders: its stores, the
+// credential references and session secrets beside them, and the capture
+// services' state. `olympusOwnRoots` is the one list of them. It follows each
+// writer's own resolution, so a root is where the writer puts it under the
+// environment (XDG homes, the Linux install receipt) in effect, and the
+// folders that writers fix under the home are named here too, for an install
+// whose environment has changed since.
+
+/** `OLYMPUS_MEDIA_CACHE_DIR`: a folder the owner names to hold prepared photo copies. */
+export const MEDIA_CACHE_DIR_ENV = 'OLYMPUS_MEDIA_CACHE_DIR';
+
+/**
+ * Where prepared photo copies are kept: `<data root>/media-cache`, or a
+ * dedicated `olympus-media` subdirectory of `OLYMPUS_MEDIA_CACHE_DIR`.
+ * `mediaCacheDir` (core/media-cache.ts) adds its checks to this answer.
+ */
+export function mediaCacheRoot(env: LayoutEnv = process.env): string {
+  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
+  return configured ? join(configured, 'olympus-media') : olympusDataPath(env, 'media-cache');
+}
+
+/** A WhatsApp state location as a folder: the value names the folder, or the `session.db` inside it. */
+export function whatsappStateDirFromValue(value: string): string {
+  const trimmed = value.trim();
+  return basename(trimmed) === 'session.db' ? dirname(trimmed) : trimmed;
+}
+
+/**
+ * The Linux install's own folders: where the receipt (else the environment)
+ * puts the config, data, state, cache, package and runtime folders. A receipt
+ * outranks a shell whose XDG homes have since changed. Nothing off Linux, and
+ * nothing when the layout cannot be read: the environment's roots still apply.
+ */
+function linuxInstallRoots(env: LayoutEnv): string[] {
+  if (process.platform !== 'linux') return [];
+  try {
+    const layout = resolveLinuxEngineLayout(env);
+    return [
+      layout.configDir,
+      layout.dataDir,
+      layout.packageDir,
+      join(layout.dataHome, 'olympus'),
+      dirname(layout.stateDir),
+      dirname(layout.cacheDir),
+      ...(layout.runtimeDir ? [layout.runtimeDir] : []),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every folder Olympus itself writes to, as absolute paths in the spelling its
+ * writers use (a caller that compares against real paths resolves links
+ * itself). Relative locations a writer would accept are left out: they name no
+ * fixed place.
+ *
+ *  - data: the data root, the media cache, and the legacy roots above (the
+ *    capture services' state, Telegram's stores and gateway state);
+ *  - config: `worker.env`, the dashboard session secret, the secret store and
+ *    `handles.json`. `handles.json` and the secret store sit under
+ *    `<home>/.config/olympus` whatever `XDG_CONFIG_HOME` says; the Linux
+ *    install keeps its own under `$XDG_CONFIG_HOME/olympus`;
+ *  - state: the lifecycle, credential-health and drain-guard state under
+ *    `<home>/.local/state/olympus`, and the Telegram reader's under
+ *    `$XDG_STATE_HOME/olympus`;
+ *  - cache: the WhatsApp bridge and the Telegram Python under
+ *    `$XDG_CACHE_HOME/olympus` (`<home>/.cache/olympus` by default);
+ *  - the Linux install's folders (`linuxInstallRoots`).
+ */
+export function olympusOwnRoots(env: LayoutEnv = process.env): string[] {
+  const home = layoutHome(env);
+  const xdg = (name: string, fallback: string): string => env[name]?.trim() || join(home, fallback);
+  const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
+  const candidates = [
+    olympusDataRoot(env),
+    mediaCacheRoot(env),
+    legacyCaptureDataRoot(env),
+    legacyWhatsAppServiceStateDir(env),
+    legacyTelegramStoreRoot(env),
+    legacyTelegramGatewayStateDir(env),
+    ...(whatsappState ? [whatsappStateDirFromValue(whatsappState)] : []),
+    join(home, '.olympus'),
+    join(home, '.config', 'olympus'),
+    join(home, '.local', 'share', 'olympus'),
+    join(home, '.local', 'share', 'openclaw', 'olympus'),
+    join(home, '.local', 'state', 'olympus'),
+    join(home, '.cache', 'olympus'),
+    join(xdg('XDG_CONFIG_HOME', '.config'), 'olympus'),
+    join(xdg('XDG_STATE_HOME', '.local/state'), 'olympus'),
+    join(xdg('XDG_CACHE_HOME', '.cache'), 'olympus'),
+    ...linuxInstallRoots(env),
+  ];
+  return [...new Set(candidates.filter((path) => isAbsolute(path)).map((path) => resolve(path)))];
 }

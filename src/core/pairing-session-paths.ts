@@ -1,7 +1,7 @@
 import { lstatSync, realpathSync, rmSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { legacyCaptureDataRoot, type LayoutEnv } from './olympus-layout.ts';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import { legacyCaptureDataRoot, whatsappStateDirFromValue, type LayoutEnv } from './olympus-layout.ts';
 
 /**
  * Where Telegram's and WhatsApp's pairing sessions live, and which roots
@@ -97,12 +97,6 @@ export function whatsappPairingSessionPaths(context: OlympusPathContext = {}): s
 function telegramSessionBase(value: string): string {
   const trimmed = value.trim();
   return trimmed.endsWith('.session') ? trimmed.slice(0, -'.session'.length) : trimmed;
-}
-
-/** Normalize either spelling of a WhatsApp state location to the directory. */
-function whatsappStateDirFromValue(value: string): string {
-  const trimmed = value.trim();
-  return basename(trimmed) === 'session.db' ? dirname(trimmed) : trimmed;
 }
 
 /** The Telethon session file base path, without its extensions. */

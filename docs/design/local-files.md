@@ -134,6 +134,25 @@ The user can turn any of these back on in the picker:
   (`~/Library/CloudStorage`). These are already indexed through their own
   sources, so this avoids duplicates.
 
+### Never indexed: Olympus's own folders
+
+What Olympus itself writes is not the person's files: its stores, the
+credential references and session secrets beside them, the capture services'
+state, its caches. These folders cannot be turned on, by choosing a parent
+(home, the whole computer) or by choosing the folder by name. The list is
+`olympusOwnRoots` in `core/olympus-layout.ts`, built from the same resolvers
+the writers use, so it follows an XDG home, the Linux install receipt and
+`OLYMPUS_MEDIA_CACHE_DIR` to wherever they point. A root reached through a
+link is excluded under both spellings. The engine's folder listing marks such
+a folder "Olympus's own data", not selectable and without children, which the
+dashboard shows as its disabled controls ("Olympus cannot read this folder."),
+and a choice of one is refused when it is saved. The live watch never reports
+them.
+
+Known limits: a folder an individual file override points at (for example
+`OLYMPUS_TELEGRAM_SESSION_PATH`, the per-store `*_DB_PATH` overrides) and a
+data folder on a disk that is not the computer's own are not in the list.
+
 ### iCloud Drive
 
 Files kept only in iCloud are placeholders on disk (dataless). Reading one

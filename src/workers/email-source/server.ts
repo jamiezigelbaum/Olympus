@@ -2890,7 +2890,7 @@ export async function main(): Promise<void> {
   };
   const localFilesApprovedScopePaths = (): string[] => {
     const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
-    return approval && approval.status === 'approved' ? localFilesRoots(approval).map((root) => root.scopePath) : [];
+    return approval && approval.status === 'approved' ? localFilesRoots(approval, localFilesExclusionContext).map((root) => root.scopePath) : [];
   };
   const localFilesOpenTarget = createLocalFilesOpenTargets({
     volumes: localFilesVolumes,
@@ -3101,6 +3101,7 @@ export async function main(): Promise<void> {
               return fileSourceScopeLocalFilesPolicy(
                 localFilesIngestionPolicy,
                 fileSourceScopeAuthority.assertCurrent(ref),
+                localFilesExclusionContext,
               ).roots.filter((root) => root.default_action === 'full_extract').map((root) => root.approved_scope_key);
             },
             resolveCandidateFilters: () => {
@@ -3959,7 +3960,7 @@ export async function main(): Promise<void> {
           if (corpusId === LOCAL_FILES_CORPUS_ID) {
             const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
             if (!ref || !fileSourceScopeAuthority) return [];
-            return fileSourceScopeLocalFilesPolicy(localFilesIngestionPolicy, fileSourceScopeAuthority.assertCurrent(ref))
+            return fileSourceScopeLocalFilesPolicy(localFilesIngestionPolicy, fileSourceScopeAuthority.assertCurrent(ref), localFilesExclusionContext)
               .roots.filter((root) => root.default_action === 'full_extract').map((root) => ({
                 corpusId,
                 provider: LOCAL_FILES_PROVIDER,
@@ -4313,6 +4314,7 @@ export async function main(): Promise<void> {
       ? fileSourceScopeLocalFilesPolicy(
           localFilesIngestionPolicy,
           fileSourceScopeAuthority.assertCurrent(currentLocalFilesScopeRef),
+          localFilesExclusionContext,
         )
       : undefined;
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime

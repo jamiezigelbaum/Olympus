@@ -68,6 +68,10 @@ export function watchIgnoreGlobs(context: DefaultExclusionContext, extra: readon
   globs.push(`${home}/.olympus`, `${home}/.openclaw`, `${home}/.local/share/openclaw`, `${home}/.local/share/Trash`);
   if ((context.platform ?? process.platform) === 'darwin') globs.push(`${home}/Library`);
   for (const root of context.syncedRoots ?? []) globs.push(root);
+  // Wherever Olympus's environment and install put its own folders. A watch
+  // above one never reports it; no folder chosen by name sits inside one
+  // (`localFilesRoots`), so `ignoreGlobsForRoot` never has to keep one apart.
+  for (const root of context.ownRoots ?? []) globs.push(root);
   return [...globs, ...extra];
 }
 
