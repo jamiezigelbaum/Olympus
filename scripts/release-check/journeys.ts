@@ -167,6 +167,15 @@ export const JOURNEYS: readonly Journey[] = [
           { present: { role: 'button', name: 'Claude', contains: true }, frame: 'host' },
           { present: { role: 'button', name: 'ChatGPT', contains: true }, frame: 'host' },
           { present: { role: 'button', name: 'Grok', contains: true }, frame: 'host' },
+          // Each agent's steps sit in its own closed section until it is picked.
+          { absent: { role: 'button', name: 'Copy address' }, frame: 'host' },
+        ],
+      },
+      {
+        name: 'Pick ChatGPT',
+        do: { click: { role: 'button', name: 'ChatGPT', contains: true }, frame: 'host' },
+        expect: [
+          { text: 'Add custom MCP server', frame: 'host' },
           { present: { role: 'button', name: 'Copy address' }, frame: 'host' },
         ],
       },

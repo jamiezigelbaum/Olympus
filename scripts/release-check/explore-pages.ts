@@ -432,6 +432,9 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
             const info = via ? await driver.click('host', { css: `[data-rc-n="${via.n}"]` }) : null;
             if (!info) { reachable = false; break; }
             await settle();
+            // A press on the way may reload the page (a section that redraws itself), which takes the question hooks with it.
+            await read(HOOK_CONFIRM(item.answer ?? true));
+            await read('__rc.watchWindows()');
             controls = await enumerate();
           }
           const finalSig = item.path[item.path.length - 1]!;
