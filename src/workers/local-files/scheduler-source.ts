@@ -32,7 +32,7 @@ import type { VolumeResolver } from './volume-identity.ts';
 import { ignoreGlobsForRoot, watchWouldIgnore, type WatchHub } from './watch-hub.ts';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** A folder the computer would not open is checked again soon: the person may have just allowed it. */
+/** A folder the computer would not open, or that is not there, is checked again soon: the person may have just allowed it or put it back. */
 const PERMISSION_RETRY_MS = 10 * 60 * 1000;
 
 export interface LocalFilesSchedulerSourceInput {
@@ -110,11 +110,12 @@ export function createLocalFilesSchedulerSource(input: LocalFilesSchedulerSource
         } catch (error) {
           // A folder that is gone (renamed, or its disk is not mounted) or that
           // the system will not let Olympus read is not an outage: it keeps a
-          // daily recovery check while every other folder runs as usual.
+          // recovery check (a stat of the folder, cheap) every ten minutes while
+          // every other folder runs as usual.
           if (error instanceof LocalFilesRootMissingError) {
             throw new SourceSchedulerTaskFailure('A chosen folder is missing.', {
               errorKind: 'scope_root_missing',
-              retryAt: retryTomorrow(context, 'scope_root_missing'),
+              retryAt: retryTomorrow(context, 'scope_root_missing', PERMISSION_RETRY_MS),
             });
           }
           if (error instanceof LocalFilesRootPermissionError) {
