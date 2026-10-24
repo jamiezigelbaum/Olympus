@@ -351,7 +351,7 @@ function options(extra: Record<string, unknown> = {}) {
   const runId = newRunId();
   // No agent asks a question here, so every run also carries the standing "no agent asked a question" problem; the checks are what is asserted.
   const config: RunConfigFile = { driver: [driverPath], agents: [], settleTimeoutS: 5 };
-  return { runId, candidateDir, upgradeFromDir: baselineDir, candidateLabel: 'upgrade test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipInbox: true, skipJourneys: true, skipExplore: true, ...extra };
+  return { runId, candidateDir, upgradeFromDir: baselineDir, candidateLabel: 'upgrade test', outDir: join(dir, 'out', runId), config, skipRelay: true, skipScreenshots: true, skipInbox: true, skipJourneys: true, skipExplore: true, skipArchive: true, ...extra };
 }
 const checkOf = (report: Awaited<ReturnType<typeof runReleaseCheck>>, id: string) => {
   const machine = report.machines[0]!;
