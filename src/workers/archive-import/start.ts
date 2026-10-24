@@ -18,6 +18,7 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import { posix } from 'node:path';
 import {
+  archiveProbeNames,
   detectArchiveFormat,
   type ArchiveFormatDefinition,
 } from '../../core/archive-formats.ts';
@@ -93,7 +94,7 @@ export function prepareArchiveImport(input: {
   }
   let handedOver = false;
   try {
-    const probe = probeArchivePath(root, chosenRelPath);
+    const probe = probeArchivePath(root, chosenRelPath, { probeNames: archiveProbeNames(input.formats) });
     const detection = detectArchiveFormat(probe, input.formats);
     if (detection.kind === 'none') return { kind: 'unsupported', supported: detection.supported };
     if (detection.kind === 'ambiguous') return { kind: 'ambiguous', formats: detection.formats };

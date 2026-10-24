@@ -132,6 +132,13 @@ export function archiveFormatsOfFamily(
 }
 
 /**
+ * Every name pattern the formats ask the probe to look for, once each.
+ */
+export function archiveProbeNames(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): readonly string[] {
+  return [...new Set(formats.flatMap((format) => format.probeNames ?? []))];
+}
+
+/**
  * Whether a name matches one of a format's `probeNames`: `*` stands for any
  * run of characters (none included), `?` for any one, and case does not
  * matter. A name with folders in it also matches by its last part.
