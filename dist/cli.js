@@ -130640,6 +130640,10 @@ function mountDashboardController(options) {
         pendingFormCount--;
       pendingForms.delete(form);
       form.removeAttribute("aria-busy");
+      if (pendingFormCount === 0 && redrawOwed)
+        setTimeout(() => {
+          refreshNow(false);
+        }, 0);
     }
     applyWriteCapability();
   }
@@ -131170,7 +131174,13 @@ function mountDashboardController(options) {
     applyWriteCapability();
   }
   async function refreshNow(force, requested = false) {
-    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted || !force && !presented)
+    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted)
+      return;
+    if (redrawOwed) {
+      redrawOwed = false;
+      force = true;
+    }
+    if (!force && !presented)
       return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === "hidden")
@@ -131200,19 +131210,14 @@ function mountDashboardController(options) {
       replaceBody(result, force);
     } catch {} finally {
       inFlight = false;
-      if (redrawOwed) {
-        redrawOwed = false;
-        refreshNow(true);
-      }
+      if (redrawOwed && pendingFormCount === 0)
+        refreshNow(false);
     }
   }
   function onRedrawRequest(event) {
     event.preventDefault();
-    if (inFlight) {
-      redrawOwed = true;
-      return;
-    }
-    refreshNow(true);
+    redrawOwed = true;
+    refreshNow(false);
   }
   function restartPoll() {
     if (interval)

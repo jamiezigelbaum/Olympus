@@ -88,7 +88,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   let pendingFormCount = 0;
   // Keep equal to the exported redraw event constant above (serialized, as above).
   const redrawEvent = 'olympus:redraw';
-  /** A redraw was asked for while a read was in flight: one forced read follows it. */
+  /** A redraw was asked for while a read or a control was in flight: the next read is forced. */
   let redrawOwed = false;
 
   function query<T extends Element = Element>(selector: string): T | null {
@@ -168,6 +168,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       if (pendingForms.has(form)) pendingFormCount--;
       pendingForms.delete(form);
       form.removeAttribute('aria-busy');
+      // A redraw that waited on this control runs once the control's own answer is on the page.
+      if (pendingFormCount === 0 && redrawOwed) setTimeout(() => { void refreshNow(false); }, 0);
     }
     applyWriteCapability();
   }
@@ -762,7 +764,9 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
   }
 
   async function refreshNow(force: boolean, requested = false): Promise<void> {
-    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted || (!force && !presented)) return;
+    if (disposed || inFlight || pendingFormCount > 0 || options.signal.aborted) return;
+    if (redrawOwed) { redrawOwed = false; force = true; }
+    if (!force && !presented) return;
     const ownerDocument = root.ownerDocument;
     if (!force && !requested && ownerDocument.visibilityState === 'hidden') return;
     if (!force && query('.sheet.on input:not([type="hidden"]),.sheet.on textarea,.sheet.on select')) return;
@@ -789,7 +793,7 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
       // Polling is quiet. A directly submitted control reports its own failure.
     } finally {
       inFlight = false;
-      if (redrawOwed) { redrawOwed = false; void refreshNow(true); }
+      if (redrawOwed && pendingFormCount === 0) void refreshNow(false);
     }
   }
 
@@ -801,8 +805,8 @@ export function mountDashboardController(options: OlympusBrowserControllerOption
    */
   function onRedrawRequest(event: Event): void {
     event.preventDefault();
-    if (inFlight) { redrawOwed = true; return; }
-    void refreshNow(true);
+    redrawOwed = true;
+    void refreshNow(false);
   }
 
   function restartPoll(): void {

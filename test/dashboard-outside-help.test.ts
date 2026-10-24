@@ -665,6 +665,22 @@ describe('the Outside help page: states and copy', () => {
     expect(third.document.querySelector('form[data-outside-form="level"] [data-action-message]')!.textContent).toBe('');
   });
 
+  test('a limits save with the statements still to accept says its confirmation in the limits form, not the Accept form', async () => {
+    const html = page(status({ route: { ...configuredRoute({ complete: false }), dailyRequestCap: 10 } as DashboardOutsideHelpStatus['route'] }));
+    const browser: Record<string, unknown> = {};
+    const first = runCardScript(html, () => ({ status: 200, body: { ok: true, status_message: 'Saved the limits.', revision: 3 } }), browser);
+    first.document.addEventListener(DASHBOARD_REDRAW_EVENT, (event) => { event.preventDefault(); });
+    const limits = first.document.querySelector('form[data-outside-form="route"]:not([data-outside-accept]):not([data-outside-nolimit])')!;
+    expect(first.document.querySelector('form[data-outside-accept]')).not.toBeNull();
+    limits.dispatchEvent(new first.window.Event('submit', { cancelable: true }));
+    await first.settle();
+    const second = runCardScript(html, () => ({ status: 500, body: {} }), browser);
+    const again = second.document.querySelector('form[data-outside-form="route"]:not([data-outside-accept]):not([data-outside-nolimit])')!;
+    expect(again.querySelector('[data-action-message]')!.textContent).toBe('Saved the limits.');
+    expect((again.closest('details') as unknown as { open: boolean }).open).toBe(true);
+    expect(second.document.querySelector('form[data-outside-accept] [data-action-message]')!.textContent).toBe('');
+  });
+
   test('on a page without the dashboard controller nobody claims the redraw, and the card reloads as before', async () => {
     const browser: Record<string, unknown> = {};
     const card = runCardScript(page(status({ settings: { level: 'general' } })), () => ({ status: 200, body: { ok: true, status_message: 'Saved.', revision: 3 } }), browser);

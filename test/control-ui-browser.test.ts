@@ -863,6 +863,31 @@ test('a part of the page that asks for a redraw is answered in place: claimed, a
   expect(root.querySelector('[data-outside-help]')!.dispatchEvent(new happyWindow.CustomEvent(DASHBOARD_REDRAW_EVENT, { bubbles: true, cancelable: true }) as unknown as Event)).toBe(true);
 });
 
+test('a redraw asked for while a Connect is pending runs once that Connect has answered', async () => {
+  const root = document.createElement('div');
+  root.innerHTML = '<form data-connect-kind="api_key"><input type="hidden" name="source" value="readwise"><input name="api_key" value="k"><button type="submit">Connect</button><span data-action-message></span></form>'
+    + '<section data-outside-help><form data-outside-form="level"><input name="x" value="saved"></form></section>';
+  document.body.append(root);
+  root.querySelector<HTMLInputElement>('section input')!.value = 'typed and saved';
+  let answer: (value: OlympusDashboardControlResult) => void = () => undefined;
+  let reads = 0;
+  const controller = mountDashboardController({
+    root, transport: { control: () => new Promise((done) => { answer = done; }) }, navigate() {}, returnUrl: '/dashboard?keys', canWrite: true,
+    signal: new AbortController().signal, signature: 'same', pollIntervalMs: -1,
+    refresh: async () => { reads += 1; return { status: 200, title: 'Keys', body: '<section data-outside-help>Redrawn</section>', controller: 'dashboard', can_write: true, signature: 'same', poll_interval_ms: -1 }; },
+  });
+  root.querySelector<HTMLFormElement>('form[data-connect-kind]')!.requestSubmit();
+  await Bun.sleep(0);
+  expect(root.querySelector('section')!.dispatchEvent(new happyWindow.CustomEvent(DASHBOARD_REDRAW_EVENT, { bubbles: true, cancelable: true }) as unknown as Event)).toBe(false);
+  await Bun.sleep(0);
+  expect(reads).toBe(0);
+  answer({ status: 400, body: { ok: false, error: { message: 'Bad key.' } } });
+  await Bun.sleep(5);
+  expect(reads).toBeGreaterThan(0);
+  expect(root.querySelector('[data-outside-help]')!.textContent).toBe('Redrawn');
+  controller.dispose();
+});
+
 test('the serialized controller listens for the exported redraw event name', () => {
   expect(mountDashboardController.toString()).toMatch(new RegExp(`['"]${DASHBOARD_REDRAW_EVENT}['"]`));
 });
