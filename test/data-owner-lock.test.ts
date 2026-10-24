@@ -19,6 +19,7 @@ import {
   withDataOwnerLockIfFree,
 } from '../src/core/data-owner-lock.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
+import { bindWorkerSocket, prepareWorkerSocket } from '../src/core/worker-transport.ts';
 
 const roots: string[] = [];
 const children: Array<{ kill(signal?: number | NodeJS.Signals): void }> = [];
@@ -357,24 +358,29 @@ describe('the worker boot step', () => {
 
 describe('the embedding drain in http mode', () => {
   test('opens no store, so it runs beside the worker that owns the data', async () => {
-    const env = isolatedEnv();
+    // On Linux the worker listens only on its owner Unix socket, and so does
+    // this stand-in for it; elsewhere it is loopback TCP.
+    const runtime = process.platform === 'linux' ? mkdtempSync(join(tmpdir(), 'olympus-owner-rt-')) : undefined;
+    if (runtime) roots.push(runtime);
+    const env = isolatedEnv(runtime ? { XDG_RUNTIME_DIR: runtime } : {});
     await startHolder(env);
     mkdirSync(env.HOME!, { recursive: true });
     const requests: string[] = [];
-    const server = Bun.serve({
-      port: 0,
-      fetch(request) {
-        requests.push(new URL(request.url).pathname);
-        return Response.json({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0, status: 'completed' });
-      },
-    });
+    const handler = (request: Request) => {
+      requests.push(new URL(request.url).pathname);
+      return Response.json({ chunks_seen: 0, chunks_embedded: 0, chunks_skipped: 0, status: 'completed' });
+    };
+    const socketPath = runtime ? prepareWorkerSocket({ env }) : undefined;
+    const server = socketPath
+      ? bindWorkerSocket(socketPath, () => Bun.serve({ unix: socketPath, fetch: handler }))
+      : Bun.serve({ port: 0, fetch: handler });
     try {
       const child = Bun.spawn([process.execPath, join(import.meta.dir, '..', 'scripts', 'source-embedding-drain.ts')], {
         env: {
           ...env,
           OLYMPUS_CONFIG: join(env.HOME!, 'missing-config.json'),
           OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
-          OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL: `http://127.0.0.1:${server.port}/v1`,
+          OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL: `http://127.0.0.1:${socketPath ? 9 : server.port}/v1`,
           OLYMPUS_SOURCE_EMBEDDING_DRAIN_MAX_RUNS: '1',
           OLYMPUS_SOURCE_EMBEDDING_DRAIN_STOP_WHEN_IDLE: 'true',
           OLYMPUS_SOURCE_EMBEDDING_DRAIN_IDLE_SLEEP_SECONDS: '0',

@@ -6,6 +6,7 @@ import { dirname, isAbsolute } from 'node:path';
 import { loadConfig, normalizeSourceWorkerBaseUrl } from '../src/core/config.ts';
 import { DataOwnerBusyError, withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { withWorkerAuthHeader, workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
+import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import {
   DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
   defaultDropboxConnectorStoreDbPath,
@@ -492,7 +493,9 @@ export function optionsFromEnv(
     baseUrl: normalizeSourceWorkerBaseUrl(env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL?.trim() || config.email.baseUrl),
     requestTimeoutMs: requestTimeoutSeconds * 1_000,
     ...(authToken ? { authToken } : {}),
-    ...(fetchImpl ? { fetchImpl } : {}),
+    // On Linux the worker listens only on its owner Unix socket; the worker
+    // transport reaches it there, and is plain fetch elsewhere.
+    fetchImpl: fetchImpl ?? createWorkerFetch({ env }),
   });
   const rosterEnabled = [
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED',

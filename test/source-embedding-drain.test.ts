@@ -187,6 +187,18 @@ describe('canonical connector-store embedding drain', () => {
     expect(optionsFromEnv(base).client).toBeDefined();
   });
 
+  // The worker listens only on its owner Unix socket on Linux. The drain's
+  // requests go through the worker transport, which refuses a non-loopback
+  // origin rather than leave the socket for TCP.
+  test.if(process.platform === 'linux')('on Linux, embed requests go through the worker\'s owner-socket transport', async () => {
+    const options = optionsFromEnv({
+      OLYMPUS_SOURCE_EMBEDDING_DRAIN_ENABLED: 'true',
+      OLYMPUS_SOURCE_EMBEDDING_DRAIN_BASE_URL: 'http://192.0.2.1:9/v1',
+    });
+    await expect(options.client.embedConnectorStore({} as never))
+      .rejects.toThrow('Linux worker requests require a loopback HTTP origin over the owner socket.');
+  });
+
   test('publishes a private content-free readiness receipt bound to the native nonce and pid', () => {
     const root = mkdtempSync(join(tmpdir(), 'olympus-embedding-ready-'));
     const path = join(root, 'state', 'readiness.json');
