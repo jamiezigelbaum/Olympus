@@ -155762,12 +155762,14 @@ function parentFolderName(relPath) {
   const parts = relPath.split("/").filter((part) => part !== "");
   return parts.length >= 2 ? parts[parts.length - 2] : undefined;
 }
-function chatNameOf(file, entry) {
+function chatNameOf(file, entry, severalChatFiles = false) {
   const fileStem = whatsAppStem(file.relPath);
   let chat;
   if (entry) {
     const memberStem = whatsAppStem(entry.name);
-    chat = whatsAppChatNameFromStem(memberStem) ?? whatsAppChatNameFromStem(fileStem) ?? (memberStem.toLowerCase() === "_chat" ? fileStem : memberStem);
+    const chatFile = memberStem.toLowerCase() === "_chat";
+    const folder = chatFile ? parentFolderName(entry.name) : undefined;
+    chat = whatsAppChatNameFromStem(memberStem) ?? (folder ? whatsAppChatNameFromStem(folder) : undefined) ?? (severalChatFiles ? folder : undefined) ?? whatsAppChatNameFromStem(fileStem) ?? (chatFile ? fileStem : memberStem);
   } else {
     const parent = parentFolderName(file.relPath);
     chat = whatsAppChatNameFromStem(fileStem) ?? (fileStem.toLowerCase() === "_chat" ? (parent ? whatsAppChatNameFromStem(parent) : undefined) ?? GENERIC_CHAT_NAME : fileStem);
@@ -155788,8 +155790,8 @@ function createWhatsAppArchiveConnector(input) {
   const pageSizeDefault = Math.max(1, input.pageSize ?? WHATSAPP_DEFAULT_PAGE_SIZE);
   const byteBudget = Math.max(1, input.maxBytesPerListing ?? WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING);
   const tag = manifestTag2(input);
-  const unitFor = (file, fileIndex, entry, base) => {
-    const chat = chatNameOf(file, entry);
+  const unitFor = (file, fileIndex, entry, base, severalChatFiles = false) => {
+    const chat = chatNameOf(file, entry, severalChatFiles);
     return {
       fileIndex,
       file,
@@ -155804,10 +155806,17 @@ function createWhatsAppArchiveConnector(input) {
   };
   const chatEntries = (zip) => {
     const all = [...zip.entries()].filter((entry) => !entry.isDirectory);
+    const startsLikeChat = (entry) => looksLikeWhatsAppChat(readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES));
+    const readAndNotChat = (entry) => {
+      const head = readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES);
+      return head !== undefined && !looksLikeWhatsAppChat(head);
+    };
     const named = all.filter((entry) => hasWhatsAppExportName(entry.name));
-    if (named.length > 0)
-      return named;
-    return all.filter((entry) => !isWhatsAppZipNoise(entry.name) && entry.name.toLowerCase().endsWith(".txt")).slice(0, MAX_UNNAMED_MEMBER_PROBES).filter((entry) => looksLikeWhatsAppChat(readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES)));
+    const namedChats = named.filter((entry) => !readAndNotChat(entry));
+    if (namedChats.length > 0)
+      return namedChats;
+    const others = all.filter((entry) => !hasWhatsAppExportName(entry.name) && !isWhatsAppZipNoise(entry.name) && entry.name.toLowerCase().endsWith(".txt")).slice(0, MAX_UNNAMED_MEMBER_PROBES).filter(startsLikeChat);
+    return others.length > 0 ? others : named;
   };
   const openZip = (reader, file, fileIndex) => {
     let zip;
@@ -155826,8 +155835,9 @@ function createWhatsAppArchiveConnector(input) {
       throw stoppedFrom2(error2, file.relPath);
     }
     let base = 0;
+    const severalChatFiles = entries.filter((entry) => whatsAppStem(entry.name).toLowerCase() === "_chat").length > 1;
     const units = entries.map((entry) => {
-      const unit = unitFor(file, fileIndex, entry, base);
+      const unit = unitFor(file, fileIndex, entry, base, severalChatFiles);
       base += entry.uncompressedSize;
       return unit;
     });

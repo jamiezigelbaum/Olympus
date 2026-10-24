@@ -156,14 +156,25 @@ function parentFolderName(relPath: string): string | undefined {
   return parts.length >= 2 ? parts[parts.length - 2] : undefined;
 }
 
-function chatNameOf(file: ArchiveFileEntry, entry: ZipEntry | undefined): string {
+/**
+ * The chat a file or member stands for. An iOS member is always `_chat.txt`,
+ * so its chat comes from the folder it sits in when that folder names one, then
+ * from the zip's own name; when the zip holds several `_chat.txt` in their own
+ * folders (`severalChatFiles`), each folder is its chat, so two chats in one zip
+ * are never read as one.
+ */
+function chatNameOf(file: ArchiveFileEntry, entry: ZipEntry | undefined, severalChatFiles = false): string {
   const fileStem = whatsAppStem(file.relPath);
   let chat: string | undefined;
   if (entry) {
     const memberStem = whatsAppStem(entry.name);
+    const chatFile = memberStem.toLowerCase() === '_chat';
+    const folder = chatFile ? parentFolderName(entry.name) : undefined;
     chat = whatsAppChatNameFromStem(memberStem)
+      ?? (folder ? whatsAppChatNameFromStem(folder) : undefined)
+      ?? (severalChatFiles ? folder : undefined)
       ?? whatsAppChatNameFromStem(fileStem)
-      ?? (memberStem.toLowerCase() === '_chat' ? fileStem : memberStem);
+      ?? (chatFile ? fileStem : memberStem);
   } else {
     const parent = parentFolderName(file.relPath);
     chat = whatsAppChatNameFromStem(fileStem)
@@ -247,8 +258,8 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
   const byteBudget = Math.max(1, input.maxBytesPerListing ?? WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING);
   const tag = manifestTag(input);
 
-  const unitFor = (file: ArchiveFileEntry, fileIndex: number, entry: ZipEntry | undefined, base: number): Unit => {
-    const chat = chatNameOf(file, entry);
+  const unitFor = (file: ArchiveFileEntry, fileIndex: number, entry: ZipEntry | undefined, base: number, severalChatFiles = false): Unit => {
+    const chat = chatNameOf(file, entry, severalChatFiles);
     return {
       fileIndex,
       file,
@@ -264,17 +275,27 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
 
   /**
    * The chat members of a zip: those named the way WhatsApp names the text of
-   * an export. A zip with none (one the person chose, whose text file has
-   * another name) takes its text members that start like a chat.
+   * an export and starting like a chat. A zip with none (one the person chose,
+   * whose text file has another name, or whose `_chat.txt` is not a chat)
+   * takes its other text members that start like a chat, the same ones that
+   * made it an export. With neither, the named members are read as they are.
    */
   const chatEntries = (zip: ZipArchive): ZipEntry[] => {
     const all = [...zip.entries()].filter((entry) => !entry.isDirectory);
+    const startsLikeChat = (entry: ZipEntry) => looksLikeWhatsAppChat(readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES));
+    // Set aside only a named member read and found not to be a chat: one that cannot be read stays, to be told as a gap.
+    const readAndNotChat = (entry: ZipEntry) => {
+      const head = readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES);
+      return head !== undefined && !looksLikeWhatsAppChat(head);
+    };
     const named = all.filter((entry) => hasWhatsAppExportName(entry.name));
-    if (named.length > 0) return named;
-    return all
-      .filter((entry) => !isWhatsAppZipNoise(entry.name) && entry.name.toLowerCase().endsWith('.txt'))
+    const namedChats = named.filter((entry) => !readAndNotChat(entry));
+    if (namedChats.length > 0) return namedChats;
+    const others = all
+      .filter((entry) => !hasWhatsAppExportName(entry.name) && !isWhatsAppZipNoise(entry.name) && entry.name.toLowerCase().endsWith('.txt'))
       .slice(0, MAX_UNNAMED_MEMBER_PROBES)
-      .filter((entry) => looksLikeWhatsAppChat(readZipMemberHead(zip, entry, WHATSAPP_HEAD_BYTES)));
+      .filter(startsLikeChat);
+    return others.length > 0 ? others : named;
   };
 
   /** The zip opened, checked against the table recorded at approval, and its chat members. */
@@ -295,8 +316,9 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
       throw stoppedFrom(error, file.relPath);
     }
     let base = 0;
+    const severalChatFiles = entries.filter((entry) => whatsAppStem(entry.name).toLowerCase() === '_chat').length > 1;
     const units = entries.map((entry) => {
-      const unit = unitFor(file, fileIndex, entry, base);
+      const unit = unitFor(file, fileIndex, entry, base, severalChatFiles);
       base += entry.uncompressedSize;
       return unit;
     });
