@@ -73,7 +73,17 @@ describe('source registry', () => {
     const folder = dirname(sourceRegistryPath(env));
     chmodSync(folder, 0o000);
     try {
-      expect(() => readSourceRegistry(env)).toThrow(SourceRegistryError);
+      let thrown: unknown;
+      try {
+        readSourceRegistry(env);
+      } catch (error) {
+        thrown = error;
+      }
+      // On Linux the data-root resolver's own look into the folder refuses
+      // first; either way the read fails, naming the folder, and is never empty.
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toContain(folder);
+      if (process.platform !== 'linux') expect(thrown).toBeInstanceOf(SourceRegistryError);
     } finally {
       chmodSync(folder, 0o700);
     }
