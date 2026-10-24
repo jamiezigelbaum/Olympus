@@ -152,11 +152,11 @@ export function isJunkArchiveMember(name: string): boolean {
 
 const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-/** "Tue, March 21st, 2023.md": how Reflect's Markdown export names a daily note. */
-const DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\.(?:md|markdown)$/i;
+/** "Tue, March 21st, 2023.md": how Reflect's Markdown export names a daily note (its JSON export titles one the same way, without the extension). */
+const DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
 
 /**
- * The day a Reflect daily note's file name stands for ("2023-03-21T12:00:00.000Z",
+ * The day a Reflect daily note's file name or title stands for ("2023-03-21T12:00:00.000Z",
  * midday so no time zone moves it a day), or undefined for any other name.
  */
 export function reflectDailyNoteDate(fileName: string): string | undefined {
@@ -171,35 +171,118 @@ export function reflectDailyNoteDate(fileName: string): string | undefined {
   return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
 }
 
-function jsonKey(names: string): RegExp {
-  return new RegExp(`"(?:${names})"\\s*:`);
+/**
+ * The keys of the records at the head of a JSON document: every object that is
+ * a direct element of its top-level list, or of the list under its `notes` key.
+ * A record cut off by the end of the head keeps the keys seen so far. Only
+ * keys count: a word inside a piece of text never does.
+ */
+function headRecordKeys(head: Uint8Array | undefined): { shape: 'list' | 'notes'; records: ReadonlySet<string>[] } | undefined {
+  const text = archiveHeadText(head);
+  const n = text.length;
+  let i = 0;
+  const isSpace = (char: string | undefined): boolean => char === ' ' || char === '\t' || char === '\n' || char === '\r';
+  while (i < n && isSpace(text[i])) i += 1;
+  const stack: Array<'a' | 'o'> = [];
+  let shape: 'list' | 'notes' | undefined;
+  let listDepth = 0;
+  if (text[i] === '[') {
+    shape = 'list';
+    listDepth = 1;
+    stack.push('a');
+  } else if (text[i] === '{') {
+    stack.push('o');
+  } else {
+    return undefined;
+  }
+  i += 1;
+  const records: Set<string>[] = [];
+  let current: Set<string> | undefined;
+  while (i < n) {
+    const char = text[i]!;
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+      if (end >= n) break;
+      const raw = text.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text[after])) after += 1;
+      if (text[after] === ':' && stack[stack.length - 1] === 'o') {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === 'notes') {
+          let value = after + 1;
+          while (value < n && isSpace(text[value])) value += 1;
+          if (text[value] === '[') {
+            shape = 'notes';
+            listDepth = 2;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === '[' || char === '{') {
+      stack.push(char === '[' ? 'a' : 'o');
+      if (char === '{' && listDepth > 0 && stack.length === listDepth + 1) {
+        current = new Set<string>();
+        records.push(current);
+      }
+    } else if (char === ']' || char === '}') {
+      stack.pop();
+      if (stack.length === 0) break;
+      if (listDepth > 0 && stack.length === listDepth) current = undefined;
+      // The list of notes itself has closed: nothing after it is a note.
+      if (listDepth > 0 && stack.length < listDepth) listDepth = 0;
+    }
+    i += 1;
+  }
+  return shape ? { shape, records } : undefined;
 }
 
-/** Keys a Reflect note has and a Roam page or block does not. */
-const REFLECT_JSON_KEYS = jsonKey('subject|document_json|documentJson|created_at|createdAt|updated_at|updatedAt|content|body');
-/** Keys a Roam page or block has and a Reflect note does not. */
-const ROAM_JSON_KEYS = jsonKey('children|create-time|edit-time|create-email|edit-email');
-const JSON_LIST_OF_OBJECTS = /^\s*\[\s*\{/;
-const JSON_NOTES_OBJECT = /^\s*\{\s*"notes"\s*:\s*\[/;
+/** Keys that carry what a Reflect note says. */
+const REFLECT_BODY_KEYS = ['content', 'body', 'document_json', 'documentJson'] as const;
+/** Keys that carry a Reflect note's title or dates. */
+const REFLECT_NOTE_KEYS = ['subject', 'title', 'created_at', 'createdAt', 'updated_at', 'updatedAt'] as const;
+/** Keys only Roam's pages and blocks carry: their times and who made them. */
+const ROAM_TIME_KEYS = ['create-time', 'edit-time', 'create-email', 'edit-email'] as const;
+
+/** A record that says something and is titled or dated, in Reflect's keys. One key alone is any application's data. */
+function isReflectRecord(keys: ReadonlySet<string>): boolean {
+  return REFLECT_BODY_KEYS.some((key) => keys.has(key)) && REFLECT_NOTE_KEYS.some((key) => keys.has(key));
+}
+
+/** A titled record with Roam's keys: its times or authors, or its blocks with an id. Blocks alone are any outline. */
+function isRoamRecord(keys: ReadonlySet<string>): boolean {
+  return keys.has('title') && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || (keys.has('children') && keys.has('uid')));
+}
 
 /**
- * Whether a file's first bytes are a Reflect JSON export: a list of notes (or
- * an object holding a `notes` list) whose notes use Reflect's keys, and none
- * of Roam's. Judged on the head alone, so a key inside a piece of text
- * (written `\"key\":` in JSON) never counts.
+ * Which notes export a JSON file's first bytes are, if exactly one: judged on
+ * the keys of its first records (a Reflect note says something and is titled
+ * or dated; a Roam page is titled and has blocks or times), never on a word
+ * anywhere else. A head that shows both, or neither, is neither: the person
+ * is told what Olympus does import rather than have it guess.
  */
-export function looksLikeReflectJson(head: Uint8Array | undefined): boolean {
-  const text = archiveHeadText(head);
-  const notesObject = JSON_NOTES_OBJECT.test(text);
-  if (!notesObject && !JSON_LIST_OF_OBJECTS.test(text)) return false;
-  if (ROAM_JSON_KEYS.test(text)) return false;
-  return notesObject || REFLECT_JSON_KEYS.test(text);
+function notesJsonFormat(head: Uint8Array | undefined): 'reflect' | 'roam' | undefined {
+  const parsed = headRecordKeys(head);
+  if (!parsed) return undefined;
+  const reflect = parsed.records.some(isReflectRecord);
+  const roam = parsed.records.some(isRoamRecord);
+  if (reflect === roam) return undefined;
+  // Roam's export is a bare list of pages.
+  if (roam) return parsed.shape === 'list' ? 'roam' : undefined;
+  return 'reflect';
 }
 
-/** Whether a file's first bytes are a Roam JSON export: a list of pages whose blocks use Roam's keys. */
+/** Whether a file's first bytes are a Reflect JSON export: a list of notes (or an object holding a `notes` list) in Reflect's keys. */
+export function looksLikeReflectJson(head: Uint8Array | undefined): boolean {
+  return notesJsonFormat(head) === 'reflect';
+}
+
+/** Whether a file's first bytes are a Roam JSON export: a list of titled pages with Roam's keys. */
 export function looksLikeRoamJson(head: Uint8Array | undefined): boolean {
-  const text = archiveHeadText(head);
-  return JSON_LIST_OF_OBJECTS.test(text) && ROAM_JSON_KEYS.test(text) && !REFLECT_JSON_KEYS.test(text);
+  return notesJsonFormat(head) === 'roam';
 }
 
 /**
@@ -218,9 +301,21 @@ function zipJsonMembers(entry: ArchiveProbeEntry): ArchiveProbeEntry[] {
     member.kind === 'file' && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
 }
 
-/** A JSON export, as a .json file or as a zip holding one. */
-function readsJsonExport(entry: ArchiveProbeEntry, isThisFormat: (head: Uint8Array | undefined) => boolean): boolean {
-  if (entry.members) return zipJsonMembers(entry).some((member) => isThisFormat(member.head));
+/**
+ * A JSON export, as a .json file or as a zip holding one. A zip is this
+ * format's when one of its JSON files is and none is the other notes
+ * format's: a zip of both is not guessed at. (Its other JSON files are not
+ * read as this format; the connector leaves them out and says so.)
+ */
+function readsJsonExport(
+  entry: ArchiveProbeEntry,
+  isThisFormat: (head: Uint8Array | undefined) => boolean,
+  isOtherFormat: (head: Uint8Array | undefined) => boolean,
+): boolean {
+  if (entry.members) {
+    const members = zipJsonMembers(entry);
+    return members.some((member) => isThisFormat(member.head)) && !members.some((member) => isOtherFormat(member.head));
+  }
   return isThisFormat(entry.head);
 }
 
@@ -233,7 +328,7 @@ export const REFLECT_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freez
   chooseHint: 'a Reflect export in JSON (the .json file, or the .zip that holds it)',
   citationLabel: 'Reflect',
   probeNames: Object.freeze(['*.json']),
-  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeReflectJson)),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeReflectJson, looksLikeRoamJson)),
 });
 
 /**
@@ -271,7 +366,7 @@ export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   chooseHint: 'a Roam export in JSON (the .json file from Export All, or the .zip that holds it)',
   citationLabel: 'Roam',
   probeNames: Object.freeze(['*.json']),
-  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson)),
+  detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson, looksLikeReflectJson)),
 });
 
 // --- Telegram Desktop export -----------------------------------------------------

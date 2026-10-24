@@ -11,11 +11,19 @@
  *   NOTE_MAX_RECORD_BYTES; a bigger one is reported (`note_too_large`) with its
  *   place and passed over. A Markdown member is streamed, the first 4 MB of it
  *   kept. Nothing reads a whole file or a whole member.
- * - Findings: an empty note is skipped, a record that is no note and a record
- *   too big are gaps, a zip member whose checksum or size is wrong, or a JSON
- *   file cut short, is `file_damaged` (what was read before it stays), and a
- *   zip's other files are counted as not imported. Each finding is at the
- *   place of its note, so a page read again after a restart counts nothing twice.
+ * - Findings: an empty note is skipped, a record that is no note, a record
+ *   too big and a note (or part of one) of a kind Olympus has no rule for are
+ *   gaps, a zip member whose checksum or size is wrong, or a JSON file cut
+ *   short, is `file_damaged` (what was read before it stays), a JSON document
+ *   without the list the format keeps its notes in, or a zip member that is
+ *   not this format's, is `section_not_imported`, and a zip's other files are
+ *   counted as not imported. Each finding is at the place of its note, so a
+ *   page read again after a restart counts nothing twice.
+ * - Bounds: the listing's byte budget is held while reading, at every record
+ *   (and every Markdown member), not after a whole file; the first record of a
+ *   listing is always read, so every listing makes progress. Whether the import
+ *   is still wanted is asked before each record and again with each chunk read,
+ *   so a single huge record or member does not outlast its cancellation.
  * - Resume point: `<prefix><manifest>:<file>:<member>:<offset>:<crc>:<json>`,
  *   the next note to read: a zip member (or -1), the byte offset after the
  *   last note read in it, the CRC-32 of the member before that offset, and the
@@ -35,6 +43,7 @@ import type {
 } from '../../../core/contracts.ts';
 import {
   ARCHIVE_COMMON_FINDINGS,
+  ARCHIVE_PROBE_HEAD_BYTES,
   ArchiveImportStoppedError,
   isJunkArchiveMember,
   type ArchiveConnectorInput,
@@ -44,6 +53,7 @@ import type { ScopeFileReader } from '../../../core/scope-safe-fs.ts';
 import { fileByteSource, type ArchiveByteSource } from '../byte-source.ts';
 import { archiveContinuations, type ContinuationKey } from '../continuation-cache.ts';
 import {
+  JSON_STREAM_ANY,
   JsonStreamError,
   JsonStreamReader,
   archiveStopFromReaderError,
@@ -81,13 +91,26 @@ export const NOTES_MAX_UNITS_PER_PAGE = 5_000;
 /** Bytes of a Markdown member kept: enough for NOTE_MAX_TEXT_CHARS characters of any text. */
 const MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
 const ROOT_PEEK_BYTES = 1024;
+/** The biggest value looked at when asking whether a document's list of notes is there; an empty list is far smaller. */
+const LIST_PEEK_BYTES = 64 * 1024;
 
 /** Where a format's notes are, and how one becomes a `NoteOutcome`. */
 export type NoteSource =
   | {
     kind: 'json';
-    /** The item paths of a JSON document whose root is an array or an object; undefined when this format reads no such document. */
+    /**
+     * The item paths of a JSON document whose root is an array or an object;
+     * undefined when this format reads no such document. Each path names a
+     * list: a document whose path is missing or holds anything but a list is
+     * not read (`section_not_imported`), never taken for one with no notes.
+     */
     itemPaths(root: 'array' | 'object'): readonly (readonly JsonPathSegment[])[] | undefined;
+    /**
+     * Whether a JSON document, from its first ARCHIVE_PROBE_HEAD_BYTES bytes,
+     * is this format's. Asked of each JSON member of a zip, so a member that is
+     * some other file is left alone and reported, not read as this format.
+     */
+    accepts(head: Uint8Array | undefined): boolean;
     parse(record: unknown): NoteOutcome;
   }
   | {
@@ -122,6 +145,8 @@ interface Segment {
   consumed: number;
   bytes: number;
   stopped: boolean;
+  /** The listing's byte budget ran out here: `next` is the record or member not yet read, and the listing ends after this page. */
+  budgetHit: boolean;
   /** Where the next page starts, for progress. */
   position?: { fileIndex: number; offset: number };
 }
@@ -129,7 +154,14 @@ interface Segment {
 interface Limits {
   items: number;
   units: number;
+  /** Bytes this listing may still read. */
+  bytes: number;
+  /** The listing has already read something, so a segment may stop at once when the budget is spent; else it reads one record first. */
+  started: boolean;
 }
+
+/** The import was told to stop while a record or member was being read: what was whole before it stays, this one is read again. */
+class ReadInterrupted extends Error {}
 
 /** One JSON document: a plain file, or a member of a zip. */
 interface JsonUnit {
@@ -221,8 +253,13 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
       report(NOTE_FINDINGS.unreadable, 'gap', place.fileIndex, offset);
       return;
     }
+    if (outcome.kind === 'unsupported') {
+      report(NOTE_FINDINGS.unsupported, 'gap', place.fileIndex, offset);
+      return;
+    }
     const built = buildNoteItem(input, outcome.note, place, savedAt);
     segment.items.push(built.item);
+    if (outcome.note.unsupported) report(NOTE_FINDINGS.unsupported, 'gap', place.fileIndex, offset);
     if (built.truncated || cut) report(ARCHIVE_COMMON_FINDINGS.itemTruncated, 'gap', place.fileIndex, offset);
     if (built.dateAssumed) report(NOTE_FINDINGS.dateAssumed, 'gap', place.fileIndex, offset);
   };
@@ -276,6 +313,63 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     };
   };
 
+  /** The bytes of a document, asking at each chunk whether the import is still wanted. */
+  const watched = (inner: ArchiveByteSource): ArchiveByteSource => ({
+    get position() { return inner.position; },
+    get crc32() { return inner.crc32; },
+    next() {
+      if (!input.shouldContinue()) throw new ReadInterrupted();
+      return inner.next();
+    },
+    unread: (count) => inner.unread(count),
+  });
+
+  /**
+   * A document that held no notes: whether the list they would have been in
+   * is there, empty (a recognised export with nothing in it), or not (some
+   * other document, or the list is a different kind of value).
+   */
+  const listIsThere = (
+    unit: JsonUnit,
+    paths: readonly (readonly JsonPathSegment[])[],
+    relPath: string,
+  ): boolean | 'interrupted' => {
+    for (const path of paths) {
+      // The root itself is the list (its kind was checked), or the path is not a name to look for.
+      if (path.length === 0 || path.some((part) => typeof part !== 'string' || part === JSON_STREAM_ANY)) return true;
+      let bytes: ArchiveByteSource;
+      try {
+        bytes = watched(unit.open(0, undefined));
+      } catch (error) {
+        if (error instanceof ZipMemberError) return true;
+        throw stoppedFrom(error, relPath);
+      }
+      let found = false;
+      try {
+        const scan = new JsonStreamReader(bytes, { itemPaths: [path.slice(0, -1)], maxItemBytes: LIST_PEEK_BYTES });
+        for (;;) {
+          const event = scan.next();
+          if (!event) break;
+          if (event.path.length === path.length && event.path.every((part, at) => part === path[at])) {
+            // A list that held a note would have been read as one: here it is empty, or it is no list.
+            found = event.kind === 'item' && Array.isArray(event.value);
+            break;
+          }
+        }
+      } catch (error) {
+        unit.close();
+        if (error instanceof ReadInterrupted) return 'interrupted';
+        if (error instanceof ArchiveImportStoppedError) throw error;
+        // Cut short or damaged: the pass that read it first has said so.
+        if (error instanceof ZipMemberError || error instanceof JsonStreamError) return true;
+        throw stoppedFrom(error, relPath);
+      }
+      unit.close();
+      if (found) return true;
+    }
+    return false;
+  };
+
   /**
    * One JSON document, from `cursor` until the page is full, the document
    * ends or the import is told to stop. 'ended': the whole document was read
@@ -292,6 +386,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
   ): 'ended' | 'paused' => {
     if (source.kind !== 'json') return 'ended';
     const damaged = (offset: number): void => report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', fileIndex, unit.posOf(offset));
+    const notRead = (): void => report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', fileIndex, unit.posOf(0));
     let root: 'array' | 'object' | undefined;
     if (unitCursor.resume) {
       root = unitCursor.resume.levels[0]?.kind;
@@ -309,12 +404,12 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     const itemPaths = root ? source.itemPaths(root) : undefined;
     if (!itemPaths) {
       // A JSON document of a shape this format does not read.
-      report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', fileIndex, unit.posOf(0));
+      notRead();
       return 'ended';
     }
     let bytes: ArchiveByteSource;
     try {
-      bytes = unit.open(unitCursor.offset, unitCursor.crc);
+      bytes = watched(unit.open(unitCursor.offset, unitCursor.crc));
     } catch (error) {
       if (error instanceof ZipMemberError) {
         if (unitCursor.offset > 0) throw invalid('Nothing starts where this import was to resume.');
@@ -361,10 +456,21 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
         return pause();
       }
       if (segment.items.length >= limits.items || segment.consumed >= limits.units) return pause();
+      // The budget is held at every record. The first record of a listing is always read, so a listing always moves on.
+      const spent = segment.bytes + (last ? last.end - unitCursor.offset : 0);
+      if (spent >= limits.bytes && (last !== undefined || segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        return pause();
+      }
       let event: JsonStreamEvent | undefined;
       try {
         event = reader.next();
       } catch (error) {
+        if (error instanceof ReadInterrupted) {
+          // Told to stop part-way through a record: it is read again from the last whole one.
+          segment.stopped = true;
+          return pause();
+        }
         unit.close();
         if (error instanceof ArchiveImportStoppedError) throw error;
         if (error instanceof ZipMemberError || (error instanceof JsonStreamError && error.code !== 'resume_invalid')) {
@@ -377,13 +483,34 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
       }
       if (!event) {
         unit.close();
-        segment.bytes += (last?.end ?? unitCursor.offset) - unitCursor.offset;
+        const readTo = Math.max(last?.end ?? unitCursor.offset, reader.position);
         const end = unit.end();
-        if (end && (end.crcOk === false || !end.sizeOk)) damaged(end.bytes);
+        if (end && (end.crcOk === false || !end.sizeOk)) {
+          segment.bytes += readTo - unitCursor.offset;
+          damaged(end.bytes);
+          return 'ended';
+        }
+        if (!last && !unitCursor.resume) {
+          // No notes at all: an export with none, or a document that has no list of them.
+          const there = listIsThere(unit, itemPaths, relPath);
+          if (there === 'interrupted') {
+            segment.stopped = true;
+            return pause();
+          }
+          if (!there) notRead();
+        }
+        segment.bytes += readTo - unitCursor.offset;
         return 'ended';
       }
       last = event;
       const offset = unit.posOf(event.start);
+      if (event.resume.levels[event.resume.levels.length - 1]?.kind !== 'array') {
+        // Where the notes should be is a value of another kind: nothing here is read as a note.
+        unit.close();
+        segment.bytes += event.end - unitCursor.offset;
+        notRead();
+        return 'ended';
+      }
       if (event.kind === 'oversize') {
         segment.consumed += 1;
         report(NOTE_FINDINGS.tooLarge, 'gap', fileIndex, offset);
@@ -395,8 +522,15 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     }
   };
 
-  /** The text of a Markdown member (the first MARKDOWN_MAX_BYTES of it), or why it has none. */
-  const readMarkdownMember = (archive: ZipArchive, entry: ZipEntry): { text: string; cut: boolean; end: ZipMemberEnd | undefined } | undefined => {
+  /**
+   * The text of a Markdown member (the first MARKDOWN_MAX_BYTES of it), why it
+   * has none (undefined), or that the import was told to stop while it was
+   * being read ('stopped'). The whole member is read, so its checksum is checked.
+   */
+  const readMarkdownMember = (
+    archive: ZipArchive,
+    entry: ZipEntry,
+  ): { text: string; cut: boolean; end: ZipMemberEnd | undefined } | undefined | 'stopped' => {
     let member: ZipMemberReader;
     try {
       member = ZipMemberReader.open(archive, entry);
@@ -409,6 +543,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     let cut = false;
     try {
       for (;;) {
+        if (!input.shouldContinue()) return 'stopped';
         const chunk = member.next();
         if (!chunk) break;
         if (kept < MARKDOWN_MAX_BYTES) {
@@ -458,9 +593,23 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
         segment.position = { fileIndex, offset: entry.localHeaderOffset };
         return;
       }
+      // The budget is held at every member (by its declared size); the first member of a listing is always read.
+      if (segment.bytes + entry.uncompressedSize > limits.bytes && (segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
       const offset = zipFindingOffset(entry.index, 0);
       const fileName = entry.name.slice(entry.name.lastIndexOf('/') + 1);
       const read = readMarkdownMember(archive, entry);
+      if (read === 'stopped') {
+        // Told to stop part-way through a member: it is read again from its start.
+        segment.stopped = true;
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
       segment.bytes += entry.uncompressedSize;
       if (!read) {
         segment.consumed += 1;
@@ -496,6 +645,28 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
       const resuming = entry.index === cursor.member && cursor.offset > 0;
       if (resuming) foundResume = true;
       const unitCursor: Cursor = resuming ? cursor : { file: fileIndex, member: entry.index, offset: 0, done: false };
+      if (!resuming) {
+        if (!input.shouldContinue()) {
+          segment.stopped = true;
+          segment.next = unitCursor;
+          return;
+        }
+        if (segment.bytes >= limits.bytes && (segment.consumed > 0 || limits.started)) {
+          segment.budgetHit = true;
+          segment.next = unitCursor;
+          segment.position = { fileIndex, offset: entry.localHeaderOffset };
+          return;
+        }
+        // A JSON file in the zip is read as this format only when it shows this format's hand; any other is reported, not guessed at.
+        const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
+        if (head && head.length > 0 && !source.accepts(head)) {
+          segment.consumed += 1;
+          report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', fileIndex, zipFindingOffset(entry.index, 0));
+          segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+          segment.position = { fileIndex, offset: entry.localHeaderOffset + entry.compressedSize };
+          continue;
+        }
+      }
       const unit = zipUnit(archive, entry, fileIndex);
       const result = readJsonUnit(unit, unitCursor, fileIndex, file.relPath, limits, segment, savedAt);
       if (result === 'paused') return;
@@ -521,7 +692,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
 
   const readSegment = (cursor: Cursor, limits: Limits): Segment => {
     const file = input.files[cursor.file]!;
-    const segment: Segment = { items: [], next: cursor, consumed: 0, bytes: 0, stopped: false };
+    const segment: Segment = { items: [], next: cursor, consumed: 0, bytes: 0, stopped: false, budgetHit: false };
     let reader: ScopeFileReader;
     try {
       reader = input.root.openFile(file.relPath, { expected: file.version });
@@ -600,7 +771,12 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
         let position: { fileIndex: number; offset: number } | undefined;
         for (;;) {
           const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page.length);
-          const segment = readSegment(cursor, { items: room, units: Math.max(1, NOTES_MAX_UNITS_PER_PAGE - units) });
+          const segment = readSegment(cursor, {
+            items: room,
+            units: Math.max(1, NOTES_MAX_UNITS_PER_PAGE - units),
+            bytes: Math.max(1, byteBudget - bytesRead),
+            started: bytesRead > 0 || emitted > 0 || page.length > 0 || units > 0,
+          });
           page.push(...segment.items);
           cursor = segment.next;
           units += segment.consumed;
@@ -618,15 +794,16 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
             yield { items: page, nextCursor: encode(DONE), done: true };
             return;
           }
+          const spentBudget = segment.budgetHit || bytesRead >= byteBudget;
           const full = page.length >= Math.min(pageSizeDefault, limit - emitted);
-          if (full || bytesRead >= byteBudget || units >= NOTES_MAX_UNITS_PER_PAGE) {
+          if (full || spentBudget || units >= NOTES_MAX_UNITS_PER_PAGE) {
             if (position) input.reportPosition?.(position);
             yield { items: page, nextCursor: encode(cursor), done: false };
             emitted += page.length;
             page = [];
             units = 0;
             pending = false;
-            if (emitted >= limit || bytesRead >= byteBudget) return;
+            if (emitted >= limit || spentBudget) return;
           }
         }
       })();

@@ -37,6 +37,13 @@ export const NOTE_FINDINGS = {
   unreadable: 'note_unreadable',
   /** A record too big to read. */
   tooLarge: 'note_too_large',
+  /**
+   * A note with something in it Olympus has no rule for (a block, an embed, a
+   * body of a shape it does not know): the rest of the note is kept, or the
+   * note is left out when nothing else of it could be read. The same word as
+   * Telegram's `message_content_unsupported`, for a note.
+   */
+  unsupported: 'note_content_unsupported',
   /** A note whose export gives no date: the day the archive file was saved is used. */
   dateAssumed: 'note_date_assumed',
 } as const;
@@ -55,14 +62,21 @@ export interface NoteDraft {
   /** A date the title or file name stands for (a daily note), ISO. Not the export's own word, so it comes after its times. */
   titleDate?: string;
   blockCount?: number;
+  /**
+   * How many parts of the record the parser could not read (a node, a block or
+   * a body of a shape it has no rule for) while the rest of it was. Absent: none.
+   */
+  unsupported?: number;
 }
 
 export type NoteOutcome =
   | { kind: 'note'; note: NoteDraft }
-  /** A note with nothing written in it. */
+  /** A note with nothing written in it: its body is there and empty, or there is none. */
   | { kind: 'empty' }
   /** Not a note. */
-  | { kind: 'unreadable' };
+  | { kind: 'unreadable' }
+  /** A note whose content is all of a shape the parser has no rule for: nothing of it could be read, and that is not the same as nothing being written. */
+  | { kind: 'unsupported' };
 
 /** Where a note sits in the archive, for its identity and its position in the findings. */
 export interface NotePlace {

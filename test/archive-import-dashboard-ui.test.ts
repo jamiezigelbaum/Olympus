@@ -362,7 +362,7 @@ describe('each archive under the Archives row', () => {
       fill(A.gaps.note_empty.many, { n: '38' }),
     ]);
     // Every kind has both a one and a many sentence, none of them the catch-all.
-    for (const kind of ['media_not_imported', 'item_truncated', 'assumption', 'section_not_imported', 'file_damaged', 'note_empty', 'note_unreadable', 'note_too_large', 'note_date_assumed'] as const) {
+    for (const kind of ['media_not_imported', 'item_truncated', 'assumption', 'section_not_imported', 'file_damaged', 'note_empty', 'note_unreadable', 'note_too_large', 'note_content_unsupported', 'note_date_assumed'] as const) {
       expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
       expect(A.gaps[kind].many).toContain('{n}');
     }

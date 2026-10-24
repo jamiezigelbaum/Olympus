@@ -163,7 +163,9 @@ describe('which files are Roam exports', () => {
     expect(ROAM_JSON_ARCHIVE_FORMAT.chooseHint).toContain('Export All');
     registerArchiveFormatConnectors();
     expect(archiveFormatConnector('roam-json')).toBeDefined();
-    expect(looksLikeRoamJson(new TextEncoder().encode('[{"title":"x","children":[]}]'))).toBe(true);
+    expect(looksLikeRoamJson(new TextEncoder().encode('[{"title":"x","uid":"u","children":[]}]'))).toBe(true);
+    // Blocks under a title are any outline; a page has its id or its times too.
+    expect(looksLikeRoamJson(new TextEncoder().encode('[{"title":"x","children":[]}]'))).toBe(false);
     expect(looksLikeRoamJson(new TextEncoder().encode('[{"id":"x","subject":"y","content":"z"}]'))).toBe(false);
     expect(looksLikeRoamJson(undefined)).toBe(false);
   });
@@ -236,16 +238,31 @@ describe('one Roam page', () => {
     expect(daily).toMatchObject({ kind: 'note', note: { title: 'October 24th, 2026', titleDate: '2026-10-24T12:00:00.000Z' } });
   });
 
-  test('a page with no text anywhere is an empty note, whatever its shape', () => {
+  test('a page with nothing written is an empty note; one with content Olympus cannot read is not taken for empty', () => {
     for (const page of [
       { title: 'Empty Page', uid: 'e', children: [] },
       { title: 'Stub Page' },
       { title: 'Blank blocks', children: [{ string: '' }, { string: '  ', children: [{ string: '' }] }] },
-      { title: 'Children are not a list', children: 'text' },
-      { title: 'Blocks are not records', children: ['text', 7, null] },
     ]) {
       expect({ title: page.title, outcome: parseRoamPage(page) }).toEqual({ title: page.title, outcome: { kind: 'empty' } });
     }
+    for (const page of [
+      { title: 'Children are not a list', children: 'text' },
+      { title: 'Blocks are not records', children: ['text', 7, null] },
+      { title: 'A block with a rich string', children: [{ string: { rich: 'text' } }] },
+      { title: 'A block with no string', children: [{ uid: 'x' }] },
+    ]) {
+      expect({ title: page.title, outcome: parseRoamPage(page) }).toEqual({ title: page.title, outcome: { kind: 'unsupported' } });
+    }
+  });
+
+  test('a page with some text and some blocks Olympus cannot read keeps the text and says what it could not read', () => {
+    const outcome = parseRoamPage({ title: 'Mixed', children: [{ string: 'Kept' }, { uid: 'odd' }, 7, { string: 'Also kept', children: 'oops' }] });
+    expect(outcome).toMatchObject({ kind: 'note', note: { title: 'Mixed', body: '- Kept\n- Also kept', unsupported: 3 } });
+    // Nothing unreadable: no count at all.
+    expect(parseRoamPage({ title: 'Plain', children: [{ string: 'x' }] })).toMatchObject({ kind: 'note' });
+    const plain = parseRoamPage({ title: 'Plain', children: [{ string: 'x' }] });
+    expect(plain.kind === 'note' && plain.note.unsupported).toBeFalsy();
   });
 
   test('anything that is not a record is not a page', () => {
@@ -461,9 +478,13 @@ describe('the Roam connector', () => {
     const opened = roamConnector('a.json', roamJson(roamPages(5)), { shouldContinue: () => ++calls <= 3 });
     const first = await listAll(opened.connector);
     expect(first.done).toBe(false);
-    expect(first.items).toHaveLength(3);
+    const taken = first.items.length;
+    expect(taken).toBeGreaterThan(0);
+    expect(taken).toBeLessThan(5);
     const rest = await listAll(opened.again({}).connector, first.cursors.at(-1));
-    expect(rest.items.map((item) => item.metadata.title)).toEqual(['Synthetic lighthouse page 3', 'Synthetic lighthouse page 4']);
+    expect(rest.items.map((item) => item.metadata.title)).toEqual(
+      Array.from({ length: 5 - taken }, (_, index) => `Synthetic lighthouse page ${taken + index}`),
+    );
   });
 
   test('a file that changed or went missing stops the listing instead of reading other bytes', async () => {
@@ -583,5 +604,69 @@ describe('Reflect\'s daily note names are not Roam\'s', () => {
   test('a zip of Markdown pages named like Reflect\'s daily notes but called Roam is not Reflect\'s', () => {
     const files = [{ name: reflectDailyName(new Date(Date.UTC(2023, 2, 21))), text: '- a block' }];
     expect(formatOf(detectFile('Roam-Export-1700000000000.zip', reflectMarkdownZip(files)))).toBe('none');
+  });
+});
+
+// --- Review round 1: told by structure, and what is said when a block is not read --------------
+
+describe('a Roam JSON file is told by its structure', () => {
+  test('one key of the kind is not a Roam export', () => {
+    for (const [name, text] of [
+      ['tree.json', '[{"children":[]}]'],
+      ['titles.json', '[{"title":"Hello"}]'],
+      ['sitemap.json', '[{"title":"Home","children":[{"string":"a"}]}]'],
+      ['wrapped.json', '{"pages":[{"title":"Home","create-time":1}]}'],
+      ['notes.json', '[{"content":"hello"}]'],
+    ] as const) {
+      expect({ name, format: formatOf(detectFile(name, text)) }).toEqual({ name, format: 'none' });
+    }
+    // A title with a page's times, or with blocks and an id, is a page.
+    expect(formatOf(detectFile('times.json', '[{"title":"T","edit-time":1717300000000}]'))).toBe('roam-json');
+    expect(formatOf(detectFile('blocks.json', '[{"title":"T","uid":"u1","children":[{"string":"a"}]}]'))).toBe('roam-json');
+  });
+
+  test('a zip is Roam JSON for the file that is, and its other JSON files are left out and reported', async () => {
+    const zip = roamJsonZip(roamJson(roamPages(2)), {
+      extra: [
+        { name: 'sitemap.json', data: '[{"title":"Home","children":[{"string":"a page of a site"}]}]' },
+        { name: 'package.json', data: '{"name": "x"}' },
+      ],
+    });
+    expect(formatOf(detectFile('Roam-Export-1700000000000.zip', zip))).toBe('roam-json');
+    const { connector, findings } = roamConnector('Roam-Export-1700000000000.zip', zip);
+    const { items, done } = await listAll(connector);
+    expect(done).toBe(true);
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => textOf(item)).join('\n')).not.toContain('a page of a site');
+    expect(kinds(findings)).toEqual(['gap:section_not_imported', 'gap:section_not_imported']);
+  });
+});
+
+describe('the Roam connector says what it could not read', () => {
+  test('blocks of a shape it has no rule for are a gap at their page: kept when the page has other text, left out when it has none', async () => {
+    const pages = [
+      { title: 'Only odd blocks', uid: 'a', 'create-time': Date.UTC(2024, 5, 1), children: [{ uid: 'x' }, 7] },
+      { title: 'Text and an odd block', uid: 'b', 'create-time': Date.UTC(2024, 5, 2), children: [{ string: 'Kept words' }, { uid: 'y' }] },
+      { title: 'Plain', uid: 'c', 'create-time': Date.UTC(2024, 5, 3), children: [{ string: 'Plain words' }] },
+      { title: 'Blank', uid: 'd', 'create-time': Date.UTC(2024, 5, 4), children: [{ string: '' }] },
+    ];
+    const { connector, findings } = roamConnector('a.json', roamJson(pages));
+    const { items } = await listAll(connector);
+    expect(items.map((item) => item.metadata.title)).toEqual(['Text and an odd block', 'Plain']);
+    expect(kinds(findings)).toEqual(['gap:note_content_unsupported', 'gap:note_content_unsupported', 'skipped:note_empty']);
+  });
+
+  test('the byte budget stops a listing at a page, and an import told to stop leaves a long page part-way', async () => {
+    const opened = roamConnector('a.json', roamJson(roamPages(5)), { maxBytesPerListing: 50 });
+    const first = await listAll(opened.connector);
+    expect(first.items).toHaveLength(1);
+    expect(first.done).toBe(false);
+    const huge = { title: 'Big', uid: 'big', 'create-time': Date.UTC(2024, 5, 1), children: [{ string: 'word '.repeat(1_000_000) }] };
+    let calls = 0;
+    const stopped = roamConnector('b.json', roamJson([huge, ...roamPages(2)]), { shouldContinue: () => ++calls <= 3 });
+    const part = await listAll(stopped.connector);
+    expect(part).toMatchObject({ items: [], done: false });
+    const all = await listAll(stopped.again({}).connector, part.cursors.at(-1));
+    expect(all.items.map((item) => item.metadata.title)).toEqual(['Big', 'Synthetic lighthouse page 0', 'Synthetic lighthouse page 1']);
   });
 });

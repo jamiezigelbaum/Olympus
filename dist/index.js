@@ -13003,6 +13003,136 @@ function startsWithFromLine(head) {
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
 }
+function archiveHeadText(head) {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
+}
+function isJunkArchiveMember(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
+}
+function reflectDailyNoteDate(fileName) {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match)
+    return;
+  const weekday = match[1].slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function headRecordKeys(head) {
+  const text2 = archiveHeadText(head);
+  const n = text2.length;
+  let i = 0;
+  const isSpace = (char) => char === " " || char === "\t" || char === `
+` || char === "\r";
+  while (i < n && isSpace(text2[i]))
+    i += 1;
+  const stack = [];
+  let shape;
+  let listDepth = 0;
+  if (text2[i] === "[") {
+    shape = "list";
+    listDepth = 1;
+    stack.push("a");
+  } else if (text2[i] === "{") {
+    stack.push("o");
+  } else {
+    return;
+  }
+  i += 1;
+  const records = [];
+  let current2;
+  while (i < n) {
+    const char = text2[i];
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text2[end] !== '"')
+        end += text2[end] === "\\" ? 2 : 1;
+      if (end >= n)
+        break;
+      const raw = text2.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text2[after]))
+        after += 1;
+      if (text2[after] === ":" && stack[stack.length - 1] === "o") {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current2?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === "notes") {
+          let value = after + 1;
+          while (value < n && isSpace(text2[value]))
+            value += 1;
+          if (text2[value] === "[") {
+            shape = "notes";
+            listDepth = 2;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char === "[" ? "a" : "o");
+      if (char === "{" && listDepth > 0 && stack.length === listDepth + 1) {
+        current2 = new Set;
+        records.push(current2);
+      }
+    } else if (char === "]" || char === "}") {
+      stack.pop();
+      if (stack.length === 0)
+        break;
+      if (listDepth > 0 && stack.length === listDepth)
+        current2 = undefined;
+      if (listDepth > 0 && stack.length < listDepth)
+        listDepth = 0;
+    }
+    i += 1;
+  }
+  return shape ? { shape, records } : undefined;
+}
+function isReflectRecord(keys) {
+  return REFLECT_BODY_KEYS.some((key) => keys.has(key)) && REFLECT_NOTE_KEYS.some((key) => keys.has(key));
+}
+function isRoamRecord(keys) {
+  return keys.has("title") && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || keys.has("children") && keys.has("uid"));
+}
+function notesJsonFormat(head) {
+  const parsed = headRecordKeys(head);
+  if (!parsed)
+    return;
+  const reflect = parsed.records.some(isReflectRecord);
+  const roam = parsed.records.some(isRoamRecord);
+  if (reflect === roam)
+    return;
+  if (roam)
+    return parsed.shape === "list" ? "roam" : undefined;
+  return "reflect";
+}
+function looksLikeReflectJson(head) {
+  return notesJsonFormat(head) === "reflect";
+}
+function looksLikeRoamJson(head) {
+  return notesJsonFormat(head) === "roam";
+}
+function detectFile(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0].relPath] : undefined;
+}
+function zipJsonMembers(entry) {
+  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+function readsJsonExport(entry, isThisFormat, isOtherFormat) {
+  if (entry.members) {
+    const members = zipJsonMembers(entry);
+    return members.some((member) => isThisFormat(member.head)) && !members.some((member) => isOtherFormat(member.head));
+  }
+  return isThisFormat(entry.head);
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -13012,7 +13142,7 @@ function isTelegramJsonHead(head) {
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -13030,6 +13160,53 @@ var init_archive_formats = __esm(() => {
       const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
       return inner ? [inner.relPath] : undefined;
     }
+  });
+  leniencyDecoder = new TextDecoder("utf-8");
+  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
+  REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
+  REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
+  ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-json",
+    label: "Reflect notes (JSON)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeReflectJson, looksLikeRoamJson))
+  });
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-markdown",
+    label: "Reflect notes (Markdown zip)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export as Markdown (the .zip file)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*, *, ????.md"]),
+    detect: (probe) => detectFile(probe, (entry) => {
+      if (!entry.members || /^roam/i.test(entry.name))
+        return false;
+      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
+      if (files.some((member) => /\.json$/i.test(member.name)))
+        return false;
+      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+      if (notes.length === 0)
+        return false;
+      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+    })
+  });
+  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "roam-json",
+    label: "Roam notes (JSON)",
+    family: "note",
+    provider: "roam",
+    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
+    citationLabel: "Roam",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson, looksLikeReflectJson))
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -13073,7 +13250,13 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
+  ARCHIVE_FORMATS = Object.freeze([
+    MBOX_ARCHIVE_FORMAT,
+    REFLECT_JSON_ARCHIVE_FORMAT,
+    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+    ROAM_JSON_ARCHIVE_FORMAT,
+    TELEGRAM_JSON_ARCHIVE_FORMAT
+  ]);
   CONNECTOR_FACTORIES = new Map;
 });
 
@@ -13570,6 +13753,11 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
+      note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
+      note_too_large: { one: "1 note too large to read", many: "{n} notes too large to read" },
+      note_content_unsupported: { one: "1 note with a kind of content Olympus cannot read yet", many: "{n} notes with a kind of content Olympus cannot read yet" },
+      note_date_assumed: { one: "1 note has no date in the archive: Olympus used the day the file was saved", many: "{n} notes have no date in the archive: Olympus used the day the file was saved" },
       service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
       media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
@@ -18347,7 +18535,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -30395,6 +30583,7 @@ var operations = [
       "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
       "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
       "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
+      "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
       "Never open, read or copy the file yourself, and never retry to get around the approval.",
       `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
       "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",

@@ -226,7 +226,9 @@ describe('which files are Reflect exports', () => {
     registerArchiveFormatConnectors();
     expect(archiveFormatConnector('reflect-json')).toBeDefined();
     expect(archiveFormatConnector('reflect-markdown')).toBeDefined();
-    expect(looksLikeReflectJson(new TextEncoder().encode('{"notes": []}'))).toBe(true);
+    expect(looksLikeReflectJson(new TextEncoder().encode('{"notes": [{"subject": "A", "content": "b"}]}'))).toBe(true);
+    // An export with no note in it shows nothing to tell it by.
+    expect(looksLikeReflectJson(new TextEncoder().encode('{"notes": []}'))).toBe(false);
     expect(looksLikeReflectJson(undefined)).toBe(false);
   });
 
@@ -565,12 +567,15 @@ describe('the Reflect JSON connector', () => {
   test('stopping between notes leaves a resume point at the next one', async () => {
     const notes = reflectNotes(5);
     let calls = 0;
+    // Asked before each note and with each chunk read, so the stop lands wherever the count does.
     const opened = jsonConnector('a.json', reflectJson(notes), { shouldContinue: () => ++calls <= 3 });
     const first = await listAll(opened.connector);
     expect(first.done).toBe(false);
-    expect(first.items).toHaveLength(3);
+    const taken = first.items.length;
+    expect(taken).toBeGreaterThan(0);
+    expect(taken).toBeLessThan(5);
     const rest = await listAll(opened.again({}).connector, first.cursors.at(-1));
-    expect(rest.items.map((item) => item.metadata.title)).toEqual(['Synthetic harbour note 3', 'Synthetic harbour note 4']);
+    expect(rest.items.map((item) => item.metadata.title)).toEqual(notes.slice(taken).map((note) => note.title));
   });
 
   test('a file that changed or went missing stops the listing instead of reading other bytes', async () => {
@@ -774,5 +779,227 @@ describe('Reflect and Roam files are told apart', () => {
   test('a Roam export is not Reflect\'s, and Reflect\'s is not Roam\'s', () => {
     expect(formatOf(detectFile('roam.json', roamJson(roamPages(3))))).toBe('roam-json');
     expect(formatOf(detectFile('reflect.json', reflectJson(reflectNotes(3))))).toBe('reflect-json');
+  });
+});
+
+// --- Review round 1: what a note is read as, and what is said when it is not read ------------
+
+describe('a Reflect body is read as what it is', () => {
+  test('text that only looks like JSON is the note, kept as written', () => {
+    for (const body of ['{"budget":100}', '[1, 2, 3]', '{"type":"order","content":[{"sku":"x"}]}', '[{"name":"a"}]']) {
+      expect(parseReflectNote({ id: 'a', subject: 'Data', content: body })).toMatchObject({ kind: 'note', note: { body } });
+    }
+    // The same text in a JSON-in-a-string `document_json` field is no more an editor document.
+    expect(parseReflectNote({ id: 'a', document_json: '{"budget":100}' })).toMatchObject({ kind: 'note', note: { body: '{"budget":100}' } });
+  });
+
+  test('content Olympus cannot read is not an empty note, and unreadable parts are counted beside the text that is read', () => {
+    const image = JSON.stringify({ type: 'doc', content: [{ type: 'image', attrs: { src: 'a.png' } }] });
+    expect(parseReflectNote({ id: 'a', document_json: image })).toEqual({ kind: 'unsupported' });
+    expect(parseReflectNote({ id: 'a', content: 7 })).toEqual({ kind: 'unsupported' });
+    expect(parseReflectNote({ id: 'a', content: { budget: 100 } })).toEqual({ kind: 'unsupported' });
+    // Nothing written is a different thing from nothing read.
+    expect(parseReflectNote({ id: 'a', subject: 'Title only', content: null })).toEqual({ kind: 'empty' });
+    expect(parseReflectNote({ id: 'a', document_json: JSON.stringify({ type: 'doc', content: [{ type: 'paragraph' }] }) })).toEqual({ kind: 'empty' });
+    const mixed = JSON.stringify({
+      type: 'doc',
+      content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Kept' }] }, { type: 'image', attrs: { src: 'a.png' } }],
+    });
+    expect(parseReflectNote({ id: 'a', document_json: mixed })).toMatchObject({ kind: 'note', note: { body: 'Kept', unsupported: 1 } });
+  });
+
+  test('a daily note titled for its day is dated by it, in the JSON export too', async () => {
+    expect(parseReflectNote({ id: 'a', subject: 'Tue, March 21st, 2023', content: 'Went sailing.' }))
+      .toMatchObject({ kind: 'note', note: { titleDate: '2023-03-21T12:00:00.000Z' } });
+    expect(parseReflectNote({ id: 'a', subject: 'Sailing', content: 'x' })).toMatchObject({ kind: 'note', note: { title: 'Sailing' } });
+    const plain = parseReflectNote({ id: 'a', subject: 'Sailing', content: 'x' });
+    expect(plain.kind === 'note' && plain.note.titleDate).toBeFalsy();
+    const text = JSON.stringify([
+      { id: 'd1', subject: 'Tue, March 21st, 2023', content: 'Went sailing.' },
+      { id: 'd2', subject: 'Undated', content: 'No date at all.' },
+      { id: 'd3', subject: 'Wed, March 22nd, 2023', content: 'Dated by title, edited later.', updated_at: '2023-04-01T00:00:00Z' },
+    ]);
+    const { connector, findings, file } = jsonConnector('a.json', text);
+    const { items } = await listAll(connector);
+    const savedDay = new Date(statSync(file.path).mtimeMs).toISOString().slice(0, 10);
+    expect(items.map((item) => String(item.metadata.authoredAt).slice(0, 10))).toEqual(['2023-03-21', savedDay, '2023-04-01']);
+    // Only the note nothing dates is reported as assumed.
+    expect(findings.filter((finding) => finding.kind === 'note_date_assumed')).toHaveLength(1);
+  });
+});
+
+describe('text between two rules is the note, not front matter', () => {
+  test('a block that is not metadata stays in the note', () => {
+    const intro = parseReflectMarkdown('---\nSome intro text\n---\nThe body.', 'x.md');
+    expect(intro).toMatchObject({ kind: 'note', note: { body: '---\nSome intro text\n---\nThe body.' } });
+    // Lines that look like pairs, none of them a key Reflect writes.
+    const pairs = splitFrontMatter('---\nTodo: buy milk\nNotes: call Bob\n---\nrest');
+    expect(pairs.meta.size).toBe(0);
+    expect(pairs.body).toBe('---\nTodo: buy milk\nNotes: call Bob\n---\nrest');
+    // One prose line among the pairs makes it text.
+    const mixed = splitFrontMatter('---\ntitle: T\nthen I went home\n---\nrest');
+    expect(mixed.meta.size).toBe(0);
+    expect(mixed.body).toContain('then I went home');
+    // Real front matter is still metadata.
+    expect(splitFrontMatter('---\ntitle: T\ntags:\n  - a\n# a comment\n\n---\nrest')).toMatchObject({ body: 'rest' });
+  });
+});
+
+describe('a Reflect JSON file is told by its structure', () => {
+  test('one key of the kind, or a key in the wrong place, is not a Reflect export', () => {
+    for (const [name, text] of [
+      ['single.json', '[{"content":"hello"}]'],
+      ['comments.json', '[{"id":1,"content":"hello","author":"bob"}]'],
+      ['wrapped.json', '{"notes":[{"content":"x"}]}'],
+      ['tree.json', '[{"children":[]}]'],
+      ['nested.json', '{"data":[{"subject":"a","content":"b"}]}'],
+      ['both.json', '[{"subject":"a","content":"b"},{"title":"p","create-time":1}]'],
+    ] as const) {
+      expect({ name, format: formatOf(detectFile(name, text)) }).toEqual({ name, format: 'none' });
+    }
+    // A title or a date with what the note says is a note.
+    expect(formatOf(detectFile('titled.json', '[{"subject":"a","content":"b"}]'))).toBe('reflect-json');
+    expect(formatOf(detectFile('dated.json', '[{"content":"b","created_at":"2023-01-01"}]'))).toBe('reflect-json');
+    expect(formatOf(detectFile('wrapped.json', '{"version":2,"notes":[{"title":"a","body":"b"}]}'))).toBe('reflect-json');
+  });
+
+  test('a zip is Reflect JSON for the file that is, never for every JSON file in it, and a zip of two apps is refused', async () => {
+    const zip = reflectJsonZip(reflectJson(reflectNotes(2)), {
+      extra: [
+        { name: 'comments.json', data: JSON.stringify([{ id: 1, content: 'a comment, not a note' }]) },
+        { name: 'package.json', data: '{"name": "x"}' },
+      ],
+    });
+    expect(formatOf(detectFile('Reflect export.zip', zip))).toBe('reflect-json');
+    const { connector, findings } = jsonConnector('Reflect export.zip', zip);
+    const { items, done } = await listAll(connector);
+    expect(done).toBe(true);
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => textOf(item)).join('\n')).not.toContain('a comment, not a note');
+    expect(kinds(findings)).toEqual(['gap:section_not_imported', 'gap:section_not_imported']);
+    const both = buildZip([
+      { name: 'reflect.json', data: reflectJson(reflectNotes(2)) },
+      { name: 'roam.json', data: roamJson(roamPages(2)) },
+    ]);
+    expect(formatOf(detectFile('Both.zip', both))).toBe('none');
+  });
+});
+
+describe('the Reflect connector says what it could not read', () => {
+  test('content of a kind it has no rule for is a gap at its note: the note is kept when it has other text, left out when it has none', async () => {
+    const image = JSON.stringify({ type: 'doc', content: [{ type: 'image', attrs: { src: 'a.png' } }] });
+    const mixed = JSON.stringify({
+      type: 'doc',
+      content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Kept words' }] }, { type: 'image', attrs: {} }],
+    });
+    const text = JSON.stringify([
+      { id: 'a', subject: 'Only an image', created_at: '2023-03-01T00:00:00Z', document_json: image },
+      { id: 'b', subject: 'Words and an image', created_at: '2023-03-02T00:00:00Z', document_json: mixed },
+      { id: 'c', subject: 'Plain', created_at: '2023-03-03T00:00:00Z', content: 'Plain words' },
+      { id: 'd', subject: 'Nothing', created_at: '2023-03-04T00:00:00Z', content: '' },
+    ]);
+    const { connector, findings } = jsonConnector('a.json', text);
+    const { items } = await listAll(connector);
+    expect(items.map((item) => item.metadata.title)).toEqual(['Words and an image', 'Plain']);
+    expect(kinds(findings)).toEqual(['gap:note_content_unsupported', 'gap:note_content_unsupported', 'skipped:note_empty']);
+  });
+
+  test('a document without the list of notes is reported, an export with an empty list is just empty', async () => {
+    for (const [what, text] of [
+      ['no list', '{"meta": {"version": 1}}'],
+      ['a number', '{"notes": 5}'],
+      ['a record', JSON.stringify({ notes: { a: { id: 'x', subject: 'S', content: 'C' } } })],
+      ['text', '{"notes": "none yet"}'],
+    ] as const) {
+      const { connector, findings } = jsonConnector('a.json', text);
+      const result = await listAll(connector);
+      expect({ what, items: result.items.length, done: result.done, findings: kinds(findings) })
+        .toEqual({ what, items: 0, done: true, findings: ['gap:section_not_imported'] });
+    }
+    const empty = jsonConnector('b.json', '{"notes": [], "version": 2}');
+    expect(await listAll(empty.connector)).toMatchObject({ items: [], done: true });
+    expect(empty.findings).toEqual([]);
+    const bare = jsonConnector('c.json', '[]');
+    expect(await listAll(bare.connector)).toMatchObject({ items: [], done: true });
+    expect(bare.findings).toEqual([]);
+  });
+
+  test('a zip member that is not an export is reported where it is, and the files around it are read', async () => {
+    const good = reflectJson(reflectNotes(2), { wrap: true });
+    const noList = '{"notes_v2": [], "subject": "a", "content": "b"}';
+    const zip = buildZip([
+      { name: 'one.json', data: good },
+      { name: 'two.json', data: noList },
+      { name: 'three.json', data: reflectJson(reflectNotes(1, 'dock'), { wrap: true }) },
+    ]);
+    const { connector, findings } = jsonConnector('Reflect export.zip', zip);
+    const { items } = await listAll(connector);
+    expect(items).toHaveLength(3);
+    expect(kinds(findings)).toEqual(['gap:section_not_imported']);
+  });
+});
+
+describe('the Reflect connector holds its bounds while it reads', () => {
+  test('the byte budget stops a listing at a note, not after the whole file, and the next listing goes on from there', async () => {
+    const notes = reflectNotes(5);
+    const opened = jsonConnector('a.json', reflectJson(notes), { maxBytesPerListing: 50 });
+    const first = await listAll(opened.connector);
+    expect(first.items).toHaveLength(1);
+    expect(first.done).toBe(false);
+    const titles = first.items.map((item) => item.metadata.title);
+    let cursor = first.cursors.at(-1);
+    for (let listing = 0; listing < 10 && cursor; listing += 1) {
+      const next = await listAll(opened.again().connector, cursor);
+      expect(next.items.length).toBeLessThanOrEqual(1);
+      titles.push(...next.items.map((item) => item.metadata.title));
+      if (next.done) break;
+      cursor = next.cursors.at(-1);
+    }
+    expect(titles).toEqual(notes.map((note) => note.title));
+  });
+
+  test('the byte budget holds between Markdown members too', async () => {
+    const files = Array.from({ length: 4 }, (_, index) => ({
+      name: `Note ${index}.md`,
+      text: reflectMarkdown({ title: `Note ${index}`, body: `word${index} ${'x'.repeat(2000)}` }),
+    }));
+    const opened = markdownConnector('Reflect.zip', reflectMarkdownZip(files), { maxBytesPerListing: 3000 });
+    const first = await listAll(opened.connector);
+    expect(first.items).toHaveLength(1);
+    expect(first.done).toBe(false);
+    const titles = first.items.map((item) => item.metadata.title);
+    let cursor = first.cursors.at(-1);
+    for (let listing = 0; listing < 10 && cursor; listing += 1) {
+      const next = await listAll(opened.again().connector, cursor);
+      titles.push(...next.items.map((item) => item.metadata.title));
+      if (next.done) break;
+      cursor = next.cursors.at(-1);
+    }
+    expect(titles).toEqual(files.map((_, index) => `Note ${index}`));
+  });
+
+  test('an import told to stop leaves a long Markdown member part-way, and reads it again from its start', async () => {
+    const big = 'word '.repeat(1_000_000);
+    const zip = reflectMarkdownZip([
+      { name: 'Big.md', text: reflectMarkdown({ title: 'Big', body: big }), method: 'stored' },
+      { name: 'Small.md', text: reflectMarkdown({ title: 'Small', body: 'little' }) },
+    ]);
+    let calls = 0;
+    const opened = markdownConnector('Reflect.zip', zip, { shouldContinue: () => ++calls <= 3 });
+    const first = await listAll(opened.connector);
+    expect(first).toMatchObject({ items: [], done: false });
+    const all = await listAll(opened.again({}).connector, first.cursors.at(-1));
+    expect(all.items.map((item) => item.metadata.title)).toEqual(['Big', 'Small']);
+  });
+
+  test('an import told to stop leaves a long note part-way, and reads it again from its start', async () => {
+    const huge = { id: 'big', subject: 'Big', created_at: '2023-01-01T00:00:00Z', content: 'word '.repeat(1_000_000) };
+    const text = JSON.stringify([huge, ...reflectNotes(2).map((note) => reflectNoteRecord(note))]);
+    let calls = 0;
+    const opened = jsonConnector('a.json', text, { shouldContinue: () => ++calls <= 3 });
+    const first = await listAll(opened.connector);
+    expect(first).toMatchObject({ items: [], done: false });
+    const all = await listAll(opened.again({}).connector, first.cursors.at(-1));
+    expect(all.items.map((item) => item.metadata.title)).toEqual(['Big', 'Synthetic harbour note 0', 'Synthetic harbour note 1']);
   });
 });

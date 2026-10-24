@@ -7,8 +7,10 @@
  * (times in milliseconds; the keys are from Roam's community-documented export,
  * which Roam does not publish). The page becomes one note: its blocks in order,
  * one `- ` bullet per block, nested blocks indented two spaces per level, block
- * text kept as written (`[[links]]`, `{{todo}}`, `**bold**` stay). A page with
- * no text in any block is an empty note.
+ * text kept as written (`[[links]]`, `{{todo}}`, `**bold**` stay). A page whose
+ * blocks are all empty text (or that has none) is an empty note; a block that
+ * is not a record, or has no text of the kind Olympus reads, is not read and
+ * the page says so (`unsupported`) rather than passing for empty.
  *
  * Dates: the page's created time is the earliest created time of the page and
  * its blocks, its updated time the latest edited time; a page with neither is
@@ -48,16 +50,31 @@ interface Flattened {
   created: string | undefined;
   edited: string | undefined;
   hasText: boolean;
+  /** Parts that could not be read: a block that is not a record, has no text field, or lies too deep, and a `children` that is no list. */
+  unsupported: number;
 }
 
-/** Depth-first, in order: a block that holds no text adds no line, but its children keep their indent. */
+/**
+ * Depth-first, in order: a block whose text is empty adds no line, but its
+ * children keep their indent. Absent children are a page or block with none;
+ * children that are not a list, and a block that is not a record or has no
+ * text field (and no children to hold any), are content that is not read.
+ */
 function flattenBlocks(children: unknown): Flattened {
-  const out: Flattened = { lines: [], blockCount: 0, created: undefined, edited: undefined, hasText: false };
+  const out: Flattened = { lines: [], blockCount: 0, created: undefined, edited: undefined, hasText: false, unsupported: 0 };
   const walk = (nodes: unknown, depth: number): void => {
-    if (!Array.isArray(nodes) || depth > MAX_BLOCK_DEPTH) return;
+    if (nodes === undefined || nodes === null) return;
+    if (!Array.isArray(nodes) || depth > MAX_BLOCK_DEPTH) {
+      out.unsupported += 1;
+      return;
+    }
     for (const node of nodes) {
-      if (!isRecord(node)) continue;
+      if (!isRecord(node)) {
+        out.unsupported += 1;
+        continue;
+      }
       out.blockCount += 1;
+      if (typeof node.string !== 'string' && !Array.isArray(node.children)) out.unsupported += 1;
       const text = typeof node.string === 'string' ? node.string.trimEnd() : '';
       if (text.trim() !== '') {
         out.lines.push(`${'  '.repeat(depth)}- ${text}`);
@@ -76,7 +93,7 @@ function flattenBlocks(children: unknown): Flattened {
 export function parseRoamPage(record: unknown): NoteOutcome {
   if (!isRecord(record)) return { kind: 'unreadable' };
   const flat = flattenBlocks(record.children);
-  if (!flat.hasText) return { kind: 'empty' };
+  if (!flat.hasText) return flat.unsupported > 0 ? { kind: 'unsupported' } : { kind: 'empty' };
   const title = typeof record.title === 'string' ? record.title.trim() : '';
   const key = idText(record.uid);
   const createdAt = earliestIso(isoTime(record['create-time']), flat.created);
@@ -93,6 +110,7 @@ export function parseRoamPage(record: unknown): NoteOutcome {
       ...(updatedAt !== undefined ? { updatedAt } : {}),
       ...(titleDate !== undefined ? { titleDate } : {}),
       blockCount: flat.blockCount,
+      ...(flat.unsupported > 0 ? { unsupported: flat.unsupported } : {}),
     },
   };
 }

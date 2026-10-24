@@ -5,7 +5,8 @@
  * where Roam keeps its pages (a top-level list) and how one becomes a note
  * (`parse.ts`).
  *
- * - Pages with no text in any block are skipped and counted, never imported.
+ * - Pages with no text in any block are skipped and counted, never imported;
+ *   a page with blocks Olympus cannot read is reported (`note_content_unsupported`).
  * - Two pages with the same uid or title are two notes: identity includes the
  *   page's place in the list.
  * - Roam's Markdown and EDN exports are not read; they are not detected, and
@@ -14,6 +15,7 @@
  *   the judge, and is held Private until judged.
  */
 import {
+  looksLikeRoamJson,
   registerArchiveFormatConnector,
   type ArchiveConnectorInput,
 } from '../../../core/archive-formats.ts';
@@ -29,6 +31,7 @@ const ROAM_SPEC: NoteArchiveSpec = {
     kind: 'json',
     // Only a list of pages is a Roam export; any other document is reported, not guessed at.
     itemPaths: (root) => (root === 'array' ? [[]] : undefined),
+    accepts: looksLikeRoamJson,
     parse: parseRoamPage,
   },
 };

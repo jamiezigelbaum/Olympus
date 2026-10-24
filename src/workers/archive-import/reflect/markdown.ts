@@ -4,8 +4,11 @@
  *
  * The files' structure is not published, so this reads liberally: an optional
  * front-matter block (`---` lines around `key: value` pairs, with a title, a
- * created and an updated time, tags as a list or as text), then the note. The
- * title is the front matter's, else the first `# ` heading, else the file name.
+ * created and an updated time, tags as a list or as text), then the note. A
+ * block is front matter only when every line in it is a `key: value` pair, a
+ * list item of one or a comment, and at least one key is one this reader
+ * knows; anything else between two `---` rules is the note, and stays in it.
+ * The title is the front matter's, else the first `# ` heading, else the file name.
  * A daily note is named for its day ("Tue, March 21st, 2023.md"); that day is
  * the note's date when the file gives none.
  */
@@ -13,6 +16,15 @@ import { reflectDailyNoteDate } from '../../../core/archive-formats.ts';
 import { cleanTags, isoTime, type NoteOutcome } from '../notes/note.ts';
 
 const MAX_FRONT_MATTER_LINES = 100;
+
+/** The keys a Reflect front-matter block is known by (lower case); a block with none of them is not taken for one. */
+const FRONT_MATTER_KEYS = new Set([
+  'created', 'created_at', 'createdat', 'created-at', 'date',
+  'id',
+  'modified',
+  'subject', 'tag', 'tags', 'title',
+  'uid', 'updated', 'updated_at', 'updatedat', 'updated-at',
+]);
 
 interface FrontMatter {
   meta: Map<string, string | string[]>;
@@ -27,11 +39,16 @@ function unquote(value: string): string {
   return text;
 }
 
-/** A leading `---` block of `key: value` lines (and `- item` lists), if the text has one. */
+/**
+ * A leading `---` block of `key: value` lines (and `- item` lists), if the
+ * text has one and the block is front matter; any other text, including a
+ * block between two rules that says something else, is returned whole.
+ */
 export function splitFrontMatter(text: string): FrontMatter {
   const plain = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const lines = plain.split(/\r?\n/);
-  if (lines[0]?.trim() !== '---') return { meta: new Map(), body: plain };
+  const whole: FrontMatter = { meta: new Map(), body: plain };
+  if (lines[0]?.trim() !== '---') return whole;
   let close = -1;
   for (let index = 1; index < lines.length && index <= MAX_FRONT_MATTER_LINES; index += 1) {
     const line = lines[index]!.trim();
@@ -40,10 +57,11 @@ export function splitFrontMatter(text: string): FrontMatter {
       break;
     }
   }
-  if (close < 0) return { meta: new Map(), body: plain };
+  if (close < 0) return whole;
   const meta = new Map<string, string | string[]>();
   let listKey: string | undefined;
   for (const line of lines.slice(1, close)) {
+    if (line.trim() === '' || /^\s*#/.test(line)) continue;
     const item = /^\s*-\s+(.*)$/.exec(line);
     if (item && listKey !== undefined) {
       const current = meta.get(listKey);
@@ -51,10 +69,8 @@ export function splitFrontMatter(text: string): FrontMatter {
       continue;
     }
     const pair = /^([A-Za-z_][\w -]*?)\s*:\s*(.*)$/.exec(line);
-    if (!pair) {
-      listKey = undefined;
-      continue;
-    }
+    // A line that is no pair: this is text between two rules, not metadata.
+    if (!pair) return whole;
     const key = pair[1]!.toLowerCase();
     const value = pair[2]!.trim();
     if (value === '') {
@@ -65,6 +81,7 @@ export function splitFrontMatter(text: string): FrontMatter {
       listKey = undefined;
     }
   }
+  if (![...meta.keys()].some((key) => FRONT_MATTER_KEYS.has(key))) return whole;
   return { meta, body: lines.slice(close + 1).join('\n') };
 }
 

@@ -35665,6 +35665,136 @@ function startsWithFromLine(head) {
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
 }
+function archiveHeadText(head) {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
+}
+function isJunkArchiveMember(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
+}
+function reflectDailyNoteDate(fileName) {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match)
+    return;
+  const weekday = match[1].slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function headRecordKeys(head) {
+  const text2 = archiveHeadText(head);
+  const n = text2.length;
+  let i = 0;
+  const isSpace = (char) => char === " " || char === "\t" || char === `
+` || char === "\r";
+  while (i < n && isSpace(text2[i]))
+    i += 1;
+  const stack = [];
+  let shape;
+  let listDepth = 0;
+  if (text2[i] === "[") {
+    shape = "list";
+    listDepth = 1;
+    stack.push("a");
+  } else if (text2[i] === "{") {
+    stack.push("o");
+  } else {
+    return;
+  }
+  i += 1;
+  const records = [];
+  let current2;
+  while (i < n) {
+    const char = text2[i];
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text2[end] !== '"')
+        end += text2[end] === "\\" ? 2 : 1;
+      if (end >= n)
+        break;
+      const raw = text2.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text2[after]))
+        after += 1;
+      if (text2[after] === ":" && stack[stack.length - 1] === "o") {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current2?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === "notes") {
+          let value = after + 1;
+          while (value < n && isSpace(text2[value]))
+            value += 1;
+          if (text2[value] === "[") {
+            shape = "notes";
+            listDepth = 2;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char === "[" ? "a" : "o");
+      if (char === "{" && listDepth > 0 && stack.length === listDepth + 1) {
+        current2 = new Set;
+        records.push(current2);
+      }
+    } else if (char === "]" || char === "}") {
+      stack.pop();
+      if (stack.length === 0)
+        break;
+      if (listDepth > 0 && stack.length === listDepth)
+        current2 = undefined;
+      if (listDepth > 0 && stack.length < listDepth)
+        listDepth = 0;
+    }
+    i += 1;
+  }
+  return shape ? { shape, records } : undefined;
+}
+function isReflectRecord(keys) {
+  return REFLECT_BODY_KEYS.some((key2) => keys.has(key2)) && REFLECT_NOTE_KEYS.some((key2) => keys.has(key2));
+}
+function isRoamRecord(keys) {
+  return keys.has("title") && (ROAM_TIME_KEYS.some((key2) => keys.has(key2)) || keys.has("children") && keys.has("uid"));
+}
+function notesJsonFormat(head) {
+  const parsed = headRecordKeys(head);
+  if (!parsed)
+    return;
+  const reflect = parsed.records.some(isReflectRecord);
+  const roam = parsed.records.some(isRoamRecord);
+  if (reflect === roam)
+    return;
+  if (roam)
+    return parsed.shape === "list" ? "roam" : undefined;
+  return "reflect";
+}
+function looksLikeReflectJson(head) {
+  return notesJsonFormat(head) === "reflect";
+}
+function looksLikeRoamJson(head) {
+  return notesJsonFormat(head) === "roam";
+}
+function detectFile(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0].relPath] : undefined;
+}
+function zipJsonMembers(entry) {
+  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+function readsJsonExport(entry, isThisFormat, isOtherFormat) {
+  if (entry.members) {
+    const members = zipJsonMembers(entry);
+    return members.some((member) => isThisFormat(member.head)) && !members.some((member) => isOtherFormat(member.head));
+  }
+  return isThisFormat(entry.head);
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -35777,7 +35907,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -35795,6 +35925,53 @@ var init_archive_formats = __esm(() => {
       const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
       return inner ? [inner.relPath] : undefined;
     }
+  });
+  leniencyDecoder = new TextDecoder("utf-8");
+  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
+  REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
+  REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
+  ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-json",
+    label: "Reflect notes (JSON)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeReflectJson, looksLikeRoamJson))
+  });
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-markdown",
+    label: "Reflect notes (Markdown zip)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export as Markdown (the .zip file)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*, *, ????.md"]),
+    detect: (probe) => detectFile(probe, (entry) => {
+      if (!entry.members || /^roam/i.test(entry.name))
+        return false;
+      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
+      if (files.some((member) => /\.json$/i.test(member.name)))
+        return false;
+      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+      if (notes.length === 0)
+        return false;
+      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+    })
+  });
+  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "roam-json",
+    label: "Roam notes (JSON)",
+    family: "note",
+    provider: "roam",
+    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
+    citationLabel: "Roam",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, looksLikeRoamJson, looksLikeReflectJson))
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -35838,7 +36015,13 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT, TELEGRAM_JSON_ARCHIVE_FORMAT]);
+  ARCHIVE_FORMATS = Object.freeze([
+    MBOX_ARCHIVE_FORMAT,
+    REFLECT_JSON_ARCHIVE_FORMAT,
+    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+    ROAM_JSON_ARCHIVE_FORMAT,
+    TELEGRAM_JSON_ARCHIVE_FORMAT
+  ]);
   ARCHIVE_COMMON_FINDINGS = {
     mediaNotImported: "media_not_imported",
     itemTruncated: "item_truncated",
@@ -50777,6 +50960,20 @@ function sameBytes(a, b) {
       return false;
   return true;
 }
+function stoppableZipSource(reader, relPath) {
+  return {
+    get size() {
+      return reader.size;
+    },
+    readAt(offset, length) {
+      try {
+        return reader.readAt(offset, length);
+      } catch (error) {
+        throw archiveStopFromScopeError(error, relPath);
+      }
+    }
+  };
+}
 function memberKey(entry) {
   return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
 }
@@ -51077,6 +51274,9 @@ function readZipMemberHead(archive, entry, maxBytes) {
     at += part.length;
   }
   return out;
+}
+function zipFindingOffset(memberIndex, offsetInMember) {
+  return memberIndex * 8589934592 + Math.min(Math.max(0, offsetInMember), 8589934591);
 }
 var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, ZIP_OVERLAP_SORT_MAX_ENTRIES = 262144, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
@@ -64433,7 +64633,7 @@ var init_public_source_capabilities = __esm(() => {
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -77716,6 +77916,11 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
+      note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
+      note_too_large: { one: "1 note too large to read", many: "{n} notes too large to read" },
+      note_content_unsupported: { one: "1 note with a kind of content Olympus cannot read yet", many: "{n} notes with a kind of content Olympus cannot read yet" },
+      note_date_assumed: { one: "1 note has no date in the archive: Olympus used the day the file was saved", many: "{n} notes have no date in the archive: Olympus used the day the file was saved" },
       service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
       media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
@@ -89825,6 +90030,7 @@ var init_operations = __esm(() => {
         "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
         "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
         "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
+        "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
         "Never open, read or copy the file yourself, and never retry to get around the approval.",
         `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
         "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
@@ -128516,7 +128722,7 @@ function outsideHelpBlockerWords(code) {
 }
 function shortDate(iso2) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso2);
-  const month = match ? MONTHS[Number(match[2]) - 1] : undefined;
+  const month = match ? MONTHS2[Number(match[2]) - 1] : undefined;
   return match && month ? `${Number(match[3])} ${month}` : iso2;
 }
 function shortTime(iso2) {
@@ -129073,7 +129279,7 @@ function outsideHelpClientScript(config2) {
   });
 })();`;
 }
-var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
+var DASHBOARD_OUTSIDE_HELP_QUERY_PARAM = "outside-help", DASHBOARD_OUTSIDE_HELP_PATHS, LANGUAGE_NAMES, MONTHS2, CAP_BLOCKERS, FUNDING_BLOCKERS, SETUP_BLOCKERS, TOOL_BLOCKERS, OLD_DAEMON_BLOCKERS, OUTSIDE_HELP_WRITER_POLL_MS = 5000;
 var init_outside_help = __esm(() => {
   init_zkapi_consult_settings();
   init_components();
@@ -129102,7 +129308,7 @@ var init_outside_help = __esm(() => {
     de: "German",
     it: "Italian"
   };
-  MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   CAP_BLOCKERS = new Set(["daily_cap_reached", "spend_cap_reached"]);
   FUNDING_BLOCKERS = new Set(["funding_date_missing", "funding_date_invalid"]);
   SETUP_BLOCKERS = new Set(["daemon_not_found", "daemon_version_unsupported", "daemon_supervisor_unsupported", "tor_not_found", "daemon_api_key_missing", "key_reuse_on", "note_expired"]);
@@ -135117,7 +135323,7 @@ function calendarDate(iso2) {
   const date4 = new Date(iso2);
   if (Number.isNaN(date4.getTime()))
     return "on an unknown date";
-  return `${MONTHS2[date4.getUTCMonth()]} ${date4.getUTCDate()}, ${date4.getUTCFullYear()}`;
+  return `${MONTHS3[date4.getUTCMonth()]} ${date4.getUTCDate()}, ${date4.getUTCFullYear()}`;
 }
 function relativeDay(iso2, now) {
   const at = new Date(iso2);
@@ -135141,7 +135347,7 @@ function hostOf(url) {
     return url;
   }
 }
-var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS2;
+var AGENT_CONNECT_SHEET_ID = "agent-connect", AGENTS, LOCAL_AGENT_PROMPT, CLAUDE_CODE_SNIPPET = "claude mcp add olympus -- <olympus path> serve", CODEX_SNIPPET, MONTHS3;
 var init_agents = __esm(() => {
   init_agent_connections();
   init_agent_instructions();
@@ -135222,7 +135428,7 @@ var init_agents = __esm(() => {
     'args = ["serve"]'
   ].join(`
 `);
-  MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  MONTHS3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 });
 
 // src/workers/dashboard/static-styles.ts
@@ -151344,6 +151550,71 @@ var init_connector6 = __esm(() => {
   decodableCharsets = new Map;
 });
 
+// src/workers/archive-import/continuation-cache.ts
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
+var init_continuation_cache = __esm(() => {
+  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+  archiveContinuations = new ContinuationCache;
+});
+
 // node_modules/@streamparser/json/dist/mjs/utils/bufferedString.js
 class NonBufferedString {
   constructor() {
@@ -153090,6 +153361,1177 @@ var init_json_stream = __esm(() => {
   };
 });
 
+// src/workers/archive-import/notes/note.ts
+import { createHash as createHash78 } from "node:crypto";
+function isRecord9(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+}
+function firstString(...values) {
+  for (const value2 of values) {
+    if (typeof value2 === "string" && value2.trim() !== "")
+      return value2.trim();
+  }
+  return;
+}
+function idText(value2) {
+  if (typeof value2 === "string" && value2.trim() !== "")
+    return value2.trim().slice(0, 200);
+  if (typeof value2 === "number" && Number.isFinite(value2))
+    return String(value2);
+  return;
+}
+function isoTime(value2) {
+  let ms;
+  if (typeof value2 === "number" && Number.isFinite(value2)) {
+    ms = Math.abs(value2) < 100000000000 ? value2 * 1000 : value2;
+  } else if (typeof value2 === "string" && value2.trim() !== "") {
+    const text3 = value2.trim();
+    ms = /^-?\d+(?:\.\d+)?$/.test(text3) ? Math.abs(Number(text3)) < 100000000000 ? Number(text3) * 1000 : Number(text3) : Date.parse(text3);
+  }
+  if (ms === undefined || !Number.isFinite(ms))
+    return;
+  const date4 = new Date(ms);
+  return Number.isNaN(date4.getTime()) ? undefined : date4.toISOString();
+}
+function earliestIso(...times) {
+  const known = times.filter((time3) => time3 !== undefined);
+  return known.length === 0 ? undefined : known.reduce((a, b) => a <= b ? a : b);
+}
+function latestIso2(...times) {
+  const known = times.filter((time3) => time3 !== undefined);
+  return known.length === 0 ? undefined : known.reduce((a, b) => a >= b ? a : b);
+}
+function cleanTags(tags) {
+  const out = [];
+  const seen = new Set;
+  for (const tag of tags) {
+    const text3 = tag.trim().replace(/^#+/, "").trim().slice(0, MAX_TAG_CHARS);
+    if (text3 === "" || seen.has(text3))
+      continue;
+    seen.add(text3);
+    out.push(text3);
+    if (out.length >= MAX_TAGS)
+      break;
+  }
+  return out;
+}
+function sha2568(value2) {
+  return createHash78("sha256").update(value2).digest("hex");
+}
+function buildNoteItem(input, draft, place, savedAt) {
+  const title = draft.title.trim().slice(0, MAX_TITLE_CHARS);
+  const given = draft.createdAt ?? draft.updatedAt ?? draft.titleDate;
+  const authoredAt = given ?? savedAt;
+  const lines = [
+    title,
+    draft.tags.length > 0 ? `Tags: ${draft.tags.join(", ")}` : undefined,
+    draft.createdAt ? `Created: ${draft.createdAt.slice(0, 10)}` : given ? `Date: ${given.slice(0, 10)}` : undefined,
+    draft.updatedAt && draft.updatedAt !== draft.createdAt ? `Updated: ${draft.updatedAt.slice(0, 10)}` : undefined
+  ].filter((line) => line !== undefined && line !== "");
+  let text3 = [lines.join(`
+`), draft.body].filter((part) => part !== "").join(`
+
+`);
+  let truncated = false;
+  if (text3.length > NOTE_MAX_TEXT_CHARS) {
+    text3 = text3.slice(0, NOTE_MAX_TEXT_CHARS);
+    truncated = true;
+  }
+  const providerItemId = sha2568(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
+  const contentHash = sha2568(text3);
+  const item = {
+    identity: {
+      family: input.format.family,
+      provider: input.format.provider,
+      accountScope: input.accountScope,
+      providerItemId,
+      localItemId: `${input.accountScope}:${providerItemId}`,
+      sourceVersion: contentHash.slice(0, 32)
+    },
+    mimeType: "text/markdown",
+    content: { kind: "text", text: text3 },
+    metadata: Object.freeze({
+      title: title || "(untitled)",
+      tags: draft.tags,
+      authoredAt,
+      ...draft.createdAt ? { createdAt: draft.createdAt } : {},
+      ...draft.updatedAt ? { updatedAt: draft.updatedAt } : {},
+      ...draft.blockCount !== undefined ? { blockCount: draft.blockCount } : {},
+      contentHash
+    }),
+    fetchedAt: new Date().toISOString()
+  };
+  return { item, truncated, dateAssumed: given === undefined };
+}
+function noteClassificationSignals(item) {
+  return compactClassificationSignals({
+    title: signalText(item.metadata, "title"),
+    labels: signalTexts(item.metadata, "tags")
+  });
+}
+var NOTE_MAX_TEXT_CHARS = 1e6, NOTE_MAX_RECORD_BYTES, MAX_TAGS = 100, MAX_TAG_CHARS = 200, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
+var init_note = __esm(() => {
+  NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
+  NOTE_FINDINGS = {
+    empty: "note_empty",
+    unreadable: "note_unreadable",
+    tooLarge: "note_too_large",
+    unsupported: "note_content_unsupported",
+    dateAssumed: "note_date_assumed"
+  };
+});
+
+// src/workers/archive-import/notes/archive.ts
+function rootKindOf(head) {
+  if (!head)
+    return;
+  let at = head[0] === 239 && head[1] === 187 && head[2] === 191 ? 3 : 0;
+  while (at < head.length && (head[at] === 32 || head[at] === 9 || head[at] === 10 || head[at] === 13))
+    at += 1;
+  if (head[at] === 91)
+    return "array";
+  if (head[at] === 123)
+    return "object";
+  return;
+}
+function createNoteArchiveConnector(input, spec) {
+  const pageSizeDefault = Math.max(1, input.pageSize ?? NOTES_DEFAULT_PAGE_SIZE);
+  const byteBudget = Math.max(1, input.maxBytesPerListing ?? NOTES_DEFAULT_MAX_BYTES_PER_LISTING);
+  const tag = input.manifestSha256.slice(0, 16);
+  const prefix = `${spec.cursorPrefix}${tag}:`;
+  const source = spec.source;
+  const DONE2 = { file: input.files.length, member: -1, offset: 0, done: true };
+  const startOfFile = (file) => file >= input.files.length ? DONE2 : { file, member: -1, offset: 0, done: false };
+  const invalid4 = (message2) => new ArchiveImportStoppedError("resume_point_invalid", message2);
+  const encode3 = (cursor) => {
+    if (cursor.done)
+      return `${prefix}done`;
+    const resume = cursor.resume ? Buffer.from(serializeJsonResume(cursor.resume)).toString("base64url") : "";
+    return `${prefix}${cursor.file}:${cursor.member}:${cursor.offset}:${cursor.crc ?? ""}:${resume}`;
+  };
+  const decode3 = (text3) => {
+    if (!text3)
+      return startOfFile(0);
+    if (!text3.startsWith(prefix))
+      throw invalid4("The resume point belongs to other files than this archive's.");
+    const rest = text3.slice(prefix.length);
+    if (rest === "done")
+      return DONE2;
+    const parts = rest.split(":");
+    if (parts.length !== 5)
+      throw invalid4("The resume point is not a position in this archive.");
+    const [fileText, memberText, offsetText, crcText, resumeText] = parts;
+    const file = Number(fileText);
+    const member = Number(memberText);
+    const offset = Number(offsetText);
+    const crc = crcText === "" ? undefined : Number(crcText);
+    if (!Number.isSafeInteger(file) || file < 0 || file >= input.files.length || !Number.isSafeInteger(member) || member < -1 || !Number.isSafeInteger(offset) || offset < 0 || crc !== undefined && (!Number.isSafeInteger(crc) || crc < 0 || crc > 4294967295)) {
+      throw invalid4("The resume point is not a position in this archive.");
+    }
+    let resume;
+    if (resumeText !== "") {
+      resume = parseJsonResume(Buffer.from(resumeText, "base64url").toString("utf8"));
+      if (!resume || resume.offset !== offset)
+        throw invalid4("The resume point is not a position in this archive.");
+    }
+    if (offset > 0 !== (resume !== undefined))
+      throw invalid4("The resume point is not a position in this archive.");
+    return { file, member, offset, ...crc !== undefined ? { crc } : {}, ...resume ? { resume } : {}, done: false };
+  };
+  const stoppedFrom2 = (error2, relPath) => archiveStopFromReaderError(error2, relPath);
+  const report = (kind, findingClass, fileIndex, offset, count) => {
+    input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
+  };
+  const takeNote = (segment, outcome, place, offset, savedAt, cut = false) => {
+    segment.consumed += 1;
+    if (outcome.kind === "empty") {
+      report(NOTE_FINDINGS.empty, "skipped", place.fileIndex, offset);
+      return;
+    }
+    if (outcome.kind === "unreadable") {
+      report(NOTE_FINDINGS.unreadable, "gap", place.fileIndex, offset);
+      return;
+    }
+    if (outcome.kind === "unsupported") {
+      report(NOTE_FINDINGS.unsupported, "gap", place.fileIndex, offset);
+      return;
+    }
+    const built = buildNoteItem(input, outcome.note, place, savedAt);
+    segment.items.push(built.item);
+    if (outcome.note.unsupported)
+      report(NOTE_FINDINGS.unsupported, "gap", place.fileIndex, offset);
+    if (built.truncated || cut)
+      report(ARCHIVE_COMMON_FINDINGS.itemTruncated, "gap", place.fileIndex, offset);
+    if (built.dateAssumed)
+      report(NOTE_FINDINGS.dateAssumed, "gap", place.fileIndex, offset);
+  };
+  const plainUnit = (reader) => ({
+    member: -1,
+    posOf: (offset) => offset,
+    progressOf: (offset) => offset,
+    head: () => reader.readAt(0, ROOT_PEEK_BYTES),
+    open: (offset) => fileByteSource(reader, { start: offset }),
+    checkpoint: () => ({}),
+    end: () => {
+      return;
+    },
+    close: () => {
+      return;
+    }
+  });
+  const zipUnit = (archive, entry, fileIndex) => {
+    let reader;
+    const key2 = { archiveId: input.archiveId, manifestTag: tag, fileIndex, memberIndex: entry.index };
+    return {
+      member: entry.index,
+      posOf: (offset) => zipFindingOffset(entry.index, offset),
+      progressOf: (offset) => entry.localHeaderOffset + Math.floor(entry.compressedSize * Math.min(1, offset / Math.max(1, entry.uncompressedSize))),
+      head: () => readZipMemberHead(archive, entry, ROOT_PEEK_BYTES),
+      open(offset, crc) {
+        const continuation = offset > 0 ? archiveContinuations.take(key2, offset) : undefined;
+        reader = ZipMemberReader.open(archive, entry, {
+          start: offset,
+          ...crc !== undefined ? { startCrc: crc } : {},
+          ...continuation ? { continuation } : {}
+        });
+        return reader;
+      },
+      checkpoint(endOffset) {
+        const member = reader;
+        if (!member)
+          return {};
+        try {
+          const back = member.position - endOffset;
+          if (back > 0)
+            member.unread(back);
+        } catch {
+          member.close();
+          return {};
+        }
+        const crc = member.crc32;
+        const continuation = member.suspend();
+        if (continuation)
+          archiveContinuations.put(key2, continuation);
+        return crc !== undefined ? { crc } : {};
+      },
+      end: () => reader?.end,
+      close: () => reader?.close()
+    };
+  };
+  const watched = (inner) => ({
+    get position() {
+      return inner.position;
+    },
+    get crc32() {
+      return inner.crc32;
+    },
+    next() {
+      if (!input.shouldContinue())
+        throw new ReadInterrupted;
+      return inner.next();
+    },
+    unread: (count) => inner.unread(count)
+  });
+  const listIsThere = (unit, paths, relPath) => {
+    for (const path of paths) {
+      if (path.length === 0 || path.some((part) => typeof part !== "string" || part === JSON_STREAM_ANY))
+        return true;
+      let bytes;
+      try {
+        bytes = watched(unit.open(0, undefined));
+      } catch (error2) {
+        if (error2 instanceof ZipMemberError)
+          return true;
+        throw stoppedFrom2(error2, relPath);
+      }
+      let found = false;
+      try {
+        const scan = new JsonStreamReader(bytes, { itemPaths: [path.slice(0, -1)], maxItemBytes: LIST_PEEK_BYTES });
+        for (;; ) {
+          const event = scan.next();
+          if (!event)
+            break;
+          if (event.path.length === path.length && event.path.every((part, at) => part === path[at])) {
+            found = event.kind === "item" && Array.isArray(event.value);
+            break;
+          }
+        }
+      } catch (error2) {
+        unit.close();
+        if (error2 instanceof ReadInterrupted)
+          return "interrupted";
+        if (error2 instanceof ArchiveImportStoppedError)
+          throw error2;
+        if (error2 instanceof ZipMemberError || error2 instanceof JsonStreamError)
+          return true;
+        throw stoppedFrom2(error2, relPath);
+      }
+      unit.close();
+      if (found)
+        return true;
+    }
+    return false;
+  };
+  const readJsonUnit = (unit, unitCursor, fileIndex, relPath, limits, segment, savedAt) => {
+    if (source.kind !== "json")
+      return "ended";
+    const damaged = (offset) => report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, unit.posOf(offset));
+    const notRead = () => report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", fileIndex, unit.posOf(0));
+    let root;
+    if (unitCursor.resume) {
+      root = unitCursor.resume.levels[0]?.kind;
+    } else {
+      try {
+        root = rootKindOf(unit.head());
+      } catch (error2) {
+        throw stoppedFrom2(error2, relPath);
+      }
+      if (!root) {
+        damaged(0);
+        return "ended";
+      }
+    }
+    const itemPaths = root ? source.itemPaths(root) : undefined;
+    if (!itemPaths) {
+      notRead();
+      return "ended";
+    }
+    let bytes;
+    try {
+      bytes = watched(unit.open(unitCursor.offset, unitCursor.crc));
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError) {
+        if (unitCursor.offset > 0)
+          throw invalid4("Nothing starts where this import was to resume.");
+        damaged(0);
+        return "ended";
+      }
+      throw stoppedFrom2(error2, relPath);
+    }
+    let reader;
+    try {
+      reader = new JsonStreamReader(bytes, {
+        itemPaths,
+        maxItemBytes: NOTE_MAX_RECORD_BYTES,
+        ...unitCursor.resume ? { resume: unitCursor.resume } : {}
+      });
+    } catch (error2) {
+      unit.close();
+      throw stoppedFrom2(error2, relPath);
+    }
+    let last;
+    const pause = () => {
+      if (!last) {
+        unit.close();
+        segment.next = unitCursor;
+        segment.position = { fileIndex, offset: unit.progressOf(unitCursor.offset) };
+        return "paused";
+      }
+      segment.bytes += last.end - unitCursor.offset;
+      const { crc } = unit.checkpoint(last.end);
+      segment.next = {
+        file: fileIndex,
+        member: unit.member,
+        offset: last.end,
+        ...crc !== undefined ? { crc } : {},
+        resume: last.resume,
+        done: false
+      };
+      segment.position = { fileIndex, offset: unit.progressOf(last.end) };
+      return "paused";
+    };
+    for (;; ) {
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        return pause();
+      }
+      if (segment.items.length >= limits.items || segment.consumed >= limits.units)
+        return pause();
+      const spent = segment.bytes + (last ? last.end - unitCursor.offset : 0);
+      if (spent >= limits.bytes && (last !== undefined || segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        return pause();
+      }
+      let event;
+      try {
+        event = reader.next();
+      } catch (error2) {
+        if (error2 instanceof ReadInterrupted) {
+          segment.stopped = true;
+          return pause();
+        }
+        unit.close();
+        if (error2 instanceof ArchiveImportStoppedError)
+          throw error2;
+        if (error2 instanceof ZipMemberError || error2 instanceof JsonStreamError && error2.code !== "resume_invalid") {
+          segment.bytes += (last?.end ?? unitCursor.offset) - unitCursor.offset;
+          damaged(last?.end ?? unitCursor.offset);
+          return "ended";
+        }
+        throw stoppedFrom2(error2, relPath);
+      }
+      if (!event) {
+        unit.close();
+        const readTo = Math.max(last?.end ?? unitCursor.offset, reader.position);
+        const end = unit.end();
+        if (end && (end.crcOk === false || !end.sizeOk)) {
+          segment.bytes += readTo - unitCursor.offset;
+          damaged(end.bytes);
+          return "ended";
+        }
+        if (!last && !unitCursor.resume) {
+          const there = listIsThere(unit, itemPaths, relPath);
+          if (there === "interrupted") {
+            segment.stopped = true;
+            return pause();
+          }
+          if (!there)
+            notRead();
+        }
+        segment.bytes += readTo - unitCursor.offset;
+        return "ended";
+      }
+      last = event;
+      const offset = unit.posOf(event.start);
+      if (event.resume.levels[event.resume.levels.length - 1]?.kind !== "array") {
+        unit.close();
+        segment.bytes += event.end - unitCursor.offset;
+        notRead();
+        return "ended";
+      }
+      if (event.kind === "oversize") {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.tooLarge, "gap", fileIndex, offset);
+        continue;
+      }
+      const index = event.path[event.path.length - 1];
+      const place = { fileIndex, member: unit.member, ordinal: typeof index === "number" ? index : event.start };
+      takeNote(segment, source.parse(event.value), place, offset, savedAt);
+    }
+  };
+  const readMarkdownMember = (archive, entry) => {
+    let member;
+    try {
+      member = ZipMemberReader.open(archive, entry);
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError)
+        return;
+      throw error2;
+    }
+    const parts = [];
+    let kept = 0;
+    let cut = false;
+    try {
+      for (;; ) {
+        if (!input.shouldContinue())
+          return "stopped";
+        const chunk = member.next();
+        if (!chunk)
+          break;
+        if (kept < MARKDOWN_MAX_BYTES) {
+          const take = chunk.subarray(0, MARKDOWN_MAX_BYTES - kept);
+          parts.push(take);
+          kept += take.length;
+          if (take.length < chunk.length)
+            cut = true;
+        } else {
+          cut = true;
+        }
+      }
+    } catch (error2) {
+      if (error2 instanceof ZipMemberError)
+        return;
+      throw error2;
+    } finally {
+      member.close();
+    }
+    const joined = new Uint8Array(kept);
+    let at = 0;
+    for (const part of parts) {
+      joined.set(part, at);
+      at += part.length;
+    }
+    return { text: new TextDecoder("utf-8").decode(joined), cut, end: member.end };
+  };
+  const readMarkdownZip = (archive, fileIndex, cursor, limits, segment, savedAt) => {
+    if (source.kind !== "markdown")
+      return;
+    const from = Math.max(0, cursor.member);
+    for (const entry of archive.entries()) {
+      if (entry.index < from || entry.isDirectory || isJunkArchiveMember(entry.name) || !source.isNote(entry.name))
+        continue;
+      const here = { file: fileIndex, member: entry.index, offset: 0, done: false };
+      if (!input.shouldContinue()) {
+        segment.stopped = true;
+        segment.next = here;
+        return;
+      }
+      if (segment.items.length >= limits.items || segment.consumed >= limits.units) {
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
+      if (segment.bytes + entry.uncompressedSize > limits.bytes && (segment.consumed > 0 || limits.started)) {
+        segment.budgetHit = true;
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
+      const offset = zipFindingOffset(entry.index, 0);
+      const fileName = entry.name.slice(entry.name.lastIndexOf("/") + 1);
+      const read = readMarkdownMember(archive, entry);
+      if (read === "stopped") {
+        segment.stopped = true;
+        segment.next = here;
+        segment.position = { fileIndex, offset: entry.localHeaderOffset };
+        return;
+      }
+      segment.bytes += entry.uncompressedSize;
+      if (!read) {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.unreadable, "gap", fileIndex, offset);
+      } else {
+        const place = { fileIndex, member: entry.index, ordinal: entry.index };
+        takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt, read.cut);
+        if (read.end && (read.end.crcOk === false || !read.end.sizeOk)) {
+          report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, zipFindingOffset(entry.index, entry.uncompressedSize));
+        }
+      }
+      segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+      segment.position = { fileIndex, offset: entry.localHeaderOffset };
+    }
+    segment.next = startOfFile(fileIndex + 1);
+    finishZip(archive, fileIndex);
+  };
+  const readJsonZip = (archive, file, fileIndex, cursor, limits, segment, savedAt) => {
+    if (source.kind !== "json")
+      return;
+    const from = Math.max(0, cursor.member);
+    let foundResume = cursor.offset === 0;
+    for (const entry of archive.entries()) {
+      if (entry.index < from || entry.isDirectory || isJunkArchiveMember(entry.name) || !/\.json$/i.test(entry.name))
+        continue;
+      const resuming = entry.index === cursor.member && cursor.offset > 0;
+      if (resuming)
+        foundResume = true;
+      const unitCursor = resuming ? cursor : { file: fileIndex, member: entry.index, offset: 0, done: false };
+      if (!resuming) {
+        if (!input.shouldContinue()) {
+          segment.stopped = true;
+          segment.next = unitCursor;
+          return;
+        }
+        if (segment.bytes >= limits.bytes && (segment.consumed > 0 || limits.started)) {
+          segment.budgetHit = true;
+          segment.next = unitCursor;
+          segment.position = { fileIndex, offset: entry.localHeaderOffset };
+          return;
+        }
+        const head = readZipMemberHead(archive, entry, ARCHIVE_PROBE_HEAD_BYTES);
+        if (head && head.length > 0 && !source.accepts(head)) {
+          segment.consumed += 1;
+          report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", fileIndex, zipFindingOffset(entry.index, 0));
+          segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+          segment.position = { fileIndex, offset: entry.localHeaderOffset + entry.compressedSize };
+          continue;
+        }
+      }
+      const unit = zipUnit(archive, entry, fileIndex);
+      const result = readJsonUnit(unit, unitCursor, fileIndex, file.relPath, limits, segment, savedAt);
+      if (result === "paused")
+        return;
+      segment.next = { file: fileIndex, member: entry.index + 1, offset: 0, done: false };
+      segment.position = { fileIndex, offset: entry.localHeaderOffset + entry.compressedSize };
+    }
+    if (!foundResume)
+      throw invalid4("Nothing starts where this import was to resume.");
+    segment.next = startOfFile(fileIndex + 1);
+    finishZip(archive, fileIndex);
+  };
+  const finishZip = (archive, fileIndex) => {
+    let other = 0;
+    for (const entry of archive.entries()) {
+      if (entry.isDirectory || isJunkArchiveMember(entry.name))
+        continue;
+      const read = source.kind === "json" ? /\.json$/i.test(entry.name) : source.isNote(entry.name);
+      if (!read)
+        other += 1;
+    }
+    if (other > 0)
+      report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", fileIndex, zipFindingOffset(archive.entryCount, 0), other);
+  };
+  const readSegment = (cursor, limits) => {
+    const file = input.files[cursor.file];
+    const segment = { items: [], next: cursor, consumed: 0, bytes: 0, stopped: false, budgetHit: false };
+    let reader;
+    try {
+      reader = input.root.openFile(file.relPath, { expected: file.version });
+    } catch (error2) {
+      throw stoppedFrom2(error2, file.relPath);
+    }
+    try {
+      const savedAt = new Date(Number.isFinite(file.version.mtimeMs) ? file.version.mtimeMs : 0).toISOString();
+      let head;
+      try {
+        head = reader.readAt(0, 4);
+      } catch (error2) {
+        throw stoppedFrom2(error2, file.relPath);
+      }
+      if (ZipArchive.looksLikeZip(head)) {
+        let archive;
+        try {
+          archive = ZipArchive.open(stoppableZipSource(reader, file.relPath));
+        } catch (error2) {
+          if (!(error2 instanceof ZipFormatError))
+            throw stoppedFrom2(error2, file.relPath);
+          report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+          segment.next = startOfFile(cursor.file + 1);
+          return segment;
+        }
+        try {
+          if (source.kind === "json")
+            readJsonZip(archive, file, cursor.file, cursor, limits, segment, savedAt);
+          else
+            readMarkdownZip(archive, cursor.file, cursor, limits, segment, savedAt);
+        } catch (error2) {
+          if (error2 instanceof ZipFormatError) {
+            report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, zipFindingOffset(archive.entryCount, 0));
+            segment.next = startOfFile(cursor.file + 1);
+          } else {
+            throw stoppedFrom2(error2, file.relPath);
+          }
+        }
+      } else if (source.kind === "json") {
+        const result = readJsonUnit(plainUnit(reader), cursor, cursor.file, file.relPath, limits, segment, savedAt);
+        if (result === "ended")
+          segment.next = startOfFile(cursor.file + 1);
+      } else {
+        report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", cursor.file, 0);
+        segment.next = startOfFile(cursor.file + 1);
+      }
+      try {
+        reader.assertCurrent();
+      } catch (error2) {
+        throw stoppedFrom2(error2, file.relPath);
+      }
+      return segment;
+    } finally {
+      reader.close();
+    }
+  };
+  return {
+    id: input.connectorId,
+    family: input.format.family,
+    async authenticate() {},
+    listItems(options) {
+      return async function* () {
+        let cursor = decode3(options?.cursor);
+        if (cursor.done) {
+          yield { items: [], nextCursor: encode3(DONE2), done: true };
+          return;
+        }
+        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
+        let emitted = 0;
+        let bytesRead = 0;
+        let page2 = [];
+        let units = 0;
+        let pending = false;
+        let position;
+        for (;; ) {
+          const room = Math.max(1, Math.min(pageSizeDefault, limit - emitted) - page2.length);
+          const segment = readSegment(cursor, {
+            items: room,
+            units: Math.max(1, NOTES_MAX_UNITS_PER_PAGE - units),
+            bytes: Math.max(1, byteBudget - bytesRead),
+            started: bytesRead > 0 || emitted > 0 || page2.length > 0 || units > 0
+          });
+          page2.push(...segment.items);
+          cursor = segment.next;
+          units += segment.consumed;
+          bytesRead += segment.bytes;
+          if (segment.consumed > 0 || segment.items.length > 0)
+            pending = true;
+          if (segment.position)
+            position = segment.position;
+          if (segment.stopped) {
+            if (pending) {
+              if (position)
+                input.reportPosition?.(position);
+              yield { items: page2, nextCursor: encode3(cursor), done: false };
+            }
+            return;
+          }
+          if (cursor.done) {
+            yield { items: page2, nextCursor: encode3(DONE2), done: true };
+            return;
+          }
+          const spentBudget = segment.budgetHit || bytesRead >= byteBudget;
+          const full = page2.length >= Math.min(pageSizeDefault, limit - emitted);
+          if (full || spentBudget || units >= NOTES_MAX_UNITS_PER_PAGE) {
+            if (position)
+              input.reportPosition?.(position);
+            yield { items: page2, nextCursor: encode3(cursor), done: false };
+            emitted += page2.length;
+            page2 = [];
+            units = 0;
+            pending = false;
+            if (emitted >= limit || spentBudget)
+              return;
+          }
+        }
+      }();
+    },
+    async fetchItem() {
+      throw new Error("An imported note is read only while its archive is listed.");
+    },
+    classificationSignals(item) {
+      return noteClassificationSignals(item);
+    }
+  };
+}
+var NOTES_DEFAULT_PAGE_SIZE = 100, NOTES_DEFAULT_MAX_BYTES_PER_LISTING, NOTES_MAX_UNITS_PER_PAGE = 5000, MARKDOWN_MAX_BYTES, ROOT_PEEK_BYTES = 1024, LIST_PEEK_BYTES, ReadInterrupted;
+var init_archive = __esm(() => {
+  init_archive_formats();
+  init_byte_source();
+  init_continuation_cache();
+  init_json_stream();
+  init_zip_reader();
+  init_note();
+  NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+  MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
+  LIST_PEEK_BYTES = 64 * 1024;
+  ReadInterrupted = class ReadInterrupted extends Error {
+  };
+});
+
+// src/workers/archive-import/reflect/markdown.ts
+function unquote2(value2) {
+  const text3 = value2.trim();
+  if (text3.length >= 2 && (text3.startsWith('"') && text3.endsWith('"') || text3.startsWith("'") && text3.endsWith("'"))) {
+    return text3.slice(1, -1);
+  }
+  return text3;
+}
+function splitFrontMatter(text3) {
+  const plain = text3.charCodeAt(0) === 65279 ? text3.slice(1) : text3;
+  const lines = plain.split(/\r?\n/);
+  const whole = { meta: new Map, body: plain };
+  if (lines[0]?.trim() !== "---")
+    return whole;
+  let close = -1;
+  for (let index = 1;index < lines.length && index <= MAX_FRONT_MATTER_LINES; index += 1) {
+    const line = lines[index].trim();
+    if (line === "---" || line === "...") {
+      close = index;
+      break;
+    }
+  }
+  if (close < 0)
+    return whole;
+  const meta2 = new Map;
+  let listKey;
+  for (const line of lines.slice(1, close)) {
+    if (line.trim() === "" || /^\s*#/.test(line))
+      continue;
+    const item = /^\s*-\s+(.*)$/.exec(line);
+    if (item && listKey !== undefined) {
+      const current2 = meta2.get(listKey);
+      if (Array.isArray(current2))
+        current2.push(unquote2(item[1]));
+      continue;
+    }
+    const pair = /^([A-Za-z_][\w -]*?)\s*:\s*(.*)$/.exec(line);
+    if (!pair)
+      return whole;
+    const key2 = pair[1].toLowerCase();
+    const value2 = pair[2].trim();
+    if (value2 === "") {
+      meta2.set(key2, []);
+      listKey = key2;
+    } else {
+      meta2.set(key2, value2);
+      listKey = undefined;
+    }
+  }
+  if (![...meta2.keys()].some((key2) => FRONT_MATTER_KEYS.has(key2)))
+    return whole;
+  return { meta: meta2, body: lines.slice(close + 1).join(`
+`) };
+}
+function metaText(meta2, ...keys) {
+  for (const key2 of keys) {
+    const value2 = meta2.get(key2);
+    if (typeof value2 === "string" && value2.trim() !== "")
+      return unquote2(value2);
+  }
+  return;
+}
+function metaTags(meta2) {
+  const value2 = meta2.get("tags") ?? meta2.get("tag");
+  if (Array.isArray(value2))
+    return cleanTags(value2);
+  if (typeof value2 !== "string")
+    return [];
+  const inner = value2.trim().replace(/^\[/, "").replace(/\]$/, "");
+  return cleanTags(inner.split(",").map(unquote2));
+}
+function parseReflectMarkdown(text3, fileName) {
+  const { meta: meta2, body: rest } = splitFrontMatter(text3);
+  let body = rest.trim();
+  const heading = /^#\s+(.+?)(?:\s+#+)?\s*$/m.exec(body);
+  const baseName = fileName.replace(/\.(?:md|markdown)$/i, "").trim();
+  const fromHeading = body.startsWith("# ") && heading ? heading[1].trim() : undefined;
+  const title = metaText(meta2, "title", "subject") ?? fromHeading ?? baseName;
+  if (fromHeading !== undefined && title === fromHeading) {
+    body = body.slice(body.indexOf(`
+`) < 0 ? body.length : body.indexOf(`
+`) + 1).trim();
+  }
+  if (body === "")
+    return { kind: "empty" };
+  const createdAt = isoTime(metaText(meta2, "created", "created_at", "createdat", "created-at", "date"));
+  const updatedAt = isoTime(metaText(meta2, "updated", "updated_at", "updatedat", "updated-at", "modified"));
+  const titleDate = reflectDailyNoteDate(fileName);
+  return {
+    kind: "note",
+    note: {
+      title,
+      body,
+      tags: metaTags(meta2),
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {}
+    }
+  };
+}
+var MAX_FRONT_MATTER_LINES = 100, FRONT_MATTER_KEYS;
+var init_markdown = __esm(() => {
+  init_archive_formats();
+  init_note();
+  FRONT_MATTER_KEYS = new Set([
+    "created",
+    "created_at",
+    "createdat",
+    "created-at",
+    "date",
+    "id",
+    "modified",
+    "subject",
+    "tag",
+    "tags",
+    "title",
+    "uid",
+    "updated",
+    "updated_at",
+    "updatedat",
+    "updated-at"
+  ]);
+});
+
+// src/workers/archive-import/reflect/parse.ts
+function nodeType(node) {
+  return isRecord9(node) && typeof node.type === "string" ? node.type.toLowerCase().replace(/[_-]/g, "") : "";
+}
+function isBlockEditorNode(node) {
+  return BLOCK_EDITOR_NODE_TYPES.has(nodeType(node));
+}
+function isKnownEditorNode(node) {
+  const type = nodeType(node);
+  return BLOCK_EDITOR_NODE_TYPES.has(type) || INLINE_EDITOR_NODE_TYPES.has(type);
+}
+function editorNodeChildren(node) {
+  if (Array.isArray(node.content))
+    return node.content;
+  if (Array.isArray(node.children))
+    return node.children;
+  return [];
+}
+function isEditorDocument(value2) {
+  if (Array.isArray(value2))
+    return value2.length > 0 && value2.every(isKnownEditorNode);
+  if (!isRecord9(value2))
+    return false;
+  if (isKnownEditorNode(value2))
+    return true;
+  const children = editorNodeChildren(value2);
+  return children.length > 0 && children.every(isKnownEditorNode);
+}
+function flattenEditorNodes(nodes, depth2) {
+  let text3 = "";
+  let unsupported = 0;
+  let previousWasBlock = false;
+  let first = true;
+  for (const node of nodes) {
+    const flat2 = flattenNode(node, depth2 + 1);
+    unsupported += flat2.unsupported;
+    if (!flat2.text)
+      continue;
+    const block = isBlockEditorNode(node);
+    if (!first && (block || previousWasBlock))
+      text3 += `
+`;
+    text3 += flat2.text;
+    previousWasBlock = block;
+    first = false;
+  }
+  return { text: text3, unsupported };
+}
+function flattenNode(node, depth2) {
+  if (typeof node === "string")
+    return { text: node, unsupported: 0 };
+  if (node === null || node === undefined)
+    return NOTHING;
+  if (depth2 > MAX_EDITOR_DEPTH)
+    return { text: "", unsupported: 1 };
+  if (Array.isArray(node))
+    return flattenEditorNodes(node, depth2);
+  if (!isRecord9(node))
+    return { text: "", unsupported: 1 };
+  const ownText = typeof node.text === "string" ? node.text : "";
+  const children = flattenEditorNodes(editorNodeChildren(node), depth2);
+  const text3 = ownText && children.text ? `${ownText}
+${children.text}` : ownText || children.text;
+  const lost = text3 === "" && !isKnownEditorNode(node) ? 1 : 0;
+  return { text: text3, unsupported: children.unsupported + lost };
+}
+function readReflectBody(value2) {
+  if (value2 === undefined || value2 === null)
+    return NOTHING;
+  if (typeof value2 === "string") {
+    const trimmed2 = value2.trim();
+    if (trimmed2.startsWith("{") || trimmed2.startsWith("[")) {
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed2);
+      } catch {
+        return { text: value2, unsupported: 0 };
+      }
+      if (isEditorDocument(parsed))
+        return flattenNode(parsed, 0);
+    }
+    return { text: value2, unsupported: 0 };
+  }
+  if (isEditorDocument(value2))
+    return flattenNode(value2, 0);
+  return { text: "", unsupported: 1 };
+}
+function reflectTags(value2) {
+  const entries = Array.isArray(value2) ? value2 : typeof value2 === "string" ? value2.split(",") : [];
+  const tags = [];
+  for (const entry of entries) {
+    const tag = typeof entry === "string" ? firstString(entry) : isRecord9(entry) ? firstString(entry.name, entry.tag, entry.title) : undefined;
+    if (tag !== undefined)
+      tags.push(tag);
+  }
+  return cleanTags(tags);
+}
+function parseReflectNote(record5) {
+  if (!isRecord9(record5))
+    return { kind: "unreadable" };
+  let body = "";
+  let unsupported = 0;
+  for (const candidate of [record5.content, record5.body, record5.document_json, record5.documentJson]) {
+    const read = readReflectBody(candidate);
+    unsupported += read.unsupported;
+    body = read.text.trim();
+    if (body !== "")
+      break;
+  }
+  if (body === "")
+    return unsupported > 0 ? { kind: "unsupported" } : { kind: "empty" };
+  const key2 = idText(record5.id ?? record5.uid);
+  const createdAt = isoTime(record5.created_at ?? record5.createdAt);
+  const updatedAt = isoTime(record5.updated_at ?? record5.updatedAt);
+  const title = firstString(record5.subject, record5.title) ?? "";
+  const titleDate = reflectDailyNoteDate(title);
+  return {
+    kind: "note",
+    note: {
+      ...key2 !== undefined ? { key: key2 } : {},
+      title,
+      body,
+      tags: reflectTags(record5.tags),
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {},
+      ...unsupported > 0 ? { unsupported } : {}
+    }
+  };
+}
+var MAX_EDITOR_DEPTH = 200, BLOCK_EDITOR_NODE_TYPES, INLINE_EDITOR_NODE_TYPES, NOTHING;
+var init_parse4 = __esm(() => {
+  init_archive_formats();
+  init_note();
+  BLOCK_EDITOR_NODE_TYPES = new Set([
+    "blockquote",
+    "bulletlist",
+    "checklist",
+    "checklistitem",
+    "codeblock",
+    "doc",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "heading",
+    "horizontalrule",
+    "li",
+    "lic",
+    "listitem",
+    "ol",
+    "orderedlist",
+    "p",
+    "paragraph",
+    "table",
+    "tablecell",
+    "tableheader",
+    "tablerow",
+    "taskitem",
+    "tasklist",
+    "ul"
+  ]);
+  INLINE_EDITOR_NODE_TYPES = new Set(["hardbreak", "text"]);
+  NOTHING = { text: "", unsupported: 0 };
+});
+
+// src/workers/archive-import/reflect/connector.ts
+function createReflectJsonArchiveConnector(input) {
+  return createNoteArchiveConnector(input, REFLECT_JSON_SPEC);
+}
+function createReflectMarkdownArchiveConnector(input) {
+  return createNoteArchiveConnector(input, REFLECT_MARKDOWN_SPEC);
+}
+function registerReflectArchiveConnectors() {
+  registerArchiveFormatConnector("reflect-json", createReflectJsonArchiveConnector);
+  registerArchiveFormatConnector("reflect-markdown", createReflectMarkdownArchiveConnector);
+}
+var REFLECT_JSON_CURSOR_PREFIX = "reflect1:", REFLECT_MARKDOWN_CURSOR_PREFIX = "reflectmd1:", REFLECT_JSON_SPEC, REFLECT_MARKDOWN_SPEC;
+var init_connector7 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_markdown();
+  init_parse4();
+  REFLECT_JSON_SPEC = {
+    cursorPrefix: REFLECT_JSON_CURSOR_PREFIX,
+    source: {
+      kind: "json",
+      itemPaths: (root) => root === "array" ? [[]] : [["notes"]],
+      accepts: looksLikeReflectJson,
+      parse: parseReflectNote
+    }
+  };
+  REFLECT_MARKDOWN_SPEC = {
+    cursorPrefix: REFLECT_MARKDOWN_CURSOR_PREFIX,
+    source: {
+      kind: "markdown",
+      isNote: (name) => /\.(?:md|markdown)$/i.test(name),
+      parse: parseReflectMarkdown
+    }
+  };
+});
+
+// src/workers/archive-import/roam/parse.ts
+function roamDailyPageDate(title) {
+  const match = DAILY_PAGE_TITLE.exec(title.trim());
+  if (!match)
+    return;
+  const month = MONTHS4.indexOf(match[1].toLowerCase());
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  if (month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function flattenBlocks(children) {
+  const out = { lines: [], blockCount: 0, created: undefined, edited: undefined, hasText: false, unsupported: 0 };
+  const walk = (nodes, depth2) => {
+    if (nodes === undefined || nodes === null)
+      return;
+    if (!Array.isArray(nodes) || depth2 > MAX_BLOCK_DEPTH) {
+      out.unsupported += 1;
+      return;
+    }
+    for (const node of nodes) {
+      if (!isRecord9(node)) {
+        out.unsupported += 1;
+        continue;
+      }
+      out.blockCount += 1;
+      if (typeof node.string !== "string" && !Array.isArray(node.children))
+        out.unsupported += 1;
+      const text3 = typeof node.string === "string" ? node.string.trimEnd() : "";
+      if (text3.trim() !== "") {
+        out.lines.push(`${"  ".repeat(depth2)}- ${text3}`);
+        out.hasText = true;
+      }
+      out.created = earliestIso(out.created, isoTime(node["create-time"]));
+      out.edited = latestIso2(out.edited, isoTime(node["edit-time"]));
+      walk(node.children, depth2 + 1);
+    }
+  };
+  walk(children, 0);
+  return out;
+}
+function parseRoamPage(record5) {
+  if (!isRecord9(record5))
+    return { kind: "unreadable" };
+  const flat2 = flattenBlocks(record5.children);
+  if (!flat2.hasText)
+    return flat2.unsupported > 0 ? { kind: "unsupported" } : { kind: "empty" };
+  const title = typeof record5.title === "string" ? record5.title.trim() : "";
+  const key2 = idText(record5.uid);
+  const createdAt = earliestIso(isoTime(record5["create-time"]), flat2.created);
+  const updatedAt = latestIso2(isoTime(record5["edit-time"]), flat2.edited);
+  const titleDate = roamDailyPageDate(title);
+  return {
+    kind: "note",
+    note: {
+      ...key2 !== undefined ? { key: key2 } : {},
+      title: firstString(title) ?? "",
+      body: flat2.lines.join(`
+`),
+      tags: [],
+      ...createdAt !== undefined ? { createdAt } : {},
+      ...updatedAt !== undefined ? { updatedAt } : {},
+      ...titleDate !== undefined ? { titleDate } : {},
+      blockCount: flat2.blockCount,
+      ...flat2.unsupported > 0 ? { unsupported: flat2.unsupported } : {}
+    }
+  };
+}
+var MAX_BLOCK_DEPTH = 256, MONTHS4, DAILY_PAGE_TITLE;
+var init_parse5 = __esm(() => {
+  init_note();
+  MONTHS4 = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  DAILY_PAGE_TITLE = /^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th),?\s+(\d{4})$/;
+});
+
+// src/workers/archive-import/roam/connector.ts
+function createRoamArchiveConnector(input) {
+  return createNoteArchiveConnector(input, ROAM_SPEC);
+}
+function registerRoamArchiveConnector() {
+  registerArchiveFormatConnector("roam-json", createRoamArchiveConnector);
+}
+var ROAM_CURSOR_PREFIX = "roam1:", ROAM_SPEC;
+var init_connector8 = __esm(() => {
+  init_archive_formats();
+  init_archive();
+  init_parse5();
+  ROAM_SPEC = {
+    cursorPrefix: ROAM_CURSOR_PREFIX,
+    source: {
+      kind: "json",
+      itemPaths: (root) => root === "array" ? [[]] : undefined,
+      accepts: looksLikeRoamJson,
+      parse: parseRoamPage
+    }
+  };
+});
+
 // src/workers/archive-import/telegram/json-repair.ts
 function isHex(byte) {
   return byte !== undefined && (byte >= 48 && byte <= 57 || byte >= 65 && byte <= 70 || byte >= 97 && byte <= 102);
@@ -153197,7 +154639,7 @@ function telegramJsonSource(source) {
 var BACKSLASH = 92, LOWER_X = 120, SPACE = 32, ESCAPE_LENGTH = 4;
 
 // src/workers/archive-import/telegram/message.ts
-function isRecord9(value2) {
+function isRecord10(value2) {
   return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
 }
 function text3(value2) {
@@ -153222,7 +154664,7 @@ function flattenTelegramText(value2) {
   for (const part of value2) {
     if (typeof part === "string") {
       out += part;
-    } else if (isRecord9(part)) {
+    } else if (isRecord10(part)) {
       const label = typeof part.text === "string" ? part.text : "";
       const href = typeof part.href === "string" ? part.href.trim() : "";
       out += part.type === "text_link" && href !== "" && href !== label ? label !== "" ? `${label} (${href})` : href : label;
@@ -153274,7 +154716,7 @@ function mediaLine(message2, content, lines) {
 }
 function factLines(message2, lines) {
   const contact = message2.contact_information;
-  if (isRecord9(contact)) {
+  if (isRecord10(contact)) {
     const name = [text3(contact.first_name), text3(contact.last_name)].filter(Boolean).join(" ");
     const detail = [name || undefined, text3(contact.phone_number)].filter(Boolean).join(", ");
     if (detail)
@@ -153284,17 +154726,17 @@ function factLines(message2, lines) {
   if (place)
     lines.push(`Place: ${cut(place)}`);
   const location = message2.location_information;
-  if (isRecord9(location) && typeof location.latitude === "number" && typeof location.longitude === "number") {
+  if (isRecord10(location) && typeof location.latitude === "number" && typeof location.longitude === "number") {
     lines.push(`Location: ${location.latitude}, ${location.longitude}`);
   }
   const poll = message2.poll;
-  if (isRecord9(poll)) {
+  if (isRecord10(poll)) {
     const question = flattenTelegramText(poll.question).trim();
     if (question)
       lines.push(`Poll: ${cut(question)}`);
     if (Array.isArray(poll.answers)) {
       for (const answer of poll.answers.slice(0, MAX_LIST_ENTRIES)) {
-        if (!isRecord9(answer))
+        if (!isRecord10(answer))
           continue;
         const label = flattenTelegramText(answer.text).trim();
         if (!label)
@@ -153305,12 +154747,12 @@ function factLines(message2, lines) {
     }
   }
   const todo = message2.todo_list;
-  if (isRecord9(todo)) {
+  if (isRecord10(todo)) {
     const title = flattenTelegramText(todo.title).trim();
     const tasks = [];
     if (Array.isArray(todo.answers)) {
       for (const task of todo.answers.slice(0, MAX_LIST_ENTRIES)) {
-        const label = isRecord9(task) ? flattenTelegramText(task.text).trim() : "";
+        const label = isRecord10(task) ? flattenTelegramText(task.text).trim() : "";
         if (label)
           tasks.push(`- ${cut(label)}`);
       }
@@ -153319,7 +154761,7 @@ function factLines(message2, lines) {
       lines.push(title ? `To-do list: ${cut(title)}` : "To-do list:", ...tasks);
   }
   const invoice = message2.invoice_information;
-  if (isRecord9(invoice)) {
+  if (isRecord10(invoice)) {
     const detail = [text3(invoice.title), text3(invoice.description)].filter(Boolean).map((part) => cut(part)).join(", ");
     if (detail)
       lines.push(`Invoice: ${detail}`);
@@ -153399,7 +154841,7 @@ var init_message = __esm(() => {
 });
 
 // src/workers/archive-import/telegram/connector.ts
-import { createHash as createHash78 } from "node:crypto";
+import { createHash as createHash79 } from "node:crypto";
 function manifestTag2(input) {
   return input.manifestSha256.slice(0, 16);
 }
@@ -153465,8 +154907,8 @@ function parseCursor2(input, cursor) {
   }
   return { resume, assumedZone: flag === "1:", done: false };
 }
-function sha2568(value2) {
-  return createHash78("sha256").update(value2).digest("hex");
+function sha2569(value2) {
+  return createHash79("sha256").update(value2).digest("hex");
 }
 function placeOf(event) {
   const path = event.path;
@@ -153516,7 +154958,7 @@ function messageOutcome2(input, event, fetchedAt) {
   const messageId = telegramScalar(record5.id);
   const reply = telegramScalar(record5.reply_to_message_id);
   const forwarded = typeof record5.forwarded_from === "string" && record5.forwarded_from.trim() !== "" ? record5.forwarded_from : undefined;
-  const providerItemId = sha2568(`${place.section}\x00${place.chatIndex}\x00${place.ordinal}\x00${messageId ?? ""}`).slice(0, 32);
+  const providerItemId = sha2569(`${place.section}\x00${place.chatIndex}\x00${place.ordinal}\x00${messageId ?? ""}`).slice(0, 32);
   const item = {
     identity: {
       family: input.format.family,
@@ -153526,7 +154968,7 @@ function messageOutcome2(input, event, fetchedAt) {
       providerThreadId: conversationId,
       providerConversationId: conversationId,
       localItemId: `${input.accountScope}:${providerItemId}`,
-      sourceVersion: sha2568(body).slice(0, 32)
+      sourceVersion: sha2569(body).slice(0, 32)
     },
     mimeType: "text/plain; charset=utf-8",
     content: { kind: "text", text: body },
@@ -153545,7 +154987,7 @@ function messageOutcome2(input, event, fetchedAt) {
       ...forwarded ? { forwardSource: forwarded } : {},
       ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
       attachmentsNotIngested: content.mediaFiles,
-      contentHash: sha2568(body)
+      contentHash: sha2569(body)
     }),
     fetchedAt
   };
@@ -153694,7 +155136,7 @@ function registerTelegramArchiveConnector() {
   registerArchiveFormatConnector("telegram_json", createTelegramArchiveConnector);
 }
 var TELEGRAM_CURSOR_PREFIX = "tg1:", TELEGRAM_DEFAULT_PAGE_SIZE = 200, TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_ITEM_TEXT_CHARS = 1e6, TELEGRAM_MAX_MESSAGE_BYTES, TELEGRAM_FINDINGS, MESSAGE_PATHS, SECTION_PATHS, ITEM_PATHS, CHAT_TYPE_KINDS, CHAT_TYPE_TITLES, SECTION_ROOTS, LISTED_SECTIONS;
-var init_connector7 = __esm(() => {
+var init_connector9 = __esm(() => {
   init_archive_formats();
   init_byte_source();
   init_json_stream();
@@ -153749,11 +155191,15 @@ var init_connector7 = __esm(() => {
 // src/workers/archive-import/format-connectors.ts
 function registerArchiveFormatConnectors() {
   registerMboxArchiveConnector();
+  registerReflectArchiveConnectors();
+  registerRoamArchiveConnector();
   registerTelegramArchiveConnector();
 }
 var init_format_connectors = __esm(() => {
   init_connector6();
   init_connector7();
+  init_connector8();
+  init_connector9();
 });
 
 // src/workers/archive-import/start.ts
@@ -154267,71 +155713,6 @@ var init_agent = __esm(() => {
       failed: "It was not imported: {reason}"
     }
   };
-});
-
-// src/workers/archive-import/continuation-cache.ts
-function sameKey(a, b) {
-  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
-}
-
-class ContinuationCache {
-  entries = [];
-  maxEntries;
-  maxBytes;
-  maxIdleMs;
-  now;
-  constructor(options = {}) {
-    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
-    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
-    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
-    this.now = options.now ?? Date.now;
-  }
-  get size() {
-    this.expire();
-    return this.entries.length;
-  }
-  get retainedBytes() {
-    this.expire();
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  put(key2, continuation) {
-    this.expire();
-    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
-    if (continuation.retainedBytes > this.maxBytes)
-      return;
-    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
-    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
-      this.entries.shift();
-  }
-  take(key2, offset) {
-    this.expire();
-    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
-    if (index < 0)
-      return;
-    const [parked] = this.entries.splice(index, 1);
-    return parked.continuation.position === offset ? parked.continuation : undefined;
-  }
-  dropArchive(archiveId) {
-    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
-  }
-  clear() {
-    this.entries = [];
-  }
-  retainedTotal() {
-    return this.entries.reduce((sum2, parked) => sum2 + parked.continuation.retainedBytes, 0);
-  }
-  expire() {
-    const cutoff = this.now() - this.maxIdleMs;
-    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
-      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
-    }
-  }
-}
-var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
-var init_continuation_cache = __esm(() => {
-  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
-  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
-  archiveContinuations = new ContinuationCache;
 });
 
 // src/workers/archive-import/removal.ts
@@ -155014,7 +156395,7 @@ var init_dashboard2 = __esm(() => {
 });
 
 // src/workers/archive-import/sync.ts
-import { createHash as createHash79 } from "node:crypto";
+import { createHash as createHash80 } from "node:crypto";
 function tally(values) {
   return Object.values(values).reduce((total, value2) => total + value2, 0);
 }
@@ -155040,7 +156421,7 @@ function receiptOf(record5, input) {
   };
   return {
     ...withoutDigest,
-    receipt_sha256: createHash79("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
+    receipt_sha256: createHash80("sha256").update(JSON.stringify(withoutDigest)).digest("hex")
   };
 }
 function stopFrom(error2, at) {
@@ -155443,7 +156824,7 @@ var init_open_target2 = __esm(() => {
 });
 
 // src/workers/local-files/volume-identity.ts
-import { createHash as createHash80 } from "node:crypto";
+import { createHash as createHash81 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
 import { existsSync as existsSync74, lstatSync as lstatSync39, readFileSync as readFileSync73, readdirSync as readdirSync16, realpathSync as realpathSync20 } from "node:fs";
 import { homedir as homedir43 } from "node:os";
@@ -155607,7 +156988,7 @@ function labelFor2(mountPoint) {
   return mountPoint.slice(mountPoint.lastIndexOf("/") + 1) || mountPoint;
 }
 function shortHash(value2) {
-  return createHash80("sha256").update(value2).digest("hex").slice(0, 16);
+  return createHash81("sha256").update(value2).digest("hex").slice(0, 16);
 }
 function normalizeNetworkSource(source) {
   return source.trim().toLowerCase().replace(/^\/\/[^@/]*@/, "//").replace(/\/+$/, "");
@@ -156989,7 +158370,7 @@ var init_gmail_scope_browser = __esm(() => {
 });
 
 // src/workers/source-account-guard.ts
-import { createHash as createHash81 } from "node:crypto";
+import { createHash as createHash82 } from "node:crypto";
 function createExclusiveRunner() {
   let tail = Promise.resolve();
   return (task) => {
@@ -157022,7 +158403,7 @@ function createSourceAccountGuard(options) {
   let lastAccessToken;
   const evidenceChecked = new Map;
   const evidenceOpens = async (accessToken, folderIds) => {
-    const key2 = createHash81("sha256").update(`${accessToken}
+    const key2 = createHash82("sha256").update(`${accessToken}
 ${folderIds.join(",")}`).digest("hex");
     const known = evidenceChecked.get(key2);
     if (known !== undefined)
@@ -157053,7 +158434,7 @@ ${folderIds.join(",")}`).digest("hex");
     if (session.kind !== "bearer_token")
       return;
     lastAccessToken = session.token;
-    const key2 = createHash81("sha256").update(session.token).digest("hex");
+    const key2 = createHash82("sha256").update(session.token).digest("hex");
     const known = verified.get(key2);
     if (known)
       return known;
@@ -172832,7 +174213,7 @@ __export(exports_handler, {
   REMOTE_OAUTH_PATHS: () => REMOTE_OAUTH_PATHS,
   CONNECT_BODY_DEADLINE_MS: () => CONNECT_BODY_DEADLINE_MS
 });
-import { createHash as createHash82, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
+import { createHash as createHash83, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual10 } from "node:crypto";
 function isRemoteOAuthRequest(request) {
   return ROUTED_PATHS.has(new URL(request.url).pathname);
 }
@@ -172958,7 +174339,7 @@ function createRemoteOAuthHandler(options) {
       return fail("invalid_target", "This app connects to Olympus at its /mcp address.");
     }
     sweep();
-    const transaction = sha2569(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
+    const transaction = sha25610(JSON.stringify([u.issuer, clientId, redirectUri, codeChallenge, resource, state]));
     if (u.installId && !demo) {
       if ([...completed.values()].some((receipt) => receipt.transaction === transaction && liveReceipt(receipt)))
         return receiptPage(true);
@@ -173004,7 +174385,7 @@ function createRemoteOAuthHandler(options) {
     if (codes.size >= MAX_LIVE_CODES)
       sweep();
     const code = u.installId ? mintCredential("code", u.installId) : randomBytes27(32).toString("base64url");
-    codes.set(sha2569(code), {
+    codes.set(sha25610(code), {
       ...entry.demo ? {} : { receipt: requestId },
       clientId: entry.client.clientId,
       displayName: entry.demo ? demoGrantDisplayName(entry.client.clientName) : entry.client.clientName,
@@ -173183,7 +174564,7 @@ function createRemoteOAuthHandler(options) {
       }
       if (!PKCE_VERIFIER_PATTERN.test(verifier))
         return oauthError(400, "invalid_grant", "The code verifier is malformed.");
-      const hash2 = sha2569(code);
+      const hash2 = sha25610(code);
       const issued = codes.get(hash2);
       if (!issued || issued.expiresAt <= now()) {
         codes.delete(hash2);
@@ -173200,7 +174581,7 @@ function createRemoteOAuthHandler(options) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The authorization code was issued to another client or redirect.");
       }
-      if (!constantTimeEqual(createHash82("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
+      if (!constantTimeEqual(createHash83("sha256").update(verifier).digest("base64url"), issued.codeChallenge)) {
         codes.delete(hash2);
         return oauthError(400, "invalid_grant", "The code verifier does not match the challenge.");
       }
@@ -173466,8 +174847,8 @@ function constantTimeEqual(left, right) {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual10(a, b);
 }
-function sha2569(value2) {
-  return createHash82("sha256").update(value2).digest("hex");
+function sha25610(value2) {
+  return createHash83("sha256").update(value2).digest("hex");
 }
 function redirectWithParams(redirectUri, params) {
   const target = new URL(redirectUri);
@@ -175582,7 +176963,7 @@ __export(exports_remote_openapi, {
   REMOTE_OPENAPI_MAX_BODY_BYTES: () => REMOTE_OPENAPI_MAX_BODY_BYTES,
   REMOTE_OPENAPI_API_VERSION: () => REMOTE_OPENAPI_API_VERSION
 });
-import { createHash as createHash83 } from "node:crypto";
+import { createHash as createHash84 } from "node:crypto";
 function isRemoteOpenApiRequest(request) {
   const { pathname } = new URL(request.url);
   return pathname === REMOTE_OPENAPI_SPEC_PATH || TOOL_PATH_PATTERN.test(pathname);
@@ -175599,7 +176980,7 @@ function createRemoteOpenApiHandler(options) {
     const serverUrl = typeof configured === "function" ? livePublicServerUrl(configured()) : publicServerUrl(configured);
     if (spec?.serverUrl !== serverUrl) {
       const text6 = JSON.stringify(buildRemoteOpenApiSpec({ serverUrl }));
-      spec = { serverUrl, text: text6, etag: `"${createHash83("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
+      spec = { serverUrl, text: text6, etag: `"${createHash84("sha256").update(text6).digest("base64url").slice(0, 27)}"` };
     }
     return spec;
   };
@@ -175975,7 +177356,7 @@ __export(exports_setup_backend, {
   privacyRevision: () => privacyRevision,
   createChatGptSetupBackend: () => createChatGptSetupBackend
 });
-import { createHash as createHash84 } from "node:crypto";
+import { createHash as createHash85 } from "node:crypto";
 function privacyRuleView(rule) {
   if (rule.kind === "sender" && rule.value)
     return [{ kind: "sender", source_id: "gmail.email", value: rule.value }];
@@ -175999,7 +177380,7 @@ function readChatGptPrivacySettings(env, pendingCount) {
 function privacyRevision(profile) {
   if (!profile)
     return "prv1.unset";
-  const digest3 = createHash84("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
+  const digest3 = createHash85("sha256").update(JSON.stringify({ d: profile.description, r: profile.rules })).digest("hex");
   return `prv1.${digest3.slice(0, 32)}`;
 }
 function createChatGptSetupBackend(options) {

@@ -40,14 +40,17 @@ describe('source-family posture and packet contracts', () => {
       ingestMode: 'deferred',
       castorEvidenceForms: ['none'],
     });
-    expect(sourceFamilyPostureRegistry.require('reflect.archive')).toMatchObject({
-      ingestMode: 'archive_import',
-      credentialKinds: ['archive_path'],
-    });
-    expect(sourceFamilyPostureRegistry.require('roam.archive')).toMatchObject({
-      ingestMode: 'archive_import',
-      credentialKinds: ['archive_path'],
-    });
+    // Shipped as archive imports, so working; their resting tier is Private like every imported archive's.
+    for (const sourceId of ['reflect.archive', 'roam.archive']) {
+      expect(sourceFamilyPostureRegistry.require(sourceId)).toMatchObject({
+        status: 'working',
+        ingestMode: 'archive_import',
+        defaultTrustDomain: 'secure_local',
+        defaultTrustTier: 'S4',
+        credentialKinds: ['archive_path'],
+        defaultSensitivity: { trustDomain: 'secure_local', cloudEmbeddingEligible: false },
+      });
+    }
     expect(sourceFamilyPostureRegistry.require('archive.imports')).toMatchObject({
       family: 'email',
       provider: 'mbox',

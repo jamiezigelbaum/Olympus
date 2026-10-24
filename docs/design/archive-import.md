@@ -51,9 +51,13 @@ same way, with the same privacy and the same status.
 | Roam export | Built in step 2 (2026-10-24): "Export All" as JSON (a list of pages with nested blocks, in a `.json` file or a zip), format `roam-json`, `workers/archive-import/roam/`, same engine. The old connector is deleted. Roam's Markdown and EDN exports are not read. |
 
 `source-family.ts` already models this: ingest mode `archive_import`,
-credential kind `archive_path`, custodian `archive_importer`. Reflect and Roam
-are still declared there as `planned` (Personal, S3); `working` would read
-false while their notes are held Private until judged.
+credential kind `archive_path`, custodian `archive_importer`. Mail, Reflect and
+Roam are declared there as `working`, because they are shipped; a posture is
+`planned` only for a source that is not. Their resting tier is Private
+(`secure_local`, S4), the same as `archive.imports`. The Private hold is a
+separate thing from availability: until the private model has judged a note,
+its content stays Private, and after that it takes the tier the judge and the
+person's privacy settings give it (the lane option below).
 
 ## Shape
 
@@ -63,7 +67,7 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Piece | What it is |
 |---|---|
 | Format registry | One registry of archive formats (`core/archive-formats.ts`, pure data like `core/file-scope-sources.ts`). Each entry: format id, label, a `detect(path)` probe, the source family, and a connector factory. Adding a format adds one entry and one thin connector. Nothing downstream branches on format. |
-| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect JSON and Roam JSON by key names in the first bytes of the `.json` file (or of the one JSON member of a zip), the two sets never overlapping; Reflect Markdown by a zip of `.md` files that shows Reflect's hand (Reflect in the file name, a daily-note file name such as `Tue, March 21st, 2023.md`, or a reflect.app link) and holds no JSON, so a Roam Markdown zip is not mistaken for it. No match: say so and list what is supported. Two matches: ask. |
+| Detection | Cheap probes on names and the first bytes, never a full parse: an mbox starts with a `From ` line; Apple Mail's export is a `Name.mbox` folder holding an `mbox` file; WhatsApp is `_chat.txt` or a zip holding one; Telegram Desktop is `result.json` with its export keys; Reflect JSON and Roam JSON by the keys of the records at the start of the `.json` file (or of a JSON member of a zip), never by a word in a note's text: a Reflect note has a body key (`content`, `body`, `document_json`) and a title or date key, a Roam page has a `title` and one of Roam's time or author keys (or `children` with a `uid`), and a file that shows only one key of the kind, or both kinds, is not guessed at (a zip with one JSON file of each is refused too). The keys must show in the first 4 KB, so an export whose first note writes a huge body before its title or date is refused with the supported-formats answer. A zip's other JSON files are not read as that format: they are left out and counted (`section_not_imported`); Reflect Markdown by a zip of `.md` files that shows Reflect's hand (Reflect in the file name, a daily-note file name such as `Tue, March 21st, 2023.md`, or a reflect.app link) and holds no JSON, so a Roam Markdown zip is not mistaken for it. No match: say so and list what is supported. Two matches: ask. |
 | Connectors | Thin `SourceConnector`s (contracts.ts), one per format. Pages honour the `done` / `truncated` rule in contracts.ts. |
 | Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. The old Reflect connector used one constant connector id and the store keyed resume on it; moving Reflect onto the registry (step 2) retired that. |
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
@@ -125,19 +129,37 @@ make its reason true.
   imported as titles alone or reported as errors. Two records with one id
   are two notes: identity includes the record's place in the file.
 - **Dates.** Every item carries `metadata.authoredAt`: the note's own created
-  time, else its edited time, else (Roam and Reflect daily notes) the day in
-  its title, else the day the archive file was saved, which is reported as
-  `note_date_assumed`.
-- **Findings.** `note_empty` (left out), `note_unreadable` (not a note),
-  `note_too_large` (a record over 16 MiB is not read; its place is named),
-  `note_date_assumed`, and the common kinds: `item_truncated` (text over one
+  time, else its edited time, else (Roam and Reflect daily notes, in Reflect's
+  JSON as well as its Markdown) the day in its title, else the day the archive
+  file was saved, which is reported as `note_date_assumed`.
+- **Bodies and front matter.** A Reflect body is flattened only when it is
+  positively an editor document; text that merely looks like JSON
+  (`{"budget":100}`) is the note, kept as written. A Markdown file's leading
+  `---` block is front matter only when every line is a `key: value` pair,
+  list item or comment and a key is one Reflect writes (title, dates, tags,
+  id); any other text between two rules stays in the note.
+- **Findings.** `note_empty` (left out: the body is there and empty, or there
+  is none), `note_unreadable` (not a note), `note_too_large` (a record over
+  16 MiB is not read; its place is named), `note_content_unsupported` (a body,
+  editor node or block of a kind Olympus has no rule for: the rest of the note
+  is imported, and a note with nothing else is left out; this is never
+  reported as `note_empty`; the same idea as Telegram's
+  `message_content_unsupported`), `note_date_assumed`, and the common kinds: `item_truncated` (text over one
   million characters keeps its start), `media_not_imported` (other files in a
   zip), `file_damaged` (bad checksum, cut-short JSON), `section_not_imported`
-  (a Roam document that is not a list of pages).
+  (a JSON document without the list its notes would be in, or with another
+  kind of value there; a Roam document that is not a list of pages; a JSON
+  file in a zip that is not this format's).
 - **Streaming.** Records are read one at a time from the JSON stream, a zip
   member through streaming inflate; a page boundary keeps the byte offset,
   the member's running checksum and the JSON reader's resume point, and a
   deflated member's inflater is parked between pages. No whole-file read.
+- **Bounds.** The listing's byte budget is held at every record and every
+  Markdown member, not after a whole file; the first record of a listing is
+  always read, so a listing always moves on. Whether the import is still
+  wanted is asked before each record and with every chunk read, so a huge
+  record or Markdown member does not outlast a removal: a stop part-way
+  through a record is resumed from the last whole one.
 
 What is known about the real exports. Confirmed from the apps' documentation
 and community write-ups: Reflect exports to JSON, CSV, Markdown (zip) and HTML
