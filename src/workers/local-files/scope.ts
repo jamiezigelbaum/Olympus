@@ -14,8 +14,8 @@
  *  4. Otherwise the path needs an `ingest` selection above it (or "whole
  *     computer").
  *
- * Before all of them: the data owner lock is never listed or read, whatever
- * the person selected (see `decideLocalFilesPath`).
+ * Before all of them: the data owner lock file is never listed or read,
+ * whatever the person selected (see `decideLocalFilesPath`).
  */
 import { isDataOwnerLockName } from '../../core/data-owner-lock.ts';
 import type { SourceIngestionPolicy } from '../../core/source-ingestion-policy.ts';
@@ -68,8 +68,8 @@ export function decideLocalFilesPath(
   const path = normalizeScopePath(scopePath);
   // The data owner lock (core/data-owner-lock.ts) sits in Olympus's own data
   // folder, which a whole-computer pass reaches on a standalone Linux install.
-  // This process may hold that lock, and reading the file would close a
-  // descriptor on it and drop the lock, so it is denied outright.
+  // Reading it is harmless to the lock (flock is per descriptor), but it is
+  // Olympus's own file, not the person's, so it is never indexed.
   if (isDataOwnerLockName(path.slice(path.lastIndexOf('/') + 1))) return 'denied';
   const selected = approval.selections
     .map((selection) => ({ key: safeKey(selection.key), state: selection.state }))

@@ -18054,9 +18054,12 @@ var init_dropbox_files = __esm(() => {
 });
 
 // src/core/data-owner-lock.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire3, O_CLOEXEC;
 var init_data_owner_lock = __esm(() => {
-  init_file_lease();
   init_olympus_layout();
+  runtimeRequire3 = createRequire4(import.meta.url);
+  O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
 });
 
 // src/workers/local-files/paths.ts
@@ -18554,10 +18557,10 @@ var init_store2 = __esm(() => {
 });
 
 // src/core/scope-safe-fs.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
+import { createRequire as createRequire5 } from "node:module";
+var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
 var init_scope_safe_fs = __esm(() => {
-  runtimeRequire3 = createRequire4(import.meta.url);
+  runtimeRequire4 = createRequire5(import.meta.url);
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 

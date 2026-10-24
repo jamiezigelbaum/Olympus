@@ -123,32 +123,6 @@ export function withFileLeaseSync<T>(
 }
 
 /**
- * A lease taken for a long time, not for one callback: the holder keeps it
- * until `release()`, or until its process dies, whichever comes first. Same
- * kernel lock and guarantees as `withFileLeaseSync`. The holder must keep
- * the object referenced for as long as it means to hold the lease.
- */
-export interface HeldFileLease {
-  readonly targetPath: string;
-  readonly lockPath: string;
-  release(): void;
-}
-
-/**
- * Take the lease on `targetPath` and hold it. Throws `FileLeaseBusyError`
- * when another holder keeps it past `acquireTimeoutMs`. The one user is the
- * data owner lock (data-owner-lock.ts), held for the life of a process.
- */
-export function holdFileLeaseSync(targetPath: string, options: FileLeaseOptions = {}): HeldFileLease {
-  const owner = acquireFileLeaseSync(targetPath, normalizeOptions(options));
-  return {
-    targetPath: owner.targetPath,
-    lockPath: owner.lockPath,
-    release: () => owner.release(),
-  };
-}
-
-/**
  * True when `name` is one of the files a lease on `target` keeps beside it: the
  * lock database and SQLite's journal for it, or the `.lock` / `.lock.commit`
  * files engines from before the kernel lock left behind. Inventories that must

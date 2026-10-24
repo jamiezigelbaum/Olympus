@@ -93,7 +93,7 @@ Inside the data root:
 ```
 <data>/
   registry.json                  the account registry (below)
-  data-owner.lock.db             the owner lock (never removed, even by Delete all)
+  data-owner.lock                the owner lock (never removed, even by Delete all)
   sources/<source_id>/<slot>/
     stores/<tier>.sqlite         one per trust tier, sidecars beside it
     raw/                         spools, watch snapshots, capture cursors
@@ -199,17 +199,18 @@ that opens files inside an account folder:
 - Search keeps reading disconnected accounts' stores ("Disconnected ·
   indexed data kept"), because they stay `active` until deleted.
 
-**Owner lock.** The worker takes an exclusive kernel lock
-(`file-lease.ts`'s `BEGIN EXCLUSIVE`, released by the kernel on death) on
-`<data>/data-owner.lock.db` for its lifetime (lease target `data-owner`;
-`src/core/data-owner-lock.ts`). The lock sits in the data root
+**Owner lock.** The worker takes an exclusive kernel lock (`flock(2)` on
+`<data>/data-owner.lock`, released by the kernel on death;
+`src/core/data-owner-lock.ts`) for its lifetime. The lock sits in the data root
 itself, not the state root, so any two processes that resolve the same data
 root contend on the same lock even with different `XDG_STATE_HOME` values;
 it is outside every directory that Delete or Delete all removes, so its
-inode never changes while held. Closing any descriptor a process has on a
-file drops all of that process's locks on it, so no code in a lock-holding
-process opens the lock file apart from the lease: walkers of the data root
-skip it (`isDataOwnerLockName`). Every other opener of a store:
+inode never changes while held. `flock` belongs to the descriptor that took
+it, so a walker or file probe that opens and closes the lock file in the
+holding process leaves it held (a POSIX `fcntl` lock, file-lease's, would be
+dropped); the descriptor is close-on-exec, so a child never keeps it. Walkers
+still leave the file alone (`isDataOwnerLockName`). Every other opener of a
+store:
 
 | Opener | After this change |
 |---|---|
@@ -289,7 +290,7 @@ outside it to find and nobody else to fence.
 **Delete all** (`data delete --all`) removes the data root's `sources/`,
 `shared/`, `.trash/`, `media-cache/`, the registry and the known legacy
 leftovers (below), under the owner lock, with the engine stopped as today.
-It never removes `data-owner.lock.db`; uninstall removes it last, after
+It never removes `data-owner.lock`; uninstall removes it last, after
 everything else.
 
 ## Export and uninstall

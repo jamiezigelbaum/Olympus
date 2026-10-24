@@ -72,10 +72,10 @@ function seedStore(path: string): void {
   db.close();
 }
 
-/** The folder holds the lock file and nothing but SQLite's journal names for it. */
+/** The folder holds the lock file and nothing else. */
 function onlyTheLock(root: string): boolean {
   const names = readdirSync(root);
-  return names.includes('data-owner.lock.db') && names.every(isDataOwnerLockName);
+  return names.length === 1 && isDataOwnerLockName(names[0]!);
 }
 
 function everyFile(root: string): string[] {
@@ -86,7 +86,7 @@ function everyFile(root: string): string[] {
 }
 
 describe('export while this process holds the lock', () => {
-  test('leaves the lock held, and does not copy the lock file or its journals', async () => {
+  test('leaves the lock held, and does not copy the lock file', async () => {
     const { dir, homeDir, env } = fixture();
     const lock = holdDataOwnerLock(env);
     held.push(lock);
@@ -142,10 +142,9 @@ describe('delete all while this process holds the lock', () => {
     const result = deleteOlympusData({ all: true, homeDir, env });
 
     expect(result.removed).toContain(dataRoot);
-    // Everything else in the data root is gone; what is left is the lock file and
-    // the journal SQLite keeps beside it while the lock is held.
+    // Everything else in the data root is gone; what is left is the lock file.
     expect(onlyTheLock(dataRoot)).toBe(true);
-    expect(dataOwnerLockPath(env)).toBe(join(dataRoot, 'data-owner.lock.db'));
+    expect(dataOwnerLockPath(env)).toBe(join(dataRoot, 'data-owner.lock'));
     expect(statSync(lock.lockPath).isFile()).toBe(true);
     expect(await otherProcessSees(env)).toBe('BUSY');
 
@@ -172,18 +171,16 @@ describe('delete all while this process holds the lock', () => {
     holdDataOwnerLock(env).release();
     writeFileSync(join(dataRoot, 'registry.json'), '{}');
     deleteOlympusData({ all: true, homeDir, env });
-    expect(readdirSync(dataRoot)).toEqual(['data-owner.lock.db']);
+    expect(readdirSync(dataRoot)).toEqual(['data-owner.lock']);
   });
 });
 
 describe('the whole-computer file index', () => {
-  test('never lists or reads the lock file or its journals, whatever was selected', () => {
+  test('never lists or reads the lock file, whatever was selected', () => {
     const context = { home: '/home/jo', syncedRoots: [], platform: 'linux' } as const;
     const everything = { wholeAccount: true, selections: [{ key: '/', state: 'ingest' as const }] };
     const lockDirectory = '/home/jo/.local/share/olympus';
-    for (const name of ['data-owner.lock.db', 'data-owner.lock.db-journal', 'data-owner.lock.db-wal', 'data-owner.lock.db-shm']) {
-      expect(decideLocalFilesPath(everything, `${lockDirectory}/${name}`, context), name).toBe('denied');
-    }
+    expect(decideLocalFilesPath(everything, `${lockDirectory}/data-owner.lock`, context)).toBe('denied');
     // Its neighbours are decided as before.
     expect(decideLocalFilesPath(everything, `${lockDirectory}/notes.txt`, context)).toBe('content');
     expect(decideLocalFilesPath(everything, '/home/jo/Documents/data-owner.txt', context)).toBe('content');

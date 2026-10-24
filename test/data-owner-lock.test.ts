@@ -11,7 +11,6 @@ import {
   DataOwnerBusyError,
   STOP_OLYMPUS_HINT,
   dataOwnerLockPath,
-  dataOwnerLockTarget,
   holdDataOwnerLock,
   isDataOwnerLockName,
   takeWorkerDataOwnerLock,
@@ -51,8 +50,7 @@ async function startHolder(env: Record<string, string>, holdMs?: number) {
   const script = join(dir, 'holder.mts');
   await Bun.write(script, `
 import { holdDataOwnerLock } from ${JSON.stringify(MODULE)};
-// Held in module state, as the worker does: a handle nothing references is
-// collected, which closes its connection and lets go of the lock.
+// Held in module state, as the worker does, and kept across collections.
 globalThis.heldDataOwnerLock = holdDataOwnerLock(process.env);
 for (let round = 0; round < 3; round += 1) { Bun.gc(true); await Bun.sleep(100); }
 process.stdout.write('HELD\\n');
@@ -71,11 +69,10 @@ ${holdMs === undefined ? 'setInterval(() => {}, 1000);' : `setTimeout(() => proc
 }
 
 describe('where the lock lives', () => {
-  test('in the data root that XDG_DATA_HOME resolves, as data-owner.lock.db', () => {
+  test('in the data root that XDG_DATA_HOME resolves, as data-owner.lock', () => {
     const env = isolatedEnv();
     expect(olympusDataRoot(env)).toBe(join(env.XDG_DATA_HOME!, 'openclaw', 'olympus'));
-    expect(dataOwnerLockTarget(env)).toBe(join(olympusDataRoot(env), 'data-owner'));
-    expect(dataOwnerLockPath(env)).toBe(join(olympusDataRoot(env), 'data-owner.lock.db'));
+    expect(dataOwnerLockPath(env)).toBe(join(olympusDataRoot(env), 'data-owner.lock'));
     expect(existsSync(dataOwnerLockPath(env))).toBe(false);
 
     const lock = holdDataOwnerLock(env);
@@ -90,11 +87,9 @@ describe('where the lock lives', () => {
     expect(existsSync(dataOwnerLockPath(env))).toBe(true);
   });
 
-  test('walkers recognise the lock file and the journal files SQLite keeps beside it, and nothing else', () => {
-    for (const name of ['data-owner.lock.db', 'data-owner.lock.db-journal', 'data-owner.lock.db-wal', 'data-owner.lock.db-shm']) {
-      expect(isDataOwnerLockName(name), name).toBe(true);
-    }
-    for (const name of ['data-owner', 'data-owner.json', 'registry.json', 'registry.json.lock.db', 'other.lock.db']) {
+  test('walkers recognise the lock file, and nothing else', () => {
+    expect(isDataOwnerLockName('data-owner.lock')).toBe(true);
+    for (const name of ['data-owner', 'data-owner.lock.db', 'data-owner.json', 'registry.json', 'registry.json.lock.db', 'other.lock']) {
       expect(isDataOwnerLockName(name), name).toBe(false);
     }
   });
@@ -133,6 +128,68 @@ describe('a lock held by another process', () => {
     // Nothing is cleaned up by hand: the kernel let go with the process.
     const lock = holdDataOwnerLock(env);
     lock.release();
+  }, 20_000);
+
+  test('stays held while the holding process opens, reads and closes the lock file elsewhere', async () => {
+    const env = isolatedEnv();
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-owner-walker-'));
+    roots.push(dir);
+    const script = join(dir, 'walker.mts');
+    // The walker cases a POSIX fcntl lock loses: a file probe, a stat that
+    // opens, a read, all in the process that holds the lock.
+    await Bun.write(script, `
+import { closeSync, openSync, readFileSync } from 'node:fs';
+import { dataOwnerLockPath, holdDataOwnerLock } from ${JSON.stringify(MODULE)};
+globalThis.heldDataOwnerLock = holdDataOwnerLock(process.env);
+const path = dataOwnerLockPath(process.env);
+closeSync(openSync(path, 'r'));
+readFileSync(path);
+await Bun.file(path).arrayBuffer();
+process.stdout.write('HELD\\n');
+setInterval(() => {}, 1000);
+`);
+    const child = Bun.spawn([process.execPath, script], { env, stdout: 'pipe', stderr: 'pipe' });
+    children.push(child);
+    const reader = child.stdout.getReader();
+    let seen = '';
+    while (!seen.includes('HELD')) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`walker exited: ${await new Response(child.stderr).text()}`);
+      seen += new TextDecoder().decode(value);
+    }
+    expect(() => holdDataOwnerLock(env)).toThrow(DataOwnerBusyError);
+  }, 20_000);
+
+  test('is not kept by a child the holder started, once the holder is killed', async () => {
+    const env = isolatedEnv();
+    const dir = mkdtempSync(join(tmpdir(), 'olympus-owner-parent-'));
+    roots.push(dir);
+    const script = join(dir, 'parent.mts');
+    await Bun.write(script, `
+import { holdDataOwnerLock } from ${JSON.stringify(MODULE)};
+globalThis.heldDataOwnerLock = holdDataOwnerLock(process.env);
+const child = Bun.spawn(['sleep', '30'], { stdio: ['ignore', 'ignore', 'ignore'] });
+process.stdout.write('HELD ' + child.pid + '\\n');
+setInterval(() => {}, 1000);
+`);
+    const parent = Bun.spawn([process.execPath, script], { env, stdout: 'pipe', stderr: 'pipe' });
+    children.push(parent);
+    const reader = parent.stdout.getReader();
+    let seen = '';
+    while (!seen.includes('\n')) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`parent exited: ${await new Response(parent.stderr).text()}`);
+      seen += new TextDecoder().decode(value);
+    }
+    const grandchild = Number(/HELD (\d+)/.exec(seen)?.[1]);
+    children.push({ kill: () => process.kill(grandchild, 'SIGKILL') });
+    expect(() => holdDataOwnerLock(env)).toThrow(DataOwnerBusyError);
+
+    parent.kill('SIGKILL');
+    await parent.exited;
+    // The child still runs; the lock went with the process that took it.
+    expect(() => process.kill(grandchild, 0)).not.toThrow();
+    holdDataOwnerLock(env).release();
   }, 20_000);
 
   test('tryDataOwnerLock answers undefined while it is held, and a handle once it is free', async () => {

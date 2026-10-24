@@ -7,23 +7,37 @@
  * for its run, so it refuses with a clear message while Olympus runs and the
  * worker cannot start under it.
  *
- * It is the file-lease kernel lock (`file-lease.ts`) on `<data>/data-owner`,
- * whose lock database is `<data>/data-owner.lock.db`. The lock sits in the data
- * root itself, so two processes that resolve the same data root contend on it
- * whatever their state or config folders are. Nothing may remove it while a
- * process holds it, and no code in a process that holds it may open that file
- * apart from the lease: closing any descriptor a process has on a file drops
- * all of that process's POSIX locks on it. Walkers of the data root skip it
- * with `isDataOwnerLockName`.
+ * It is a `flock(2)` exclusive lock on `<data>/data-owner.lock`, through
+ * `bun:ffi` to libc. The lock sits in the data root itself, so two processes
+ * that resolve the same data root contend on it whatever their state or
+ * config folders are. `flock` belongs to the one descriptor that took it, not
+ * to the process: another open and close of the file anywhere in the holding
+ * process (a walker of the data root, a file probe) leaves it held, which a
+ * POSIX `fcntl` lock such as file-lease's would not. A second take in the same
+ * process is refused like any other. The descriptor is close-on-exec, so a
+ * child never keeps the lock after its parent dies; the kernel drops it when
+ * the holder exits, SIGKILL included. Nothing may remove or replace the file
+ * while a process holds it: a new file would be a different lock.
  *
- * Deliberately light (layout and file-lease only): the CLI, the scripts and
- * the file-scope decider import it.
+ * Deliberately light (layout and node:fs only, `bun:ffi` loaded on first
+ * take): the CLI, the scripts and the file-scope decider import it.
  */
-import { FileLeaseBusyError, holdFileLeaseSync, isFileLeaseSidecarName, type HeldFileLease } from './file-lease.ts';
+import { closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname } from 'node:path';
 import { olympusDataRoot, olympusDataPath, type LayoutEnv } from './olympus-layout.ts';
 
-/** The lease target, relative to the data root; the lease appends `.lock.db`. */
-const OWNER_LOCK_TARGET = 'data-owner';
+const runtimeRequire = createRequire(import.meta.url);
+
+/** The lock file, in the data root. */
+const OWNER_LOCK_NAME = 'data-owner.lock';
+
+// <sys/file.h>: the same values on Linux and macOS.
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+const LOCK_UN = 8;
+// open(2)'s O_CLOEXEC, which node:fs does not export.
+const O_CLOEXEC = process.platform === 'darwin' ? 0x0100_0000 : 0o200_0000;
 
 /** How the owner stops Olympus, named in every refusal. */
 export const STOP_OLYMPUS_HINT = 'olympus engine stop, or olympus worker stop if it runs as a worker service, or stop the OpenClaw Gateway that hosts it';
@@ -46,7 +60,7 @@ export class DataOwnerBusyError extends Error {
 export interface HeldDataOwnerLock {
   /** The data root this lock owns. */
   readonly root: string;
-  /** The lock database: never open it, copy it or remove it while it is held. */
+  /** The lock file: never remove or replace it while it is held. */
   readonly lockPath: string;
   release(): void;
 }
@@ -56,38 +70,73 @@ export interface DataOwnerLockOptions {
   waitMs?: number;
 }
 
-/** The lease target for the data root `env` resolves. */
-export function dataOwnerLockTarget(env: LayoutEnv = process.env): string {
-  return olympusDataPath(env, OWNER_LOCK_TARGET);
-}
-
-/** The lock file itself, `<data>/data-owner.lock.db`. */
+/** The lock file itself, `<data>/data-owner.lock`. */
 export function dataOwnerLockPath(env: LayoutEnv = process.env): string {
-  return `${dataOwnerLockTarget(env)}.lock.db`;
+  return olympusDataPath(env, OWNER_LOCK_NAME);
 }
 
-/**
- * Whether `name` (a file name, not a path) is the owner lock or one of the
- * journal files SQLite keeps beside it. Walkers of the data root skip these.
- */
+/** Whether `name` (a file name, not a path) is the owner lock. */
 export function isDataOwnerLockName(name: string): boolean {
-  return isFileLeaseSidecarName(OWNER_LOCK_TARGET, name);
+  return name === OWNER_LOCK_NAME;
 }
 
 /** Take the lock and hold it until `release()` or the process dies. Throws `DataOwnerBusyError`. */
 export function holdDataOwnerLock(env: LayoutEnv = process.env, options: DataOwnerLockOptions = {}): HeldDataOwnerLock {
-  const waitMs = Math.max(0, options.waitMs ?? 0);
-  let lease: HeldFileLease;
+  const lockPath = dataOwnerLockPath(env);
+  const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
+  if (!existsSync(dirname(lockPath))) mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  while (true) {
+    const fd = tryFlock(lockPath);
+    if (fd !== undefined) {
+      let held = true;
+      return {
+        root: olympusDataRoot(env),
+        lockPath,
+        release() {
+          if (!held) return;
+          held = false;
+          flockLibrary().flock(fd, LOCK_UN);
+          closeSync(fd);
+        },
+      };
+    }
+    if (Date.now() >= deadline) throw new DataOwnerBusyError(olympusDataRoot(env));
+    sleepSync(25);
+  }
+}
+
+/** One attempt: the descriptor holding the lock, or undefined when another holder has it. */
+function tryFlock(lockPath: string): number | undefined {
+  const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT | O_CLOEXEC, 0o600);
   try {
-    lease = holdFileLeaseSync(dataOwnerLockTarget(env), {
-      acquireTimeoutMs: Math.max(1, waitMs),
-      pollIntervalMs: Math.min(25, Math.max(1, waitMs)),
-    });
+    if (flockLibrary().flock(fd, LOCK_EX | LOCK_NB) === 0) return fd;
   } catch (error) {
-    if (error instanceof FileLeaseBusyError) throw new DataOwnerBusyError(olympusDataRoot(env));
+    closeSync(fd);
     throw error;
   }
-  return { root: olympusDataRoot(env), lockPath: lease.lockPath, release: () => lease.release() };
+  // Closing this descriptor leaves the holder's lock alone: flock is per descriptor.
+  closeSync(fd);
+  return undefined;
+}
+
+interface FlockLibrary {
+  flock(fd: number, operation: number): number;
+}
+
+let library: FlockLibrary | undefined;
+
+function flockLibrary(): FlockLibrary {
+  if (library) return library;
+  const { dlopen, FFIType } = runtimeRequire('bun:ffi') as typeof import('bun:ffi');
+  const path = process.platform === 'darwin'
+    ? '/usr/lib/libSystem.B.dylib'
+    : ['/usr/lib/libc.so.6', '/lib/x86_64-linux-gnu/libc.so.6', '/lib/aarch64-linux-gnu/libc.so.6', '/lib64/libc.so.6'].find(existsSync) ?? 'libc.so.6';
+  library = dlopen(path, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } }).symbols as unknown as FlockLibrary;
+  return library;
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /** The lock, or `undefined` when its owner is running. Other failures throw. */
