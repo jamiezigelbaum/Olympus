@@ -1,4 +1,5 @@
 import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type {
@@ -906,24 +907,15 @@ function internalDateNumber(metadata: Readonly<Record<string, unknown>>): number
 }
 
 export function defaultGmailConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GMAIL_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, 'gmail-connector-store.sqlite');
+  return resolvedStorePath(GMAIL_SOURCE_ID, 'internal', env);
 }
 
 export function defaultGmailSecureConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, 'gmail-secure-connector-store.sqlite');
+  return resolvedStorePath(GMAIL_SOURCE_ID, 'secure_local', env);
 }
 
 export function defaultGmailPublicConnectorStoreDbPath(env: Record<string, string | undefined> = process.env): string {
-  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, 'gmail-public-connector-store.sqlite');
+  return resolvedStorePath(GMAIL_SOURCE_ID, 'public_safe', env);
 }
 
 class RestGmailApiClient implements GmailApiClient {

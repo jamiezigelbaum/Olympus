@@ -22,8 +22,10 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
+import type { LayoutEnv } from '../../core/olympus-layout.ts';
+import { recordAccountPlacement } from '../../core/source-storage.ts';
 import { archiveManifestSha256 } from './manifest.ts';
-import { ArchiveRecordFormError, isArchiveId, type NewArchiveImportRecord } from './state.ts';
+import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, isArchiveId, type NewArchiveImportRecord } from './state.ts';
 
 /**
  * Requests an agent may leave waiting at once; one more is refused until the person answers.
@@ -118,7 +120,9 @@ function validApprovedFile(value: unknown): boolean {
     && typeof value.dev === 'string' && typeof value.ino === 'string'
     && Number.isSafeInteger(value.size) && typeof value.mtime_ms === 'number' && Number.isFinite(value.mtime_ms)
     && isRecord(value.fingerprint)
-    && typeof value.fingerprint.head_sha256 === 'string' && typeof value.fingerprint.tail_sha256 === 'string';
+    && typeof value.fingerprint.head_sha256 === 'string' && typeof value.fingerprint.tail_sha256 === 'string'
+    && (value.members === undefined
+      || (isRecord(value.members) && Number.isSafeInteger(value.members.count) && typeof value.members.sha256 === 'string'));
 }
 
 function validApproval(value: unknown): value is ArchiveImportApproval {
@@ -128,6 +132,8 @@ function validApproval(value: unknown): value is ArchiveImportApproval {
     && typeof value.root_identity.dev === 'string' && typeof value.root_identity.ino === 'string'
     && typeof value.chosen_rel_path === 'string'
     && value.files.every(validApprovedFile)
+    && (value.skipped === undefined
+      || (isRecord(value.skipped) && Object.values(value.skipped).every((count) => Number.isSafeInteger(count) && (count as number) > 0)))
     && value.manifest_sha256 === archiveManifestSha256(value.files as ArchiveImportApproval['files']);
 }
 
@@ -178,10 +184,13 @@ export function archivePathLabel(path: string): string {
 export class ArchiveImportRequestStore {
   readonly path: string;
   private readonly now: () => Date;
+  private readonly env: LayoutEnv;
 
-  constructor(options: { path: string; now?: () => Date }) {
+  // `env` is the one the path was resolved in; it decides where the account's placement is recorded.
+  constructor(options: { path: string; now?: () => Date; env?: LayoutEnv }) {
     this.path = options.path;
     this.now = options.now ?? (() => new Date());
+    this.env = options.env ?? process.env;
   }
 
   list(): ArchiveImportRequest[] {
@@ -343,6 +352,8 @@ export class ArchiveImportRequestStore {
   }
 
   private mutate(change: (state: PersistedRequests) => boolean | void): void {
+    // A request can be the account's first file, with no store opened yet.
+    recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, this.path, this.env);
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readRequests(this.path);

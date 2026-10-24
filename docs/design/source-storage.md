@@ -1,7 +1,7 @@
 # Source storage
 
 Status: approved by the owner 2026-10-24 (decisions 1–5 below); delivery in
-progress. Replaces the storage half of the Delete work in #455/#467 (#467
+progress (steps 1–3 and 4a done). Replaces the storage half of the Delete work in #455/#467 (#467
 frozen 2026-10-24). This page covers storage only: where each account's
 files live, who opens them, and the storage operations that Delete, Export,
 uninstall and ingestion call. The Delete feature itself (dashboard states,
@@ -96,9 +96,11 @@ Inside the data root:
   data-owner.lock                the owner lock (never removed, even by Delete all)
   sources/<source_id>/<slot>/
     stores/<tier>.sqlite         one per trust tier, sidecars beside it
-    raw/                         spools, watch snapshots, capture cursors
+                                 (archive imports: stores/<family>.<tier>.sqlite)
+    raw/                         spools, watch snapshots, capture cursors,
+                                 X's reconcile state (raw/x-reconcile.sqlite)
     session/                     pairing sessions (WhatsApp session.db, Telegram .session)
-    settings/                    per-account choices (folder scopes, ingestion policy)
+    settings/                    reserved; unused (see below)
   shared/                        shared files (dashboard, scheduler, jobs, ledgers)
   media-cache/                   content-addressed, holders keyed by account
   models/, engine/, connect-relay/   unchanged
@@ -114,10 +116,31 @@ Inside the data root:
 - Credentials stay in the secret store (Keychain, libsecret or
   `secrets.enc`); `handles.json` keeps only references. Disconnect already
   removes both.
-- One data-root override (`OLYMPUS_DATA_DIR`) remains for tests and
-  development. The per-store `OLYMPUS_SOURCE_INDEX_*_DB_PATH` overrides and
-  `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON` path fields go away (owner
-  decision 3).
+- There is no `OLYMPUS_DATA_DIR`: the data root follows the standalone Linux
+  receipt, else `XDG_DATA_HOME` (`olympus-layout.ts`), and tests isolate
+  themselves with a throwaway HOME. The per-store `OLYMPUS_SOURCE_INDEX_*_DB_PATH`
+  overrides and `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON` path fields go
+  away (owner decision 3). Until step 6 deletes them, an override or a mount
+  that names an account's files pins that account to `legacy`, and a `folder`
+  account never honors one.
+- **Settings stay in the shared config files** (`file-source-scopes.json`,
+  `mail-source-scopes.json`, `this-computer.json`, `source-account-bindings.json`
+  and the Dropbox ingestion policy). Several sources share one file, so they
+  cannot move by rename; the forget steps already handle them, and
+  `settings/` stays unused. Export names them as it does today.
+- **The X usage ledger stays shared.** It is the quota ledger, kept when X is
+  deleted, so it stays in the data root; only X's reconcile state is
+  per-account (`raw/x-reconcile.sqlite`). The request budgets stay shared too.
+- **Messaging, Reflect and Roam stay legacy for now.** Telegram and WhatsApp
+  capture run in separate processes that name their paths, so they keep
+  their legacy paths until steps 4b and 4d; Reflect and Roam name theirs
+  through JSON mounts.
+- **Gateway-run capture stays legacy after 4d too.** In OpenClaw-hosted mode
+  the Gateway runs the capture services, and the worker can neither stop nor
+  coordinate them, so an account whose capture the Gateway owns, or whose
+  path a plugin-config setting pins, is never moved. Moving those would need
+  a Gateway-level step (run the move before the Gateway starts capture, or
+  have the worker ask it to stop), which is not planned.
 
 ## Registry
 
@@ -126,7 +149,7 @@ Inside the data root:
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "accounts": [
     {
       "source_id": "dropbox.files",
@@ -147,11 +170,35 @@ Inside the data root:
   an unknown schema or lists an account twice is never read as empty: every
   open refuses until it is repaired, since it may hold a delete marker
   (`src/core/source-registry.ts`).
+- **The schema is 1 while every entry is `legacy`, and 2 from the first
+  `folder` entry** (the file is written as 2 whenever any account is a folder).
+  A build that only knows schema 1 (step 3) then reads the file as unreadable
+  and opens nothing, instead of ignoring `layout` and creating empty stores at
+  the legacy paths beside the data in the folder. An install with no folder
+  account keeps a schema-1 file.
 - `layout` is `legacy` (files still at today's paths, as step 2 adopts
   existing accounts) or `folder` (inside `sources/<source_id>/<slot>/`).
   Whether an account exists and where its files are are tracked apart: the
   storage service resolves an account's paths from `layout`, and migration
   selects on it.
+- **Placement of a new account (4a).** An account with no entry is recorded
+  `folder` only if nothing says it lives elsewhere: its source has a folder
+  layout, no env override or connector-store mount names its files, no file of
+  it exists at any legacy location (stores, tier sidecars, `-wal`/`-shm`, raw
+  state; lock files do not count), and every legacy location can be looked at
+  (an unreadable folder or a dangling link places it `legacy`). The decision is
+  a pure function of the registry, the file system and the environment
+  (`core/source-placement.ts`), so the worker, the CLI and scripts reach the
+  same answer before the entry exists; only the worker, which holds the owner
+  lock, records it, before the account's first file is created, whichever file
+  that is: a store, a tier sidecar opened ahead of its stores, or raw state
+  written with no store open (an archive import request, the X reconcile
+  state, the local files watch folder; `recordAccountPlacement`). Recording
+  is the worker's alone: the CLI, which holds the owner lock only while the
+  worker is down, writes no first file of an account (a tier command opens only
+  lanes whose stores exist), so it records nothing and adoption stays off for
+  it. A registry that cannot be read resolves to the folder when one is
+  on disk, else to the legacy paths: nothing opens until it is repaired.
 - The registry is the only list of accounts. Export, Delete, uninstall,
   `ingestion status`, the tier commands, the dashboard and the scheduler
   read it; `lifecycleSourceSpecs`, `localConnectorStores` and the tier
@@ -234,25 +281,51 @@ shrinks.
 
 ## Shared files
 
-Each shared file is either listed as holding no per-source data, or
-registers one forget step `forget({ source_id, slot, corpus_ids })` in
-`src/core/source-forget-registry.ts`. A test fails when a module opens a
-shared SQLite file without one of the two.
+Each shared file is either listed as holding no per-source data
+(`KEPT_SHARED_FILES`, with the reason) or has one forget step in
+`src/core/source-forget-registry.ts` (`FORGET_STEPS`). A step is
+`forget({ source_id, slot, corpus_ids }, context, { dryRun })`: its logic
+lives in the module that owns the file, and the registry lists the steps and
+`runForgetSteps` runs them in order, stopping at the first failure with an
+error that names the step and the file. Each step is idempotent, runs in its
+own transaction (SQLite) or atomic write (JSON), counts without writing on a
+dry run, and does nothing for a file that is not there. The account's
+`corpus_ids` are the registry entry's joined with the shipped corpus
+registry's for the source and its aliases. A test fails when a module opens a
+shared SQLite file without owning a step or a kept entry, or when a step or
+kept entry names a module that no longer opens one
+(`test/store-open-guard.test.ts`).
 
-| File | Per-source key | Plan |
+| File | Per-source key | Step id, or why kept |
 |---|---|---|
-| `source-dashboard.sqlite` | `source_id`, `corpus_id` | forget step |
-| `source-scheduler.sqlite` | `(source_id, corpus_id, task_id)` | forget step |
-| `file-extraction-jobs.sqlite` | `corpus_id`, `account_scope`; holds file **names** | forget step (names are item data, principle 3); later candidate to move into the account folder |
-| `waiting-private-questions.sqlite` | results' `corpusId`, provenance | forget step (`deleteForCorpora`, `deleteForAccountScope` exist) |
-| `source-watches.sqlite` | `corpus_id` | forget step |
-| `source-ingestion-doctor-state.json` | `sources[source_id]` | forget step |
+| `waiting-private-questions.sqlite` | results' `corpusId`, provenance | `waiting-private-questions`, first: answers go before anything they depend on |
+| `source-dashboard.sqlite` (with the ingestion ledger's tables) | `source_id`, ledger id, `corpus_id` | `source-dashboard` |
+| `source-scheduler.sqlite` | `(source_id, corpus_id, task_id)` | `source-scheduler` |
+| `file-extraction-jobs.sqlite` | `corpus_id`; holds file **names**; Secrets redaction claims keyed by the source's tier-ledger id | `file-extraction-jobs` (names are item data, principle 3): jobs, artifacts, re-reads, and the claims of the source's tier ledgers with each redaction no other ledger claims (the ids are read from the ledger files before they go; an unreadable ledger keeps its claims and is reported); later candidate to move into the account folder |
+| `source-watches.sqlite` | `corpus_id` | `source-watches` |
+| `source-ingestion-doctor-state.json` | `sources[ledger id]` | `ingestion-doctor-state` |
+| `tier-migration/reports/*.json` | `topPatterns[].source`; hold the owner's folder paths, senders, chat keys | `tier-migration-reports` (found by the sweep) |
+| `tier-migration/state.json` | `plans[].lanes[].sourceId`; `plans[].batches[].selector` holds the owner's raw selectors | `tier-migration-state`: in every plan with the source as a lane, each selector but `source:` becomes `<kind>:<forgotten>`; a stopped batch no longer resumes by it |
+| `~/.config/olympus/{file,mail}-source-scopes.json`, `this-computer.json`, `source-account-bindings.json` | `source_id` | `file-source-scopes`, `mail-source-scopes`, `this-computer`, `source-account-bindings` (last); stay in the shared files (they cannot move by rename) |
 | `embedding-ledger.jsonl`, `source-answer-latency.jsonl` | corpus ids only, no content | kept (accounting) |
 | `classification-ledger.jsonl` | none | kept |
 | request budgets, `tier-sniffer-budget.json` | per provider / global counters | kept |
 | `remote-connections.sqlite` | none (`provider` is the agent host) | kept |
+| `credential-broker-state.json`, `handles.json.unpaired` | handle, source id | kept: credential and Unpair custody, no item data (Disconnect and Unpair own them) |
+| `connect-relay/`, `models/`, `local-files/folder-access.json` | none | kept |
+| `~/.olympus/{sources/ingestion-exclusions.json, tier-rules.json, privacy.json}` | optional `source` per rule | kept: the owner's own policy. An exclusion is protective (dropping it would let a reconnected account ingest what the owner refused), and a tier rule is the owner's to change |
 | `media-cache` | holders per store | holders keyed by `(source_id, slot)`; Delete releases them |
-| `~/.config/olympus/{file,mail}-source-scopes.json`, `this-computer.json`, `source-account-bindings.json` | `source_id` | move into the account's `settings/`; until then forget steps |
+
+A per-source Delete runs the steps (`forgotten` in its result lists each file
+and count; a dry run lists what it would forget) after the account's state is
+reset and before any bytes are removed. A failing step fails the delete there.
+Disconnect runs none. The worker repeats the steps marked
+`repeatBeforeRestart` (`waiting-private-questions`, `source-dashboard`,
+`source-watches`) once it has stopped, just before the restart a Delete asks
+for, because until then a private question can be answered, a dashboard poll
+can record counts and the watch pass can queue matches, all through store
+handles still open. No owner-choice step is repeated: the owner can reconnect
+in that window, and a repeat would erase the reconnect.
 
 ## Delete
 
@@ -298,8 +371,9 @@ everything else.
 ## Export and uninstall
 
 - **Export** iterates the registry, snapshots each store with the existing
-  SQLite snapshot code (`data-lifecycle.ts:1391`), copies `settings/`
-  sanitized, and records the layout version. It never copies `raw/` or
+  SQLite snapshot code (`data-lifecycle.ts:1391`), copies the shared settings
+  files sanitized as it does today (`settings/` stays unused), and records the
+  layout version. It never copies `raw/` or
   `session/`: the spool is input the store already holds, and the session
   holds pairing keys (WhatsApp, Telegram). Both are named as skipped in the
   manifest, which keeps `secrets_excluded: true`, as export does today
@@ -325,18 +399,21 @@ One-time, at worker boot, holding the owner lock, before mounting:
    WhatsApp bridge) is confirmed stopped, not merely not yet started: write
    a move plan into the entry, rename each file (stores, sidecars,
    `-wal`/`-shm` together, spools, sessions, watch snapshots, settings) into
-   the account folder, verify (same file set and sizes, `PRAGMA
-   quick_check`, store opens), then set `layout` to `folder` and mark the
-   plan done. A
+   the account folder, verify by identity (the same `(dev, ino, size)` for
+   each file, then a read-only open of each store; `PRAGMA quick_check` runs
+   before the move, within a time budget, to record the existing state only),
+   then set `layout` to `folder` and mark the plan done. A
    crash mid-move resumes from the plan; a failed verify moves the files
    back and leaves the source on its legacy paths with a Needs you row. A
    source whose capture is still running stays on its legacy paths until
    the next boot; a capture process that reopened its session by the old
    path would start an empty, unpaired session.
-3. Renames only. A file on another volume (only possible with a per-store
-   env override) is not copied: the source stays on legacy paths and the
-   dashboard says why. Public docs must be checked to confirm no user was
-   told to set those overrides (unverified).
+3. Renames only. Legacy roots can sit on another volume without any
+   override (`legacyTelegramStoreRoot` ignores `XDG_DATA_HOME`, the WhatsApp
+   service state is under `$HOME`, the gateway state is under the state home),
+   so the plan compares `st_dev` of each file's legacy folder with the account
+   folder and skips the account on a mismatch: nothing is copied, the source
+   stays on legacy paths and the dashboard says why.
 4. Legacy pre-1.0 index files (`email-index.sqlite`,
    `dropbox-files-index.sqlite`, `google-drive-docs-index.sqlite`,
    `telegram-messages-index.sqlite`, `readwise-index.sqlite`; only in
@@ -398,10 +475,36 @@ touch the store path (`eval/`).
    CLI, with the drain's direct mode removed; 2b-ii, the CLI through the
    worker's API while Olympus runs (`src/core/cli-via-worker.ts`).
 3. **Forget registry.** Forget steps for the shared files above, and the
-   guard test.
-4. **Migration into account folders.** Behind the boot pass, with the
-   tests in "What must not break". Trying it on real installs before it is
-   on by default belongs to release testing.
+   guard test (done). A per-source Delete runs them; the worker repeats them
+   before its restart.
+4. **Account folders.** Four PRs, each with focused proof:
+   - **4a, resolution through the registry (done).** Fresh accounts of
+     Gmail, Drive, Dropbox, local files, Readwise, X and imported archives
+     land in `sources/<source_id>/<slot>/` (placement above); every other
+     account, and every account with legacy files, stays `legacy`. Per-kind
+     resolvers in `olympus-layout.ts` (`accountFolder`, `accountStorePath`,
+     `accountRawPath`) and the placement predicate in `source-placement.ts`; the
+     connectors' `default*DbPath` functions are thin wrappers over them
+     (step 6 deletes the wrappers). The registry schema becomes 2 with the first
+     folder entry. Delete takes the whole folder, Delete all keeps
+     `data-owner.lock`, Export names `raw/` and `session/` and never copies
+     them. No existing file moves. Delete refuses, with nothing removed, when
+     anything it would remove under `sources/` is reached through a link, and
+     when another source's resolved path (a retained `OLYMPUS_*_DB_PATH`
+     override, say) lies inside the folder it would take.
+   - **4b, capture paths.** Messaging accounts (Telegram, WhatsApp) can be
+     folders: the capture services are given their paths from the registry.
+   - **4c, the boot migration of existing non-messaging accounts**, behind
+     `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
+     default), with the tests in "What must not break". Retirement: default
+     on, then delete the switch, once release testing records, on Mac
+     OpenClaw-hosted, Mac engine and standalone Linux with both receipt
+     roots: every source migrated with real data; paired WhatsApp and
+     Telegram on Mac and Linux; one store over 1 GB migrated within the
+     startup timeout; one injected verify failure moved back with its Needs
+     you row; one crash mid-move resumed; the downgrade behavior. The owner
+     signs this off here.
+   - **4d, the messaging migration.**
 5. **Delete, export, uninstall on the registry.** Replace
    `lifecycleSourceSpecs` with the registry: a per-source delete marks the
    account `deleting` and the boot pass removes it; export and uninstall
@@ -431,7 +534,8 @@ All five approved by the owner, 2026-10-24.
    policy, scope approvals), so reconnecting starts clean; Disconnect keeps
    them.
 3. **Drop per-store path overrides**, keep one data-root override (they
-   serve development, not users).
+   serve development, not users). The data-root control that exists is the
+   Linux receipt and `XDG_DATA_HOME`; no `OLYMPUS_DATA_DIR` was ever added.
 4. **Removal applies when the worker restarts**, before anything opens the
    account, not live. A live in-process removal can come later once the
    scheduler can cancel a running task per source

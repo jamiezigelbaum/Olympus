@@ -26,7 +26,7 @@ import type {
   ComputerArchivesMeta,
 } from '../chatgpt/dashboard-contract.ts';
 import { displayText } from '../dashboard/display-text.ts';
-import { DASHBOARD_ARCHIVE_COPY } from '../dashboard/vocabulary.ts';
+import { DASHBOARD_ARCHIVE_COPY, dashboardArchiveNouns } from '../dashboard/vocabulary.ts';
 import {
   ARCHIVE_IMPORT_REQUEST_PATH_MAX,
   archivePathLabel,
@@ -72,7 +72,11 @@ export interface AgentArchive {
   /** The folder it was imported from (home shown as ~). */
   where: string;
   status: ComputerArchiveEntry['status'];
-  /** Messages stored so far. Absent when Olympus cannot count them now (`counts_unavailable`): never 0. */
+  /** The source family of the format ("email", "note", "chat"): what its items are. */
+  family: string;
+  /** Items stored so far (messages, notes). Absent when Olympus cannot count them now (`counts_unavailable`): never 0. */
+  items?: number;
+  /** The same count, for an archive whose items are messages (mail, chat). */
   messages?: number;
   /** Of those, judged by the private model (or by the rules). */
   judged?: number;
@@ -198,8 +202,9 @@ function fill(template: string, values: Record<string, string>): string {
   return out;
 }
 
-function messages(n: number): string {
-  return n === 1 ? DASHBOARD_ARCHIVE_COPY.items.one : DASHBOARD_ARCHIVE_COPY.items.many.replace('{n}', String(n));
+function itemsPhrase(family: string | undefined, n: number): string {
+  const nouns = dashboardArchiveNouns(family);
+  return n === 1 ? nouns.one : nouns.many.replace('{n}', String(n));
 }
 
 function kindLine(kinds: Readonly<Record<string, { one: string; many: string }>>, entry: { kind: string; count: number; file?: string }): AgentArchiveLine {
@@ -213,6 +218,12 @@ function kindLine(kinds: Readonly<Record<string, { one: string; many: string }>>
   };
 }
 
+/** A family's exports that are a copy as of the export day say so, after the count. */
+function snapshotOf(entry: ComputerArchiveEntry): string {
+  const snapshot = dashboardArchiveNouns(entry.family).snapshot;
+  return snapshot ? ` ${snapshot}.` : '';
+}
+
 function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | undefined): string {
   const copy = DASHBOARD_ARCHIVE_COPY;
   if (entry.countsUnavailable && entry.status !== 'stopped' && entry.status !== 'removing') {
@@ -220,7 +231,7 @@ function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | u
     const read = entry.status === 'importing' ? `${fill(copy.importingLineUncounted, { percent: String(entry.percent ?? 0) })}. ` : '';
     return `${read}${copy.countsUnavailable.why} ${copy.countsUnavailable.fix}`;
   }
-  const items = messages(entry.items);
+  const items = itemsPhrase(entry.family, entry.items);
   const held = entry.items > 0 && entry.status !== 'removing'
     ? ` ${fill(copy.judgedLine, { judged: String(entry.judged), held: String(entry.held) })}.`
     : '';
@@ -228,7 +239,15 @@ function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | u
     case 'importing':
       return `${fill(copy.importingLine, { percent: String(entry.percent ?? 0), items })}.${held}`;
     case 'imported':
-      return `${fill(copy.importedLineNoTime, { items })}.${held}`;
+      // A finished import that found nothing at all says so, never "0 notes".
+      if (entry.items === 0) {
+        const none = dashboardArchiveNouns(entry.family).none;
+        const reasons = [...entry.gaps, ...entry.skipped].filter((gap) => gap.count > 0).map((gap) => kindLine(copy.gaps, gap).line);
+        // Something was found and left out or not read: nothing was imported, and the reasons are said with it.
+        if (reasons.length > 0) return `${fill(copy.nothingImported, { None: none.charAt(0).toUpperCase() + none.slice(1) })} ${reasons.join('; ')}.`;
+        return fill(copy.emptyImport, { none });
+      }
+      return `${fill(copy.importedLineNoTime, { items })}.${snapshotOf(entry)}${held}`;
     case 'stopped':
       return `Stopped: ${stopped?.why ?? ''} ${stopped?.fix ?? ''}`.trim();
     case 'removing':
@@ -254,9 +273,15 @@ function archiveOf(entry: ComputerArchiveEntry): AgentArchive {
     format: entry.format,
     where: entry.where,
     status: entry.status,
+    family: entry.family ?? 'other',
     ...(entry.countsUnavailable
       ? { counts_unavailable: true as const }
-      : { messages: entry.items, judged: entry.judged, waiting_for_private_model: entry.held }),
+      : {
+          items: entry.items,
+          ...(entry.family === 'email' || entry.family === 'chat' ? { messages: entry.items } : {}),
+          judged: entry.judged,
+          waiting_for_private_model: entry.held,
+        }),
     ...(entry.status === 'importing' && entry.percent !== undefined ? { progress_percent: entry.percent } : {}),
     ...(entry.earliest ? { earliest: entry.earliest } : {}),
     ...(entry.latest ? { latest: entry.latest } : {}),

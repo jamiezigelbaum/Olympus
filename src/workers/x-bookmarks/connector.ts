@@ -3,7 +3,7 @@
 // completeness, fetch, and classification; this module converts its bounded
 // acquisition into stable RawItems for the shared connector store.
 
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
 import { compactClassificationSignals, signalText } from '../../core/classification-signals.ts';
@@ -108,9 +108,7 @@ export function createXBookmarksConnectorStore(
 export function defaultXBookmarksConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH?.trim();
-  if (configured) return configured;
-  return olympusDataPath(env, 'x-bookmarks-connector-store.sqlite');
+  return resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'internal', env);
 }
 
 export function xBookmarkLocalItemId(account: string, postId: string): string {

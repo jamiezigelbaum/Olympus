@@ -35,7 +35,8 @@
  * Archive-import leg (on by default; `--skip-archive` leaves it out for a candidate with no archive import): synthetic archives, written to
  * a folder on the machine and never real data (archive-fixtures.ts), are imported the way their owner and her agents meet it. An agent's
  * request is approved with a real press in the dashboard; the picker is walked once; the settled row and the agent's own status are held
- * to what the fixture holds; a search is cited as the format's citation label. With the private model switched off through the engine's
+ * to what the fixture holds; a search is cited as the format's citation label (every format in ARCHIVE_FORMATS is imported this way, one
+ * after the other). With the private model switched off through the engine's
  * settings, an import stays held Private, shows it, leaves its content out of the Personal and Public stores and out of a search, and
  * sends nothing off the machine; switched back on, what was held drains to zero within the leg's own bound. Remove deletes only that
  * archive, and a file changed during an import stops it visibly (archive-leg.ts, archive-stages.ts). Each later format adds one entry to
@@ -79,7 +80,7 @@ import { buildPageInventory } from './explore-pages-inventory.ts';
 import { exploreChecks, type ExploreResult } from './explore.ts';
 import { SCREENS, compareScreens, currentApprovalDigest, visualChecks, type VisualResult } from './visual.ts';
 import { SCREEN_THEMES, SCREEN_WIDTHS, screenName } from './visual-capture.ts';
-import { STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
+import { EXTRA_FORMATS, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
 import {
   ARCHIVE_BOUNDS, BULK_SIZES, changedChecks, drainBoundS, drainChecks, heldOffChecks, importChecks, modelChecks, removeChecks, searchChecks,
   type ChangedObservation, type ImportObservation, type ModelObservation, type RemoveObservation,
@@ -983,8 +984,9 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
  * The archive-import leg (archive-leg.ts, archive-stages.ts), on the machine. The order matters: the picker runs first because "Import an
  * archive" is a top-level button only while no archive is listed; the agent path follows and waits for the private model to judge what it
  * imported, so the search is cited; then the private model is switched off, an archive is imported with it off, and it is switched back
- * on (always, in the end, whatever failed) so the held messages drain; Remove takes the three archives away; the changed-file stage uses
- * its own large archive. Whatever happened, the machine's archives and fixtures are cleaned up last.
+ * on (always, in the end, whatever failed) so the held messages drain; Remove takes the archives away; the changed-file stage uses
+ * its own large archive. Each format besides the stress one (mail) is imported by the agent path right after the mail archive, judged
+ * and searched the same way, and removed with the others. Whatever happened, the machine's archives and fixtures are cleaned up last.
  */
 async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promise<void> {
   if (run.options.skipArchive) return;
@@ -992,6 +994,8 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
   const seed = randomBytes(6).toString('hex');
   const fixture = (role: FixtureRole) => legFixture(role, seed, STRESS_FORMAT);
   const [agentFx, pickerFx, heldFx] = [fixture('agent'), fixture('picker'), fixture('held')];
+  // Each other format's small archive: the same role as the mail one, told apart by its format.
+  const extraFxs = EXTRA_FORMATS.map((format) => legFixture('agent', seed, format));
   const drainS = drainBoundS(os);
   const traces: JourneyTrace[] = [];
   const stepS = ARCHIVE_BOUNDS.startS + ARCHIVE_BOUNDS.settleS + 600;
@@ -1023,6 +1027,13 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
     if (!outOfTime('the agent-path archive import')) {
       const agent = await call<ImportObservation>('archive-import', `${flags(agentFx)} --via request --drain-s ${drainS} --search`, stepS + drainS);
       addAll(importChecks(agent, agentFx, os));
+    }
+
+    // 2b. The same for each other format: a request, the owner's approval, the judge, a search cited with the format's own label.
+    for (const extraFx of extraFxs) {
+      if (outOfTime(`the ${extraFx.format} archive import`)) break;
+      const extra = await call<ImportObservation>('archive-import', `${flags(extraFx)} --via request --drain-s ${drainS} --search`, stepS + drainS);
+      addAll(importChecks(extra, extraFx, os));
     }
 
     // 3. The private model off: the archive stays held Private and nothing leaves the machine.
@@ -1058,7 +1069,7 @@ async function runArchiveLeg(run: Run, outDir: string, deadline: number): Promis
 
     // 6. Remove takes each archive away, and only that archive.
     if (!outOfTime('removing the archives')) {
-      const targets = [agentFx, pickerFx, heldFx];
+      const targets = [agentFx, ...extraFxs, pickerFx, heldFx];
       const removed = await call<RemoveObservation>('archive-remove', `--targets ${sh(targets.map((fx) => `${fx.role}:${fx.format}`).join(','))} --seed ${sh(seed)}`, targets.length * (ARCHIVE_BOUNDS.removeS + 180) + 120);
       traces.push(...(removed?.removals ?? []).flatMap((removal) => removal.traces));
       addAll(removeChecks(removed, targets));

@@ -27,7 +27,7 @@ import {
 import { whatsappBridgePathForPackage } from '../../core/messaging-pairing.ts';
 import { NATIVE_CAPTURE_OWNER_ENV_NAMES } from '../../core/native-worker-service.ts';
 import { ModelSetupService, requiredModelProfiles, type ModelCredentialState } from '../../core/model-setup.ts';
-import { workerRestartsItself, type WorkerLaunch } from '../../core/model-key-reload.ts';
+import { workerRestartsItself, type ModelKeyReloadRequest, type WorkerLaunch } from '../../core/model-key-reload.ts';
 import { connectGeminiApiKey, connectPublicApiKeySource } from '../../core/connect.ts';
 import { environmentWithWorkerSetupEnv, readWorkerSetupEnv } from '../../core/worker-auth.ts';
 import { resolveServerMode, resolveAgentApprovalHost } from '../../core/remote-open.ts';
@@ -316,6 +316,7 @@ import {
   enableSourceRegistryAdoption,
   openConnectorStore,
   openSecretLocations,
+  recordAccountPlacement,
   sourceAccountUnavailableReason,
   storageAccountForCorpus,
   type StorageAccount,
@@ -2328,7 +2329,7 @@ export async function main(): Promise<void> {
       || bootSecretResolver.status().some((failure) => failure.affected_profiles?.includes(id))) return 'applying';
     return 'ready';
   };
-  let requestModelReload: () => boolean = () => false;
+  let requestModelReload: (request?: ModelKeyReloadRequest) => boolean = () => false;
   // Set once the real reload is installed (after startup): until then a
   // request is a no-op, so Delete indexed data must refuse rather than leave
   // open handles serving deleted rows (PR #455 review).
@@ -2869,6 +2870,9 @@ export async function main(): Promise<void> {
     if (!localFilesConnectorStore || !fileSourceScopeAuthority) return undefined;
     const key = `${ref.accountGeneration}:${ref.revision}`;
     if (localFilesSyncCache?.key === key) return localFilesSyncCache.handler;
+    // The watch folder is the account's raw state, written only from here on. The store is open
+    // (the guard above), so the account is already placed; this keeps that true by construction.
+    recordAccountPlacement({ sourceId: LOCAL_FILES_SOURCE_ID }, localFilesWatchDir(process.env));
     const handler = createLocalFilesProviderStoreSyncHandler({
       ...(localFilesTierLane ? { tierSet: localFilesTierLane.set } : {}),
       store: localFilesConnectorStore,
@@ -5102,7 +5106,7 @@ export async function main(): Promise<void> {
             // check it before deleting anything.
             workerRestart: {
               canRestart: () => modelReloadInstalled && workerRestartsItself(workerLaunch, process.env),
-              request: () => requestModelReload(),
+              request: (reload) => requestModelReload(reload),
             },
             corpusRegistry: sourceCorpusRegistry,
             registryPath: handleRegistryPathFromEnv(process.env, true)!,
@@ -6713,6 +6717,7 @@ export function createRefreshableXBookmarksConnectorStoreRuntime(options: {
       usageStore ??= new LocalXBookmarksApiUsageStore();
       reconcileStateStore ??= new LocalXBookmarksReconcileStateStore(
         defaultXBookmarksReconcileStateDbPath(env, usageStore.dbPath),
+        env,
       );
       cachedRuntime = bindXBookmarksConnectorStoreRuntime({
         ...binding,

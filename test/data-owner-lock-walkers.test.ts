@@ -8,7 +8,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
@@ -101,7 +101,7 @@ describe('export while this process holds the lock', () => {
     const result = exportOlympusData({ destination, homeDir, env });
 
     // The store was exported (the walk really ran across this data root) ...
-    expect(result.files.some((file) => file.endsWith('x-bookmarks-connector-store.sqlite'))).toBe(true);
+    expect(result.files.some((file) => file.endsWith(`/${basename(storePath)}`))).toBe(true);
     // ... and the lock file, which sits in that data root, was not.
     const exported = everyFile(destination);
     expect(exported.filter((path) => isDataOwnerLockName(path.slice(path.lastIndexOf('/') + 1)))).toEqual([]);

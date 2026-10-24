@@ -11,7 +11,7 @@
 // filter; the secure store's co-located tier ledger governs visibility for
 // all three.
 
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import type { SourceTrustDomain } from '../../core/source-index/types.ts';
@@ -89,25 +89,19 @@ export const DROPBOX_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.freez
 export function defaultDropboxConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
-  if (configured) return configured;
-  return olympusDataPath(env, 'dropbox-files-connector-store.sqlite');
+  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env);
 }
 
 export function defaultDropboxInternalConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env[DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
-  if (configured) return configured;
-  return olympusDataPath(env, 'dropbox-files-internal-connector-store.sqlite');
+  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'internal', env);
 }
 
 export function defaultDropboxPublicConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env[DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
-  if (configured) return configured;
-  return olympusDataPath(env, 'dropbox-files-public-connector-store.sqlite');
+  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'public_safe', env);
 }
 
 /** Every Dropbox tier store's path: the lifecycle deletes all of them with the source. */

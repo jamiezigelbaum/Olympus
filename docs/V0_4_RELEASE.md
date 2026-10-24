@@ -36,12 +36,22 @@ delivery sequence:
 
 ## Archive import (owner direction 2026-10-23)
 
-Step 1 is built: mail (mbox) with the shared spine. One "Import an archive"
+All four steps are built: mail (mbox) with the shared spine (2026-10-23), then
+Reflect and Roam, WhatsApp chat exports and Telegram Desktop exports
+(2026-10-24). One "Import an archive"
 entry point in the dashboard and one `archive_import` operation for agents:
 Olympus detects the format and a thin per-format connector reads it. An agent
 can only ask; the person approves each import and each removal in the
-dashboard. Remaining order: Reflect and Roam, WhatsApp chat export, Telegram
-Desktop export. This adds
+dashboard. On 2026-10-24 the release check's archive leg passed all 55 of its
+checks on fresh Mac (Tart) and Linux (LXD) installs of main `1e043925`:
+each of the five formats imported by the agent path with dashboard approval,
+with the counts, dates and gaps the dashboard shows, a cited search, and
+removal; mail also through the picker, imported with the private model
+stopped (held Private, nothing released before judgment), and stopped
+visibly when its file changed. The leg adds about 12 minutes on Linux and 16
+on Mac. Still to prove: live WhatsApp or Telegram capture beside an imported
+archive (below, "Qualification action"), which needs a paired phone and so
+an owner canary. This adds
 Reflect, Roam and archive import to the public surface after 1.0; the 0.4
 source roster in Slice 3A below is the 0.4 record and does not limit it.
 Imported content stays Private until the private model judges it: the
@@ -1228,6 +1238,13 @@ alone is a snapshot; promise continuing updates only after live pairing/capture
 and automatic import are working. Show the connected scope and historical gaps,
 and distinguish stale capture from a successful empty import. Do not add Signal
 or require this tester to connect additional sources for coverage.
+
+Status 2026-10-24: the Telegram and WhatsApp archive-import journey is proven
+on fresh Mac and Linux installs (the release check's archive leg; "Archive
+import" above). The live half (an import beside paired capture of the same
+account, stale capture told apart from an empty import, and removal leaving
+capture running) cannot run on the throwaway machines and waits for an owner
+canary with a paired phone.
 
 ### Deferred: source coverage and PDF ingestion inventory
 

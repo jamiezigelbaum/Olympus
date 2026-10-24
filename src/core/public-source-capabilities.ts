@@ -103,12 +103,12 @@ export const V0_4_PUBLIC_SOURCE_CAPABILITIES: readonly PublicSourceCapability[] 
     source_id: 'archive.imports',
     label: 'Archives',
     authentication: { type: 'none', ownership: 'no account: the export files you choose on this computer' },
-    contextual_scopes: ['one export file or folder per import, chosen in the dashboard', 'read where it is, never copied, moved or changed', 'content stays Private until the private model judges each item', 'Spam and Trash left out'],
+    contextual_scopes: ['one export file or folder per import, chosen in the dashboard', 'read where it is, never copied, moved or changed', 'content stays Private until the private model judges each item', 'Spam and Trash left out', 'WhatsApp notices and the status updates chat left out', 'a chat export is a snapshot: it is not updated after the export'],
     dependencies: [
       { id: 'private_model', label: 'Private model (on this computer, or Venice Private)', required_for: 'judging each imported item before its content may leave Private' },
     ],
     provider_ceiling: 'An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.',
-    supported_formats: ['mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)', 'headers', 'text/plain', 'text/html (stripped)', 'attachment names'],
+    supported_formats: ['mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)', 'headers', 'text/plain', 'text/html (stripped)', 'attachment names', 'WhatsApp chat exports (a chat .txt or .zip, or a folder of them)', 'message text', 'media file names', 'Reflect exports (JSON, or a zip of Markdown files)', 'Roam exports (JSON from Export All)', 'note titles, text, tags and dates', 'Telegram Desktop exports (result.json, Machine-readable JSON)', 'chat messages with their links', 'picture and file names'],
   },
   {
     source_id: 'x.bookmarks',

@@ -1491,6 +1491,7 @@ async function withReconcileStateStore<T>(
   const provided = options.reconcileStateStore;
   const store = provided ?? new LocalXBookmarksReconcileStateStore(
     defaultXBookmarksReconcileStateDbPath(env, options.usageStore.dbPath),
+    env,
   );
   try {
     return await run(store);

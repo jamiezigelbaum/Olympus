@@ -13,9 +13,14 @@
  * Every store is created on first need, so an install that never imported
  * anything has none.
  */
-import { olympusDataRoot } from '../../core/olympus-layout.ts';
-import { join } from 'node:path';
-import { ARCHIVE_FORMATS, archiveCorpusId, archiveImportFamilies } from '../../core/archive-formats.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
+import {
+  ARCHIVE_FORMATS,
+  archiveCorpusId,
+  archiveFamilyProvider,
+  archiveImportFamilies,
+  type ArchiveFormatDefinition,
+} from '../../core/archive-formats.ts';
 import {
   withSourceCorpora,
   type SourceCorpusConfig,
@@ -48,22 +53,12 @@ export function archiveTierSetId(family: SourceFamily): string {
   return `archive.imports.${family}`;
 }
 
-function dataDir(env: Record<string, string | undefined>): string {
-  return olympusDataRoot(env);
-}
-
-const FILE_LABEL: Readonly<Record<string, string>> = {
-  secure_local: '',
-  internal: '-internal',
-  public_safe: '-public',
-};
-
 export function archiveConnectorStoreDbPath(
   trustDomain: SourceTrustDomain,
   family: SourceFamily,
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return join(dataDir(env), `archive-${family}${FILE_LABEL[trustDomain] ?? `-${trustDomain}`}-connector-store.sqlite`);
+  return resolvedStorePath(ARCHIVE_IMPORTS_SOURCE_ID, `${family}.${trustDomain}`, env);
 }
 
 /**
@@ -120,9 +115,10 @@ const CORPUS_ROLE: Readonly<Record<string, { capabilities: SourceCorpusConfig['c
  * runtime, with `withArchiveImportCorpora`, and the data lifecycle, through
  * the archive spec's registry entries.
  */
-export function archiveImportCorpora(): SourceCorpusConfig[] {
-  return archiveImportFamilies().flatMap((family) => {
-    const provider = ARCHIVE_FORMATS.find((format) => format.family === family)!.provider;
+export function archiveImportCorpora(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): SourceCorpusConfig[] {
+  return archiveImportFamilies(formats).flatMap((family) => {
+    // The set belongs to the family: a format's own provider only when it is the family's only one.
+    const provider = archiveFamilyProvider(family, formats);
     return (['secure_local', 'internal', 'public_safe'] as const).map((trustDomain) => ({
       corpusId: archiveCorpusId(trustDomain, family),
       sourceId: 'archive.imports',

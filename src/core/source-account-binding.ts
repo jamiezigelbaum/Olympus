@@ -126,6 +126,37 @@ export function updateSourceAccountBinding(
   });
 }
 
+/**
+ * One source's forget step on the bindings file: its binding goes, so a
+ * reconnect starts with no account on record and binds the first it verifies.
+ * Others' entries stay. A missing file has nothing to forget; a file nothing
+ * can read is left (the delete is not what repairs it: its own error says so).
+ * Returns how many entries went (on a dry run, would go).
+ */
+export function forgetSourceAccountBindings(
+  path: string,
+  sourceIds: readonly string[],
+  options: { dryRun?: boolean } = {},
+): number {
+  const doomed = (bindings: SourceAccountBindings) =>
+    (Object.keys(bindings.sources) as AccountBoundSourceId[]).filter((id) => sourceIds.includes(id));
+  if (!existsSync(path)) return 0;
+  const first = readSourceAccountBindings(path);
+  const found = first.kind === 'ok' ? doomed(first.bindings).length : 0;
+  // Nothing to forget, or only asked how much: no lease, so no lock file.
+  if (found === 0 || options.dryRun === true) return found;
+  return withFileLeaseSync(path, (lease) => {
+    const read = readSourceAccountBindings(path);
+    if (read.kind === 'malformed') return 0;
+    const ids = doomed(read.bindings);
+    if (ids.length === 0) return 0;
+    const sources = { ...read.bindings.sources };
+    for (const id of ids) delete sources[id];
+    lease.commit(() => writePrivateFileAtomicSync(path, `${JSON.stringify({ version: 1, sources }, null, 2)}\n`));
+    return ids.length;
+  });
+}
+
 export type FileSourceConnectOutcome = 'same_account' | 'reconnected' | 'purge_required';
 
 /**

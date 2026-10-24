@@ -24,6 +24,7 @@ import {
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { ARCHIVE_COMMON_FINDINGS } from '../src/core/archive-formats.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY } from '../src/workers/archive-import/dashboard.ts';
@@ -152,6 +153,7 @@ const ARCHIVE: ComputerArchiveEntry = {
   id: '6a1f0e2d-4c3b-4a59-8e7d-1b2c3d4e5f60',
   name: 'Old work mail.mbox',
   format: 'Mail (mbox)',
+  family: 'email',
   where: '~/Exports',
   status: 'imported',
   items: 1_250,
@@ -268,7 +270,7 @@ describe('each archive under the Archives row', () => {
     const item = archiveItem(page, 'importing');
     expect(item.querySelector('.archive-name')!.textContent).toBe(ARCHIVE.name);
     expect(item.textContent).toContain(`${ARCHIVE.format} · ${ARCHIVE.where} · ${fill(A.dates, { earliest: '2011-02-03', latest: '2019-12-30' })}`);
-    expect(item.textContent).toContain(fill(A.importingLine, { percent: '42', items: fill(A.items.many, { n: '20,340' }) }));
+    expect(item.textContent).toContain(fill(A.importingLine, { percent: '42', items: fill(A.nouns.email.many, { n: '20,340' }) }));
     expect(item.querySelector('[role="progressbar"]')).not.toBeNull();
     expect(item.textContent).toContain(fill(A.judgedLine, { judged: '12,900', held: '7,440' }));
     expect(item.textContent).toContain(A.heldWhy.ready);
@@ -340,6 +342,177 @@ describe('each archive under the Archives row', () => {
       fill(A.gapInFile, { file: 'Inbox', gap: fill(A.gaps.message_too_large.many, { n: '2' }) }),
       fill(A.gapInFile, { file: 'Sent', gap: A.gaps.message_unreadable.one }),
     ]);
+  });
+
+  test('a notes archive counts notes, and every kind of gap any format reports has its own plain sentence', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-notes') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.note.many, { n: '3,412' }));
+    expect(item.textContent).not.toContain('messages');
+    expect(item.textContent).not.toContain(fill(A.nouns.other.many, { n: '3,412' }));
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '287' }),
+      fill(A.gaps.item_truncated.many, { n: '4' }),
+      fill(A.gaps.note_date_assumed.many, { n: '12' }),
+      A.gaps.note_too_large.one,
+      fill(A.gaps.section_not_imported.many, { n: '2' }),
+      A.gaps.file_damaged.one,
+      // What was left out on purpose comes after what could not be read.
+      fill(A.gaps.note_empty.many, { n: '38' }),
+    ]);
+    // Every kind has both a one and a many sentence, none of them the catch-all.
+    for (const kind of ['media_not_imported', 'item_truncated', 'section_not_imported', 'file_damaged', 'note_empty', 'note_unreadable', 'note_too_large', 'note_content_unsupported', 'note_date_assumed'] as const) {
+      expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
+      expect(A.gaps[kind].many).toContain('{n}');
+    }
+  });
+
+  test('a chat archive counts messages, says Snapshot, not updated beside its dates, and names what it left out in plain words', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat-whatsapp') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.chat.many, { n: '12,644' }));
+    const facts = item.querySelector('.archive-facts')!;
+    expect(facts.textContent).toContain('WhatsApp chat export');
+    expect(facts.textContent).toContain(fill(A.dates, { earliest: '2019-06-08', latest: '2026-09-30' }));
+    expect(facts.querySelector('.archive-snapshot')!.textContent).toBe('Snapshot, not updated');
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '1,870' }),
+      fill(A.gaps.item_truncated.many, { n: '2' }),
+      A.gaps.time_zone_assumed.one,
+      A.gaps.date_order_assumed.one,
+      fill(A.gaps.item_start_assumed.many, { n: '3' }),
+      A.gaps.file_damaged.one,
+      fill(A.gaps.system_message.many, { n: '318' }),
+      fill(A.gaps.message_empty.many, { n: '6' }),
+      fill(A.gaps.status_updates.many, { n: '41' }),
+      fill(A.gaps.item_repeated.many, { n: '112' }),
+      A.gaps.files_unconfirmed.one,
+    ]);
+    // A mail archive is not a snapshot.
+    const mail = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-imported') });
+    expect(archiveItem(mail, 'imported').textContent).not.toContain('Snapshot');
+    expect(archiveItem(mail, 'imported').querySelector('.archive-snapshot')).toBeNull();
+  });
+
+  test('a Telegram archive counts messages, and what it leaves out or cannot carry has its own plain sentence', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.chat.many, { n: '18,460' }));
+    expect(item.textContent).not.toContain(fill(A.nouns.other.many, { n: '18,460' }));
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '2,318' }),
+      fill(A.gaps.section_not_imported.many, { n: '6' }),
+      fill(A.gaps.message_content_unsupported.many, { n: '12' }),
+      A.gaps.item_truncated.one,
+      A.gaps.time_zone_assumed.one,
+      A.gaps.file_damaged.one,
+      fill(A.gaps.service_message.many, { n: '3,071' }),
+      fill(A.gaps.message_without_text.many, { n: '54' }),
+    ]);
+    for (const kind of ['service_message', 'message_without_text', 'message_content_unsupported'] as const) {
+      expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
+      expect(A.gaps[kind].many).toContain('{n}');
+    }
+  });
+
+  test('a Reflect archive counts notes, and a note with no date and a note that could not be read are named', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-notes-reflect') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.note.many, { n: '1,208' }));
+    expect(item.textContent).not.toContain('messages');
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '94' }),
+      A.gaps.item_truncated.one,
+      fill(A.gaps.note_date_assumed.many, { n: '3' }),
+      fill(A.gaps.note_unreadable.many, { n: '2' }),
+      fill(A.gaps.note_empty.many, { n: '17' }),
+    ]);
+  });
+
+  test('every assumption the import makes has its own sentence, in a one and a many form, and none lists the others', () => {
+    const specific = [
+      ARCHIVE_COMMON_FINDINGS.timeZoneAssumed,
+      ARCHIVE_COMMON_FINDINGS.dateOrderAssumed,
+      ARCHIVE_COMMON_FINDINGS.itemStartAssumed,
+      ARCHIVE_COMMON_FINDINGS.zipOverlapUnchecked,
+    ];
+    for (const kind of specific) {
+      const words = (A.gaps as Record<string, { one: string; many: string }>)[kind]!;
+      expect(words, kind).toBeDefined();
+      expect(words.one).not.toBe(A.gaps.other.one);
+      expect(words.many).toContain('{n}');
+      // One thing is said, not a list of maybes.
+      for (const sentence of [words.one, words.many]) expect(sentence).not.toMatch(/such as|had to assume/);
+    }
+    // They say the value that was taken.
+    expect(A.gaps.date_order_assumed.one).toContain('day first');
+    expect(A.gaps.time_zone_assumed.one).toContain("this computer's time zone");
+    // Each kind reports a different thing.
+    expect(new Set(specific.map((kind) => (A.gaps as Record<string, { one: string }>)[kind]!.one)).size).toBe(specific.length);
+    // Every common kind a format can report has a sentence of its own, none of them the catch-all.
+    for (const kind of Object.values(ARCHIVE_COMMON_FINDINGS)) {
+      const words = (A.gaps as Record<string, { one: string; many: string }>)[kind];
+      expect(words, kind).toBeDefined();
+      expect(words!.one).not.toBe(A.gaps.other.one);
+    }
+  });
+
+  test('an archive recorded before the specific kinds still reads: its one assumption has a plain sentence, not the catch-all', async () => {
+    const old = { ...ARCHIVE, family: 'chat', gaps: [{ kind: ARCHIVE_COMMON_FINDINGS.assumption, count: 2 }], skipped: [] };
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });
+    const lines = Array.from(archiveItem(page, 'imported').querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([fill(A.gaps.assumption.many, { n: '2' })]);
+    expect(lines[0]).not.toBe(fill(A.gaps.other.many, { n: '2' }));
+    // It says why it cannot say which, and what to do.
+    expect(A.gaps.assumption.one).toContain('import it again');
+  });
+
+  test('an archive from an engine that sends no family says items, and an empty import says it found nothing', async () => {
+    const { family: _family, ...old } = ARCHIVE;
+    const unknown = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });
+    expect(archiveItem(unknown, 'imported').textContent).toContain(fill(A.nouns.other.many, { n: '1,250' }));
+
+    const empty = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-empty') });
+    const item = archiveItem(empty, 'imported');
+    expect(item.textContent).toContain('no notes found in this archive');
+    expect(item.textContent).not.toContain(A.countsUnavailable.why);
+    expect(item.textContent).not.toContain(fill(A.nouns.note.many, { n: '0' }));
+    expect(item.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
+    // Without a time to say, the same sentence reads on its own.
+    const { importedAt: _at, ...untimed } = { ...ARCHIVE, family: 'note', items: 0, judged: 0, held: 0 };
+    const bare = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([untimed])) });
+    expect(archiveItem(bare, 'imported').textContent).toContain(fill(A.emptyImport, { none: A.nouns.note.none }));
+    // An archive found nothing at all only when it also left out and could not read nothing.
+    const { importedAt: _zeroAt, ...reasonsOfNothing } = { ...ARCHIVE, family: 'note', items: 0, judged: 0, held: 0, gaps: [{ kind: 'message_unreadable', count: 0 }], skipped: [] };
+    const zero = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([reasonsOfNothing])) });
+    expect(archiveItem(zero, 'imported').textContent).toContain(fill(A.emptyImport, { none: A.nouns.note.none }));
+  });
+
+  test('an archive whose messages were all left out or not read says no messages were imported, with the reasons', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-nothing-imported') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toMatch(/No messages imported .+ ago\./);
+    expect(item.textContent).not.toContain('found in this archive');
+    expect(item.textContent).not.toContain(A.countsUnavailable.why);
+    expect(item.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
+    // The reasons stay one press away, in plain words.
+    expect(item.textContent).toContain(A.seeWhy);
+    expect(item.textContent).toContain(fill(A.gaps.spam_or_trash.many, { n: '1,204' }));
+    expect(item.textContent).toContain(fill(A.gaps.message_too_large.many, { n: '2' }));
+    // The same for notes, and without a time to say.
+    const { importedAt: _at, ...untimed } = { ...ARCHIVE, family: 'note', items: 0, judged: 0, held: 0, gaps: [{ kind: 'file_damaged', count: 1 }], skipped: [] };
+    const notes = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([untimed])) });
+    expect(archiveItem(notes, 'imported').textContent).toContain('No notes imported.');
+  });
+
+  test('the picker names the formats the engine registers, from the registry', async () => {
+    expect(A.pick.intro).toContain('an .mbox file from Google Takeout or Thunderbird');
+    expect(A.pick.intro.startsWith('Choose a file or folder on this computer: ')).toBe(true);
+    expect(A.pick.intro.endsWith('Olympus reads it where it is and never changes it.')).toBe(true);
   });
 
   test('stopped: which file, what happened, and what to do', async () => {
@@ -544,7 +717,7 @@ describe('Needs you for imports', () => {
     const archive = archiveItem(page, 'imported');
     expect(archive.textContent).toContain(A.countsUnavailable.why);
     expect(archive.textContent).toContain(A.countsUnavailable.fix);
-    expect(archive.textContent).not.toContain(fill(A.items.many, { n: '0' }));
+    expect(archive.textContent).not.toContain(fill(A.nouns.email.many, { n: '0' }));
     expect(archive.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
     const line = needsYou(page).get(fill(A.needsYou.counts, { name: TAKEOUT }));
     expect(line).toBeDefined();
@@ -577,7 +750,7 @@ describe('Needs you for imports', () => {
     expect(archive.getAttribute('data-not-running')).toBe('disabled');
     expect(archive.querySelector('.ftag')!.textContent).toBe(A.status.notRunning);
     expect(archive.querySelector('[role="progressbar"]')).toBeNull();
-    expect(archive.textContent).toContain(fill(A.notRunningLine, { percent: '0', items: fill(A.items.many, { n: '0' }) }));
+    expect(archive.textContent).toContain(fill(A.notRunningLine, { percent: '0', items: fill(A.nouns.email.many, { n: '0' }) }));
     expect(archivesRow(page).textContent).not.toContain(A.status.importing);
     const remove = Array.from(archive.querySelectorAll('button')).find((node) => node.textContent === A.remove) as HTMLButtonElement;
     expect(remove.disabled).toBe(true);

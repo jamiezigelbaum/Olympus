@@ -8,7 +8,7 @@
 // `secure_local.x.bookmarks`, created on first need; one carrying a secret is
 // stored nowhere and only its location is kept. The lane has no Public store.
 
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { openConnectorStore } from '../../core/source-storage.ts';
@@ -23,9 +23,7 @@ export const X_BOOKMARKS_TIER_SET_ID = 'x.bookmarks';
 export function defaultXBookmarksSecureConnectorStoreDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env.OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH?.trim();
-  if (configured) return configured;
-  return olympusDataPath(env, 'x-bookmarks-secure-connector-store.sqlite');
+  return resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'secure_local', env);
 }
 
 export function createXBookmarksTierLane(options: {

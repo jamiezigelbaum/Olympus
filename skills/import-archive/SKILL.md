@@ -1,9 +1,10 @@
 ---
 name: import-archive
 version: 0.1.0
-description: Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder). archive_import only asks; the user approves every import and every removal on the Olympus dashboard on their computer.
+description: Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat). archive_import only asks; the user approves every import and every removal on the Olympus dashboard on their computer.
 triggers:
   - user mentions an old mail export, a Google Takeout download, an .mbox file, or an Apple Mail export they want searchable
+  - user mentions an exported WhatsApp chat (a _chat.txt, a "WhatsApp Chat with" file, or the zip WhatsApp shares) they want searchable
   - user asks to remove an archive they imported earlier
   - user asks how an archive import is going
 tools:
@@ -16,7 +17,32 @@ mutating: true
 Use this skill when the user has an old export on their computer and wants
 Olympus to search it like any other source. Today that means mail: an `.mbox`
 file (Google Takeout, Thunderbird) or an Apple Mail export folder ending in
-`.mbox`.
+`.mbox`; and WhatsApp chats exported with Export Chat: the `.txt`, the `.zip`
+WhatsApp shares, or a folder of them. A chat export is a snapshot: later
+messages are not added. In a folder, only files named the way WhatsApp names
+an export (or zips holding one) are taken; a chat saved under another name
+imports when the user chooses that file by itself. Messages that appear in two
+export files of the same chat are imported once. When what the user chose is
+too much to look through (a lot of files, or very large ones), Olympus may
+import nothing and say so in one sentence: ask the user to choose just the
+export file, or a folder or zip that holds only the export. When it found the
+export but did not reach some files, those are counted on the archive as not
+looked at.
+
+A Telegram Desktop export works too: its `result.json` (or the folder that
+holds it), exported as Machine-readable JSON. Messages are imported as text;
+pictures and files are counted, not imported. If the user only has the HTML
+form (`messages.html`), tell them to export again from Telegram Desktop
+(Settings, Advanced, Export Telegram data) with the format set to
+Machine-readable JSON.
+
+Notes exports work too: a Reflect export (the JSON file, or the zip of
+Markdown files) and a Roam export (Export All, as JSON; a zip holding the JSON
+works as well). A Reflect CSV or HTML export, or a Roam Markdown or EDN
+export, is not read: if that is all the user has, tell them to export again
+from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on
+its own, like mail, and a note or page with nothing written in it is left out
+and counted. For a notes archive the counts are notes.
 
 ## The rule
 

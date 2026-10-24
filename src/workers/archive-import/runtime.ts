@@ -84,7 +84,7 @@ export interface ArchiveImportRuntimeOptions {
 export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions = {}): ArchiveImportRuntime {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
-  const state = new ArchiveImportStateStore({ path: options.statePath ?? defaultArchiveImportStatePath(env) });
+  const state = new ArchiveImportStateStore({ path: options.statePath ?? defaultArchiveImportStatePath(env), env });
   const families = archiveImportFamilies();
   const lanes = new Map<string, ArchiveTierLane>();
 

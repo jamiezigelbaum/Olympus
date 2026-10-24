@@ -196,6 +196,40 @@ export function connectThisComputerSource(
   });
 }
 
+/**
+ * A `this_computer` source's forget step: its connection leaves the record
+ * (Disconnect already took it out before a delete is allowed, so this finds
+ * nothing in the ordinary flow). The machine id is kept. A record that is
+ * missing, unreadable or another host's has nothing to forget. Returns how many
+ * connections went (on a dry run, would go).
+ */
+export function forgetThisComputerSources(
+  handleRegistryPath: string,
+  sourceIds: readonly string[],
+  options: { dryRun?: boolean; hostIdentity?: HostIdentity } = {},
+): number {
+  const path = defaultThisComputerStatePath(handleRegistryPath);
+  if (!existsSync(path)) return 0;
+  const hostIdentity = options.hostIdentity ?? systemHostIdentity;
+  const connected = (state: PersistedThisComputerState) =>
+    state.sources.filter((entry) => sourceIds.includes(entry.source_id));
+  const first = readStateForHost(path, hostIdentity);
+  const found = first ? connected(first).length : 0;
+  // Nothing to forget, or only asked how much: no lease, so no lock file.
+  if (found === 0 || options.dryRun === true) return found;
+  return withFileLeaseSync(path, (lease) => {
+    const current = readStateForHost(path, hostIdentity);
+    if (!current) return 0;
+    const count = connected(current).length;
+    if (count === 0) return 0;
+    lease.commit(() => writeState(path, {
+      ...current,
+      sources: current.sources.filter((entry) => !sourceIds.includes(entry.source_id)),
+    }));
+    return count;
+  });
+}
+
 /** Disconnects a `this_computer` source. The machine id is kept. Returns whether it was connected. */
 export function disconnectThisComputerSource(
   handleRegistryPath: string,

@@ -2329,7 +2329,7 @@ var init_pinned_download = __esm(() => {
 
 // src/core/olympus-layout.ts
 import { homedir as homedir5 } from "node:os";
-import { join as join10 } from "node:path";
+import { dirname as dirname7, join as join10 } from "node:path";
 function layoutHome(env = process.env) {
   return env.HOME?.trim() || homedir5();
 }
@@ -2351,8 +2351,71 @@ function legacyWhatsAppServiceStateDir(env = process.env) {
 function legacyTelegramGatewayStateDir(env = process.env) {
   return env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR?.trim() || join10(env.XDG_STATE_HOME?.trim() || join10(layoutHome(env), ".local", "state"), "olympus", "telegram-capture-gateway");
 }
+var gmailStore = (infix, overrideInfix) => ({
+  file: `gmail-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_GMAIL_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), driveStore = (infix, overrideInfix) => ({
+  file: `google-drive-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), dropboxStore = (infix, overrideInfix) => ({
+  file: `dropbox-files-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_DROPBOX_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), localFilesStore = (infix, overrideInfix) => ({
+  file: `local-files-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_LOCAL_FILES_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", FOLDER_LAYOUT_SOURCES, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES;
 var init_olympus_layout = __esm(() => {
   init_linux_engine_layout();
+  LEGACY_STORES = {
+    "gmail.email": {
+      internal: gmailStore("", ""),
+      secure_local: gmailStore("secure-", "SECURE_"),
+      public_safe: gmailStore("public-", "PUBLIC_")
+    },
+    "google_drive.docs": {
+      internal: driveStore("", ""),
+      secure_local: driveStore("secure-", "SECURE_"),
+      public_safe: driveStore("public-", "PUBLIC_")
+    },
+    "dropbox.files": {
+      secure_local: dropboxStore("", ""),
+      internal: dropboxStore("internal-", "INTERNAL_"),
+      public_safe: dropboxStore("public-", "PUBLIC_")
+    },
+    "local.files": {
+      secure_local: localFilesStore("", ""),
+      internal: localFilesStore("internal-", "INTERNAL_"),
+      public_safe: localFilesStore("public-", "PUBLIC_")
+    },
+    "readwise.library": {
+      internal: {
+        file: "readwise-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH"
+      },
+      secure_local: {
+        file: "readwise-secure-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH"
+      },
+      public_safe: undefined
+    },
+    "x.bookmarks": {
+      internal: {
+        file: "x-bookmarks-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH"
+      },
+      secure_local: {
+        file: "x-bookmarks-secure-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH"
+      },
+      public_safe: undefined
+    },
+    "archive.imports": { secure_local: undefined, internal: undefined, public_safe: undefined }
+  };
+  FOLDER_LAYOUT_SOURCES = Object.keys(LEGACY_STORES);
+  LEGACY_RAW_OVERRIDES = {
+    "x.bookmarks": [X_USAGE_OVERRIDE, X_RECONCILE_OVERRIDE],
+    [ARCHIVE_IMPORTS]: [ARCHIVE_STATE_OVERRIDE]
+  };
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
@@ -2470,7 +2533,7 @@ import {
   writeFileSync as writeFileSync2,
   writeSync
 } from "node:fs";
-import { basename, dirname as dirname7, isAbsolute as isAbsolute6, join as join11 } from "node:path";
+import { basename, dirname as dirname8, isAbsolute as isAbsolute6, join as join11 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const root = configured || olympusDataPath(env, "models", "built-in-embedding");
@@ -3047,7 +3110,7 @@ except Exception as error:
 
 // src/core/linux-secret-backend.ts
 import { lstatSync as lstatSync6, readFileSync as readFileSync9 } from "node:fs";
-import { dirname as dirname8, isAbsolute as isAbsolute7, join as join13, resolve as resolve3 } from "node:path";
+import { dirname as dirname9, isAbsolute as isAbsolute7, join as join13, resolve as resolve3 } from "node:path";
 function secretStoreFailure(error) {
   if (error instanceof SecretStoreError)
     return error;
@@ -3068,8 +3131,8 @@ function resolveLinuxSecretPaths(env, paths = {}) {
   const encryptedFilePath = paths.encryptedFilePath ?? layout.secretsPath;
   const result = {
     encryptedFilePath,
-    keyFilePath: paths.keyFilePath ?? join13(dirname8(encryptedFilePath), "secrets.key"),
-    backendFilePath: paths.backendFilePath ?? join13(dirname8(encryptedFilePath), "secret-backend.json")
+    keyFilePath: paths.keyFilePath ?? join13(dirname9(encryptedFilePath), "secrets.key"),
+    backendFilePath: paths.backendFilePath ?? join13(dirname9(encryptedFilePath), "secret-backend.json")
   };
   for (const path of Object.values(result)) {
     if (!isAbsolute7(path) || /[\0\r\n]/.test(path))
@@ -3111,7 +3174,7 @@ function assertLinuxSecretPath(path) {
       if (error.code !== "ENOENT")
         throw secretStoreFailure(error);
     }
-    const parent = dirname8(current2);
+    const parent = dirname9(current2);
     if (parent === current2)
       break;
     privateParent = leaf;
@@ -3125,7 +3188,7 @@ function selectLinuxSecretBackend(paths, requested) {
       throw new SecretStoreError("configuration", "unsupported Linux backend.");
     for (const path of Object.values(paths))
       assertLinuxSecretPath(path);
-    ensurePrivateRootDirectorySync(dirname8(paths.backendFilePath));
+    ensurePrivateRootDirectorySync(dirname9(paths.backendFilePath));
     return withFileLeaseSync(paths.backendFilePath, (lease) => {
       for (const path of Object.values(paths))
         assertLinuxSecretPath(path);
@@ -3176,7 +3239,7 @@ import { spawnSync as spawnSync4 } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes3, scryptSync } from "node:crypto";
 import { existsSync as existsSync5, mkdirSync as mkdirSync6, readFileSync as readFileSync10 } from "node:fs";
 import { homedir as homedir6, platform } from "node:os";
-import { dirname as dirname9, join as join14 } from "node:path";
+import { dirname as dirname10, join as join14 } from "node:path";
 function defaultOlympusConfigDir(env = process.env, targetPlatform = process.platform) {
   if (targetPlatform === "linux")
     return resolveLinuxEngineLayout(env).configDir;
@@ -3353,7 +3416,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync6(dirname9(this.encryptedFilePath), { recursive: true, mode: 448 });
+      mkdirSync6(dirname10(this.encryptedFilePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -3387,7 +3450,7 @@ class EncryptedFileSecretStore {
     if (this.strictLinux && readSecretFile(this.keyFilePath) === undefined && readSecretFile(this.encryptedFilePath) !== undefined) {
       throw new SecretStoreError("corrupt", "wrapping key is lost; restore the original key. No replacement was generated.");
     }
-    mkdirSync6(dirname9(this.keyFilePath), { recursive: true, mode: 448 });
+    mkdirSync6(dirname10(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync5(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes3(32).toString("base64"));
     }
@@ -5091,6 +5154,54 @@ var init_operation_caller = __esm(() => {
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
+// src/core/source-watch.ts
+function sourceWatchAuthenticatedRouteHeaders(route) {
+  const headers = new Headers({
+    [SOURCE_WATCH_OWNER_HEADER]: route.ownerId,
+    [SOURCE_WATCH_ROUTE_KIND_HEADER]: route.routeKind,
+    [SOURCE_WATCH_ROUTE_TARGET_HEADER]: route.routeTargetId
+  });
+  if (route.routeAccountId)
+    headers.set(SOURCE_WATCH_ROUTE_ACCOUNT_HEADER, route.routeAccountId);
+  return headers;
+}
+var SOURCE_WATCH_MIN_LEASE_MS = 1000, SOURCE_WATCH_MAX_LEASE_MS, SOURCE_WATCH_MIN_RETRY_MS = 1000, SOURCE_WATCH_MAX_RETRY_MS, SOURCE_WATCH_MIN_RETENTION_MS, SOURCE_WATCH_MAX_RETENTION_MS, SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner", SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind", SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target", SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account", SOURCE_WATCH_MAX_QUERY_LENGTH = 4096, MAX_WATCH_LIFETIME_MS, MAX_SOURCE_CLOCK_SKEW_MS, MAX_AVAILABLE_DELAY_MS, OWNER_CONTEXT_FIELDS, CREATE_WATCH_FIELDS, CANONICAL_REF_FIELDS, WATCH_STATUS_VALUES, OUTBOX_STATUS_VALUES, ownedContexts, executorCapabilities, SYSTEM_CLOCK;
+var init_source_watch = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+  SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
+  SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
+  SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
+  MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
+  MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
+  MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
+  OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
+  CREATE_WATCH_FIELDS = new Set([
+    "watchId",
+    "corpusId",
+    "queryText",
+    "mode",
+    "expiresAt",
+    "maxDeliveryAttempts"
+  ]);
+  CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
+  WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
+  OUTBOX_STATUS_VALUES = new Set([
+    "pending",
+    "leased",
+    "retry",
+    "delivered",
+    "dead_letter",
+    "cancelled"
+  ]);
+  ownedContexts = new WeakSet;
+  executorCapabilities = new WeakSet;
+  SYSTEM_CLOCK = Object.freeze({
+    now: () => new Date
+  });
+});
+
 // connect-relay/shared/directory-tools.ts
 var DEMO_GRANT_REMOTE_TOOLS, DIRECTORY_TOOL_NAMES, DIRECTORY_TOOLS;
 var init_directory_tools = __esm(() => {
@@ -5604,7 +5715,7 @@ var init_venice_models = __esm(() => {
 
 // src/core/sovereignty.ts
 import { chmodSync as chmodSync2, existsSync as existsSync9, mkdirSync as mkdirSync9, readFileSync as readFileSync18 } from "node:fs";
-import { dirname as dirname15, join as join24, resolve as resolve5 } from "node:path";
+import { dirname as dirname16, join as join24, resolve as resolve5 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID as randomUUID6 } from "node:crypto";
@@ -5943,8 +6054,8 @@ function migratePrivateMeaningSearch(path) {
   }, { acquireTimeoutMs: 5000 });
 }
 function loadSovereigntyPreset(name) {
-  const sourceLayoutPath = join24(dirname15(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
-  const bundledLayoutPath = join24(dirname15(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
+  const sourceLayoutPath = join24(dirname16(fileURLToPath5(import.meta.url)), "..", "..", "config", "sovereignty", "presets", `${name}.json`);
+  const bundledLayoutPath = join24(dirname16(fileURLToPath5(import.meta.url)), "..", "config", "sovereignty", "presets", `${name}.json`);
   const path = existsSync9(sourceLayoutPath) ? sourceLayoutPath : bundledLayoutPath;
   const parsed = JSON.parse(readFileSync18(path, "utf8"));
   return validateSovereigntyConfig(parsed);
@@ -6375,7 +6486,7 @@ var init_sovereignty = __esm(() => {
 });
 
 // src/core/worker-service.ts
-import { basename as basename3, dirname as dirname16, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
+import { basename as basename3, dirname as dirname17, isAbsolute as isAbsolute15, join as join25, relative as relative3, sep as sep3 } from "node:path";
 function workerServicePaths(platform2, homeDir, env = {}) {
   homeDir = validatedAbsolutePath(homeDir, "home directory");
   if (platform2 === "darwin") {
@@ -6432,7 +6543,7 @@ import {
   chmodSync as chmodSync3
 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { dirname as dirname17, isAbsolute as isAbsolute16, join as join26, posix, sep as sep4 } from "node:path";
+import { dirname as dirname18, isAbsolute as isAbsolute16, join as join26, posix, sep as sep4 } from "node:path";
 function zkapiAsset(url, sha256, bytes, extra = {}) {
   return {
     url,
@@ -6575,7 +6686,7 @@ function trustedInside(realDir, path, uid, versionDir) {
   }
   if (!within(realDir, real) || !privatelyOwned(real, uid, "file"))
     return false;
-  for (let dir = dirname17(real);dir !== realDir; dir = dirname17(dir)) {
+  for (let dir = dirname18(real);dir !== realDir; dir = dirname18(dir)) {
     if (!within(realDir, dir) || !privatelyOwned(dir, uid, "dir"))
       return false;
   }
@@ -8062,7 +8173,7 @@ import { promisify } from "node:util";
 import { readFile, stat as fileStat } from "node:fs/promises";
 import { createHash as createHash4 } from "node:crypto";
 import { lstatSync as lstatSync8, readFileSync as readFileSync21, readlinkSync as readlinkSync2, readdirSync as readdirSync4, realpathSync as realpathSync5 } from "node:fs";
-import { dirname as dirname18, join as join28 } from "node:path";
+import { dirname as dirname19, join as join28 } from "node:path";
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
@@ -8220,7 +8331,7 @@ Then ask Olympus again. To undo: sudo apparmor_parser -R /etc/apparmor.d/olympus
 }
 async function launcherPath(env) {
   const daemon = managedToolExecutable("zkapi-clientd", { env, platform: "linux", arch: "x64" });
-  const managed = daemon ? join28(dirname18(daemon), "zkapi-confine") : undefined;
+  const managed = daemon ? join28(dirname19(daemon), "zkapi-confine") : undefined;
   const system = "/usr/local/libexec/olympus/zkapi-confine";
   for (const path of [system, managed]) {
     if (!path)
@@ -8235,7 +8346,7 @@ async function launcherPath(env) {
           throw new Error("untrusted path");
         if (current2 === "/")
           break;
-        current2 = dirname18(current2);
+        current2 = dirname19(current2);
       }
       if (!lstatSync8(path).isFile() || createHash4("sha256").update(await readFile(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
@@ -8458,7 +8569,7 @@ import { createHash as createHash5, randomUUID as randomUUID8 } from "node:crypt
 import { accessSync as accessSync7, chmodSync as chmodSync5, closeSync as closeSync5, constants as constants3, existsSync as existsSync10, mkdirSync as mkdirSync11, mkdtempSync as mkdtempSync2, readdirSync as readdirSync5, readFileSync as readFileSync22, readlinkSync as readlinkSync3, realpathSync as realpathSync6, rmSync as rmSync6, statSync as statSync13, writeFileSync as writeFileSync7 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer2 } from "node:net";
 import { homedir as homedir9, tmpdir as tmpdir3 } from "node:os";
-import { delimiter as delimiter5, dirname as dirname19, isAbsolute as isAbsolute17, join as join29, resolve as resolvePath } from "node:path";
+import { delimiter as delimiter5, dirname as dirname20, isAbsolute as isAbsolute17, join as join29, resolve as resolvePath } from "node:path";
 function zkapiStageRows(timings) {
   if (!timings)
     return [];
@@ -8763,7 +8874,7 @@ function abandonZkapiFence(path, scope, now) {
   return found;
 }
 function updateState(path, now, mutate) {
-  mkdirSync11(dirname19(path), { recursive: true, mode: 448 });
+  mkdirSync11(dirname20(path), { recursive: true, mode: 448 });
   return withFileLeaseSync(path, (lease) => {
     const day = utcDay(now);
     const current2 = readState(path);
@@ -9150,7 +9261,7 @@ function daemonEnvironment(base, daemonExecutable) {
   try {
     real = realpathSync6(daemonExecutable);
   } catch {}
-  const installBin = dirname19(real);
+  const installBin = dirname20(real);
   const rest = (base.PATH ?? "").split(delimiter5).filter((entry) => entry && entry !== installBin);
   return { ...base, PATH: [installBin, ...rest].join(delimiter5) };
 }
@@ -9164,7 +9275,7 @@ function standardExecutableDirectories(env, platform2 = process.platform) {
   return local;
 }
 function trustedChain(path, probe, uid) {
-  for (let current2 = path;; current2 = dirname19(current2)) {
+  for (let current2 = path;; current2 = dirname20(current2)) {
     const stats = probe.stat(current2);
     if (current2 !== path && !stats.isDirectory())
       return false;
@@ -9172,7 +9283,7 @@ function trustedChain(path, probe, uid) {
       return false;
     if ((stats.mode & 18) !== 0)
       return false;
-    if (dirname19(current2) === current2)
+    if (dirname20(current2) === current2)
       return true;
   }
 }
@@ -9187,7 +9298,7 @@ function trustedFallbackExecutable(candidate, probe = DEFAULT_EXECUTABLE_TRUST) 
       return;
     if (!trustedChain(real, probe, uid))
       return;
-    if (!trustedChain(probe.realpath(dirname19(candidate)), probe, uid))
+    if (!trustedChain(probe.realpath(dirname20(candidate)), probe, uid))
       return;
     return real;
   } catch {
@@ -9592,7 +9703,7 @@ async function openSession(options, control, recovery) {
   let admissionHeld = false;
   const finished = (async () => {
     try {
-      mkdirSync11(dirname19(statePath), { recursive: true, mode: 448 });
+      mkdirSync11(dirname20(statePath), { recursive: true, mode: 448 });
       const result2 = await withEngineConsultAdmission(statePath, () => {
         leaseHeld = true;
         if (zkapiConsultInFlight)
@@ -10854,7 +10965,7 @@ var init_publisher_oauth_client = __esm(() => {
 // src/workers/credential-broker/index.ts
 import { createHash as createHash7 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname22 } from "node:path";
+import { dirname as dirname23 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -10923,7 +11034,7 @@ class JsonCredentialOAuth2StateStore {
         merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname22(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname23(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -10935,7 +11046,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname22(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname23(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -12646,7 +12757,7 @@ var init_credential_broker = __esm(() => {
 import { randomUUID as randomUUID9 } from "node:crypto";
 import { existsSync as existsSync14, mkdirSync as mkdirSync13, readFileSync as readFileSync25 } from "node:fs";
 import { homedir as homedir11 } from "node:os";
-import { dirname as dirname23, join as join32 } from "node:path";
+import { dirname as dirname24, join as join32 } from "node:path";
 function defaultHandleRegistryPath() {
   return join32(homedir11(), ".config", "olympus", "handles.json");
 }
@@ -12724,7 +12835,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync13(dirname23(path), { recursive: true, mode: 448 });
+  mkdirSync13(dirname24(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -12986,6 +13097,29 @@ var init_unpaired_sources = __esm(() => {
   UNPAIRED_RECORD_STATES = new Set(["unpaired", "unpair_in_progress", "unpair_incomplete"]);
 });
 
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+});
+
+// src/core/source-account-binding.ts
+var ACCOUNT_BOUND_SOURCE_IDS;
+var init_source_account_binding = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_provider_account_identity();
+  ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
+});
+
 // src/core/privacy-language.ts
 var SENSITIVITY_TIER_LABELS;
 var init_privacy_language = __esm(() => {
@@ -12995,6 +13129,353 @@ var init_privacy_language = __esm(() => {
     secure: "Private",
     secrets: "Secrets"
   };
+});
+
+// src/core/archive-formats.ts
+function startsWithFromLine(head) {
+  if (!head || head.length < FROM_LINE.length)
+    return false;
+  return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function lastNameOf(name) {
+  return name.split("/").pop() ?? name;
+}
+function whatsAppNoiseName(name) {
+  const base = lastNameOf(name);
+  return name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/") || base.startsWith("._") || base === ".DS_Store";
+}
+function whatsAppNamed(name) {
+  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
+}
+function startsLikeWhatsAppChat(head) {
+  if (!head || head.length < 10 || head.includes(0))
+    return false;
+  for (const raw of new TextDecoder("utf-8").decode(head).split(`
+`).slice(0, 8)) {
+    const line = raw.replace(WHATSAPP_LINE_NOISE, "").replace(WHATSAPP_NARROW_SPACES, " ").replace(/\r$/, "");
+    if (line.trim() === "")
+      continue;
+    return WHATSAPP_FIRST_LINE.test(line);
+  }
+  return false;
+}
+function whatsAppIsExport(entry, needName) {
+  if (entry.kind !== "file")
+    return false;
+  if (entry.members) {
+    return entry.members.some((member) => member.kind === "file" && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
+  }
+  return entry.name.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
+}
+function archiveHeadText(head) {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
+}
+function isJunkArchiveMember(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
+}
+function reflectDailyNoteDate(fileName) {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match)
+    return;
+  const weekday = match[1].slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function headRecordKeys(head) {
+  const text2 = archiveHeadText(head);
+  const n = text2.length;
+  let i = 0;
+  const isSpace = (char) => char === " " || char === "\t" || char === `
+` || char === "\r";
+  while (i < n && isSpace(text2[i]))
+    i += 1;
+  const stack = [];
+  let shape;
+  let listDepth = 0;
+  let closed = false;
+  let hasElements = false;
+  let objectRoot = false;
+  let notesNotAList = false;
+  if (text2[i] === "[") {
+    shape = "list";
+    listDepth = 1;
+    stack.push("a");
+  } else if (text2[i] === "{") {
+    objectRoot = true;
+    stack.push("o");
+  } else {
+    return;
+  }
+  i += 1;
+  const records = [];
+  let current2;
+  while (i < n) {
+    const char = text2[i];
+    if (listDepth > 0 && stack.length === listDepth && !isSpace(char) && char !== "," && char !== "]")
+      hasElements = true;
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text2[end] !== '"')
+        end += text2[end] === "\\" ? 2 : 1;
+      if (end >= n)
+        break;
+      const raw = text2.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text2[after]))
+        after += 1;
+      if (text2[after] === ":" && stack[stack.length - 1] === "o") {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current2?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
+          let value = after + 1;
+          while (value < n && isSpace(text2[value]))
+            value += 1;
+          if (text2[value] === "[") {
+            shape = "notes";
+            listDepth = 2;
+          } else if (value < n) {
+            notesNotAList = true;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char === "[" ? "a" : "o");
+      if (char === "{" && listDepth > 0 && stack.length === listDepth + 1) {
+        current2 = new Set;
+        records.push(current2);
+      }
+    } else if (char === "]" || char === "}") {
+      stack.pop();
+      if (listDepth > 0 && stack.length < listDepth) {
+        closed = true;
+        listDepth = 0;
+      }
+      if (stack.length === 0)
+        break;
+      if (listDepth > 0 && stack.length === listDepth)
+        current2 = undefined;
+    }
+    i += 1;
+  }
+  if (!shape) {
+    if (objectRoot && !notesNotAList && stack.length > 0) {
+      return { shape: "notes", records: [], empty: false, firstRecordCut: true, unreached: true };
+    }
+    return;
+  }
+  const open2 = listDepth > 0;
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open2 && records.length === 1 && current2 !== undefined, unreached: false };
+}
+function isReflectRecord(keys) {
+  return REFLECT_BODY_KEYS.some((key) => keys.has(key)) && REFLECT_NOTE_KEYS.some((key) => keys.has(key));
+}
+function isRoamRecord(keys) {
+  return keys.has("title") && (ROAM_TIME_KEYS.some((key) => keys.has(key)) || keys.has("children") && keys.has("uid"));
+}
+function recordsFormat(records, shape) {
+  const reflect = records.some(isReflectRecord);
+  const roam = records.some(isRoamRecord);
+  if (reflect === roam)
+    return;
+  if (roam)
+    return shape === "list" ? "roam" : undefined;
+  return "reflect";
+}
+function notesJsonFormat(probe) {
+  const parsed = headRecordKeys(probe.head);
+  if (!parsed)
+    return;
+  const fromHead = recordsFormat(parsed.records, parsed.shape);
+  if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
+    return fromHead;
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
+}
+function detectFile(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0].relPath] : undefined;
+}
+function zipJsonMembers(entry) {
+  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+function readsJsonExport(entry, format) {
+  const other = format === "reflect" ? "roam" : "reflect";
+  if (entry.members) {
+    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
+    return members.includes(format) && !members.includes(other);
+  }
+  return notesJsonFormat(entry) === format;
+}
+function isTelegramJsonHead(head) {
+  if (!head || head.length === 0)
+    return false;
+  const text2 = new TextDecoder("utf-8").decode(head);
+  return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
+}
+function archiveCorpusId(trustDomain, family) {
+  return `${trustDomain}.archive.${family}`;
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var init_archive_formats = __esm(() => {
+  FROM_LINE = [70, 114, 111, 109, 32];
+  MBOX_ARCHIVE_FORMAT = Object.freeze({
+    id: "mbox",
+    label: "Mail (mbox)",
+    family: "email",
+    provider: "mbox",
+    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
+    citationLabel: "Imported mail",
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
+      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
+        return;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
+  WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
+  WHATSAPP_FIRST_LINE = new RegExp(`^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`, "i");
+  WHATSAPP_LINE_NOISE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  WHATSAPP_NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
+  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
+    id: "whatsapp_chat",
+    label: "WhatsApp chat export",
+    family: "chat",
+    provider: "whatsapp_export",
+    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
+    citationLabel: "WhatsApp",
+    probeNames: Object.freeze(["*.txt", "*.zip"]),
+    signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
+      const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
+      return found.length > 0 ? found : undefined;
+    },
+    unconfirmed(probe) {
+      if (probe.chosen.kind === "file")
+        return 0;
+      return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
+    }
+  });
+  leniencyDecoder = new TextDecoder("utf-8");
+  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
+  REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
+  REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
+  ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  SCANNED = new WeakMap;
+  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-json",
+    label: "Reflect notes (JSON)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
+  });
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-markdown",
+    label: "Reflect notes (Markdown zip)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export as Markdown (the .zip file)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*, *, ????.md"]),
+    detect: (probe) => detectFile(probe, (entry) => {
+      if (!entry.members || /^roam/i.test(entry.name))
+        return false;
+      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
+      if (files.some((member) => /\.json$/i.test(member.name)))
+        return false;
+      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+      if (notes.length === 0)
+        return false;
+      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+    })
+  });
+  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "roam-json",
+    label: "Roam notes (JSON)",
+    family: "note",
+    provider: "roam",
+    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
+    citationLabel: "Roam",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
+  TELEGRAM_EXPORT_SECTIONS = Object.freeze([
+    "personal_information",
+    "profile_pictures",
+    "stories",
+    "profile_music",
+    "contacts",
+    "frequent_contacts",
+    "sessions",
+    "web_sessions",
+    "other_data",
+    "chats",
+    "left_chats"
+  ]);
+  TELEGRAM_FULL_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join("|")})"\s*:\s*[\[{]`);
+  TELEGRAM_CHAT_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`);
+  TELEGRAM_HTML_NAME = /^(?:messages\d*|export_results)\.html?$/i;
+  TELEGRAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "telegram_json",
+    label: "Telegram Desktop export (JSON)",
+    family: "chat",
+    provider: "telegram_export",
+    chooseHint: "a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON)",
+    citationLabel: "Telegram",
+    probeNames: ["result.json", "messages.html", "export_results.html"],
+    unsupportedVariants: Object.freeze([
+      Object.freeze({
+        matches(probe) {
+          if (probe.chosen.kind === "file")
+            return TELEGRAM_HTML_NAME.test(probe.chosen.name);
+          return probe.children.some((entry) => entry.kind === "file" && TELEGRAM_HTML_NAME.test(entry.name));
+        },
+        advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
+      })
+    ]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name.toLowerCase() === "result.json" && isTelegramJsonHead(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([
+    MBOX_ARCHIVE_FORMAT,
+    WHATSAPP_ARCHIVE_FORMAT,
+    REFLECT_JSON_ARCHIVE_FORMAT,
+    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+    ROAM_JSON_ARCHIVE_FORMAT,
+    TELEGRAM_JSON_ARCHIVE_FORMAT
+  ]);
+  CONNECTOR_FACTORIES = new Map;
 });
 
 // src/core/ingestion-throughput.ts
@@ -13169,9 +13650,13 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+function archivePickIntro(formats = ARCHIVE_FORMATS) {
+  return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
+}
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
+  init_archive_formats();
   init_answer_ready_coverage();
   init_display_text();
   init_scheduler_markers();
@@ -13407,12 +13892,19 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  ARCHIVE_PICK_INTRO = archivePickIntro();
+  DASHBOARD_ARCHIVE_NOUNS = {
+    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
+    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "Snapshot, not updated" },
+    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes", snapshot: "" },
+    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
+  };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
     pick: {
       back: "Back to Olympus",
       title: "Import an archive",
-      intro: "Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.",
+      intro: ARCHIVE_PICK_INTRO,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -13423,11 +13915,15 @@ var init_vocabulary = __esm(() => {
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
     dates: "{earliest} to {latest}",
-    items: { one: "1 message", many: "{n} messages" },
+    nouns: DASHBOARD_ARCHIVE_NOUNS,
     importingLine: "{percent}% read · {items} so far",
     importingLineUncounted: "{percent}% read",
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
+    emptyImport: "Imported: {none} found in this archive.",
+    emptyImportWhen: "Imported {when}: {none} found in this archive.",
+    nothingImported: "{None} imported.",
+    nothingImportedWhen: "{None} imported {when}.",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
@@ -13440,7 +13936,7 @@ var init_vocabulary = __esm(() => {
     },
     setUpPrivateModel: "Set up the private model",
     countsUnavailable: {
-      why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
+      why: "Olympus can't count what this archive holds right now: its index could not be opened.",
       fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
     },
     notRunning: {
@@ -13470,10 +13966,33 @@ var init_vocabulary = __esm(() => {
     gaps: {
       message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
       message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
+      message_content_unsupported: { one: "1 message with a kind of content Olympus cannot read yet", many: "{n} messages with a kind of content Olympus cannot read yet" },
       charset_not_decoded: { one: "1 message in a character set Olympus could not read", many: "{n} messages in a character set Olympus could not read" },
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+      message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
+      note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
+      note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
+      note_too_large: { one: "1 note too large to read", many: "{n} notes too large to read" },
+      note_content_unsupported: { one: "1 note with a kind of content Olympus cannot read yet", many: "{n} notes with a kind of content Olympus cannot read yet" },
+      note_date_assumed: { one: "1 note has no date in the archive: Olympus used the day the file was saved", many: "{n} notes have no date in the archive: Olympus used the day the file was saved" },
+      service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
+      message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
+      media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
+      item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
+      time_zone_assumed: { one: "The times have no time zone, so Olympus read them in this computer's time zone", many: "The times in {n} files have no time zone, so Olympus read them in this computer's time zone" },
+      date_order_assumed: { one: "The dates do not say which part is the day, so Olympus read them day first", many: "The dates in {n} files do not say which part is the day, so Olympus read them day first" },
+      item_start_assumed: { one: "1 line that looks like the start of a new message was taken as one, though it is dated before the message above it or written in another style, so it may belong to that message", many: "{n} lines that look like the start of a new message were taken as new messages, though each is dated before the message above it or written in another style, so they may belong to those messages" },
+      zip_overlap_unchecked: { one: "1 zip is too large to check whether its files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)", many: "{n} zips are too large to check whether their files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)" },
+      section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
+      file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
+      item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      files_not_looked_at: { one: "1 file in what you chose was not looked at, so it was not imported if it is an export", many: "{n} files in what you chose were not looked at, so any of them that are exports were not imported" },
+      files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
@@ -13515,12 +14034,12 @@ var init_vocabulary = __esm(() => {
       request: "An agent asked to import {name}",
       removal: "An agent asked to remove {name}",
       failed: "An import did not start: {name}",
-      counts: "Olympus can't count the messages in {name}",
+      counts: "Olympus can't count what is in {name}",
       scheduler: {
         disabled: "Imports can't run: background syncing is turned off",
         not_selected: "Imports can't run: background syncing leaves out archives"
       },
-      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
       seeWhy: "See why",
       review: "Review",
@@ -13933,6 +14452,20 @@ var init_credential_health = __esm(() => {
 
 // src/core/embedding-cost-estimates.ts
 var init_embedding_cost_estimates = () => {};
+// src/core/source-registry.ts
+var init_source_registry = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_olympus_layout();
+});
+
+// src/core/source-placement.ts
+var init_source_placement = __esm(() => {
+  init_archive_formats();
+  init_olympus_layout();
+  init_source_corpus_registry();
+  init_source_registry();
+});
 
 // src/core/classification-signals.ts
 function namesOnlyContentScopeMetadata() {
@@ -14886,6 +15419,7 @@ function hashString(value) {
 var GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
@@ -15466,6 +16000,7 @@ function hashString2(value) {
 var GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_source_ingestion_exclusions();
   init_credential_broker();
   init_request_budget();
@@ -15729,6 +16264,7 @@ var init_tier_classifier = __esm(() => {
     judge: () => ({ verdict: "undecided" })
   });
 });
+
 // src/workers/classification/secret-locations.ts
 var STOP_WORDS;
 var init_secret_locations = __esm(() => {
@@ -16459,52 +16995,13 @@ var init_local_index = __esm(() => {
   ]);
 });
 
-// src/core/archive-formats.ts
-function startsWithFromLine(head) {
-  if (!head || head.length < FROM_LINE.length)
-    return false;
-  return FROM_LINE.every((byte, index) => head[index] === byte);
-}
-function archiveCorpusId(trustDomain, family) {
-  return `${trustDomain}.archive.${family}`;
-}
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
-var init_archive_formats = __esm(() => {
-  FROM_LINE = [70, 114, 111, 109, 32];
-  MBOX_ARCHIVE_FORMAT = Object.freeze({
-    id: "mbox",
-    label: "Mail (mbox)",
-    family: "email",
-    provider: "mbox",
-    citationLabel: "Imported mail",
-    detect(probe) {
-      if (probe.chosen.kind === "file")
-        return startsWithFromLine(probe.chosen.head) ? [""] : undefined;
-      if (!probe.chosen.name.toLowerCase().endsWith(".mbox"))
-        return;
-      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name === "mbox" && startsWithFromLine(entry.head));
-      return inner ? [inner.relPath] : undefined;
-    }
-  });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
-  CONNECTOR_FACTORIES = new Map;
-});
-
-// src/core/source-registry.ts
-var init_source_registry = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_olympus_layout();
-});
-
 // src/core/source-storage.ts
 var init_source_storage = __esm(() => {
   init_secret_locations();
   init_sniffer_store();
   init_tier_ledger();
   init_local_index();
-  init_archive_formats();
-  init_source_corpus_registry();
+  init_source_placement();
   init_source_registry();
 });
 
@@ -16512,6 +17009,7 @@ var init_source_storage = __esm(() => {
 var READWISE_STORE_PLACEMENT;
 var init_connector = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_atomic_file();
   init_credential_broker();
   init_source_storage();
@@ -16726,7 +17224,7 @@ var init_tier_content_purge = __esm(() => {
 import { spawn as spawn3 } from "node:child_process";
 import { existsSync as existsSync16, statSync as statSync16 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
-import { delimiter as delimiter6, dirname as dirname25, isAbsolute as isAbsolute19, join as join34 } from "node:path";
+import { delimiter as delimiter6, dirname as dirname26, isAbsolute as isAbsolute19, join as join34 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath as fileURLToPath6 } from "node:url";
 function helperEnvironment() {
@@ -16900,7 +17398,7 @@ class HelperProcess {
   }
 }
 function helperPath() {
-  const here = dirname25(fileURLToPath6(import.meta.url));
+  const here = dirname26(fileURLToPath6(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join34(here, name);
     if (existsSync16(candidate))
@@ -17523,7 +18021,7 @@ var init_folder_facets = __esm(() => {
 // src/workers/x-bookmarks/connector.ts
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_storage();
   init_corpus_adapter2();
   init_folder_facets();
@@ -17556,7 +18054,9 @@ var init_live_control2 = __esm(() => {
 // src/workers/x-bookmarks/reconcile-state.ts
 var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2, FOLDER_FACET_REFRESH_LEASE_MS;
 var init_reconcile_state = __esm(() => {
-  init_live_control2();
+  init_source_placement();
+  init_source_storage();
+  init_connector2();
   init_sqlite_migrations();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
 });
@@ -17660,7 +18160,7 @@ var init_corpus_adapter3 = __esm(() => {
 // src/workers/dropbox-files/connector-store.ts
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_STORE_PLACEMENT;
 var init_connector_store2 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
   init_file_ingestion_matcher();
@@ -18107,7 +18607,7 @@ var init_scope = __esm(() => {
 // src/workers/local-files/store.ts
 var LOCAL_FILES_CORPUS_ID = "secure_local.local.files", LOCAL_FILES_INTERNAL_CORPUS_ID = "internal.local.files", LOCAL_FILES_PUBLIC_CORPUS_ID = "public_safe.local.files", LOCAL_FILES_TIER_CORPUS_IDS, LOCAL_FILES_STORE_PLACEMENT;
 var init_store = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
@@ -18270,12 +18770,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -18337,15 +18837,13 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-function defaultSourceDashboardHistoryDbPath(env = process.env) {
-  return olympusDataPath(env, "source-dashboard.sqlite");
-}
 var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
   init_publisher_oauth_client();
   init_privacy_language();
+  init_archive_formats();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -18534,17 +19032,101 @@ var init_remote_connections = __esm(() => {
   init_olympus_layout();
 });
 
+// src/core/ingestion-health-state.ts
+import { existsSync as existsSync17, mkdirSync as mkdirSync15, readFileSync as readFileSync27, writeFileSync as writeFileSync10 } from "node:fs";
+import { dirname as dirname27 } from "node:path";
+function defaultIngestionHealthStatePath(env = process.env) {
+  return olympusDataPath(env, "source-ingestion-doctor-state.json");
+}
+function readIngestionHealthState(path) {
+  try {
+    if (!existsSync17(path))
+      return;
+    const parsed = JSON.parse(readFileSync27(path, "utf8"));
+    const record2 = asRecord16(parsed);
+    const sources = asRecord16(record2.sources);
+    const normalized = {};
+    for (const [sourceId, sourceValue] of Object.entries(sources)) {
+      const source = asRecord16(sourceValue);
+      const terminal = asRecord16(source.failed_terminal_by_class);
+      normalized[sourceId] = {
+        actionable_stuck: asCount(source.actionable_stuck),
+        failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
+      };
+    }
+    return {
+      generated_at: typeof record2.generated_at === "string" ? record2.generated_at : new Date(0).toISOString(),
+      sources: normalized
+    };
+  } catch {
+    return;
+  }
+}
+function writeIngestionHealthState(path, state) {
+  mkdirSync15(dirname27(path), { recursive: true, mode: 448 });
+  writeFileSync10(path, `${JSON.stringify(state, null, 2)}
+`);
+}
+function asRecord16(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function asCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+var init_ingestion_health_state = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/this-computer.ts
+var init_this_computer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_file_scope_sources();
+});
+
+// src/workers/source-scheduler-state.ts
+var init_source_scheduler_state = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+});
+
+// src/workers/classification/tier-migration-reports.ts
+var init_tier_migration_reports = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/source-forget-registry.ts
+var init_source_forget_registry = __esm(() => {
+  init_operation_error();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_watch();
+  init_ingestion_health_state();
+  init_source_scope_approval();
+  init_mail_source_scope();
+  init_source_account_binding();
+  init_this_computer();
+  init_source_dashboard();
+  init_source_scheduler_state();
+  init_job_names();
+  init_tier_migration_reports();
+});
+
 // src/workers/archive-import/state.ts
 var init_state = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
+  init_source_storage();
   init_atomic_file();
+  init_archive_formats();
   init_file_lease();
 });
 
 // src/workers/archive-import/store.ts
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_archive_formats();
   init_source_corpus_registry();
   init_source_storage();
@@ -18564,11 +19146,904 @@ var init_scope_safe_fs = __esm(() => {
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data.length; index += 1) {
+    crc = crcTable[(crc ^ data[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data) {
+  if (data.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data, value) >>> 0 : tableCrc32(data, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+var TokenizerStates;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/json-stream.ts
+var EMPTY_FRAME, MAX_SAFE_DIGITS;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  init_archive_formats();
+  init_stop_errors();
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+});
+
+// src/workers/archive-import/record-probe.ts
+var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
+var init_record_probe = __esm(() => {
+  init_json_stream();
+  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
+});
+
+// node_modules/fflate/esm/browser.js
+var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0;i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1;i < 30; ++i) {
+    for (var j = b[i];j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+}, _a, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
+  var s = cd.length;
+  var i2 = 0;
+  var l = new u16(mb);
+  for (;i2 < s; ++i2) {
+    if (cd[i2])
+      ++l[cd[i2] - 1];
+  }
+  var le = new u16(mb);
+  for (i2 = 1;i2 < mb; ++i2) {
+    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+  }
+  var co;
+  if (r) {
+    co = new u16(1 << mb);
+    var rvb = 15 - mb;
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        var sv = i2 << 4 | cd[i2];
+        var r_1 = mb - cd[i2];
+        var v = le[cd[i2] - 1]++ << r_1;
+        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
+          co[rev[v] >> rvb] = sv;
+        }
+      }
+    }
+  } else {
+    co = new u16(s);
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+      }
+    }
+  }
+  return co;
+}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
+  var m = a[0];
+  for (var i2 = 1;i2 < a.length; ++i2) {
+    if (a[i2] > m)
+      m = a[i2];
+  }
+  return m;
+}, bits = function(d, p, m) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+}, bits16 = function(d, p) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+}, shft = function(p) {
+  return (p + 7) / 8 | 0;
+}, slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+}, ec, err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+}, inflt = function(dat, st, buf, dict) {
+  var sl = dat.length, dl = dict ? dict.length : 0;
+  if (!sl || st.f && !st.l)
+    return buf || new u8(0);
+  var noBuf = !buf;
+  var resize = noBuf || st.i != 2;
+  var noSt = st.i;
+  if (noBuf)
+    buf = new u8(sl * 3);
+  var cbuf = function(l2) {
+    var bl = buf.length;
+    if (l2 > bl) {
+      var nbuf = new u8(Math.max(bl * 2, l2));
+      nbuf.set(buf);
+      buf = nbuf;
+    }
+  };
+  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+  var tbts = sl * 8;
+  do {
+    if (!lm) {
+      final = bits(dat, pos, 1);
+      var type = bits(dat, pos + 1, 3);
+      pos += 3;
+      if (!type) {
+        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+        if (t > sl) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + l);
+        buf.set(dat.subarray(s, t), bt);
+        st.b = bt += l, st.p = pos = t * 8, st.f = final;
+        continue;
+      } else if (type == 1)
+        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+      else if (type == 2) {
+        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        pos += 14;
+        var ldt = new u8(tl);
+        var clt = new u8(19);
+        for (var i2 = 0;i2 < hcLen; ++i2) {
+          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+        }
+        pos += hcLen * 3;
+        var clb = max(clt), clbmsk = (1 << clb) - 1;
+        var clm = hMap(clt, clb, 1);
+        for (var i2 = 0;i2 < tl; ) {
+          var r = clm[bits(dat, pos, clbmsk)];
+          pos += r & 15;
+          var s = r >> 4;
+          if (s < 16) {
+            ldt[i2++] = s;
+          } else {
+            var c = 0, n = 0;
+            if (s == 16)
+              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+            else if (s == 17)
+              n = 3 + bits(dat, pos, 7), pos += 3;
+            else if (s == 18)
+              n = 11 + bits(dat, pos, 127), pos += 7;
+            while (n--)
+              ldt[i2++] = c;
+          }
+        }
+        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+        lbt = max(lt);
+        dbt = max(dt);
+        lm = hMap(lt, lbt, 1);
+        dm = hMap(dt, dbt, 1);
+      } else
+        err(1);
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+    }
+    if (resize)
+      cbuf(bt + 131072);
+    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+    var lpos = pos;
+    for (;; lpos = pos) {
+      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+      pos += c & 15;
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+      if (!c)
+        err(2);
+      if (sym < 256)
+        buf[bt++] = sym;
+      else if (sym == 256) {
+        lpos = pos, lm = null;
+        break;
+      } else {
+        var add = sym - 254;
+        if (sym > 264) {
+          var i2 = sym - 257, b = fleb[i2];
+          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+          pos += b;
+        }
+        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+        if (!d)
+          err(3);
+        pos += d & 15;
+        var dt = fd[dsym];
+        if (dsym > 3) {
+          var b = fdeb[dsym];
+          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+        }
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var end = bt + add;
+        if (bt < dt) {
+          var shift = dl - dt, dend = Math.min(dt, end);
+          if (shift + bt < 0)
+            err(3);
+          for (;bt < dend; ++bt)
+            buf[bt] = dict[shift + bt];
+        }
+        for (;bt < end; ++bt)
+          buf[bt] = buf[bt - dt];
+      }
+    }
+    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+    if (lm)
+      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+  } while (!final);
+  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+}, et, Inflate, td, tds = 0;
+var init_browser = __esm(() => {
+  u8 = Uint8Array;
+  u16 = Uint16Array;
+  i32 = Int32Array;
+  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  _a = freb(fleb, 2);
+  fl = _a.b;
+  revfl = _a.r;
+  fl[28] = 258, revfl[258] = 28;
+  _b = freb(fdeb, 0);
+  fd = _b.b;
+  revfd = _b.r;
+  rev = new u16(32768);
+  for (i = 0;i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  flt = new u8(288);
+  for (i = 0;i < 144; ++i)
+    flt[i] = 8;
+  for (i = 144;i < 256; ++i)
+    flt[i] = 9;
+  for (i = 256;i < 280; ++i)
+    flt[i] = 7;
+  for (i = 280;i < 288; ++i)
+    flt[i] = 8;
+  fdt = new u8(32);
+  for (i = 0;i < 32; ++i)
+    fdt[i] = 5;
+  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+  ];
+  et = /* @__PURE__ */ new u8(0);
+  Inflate = /* @__PURE__ */ function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  }();
+  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {}
+});
+
+// src/workers/archive-import/zip-reader.ts
+function readExact(source, offset, length) {
+  if (length < 0 || offset < 0 || offset + length > source.size)
+    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+  if (length <= ZIP_READ_CHUNK_BYTES) {
+    const bytes = source.readAt(offset, length);
+    if (bytes.length !== length)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    return bytes;
+  }
+  const out = new Uint8Array(length);
+  for (let done = 0;done < length; ) {
+    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
+    if (part.length === 0)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    out.set(part, done);
+    done += part.length;
+  }
+  return out;
+}
+function memberKey(entry) {
+  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
+}
+
+class ZipMemberReader {
+  entry;
+  archive;
+  dataStart;
+  startAt;
+  pos = 0;
+  runningCrc = 0;
+  crcKnown;
+  out = [];
+  lastChunk = new Uint8Array(0);
+  crcBeforeLast = 0;
+  heldLast = 0;
+  closed = false;
+  result;
+  storedNext = 0;
+  inflate;
+  compressedNext = 0;
+  compressedBlock = new Uint8Array(0);
+  compressedOffset = 0;
+  inflateFinished = false;
+  failure;
+  replayed = 0;
+  replayStep;
+  catchUpEnded = false;
+  constructor(archive, entry, dataStart, options) {
+    this.archive = archive;
+    this.entry = entry;
+    this.dataStart = dataStart;
+    const start = options.start ?? 0;
+    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
+    }
+    this.startAt = start;
+    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
+      throw new RangeError("replayStepBytes must be a positive whole number");
+    }
+    this.replayStep = options.replayStepBytes;
+    this.crcKnown = start === 0;
+    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
+      this.inflateFinished = true;
+      this.pos = start;
+      this.crcKnown = true;
+      return;
+    }
+    if (entry.method === 0) {
+      this.storedNext = start;
+      this.pos = start;
+      if (start > 0 && options.startCrc !== undefined) {
+        this.runningCrc = options.startCrc >>> 0;
+        this.crcKnown = true;
+      }
+      return;
+    }
+    const kept = options.continuation;
+    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
+      this.inflate = this.bind(kept.inflate);
+      this.compressedNext = kept.compressedNext;
+      this.compressedBlock = kept.compressedBlock;
+      this.compressedOffset = 0;
+      this.out = [...kept.out];
+      this.inflateFinished = kept.inflateFinished;
+      this.pos = kept.reached;
+      this.runningCrc = kept.crc;
+      this.crcKnown = kept.crcKnown;
+      return;
+    }
+    this.inflate = this.bind(new Inflate(() => {
+      return;
+    }));
+    this.crcKnown = true;
+  }
+  bind(inflate) {
+    inflate.ondata = (chunk) => {
+      if (chunk.length > 0)
+        this.out.push(chunk);
+    };
+    return inflate;
+  }
+  static open(archive, entry, options = {}) {
+    if (entry.encrypted)
+      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
+    }
+    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
+    }
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
+    return new ZipMemberReader(archive, entry, dataStart, options);
+  }
+  get position() {
+    return Math.max(this.pos, this.startAt);
+  }
+  get crc32() {
+    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
+  }
+  get catchingUp() {
+    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
+  }
+  get replayedBytes() {
+    return this.replayed;
+  }
+  get end() {
+    return this.result;
+  }
+  next() {
+    this.assertUsable();
+    if (!this.replay()) {
+      this.heldLast = 0;
+      this.lastChunk = new Uint8Array(0);
+      return this.lastChunk;
+    }
+    for (;; ) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (!this.fillOrFail()) {
+          this.conclude();
+          return;
+        }
+        continue;
+      }
+      this.crcBeforeLast = this.runningCrc;
+      if (this.crcKnown)
+        this.runningCrc = crc32Update(this.runningCrc, chunk);
+      this.lastChunk = chunk;
+      this.heldLast = chunk.length;
+      this.pos += chunk.length;
+      return chunk;
+    }
+  }
+  catchUp() {
+    this.assertUsable();
+    return this.replay();
+  }
+  assertUsable() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
+  }
+  replay() {
+    const stepFrom = this.replayed;
+    while (this.pos < this.startAt && !this.catchUpEnded) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep)
+          return false;
+        if (!this.fillOrFail()) {
+          this.catchUpEnded = true;
+          break;
+        }
+        continue;
+      }
+      const skip = this.startAt - this.pos;
+      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
+      this.runningCrc = crc32Update(this.runningCrc, head);
+      this.pos += head.length;
+      this.replayed += head.length;
+      if (head.length < chunk.length)
+        this.out.unshift(chunk.subarray(head.length));
+    }
+    return true;
+  }
+  unread(count) {
+    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
+      throw new RangeError("unread past the last chunk");
+    if (count === 0)
+      return;
+    this.heldLast -= count;
+    this.pos -= count;
+    if (this.crcKnown)
+      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
+    this.out.unshift(this.lastChunk.subarray(this.heldLast));
+    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
+    this.result = undefined;
+  }
+  suspend() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
+      return;
+    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES)
+      return;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
+    const state = {
+      position: Math.max(this.pos, this.startAt),
+      reached: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
+      memberKey: memberKey(this.entry),
+      crc: this.runningCrc,
+      crcKnown: this.crcKnown,
+      inflate: this.inflate,
+      compressedNext: this.compressedNext,
+      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
+      out: [...this.out],
+      inflateFinished: this.inflateFinished
+    };
+    this.inflate = undefined;
+    this.out = [];
+    return state;
+  }
+  close() {
+    this.closed = true;
+    this.inflate = undefined;
+    this.out = [];
+  }
+  fillOrFail() {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
+  fill() {
+    if (this.entry.method === 0) {
+      if (this.storedNext >= this.entry.uncompressedSize)
+        return false;
+      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
+      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
+      if (bytes.length === 0)
+        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
+      this.storedNext += bytes.length;
+      this.out.push(bytes);
+      return true;
+    }
+    if (this.inflateFinished || !this.inflate)
+      return false;
+    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
+      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
+      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
+      this.compressedOffset = 0;
+      this.compressedNext += length;
+    }
+    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
+    this.compressedOffset += slice.length;
+    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
+    try {
+      this.inflate.push(slice, final);
+    } catch (error) {
+      if (error instanceof ZipMemberError)
+        throw error;
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
+    }
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
+      }
+      this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
+    }
+    return true;
+  }
+  conclude() {
+    if (this.result)
+      return;
+    const sizeOk = this.pos === this.entry.uncompressedSize;
+    this.result = {
+      bytes: this.pos,
+      sizeOk,
+      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
+    };
+  }
+}
+function inflaterProgress(inflate) {
+  const internal = inflate;
+  const state = internal.s;
+  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
+    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
+}
+function readBlock(source, offset, length, name) {
+  try {
+    return readExact(source, offset, length);
+  } catch (error) {
+    if (error instanceof ZipFormatError)
+      throw new ZipMemberError("damaged", name, error.message);
+    throw error;
+  }
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var init_zip_reader = __esm(() => {
+  init_browser();
+  init_archive_formats();
+  init_stop_errors();
+  init_byte_source();
+  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
+  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
+  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
+  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
+  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
+  ZipFormatError = class ZipFormatError extends Error {
+    code;
+    constructor(code, message) {
+      super(message);
+      this.name = "ZipFormatError";
+      this.code = code;
+    }
+  };
+  ZipMemberError = class ZipMemberError extends Error {
+    code;
+    memberName;
+    constructor(code, memberName, message) {
+      super(message);
+      this.name = "ZipMemberError";
+      this.code = code;
+      this.memberName = memberName;
+    }
+  };
+  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
 // src/workers/archive-import/manifest.ts
 var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
 var init_manifest2 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
+  init_byte_source();
+  init_record_probe();
+  init_zip_reader();
   ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
   ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
 });
@@ -18578,6 +20053,7 @@ var STATUSES;
 var init_requests = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_source_storage();
   init_manifest2();
   init_state();
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
@@ -18585,7 +20061,7 @@ var init_requests = __esm(() => {
 
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_storage();
   init_tiered_store_set();
   init_connector();
@@ -18593,14 +20069,11 @@ var init_tier_set2 = __esm(() => {
 
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_storage();
   init_tiered_store_set();
   init_connector2();
 });
-
-// src/workers/whatsapp/connector.ts
-var init_connector4 = () => {};
 
 // src/workers/whatsapp/reaction-index.ts
 var init_reaction_index = __esm(() => {
@@ -18654,7 +20127,6 @@ var init_extraction_source = __esm(() => {
 
 // src/workers/whatsapp/index.ts
 var init_whatsapp = __esm(() => {
-  init_connector4();
   init_live_connector();
   init_store_sync2();
   init_extraction_source();
@@ -18668,6 +20140,7 @@ var init_pairing_session_paths = __esm(() => {
 // src/data-lifecycle.ts
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_data_owner_lock();
   init_source_storage();
   init_atomic_file();
@@ -18675,6 +20148,8 @@ var init_data_lifecycle = __esm(() => {
   init_sqlite_migrations();
   init_remote_connections();
   init_waiting_private_questions();
+  init_source_forget_registry();
+  init_source_registry();
   init_source_ingestion_policy();
   init_dropbox_files();
   init_store();
@@ -20929,7 +22404,7 @@ import { isAbsolute as isAbsolute9 } from "node:path";
 init_model_transport();
 init_atomic_file();
 import { existsSync as existsSync7, mkdirSync as mkdirSync7, readFileSync as readFileSync13, unlinkSync } from "node:fs";
-import { dirname as dirname10 } from "node:path";
+import { dirname as dirname11 } from "node:path";
 var VENICE_BILLING_BASE_URL = "https://api.venice.ai/api/v1";
 var DEFAULT_BASE_URL = VENICE_BILLING_BASE_URL;
 var DEFAULT_TIMEOUT_MS = 15000;
@@ -21284,12 +22759,12 @@ function safeErrorMessage(error) {
   return error instanceof Error && error.name === "AbortError" ? "Venice billing request timed out or was cancelled." : "Venice billing request failed.";
 }
 function writeReport(path, report) {
-  mkdirSync7(dirname10(path), { recursive: true, mode: 448 });
+  mkdirSync7(dirname11(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify(report, null, 2)}
 `);
 }
 function writeProviderPause(path, report) {
-  mkdirSync7(dirname10(path), { recursive: true, mode: 448 });
+  mkdirSync7(dirname11(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, `${JSON.stringify({
     active: true,
     kind: "venice",
@@ -21776,60 +23251,7 @@ init_http_timeout();
 init_operation_error();
 init_operation_caller();
 init_source_corpus_registry();
-
-// src/core/source-watch.ts
-init_olympus_layout();
-init_sqlite_migrations();
-var SOURCE_WATCH_MIN_LEASE_MS = 1000;
-var SOURCE_WATCH_MAX_LEASE_MS = 5 * 60000;
-var SOURCE_WATCH_MIN_RETRY_MS = 1000;
-var SOURCE_WATCH_MAX_RETRY_MS = 24 * 60 * 60000;
-var SOURCE_WATCH_MIN_RETENTION_MS = 24 * 60 * 60000;
-var SOURCE_WATCH_MAX_RETENTION_MS = 365 * 24 * 60 * 60000;
-var SOURCE_WATCH_OWNER_HEADER = "X-Olympus-Source-Watch-Owner";
-var SOURCE_WATCH_ROUTE_KIND_HEADER = "X-Olympus-Source-Watch-Route-Kind";
-var SOURCE_WATCH_ROUTE_TARGET_HEADER = "X-Olympus-Source-Watch-Route-Target";
-var SOURCE_WATCH_ROUTE_ACCOUNT_HEADER = "X-Olympus-Source-Watch-Route-Account";
-var SOURCE_WATCH_MAX_QUERY_LENGTH = 4096;
-var MAX_WATCH_LIFETIME_MS = 5 * 365 * 24 * 60 * 60000;
-var MAX_SOURCE_CLOCK_SKEW_MS = 5 * 60000;
-var MAX_AVAILABLE_DELAY_MS = 24 * 60 * 60000;
-var OWNER_CONTEXT_FIELDS = new Set(["ownerId", "routeKind", "routeTargetId", "routeAccountId"]);
-var CREATE_WATCH_FIELDS = new Set([
-  "watchId",
-  "corpusId",
-  "queryText",
-  "mode",
-  "expiresAt",
-  "maxDeliveryAttempts"
-]);
-var CANONICAL_REF_FIELDS = new Set(["corpusId", "localItemId", "sourceVersion"]);
-var WATCH_STATUS_VALUES = new Set(["active", "completed", "cancelled", "expired"]);
-var OUTBOX_STATUS_VALUES = new Set([
-  "pending",
-  "leased",
-  "retry",
-  "delivered",
-  "dead_letter",
-  "cancelled"
-]);
-var ownedContexts = new WeakSet;
-var executorCapabilities = new WeakSet;
-function sourceWatchAuthenticatedRouteHeaders(route) {
-  const headers = new Headers({
-    [SOURCE_WATCH_OWNER_HEADER]: route.ownerId,
-    [SOURCE_WATCH_ROUTE_KIND_HEADER]: route.routeKind,
-    [SOURCE_WATCH_ROUTE_TARGET_HEADER]: route.routeTargetId
-  });
-  if (route.routeAccountId)
-    headers.set(SOURCE_WATCH_ROUTE_ACCOUNT_HEADER, route.routeAccountId);
-  return headers;
-}
-var SYSTEM_CLOCK = Object.freeze({
-  now: () => new Date
-});
-
-// src/core/email.ts
+init_source_watch();
 init_worker_auth();
 var MAX_EMAIL_WORKER_ERROR_MESSAGE_LENGTH = 512;
 var MAX_EMAIL_WORKER_ERROR_BODY_LENGTH = 8 * 1024;
@@ -22881,7 +24303,7 @@ init_worker_auth();
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash2, randomBytes as randomBytes4, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync4, openSync as openSync4, writeFileSync as writeFileSync4, unlinkSync as unlinkSync2 } from "node:fs";
-import { dirname as dirname11, join as join16 } from "node:path";
+import { dirname as dirname12, join as join16 } from "node:path";
 
 // src/workers/remote-request-body.ts
 init_http_timeout();
@@ -23192,7 +24614,7 @@ class LinuxOwnerBridge {
       this.clearTicket(previous);
     const value = secret(), challenge = secret();
     const answer = createHmac("sha256", value).update(challenge).digest("base64url");
-    const path = join16(dirname11(this.options.socketPath), `owner-ticket-${randomBytes4(16).toString("hex")}.html`);
+    const path = join16(dirname12(this.options.socketPath), `owner-ticket-${randomBytes4(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
     const html = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
@@ -24027,13 +25449,13 @@ function asRecord11(value) {
 init_config();
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { readFileSync as readFileSync16, statSync as statSync10 } from "node:fs";
-import { delimiter as delimiter3, dirname as dirname13, isAbsolute as isAbsolute13, join as join21 } from "node:path";
+import { delimiter as delimiter3, dirname as dirname14, isAbsolute as isAbsolute13, join as join21 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 init_worker_auth();
 
 // src/workers/dashboard/embedding-runtime.ts
 init_model_transport();
-import { dirname as dirname12, join as join20 } from "node:path";
+import { dirname as dirname13, join as join20 } from "node:path";
 var EMBEDDING_DRAIN_REPORT_PATH_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_PATH";
 var EMBEDDING_DRAIN_REPORT_DIR_ENV = "OLYMPUS_SOURCE_EMBEDDING_DRAIN_REPORT_DIR";
 var EMBEDDING_DRAIN_REPORT_DIR_DEFAULT = "/tmp/olympus-source-processing-supervisor";
@@ -24175,7 +25597,7 @@ async function prepareEmbeddingDrainStart(input, options) {
   if (!isAbsolute13(reportPath)) {
     throw new NativeProcessConfigurationError("Olympus source embedding drain report path must be absolute.");
   }
-  const readinessPath = join21(dirname13(reportPath), READINESS_FILE3);
+  const readinessPath = join21(dirname14(reportPath), READINESS_FILE3);
   const instanceId = randomUUID5();
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_INSTANCE_ID = instanceId;
   env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_READINESS_PATH = readinessPath;
@@ -24465,6 +25887,7 @@ function relayConfigRecord(value) {
 }
 
 // src/workers/source-watch-runtime.ts
+init_source_watch();
 init_openclaw_executable();
 init_http_timeout();
 init_worker_auth();
@@ -24508,6 +25931,9 @@ function humanUtcMinute(value) {
   const iso = new Date(deliveryTimestamp(value)).toISOString();
   return `${iso.slice(0, 16).replace("T", " ")} UTC`;
 }
+
+// src/native-plugin.ts
+init_source_watch();
 
 // src/workers/http.ts
 import { createHmac as createHmac2, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
@@ -24563,7 +25989,7 @@ init_linux_desktop_entry();
 import { spawnSync as spawnSync6 } from "node:child_process";
 import { chmodSync as chmodSync6, closeSync as closeSync6, constants as constants4, copyFileSync, existsSync as existsSync12, fstatSync, fsyncSync as fsyncSync2, ftruncateSync, lstatSync as lstatSync10, linkSync, mkdirSync as mkdirSync12, openSync as openSync5, readFileSync as readFileSync24, readlinkSync as readlinkSync4, readdirSync as readdirSync7, realpathSync as realpathSync7, renameSync as renameSync5, rmSync as rmSync7, rmdirSync, statSync as statSync15, symlinkSync as symlinkSync2, writeFileSync as writeFileSync8 } from "node:fs";
 import { createRequire as createRequire3 } from "node:module";
-import { basename as basename5, dirname as dirname21, join as join31, relative as relative4, resolve as resolve6, sep as sep5 } from "node:path";
+import { basename as basename5, dirname as dirname22, join as join31, relative as relative4, resolve as resolve6, sep as sep5 } from "node:path";
 init_linux_engine_layout();
 init_atomic_file();
 init_linux_engine_layout();
@@ -24581,13 +26007,13 @@ import { spawnSync as spawnSync5 } from "node:child_process";
 init_atomic_file();
 import { existsSync as existsSync11, lstatSync as lstatSync9, readdirSync as readdirSync6, readFileSync as readFileSync23, renameSync as renameSync4, statSync as statSync14 } from "node:fs";
 import { homedir as homedir10, platform as osPlatform } from "node:os";
-import { basename as basename4, dirname as dirname20, isAbsolute as isAbsolute18, join as join30, resolve as resolvePath2 } from "node:path";
+import { basename as basename4, dirname as dirname21, isAbsolute as isAbsolute18, join as join30, resolve as resolvePath2 } from "node:path";
 
 // src/core/engine-children.ts
 init_atomic_file();
 init_remote_access();
 import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync17 } from "node:fs";
-import { dirname as dirname14, join as join23 } from "node:path";
+import { dirname as dirname15, join as join23 } from "node:path";
 var ENGINE_CHILDREN_SCHEMA = "olympus.engine.children.v2";
 var ENGINE_CHILDREN_SCHEMA_V1 = "olympus.engine.children.v1";
 function engineChildrenPath(env = process.env) {
@@ -25001,8 +26427,8 @@ init_linux_engine_layout();
 init_model_transport();
 init_config();
 import { spawnSync as spawnSync7 } from "node:child_process";
-import { existsSync as existsSync18, mkdirSync as mkdirSync15, readFileSync as readFileSync28, writeFileSync as writeFileSync10 } from "node:fs";
-import { dirname as dirname27, join as join39 } from "node:path";
+import { existsSync as existsSync19, readFileSync as readFileSync29 } from "node:fs";
+import { join as join39 } from "node:path";
 import { homedir as homedir15 } from "node:os";
 init_openclaw_executable();
 init_worker_service();
@@ -25334,7 +26760,7 @@ init_model_transport();
 init_zkapi_consult_settings();
 import { mkdirSync as mkdirSync14, readFileSync as readFileSync26, rmSync as rmSync8, writeFileSync as writeFileSync9 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
-import { dirname as dirname24, join as join33 } from "node:path";
+import { dirname as dirname25, join as join33 } from "node:path";
 init_secret_store();
 init_worker_service();
 init_http_timeout();
@@ -25343,24 +26769,8 @@ init_publisher_oauth_client();
 init_connected_handles();
 init_unpaired_sources();
 init_credential_broker();
-
-// src/core/provider-account-identity.ts
-init_http_timeout();
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-  dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-  gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-  google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-  x: "https://api.x.com/2/users/me",
-  google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-};
-var IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-
-// src/core/source-account-binding.ts
-init_atomic_file();
-init_file_lease();
-var ACCOUNT_BOUND_SOURCE_IDS = ["dropbox.files", "google_drive.docs", "gmail.email", "x.bookmarks"];
-
-// src/core/connect.ts
+init_provider_account_identity();
+init_source_account_binding();
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
 var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -25390,7 +26800,7 @@ function readDetachedOAuthState(path) {
     if (process.platform === "linux" && state.logPath) {
       const layout = resolveLinuxEngineLayout();
       const legacyLogs = join33(layout.home, ".olympus/logs") + "/";
-      if (readLinuxEngineReceipt(layout.receiptPath) && dirname24(path) === join33(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
+      if (readLinuxEngineReceipt(layout.receiptPath) && dirname25(path) === join33(layout.configDir, "pending-oauth") && state.logPath.startsWith(legacyLogs)) {
         const name = state.logPath.slice(legacyLogs.length);
         if (isLegacyLinuxSetting(`logs/${name}`))
           state.logPath = join33(layout.configDir, "logs", name);
@@ -25461,7 +26871,7 @@ function isPidAlive(pid) {
 
 // src/core/doctor.ts
 init_source_ingestion_ledger();
-init_source_dashboard();
+init_ingestion_health_state();
 init_ingestion_throughput();
 init_public_source_capabilities();
 init_source_corpus_registry();
@@ -25471,9 +26881,9 @@ init_consult_transport_zkapi();
 // src/core/consult-gate.ts
 init_owner_config_read();
 import { createHash as createHash11 } from "node:crypto";
-import { existsSync as existsSync17, readFileSync as readFileSync27, statSync as statSync18 } from "node:fs";
+import { existsSync as existsSync18, readFileSync as readFileSync28, statSync as statSync18 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
-import { basename as basename6, dirname as dirname26, join as join37 } from "node:path";
+import { basename as basename6, dirname as dirname28, join as join37 } from "node:path";
 import { fileURLToPath as fileURLToPath7 } from "node:url";
 init_opsec();
 init_types();
@@ -25714,20 +27124,20 @@ function consultUserVocabularyDir(env = process.env) {
 var vocabularyCache = new Map;
 function verifiedPackFile(path, sha256) {
   try {
-    if (!existsSync17(path))
+    if (!existsSync18(path))
       return "missing";
     if (statSync18(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
-    const gz = readFileSync27(path);
+    const gz = readFileSync28(path);
     return createHash11("sha256").update(gz).digest("hex") === sha256 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
 }
 function consultVocabularyRoot(moduleUrl = import.meta.url) {
-  const here = dirname26(fileURLToPath7(moduleUrl));
-  const root = basename6(here) === "core" && basename6(dirname26(here)) === "src" ? dirname26(dirname26(here)) : basename6(here) === "dist" ? dirname26(here) : undefined;
-  return root !== undefined && existsSync17(join37(root, ...VOCABULARY_DIR)) ? root : undefined;
+  const here = dirname28(fileURLToPath7(moduleUrl));
+  const root = basename6(here) === "core" && basename6(dirname28(here)) === "src" ? dirname28(dirname28(here)) : basename6(here) === "dist" ? dirname28(here) : undefined;
+  return root !== undefined && existsSync18(join37(root, ...VOCABULARY_DIR)) ? root : undefined;
 }
 function consultVocabularyFileStatus(options = {}, env = process.env) {
   const selection = consultVocabularySelection(options);
@@ -25752,9 +27162,9 @@ function userManifestEntries(userDir) {
     return [];
   try {
     const path = join37(userDir, "manifest.json");
-    if (!existsSync17(path) || statSync18(path).size > 1024 * 1024)
+    if (!existsSync18(path) || statSync18(path).size > 1024 * 1024)
       return [];
-    const manifest = JSON.parse(readFileSync27(path, "utf8"));
+    const manifest = JSON.parse(readFileSync28(path, "utf8"));
     if (!manifest || typeof manifest !== "object" || Array.isArray(manifest))
       return [];
     const packs = manifest.packs;
@@ -27184,7 +28594,7 @@ async function defaultDoctorHostProbe(env = process.env, options = {}) {
   const home = env.HOME?.trim() || homedir15();
   const openclawPath = resolveOpenClawExecutable({ env, homeDir: home });
   const engine = process.platform === "darwin" || process.platform === "linux" ? inspectEngine({ homeDir: home, env }) : { installed: false, state: "not_loaded" };
-  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync18(workerServicePaths(process.platform, home).unitPath) : false;
+  const legacyWorkerUnit = process.platform === "darwin" || process.platform === "linux" ? existsSync19(workerServicePaths(process.platform, home).unitPath) : false;
   const health = process.platform === "linux" && engine.installed ? await waitForEngineHealthy({ paths: engineServicePaths({ homeDir: home, env }), expectedBuild: linuxInstalledBuild({ homeDir: home, env }) }, { timeoutMs: 0 }) : undefined;
   return {
     ...openclawPath ? { openclawPath } : {},
@@ -27253,7 +28663,7 @@ async function photoSearchCheck(deps) {
 }
 function defaultOsRelease() {
   try {
-    return readFileSync28("/etc/os-release", "utf8");
+    return readFileSync29("/etc/os-release", "utf8");
   } catch {
     return;
   }
@@ -27289,7 +28699,7 @@ function doctorSovereigntyEngine(deps) {
   if (inline !== undefined)
     return loadSovereigntyEngine({ inlineConfig: inline });
   const configPath = doctorSovereigntyConfigPath(deps);
-  if (configPath === undefined || !existsSync18(configPath))
+  if (configPath === undefined || !existsSync19(configPath))
     return;
   return loadSovereigntyEngine({ configPath, ...deps.env ? { env: deps.env } : {} });
 }
@@ -27679,14 +29089,14 @@ async function workerCredentialReadiness(deps) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${deps.config.email.baseUrl}/health/dependencies`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const body = asRecord16(await response.json());
-    const readiness = asRecord16(body.credential_readiness);
-    const policy = asRecord16(readiness.policy);
+    const body = asRecord17(await response.json());
+    const readiness = asRecord17(body.credential_readiness);
+    const policy = asRecord17(readiness.policy);
     if (readiness.kind !== "worker_credential_readiness" || policy.raw_runtime_secrets_exposed !== false || policy.secret_refs_exposed !== false || !Array.isArray(readiness.ready_profiles)) {
       return;
     }
     return readiness.ready_profiles.flatMap((entry) => {
-      const profile = asRecord16(entry);
+      const profile = asRecord17(entry);
       if (typeof profile.profile_id !== "string" || typeof profile.config_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(profile.config_fingerprint)) {
         return [];
       }
@@ -27740,8 +29150,8 @@ async function emailWorkerCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const health = asRecord16(await response.json());
-  const bridge = asRecord16(health.desktop_bridge);
+  const health = asRecord17(await response.json());
+  const bridge = asRecord17(health.desktop_bridge);
   if ((deps.platform ?? process.platform) === "linux" && ["port_in_use", "unavailable"].includes(String(bridge.state))) {
     return {
       name,
@@ -27802,7 +29212,7 @@ async function sourceIndexStatusCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const degradedCredentials = degradedCredentialDetails(status);
   const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
   const problems = [];
@@ -27811,7 +29221,7 @@ async function sourceIndexStatusCheck(deps) {
   const connectedCorpusIds = connectedSourceCorpusIds(deps);
   const migration = approvedTierMigrationInProgress(status.tier_migration, deps.now?.() ?? new Date, tierMigrationStoppedGraceDays(deps.env ?? process.env));
   for (const entry of corpora) {
-    const corpus = asRecord16(entry);
+    const corpus = asRecord17(entry);
     const corpusId = typeof corpus.corpus_id === "string" ? corpus.corpus_id : "unknown_corpus";
     if (ON_DEMAND_TIER_CORPUS_IDS.has(corpusId) && corpus.configured !== true)
       continue;
@@ -27827,16 +29237,16 @@ async function sourceIndexStatusCheck(deps) {
     if (staleSync) {
       problems.push(`${corpusId} sync run ${staleSync.syncRunId} has been running since ${staleSync.startedAt} (older than 24h)`);
     }
-    const counts = asRecord16(corpus.counts);
-    const embeddingParity = asRecord16(corpus.embedding_parity);
+    const counts = asRecord17(corpus.counts);
+    const embeddingParity = asRecord17(corpus.embedding_parity);
     const embeddingRequired = corpus.embedding_policy !== "disabled" && corpus.activation_mode !== "lexical_only" && embeddingParity.required !== false;
-    const chunks = typeof embeddingParity.chunks === "number" ? asCount(embeddingParity.chunks) : asCount(counts.chunks);
-    const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount(embeddingParity.embedded_chunks) : asCount(counts.embedded_chunks);
+    const chunks = typeof embeddingParity.chunks === "number" ? asCount2(embeddingParity.chunks) : asCount2(counts.chunks);
+    const embedded = typeof embeddingParity.embedded_chunks === "number" ? asCount2(embeddingParity.embedded_chunks) : asCount2(counts.embedded_chunks);
     const embeddingLag = Math.max(chunks - embedded, 0);
     if (chunks > 0 || embedded > 0) {
-      const items = typeof counts.indexed_items === "number" ? `, ${asCount(counts.indexed_items)} items indexed` : "";
-      const backlog = asRecord16(embeddingParity.backlog_estimate);
-      const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === "number" && asCount(backlog.missing_chunks) > 0 ? `, ${asCount(backlog.missing_chunks)} chunks waiting ≈ ${asCount(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === "default_unverified" ? ", unverified list price" : ""})` : "";
+      const items = typeof counts.indexed_items === "number" ? `, ${asCount2(counts.indexed_items)} items indexed` : "";
+      const backlog = asRecord17(embeddingParity.backlog_estimate);
+      const backlogEstimate = embeddingRequired && typeof backlog.estimated_cost_usd === "number" && asCount2(backlog.missing_chunks) > 0 ? `, ${asCount2(backlog.missing_chunks)} chunks waiting ≈ ${asCount2(backlog.estimated_tokens)} tokens ≈ $${Number(backlog.estimated_cost_usd).toFixed(2)} (estimate${backlog.price_source === "default_unverified" ? ", unverified list price" : ""})` : "";
       summaries.push((embeddingRequired ? `${corpusId}: connector store, ${chunks} chunks, ${embedded} embedded (lag ${embeddingLag})${backlogEstimate}` : corpus.embedding_policy === "disabled" ? `${corpusId}: connector store, ${chunks} chunks, embeddings disabled` : `${corpusId}: connector store, ${chunks} chunks, embeddings optional (lexical-only retrieval)`) + items);
     }
     if (embeddingRequired && chunks > 0 && embeddingLag > chunks * EMBEDDING_LAG_RATIO) {
@@ -27882,7 +29292,7 @@ function tierMigrationStoppedGraceDays(env) {
 }
 var DAY_MS2 = 24 * 60 * 60 * 1000;
 function approvedTierMigrationInProgress(value, now, graceDays) {
-  const migration = asRecord16(value);
+  const migration = asRecord17(value);
   if (migration.in_progress !== true)
     return;
   const state = typeof migration.state === "string" ? migration.state : "";
@@ -27893,9 +29303,9 @@ function approvedTierMigrationInProgress(value, now, graceDays) {
     return;
   const destinations = new Map;
   for (const entry of Array.isArray(migration.destinations) ? migration.destinations : []) {
-    const destination = asRecord16(entry);
+    const destination = asRecord17(entry);
     if (typeof destination.corpus_id === "string")
-      destinations.set(destination.corpus_id, asCount(destination.chunks_to_embed));
+      destinations.set(destination.corpus_id, asCount2(destination.chunks_to_embed));
   }
   if (state === "stopped") {
     const stoppedAt = typeof migration.stopped_at === "string" ? Date.parse(migration.stopped_at) : Number.NaN;
@@ -27944,7 +29354,7 @@ async function workerCredentialLanesCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const degradedCredentials = degradedCredentialDetails(status, { onlyFailingStates: true });
   if (degradedCredentials.length > 0) {
     return {
@@ -27989,7 +29399,7 @@ async function dropboxContentExtractionThroughputCheck(deps) {
       hint: EMAIL_WORKER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const ledger = sourceIngestionLedgerFromStatus(status);
   const dropbox = ledger?.rows.find((row) => row.source_id === "dropbox");
   if (!dropbox?.configured) {
@@ -28001,9 +29411,9 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   }
   const signal = contentExtractionThroughputSignal(dropbox.ingestion_health.content_extraction_throughput);
   if (!signal) {
-    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord16(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
-    const counts = asRecord16(corpus?.counts);
-    const actionable = asCount(counts.extraction_jobs_queued_actionable);
+    const corpus = (Array.isArray(status.corpora) ? status.corpora : []).map((entry) => asRecord17(entry)).find((entry) => entry.corpus_id === DROPBOX_FILES_CORPUS_ID2);
+    const counts = asRecord17(corpus?.counts);
+    const actionable = asCount2(counts.extraction_jobs_queued_actionable);
     if (actionable === 0) {
       return {
         name,
@@ -28059,12 +29469,12 @@ async function dropboxContentExtractionThroughputCheck(deps) {
   };
 }
 function contentExtractionThroughputSignal(value) {
-  const record2 = asRecord16(value);
+  const record2 = asRecord17(value);
   if (!("actionable_queued" in record2) || !("actionable_retryable_due" in record2))
     return;
   return {
-    actionable_queued: asCount(record2.actionable_queued),
-    actionable_retryable_due: asCount(record2.actionable_retryable_due),
+    actionable_queued: asCount2(record2.actionable_queued),
+    actionable_retryable_due: asCount2(record2.actionable_retryable_due),
     ...typeof record2.oldest_actionable_at === "string" ? { oldest_actionable_at: record2.oldest_actionable_at } : {},
     ...typeof record2.newest_terminal_progress_at === "string" ? { newest_terminal_progress_at: record2.newest_terminal_progress_at } : {}
   };
@@ -28072,7 +29482,7 @@ function contentExtractionThroughputSignal(value) {
 function degradedCredentialDetails(record2, options = {}) {
   const credentials = Array.isArray(record2.degraded_credentials) ? record2.degraded_credentials : [];
   return credentials.flatMap((entry) => {
-    const credential = asRecord16(entry);
+    const credential = asRecord17(entry);
     const state = typeof credential.state === "string" ? credential.state : undefined;
     if (options.onlyFailingStates && !isFailingCredentialState(state))
       return [];
@@ -28124,7 +29534,7 @@ async function sourceSchedulerStatusCheck(deps) {
       hint: SCHEDULER_HINT
     };
   }
-  const status = asRecord16(await response.json());
+  const status = asRecord17(await response.json());
   const problems = [];
   if (status.enabled !== true)
     problems.push("scheduler is not enabled");
@@ -28152,7 +29562,7 @@ async function sourceSchedulerStatusCheck(deps) {
   const schedulerSourceIds = new Set;
   const schedulerCorpusIds = new Set;
   for (const entry of sources) {
-    const source = asRecord16(entry);
+    const source = asRecord17(entry);
     const sourceId = typeof source.source_id === "string" ? source.source_id : "unknown_source";
     if (typeof source.source_id === "string")
       schedulerSourceIds.add(source.source_id);
@@ -28161,16 +29571,16 @@ async function sourceSchedulerStatusCheck(deps) {
     if (source.stale_sync_anomaly === true)
       problems.push(`${sourceId} is past its freshness threshold`);
     const tasks = Array.isArray(source.tasks) ? source.tasks : [];
-    if (tasks.some((taskEntry) => asRecord16(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
+    if (tasks.some((taskEntry) => asRecord17(taskEntry).degraded_reason === "embedding_provider_unavailable")) {
       problems.push(`${sourceId} embedding is deferred: the embedding provider is not answering, so new chunks wait and the sweep retries with backoff`);
     }
-    if (tasks.some((taskEntry) => asRecord16(taskEntry).degraded_reason === "embedding_items_failed")) {
+    if (tasks.some((taskEntry) => asRecord17(taskEntry).degraded_reason === "embedding_items_failed")) {
       problems.push(`${sourceId} has items whose embedding failed; they are skipped (keyword search still finds them) and the rest keep embedding`);
     }
     for (const taskEntry of tasks) {
-      const task = asRecord16(taskEntry);
+      const task = asRecord17(taskEntry);
       const taskId = typeof task.id === "string" ? task.id : "unknown_task";
-      const failures = asCount(task.consecutive_failures);
+      const failures = asCount2(task.consecutive_failures);
       if (task.stale_anomaly === true) {
         problems.push(`${sourceId}/${taskId} is past its task freshness threshold`);
       }
@@ -28304,7 +29714,7 @@ async function fetchSourceIndexStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status?include_ingestion_ledger=true&include_items=false`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    return asRecord16(await response.json());
+    return asRecord17(await response.json());
   } catch {
     return;
   }
@@ -28314,7 +29724,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/scheduler/status`, workerRequestInit(deps));
     if (!response.ok)
       return;
-    const status = asRecord16(await response.json());
+    const status = asRecord17(await response.json());
     if (status.kind !== "source_scheduler_status")
       return;
     return status;
@@ -28323,7 +29733,7 @@ async function fetchSchedulerStatusForIngestion(deps, baseUrl) {
   }
 }
 function sourceIngestionLedgerFromStatus(status) {
-  const ledger = asRecord16(status.ingestion_ledger);
+  const ledger = asRecord17(status.ingestion_ledger);
   if (ledger.kind !== "source_ingestion_ledger" || !Array.isArray(ledger.rows))
     return;
   return ledger;
@@ -28331,7 +29741,7 @@ function sourceIngestionLedgerFromStatus(status) {
 function ingestionHealthStatePath(deps) {
   if (deps.ingestionHealthStatePath)
     return deps.ingestionHealthStatePath;
-  return join39(dirname27(defaultSourceDashboardHistoryDbPath(deps.env)), "source-ingestion-doctor-state.json");
+  return defaultIngestionHealthStatePath(deps.env);
 }
 function ingestionHealthStateFromLedger(ledger) {
   const sources = {};
@@ -28350,35 +29760,6 @@ function ingestionHealthStateFromLedger(ledger) {
   }
   return { generated_at: ledger.generated_at, sources };
 }
-function readIngestionHealthState(path) {
-  try {
-    if (!existsSync18(path))
-      return;
-    const parsed = JSON.parse(readFileSync28(path, "utf8"));
-    const record2 = asRecord16(parsed);
-    const sources = asRecord16(record2.sources);
-    const normalized = {};
-    for (const [sourceId, sourceValue] of Object.entries(sources)) {
-      const source = asRecord16(sourceValue);
-      const terminal = asRecord16(source.failed_terminal_by_class);
-      normalized[sourceId] = {
-        actionable_stuck: asCount(source.actionable_stuck),
-        failed_terminal_by_class: Object.fromEntries(Object.entries(terminal).map(([key, value]) => [key, asCount(value)]))
-      };
-    }
-    return {
-      generated_at: typeof record2.generated_at === "string" ? record2.generated_at : new Date(0).toISOString(),
-      sources: normalized
-    };
-  } catch {
-    return;
-  }
-}
-function writeIngestionHealthState(path, state) {
-  mkdirSync15(dirname27(path), { recursive: true, mode: 448 });
-  writeFileSync10(path, `${JSON.stringify(state, null, 2)}
-`);
-}
 function ingestionHealthHint(ledger) {
   const hints = ledger.rows.map((row) => row.ingestion_health.drain.hint).filter((value) => typeof value === "string" && value.trim().length > 0);
   return hints[0];
@@ -28388,9 +29769,9 @@ async function sourceIndexCorpusIdsForDoctor(deps, baseUrl) {
     const response = await (deps.fetchImpl ?? workerFetch)(`${baseUrl}/source/index/status`, workerRequestInit(deps));
     if (!response.ok)
       return new Set;
-    const status = asRecord16(await response.json());
+    const status = asRecord17(await response.json());
     const corpora = doctorVisibleCorpora(deps, Array.isArray(status.corpora) ? status.corpora : []);
-    return new Set(corpora.map((entry) => asRecord16(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
+    return new Set(corpora.map((entry) => asRecord17(entry)).map((corpus) => typeof corpus.corpus_id === "string" ? corpus.corpus_id : undefined).filter((corpusId) => !!corpusId));
   } catch {
     return new Set;
   }
@@ -28537,7 +29918,7 @@ async function googleOAuthRefreshLifetimeCheck(deps) {
   };
 }
 function staleRunningSync(corpus) {
-  const lastRefresh = asRecord16(corpus.last_refresh);
+  const lastRefresh = asRecord17(corpus.last_refresh);
   if (lastRefresh.status !== "running")
     return;
   const startedAt = typeof lastRefresh.started_at === "string" ? lastRefresh.started_at : undefined;
@@ -28552,14 +29933,14 @@ function staleRunningSync(corpus) {
   };
 }
 function hasSyncRecord(corpus) {
-  const lastRefresh = asRecord16(corpus.last_refresh);
+  const lastRefresh = asRecord17(corpus.last_refresh);
   if (Object.keys(lastRefresh).length > 0)
     return true;
-  const lastSync = asRecord16(corpus.last_sync);
+  const lastSync = asRecord17(corpus.last_sync);
   if (Object.keys(lastSync).length > 0)
     return true;
-  const counts = asRecord16(corpus.counts);
-  return asCount(counts.items_indexed) > 0 || asCount(counts.messages_indexed) > 0 || asCount(counts.total_items) > 0;
+  const counts = asRecord17(corpus.counts);
+  return asCount2(counts.items_indexed) > 0 || asCount2(counts.messages_indexed) > 0 || asCount2(counts.total_items) > 0;
 }
 function doctorVisibleCorpora(deps, corpora) {
   return corpora;
@@ -28589,16 +29970,16 @@ function readRegistrySafely(deps) {
 }
 function defaultCommandExists(command) {
   const path = process.env.PATH ?? "";
-  return path.split(":").some((dir) => Boolean(dir) && existsSync18(join39(dir, command)));
+  return path.split(":").some((dir) => Boolean(dir) && existsSync19(join39(dir, command)));
 }
 function defaultPythonModuleExists(pythonCommand, moduleName) {
   const proc = spawnSync7(pythonCommand, ["-c", `import ${moduleName}`], { stdio: "ignore" });
   return proc.status === 0;
 }
-function asRecord16(value) {
+function asRecord17(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asCount(value) {
+function asCount2(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 function errorDetail(error) {
@@ -28606,11 +29987,11 @@ function errorDetail(error) {
 }
 
 // src/core/ocr-readiness.ts
-import { existsSync as existsSync20, readFileSync as readFileSync29 } from "node:fs";
+import { existsSync as existsSync21, readFileSync as readFileSync30 } from "node:fs";
 
 // src/workers/file-extraction/extractors/apple-vision-ocr.ts
-import { existsSync as existsSync19 } from "node:fs";
-import { dirname as dirname28, join as join40 } from "node:path";
+import { existsSync as existsSync20 } from "node:fs";
+import { dirname as dirname29, join as join40 } from "node:path";
 import { fileURLToPath as fileURLToPath8 } from "node:url";
 
 // src/workers/file-extraction/extractors/bounded-text.ts
@@ -28650,13 +30031,13 @@ init_command_runner();
 var APPLE_VISION_OCR_SCRIPT = "scripts/macos-vision-ocr.js";
 var APPLE_VISION_OSASCRIPT = "/usr/bin/osascript";
 var OCR_ENGINE_PREFERENCES = ["auto", "tesseract"];
-function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync19) {
-  let directory = dirname28(fileURLToPath8(moduleUrl));
+function resolveAppleVisionOcrScript(moduleUrl = import.meta.url, exists = existsSync20) {
+  let directory = dirname29(fileURLToPath8(moduleUrl));
   for (let depth2 = 0;depth2 < 6; depth2 += 1) {
     const candidate = join40(directory, APPLE_VISION_OCR_SCRIPT);
     if (exists(candidate))
       return candidate;
-    const parent = dirname28(directory);
+    const parent = dirname29(directory);
     if (parent === directory)
       break;
     directory = parent;
@@ -28978,7 +30359,7 @@ function linuxFamilyFromOsRelease2(text2) {
 function readOsRelease() {
   for (const path of ["/etc/os-release", "/usr/lib/os-release"]) {
     try {
-      return readFileSync29(path, "utf8");
+      return readFileSync30(path, "utf8");
     } catch {}
   }
   return;
@@ -28998,7 +30379,7 @@ function ocrInstallRemedy(input) {
   return "Install the packages that provide tesseract (with its English language data) and pdftoppm (poppler-utils) with your package manager.";
 }
 function visionReady(platform2, preference) {
-  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync20(APPLE_VISION_OSASCRIPT);
+  return appleVisionOcrSelected(preference, platform2) && resolveAppleVisionOcrScript() !== undefined && existsSync21(APPLE_VISION_OSASCRIPT);
 }
 function describeOcrReadiness(input) {
   if (input.preference === "tesseract")
@@ -29216,7 +30597,7 @@ var ARCHIVE_IMPORT_PARAMS = {
     enum: ["start", "status", "remove"],
     description: '"start" asks to import an export file or folder (needs path), "status" lists the imported archives and the requests waiting for the user (archive_id narrows it to one), "remove" asks to remove one imported archive (needs archive_id).'
   },
-  path: { type: "string", description: "start only: the full path of the export (an .mbox file, or an Apple Mail .mbox folder), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
+  path: { type: "string", description: "start only: the full path of the export (an .mbox file, an Apple Mail .mbox folder, a WhatsApp chat export: its .txt or .zip, or a folder of them, or a Telegram Desktop result.json or the folder that holds it), starting with /. It is kept as text: Olympus does not open, list or check it until the user approves." },
   archive_id: { type: "string", description: "remove: the archive_id status returned. status: show only this archive." }
 };
 var operations = [
@@ -29651,8 +31032,10 @@ var operations = [
   {
     name: "archive_import",
     description: [
-      "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder), so it can be searched like any other source.",
+      "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat, or a folder of them), so it can be searched like any other source.",
+      "A Telegram Desktop export works too: its result.json (or the folder that holds it), exported as Machine-readable JSON. Its messages are imported as text; pictures and files are counted, not imported.",
       "Offer it when the user mentions such an export. You can only ask: the user approves every import and every removal on the Olympus dashboard on their computer, and nothing happens before they do.",
+      "Notes exports are imported too: a Reflect export (the JSON file, or the Markdown zip) and a Roam export (Export All, as JSON); a zip holding the JSON works as well. A Reflect CSV or HTML export, or a Roam Markdown or EDN export, is not read: if the user has one, ask them to export again from Reflect as JSON or Markdown, or from Roam as JSON. Each note is judged on its own like mail, and a page or note with nothing written in it is left out and counted. For a notes archive the counts are notes.",
       "Never open, read or copy the file yourself, and never retry to get around the approval.",
       `start {path}: returns {ok: false, code: "needs_approval", request_id, message, open} - tell the user, in the message's words, to open Olympus on their computer and choose Import under Sources, Archives (open names that page), then call status to follow it. If Olympus already holds an earlier import from the same path, the result carries it as existing_record with its state, beside the request: a matching path does not show the file is the same export (it may have been replaced), so the request is still recorded, and only when the user approves does Olympus open the file and compare it with what it holds.`,
       "status {archive_id?}: each archive with its format, file name, folder, date range, message counts, progress, how many messages are judged and how many still wait for the private model, what could not be read in plain words, and whether it stopped; plus the requests waiting for the user. It carries no message text, subject or snippet. A list Olympus cannot read is reported as unreadable, never as empty.",
@@ -30603,7 +31986,7 @@ async function handleRemoteAccessConfigRequest(input) {
         remote.enabled = enabled;
       }
     });
-    const followUp = asRecord17(asRecord17(result)?.followUp);
+    const followUp = asRecord18(asRecord18(result)?.followUp);
     return {
       status: 200,
       body: {
@@ -30618,8 +32001,8 @@ async function handleRemoteAccessConfigRequest(input) {
 }
 function currentEnabled(writer) {
   try {
-    const root = asRecord17(writer.current?.());
-    const remote = asRecord17(asRecord17(asRecord17(asRecord17(asRecord17(root?.plugins)?.entries)?.olympus)?.config)?.remote);
+    const root = asRecord18(writer.current?.());
+    const remote = asRecord18(asRecord18(asRecord18(asRecord18(asRecord18(root?.plugins)?.entries)?.olympus)?.config)?.remote);
     return typeof remote?.enabled === "boolean" ? remote.enabled : undefined;
   } catch {
     return;
@@ -30632,12 +32015,12 @@ function objectAt(parent, key) {
     parent[key] = created;
     return created;
   }
-  const record2 = asRecord17(existing);
+  const record2 = asRecord18(existing);
   if (!record2)
     throw new TypeError(`config ${key} is not an object`);
   return record2;
 }
-function asRecord17(value) {
+function asRecord18(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function failed(status, errorKind, message) {
@@ -30675,14 +32058,14 @@ function contentTextForOperation(operation, payload2) {
   return JSON.stringify(payload2, null, 2);
 }
 function archiveImportContentText(payload2) {
-  const result = asRecord18(payload2);
+  const result = asRecord19(payload2);
   if (!result || result.ok !== false || typeof result.message !== "string")
     return;
   if (result.code === "needs_approval") {
     const lines = ["Waiting for the user to approve on their computer: " + result.message];
     if (typeof result.request_id === "string")
       lines.push("request_id: " + result.request_id);
-    const open2 = asRecord18(result.open);
+    const open2 = asRecord19(result.open);
     if (open2 && typeof open2.url === "string")
       lines.push("Opens the Archives page: " + open2.url);
     return lines.join(`
@@ -30691,7 +32074,7 @@ function archiveImportContentText(payload2) {
   return "Not done: " + result.message;
 }
 function askAnonymouslyContentText(payload2) {
-  const result = asRecord18(payload2);
+  const result = asRecord19(payload2);
   if (!result || typeof result.ok !== "boolean")
     return;
   if (result.ok) {
@@ -30719,13 +32102,13 @@ function askAnonymouslyContentText(payload2) {
   return "Not answered: " + result.message;
 }
 function sourceAnswerContentText(payload2) {
-  const result = asRecord18(payload2);
+  const result = asRecord19(payload2);
   if (!result || typeof result.answer !== "string")
     return;
-  const audit = asRecord18(result.audit);
-  const policy = asRecord18(result.policy);
-  const synthesis = asRecord18(audit?.answer_synthesis);
-  const timings = asRecord18(audit?.phase_timings);
+  const audit = asRecord19(result.audit);
+  const policy = asRecord19(result.policy);
+  const synthesis = asRecord19(audit?.answer_synthesis);
+  const timings = asRecord19(audit?.phase_timings);
   const evidence = Array.isArray(result.evidence) ? result.evidence : [];
   const skipped = Array.isArray(audit?.skipped_corpora) ? audit.skipped_corpora : [];
   const lines = [
@@ -30735,7 +32118,7 @@ function sourceAnswerContentText(payload2) {
     `Evidence: ${evidence.length === 0 ? "none returned" : ""}`
   ];
   evidence.slice(0, 8).forEach((item, index) => {
-    const record2 = asRecord18(item);
+    const record2 = asRecord19(item);
     if (!record2)
       return;
     const label = firstString(record2.source_label, record2.title, record2.corpus_id, "source");
@@ -30746,7 +32129,7 @@ function sourceAnswerContentText(payload2) {
   });
   if (evidence.length > 8)
     lines.push(`... ${evidence.length - 8} more evidence item(s) kept in tool details.`);
-  const coverageNotes = skipped.map((item) => asRecord18(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
+  const coverageNotes = skipped.map((item) => asRecord19(item)).filter((item) => item !== undefined).slice(0, 6).map((item) => {
     const corpus = typeof item.corpus_id === "string" ? item.corpus_id : "unknown corpus";
     const reason = typeof item.reason === "string" ? item.reason : "skipped";
     return `${corpus}: ${reason}`;
@@ -30798,7 +32181,7 @@ function labelForOperation(operation) {
 function asParams(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-function asRecord18(value) {
+function asRecord19(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
 }
 function firstString(...values) {
@@ -31088,7 +32471,7 @@ function splitChannelTarget(value) {
   return [match[1], match[2]];
 }
 function exactRecord2(value, allowed) {
-  const record2 = asRecord18(value);
+  const record2 = asRecord19(value);
   if (!record2 || Object.keys(record2).some((key) => !allowed.includes(key))) {
     throw new TypeError("Invalid watch delivery object.");
   }

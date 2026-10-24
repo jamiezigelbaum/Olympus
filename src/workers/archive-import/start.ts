@@ -18,6 +18,10 @@
 import { lstatSync, realpathSync } from 'node:fs';
 import { posix } from 'node:path';
 import {
+  ARCHIVE_COMMON_FINDINGS,
+  archiveFilesNotLookedAt,
+  archiveProbeNames,
+  archiveSignatureNames,
   detectArchiveFormat,
   type ArchiveFormatDefinition,
 } from '../../core/archive-formats.ts';
@@ -37,7 +41,7 @@ import type { ArchiveImportRecord, ArchiveImportStateStore, NewArchiveImportReco
 export type ArchiveImportStart =
   | { kind: 'started'; archive: ArchiveImportRecord }
   | { kind: 'already_imported'; archive: ArchiveImportRecord }
-  | { kind: 'unsupported'; supported: readonly string[] }
+  | { kind: 'unsupported'; supported: readonly string[]; advice?: string }
   | { kind: 'ambiguous'; formats: readonly string[] }
   | { kind: 'unreadable'; code: string };
 
@@ -93,11 +97,26 @@ export function prepareArchiveImport(input: {
   }
   let handedOver = false;
   try {
-    const probe = probeArchivePath(root, chosenRelPath);
+    const probe = probeArchivePath(root, chosenRelPath, {
+      probeNames: archiveProbeNames(input.formats),
+      signatureNames: archiveSignatureNames(input.formats),
+    });
     const detection = detectArchiveFormat(probe, input.formats);
-    if (detection.kind === 'none') return { kind: 'unsupported', supported: detection.supported };
+    // Files the first look did not reach, in the folder or in a zip: counted, never silent. A refusal says so in the
+    // detection's own advice (one sentence for every way a look can be incomplete).
+    const notLookedAt = archiveFilesNotLookedAt(probe);
+    if (detection.kind === 'none') {
+      return { kind: 'unsupported', supported: detection.supported, ...(detection.advice ? { advice: detection.advice } : {}) };
+    }
     if (detection.kind === 'ambiguous') return { kind: 'ambiguous', formats: detection.formats };
     const relPaths = detection.files.map((file) => (file === '' ? chosenRelPath : joinRelative(chosenRelPath, file)));
+    // A folder can hold more than the first look takes in, and files that look like exports
+    // without saying so: neither is silent, both are counted on the record.
+    const unconfirmed = detection.format.unconfirmed?.(probe) ?? 0;
+    const skipped: Record<string, number> = {
+      ...(notLookedAt > 0 ? { [ARCHIVE_COMMON_FINDINGS.filesNotLookedAt]: notLookedAt } : {}),
+      ...(unconfirmed > 0 ? { [ARCHIVE_COMMON_FINDINGS.filesUnconfirmed]: unconfirmed } : {}),
+    };
     const files = buildArchiveManifest(root, relPaths);
     const records = input.state.list();
     const same = findSameVersionImport(records, files);
@@ -117,6 +136,7 @@ export function prepareArchiveImport(input: {
         chosen_rel_path: chosenRelPath,
         files,
         manifest_sha256: archiveManifestSha256(files),
+        ...(Object.keys(skipped).length > 0 ? { skipped } : {}),
       },
     };
   } catch (error) {

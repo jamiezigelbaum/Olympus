@@ -2059,7 +2059,7 @@ var init_pinned_download = __esm(() => {
 
 // src/core/olympus-layout.ts
 import { homedir as homedir4 } from "node:os";
-import { join as join6 } from "node:path";
+import { dirname as dirname5, join as join6 } from "node:path";
 function layoutHome(env = process.env) {
   return env.HOME?.trim() || homedir4();
 }
@@ -2075,8 +2075,124 @@ function olympusDataRoot(env = process.env) {
 function olympusDataPath(env, ...segments) {
   return join6(olympusDataRoot(env), ...segments);
 }
+function folderSegment(value, what) {
+  if (!FOLDER_SEGMENT.test(value) || value === "." || value === "..") {
+    throw new TypeError(`An account folder needs a plain ${what}; got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+function accountFolder(account, env = process.env) {
+  return olympusDataPath(env, ACCOUNT_FOLDERS_DIR, folderSegment(account.source_id, "source id"), folderSegment(account.slot, "slot"));
+}
+function legacyStoreFile(sourceId, name) {
+  if (sourceId === ARCHIVE_IMPORTS) {
+    const [family, tier, extra] = name.split(".");
+    if (!family || !tier || extra !== undefined || !(tier in ARCHIVE_FILE_LABEL)) {
+      throw new TypeError(`An archive store is named <family>.<tier>; got ${JSON.stringify(name)}.`);
+    }
+    return { file: `archive-${family}${ARCHIVE_FILE_LABEL[tier]}-connector-store.sqlite` };
+  }
+  const file = LEGACY_STORES[sourceId]?.[name];
+  if (!file)
+    throw new TypeError(`${sourceId} has no store named ${JSON.stringify(name)}.`);
+  return file;
+}
+function legacyFilePath(env, entry) {
+  const configured = entry.override ? env[entry.override]?.trim() : undefined;
+  return configured || olympusDataPath(env, entry.file);
+}
+function accountStorePath(account, name, env = process.env) {
+  if (!STORE_NAME.test(name))
+    throw new TypeError(`A store name is a tier or <family>.<tier>; got ${JSON.stringify(name)}.`);
+  if (account.layout === "folder")
+    return join6(accountFolder(account, env), "stores", `${name}.sqlite`);
+  return legacyFilePath(env, legacyStoreFile(account.source_id, name));
+}
+function legacyOverrideEnvNames(sourceId) {
+  const names = Object.values(LEGACY_STORES[sourceId] ?? {}).flatMap((file) => file?.override ? [file.override] : []);
+  return [...names, ...LEGACY_RAW_OVERRIDES[sourceId] ?? []];
+}
+function legacyAccountPaths(sourceId, env = process.env, archiveFamilies = []) {
+  const names = sourceId === ARCHIVE_IMPORTS ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`)) : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => file ? [tier] : []);
+  const stores = names.map((name) => olympusDataPath(env, legacyStoreFile(sourceId, name).file));
+  const raw = [];
+  if (sourceId === "local.files")
+    raw.push(olympusDataPath(env, "local-files-watch"));
+  if (sourceId === "x.bookmarks")
+    raw.push(`${olympusDataPath(env, "x-bookmarks-api-usage.sqlite")}.reconcile`);
+  if (sourceId === ARCHIVE_IMPORTS)
+    raw.push(olympusDataPath(env, "archive-imports.json"), olympusDataPath(env, "archive-import-requests.json"));
+  return { stores, raw };
+}
+var ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, STORE_NAME, TIERS, gmailStore = (infix, overrideInfix) => ({
+  file: `gmail-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_GMAIL_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), driveStore = (infix, overrideInfix) => ({
+  file: `google-drive-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), dropboxStore = (infix, overrideInfix) => ({
+  file: `dropbox-files-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_DROPBOX_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), localFilesStore = (infix, overrideInfix) => ({
+  file: `local-files-${infix}connector-store.sqlite`,
+  override: `OLYMPUS_SOURCE_INDEX_LOCAL_FILES_${overrideInfix}CONNECTOR_STORE_DB_PATH`
+}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_LAYOUT_SOURCES, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES;
 var init_olympus_layout = __esm(() => {
   init_linux_engine_layout();
+  FOLDER_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+  STORE_NAME = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?$/;
+  TIERS = ["secure_local", "internal", "public_safe"];
+  LEGACY_STORES = {
+    "gmail.email": {
+      internal: gmailStore("", ""),
+      secure_local: gmailStore("secure-", "SECURE_"),
+      public_safe: gmailStore("public-", "PUBLIC_")
+    },
+    "google_drive.docs": {
+      internal: driveStore("", ""),
+      secure_local: driveStore("secure-", "SECURE_"),
+      public_safe: driveStore("public-", "PUBLIC_")
+    },
+    "dropbox.files": {
+      secure_local: dropboxStore("", ""),
+      internal: dropboxStore("internal-", "INTERNAL_"),
+      public_safe: dropboxStore("public-", "PUBLIC_")
+    },
+    "local.files": {
+      secure_local: localFilesStore("", ""),
+      internal: localFilesStore("internal-", "INTERNAL_"),
+      public_safe: localFilesStore("public-", "PUBLIC_")
+    },
+    "readwise.library": {
+      internal: {
+        file: "readwise-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_READWISE_CONNECTOR_STORE_DB_PATH"
+      },
+      secure_local: {
+        file: "readwise-secure-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH"
+      },
+      public_safe: undefined
+    },
+    "x.bookmarks": {
+      internal: {
+        file: "x-bookmarks-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH"
+      },
+      secure_local: {
+        file: "x-bookmarks-secure-connector-store.sqlite",
+        override: "OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH"
+      },
+      public_safe: undefined
+    },
+    "archive.imports": { secure_local: undefined, internal: undefined, public_safe: undefined }
+  };
+  ARCHIVE_FILE_LABEL = { secure_local: "", internal: "-internal", public_safe: "-public" };
+  FOLDER_LAYOUT_SOURCES = Object.keys(LEGACY_STORES);
+  LEGACY_RAW_OVERRIDES = {
+    "x.bookmarks": [X_USAGE_OVERRIDE, X_RECONCILE_OVERRIDE],
+    [ARCHIVE_IMPORTS]: [ARCHIVE_STATE_OVERRIDE]
+  };
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
@@ -2319,7 +2435,7 @@ import {
   writeFileSync as writeFileSync2,
   writeSync as writeSync2
 } from "node:fs";
-import { basename, dirname as dirname5, isAbsolute as isAbsolute4, join as join7 } from "node:path";
+import { basename, dirname as dirname6, isAbsolute as isAbsolute4, join as join7 } from "node:path";
 function builtInEmbeddingPaths(env = process.env, model = BUILT_IN_EMBEDDING_MODEL, runtime = ONNX_RUNTIME_PACK, platform = currentPlatform(), liteRtRuntime = LITERT_RUNTIME_PACK) {
   const configured = env[BUILT_IN_EMBEDDING_DIR_ENV]?.trim();
   const root = configured || olympusDataPath(env, "models", "built-in-embedding");
@@ -2596,7 +2712,7 @@ async function installRuntime(fetchImpl, runtimeDir, packages, platform, reporte
       }
       for (const file of files) {
         const target = join7(staging, "node_modules", pack.name, file.path.replace(/^package\//, ""));
-        ensureDirectory(dirname5(target));
+        ensureDirectory(dirname6(target));
         writeFileSync2(target, file.data, { mode: file.mode & 493 || 420 });
       }
       rmSync3(archivePath, { force: true });
@@ -2790,7 +2906,7 @@ class ProgressReporter {
       return;
     this.lastWriteMs = nowMs;
     try {
-      mkdirSync4(dirname5(this.statusPath), { recursive: true, mode: 448 });
+      mkdirSync4(dirname6(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
       writeFileSync2(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
@@ -3619,7 +3735,7 @@ except Exception as error:
 
 // src/core/linux-secret-backend.ts
 import { lstatSync as lstatSync4, readFileSync as readFileSync8 } from "node:fs";
-import { dirname as dirname6, isAbsolute as isAbsolute5, join as join9, resolve as resolve3 } from "node:path";
+import { dirname as dirname7, isAbsolute as isAbsolute5, join as join9, resolve as resolve3 } from "node:path";
 function secretStoreFailure(error) {
   if (error instanceof SecretStoreError)
     return error;
@@ -3640,8 +3756,8 @@ function resolveLinuxSecretPaths(env, paths = {}) {
   const encryptedFilePath = paths.encryptedFilePath ?? layout.secretsPath;
   const result = {
     encryptedFilePath,
-    keyFilePath: paths.keyFilePath ?? join9(dirname6(encryptedFilePath), "secrets.key"),
-    backendFilePath: paths.backendFilePath ?? join9(dirname6(encryptedFilePath), "secret-backend.json")
+    keyFilePath: paths.keyFilePath ?? join9(dirname7(encryptedFilePath), "secrets.key"),
+    backendFilePath: paths.backendFilePath ?? join9(dirname7(encryptedFilePath), "secret-backend.json")
   };
   for (const path of Object.values(result)) {
     if (!isAbsolute5(path) || /[\0\r\n]/.test(path))
@@ -3683,7 +3799,7 @@ function assertLinuxSecretPath(path) {
       if (error.code !== "ENOENT")
         throw secretStoreFailure(error);
     }
-    const parent = dirname6(current2);
+    const parent = dirname7(current2);
     if (parent === current2)
       break;
     privateParent = leaf;
@@ -3697,7 +3813,7 @@ function selectLinuxSecretBackend(paths, requested) {
       throw new SecretStoreError("configuration", "unsupported Linux backend.");
     for (const path of Object.values(paths))
       assertLinuxSecretPath(path);
-    ensurePrivateRootDirectorySync(dirname6(paths.backendFilePath));
+    ensurePrivateRootDirectorySync(dirname7(paths.backendFilePath));
     return withFileLeaseSync(paths.backendFilePath, (lease) => {
       for (const path of Object.values(paths))
         assertLinuxSecretPath(path);
@@ -3748,7 +3864,7 @@ import { spawnSync as spawnSync2 } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9 } from "node:fs";
 import { homedir as homedir5, platform } from "node:os";
-import { dirname as dirname7, join as join10 } from "node:path";
+import { dirname as dirname8, join as join10 } from "node:path";
 function defaultOlympusConfigDir(env = process.env, targetPlatform = process.platform) {
   if (targetPlatform === "linux")
     return resolveLinuxEngineLayout(env).configDir;
@@ -3925,7 +4041,7 @@ class EncryptedFileSecretStore {
         tag: cipher.getAuthTag().toString("base64"),
         ciphertext: ciphertext.toString("base64")
       };
-      mkdirSync5(dirname7(this.encryptedFilePath), { recursive: true, mode: 448 });
+      mkdirSync5(dirname8(this.encryptedFilePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.encryptedFilePath, JSON.stringify(encrypted, null, 2));
     } finally {
       key.fill(0);
@@ -3959,7 +4075,7 @@ class EncryptedFileSecretStore {
     if (this.strictLinux && readSecretFile(this.keyFilePath) === undefined && readSecretFile(this.encryptedFilePath) !== undefined) {
       throw new SecretStoreError("corrupt", "wrapping key is lost; restore the original key. No replacement was generated.");
     }
-    mkdirSync5(dirname7(this.keyFilePath), { recursive: true, mode: 448 });
+    mkdirSync5(dirname8(this.keyFilePath), { recursive: true, mode: 448 });
     if (!existsSync6(this.keyFilePath)) {
       writePrivateFileAtomicSync(this.keyFilePath, randomBytes(32).toString("base64"));
     }
@@ -5310,15 +5426,15 @@ var init_config = __esm(() => {
 import { closeSync as closeSync5, constants, existsSync as existsSync8, mkdirSync as mkdirSync6, openSync as openSync5 } from "node:fs";
 import { createRequire as createRequire3 } from "node:module";
 import { constants as osConstants } from "node:os";
-import { dirname as dirname8 } from "node:path";
+import { dirname as dirname9 } from "node:path";
 function dataOwnerLockPath(env = process.env) {
   return olympusDataPath(env, OWNER_LOCK_NAME);
 }
 function holdDataOwnerLock(env = process.env, options = {}) {
   const lockPath = dataOwnerLockPath(env);
   const deadline = Date.now() + Math.max(0, options.waitMs ?? 0);
-  if (!existsSync8(dirname8(lockPath)))
-    mkdirSync6(dirname8(lockPath), { recursive: true, mode: 448 });
+  if (!existsSync8(dirname9(lockPath)))
+    mkdirSync6(dirname9(lockPath), { recursive: true, mode: 448 });
   while (true) {
     const fd = tryFlock(lockPath);
     if (fd !== undefined) {
@@ -5494,7 +5610,7 @@ var init_worker_auth = __esm(() => {
 
 // src/core/worker-transport.ts
 import { lstatSync as lstatSync5, mkdirSync as mkdirSync7, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { dirname as dirname9, isAbsolute as isAbsolute6, join as join13, normalize, parse } from "node:path";
+import { dirname as dirname10, isAbsolute as isAbsolute6, join as join13, normalize, parse } from "node:path";
 function ownerId(options) {
   const uid = options.uid ?? process.getuid?.();
   if (uid === undefined)
@@ -5538,7 +5654,7 @@ function validateWorkerSocketDirectory(options = {}) {
   const path = workerSocketPath(options);
   if (!path)
     return;
-  validateDirectory(dirname9(path), ownerId(options), true);
+  validateDirectory(dirname10(path), ownerId(options), true);
   return path;
 }
 function validateWorkerSocket(options = {}) {
@@ -5732,7 +5848,7 @@ var init_publisher_oauth_client = __esm(() => {
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync12 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { dirname as dirname10, join as join14 } from "node:path";
+import { dirname as dirname11, join as join14 } from "node:path";
 function defaultHandleRegistryPath() {
   return join14(homedir8(), ".config", "olympus", "handles.json");
 }
@@ -5810,7 +5926,7 @@ function readConnectedHandleRegistryForWrite(path = defaultHandleRegistryPath())
   return { registry, preservedUnknownHandles };
 }
 function writeConnectedHandleRegistryWithPreservedUnknowns(registry, path, preservedUnknownHandles) {
-  mkdirSync8(dirname10(path), { recursive: true, mode: 448 });
+  mkdirSync8(dirname11(path), { recursive: true, mode: 448 });
   writePrivateFileAtomicSync(path, JSON.stringify({
     version: 1,
     handles: [
@@ -6064,7 +6180,7 @@ var init_connected_handles = __esm(() => {
 // src/workers/credential-broker/index.ts
 import { createHash as createHash3 } from "node:crypto";
 import { mkdir as mkdir2, readFile } from "node:fs/promises";
-import { dirname as dirname11 } from "node:path";
+import { dirname as dirname12 } from "node:path";
 function isCredentialProvider(value) {
   return typeof value === "string" && CREDENTIAL_PROVIDERS.includes(value);
 }
@@ -6139,7 +6255,7 @@ class JsonCredentialOAuth2StateStore {
         merged.pendingRefreshGrantGeneration = undefined;
       store.handles[handle] = pruneUndefined(merged);
       await lease.commit(async () => {
-        await mkdir2(dirname11(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname12(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -6151,7 +6267,7 @@ class JsonCredentialOAuth2StateStore {
         return;
       delete store.handles[handle];
       await lease.commit(async () => {
-        await mkdir2(dirname11(this.path), { recursive: true, mode: 448 });
+        await mkdir2(dirname12(this.path), { recursive: true, mode: 448 });
         await writePrivateFileAtomic(this.path, JSON.stringify(store, null, 2));
       });
     });
@@ -11847,12 +11963,18 @@ function tierSnifferPathForLedger(ledgerPath) {
   const base = ledgerPath.endsWith(TIER_LEDGER_FILE_SUFFIX) ? ledgerPath.slice(0, -TIER_LEDGER_FILE_SUFFIX.length) : ledgerPath;
   return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
 }
+function tierSnifferPathForStore(storeDbPath) {
+  if (storeDbPath === ":memory:")
+    return ":memory:";
+  const base = storeDbPath.endsWith(".sqlite") ? storeDbPath.slice(0, -".sqlite".length) : storeDbPath;
+  return `${base}${TIER_SNIFFER_FILE_SUFFIX}`;
+}
 var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX = ".tier-ledger.sqlite", SECRET_LOCATIONS_SQLITE_STORE_ID = "olympus_secret_locations", SECRET_LOCATIONS_FILE_SUFFIX = ".secret-locations.sqlite", TIER_SNIFFER_SQLITE_STORE_ID = "olympus_tier_sniffer", TIER_SNIFFER_FILE_SUFFIX = ".tier-sniffer.sqlite";
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
 import { chmodSync as chmodSync2, closeSync as closeSync6, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync6 } from "node:fs";
-import { dirname as dirname12 } from "node:path";
+import { dirname as dirname13 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
 }
@@ -11869,7 +11991,7 @@ class TierLedger {
     this.now = options.now ?? (() => new Date);
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
-      mkdirSync9(dirname12(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync9(dirname13(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync10(this.dbPath))
         closeSync6(openSync6(this.dbPath, "a", 384));
       restrictLedgerFiles(this.dbPath);
@@ -15753,7 +15875,7 @@ import {
   statSync as statSync7,
   writeFileSync as writeFileSync4
 } from "node:fs";
-import { basename as basename2, dirname as dirname13, isAbsolute as isAbsolute7, join as join15, resolve as resolve5 } from "node:path";
+import { basename as basename2, dirname as dirname14, isAbsolute as isAbsolute7, join as join15, resolve as resolve5 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute7(configured))
@@ -15772,9 +15894,9 @@ function isSha256(value) {
 function isMediaCachePath(path, sha256, dir) {
   if (!isAbsolute7(path) || !isSha256(sha256) || resolve5(path) !== path)
     return false;
-  if (basename2(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename2(dirname13(path))))
+  if (basename2(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename2(dirname14(path))))
     return false;
-  if (dir !== undefined && dirname13(path) !== resolve5(dir))
+  if (dir !== undefined && dirname14(path) !== resolve5(dir))
     return false;
   try {
     const stat2 = lstatSync6(path);
@@ -15891,10 +16013,10 @@ function holderGone(marker, markerName) {
   const name = readMarker(marker);
   if (!name || !isAbsolute7(name) || holderDigest(name) !== markerName)
     return false;
-  return !existsSync11(name) && existsSync11(dirname13(name));
+  return !existsSync11(name) && existsSync11(dirname14(name));
 }
 function refsDir(path) {
-  return join15(dirname13(path), `${basename2(path)}.refs`);
+  return join15(dirname14(path), `${basename2(path)}.refs`);
 }
 function holderDigest(name) {
   return createHash7("sha256").update(name).digest("hex").slice(0, 32);
@@ -15926,7 +16048,7 @@ var init_media_cache = __esm(() => {
 import { Database as Database2 } from "bun:sqlite";
 import { createHash as createHash8 } from "node:crypto";
 import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync12, mkdirSync as mkdirSync11, openSync as openSync7 } from "node:fs";
-import { dirname as dirname14 } from "node:path";
+import { dirname as dirname15 } from "node:path";
 function screenedSecretLocator(locator) {
   return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
 }
@@ -15945,7 +16067,7 @@ class SecretLocationsIndex {
     }
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk) {
-      mkdirSync11(dirname14(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync11(dirname15(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync12(this.dbPath))
         closeSync7(openSync7(this.dbPath, "a", 384));
       chmodSync4(this.dbPath, 384);
@@ -16326,7 +16448,7 @@ var init_delphi_scorer = __esm(() => {
 import { Database as Database3 } from "bun:sqlite";
 import { createHash as createHash9 } from "node:crypto";
 import { chmodSync as chmodSync5, existsSync as existsSync13, mkdirSync as mkdirSync12 } from "node:fs";
-import { dirname as dirname15 } from "node:path";
+import { dirname as dirname16 } from "node:path";
 function snifferMaterialHash(pass, material) {
   return createHash9("sha256").update(`${pass}
 ${material}`).digest("hex");
@@ -16349,7 +16471,7 @@ class TierSnifferStore {
     this.readOnly = false;
     const onDisk = this.dbPath !== ":memory:";
     if (onDisk)
-      mkdirSync12(dirname15(this.dbPath), { recursive: true, mode: 448 });
+      mkdirSync12(dirname16(this.dbPath), { recursive: true, mode: 448 });
     const previousUmask = onDisk ? process.umask(63) : undefined;
     let db;
     try {
@@ -16935,7 +17057,6 @@ var init_sniffer = __esm(() => {
     relationships: "intimate"
   };
 });
-
 // src/workers/file-extraction/job-names.ts
 import { existsSync as existsSync14 } from "node:fs";
 import { Database as Database4 } from "bun:sqlite";
@@ -17677,7 +17798,7 @@ var init_media_judge = __esm(() => {
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID5 } from "node:crypto";
 import { existsSync as existsSync16, lstatSync as lstatSync7, mkdirSync as mkdirSync13, statSync as statSync8 } from "node:fs";
-import { dirname as dirname16 } from "node:path";
+import { dirname as dirname17 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
 function connectorStoreMigrations() {
   return [
@@ -19949,7 +20070,7 @@ var init_local_index = __esm(() => {
           throw new Error("Connector store read-only mode requires a regular non-symlink database file.");
         }
       } else if (this.dbPath !== ":memory:") {
-        mkdirSync13(dirname16(this.dbPath), { recursive: true, mode: 448 });
+        mkdirSync13(dirname17(this.dbPath), { recursive: true, mode: 448 });
       }
       this.db = new Database5(this.dbPath, options.readOnly === true ? { readonly: true, create: false, strict: true } : { create: true });
       this.openedFile = fileIdentity(this.dbPath);
@@ -25564,11 +25685,11 @@ var init_tier_names_only_settle = __esm(() => {
 
 // src/workers/embedding-ledger.ts
 import { mkdir as mkdir3, open as open2, readFile as readFile2 } from "node:fs/promises";
-import { dirname as dirname17 } from "node:path";
+import { dirname as dirname18 } from "node:path";
 async function appendEmbeddingLedgerEntry(path, entry) {
   const line = `${JSON.stringify(entry)}
 `;
-  await mkdir3(dirname17(path), { recursive: true, mode: 448 });
+  await mkdir3(dirname18(path), { recursive: true, mode: 448 });
   const handle = await open2(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -26304,7 +26425,7 @@ var init_tier_content_purge = __esm(() => {
 import { spawn } from "node:child_process";
 import { existsSync as existsSync17, statSync as statSync9 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname18, isAbsolute as isAbsolute8, join as join17 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname19, isAbsolute as isAbsolute8, join as join17 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 function helperEnvironment() {
@@ -26518,7 +26639,7 @@ async function startLiteRtEmbedder(options) {
   };
 }
 function helperPath() {
-  const here = dirname18(fileURLToPath(import.meta.url));
+  const here = dirname19(fileURLToPath(import.meta.url));
   for (const name of ["litert-helper.js", "litert-helper.ts"]) {
     const candidate = join17(here, name);
     if (existsSync17(candidate))
@@ -26754,7 +26875,7 @@ var init_wordpiece = __esm(() => {
 import { createHash as createHash13 } from "node:crypto";
 import { readFileSync as readFileSync15 } from "node:fs";
 import { availableParallelism } from "node:os";
-import { dirname as dirname19, join as join19 } from "node:path";
+import { dirname as dirname20, join as join19 } from "node:path";
 
 class BuiltInSourceEmbeddingProvider {
   provider;
@@ -26927,7 +27048,7 @@ class BuiltInSourceEmbeddingProvider {
         const embedder = await this.liteRtFactory({
           library: installed.libraryPath,
           model: installed.modelPath,
-          cacheDir: join19(dirname19(installed.modelPath), "cache"),
+          cacheDir: join19(dirname20(installed.modelPath), "cache"),
           threads: this.threads,
           device: this.device,
           maxInputTokens: this.spec.maxTokens,
@@ -28104,24 +28225,202 @@ var init_tiered_store_set = __esm(() => {
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
 });
 
-// src/workers/connector-store/file-ingestion-matcher.ts
-var POLICY_ADMITTED;
-var init_file_ingestion_matcher = __esm(() => {
-  init_source_ingestion_exclusions();
-  init_still_image_readiness();
-  init_source_ingestion_policy();
-  POLICY_ADMITTED = Object.freeze({
-    excluded: false,
-    disposition: "admit",
-    outcome: "admitted"
-  });
-});
-
 // src/core/archive-formats.ts
 function startsWithFromLine(head) {
   if (!head || head.length < FROM_LINE.length)
     return false;
   return FROM_LINE.every((byte, index) => head[index] === byte);
+}
+function lastNameOf(name) {
+  return name.split("/").pop() ?? name;
+}
+function whatsAppNoiseName(name) {
+  const base = lastNameOf(name);
+  return name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/") || base.startsWith("._") || base === ".DS_Store";
+}
+function whatsAppNamed(name) {
+  return !whatsAppNoiseName(name) && WHATSAPP_TEXT_NAME.test(lastNameOf(name));
+}
+function startsLikeWhatsAppChat(head) {
+  if (!head || head.length < 10 || head.includes(0))
+    return false;
+  for (const raw of new TextDecoder("utf-8").decode(head).split(`
+`).slice(0, 8)) {
+    const line = raw.replace(WHATSAPP_LINE_NOISE, "").replace(WHATSAPP_NARROW_SPACES, " ").replace(/\r$/, "");
+    if (line.trim() === "")
+      continue;
+    return WHATSAPP_FIRST_LINE.test(line);
+  }
+  return false;
+}
+function whatsAppIsExport(entry, needName) {
+  if (entry.kind !== "file")
+    return false;
+  if (entry.members) {
+    return entry.members.some((member) => member.kind === "file" && !whatsAppNoiseName(member.relPath) && member.relPath.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(member.relPath)) && startsLikeWhatsAppChat(member.head));
+  }
+  return entry.name.toLowerCase().endsWith(".txt") && (!needName || whatsAppNamed(entry.name)) && startsLikeWhatsAppChat(entry.head);
+}
+function archiveHeadText(head) {
+  return head && head.length > 0 ? leniencyDecoder.decode(head) : "";
+}
+function isJunkArchiveMember(name) {
+  const parts = name.split("/").filter((part) => part !== "");
+  return parts.includes("__MACOSX") || (parts[parts.length - 1] ?? "").startsWith(".");
+}
+function reflectDailyNoteDate(fileName) {
+  const match = DAILY_NOTE_FILE.exec(fileName.trim());
+  if (!match)
+    return;
+  const weekday = match[1].slice(0, 3).toLowerCase();
+  const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase());
+  const day = Number(match[3]);
+  const year = Number(match[4]);
+  if (!WEEKDAYS.includes(weekday) || month < 0 || day < 1 || day > 31)
+    return;
+  const at = new Date(Date.UTC(year, month, day, 12));
+  return at.getUTCMonth() === month && at.getUTCDate() === day ? at.toISOString() : undefined;
+}
+function headRecordKeys(head) {
+  const text2 = archiveHeadText(head);
+  const n = text2.length;
+  let i = 0;
+  const isSpace = (char) => char === " " || char === "\t" || char === `
+` || char === "\r";
+  while (i < n && isSpace(text2[i]))
+    i += 1;
+  const stack = [];
+  let shape;
+  let listDepth = 0;
+  let closed = false;
+  let hasElements = false;
+  let objectRoot = false;
+  let notesNotAList = false;
+  if (text2[i] === "[") {
+    shape = "list";
+    listDepth = 1;
+    stack.push("a");
+  } else if (text2[i] === "{") {
+    objectRoot = true;
+    stack.push("o");
+  } else {
+    return;
+  }
+  i += 1;
+  const records = [];
+  let current2;
+  while (i < n) {
+    const char = text2[i];
+    if (listDepth > 0 && stack.length === listDepth && !isSpace(char) && char !== "," && char !== "]")
+      hasElements = true;
+    if (char === '"') {
+      let end = i + 1;
+      while (end < n && text2[end] !== '"')
+        end += text2[end] === "\\" ? 2 : 1;
+      if (end >= n)
+        break;
+      const raw = text2.slice(i + 1, end);
+      let after = end + 1;
+      while (after < n && isSpace(text2[after]))
+        after += 1;
+      if (text2[after] === ":" && stack[stack.length - 1] === "o") {
+        if (listDepth > 0 && stack.length === listDepth + 1) {
+          current2?.add(raw);
+        } else if (shape === undefined && stack.length === 1 && raw === REFLECT_NOTES_LIST_KEY) {
+          let value = after + 1;
+          while (value < n && isSpace(text2[value]))
+            value += 1;
+          if (text2[value] === "[") {
+            shape = "notes";
+            listDepth = 2;
+          } else if (value < n) {
+            notesNotAList = true;
+          }
+        }
+      }
+      i = end + 1;
+      continue;
+    }
+    if (char === "[" || char === "{") {
+      stack.push(char === "[" ? "a" : "o");
+      if (char === "{" && listDepth > 0 && stack.length === listDepth + 1) {
+        current2 = new Set;
+        records.push(current2);
+      }
+    } else if (char === "]" || char === "}") {
+      stack.pop();
+      if (listDepth > 0 && stack.length < listDepth) {
+        closed = true;
+        listDepth = 0;
+      }
+      if (stack.length === 0)
+        break;
+      if (listDepth > 0 && stack.length === listDepth)
+        current2 = undefined;
+    }
+    i += 1;
+  }
+  if (!shape) {
+    if (objectRoot && !notesNotAList && stack.length > 0) {
+      return { shape: "notes", records: [], empty: false, firstRecordCut: true, unreached: true };
+    }
+    return;
+  }
+  const open3 = listDepth > 0;
+  return { shape, records, empty: closed && !hasElements, firstRecordCut: open3 && records.length === 1 && current2 !== undefined, unreached: false };
+}
+function isReflectRecord(keys) {
+  return REFLECT_BODY_KEYS.some((key2) => keys.has(key2)) && REFLECT_NOTE_KEYS.some((key2) => keys.has(key2));
+}
+function isRoamRecord(keys) {
+  return keys.has("title") && (ROAM_TIME_KEYS.some((key2) => keys.has(key2)) || keys.has("children") && keys.has("uid"));
+}
+function recordsFormat(records, shape) {
+  const reflect = records.some(isReflectRecord);
+  const roam = records.some(isRoamRecord);
+  if (reflect === roam)
+    return;
+  if (roam)
+    return shape === "list" ? "roam" : undefined;
+  return "reflect";
+}
+function notesJsonFormat(probe) {
+  const parsed = headRecordKeys(probe.head);
+  if (!parsed)
+    return;
+  const fromHead = recordsFormat(parsed.records, parsed.shape);
+  if (fromHead || !parsed.firstRecordCut || !probe.firstRecordKeys)
+    return fromHead;
+  let scanned = SCANNED.get(probe);
+  if (!scanned) {
+    const keys = probe.firstRecordKeys(parsed.shape === "list" ? [] : [REFLECT_NOTES_LIST_KEY], (seen) => isReflectRecord(seen) || isRoamRecord(seen));
+    scanned = { keys };
+    SCANNED.set(probe, scanned);
+  }
+  return scanned.keys ? recordsFormat([scanned.keys], parsed.shape) : undefined;
+}
+function detectFile(probe, reads) {
+  if (probe.chosen.kind === "file")
+    return reads(probe.chosen) ? [""] : undefined;
+  const found = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && reads(entry));
+  return found.length === 1 ? [found[0].relPath] : undefined;
+}
+function zipJsonMembers(entry) {
+  return (entry.members ?? []).filter((member) => member.kind === "file" && /\.json$/i.test(member.name) && !isJunkArchiveMember(member.relPath));
+}
+function readsJsonExport(entry, format) {
+  const other = format === "reflect" ? "roam" : "reflect";
+  if (entry.members) {
+    const members = zipJsonMembers(entry).map((member) => notesJsonFormat(member));
+    return members.includes(format) && !members.includes(other);
+  }
+  return notesJsonFormat(entry) === format;
+}
+function isTelegramJsonHead(head) {
+  if (!head || head.length === 0)
+    return false;
+  const text2 = new TextDecoder("utf-8").decode(head);
+  return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
 }
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
@@ -28129,7 +28428,10 @@ function archiveCorpusId(trustDomain, family) {
 function isArchiveCorpusId(corpusId, trustDomain) {
   return corpusId.startsWith(`${trustDomain}.archive.`);
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
+  return [...new Set(formats.map((format) => format.family))];
+}
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -28137,6 +28439,7 @@ var init_archive_formats = __esm(() => {
     label: "Mail (mbox)",
     family: "email",
     provider: "mbox",
+    chooseHint: "a mail export (an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail)",
     citationLabel: "Imported mail",
     detect(probe) {
       if (probe.chosen.kind === "file")
@@ -28147,7 +28450,131 @@ var init_archive_formats = __esm(() => {
       return inner ? [inner.relPath] : undefined;
     }
   });
-  ARCHIVE_FORMATS = Object.freeze([MBOX_ARCHIVE_FORMAT]);
+  WHATSAPP_DATE = String.raw`\d{1,4}[./-]\s?\d{1,2}[./-]\s?\d{1,4}`;
+  WHATSAPP_TIME = String.raw`\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s?[ap]\.?\s?m\.?)?`;
+  WHATSAPP_FIRST_LINE = new RegExp(`^(?:\\[\\s?${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s?\\]|${WHATSAPP_DATE},?\\s+${WHATSAPP_TIME}\\s[-\\u2013]\\s)`, "i");
+  WHATSAPP_LINE_NOISE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+  WHATSAPP_NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+  WHATSAPP_TEXT_NAME = /^(?:_chat|whatsapp chat (?:with|-)\s+\S.*)\.txt$/i;
+  WHATSAPP_ARCHIVE_FORMAT = Object.freeze({
+    id: "whatsapp_chat",
+    label: "WhatsApp chat export",
+    family: "chat",
+    provider: "whatsapp_export",
+    chooseHint: "a WhatsApp chat export (the .zip or the text file from Export Chat, or a folder of them)",
+    citationLabel: "WhatsApp",
+    probeNames: Object.freeze(["*.txt", "*.zip"]),
+    signatureNames: Object.freeze(["_chat.txt", "WhatsApp Chat with *.txt", "WhatsApp Chat - *.txt", "WhatsApp Chat*.zip"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return whatsAppIsExport(probe.chosen, false) ? [""] : undefined;
+      const found = probe.children.filter((entry) => whatsAppIsExport(entry, true)).map((entry) => entry.relPath).sort();
+      return found.length > 0 ? found : undefined;
+    },
+    unconfirmed(probe) {
+      if (probe.chosen.kind === "file")
+        return 0;
+      return probe.children.filter((entry) => !whatsAppIsExport(entry, true) && whatsAppIsExport(entry, false)).length;
+    }
+  });
+  leniencyDecoder = new TextDecoder("utf-8");
+  WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  DAILY_NOTE_FILE = /^([a-z]+),?\s+([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?:\.(?:md|markdown))?$/i;
+  REFLECT_BODY_KEYS = ["content", "body", "document_json", "documentJson"];
+  REFLECT_NOTE_KEYS = ["subject", "title", "created_at", "createdAt", "updated_at", "updatedAt"];
+  ROAM_TIME_KEYS = ["create-time", "edit-time", "create-email", "edit-email"];
+  SCANNED = new WeakMap;
+  REFLECT_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-json",
+    label: "Reflect notes (JSON)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
+  });
+  REFLECT_MARKDOWN_ARCHIVE_FORMAT = Object.freeze({
+    id: "reflect-markdown",
+    label: "Reflect notes (Markdown zip)",
+    family: "note",
+    provider: "reflect",
+    chooseHint: "a Reflect export as Markdown (the .zip file)",
+    citationLabel: "Reflect",
+    probeNames: Object.freeze(["*, *, ????.md"]),
+    detect: (probe) => detectFile(probe, (entry) => {
+      if (!entry.members || /^roam/i.test(entry.name))
+        return false;
+      const files = entry.members.filter((member) => member.kind === "file" && !isJunkArchiveMember(member.relPath));
+      if (files.some((member) => /\.json$/i.test(member.name)))
+        return false;
+      const notes = files.filter((member) => /\.(?:md|markdown)$/i.test(member.name));
+      if (notes.length === 0)
+        return false;
+      return /reflect/i.test(entry.name) || notes.some((member) => reflectDailyNoteDate(member.name) !== undefined) || notes.some((member) => /reflect\.app\//i.test(archiveHeadText(member.head)));
+    })
+  });
+  ROAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "roam-json",
+    label: "Roam notes (JSON)",
+    family: "note",
+    provider: "roam",
+    chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
+    citationLabel: "Roam",
+    probeNames: Object.freeze(["*.json"]),
+    detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
+  TELEGRAM_EXPORT_SECTIONS = Object.freeze([
+    "personal_information",
+    "profile_pictures",
+    "stories",
+    "profile_music",
+    "contacts",
+    "frequent_contacts",
+    "sessions",
+    "web_sessions",
+    "other_data",
+    "chats",
+    "left_chats"
+  ]);
+  TELEGRAM_FULL_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"about"\s*:\s*${JSON_STRING}\s*,\s*)?"(?:${TELEGRAM_EXPORT_SECTIONS.join("|")})"\s*:\s*[\[{]`);
+  TELEGRAM_CHAT_HEAD = new RegExp(String.raw`^\s*\{\s*(?:"name"\s*:\s*(?:null|${JSON_STRING})\s*,\s*)?"type"\s*:\s*(?:null|${JSON_STRING})\s*,\s*"id"\s*:\s*-?\d+\s*,\s*"messages"\s*:\s*\[`);
+  TELEGRAM_HTML_NAME = /^(?:messages\d*|export_results)\.html?$/i;
+  TELEGRAM_JSON_ARCHIVE_FORMAT = Object.freeze({
+    id: "telegram_json",
+    label: "Telegram Desktop export (JSON)",
+    family: "chat",
+    provider: "telegram_export",
+    chooseHint: "a Telegram Desktop export (its result.json file, or the folder that holds it; export it as Machine-readable JSON)",
+    citationLabel: "Telegram",
+    probeNames: ["result.json", "messages.html", "export_results.html"],
+    unsupportedVariants: Object.freeze([
+      Object.freeze({
+        matches(probe) {
+          if (probe.chosen.kind === "file")
+            return TELEGRAM_HTML_NAME.test(probe.chosen.name);
+          return probe.children.some((entry) => entry.kind === "file" && TELEGRAM_HTML_NAME.test(entry.name));
+        },
+        advice: "This looks like a Telegram Desktop export in its HTML form, which Olympus cannot read. In Telegram Desktop, export again (Settings, Advanced, Export Telegram data, or Export chat history in a chat's menu) and set the format to Machine-readable JSON, or Both. Then choose the new result.json or the folder that holds it."
+      })
+    ]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return isTelegramJsonHead(probe.chosen.head) ? [""] : undefined;
+      const inner = probe.children.find((entry) => entry.kind === "file" && entry.name.toLowerCase() === "result.json" && isTelegramJsonHead(entry.head));
+      return inner ? [inner.relPath] : undefined;
+    }
+  });
+  ARCHIVE_FORMATS = Object.freeze([
+    MBOX_ARCHIVE_FORMAT,
+    WHATSAPP_ARCHIVE_FORMAT,
+    REFLECT_JSON_ARCHIVE_FORMAT,
+    REFLECT_MARKDOWN_ARCHIVE_FORMAT,
+    ROAM_JSON_ARCHIVE_FORMAT,
+    TELEGRAM_JSON_ARCHIVE_FORMAT
+  ]);
   CONNECTOR_FACTORIES = new Map;
 });
 
@@ -28164,6 +28591,7 @@ function updateSourceRegistry(env, mutate) {
   return withFileLeaseSync(path, (lease) => {
     const current2 = readSourceRegistryAt(path);
     const next = mutate(current2) ?? current2;
+    next.schema = next.accounts.some((account) => account.layout === "folder") ? SOURCE_REGISTRY_FOLDER_SCHEMA : SOURCE_REGISTRY_SCHEMA;
     const text2 = `${JSON.stringify(validateRegistry(next, path), null, 2)}
 `;
     lease.commit(() => writePrivateFileAtomicSync(path, text2));
@@ -28193,7 +28621,7 @@ function readSourceRegistryAt(path) {
 function validateRegistry(value, path) {
   if (!isRecord(value))
     throw new SourceRegistryError(path, "not an object");
-  if (value.schema !== SOURCE_REGISTRY_SCHEMA)
+  if (!KNOWN_SCHEMAS.includes(value.schema))
     throw new SourceRegistryError(path, `unknown schema ${JSON.stringify(value.schema)}`);
   if (!Array.isArray(value.accounts))
     throw new SourceRegistryError(path, "accounts is not a list");
@@ -28217,11 +28645,12 @@ function nonEmptyString(value) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-var SOURCE_REGISTRY_SCHEMA = 1, SourceRegistryError, STATES, LAYOUTS;
+var SOURCE_REGISTRY_SCHEMA = 1, SOURCE_REGISTRY_FOLDER_SCHEMA = 2, KNOWN_SCHEMAS, DEFAULT_ACCOUNT_SLOT = "1", SourceRegistryError, STATES, LAYOUTS;
 var init_source_registry = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_olympus_layout();
+  KNOWN_SCHEMAS = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA];
   SourceRegistryError = class SourceRegistryError extends Error {
     code = "source_registry_unreadable";
     path;
@@ -28235,17 +28664,56 @@ var init_source_registry = __esm(() => {
   LAYOUTS = ["legacy", "folder"];
 });
 
-// src/core/source-storage.ts
-function openConnectorStore(account, options, env = process.env) {
-  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
-  const registry = readSourceRegistry(env);
-  assertOpenable(registry, account.sourceId, slot);
-  if (adoptionEnabled && options.readOnly !== true) {
-    const entry = findRegistryAccount(registry, account.sourceId, slot);
-    if (!entry?.corpus_ids.includes(options.corpusId))
-      adopt(env, account.sourceId, slot, options.corpusId);
+// src/core/source-placement.ts
+import { accessSync as accessSync2, constants as constants2, lstatSync as lstatSync8, statSync as statSync10 } from "node:fs";
+import { resolve as resolve6, sep as sep3 } from "node:path";
+function hasFolderLayout(sourceId) {
+  return FOLDER_LAYOUT_SOURCES.includes(sourceId);
+}
+function decideAccountLayout(sourceId, env = process.env) {
+  if (!hasFolderLayout(sourceId))
+    return { layout: "legacy", why: "its source has no folder layout" };
+  const pin = pinnedLegacyBy(sourceId, env);
+  if (pin)
+    return { layout: "legacy", why: `${pin} pins its files` };
+  const root = dataRootState(env);
+  if (root === "unreadable")
+    return { layout: "legacy", why: "the data folder cannot be looked at" };
+  if (root === "absent")
+    return { layout: "folder", why: "nothing is stored yet" };
+  const existing = legacyFilesState(sourceId, env);
+  if (existing === "present")
+    return { layout: "legacy", why: "its files are already at the legacy paths" };
+  if (existing === "unreadable")
+    return { layout: "legacy", why: "a legacy path cannot be looked at" };
+  return { layout: "folder", why: "new account with no legacy files" };
+}
+function placedAccount(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT) {
+  if (!hasFolderLayout(sourceId))
+    return { source_id: sourceId, slot, layout: "legacy" };
+  let entry;
+  try {
+    entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
+  } catch (error) {
+    if (error instanceof SourceRegistryError)
+      return { source_id: sourceId, slot, layout: hasAccountFolderOnDisk(sourceId, slot, env) ? "folder" : "legacy" };
+    return { source_id: sourceId, slot, layout: "legacy" };
   }
-  return new LocalConnectorStore(options);
+  return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
+}
+function resolvedStorePath(sourceId, name, env = process.env) {
+  return accountStorePath(placedAccount(sourceId, env), name, env);
+}
+function hasAccountFolderOnDisk(sourceId, slot, env) {
+  try {
+    lstatSync8(accountFolder({ source_id: sourceId, slot }, env));
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isInsideAccountFolder(dbPath, account, env = process.env) {
+  return resolve6(dbPath).startsWith(`${resolve6(accountFolder(account, env))}${sep3}`);
 }
 function storageAccountForCorpus(corpus, registered2 = []) {
   const known = [...registered2, ...defaultSourceCorpusRegistryConfig().corpora].find((entry) => entry.corpusId === corpus.corpusId);
@@ -28257,6 +28725,128 @@ function storageAccountForCorpus(corpus, registered2 = []) {
   const unprefixed = corpus.corpusId.startsWith(prefix) ? corpus.corpusId.slice(prefix.length) : "";
   return { sourceId: unprefixed || corpus.corpusId };
 }
+function declaredConnectorStoreMounts(env = process.env) {
+  const mounts = env[MOUNTS_ENV]?.trim();
+  if (!mounts)
+    return [];
+  let declared;
+  try {
+    declared = JSON.parse(mounts);
+  } catch {
+    return "unreadable";
+  }
+  if (!Array.isArray(declared))
+    return "unreadable";
+  const found = [];
+  for (const entry of declared) {
+    const record = entry && typeof entry === "object" ? entry : {};
+    if (typeof record.corpusId !== "string")
+      continue;
+    const corpusId = record.corpusId.trim();
+    const owner = storageAccountForCorpus({
+      corpusId,
+      trustDomain: typeof record.trustDomain === "string" ? record.trustDomain.trim() : ""
+    });
+    const dbPath = typeof record.dbPath === "string" && record.dbPath.trim() ? record.dbPath.trim() : undefined;
+    found.push({ sourceId: owner.sourceId, corpusId, ...dbPath ? { dbPath } : {} });
+  }
+  return found;
+}
+function pinnedLegacyBy(sourceId, env) {
+  for (const name of legacyOverrideEnvNames(sourceId)) {
+    if (env[name]?.trim())
+      return name;
+  }
+  const mounts = declaredConnectorStoreMounts(env);
+  if (mounts === "unreadable")
+    return `${MOUNTS_ENV} (unreadable)`;
+  const mount = mounts.find((candidate) => candidate.sourceId === sourceId);
+  return mount ? `${MOUNTS_ENV} (${mount.corpusId})` : undefined;
+}
+function dataRootState(env) {
+  let root;
+  try {
+    root = olympusDataRoot(env);
+  } catch {
+    return "unreadable";
+  }
+  try {
+    const link = lstatSync8(root);
+    const target = link.isSymbolicLink() ? statSync10(root) : link;
+    if (!target.isDirectory())
+      return "unreadable";
+    accessSync2(root, constants2.R_OK | constants2.X_OK);
+    return "present";
+  } catch (error) {
+    return error?.code === "ENOENT" && !isDanglingLink(root) ? "absent" : "unreadable";
+  }
+}
+function isDanglingLink(path) {
+  try {
+    return lstatSync8(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+function legacyFilesState(sourceId, env) {
+  const { stores, raw } = legacyAccountPaths(sourceId, env, archiveImportFamilies());
+  const candidates = [
+    ...raw.flatMap(withSqliteFiles),
+    ...stores.flatMap((store) => [
+      store,
+      tierLedgerPathForStore(store),
+      secretLocationsPathForStore(store),
+      tierSnifferPathForStore(store)
+    ].flatMap(withSqliteFiles))
+  ];
+  let unreadable = false;
+  for (const path of candidates) {
+    try {
+      lstatSync8(path);
+      return "present";
+    } catch (error) {
+      if (error?.code !== "ENOENT")
+        unreadable = true;
+    }
+  }
+  return unreadable ? "unreadable" : "none";
+}
+function withSqliteFiles(path) {
+  return [path, `${path}-wal`, `${path}-shm`];
+}
+var ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", MOUNTS_ENV = "OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON";
+var init_source_placement = __esm(() => {
+  init_archive_formats();
+  init_olympus_layout();
+  init_source_corpus_registry();
+  init_source_registry();
+});
+
+// src/workers/connector-store/file-ingestion-matcher.ts
+var POLICY_ADMITTED;
+var init_file_ingestion_matcher = __esm(() => {
+  init_source_ingestion_exclusions();
+  init_still_image_readiness();
+  init_source_ingestion_policy();
+  POLICY_ADMITTED = Object.freeze({
+    excluded: false,
+    disposition: "admit",
+    outcome: "admitted"
+  });
+});
+
+// src/core/source-storage.ts
+function openConnectorStore(account, options, env = process.env) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, slot);
+  if (adoptionEnabled && options.readOnly !== true) {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry?.corpus_ids.includes(options.corpusId))
+      adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
+  }
+  return new LocalConnectorStore(options);
+}
 function unavailableStateReason(state) {
   return state === "deleting" ? "its data is being deleted" : "its data was deleted";
 }
@@ -28265,7 +28855,7 @@ function assertOpenable(registry, sourceId, slot) {
   if (state !== undefined && state !== "active")
     throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
-function adopt(env, sourceId, slot, corpusId) {
+function adopt(env, sourceId, slot, dbPath, corpusId) {
   updateSourceRegistry(env, (registry) => {
     assertOpenable(registry, sourceId, slot);
     const entry = findRegistryAccount(registry, sourceId, slot);
@@ -28274,24 +28864,29 @@ function adopt(env, sourceId, slot, corpusId) {
         source_id: sourceId,
         slot,
         state: "active",
-        layout: "legacy",
-        corpus_ids: [corpusId],
+        layout: adoptedLayout(env, sourceId, slot, dbPath),
+        corpus_ids: corpusId === undefined ? [] : [corpusId],
         created_at: new Date().toISOString()
       });
-    } else if (!entry.corpus_ids.includes(corpusId)) {
+    } else if (corpusId !== undefined && !entry.corpus_ids.includes(corpusId)) {
       entry.corpus_ids.push(corpusId);
     }
   });
 }
-var DEFAULT_STORAGE_SLOT = "1", ARCHIVE_IMPORTS_SOURCE_ID = "archive.imports", SourceStorageUnavailableError, adoptionEnabled = false;
+function adoptedLayout(env, sourceId, slot, dbPath) {
+  if (decideAccountLayout(sourceId, env).layout !== "folder")
+    return "legacy";
+  return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? "folder" : "legacy";
+}
+var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false;
 var init_source_storage = __esm(() => {
   init_secret_locations();
   init_sniffer_store();
   init_tier_ledger();
   init_local_index();
-  init_archive_formats();
-  init_source_corpus_registry();
+  init_source_placement();
   init_source_registry();
+  DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
   SourceStorageUnavailableError = class SourceStorageUnavailableError extends Error {
     code = "source_storage_unavailable";
     sourceId;
@@ -28316,14 +28911,11 @@ var init_corpus_adapter = __esm(() => {
 
 // src/workers/dropbox-files/connector-store.ts
 function defaultDropboxConnectorStoreDbPath(env = process.env) {
-  const configured = env[DROPBOX_CONNECTOR_STORE_DB_PATH_ENV]?.trim();
-  if (configured)
-    return configured;
-  return olympusDataPath(env, "dropbox-files-connector-store.sqlite");
+  return resolvedStorePath(DROPBOX_FILES_SOURCE_ID, "secure_local", env);
 }
 var DROPBOX_INTERNAL_FILES_CORPUS_ID = "internal.dropbox.files", DROPBOX_PUBLIC_FILES_CORPUS_ID = "public_safe.dropbox.files", DROPBOX_TIER_CORPUS_IDS, DROPBOX_CONNECTOR_STORE_DB_PATH_ENV = "OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH", DROPBOX_STORE_PLACEMENT;
 var init_connector_store = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
   init_file_ingestion_matcher();
@@ -29850,10 +30442,7 @@ function internalDateNumber(metadata) {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 function defaultGmailSecureConnectorStoreDbPath(env = process.env) {
-  if (env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH?.trim()) {
-    return env.OLYMPUS_SOURCE_INDEX_GMAIL_SECURE_CONNECTOR_STORE_DB_PATH.trim();
-  }
-  return olympusDataPath(env, "gmail-secure-connector-store.sqlite");
+  return resolvedStorePath(GMAIL_SOURCE_ID, "secure_local", env);
 }
 
 class RestGmailApiClient {
@@ -29871,7 +30460,7 @@ class RestGmailApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GMAIL_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
   }
   async listMessages(request) {
     const params = new URLSearchParams({
@@ -30119,9 +30708,10 @@ function safeProviderDetail(value) {
 function hashString3(value) {
   return createHash16("sha256").update(value).digest("hex");
 }
-var GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
+var GMAIL_SOURCE_ID = "gmail.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GMAIL_METADATA_HEADERS, MAX_ATTACHMENT_NAME_CHARS = 256;
 var init_gmail = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_mail_source_scope();
   init_sender_rules();
   init_credential_broker();
@@ -30535,7 +31125,7 @@ class RestGoogleDriveApiClient {
     this.requestBudget = options.requestBudget;
     this.provenance = sourceInvocationProvenance(options.provenance);
     this.maxRetries = Math.max(0, Math.floor(options.maxRetries ?? DEFAULT_GOOGLE_DRIVE_MAX_RETRIES));
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve6) => setTimeout(resolve6, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
   }
   async listFiles(request) {
     const params = new URLSearchParams({
@@ -30702,6 +31292,7 @@ function hashString4(value) {
 var GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED;
 var init_drive = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_source_ingestion_exclusions();
   init_credential_broker();
   init_request_budget();
@@ -30743,6 +31334,7 @@ var init_corpus_adapter2 = __esm(() => {
 var READWISE_STORE_PLACEMENT;
 var init_connector2 = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_atomic_file();
   init_credential_broker();
   init_source_storage();
@@ -30844,7 +31436,7 @@ var init_folder_facets = __esm(() => {
 // src/workers/x-bookmarks/connector.ts
 var X_BOOKMARKS_STORE_PLACEMENT;
 var init_connector3 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_storage();
   init_corpus_adapter3();
   init_folder_facets();
@@ -30877,7 +31469,9 @@ var init_live_control2 = __esm(() => {
 // src/workers/x-bookmarks/reconcile-state.ts
 var X_BOOKMARKS_WINDOW_BOUNDARY_ALGORITHM_VERSION = 2, FOLDER_FACET_REFRESH_LEASE_MS;
 var init_reconcile_state = __esm(() => {
-  init_live_control2();
+  init_source_placement();
+  init_source_storage();
+  init_connector3();
   init_sqlite_migrations();
   FOLDER_FACET_REFRESH_LEASE_MS = 5 * 60000;
 });
@@ -31135,7 +31729,7 @@ var init_scope = __esm(() => {
 // src/workers/local-files/store.ts
 var LOCAL_FILES_CORPUS_ID = "secure_local.local.files", LOCAL_FILES_INTERNAL_CORPUS_ID = "internal.local.files", LOCAL_FILES_PUBLIC_CORPUS_ID = "public_safe.local.files", LOCAL_FILES_TIER_CORPUS_IDS, LOCAL_FILES_STORE_PLACEMENT;
 var init_store = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_corpus();
   init_source_ingestion_exclusions();
   init_source_ingestion_policy();
@@ -31283,12 +31877,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -31356,6 +31950,7 @@ var init_source_dashboard = __esm(() => {
   init_google_handle_compatibility();
   init_publisher_oauth_client();
   init_privacy_language();
+  init_archive_formats();
   init_sqlite_migrations();
   init_ingestion_throughput();
   init_source_corpus_registry();
@@ -31431,9 +32026,13 @@ function dashboardManualSyncPendingLine(label) {
 function syncMid(name) {
   return typeof name === "string" ? name : name.mid;
 }
-var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
+function archivePickIntro(formats = ARCHIVE_FORMATS) {
+  return `Choose a file or folder on this computer: ${formats.map((format) => format.chooseHint ?? format.label).join("; or ")}. Olympus reads it where it is and never changes it.`;
+}
+var DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_INDEX_FASTER, DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_LOCAL_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
+  init_archive_formats();
   init_answer_ready_coverage();
   init_display_text();
   init_scheduler_markers();
@@ -31719,12 +32318,19 @@ var init_vocabulary = __esm(() => {
     unreadableNoteMany: DASHBOARD_UNREADABLE_NOTE_MANY
   };
   DASHBOARD_WORKER_TOKEN_AGENT_PROMPT = "Open the Olympus dashboard for me with its controls ready. On the machine hosting Olympus, " + "resolve the installed plugin rootDir yourself with `openclaw plugins inspect olympus --json`, " + "run `<rootDir>/bin/olympus dashboard --no-open`, and give me the new opening link. " + "Do not read or print the worker token. Do not change configuration or connect sources.";
+  ARCHIVE_PICK_INTRO = archivePickIntro();
+  DASHBOARD_ARCHIVE_NOUNS = {
+    email: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "" },
+    chat: { one: "1 message", many: "{n} messages", none: "no messages", plural: "messages", snapshot: "Snapshot, not updated" },
+    note: { one: "1 note", many: "{n} notes", none: "no notes", plural: "notes", snapshot: "" },
+    other: { one: "1 item", many: "{n} items", none: "no items", plural: "items", snapshot: "" }
+  };
   DASHBOARD_ARCHIVE_COPY = {
     importAction: "Import an archive",
     pick: {
       back: "Back to Olympus",
       title: "Import an archive",
-      intro: "Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.",
+      intro: ARCHIVE_PICK_INTRO,
       source: "This computer",
       makePrivate: "Import",
       makePrivateFor: "Import {name}",
@@ -31735,11 +32341,15 @@ var init_vocabulary = __esm(() => {
     listLabel: "Imported archives",
     status: { importing: "Importing", imported: "Imported", stopped: "Stopped", removing: "Removing", notRunning: "Not running" },
     dates: "{earliest} to {latest}",
-    items: { one: "1 message", many: "{n} messages" },
+    nouns: DASHBOARD_ARCHIVE_NOUNS,
     importingLine: "{percent}% read · {items} so far",
     importingLineUncounted: "{percent}% read",
     importedLine: "{items} · imported {when}",
     importedLineNoTime: "{items}",
+    emptyImport: "Imported: {none} found in this archive.",
+    emptyImportWhen: "Imported {when}: {none} found in this archive.",
+    nothingImported: "{None} imported.",
+    nothingImportedWhen: "{None} imported {when}.",
     removingLine: "Removing everything Olympus made from this archive. The file itself stays where it is.",
     notRunningLine: "{percent}% read · {items} so far. It goes on from there once imports can run.",
     notRunningLineUncounted: "{percent}% read. It goes on from there once imports can run.",
@@ -31752,7 +32362,7 @@ var init_vocabulary = __esm(() => {
     },
     setUpPrivateModel: "Set up the private model",
     countsUnavailable: {
-      why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
+      why: "Olympus can't count what this archive holds right now: its index could not be opened.",
       fix: "Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support."
     },
     notRunning: {
@@ -31782,10 +32392,33 @@ var init_vocabulary = __esm(() => {
     gaps: {
       message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
       message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
+      message_content_unsupported: { one: "1 message with a kind of content Olympus cannot read yet", many: "{n} messages with a kind of content Olympus cannot read yet" },
       charset_not_decoded: { one: "1 message in a character set Olympus could not read", many: "{n} messages in a character set Olympus could not read" },
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+      message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
+      status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
+      note_empty: { one: "1 note with nothing written in it left out", many: "{n} notes with nothing written in them left out" },
+      note_unreadable: { one: "1 note could not be read", many: "{n} notes could not be read" },
+      note_too_large: { one: "1 note too large to read", many: "{n} notes too large to read" },
+      note_content_unsupported: { one: "1 note with a kind of content Olympus cannot read yet", many: "{n} notes with a kind of content Olympus cannot read yet" },
+      note_date_assumed: { one: "1 note has no date in the archive: Olympus used the day the file was saved", many: "{n} notes have no date in the archive: Olympus used the day the file was saved" },
+      service_message: { one: "1 service message (a join, a call or a pin) left out", many: "{n} service messages (joins, calls or pins) left out" },
+      message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
+      media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
+      item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
+      time_zone_assumed: { one: "The times have no time zone, so Olympus read them in this computer's time zone", many: "The times in {n} files have no time zone, so Olympus read them in this computer's time zone" },
+      date_order_assumed: { one: "The dates do not say which part is the day, so Olympus read them day first", many: "The dates in {n} files do not say which part is the day, so Olympus read them day first" },
+      item_start_assumed: { one: "1 line that looks like the start of a new message was taken as one, though it is dated before the message above it or written in another style, so it may belong to that message", many: "{n} lines that look like the start of a new message were taken as new messages, though each is dated before the message above it or written in another style, so they may belong to those messages" },
+      zip_overlap_unchecked: { one: "1 zip is too large to check whether its files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)", many: "{n} zips are too large to check whether their files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)" },
+      section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
+      file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
+      item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      files_not_looked_at: { one: "1 file in what you chose was not looked at, so it was not imported if it is an export", many: "{n} files in what you chose were not looked at, so any of them that are exports were not imported" },
+      files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
     seeWhy: "See what was not read",
@@ -31827,12 +32460,12 @@ var init_vocabulary = __esm(() => {
       request: "An agent asked to import {name}",
       removal: "An agent asked to remove {name}",
       failed: "An import did not start: {name}",
-      counts: "Olympus can't count the messages in {name}",
+      counts: "Olympus can't count what is in {name}",
       scheduler: {
         disabled: "Imports can't run: background syncing is turned off",
         not_selected: "Imports can't run: background syncing leaves out archives"
       },
-      held: { one: "1 imported message waits for the private model", many: "{n} imported messages wait for the private model" },
+      held: { one: "1 imported item waits for the private model", many: "{n} imported items wait for the private model" },
       unreadable: "Olympus can't read its list of imported archives",
       seeWhy: "See why",
       review: "Review",
@@ -32639,10 +33272,10 @@ var init_open_target = __esm(() => {
 });
 
 // src/core/linux-desktop-opener.ts
-import { accessSync as accessSync2, constants as fsConstants2, lstatSync as lstatSync8, realpathSync as realpathSync5 } from "node:fs";
+import { accessSync as accessSync3, constants as fsConstants2, lstatSync as lstatSync9, realpathSync as realpathSync5 } from "node:fs";
 import { execFile, spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { dirname as dirname20, extname, isAbsolute as isAbsolute9, join as join21 } from "node:path";
+import { dirname as dirname21, extname, isAbsolute as isAbsolute9, join as join21 } from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 function linuxGraphicalSessionReadiness(dependencies = {}) {
   const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
@@ -32769,7 +33402,7 @@ function sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath) {
 }
 function inspectLinuxPath(path) {
   try {
-    const stat2 = lstatSync8(path);
+    const stat2 = lstatSync9(path);
     return {
       kind: stat2.isDirectory() ? "directory" : stat2.isFile() ? "file" : stat2.isSocket() ? "socket" : "other",
       uid: stat2.uid,
@@ -32791,8 +33424,8 @@ function isTrustedExecutable(path) {
   if (!isAbsolute9(path))
     return false;
   try {
-    accessSync2(path, fsConstants2.X_OK);
-    const stat2 = lstatSync8(path);
+    accessSync3(path, fsConstants2.X_OK);
+    const stat2 = lstatSync9(path);
     const uid = typeof process.getuid === "function" ? process.getuid() : -1;
     return stat2.isFile() && !stat2.isSymbolicLink() && (stat2.uid === 0 || stat2.uid === uid) && (stat2.mode & 18) === 0;
   } catch {
@@ -32812,7 +33445,7 @@ function runCommandSync(argv, timeoutMs) {
   };
 }
 function runCommand2(argv, options) {
-  return new Promise((resolve6) => {
+  return new Promise((resolve7) => {
     execFile(argv[0], argv.slice(1), {
       encoding: "utf8",
       timeout: options.timeoutMs,
@@ -32822,12 +33455,12 @@ function runCommand2(argv, options) {
     }, (error, stdout, stderr) => {
       const failure = error;
       const status = typeof failure?.code === "number" ? failure.code : failure ? null : 0;
-      resolve6({ status, stdout, stderr, ...failure?.killed === true ? { timedOut: true } : {} });
+      resolve7({ status, stdout, stderr, ...failure?.killed === true ? { timedOut: true } : {} });
     });
   });
 }
 function launchInUserScope(argv, options) {
-  return new Promise((resolve6) => {
+  return new Promise((resolve7) => {
     let settled = false;
     let exited = false;
     let overallTimer;
@@ -32844,7 +33477,7 @@ function launchInUserScope(argv, options) {
       if (overallTimer)
         clearTimeout(overallTimer);
       child.unref();
-      resolve6(result);
+      resolve7(result);
     };
     child.once("error", (error) => finish({ established: false, stderr: error.message }));
     child.once("exit", (code) => {
@@ -32894,10 +33527,10 @@ async function openLinuxOwnerTicketFile(path, dependencies = {}) {
   if (!readiness.ready)
     throw new Error("No live graphical session.");
   const runtime = readiness.environment.XDG_RUNTIME_DIR;
-  if (!runtime || dirname20(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname20(path).length + 1)))
+  if (!runtime || dirname21(path) !== `${runtime}/olympus` || !/^owner-ticket-[a-f0-9]{32}\.html$/.test(path.slice(dirname21(path).length + 1)))
     throw new Error("Invalid owner ticket path.");
-  const stat2 = lstatSync8(path);
-  const parent = lstatSync8(dirname20(path));
+  const stat2 = lstatSync9(path);
+  const parent = lstatSync9(dirname21(path));
   const uid = dependencies.uid ?? process.getuid?.();
   if (realpathSync5(path) !== path || !stat2.isFile() || stat2.isSymbolicLink() || stat2.uid !== uid || (stat2.mode & 511) !== 384 || !parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== uid || (parent.mode & 511) !== 448)
     throw new Error("Unsafe owner ticket file.");
@@ -33263,14 +33896,14 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync9, constants as constants2, fstatSync, lstatSync as lstatSync9, openSync as openSync9, readFileSync as readFileSync17 } from "node:fs";
+import { closeSync as closeSync9, constants as constants3, fstatSync, lstatSync as lstatSync10, openSync as openSync9, readFileSync as readFileSync17 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
 function inspectRecordNode(path) {
   let stat2;
   try {
-    stat2 = lstatSync9(path);
+    stat2 = lstatSync10(path);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -33287,7 +33920,7 @@ function readRecordText(path) {
   const node = inspectRecordNode(path);
   if (node.kind !== "file")
     return node;
-  const flags = constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0) | (constants2.O_NONBLOCK ?? 0);
+  const flags = constants3.O_RDONLY | (constants3.O_NOFOLLOW ?? 0) | (constants3.O_NONBLOCK ?? 0);
   let fd;
   try {
     fd = openSync9(path, flags);
@@ -33878,12 +34511,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve7, reject) => {
+    return new Promise((resolve8, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve7, reject, timer };
+      pending[id] = { resolve: resolve8, reject, timer };
     });
   }
   function notify(method, params) {
@@ -34871,9 +35504,14 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
   function wholeCount(value) {
     return typeof value === "number" && isFinite(value) && value > 0 ? Math.floor(value) : 0;
   }
-  function messageCount(n) {
-    const A = H.copy.archives;
-    return fill2(n === 1 ? A.items.one : A.items.many, { n: count(n) });
+  function archiveNouns(archive) {
+    const nouns = H.copy.archives.nouns;
+    const family = archive && typeof archive.family === "string" ? archive.family : "";
+    return Object.prototype.hasOwnProperty.call(nouns, family) ? nouns[family] : nouns.other;
+  }
+  function itemCount(archive, n) {
+    const nouns = archiveNouns(archive);
+    return fill2(n === 1 ? nouns.one : nouns.many, { n: count(n) });
   }
   function archiveList(meta) {
     const A = H.copy.archives;
@@ -34959,8 +35597,12 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const facts = [archive.format, archive.where].filter((part) => typeof part === "string" && part).map((part) => el("span", "", part));
     const earliest = typeof archive.earliest === "string" ? archive.earliest : "";
     const latest = typeof archive.latest === "string" ? archive.latest : "";
-    if (earliest && latest)
+    if (earliest && latest) {
       facts.push(el("span", "archive-dates", earliest === latest ? earliest : fill2(A.dates, { earliest, latest })));
+      const snapshot = archiveNouns(archive).snapshot;
+      if (typeof snapshot === "string" && snapshot)
+        facts.push(el("span", "archive-snapshot", snapshot));
+    }
     if (facts.length) {
       const line = el("p", "muted archive-facts");
       facts.forEach((fact, index) => {
@@ -34974,17 +35616,26 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const uncounted = archive.countsUnavailable === true && archive.status !== "removing";
     if (halted && archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
-      add(item, el("p", "muted", uncounted ? fill2(A.notRunningLineUncounted, { percent: percent(pct) }) : fill2(A.notRunningLine, { percent: percent(pct), items: messageCount(items) })));
+      add(item, el("p", "muted", uncounted ? fill2(A.notRunningLineUncounted, { percent: percent(pct) }) : fill2(A.notRunningLine, { percent: percent(pct), items: itemCount(archive, items) })));
     } else if (halted) {
       add(item, el("p", "muted", A.removingNotRunningLine));
     } else if (archive.status === "importing") {
       const pct = typeof archive.percent === "number" && isFinite(archive.percent) ? archive.percent : 0;
-      const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: messageCount(items) });
+      const line = uncounted ? fill2(A.importingLineUncounted, { percent: percent(pct) }) : fill2(A.importingLine, { percent: percent(pct), items: itemCount(archive, items) });
       add(item, add(el("div", "archive-progress"), progressBar(pct, line), el("p", "muted", line)));
     } else if (archive.status === "imported") {
       const when = typeof archive.importedAt === "string" ? ago(archive.importedAt) : "";
-      if (!uncounted)
-        add(item, el("p", "muted", when ? fill2(A.importedLine, { items: messageCount(items), when }) : fill2(A.importedLineNoTime, { items: messageCount(items) })));
+      if (!uncounted && items === 0) {
+        const none = archiveNouns(archive).none;
+        if (archiveHasReasons(archive)) {
+          const None = none.charAt(0).toUpperCase() + none.slice(1);
+          add(item, el("p", "muted", when ? fill2(A.nothingImportedWhen, { None, when }) : fill2(A.nothingImported, { None })));
+        } else {
+          add(item, el("p", "muted", when ? fill2(A.emptyImportWhen, { none, when }) : fill2(A.emptyImport, { none })));
+        }
+      } else if (!uncounted) {
+        add(item, el("p", "muted", when ? fill2(A.importedLine, { items: itemCount(archive, items), when }) : fill2(A.importedLineNoTime, { items: itemCount(archive, items) })));
+      }
     } else if (archive.status === "removing") {
       const line = el("p", "muted", A.removingLine);
       line.setAttribute("role", "status");
@@ -35030,6 +35681,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       }, "plain")));
     }
     return block;
+  }
+  function archiveHasReasons(archive) {
+    return archive.gaps.concat(archive.skipped).some((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0);
   }
   function archiveWhy(archive) {
     const A = H.copy.archives;
@@ -39003,17 +39657,61 @@ var init_remote_connections = __esm(() => {
   init_olympus_layout();
 });
 
+// src/core/ingestion-health-state.ts
+var init_ingestion_health_state = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/this-computer.ts
+var init_this_computer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_file_scope_sources();
+});
+
+// src/workers/source-scheduler-state.ts
+var init_source_scheduler_state = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+});
+
+// src/workers/classification/tier-migration-reports.ts
+var init_tier_migration_reports = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/source-forget-registry.ts
+var init_source_forget_registry = __esm(() => {
+  init_operation_error();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_watch();
+  init_ingestion_health_state();
+  init_source_scope_approval();
+  init_mail_source_scope();
+  init_source_account_binding();
+  init_this_computer();
+  init_source_dashboard();
+  init_source_scheduler_state();
+  init_job_names();
+  init_tier_migration_reports();
+});
+
 // src/workers/archive-import/state.ts
 var init_state = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
+  init_source_storage();
   init_atomic_file();
+  init_archive_formats();
   init_file_lease();
 });
 
 // src/workers/archive-import/store.ts
 var ARCHIVE_STORE_PLACEMENT;
 var init_store2 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_archive_formats();
   init_source_corpus_registry();
   init_source_storage();
@@ -39033,11 +39731,904 @@ var init_scope_safe_fs = __esm(() => {
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
+// src/workers/archive-import/byte-source.ts
+import * as zlib from "node:zlib";
+function tableCrc32(data2, value) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0;n < 256; n += 1) {
+      let c = n;
+      for (let k = 0;k < 8; k += 1)
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  let crc = ~value;
+  for (let index = 0;index < data2.length; index += 1) {
+    crc = crcTable[(crc ^ data2[index]) & 255] ^ crc >>> 8;
+  }
+  return ~crc >>> 0;
+}
+function crc32Update(value, data2) {
+  if (data2.length === 0)
+    return value >>> 0;
+  return nativeCrc32 ? nativeCrc32(data2, value) >>> 0 : tableCrc32(data2, value);
+}
+var ARCHIVE_SOURCE_CHUNK_BYTES, nativeCrc32, crcTable;
+var init_byte_source = __esm(() => {
+  ARCHIVE_SOURCE_CHUNK_BYTES = 1024 * 1024;
+  nativeCrc32 = zlib.crc32;
+});
+// node_modules/@streamparser/json/dist/mjs/utils/types/tokenType.js
+var TokenType;
+var init_tokenType = __esm(() => {
+  (function(TokenType2) {
+    TokenType2[TokenType2["LEFT_BRACE"] = 0] = "LEFT_BRACE";
+    TokenType2[TokenType2["RIGHT_BRACE"] = 1] = "RIGHT_BRACE";
+    TokenType2[TokenType2["LEFT_BRACKET"] = 2] = "LEFT_BRACKET";
+    TokenType2[TokenType2["RIGHT_BRACKET"] = 3] = "RIGHT_BRACKET";
+    TokenType2[TokenType2["COLON"] = 4] = "COLON";
+    TokenType2[TokenType2["COMMA"] = 5] = "COMMA";
+    TokenType2[TokenType2["TRUE"] = 6] = "TRUE";
+    TokenType2[TokenType2["FALSE"] = 7] = "FALSE";
+    TokenType2[TokenType2["NULL"] = 8] = "NULL";
+    TokenType2[TokenType2["STRING"] = 9] = "STRING";
+    TokenType2[TokenType2["NUMBER"] = 10] = "NUMBER";
+    TokenType2[TokenType2["SEPARATOR"] = 11] = "SEPARATOR";
+  })(TokenType || (TokenType = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/utils/utf-8.js
+var charset;
+var init_utf_8 = __esm(() => {
+  (function(charset2) {
+    charset2[charset2["BACKSPACE"] = 8] = "BACKSPACE";
+    charset2[charset2["FORM_FEED"] = 12] = "FORM_FEED";
+    charset2[charset2["NEWLINE"] = 10] = "NEWLINE";
+    charset2[charset2["CARRIAGE_RETURN"] = 13] = "CARRIAGE_RETURN";
+    charset2[charset2["TAB"] = 9] = "TAB";
+    charset2[charset2["SPACE"] = 32] = "SPACE";
+    charset2[charset2["EXCLAMATION_MARK"] = 33] = "EXCLAMATION_MARK";
+    charset2[charset2["QUOTATION_MARK"] = 34] = "QUOTATION_MARK";
+    charset2[charset2["NUMBER_SIGN"] = 35] = "NUMBER_SIGN";
+    charset2[charset2["DOLLAR_SIGN"] = 36] = "DOLLAR_SIGN";
+    charset2[charset2["PERCENT_SIGN"] = 37] = "PERCENT_SIGN";
+    charset2[charset2["AMPERSAND"] = 38] = "AMPERSAND";
+    charset2[charset2["APOSTROPHE"] = 39] = "APOSTROPHE";
+    charset2[charset2["LEFT_PARENTHESIS"] = 40] = "LEFT_PARENTHESIS";
+    charset2[charset2["RIGHT_PARENTHESIS"] = 41] = "RIGHT_PARENTHESIS";
+    charset2[charset2["ASTERISK"] = 42] = "ASTERISK";
+    charset2[charset2["PLUS_SIGN"] = 43] = "PLUS_SIGN";
+    charset2[charset2["COMMA"] = 44] = "COMMA";
+    charset2[charset2["HYPHEN_MINUS"] = 45] = "HYPHEN_MINUS";
+    charset2[charset2["FULL_STOP"] = 46] = "FULL_STOP";
+    charset2[charset2["SOLIDUS"] = 47] = "SOLIDUS";
+    charset2[charset2["DIGIT_ZERO"] = 48] = "DIGIT_ZERO";
+    charset2[charset2["DIGIT_ONE"] = 49] = "DIGIT_ONE";
+    charset2[charset2["DIGIT_TWO"] = 50] = "DIGIT_TWO";
+    charset2[charset2["DIGIT_THREE"] = 51] = "DIGIT_THREE";
+    charset2[charset2["DIGIT_FOUR"] = 52] = "DIGIT_FOUR";
+    charset2[charset2["DIGIT_FIVE"] = 53] = "DIGIT_FIVE";
+    charset2[charset2["DIGIT_SIX"] = 54] = "DIGIT_SIX";
+    charset2[charset2["DIGIT_SEVEN"] = 55] = "DIGIT_SEVEN";
+    charset2[charset2["DIGIT_EIGHT"] = 56] = "DIGIT_EIGHT";
+    charset2[charset2["DIGIT_NINE"] = 57] = "DIGIT_NINE";
+    charset2[charset2["COLON"] = 58] = "COLON";
+    charset2[charset2["SEMICOLON"] = 59] = "SEMICOLON";
+    charset2[charset2["LESS_THAN_SIGN"] = 60] = "LESS_THAN_SIGN";
+    charset2[charset2["EQUALS_SIGN"] = 61] = "EQUALS_SIGN";
+    charset2[charset2["GREATER_THAN_SIGN"] = 62] = "GREATER_THAN_SIGN";
+    charset2[charset2["QUESTION_MARK"] = 63] = "QUESTION_MARK";
+    charset2[charset2["COMMERCIAL_AT"] = 64] = "COMMERCIAL_AT";
+    charset2[charset2["LATIN_CAPITAL_LETTER_A"] = 65] = "LATIN_CAPITAL_LETTER_A";
+    charset2[charset2["LATIN_CAPITAL_LETTER_B"] = 66] = "LATIN_CAPITAL_LETTER_B";
+    charset2[charset2["LATIN_CAPITAL_LETTER_C"] = 67] = "LATIN_CAPITAL_LETTER_C";
+    charset2[charset2["LATIN_CAPITAL_LETTER_D"] = 68] = "LATIN_CAPITAL_LETTER_D";
+    charset2[charset2["LATIN_CAPITAL_LETTER_E"] = 69] = "LATIN_CAPITAL_LETTER_E";
+    charset2[charset2["LATIN_CAPITAL_LETTER_F"] = 70] = "LATIN_CAPITAL_LETTER_F";
+    charset2[charset2["LATIN_CAPITAL_LETTER_G"] = 71] = "LATIN_CAPITAL_LETTER_G";
+    charset2[charset2["LATIN_CAPITAL_LETTER_H"] = 72] = "LATIN_CAPITAL_LETTER_H";
+    charset2[charset2["LATIN_CAPITAL_LETTER_I"] = 73] = "LATIN_CAPITAL_LETTER_I";
+    charset2[charset2["LATIN_CAPITAL_LETTER_J"] = 74] = "LATIN_CAPITAL_LETTER_J";
+    charset2[charset2["LATIN_CAPITAL_LETTER_K"] = 75] = "LATIN_CAPITAL_LETTER_K";
+    charset2[charset2["LATIN_CAPITAL_LETTER_L"] = 76] = "LATIN_CAPITAL_LETTER_L";
+    charset2[charset2["LATIN_CAPITAL_LETTER_M"] = 77] = "LATIN_CAPITAL_LETTER_M";
+    charset2[charset2["LATIN_CAPITAL_LETTER_N"] = 78] = "LATIN_CAPITAL_LETTER_N";
+    charset2[charset2["LATIN_CAPITAL_LETTER_O"] = 79] = "LATIN_CAPITAL_LETTER_O";
+    charset2[charset2["LATIN_CAPITAL_LETTER_P"] = 80] = "LATIN_CAPITAL_LETTER_P";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Q"] = 81] = "LATIN_CAPITAL_LETTER_Q";
+    charset2[charset2["LATIN_CAPITAL_LETTER_R"] = 82] = "LATIN_CAPITAL_LETTER_R";
+    charset2[charset2["LATIN_CAPITAL_LETTER_S"] = 83] = "LATIN_CAPITAL_LETTER_S";
+    charset2[charset2["LATIN_CAPITAL_LETTER_T"] = 84] = "LATIN_CAPITAL_LETTER_T";
+    charset2[charset2["LATIN_CAPITAL_LETTER_U"] = 85] = "LATIN_CAPITAL_LETTER_U";
+    charset2[charset2["LATIN_CAPITAL_LETTER_V"] = 86] = "LATIN_CAPITAL_LETTER_V";
+    charset2[charset2["LATIN_CAPITAL_LETTER_W"] = 87] = "LATIN_CAPITAL_LETTER_W";
+    charset2[charset2["LATIN_CAPITAL_LETTER_X"] = 88] = "LATIN_CAPITAL_LETTER_X";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Y"] = 89] = "LATIN_CAPITAL_LETTER_Y";
+    charset2[charset2["LATIN_CAPITAL_LETTER_Z"] = 90] = "LATIN_CAPITAL_LETTER_Z";
+    charset2[charset2["LEFT_SQUARE_BRACKET"] = 91] = "LEFT_SQUARE_BRACKET";
+    charset2[charset2["REVERSE_SOLIDUS"] = 92] = "REVERSE_SOLIDUS";
+    charset2[charset2["RIGHT_SQUARE_BRACKET"] = 93] = "RIGHT_SQUARE_BRACKET";
+    charset2[charset2["CIRCUMFLEX_ACCENT"] = 94] = "CIRCUMFLEX_ACCENT";
+    charset2[charset2["LOW_LINE"] = 95] = "LOW_LINE";
+    charset2[charset2["GRAVE_ACCENT"] = 96] = "GRAVE_ACCENT";
+    charset2[charset2["LATIN_SMALL_LETTER_A"] = 97] = "LATIN_SMALL_LETTER_A";
+    charset2[charset2["LATIN_SMALL_LETTER_B"] = 98] = "LATIN_SMALL_LETTER_B";
+    charset2[charset2["LATIN_SMALL_LETTER_C"] = 99] = "LATIN_SMALL_LETTER_C";
+    charset2[charset2["LATIN_SMALL_LETTER_D"] = 100] = "LATIN_SMALL_LETTER_D";
+    charset2[charset2["LATIN_SMALL_LETTER_E"] = 101] = "LATIN_SMALL_LETTER_E";
+    charset2[charset2["LATIN_SMALL_LETTER_F"] = 102] = "LATIN_SMALL_LETTER_F";
+    charset2[charset2["LATIN_SMALL_LETTER_G"] = 103] = "LATIN_SMALL_LETTER_G";
+    charset2[charset2["LATIN_SMALL_LETTER_H"] = 104] = "LATIN_SMALL_LETTER_H";
+    charset2[charset2["LATIN_SMALL_LETTER_I"] = 105] = "LATIN_SMALL_LETTER_I";
+    charset2[charset2["LATIN_SMALL_LETTER_J"] = 106] = "LATIN_SMALL_LETTER_J";
+    charset2[charset2["LATIN_SMALL_LETTER_K"] = 107] = "LATIN_SMALL_LETTER_K";
+    charset2[charset2["LATIN_SMALL_LETTER_L"] = 108] = "LATIN_SMALL_LETTER_L";
+    charset2[charset2["LATIN_SMALL_LETTER_M"] = 109] = "LATIN_SMALL_LETTER_M";
+    charset2[charset2["LATIN_SMALL_LETTER_N"] = 110] = "LATIN_SMALL_LETTER_N";
+    charset2[charset2["LATIN_SMALL_LETTER_O"] = 111] = "LATIN_SMALL_LETTER_O";
+    charset2[charset2["LATIN_SMALL_LETTER_P"] = 112] = "LATIN_SMALL_LETTER_P";
+    charset2[charset2["LATIN_SMALL_LETTER_Q"] = 113] = "LATIN_SMALL_LETTER_Q";
+    charset2[charset2["LATIN_SMALL_LETTER_R"] = 114] = "LATIN_SMALL_LETTER_R";
+    charset2[charset2["LATIN_SMALL_LETTER_S"] = 115] = "LATIN_SMALL_LETTER_S";
+    charset2[charset2["LATIN_SMALL_LETTER_T"] = 116] = "LATIN_SMALL_LETTER_T";
+    charset2[charset2["LATIN_SMALL_LETTER_U"] = 117] = "LATIN_SMALL_LETTER_U";
+    charset2[charset2["LATIN_SMALL_LETTER_V"] = 118] = "LATIN_SMALL_LETTER_V";
+    charset2[charset2["LATIN_SMALL_LETTER_W"] = 119] = "LATIN_SMALL_LETTER_W";
+    charset2[charset2["LATIN_SMALL_LETTER_X"] = 120] = "LATIN_SMALL_LETTER_X";
+    charset2[charset2["LATIN_SMALL_LETTER_Y"] = 121] = "LATIN_SMALL_LETTER_Y";
+    charset2[charset2["LATIN_SMALL_LETTER_Z"] = 122] = "LATIN_SMALL_LETTER_Z";
+    charset2[charset2["LEFT_CURLY_BRACKET"] = 123] = "LEFT_CURLY_BRACKET";
+    charset2[charset2["VERTICAL_LINE"] = 124] = "VERTICAL_LINE";
+    charset2[charset2["RIGHT_CURLY_BRACKET"] = 125] = "RIGHT_CURLY_BRACKET";
+    charset2[charset2["TILDE"] = 126] = "TILDE";
+  })(charset || (charset = {}));
+});
+
+// node_modules/@streamparser/json/dist/mjs/tokenizer.js
+var TokenizerStates;
+var init_tokenizer = __esm(() => {
+  init_tokenType();
+  init_utf_8();
+  (function(TokenizerStates2) {
+    TokenizerStates2[TokenizerStates2["START"] = 0] = "START";
+    TokenizerStates2[TokenizerStates2["ENDED"] = 1] = "ENDED";
+    TokenizerStates2[TokenizerStates2["ERROR"] = 2] = "ERROR";
+    TokenizerStates2[TokenizerStates2["TRUE1"] = 3] = "TRUE1";
+    TokenizerStates2[TokenizerStates2["TRUE2"] = 4] = "TRUE2";
+    TokenizerStates2[TokenizerStates2["TRUE3"] = 5] = "TRUE3";
+    TokenizerStates2[TokenizerStates2["FALSE1"] = 6] = "FALSE1";
+    TokenizerStates2[TokenizerStates2["FALSE2"] = 7] = "FALSE2";
+    TokenizerStates2[TokenizerStates2["FALSE3"] = 8] = "FALSE3";
+    TokenizerStates2[TokenizerStates2["FALSE4"] = 9] = "FALSE4";
+    TokenizerStates2[TokenizerStates2["NULL1"] = 10] = "NULL1";
+    TokenizerStates2[TokenizerStates2["NULL2"] = 11] = "NULL2";
+    TokenizerStates2[TokenizerStates2["NULL3"] = 12] = "NULL3";
+    TokenizerStates2[TokenizerStates2["STRING_DEFAULT"] = 13] = "STRING_DEFAULT";
+    TokenizerStates2[TokenizerStates2["STRING_AFTER_BACKSLASH"] = 14] = "STRING_AFTER_BACKSLASH";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_1"] = 15] = "STRING_UNICODE_DIGIT_1";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_2"] = 16] = "STRING_UNICODE_DIGIT_2";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_3"] = 17] = "STRING_UNICODE_DIGIT_3";
+    TokenizerStates2[TokenizerStates2["STRING_UNICODE_DIGIT_4"] = 18] = "STRING_UNICODE_DIGIT_4";
+    TokenizerStates2[TokenizerStates2["STRING_INCOMPLETE_CHAR"] = 19] = "STRING_INCOMPLETE_CHAR";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_MINUS"] = 20] = "NUMBER_AFTER_INITIAL_MINUS";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_ZERO"] = 21] = "NUMBER_AFTER_INITIAL_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_INITIAL_NON_ZERO"] = 22] = "NUMBER_AFTER_INITIAL_NON_ZERO";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_FULL_STOP"] = 23] = "NUMBER_AFTER_FULL_STOP";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_DECIMAL"] = 24] = "NUMBER_AFTER_DECIMAL";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E"] = 25] = "NUMBER_AFTER_E";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_SIGN"] = 26] = "NUMBER_AFTER_E_AND_SIGN";
+    TokenizerStates2[TokenizerStates2["NUMBER_AFTER_E_AND_DIGIT"] = 27] = "NUMBER_AFTER_E_AND_DIGIT";
+    TokenizerStates2[TokenizerStates2["SEPARATOR"] = 28] = "SEPARATOR";
+    TokenizerStates2[TokenizerStates2["BOM_OR_START"] = 29] = "BOM_OR_START";
+    TokenizerStates2[TokenizerStates2["BOM"] = 30] = "BOM";
+  })(TokenizerStates || (TokenizerStates = {}));
+});
+
+// src/workers/archive-import/stop-errors.ts
+var init_stop_errors = __esm(() => {
+  init_archive_formats();
+  init_scope_safe_fs();
+});
+
+// src/workers/archive-import/json-stream.ts
+var EMPTY_FRAME, MAX_SAFE_DIGITS;
+var init_json_stream = __esm(() => {
+  init_tokenizer();
+  init_tokenType();
+  init_archive_formats();
+  init_stop_errors();
+  EMPTY_FRAME = Object.freeze({});
+  MAX_SAFE_DIGITS = String(Number.MAX_SAFE_INTEGER);
+});
+
+// src/workers/archive-import/record-probe.ts
+var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
+var init_record_probe = __esm(() => {
+  init_json_stream();
+  RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
+  RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
+});
+
+// node_modules/fflate/esm/browser.js
+var u8, u16, i32, fleb, fdeb, clim, freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0;i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1;i < 30; ++i) {
+    for (var j = b[i];j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+}, _a2, fl, revfl, _b, fd, revfd, rev, x, i, hMap = function(cd, mb, r) {
+  var s = cd.length;
+  var i2 = 0;
+  var l = new u16(mb);
+  for (;i2 < s; ++i2) {
+    if (cd[i2])
+      ++l[cd[i2] - 1];
+  }
+  var le = new u16(mb);
+  for (i2 = 1;i2 < mb; ++i2) {
+    le[i2] = le[i2 - 1] + l[i2 - 1] << 1;
+  }
+  var co;
+  if (r) {
+    co = new u16(1 << mb);
+    var rvb = 15 - mb;
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        var sv = i2 << 4 | cd[i2];
+        var r_1 = mb - cd[i2];
+        var v = le[cd[i2] - 1]++ << r_1;
+        for (var m = v | (1 << r_1) - 1;v <= m; ++v) {
+          co[rev[v] >> rvb] = sv;
+        }
+      }
+    }
+  } else {
+    co = new u16(s);
+    for (i2 = 0;i2 < s; ++i2) {
+      if (cd[i2]) {
+        co[i2] = rev[le[cd[i2] - 1]++] >> 15 - cd[i2];
+      }
+    }
+  }
+  return co;
+}, flt, i, i, i, i, fdt, i, flrm, fdrm, max = function(a) {
+  var m = a[0];
+  for (var i2 = 1;i2 < a.length; ++i2) {
+    if (a[i2] > m)
+      m = a[i2];
+  }
+  return m;
+}, bits = function(d, p, m) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8) >> (p & 7) & m;
+}, bits16 = function(d, p) {
+  var o = p / 8 | 0;
+  return (d[o] | d[o + 1] << 8 | d[o + 2] << 16) >> (p & 7);
+}, shft = function(p) {
+  return (p + 7) / 8 | 0;
+}, slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+}, ec, err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+}, inflt = function(dat, st, buf, dict) {
+  var sl = dat.length, dl = dict ? dict.length : 0;
+  if (!sl || st.f && !st.l)
+    return buf || new u8(0);
+  var noBuf = !buf;
+  var resize = noBuf || st.i != 2;
+  var noSt = st.i;
+  if (noBuf)
+    buf = new u8(sl * 3);
+  var cbuf = function(l2) {
+    var bl = buf.length;
+    if (l2 > bl) {
+      var nbuf = new u8(Math.max(bl * 2, l2));
+      nbuf.set(buf);
+      buf = nbuf;
+    }
+  };
+  var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+  var tbts = sl * 8;
+  do {
+    if (!lm) {
+      final = bits(dat, pos, 1);
+      var type = bits(dat, pos + 1, 3);
+      pos += 3;
+      if (!type) {
+        var s = shft(pos) + 4, l = dat[s - 4] | dat[s - 3] << 8, t = s + l;
+        if (t > sl) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + l);
+        buf.set(dat.subarray(s, t), bt);
+        st.b = bt += l, st.p = pos = t * 8, st.f = final;
+        continue;
+      } else if (type == 1)
+        lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+      else if (type == 2) {
+        var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+        var tl = hLit + bits(dat, pos + 5, 31) + 1;
+        pos += 14;
+        var ldt = new u8(tl);
+        var clt = new u8(19);
+        for (var i2 = 0;i2 < hcLen; ++i2) {
+          clt[clim[i2]] = bits(dat, pos + i2 * 3, 7);
+        }
+        pos += hcLen * 3;
+        var clb = max(clt), clbmsk = (1 << clb) - 1;
+        var clm = hMap(clt, clb, 1);
+        for (var i2 = 0;i2 < tl; ) {
+          var r = clm[bits(dat, pos, clbmsk)];
+          pos += r & 15;
+          var s = r >> 4;
+          if (s < 16) {
+            ldt[i2++] = s;
+          } else {
+            var c = 0, n = 0;
+            if (s == 16)
+              n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i2 - 1];
+            else if (s == 17)
+              n = 3 + bits(dat, pos, 7), pos += 3;
+            else if (s == 18)
+              n = 11 + bits(dat, pos, 127), pos += 7;
+            while (n--)
+              ldt[i2++] = c;
+          }
+        }
+        var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+        lbt = max(lt);
+        dbt = max(dt);
+        lm = hMap(lt, lbt, 1);
+        dm = hMap(dt, dbt, 1);
+      } else
+        err(1);
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+    }
+    if (resize)
+      cbuf(bt + 131072);
+    var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+    var lpos = pos;
+    for (;; lpos = pos) {
+      var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+      pos += c & 15;
+      if (pos > tbts) {
+        if (noSt)
+          err(0);
+        break;
+      }
+      if (!c)
+        err(2);
+      if (sym < 256)
+        buf[bt++] = sym;
+      else if (sym == 256) {
+        lpos = pos, lm = null;
+        break;
+      } else {
+        var add = sym - 254;
+        if (sym > 264) {
+          var i2 = sym - 257, b = fleb[i2];
+          add = bits(dat, pos, (1 << b) - 1) + fl[i2];
+          pos += b;
+        }
+        var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+        if (!d)
+          err(3);
+        pos += d & 15;
+        var dt = fd[dsym];
+        if (dsym > 3) {
+          var b = fdeb[dsym];
+          dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+        }
+        if (pos > tbts) {
+          if (noSt)
+            err(0);
+          break;
+        }
+        if (resize)
+          cbuf(bt + 131072);
+        var end = bt + add;
+        if (bt < dt) {
+          var shift = dl - dt, dend = Math.min(dt, end);
+          if (shift + bt < 0)
+            err(3);
+          for (;bt < dend; ++bt)
+            buf[bt] = dict[shift + bt];
+        }
+        for (;bt < end; ++bt)
+          buf[bt] = buf[bt - dt];
+      }
+    }
+    st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+    if (lm)
+      final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+  } while (!final);
+  return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+}, et, Inflate, td, tds = 0;
+var init_browser = __esm(() => {
+  u8 = Uint8Array;
+  u16 = Uint16Array;
+  i32 = Int32Array;
+  fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0, 0]);
+  fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0]);
+  clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+  _a2 = freb(fleb, 2);
+  fl = _a2.b;
+  revfl = _a2.r;
+  fl[28] = 258, revfl[258] = 28;
+  _b = freb(fdeb, 0);
+  fd = _b.b;
+  revfd = _b.r;
+  rev = new u16(32768);
+  for (i = 0;i < 32768; ++i) {
+    x = (i & 43690) >> 1 | (i & 21845) << 1;
+    x = (x & 52428) >> 2 | (x & 13107) << 2;
+    x = (x & 61680) >> 4 | (x & 3855) << 4;
+    rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+  }
+  flt = new u8(288);
+  for (i = 0;i < 144; ++i)
+    flt[i] = 8;
+  for (i = 144;i < 256; ++i)
+    flt[i] = 9;
+  for (i = 256;i < 280; ++i)
+    flt[i] = 7;
+  for (i = 280;i < 288; ++i)
+    flt[i] = 8;
+  fdt = new u8(32);
+  for (i = 0;i < 32; ++i)
+    fdt[i] = 5;
+  flrm = /* @__PURE__ */ hMap(flt, 9, 1);
+  fdrm = /* @__PURE__ */ hMap(fdt, 5, 1);
+  ec = [
+    "unexpected EOF",
+    "invalid block type",
+    "invalid length/literal",
+    "invalid distance",
+    "stream finished",
+    "no stream handler",
+    ,
+    "no callback",
+    "invalid UTF-8 data",
+    "extra field too long",
+    "date not in range 1980-2099",
+    "filename too long",
+    "stream finishing",
+    "invalid zip data"
+  ];
+  et = /* @__PURE__ */ new u8(0);
+  Inflate = /* @__PURE__ */ function() {
+    function Inflate2(opts, cb) {
+      if (typeof opts == "function")
+        cb = opts, opts = {};
+      this.ondata = cb;
+      var dict = opts && opts.dictionary && opts.dictionary.subarray(-32768);
+      this.s = { i: 0, b: dict ? dict.length : 0 };
+      this.o = new u8(32768);
+      this.p = new u8(0);
+      if (dict)
+        this.o.set(dict);
+    }
+    Inflate2.prototype.e = function(c) {
+      if (!this.ondata)
+        err(5);
+      if (this.d)
+        err(4);
+      if (!this.p.length)
+        this.p = c;
+      else if (c.length) {
+        var n = new u8(this.p.length + c.length);
+        n.set(this.p), n.set(c, this.p.length), this.p = n;
+      }
+    };
+    Inflate2.prototype.c = function(final) {
+      this.s.i = +(this.d = final || false);
+      var bts = this.s.b;
+      var dt = inflt(this.p, this.s, this.o);
+      this.ondata(slc(dt, bts, this.s.b), this.d);
+      this.o = slc(dt, this.s.b - 32768), this.s.b = this.o.length;
+      this.p = slc(this.p, this.s.p / 8 | 0), this.s.p &= 7;
+    };
+    Inflate2.prototype.push = function(chunk, final) {
+      this.e(chunk), this.c(final);
+    };
+    return Inflate2;
+  }();
+  td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder;
+  try {
+    td.decode(et, { stream: true });
+    tds = 1;
+  } catch (e) {}
+});
+
+// src/workers/archive-import/zip-reader.ts
+function readExact(source, offset, length) {
+  if (length < 0 || offset < 0 || offset + length > source.size)
+    throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+  if (length <= ZIP_READ_CHUNK_BYTES) {
+    const bytes = source.readAt(offset, length);
+    if (bytes.length !== length)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    return bytes;
+  }
+  const out = new Uint8Array(length);
+  for (let done = 0;done < length; ) {
+    const part = source.readAt(offset + done, Math.min(ZIP_READ_CHUNK_BYTES, length - done));
+    if (part.length === 0)
+      throw new ZipFormatError("damaged", "The zip ends before its own records do.");
+    out.set(part, done);
+    done += part.length;
+  }
+  return out;
+}
+function memberKey(entry) {
+  return `${entry.localHeaderOffset}:${entry.crc32}:${entry.compressedSize}:${entry.uncompressedSize}:${entry.method}`;
+}
+
+class ZipMemberReader {
+  entry;
+  archive;
+  dataStart;
+  startAt;
+  pos = 0;
+  runningCrc = 0;
+  crcKnown;
+  out = [];
+  lastChunk = new Uint8Array(0);
+  crcBeforeLast = 0;
+  heldLast = 0;
+  closed = false;
+  result;
+  storedNext = 0;
+  inflate;
+  compressedNext = 0;
+  compressedBlock = new Uint8Array(0);
+  compressedOffset = 0;
+  inflateFinished = false;
+  failure;
+  replayed = 0;
+  replayStep;
+  catchUpEnded = false;
+  constructor(archive, entry, dataStart, options) {
+    this.archive = archive;
+    this.entry = entry;
+    this.dataStart = dataStart;
+    const start = options.start ?? 0;
+    if (!Number.isSafeInteger(start) || start < 0 || start > entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "The offset to start a member at is not inside it.");
+    }
+    this.startAt = start;
+    if (options.replayStepBytes !== undefined && (!Number.isSafeInteger(options.replayStepBytes) || options.replayStepBytes < 1)) {
+      throw new RangeError("replayStepBytes must be a positive whole number");
+    }
+    this.replayStep = options.replayStepBytes;
+    this.crcKnown = start === 0;
+    if (entry.isDirectory || entry.uncompressedSize === 0 && (entry.method === 0 || entry.compressedSize === 0)) {
+      this.inflateFinished = true;
+      this.pos = start;
+      this.crcKnown = true;
+      return;
+    }
+    if (entry.method === 0) {
+      this.storedNext = start;
+      this.pos = start;
+      if (start > 0 && options.startCrc !== undefined) {
+        this.runningCrc = options.startCrc >>> 0;
+        this.crcKnown = true;
+      }
+      return;
+    }
+    const kept = options.continuation;
+    if (kept && kept.memberKey === memberKey(entry) && kept.position === start) {
+      this.inflate = this.bind(kept.inflate);
+      this.compressedNext = kept.compressedNext;
+      this.compressedBlock = kept.compressedBlock;
+      this.compressedOffset = 0;
+      this.out = [...kept.out];
+      this.inflateFinished = kept.inflateFinished;
+      this.pos = kept.reached;
+      this.runningCrc = kept.crc;
+      this.crcKnown = kept.crcKnown;
+      return;
+    }
+    this.inflate = this.bind(new Inflate(() => {
+      return;
+    }));
+    this.crcKnown = true;
+  }
+  bind(inflate) {
+    inflate.ondata = (chunk) => {
+      if (chunk.length > 0)
+        this.out.push(chunk);
+    };
+    return inflate;
+  }
+  static open(archive, entry, options = {}) {
+    if (entry.encrypted)
+      throw new ZipMemberError("encrypted", entry.name, "This member is encrypted.");
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new ZipMemberError("unsupported_method", entry.name, `This member uses compression method ${entry.method}.`);
+    }
+    if (entry.method === 0 && entry.compressedSize !== entry.uncompressedSize) {
+      throw new ZipMemberError("damaged", entry.name, "A stored member's sizes disagree.");
+    }
+    const dataStart = entry.isDirectory ? 0 : archive.dataStart(entry);
+    return new ZipMemberReader(archive, entry, dataStart, options);
+  }
+  get position() {
+    return Math.max(this.pos, this.startAt);
+  }
+  get crc32() {
+    return this.crcKnown && this.pos >= this.startAt ? this.runningCrc : undefined;
+  }
+  get catchingUp() {
+    return this.pos < this.startAt && !this.closed && !this.failure && !this.catchUpEnded;
+  }
+  get replayedBytes() {
+    return this.replayed;
+  }
+  get end() {
+    return this.result;
+  }
+  next() {
+    this.assertUsable();
+    if (!this.replay()) {
+      this.heldLast = 0;
+      this.lastChunk = new Uint8Array(0);
+      return this.lastChunk;
+    }
+    for (;; ) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (!this.fillOrFail()) {
+          this.conclude();
+          return;
+        }
+        continue;
+      }
+      this.crcBeforeLast = this.runningCrc;
+      if (this.crcKnown)
+        this.runningCrc = crc32Update(this.runningCrc, chunk);
+      this.lastChunk = chunk;
+      this.heldLast = chunk.length;
+      this.pos += chunk.length;
+      return chunk;
+    }
+  }
+  catchUp() {
+    this.assertUsable();
+    return this.replay();
+  }
+  assertUsable() {
+    if (this.closed)
+      throw new Error("This member reader was suspended or closed.");
+    if (this.failure)
+      throw this.failure;
+  }
+  replay() {
+    const stepFrom = this.replayed;
+    while (this.pos < this.startAt && !this.catchUpEnded) {
+      const chunk = this.out.shift();
+      if (chunk === undefined) {
+        if (this.replayStep !== undefined && this.replayed - stepFrom >= this.replayStep)
+          return false;
+        if (!this.fillOrFail()) {
+          this.catchUpEnded = true;
+          break;
+        }
+        continue;
+      }
+      const skip = this.startAt - this.pos;
+      const head = chunk.length <= skip ? chunk : chunk.subarray(0, skip);
+      this.runningCrc = crc32Update(this.runningCrc, head);
+      this.pos += head.length;
+      this.replayed += head.length;
+      if (head.length < chunk.length)
+        this.out.unshift(chunk.subarray(head.length));
+    }
+    return true;
+  }
+  unread(count) {
+    if (!Number.isInteger(count) || count < 0 || count > this.heldLast)
+      throw new RangeError("unread past the last chunk");
+    if (count === 0)
+      return;
+    this.heldLast -= count;
+    this.pos -= count;
+    if (this.crcKnown)
+      this.runningCrc = crc32Update(this.crcBeforeLast, this.lastChunk.subarray(0, this.heldLast));
+    this.out.unshift(this.lastChunk.subarray(this.heldLast));
+    this.lastChunk = this.lastChunk.subarray(0, this.heldLast);
+    this.result = undefined;
+  }
+  suspend() {
+    if (this.closed)
+      return;
+    this.closed = true;
+    if (this.entry.method !== 8 || !this.inflate || this.inflateFinished && this.out.length === 0)
+      return;
+    const pending = this.out.reduce((sum, chunk) => sum + chunk.length, 0);
+    if (pending > ZIP_CONTINUATION_MAX_PENDING_BYTES)
+      return;
+    const compressedWaiting = this.compressedBlock.length - this.compressedOffset;
+    const state = {
+      position: Math.max(this.pos, this.startAt),
+      reached: this.pos,
+      retainedBytes: ZIP_INFLATER_OVERHEAD_BYTES + pending + compressedWaiting,
+      memberKey: memberKey(this.entry),
+      crc: this.runningCrc,
+      crcKnown: this.crcKnown,
+      inflate: this.inflate,
+      compressedNext: this.compressedNext,
+      compressedBlock: this.compressedBlock.slice(this.compressedOffset),
+      out: [...this.out],
+      inflateFinished: this.inflateFinished
+    };
+    this.inflate = undefined;
+    this.out = [];
+    return state;
+  }
+  close() {
+    this.closed = true;
+    this.inflate = undefined;
+    this.out = [];
+  }
+  fillOrFail() {
+    try {
+      return this.fill();
+    } catch (error) {
+      if (error instanceof ZipMemberError) {
+        this.failure = error;
+        this.out = [];
+        this.inflateFinished = true;
+      }
+      throw error;
+    }
+  }
+  fill() {
+    if (this.entry.method === 0) {
+      if (this.storedNext >= this.entry.uncompressedSize)
+        return false;
+      const length = Math.min(ZIP_READ_CHUNK_BYTES, this.entry.uncompressedSize - this.storedNext);
+      const bytes = this.archive.source.readAt(this.dataStart + this.storedNext, length);
+      if (bytes.length === 0)
+        throw new ZipMemberError("damaged", this.entry.name, "A stored member ends early.");
+      this.storedNext += bytes.length;
+      this.out.push(bytes);
+      return true;
+    }
+    if (this.inflateFinished || !this.inflate)
+      return false;
+    if (this.compressedOffset >= this.compressedBlock.length && this.compressedNext < this.entry.compressedSize) {
+      const length = Math.min(ZIP_COMPRESSED_BLOCK_BYTES, this.entry.compressedSize - this.compressedNext);
+      this.compressedBlock = readBlock(this.archive.source, this.dataStart + this.compressedNext, length, this.entry.name);
+      this.compressedOffset = 0;
+      this.compressedNext += length;
+    }
+    const slice = this.compressedBlock.subarray(this.compressedOffset, this.compressedOffset + ZIP_INFLATE_PUSH_BYTES);
+    this.compressedOffset += slice.length;
+    const final = this.compressedOffset >= this.compressedBlock.length && this.compressedNext >= this.entry.compressedSize;
+    try {
+      this.inflate.push(slice, final);
+    } catch (error) {
+      if (error instanceof ZipMemberError)
+        throw error;
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data is damaged.");
+    }
+    const progress = inflaterProgress(this.inflate);
+    if (progress.ended) {
+      const pushed = this.compressedNext - (this.compressedBlock.length - this.compressedOffset);
+      const consumed = pushed - progress.unconsumed;
+      if (consumed < this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends before the size the zip gives it.");
+      }
+      if (consumed > this.entry.compressedSize) {
+        throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data runs past the size the zip gives it.");
+      }
+      this.inflateFinished = true;
+    } else if (final) {
+      throw new ZipMemberError("damaged", this.entry.name, "This member's compressed data ends without a complete stream.");
+    }
+    return true;
+  }
+  conclude() {
+    if (this.result)
+      return;
+    const sizeOk = this.pos === this.entry.uncompressedSize;
+    this.result = {
+      bytes: this.pos,
+      sizeOk,
+      crcOk: this.crcKnown ? this.runningCrc === this.entry.crc32 : undefined
+    };
+  }
+}
+function inflaterProgress(inflate) {
+  const internal = inflate;
+  const state = internal.s;
+  if (typeof state !== "object" || state === null || !(internal.p instanceof Uint8Array) || state.p !== undefined && typeof state.p !== "number") {
+    throw new Error("The installed inflater does not expose the state this reader reads; the zip reader must be updated with it.");
+  }
+  const ended = Boolean(state.f) && !state.l;
+  const partialByte = typeof state.p === "number" && (state.p & 7) !== 0 ? 1 : 0;
+  return { ended, unconsumed: Math.max(0, internal.p.length - partialByte) };
+}
+function readBlock(source, offset, length, name) {
+  try {
+    return readExact(source, offset, length);
+  } catch (error) {
+    if (error instanceof ZipFormatError)
+      throw new ZipMemberError("damaged", name, error.message);
+    throw error;
+  }
+}
+var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, ZipFormatError, ZipMemberError, strictUtf8, lenientUtf8;
+var init_zip_reader = __esm(() => {
+  init_browser();
+  init_archive_formats();
+  init_stop_errors();
+  init_byte_source();
+  ZIP_READ_CHUNK_BYTES = 1024 * 1024;
+  ZIP_COMPRESSED_BLOCK_BYTES = 256 * 1024;
+  ZIP_INFLATE_PUSH_BYTES = 16 * 1024;
+  ZIP_REPLAY_STEP_BYTES = 16 * 1024 * 1024;
+  ZIP_CONTINUATION_MAX_PENDING_BYTES = 8 * 1024 * 1024;
+  ZIP_INFLATER_OVERHEAD_BYTES = 128 * 1024;
+  ZIP_NEIGHBOR_READ_BYTES = 64 * 1024;
+  MAX_END_SEARCH_BYTES = 22 + 65535 + 20;
+  ZipFormatError = class ZipFormatError extends Error {
+    code;
+    constructor(code, message2) {
+      super(message2);
+      this.name = "ZipFormatError";
+      this.code = code;
+    }
+  };
+  ZipMemberError = class ZipMemberError extends Error {
+    code;
+    memberName;
+    constructor(code, memberName, message2) {
+      super(message2);
+      this.name = "ZipMemberError";
+      this.code = code;
+      this.memberName = memberName;
+    }
+  };
+  strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+  lenientUtf8 = new TextDecoder("utf-8");
+});
+
 // src/workers/archive-import/manifest.ts
 var ARCHIVE_FINGERPRINT_BYTES, ARCHIVE_DIGEST_RANGE_BYTES;
 var init_manifest3 = __esm(() => {
   init_archive_formats();
   init_scope_safe_fs();
+  init_byte_source();
+  init_record_probe();
+  init_zip_reader();
   ARCHIVE_FINGERPRINT_BYTES = 1024 * 1024;
   ARCHIVE_DIGEST_RANGE_BYTES = 8 * 1024 * 1024;
 });
@@ -39047,6 +40638,7 @@ var STATUSES;
 var init_requests = __esm(() => {
   init_atomic_file();
   init_file_lease();
+  init_source_storage();
   init_manifest3();
   init_state();
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
@@ -39054,7 +40646,7 @@ var init_requests = __esm(() => {
 
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_storage();
   init_tiered_store_set();
   init_connector2();
@@ -39062,18 +40654,14 @@ var init_tier_set2 = __esm(() => {
 
 // src/workers/x-bookmarks/tier-set.ts
 var init_tier_set3 = __esm(() => {
-  init_olympus_layout();
+  init_source_placement();
   init_source_storage();
   init_tiered_store_set();
   init_connector3();
 });
 
-// src/workers/whatsapp/connector.ts
-var init_connector4 = () => {};
-
 // src/workers/whatsapp/index.ts
 var init_whatsapp = __esm(() => {
-  init_connector4();
   init_live_connector();
   init_store_sync2();
   init_extraction_source();
@@ -39082,6 +40670,7 @@ var init_whatsapp = __esm(() => {
 // src/data-lifecycle.ts
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
+  init_source_placement();
   init_data_owner_lock();
   init_source_storage();
   init_atomic_file();
@@ -39089,6 +40678,8 @@ var init_data_lifecycle = __esm(() => {
   init_sqlite_migrations();
   init_remote_connections();
   init_waiting_private_questions();
+  init_source_forget_registry();
+  init_source_registry();
   init_source_ingestion_policy();
   init_dropbox_files();
   init_store();
@@ -39198,11 +40789,11 @@ var init_source_ingestion_ledger = __esm(() => {
 
 // src/workers/classification-ledger.ts
 import { mkdir as mkdir4, open as open3, readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname24 } from "node:path";
+import { dirname as dirname25 } from "node:path";
 async function appendClassificationLedgerEntry(path, entry) {
   if (!isClassificationLedgerEntry(entry))
     throw new Error("Refusing to append a malformed classification ledger entry.");
-  await mkdir4(dirname24(path), { recursive: true, mode: 448 });
+  await mkdir4(dirname25(path), { recursive: true, mode: 448 });
   const handle = await open3(path, "a", 384);
   try {
     await handle.chmod(384);
@@ -39457,7 +41048,7 @@ var init_delphi = __esm(() => {
 // src/workers/local-files/mac-permissions.ts
 import { existsSync as existsSync22, mkdirSync as mkdirSync15, opendirSync, readFileSync as readFileSync21 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname26, join as join28 } from "node:path";
+import { dirname as dirname27, join as join28 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -39627,8 +41218,8 @@ class MacPermissions {
       });
       this.inFlight.set(guard.root, pending);
     }
-    const waiting = new Promise((resolve7) => {
-      const timer = setTimeout(() => resolve7("waiting"), this.askTimeoutMs);
+    const waiting = new Promise((resolve8) => {
+      const timer = setTimeout(() => resolve8("waiting"), this.askTimeoutMs);
       timer.unref?.();
       pending.finally(() => clearTimeout(timer)).catch(() => {
         return;
@@ -39650,7 +41241,7 @@ class MacPermissions {
     if (!this.memoryPath)
       return;
     try {
-      mkdirSync15(dirname26(this.memoryPath), { recursive: true, mode: 448 });
+      mkdirSync15(dirname27(this.memoryPath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.memoryPath, `${JSON.stringify(memory, null, 2)}
 `);
     } catch {}
@@ -39921,7 +41512,7 @@ var init_credential_degradation = __esm(() => {
 // src/workers/classification/tier-migration.ts
 var TIER_MIGRATION_REPLAN_STOP_REASONS;
 var init_tier_migration = __esm(() => {
-  init_olympus_layout();
+  init_tier_migration_reports();
   init_embedding_cost_estimates();
   init_operation_error();
   init_tier_move();
@@ -39950,8 +41541,8 @@ init_worker_auth();
 init_worker_transport();
 init_dropbox_files();
 import { createHash as createHash25 } from "node:crypto";
-import { existsSync as existsSync26, lstatSync as lstatSync12, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname28, isAbsolute as isAbsolute11 } from "node:path";
+import { existsSync as existsSync26, lstatSync as lstatSync13, mkdirSync as mkdirSync17, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname29, isAbsolute as isAbsolute11 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_vocabulary();
@@ -39963,7 +41554,7 @@ init_linux_desktop_opener();
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash18, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
 import { closeSync as closeSync8, openSync as openSync8, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
-import { dirname as dirname21, join as join22 } from "node:path";
+import { dirname as dirname22, join as join22 } from "node:path";
 init_worker_transport();
 init_linux_desktop_opener();
 init_remote_request_body();
@@ -40220,7 +41811,7 @@ class LinuxOwnerBridge {
       this.clearTicket(previous);
     const value = secret(), challenge = secret();
     const answer = createHmac("sha256", value).update(challenge).digest("base64url");
-    const path = join22(dirname21(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
+    const path = join22(dirname22(this.options.socketPath), `owner-ticket-${randomBytes3(16).toString("hex")}.html`);
     const url = `${this.origin}/owner-proof#${value}`;
     const html2 = `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ${this.origin}; worker-src 'none'; base-uri 'none'"><title>Olympus</title>${openingView()}<script>
 (async function(){
@@ -40489,12 +42080,12 @@ init_atomic_file();
 init_secret_store();
 init_unpaired_sources();
 init_connected_handles();
-import { closeSync as closeSync10, constants as constants3, existsSync as existsSync19, fstatSync as fstatSync2, openSync as openSync10, readFileSync as readFileSync18, rmSync as rmSync6 } from "node:fs";
+import { closeSync as closeSync10, constants as constants4, existsSync as existsSync19, fstatSync as fstatSync2, openSync as openSync10, readFileSync as readFileSync18, rmSync as rmSync6 } from "node:fs";
 import { homedir as homedir12 } from "node:os";
-import { dirname as dirname22, join as join24 } from "node:path";
+import { dirname as dirname23, join as join24 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function defaultMessagingCaptureGrantPath(source, registryPath = defaultHandleRegistryPath()) {
-  return join24(dirname22(registryPath), `messaging-capture.${source}.json`);
+  return join24(dirname23(registryPath), `messaging-capture.${source}.json`);
 }
 var UNEXPECTED_EXIT_WINDOW_MS = 10 * 60000;
 var STABLE_RUN_MS = 60000;
@@ -40607,8 +42198,8 @@ async function observeChildExit(child, timeoutMs) {
   let timeout;
   const observed = await Promise.race([
     child.exited.then(() => true, () => true),
-    new Promise((resolve6) => {
-      timeout = setTimeout(() => resolve6(false), timeoutMs);
+    new Promise((resolve7) => {
+      timeout = setTimeout(() => resolve7(false), timeoutMs);
     })
   ]);
   if (timeout)
@@ -40620,7 +42211,7 @@ function readGrant(path) {
     return { kind: "missing" };
   let descriptor;
   try {
-    descriptor = openSync10(path, constants3.O_RDONLY | (constants3.O_NOFOLLOW ?? 0));
+    descriptor = openSync10(path, constants4.O_RDONLY | (constants4.O_NOFOLLOW ?? 0));
     const info = fstatSync2(descriptor);
     const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
     if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
@@ -40644,7 +42235,7 @@ function resolveCurrentLaunch(options, source) {
     const executable = telegramPythonExecutable({ ...options.pythonExecutable ? { pythonExecutable: options.pythonExecutable } : {} });
     if (!executable)
       throw new Error("Python 3 is required to start Telegram capture.");
-    const packageRoot = options.packageRoot ?? join24(dirname22(fileURLToPath2(import.meta.url)), "..", "..");
+    const packageRoot = options.packageRoot ?? join24(dirname23(fileURLToPath2(import.meta.url)), "..", "..");
     return { executable, args: [join24(packageRoot, "scripts", "telegram-telethon-reader.py"), "--gateway"] };
   }
   return {
@@ -40710,7 +42301,7 @@ init_provider_client();
 init_http_timeout();
 init_file_extraction_source();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { relative as relative3, resolve as resolve6, sep as sep3 } from "node:path";
+import { relative as relative3, resolve as resolve7, sep as sep4 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
 var DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.";
 var DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:";
@@ -40857,9 +42448,9 @@ class DropboxExtractionSource {
     const rootRealPath = await this.canonicalRoot(root.rootPath);
     if (!rootRealPath)
       return;
-    const candidatePath = resolve6(rootRealPath, relativePath);
+    const candidatePath = resolve7(rootRealPath, relativePath);
     const relativeToRoot = relative3(rootRealPath, candidatePath);
-    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep3}`)) {
+    if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep4}`)) {
       return;
     }
     return candidatePath;
@@ -41300,7 +42891,7 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID6 } from "node:crypto";
 import { homedir as homedir13 } from "node:os";
-import { dirname as dirname23, isAbsolute as isAbsolute10, join as join25 } from "node:path";
+import { dirname as dirname24, isAbsolute as isAbsolute10, join as join25 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -41517,7 +43108,7 @@ function readCatalogCache(path, type) {
 function writeCatalogCache(path, catalog) {
   const tempPath = `${path}.${process.pid}.${randomUUID6()}.tmp`;
   try {
-    mkdirSync14(dirname23(path), { recursive: true, mode: 448 });
+    mkdirSync14(dirname24(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync6(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
@@ -42394,12 +43985,8 @@ var CHAT_TITLE_STOPWORDS = new Set([
   "telegram"
 ]);
 
-// src/core/this-computer.ts
-init_atomic_file();
-init_file_lease();
-init_file_scope_sources();
-
 // src/workers/email-source/index.ts
+init_this_computer();
 init_data_lifecycle();
 
 // src/core/cli-via-worker.ts
@@ -42660,7 +44247,7 @@ init_scope();
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire6 } from "node:module";
 import { existsSync as existsSync21, readFileSync as readFileSync20 } from "node:fs";
-import { dirname as dirname25, join as join27 } from "node:path";
+import { dirname as dirname26, join as join27 } from "node:path";
 
 class WatchHistoryUnavailableError extends Error {
   constructor(detail) {
@@ -42852,7 +44439,7 @@ async function loadParcelWatcher(extraDirs = []) {
     if (!existsSync21(join27(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire6(join27(dirname25(candidate), "package.json"));
+      const requireFrom = createRequire6(join27(dirname26(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
@@ -42896,12 +44483,7 @@ init_x_bookmarks();
 init_live_control2();
 init_whatsapp();
 init_telegram_messages();
-
-// src/workers/source-scheduler-state.ts
-init_olympus_layout();
-init_sqlite_migrations();
-
-// src/workers/source-scheduler.ts
+init_source_scheduler_state();
 init_credential_broker();
 var SOURCE_SCHEDULER_MAX_FUTURE_DEFERRAL_MS = 48 * 60 * 60 * 1000;
 var SOURCE_SCHEDULER_CONTINUE_AFTER_MS = 5000;
@@ -42973,7 +44555,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -43970,8 +45552,8 @@ init_waiting_private_questions();
 var textEncoder = new TextEncoder;
 var base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 var base64Lookup = new Uint8Array(256);
-for (let i = 0;i < base64Chars.length; i++) {
-  base64Lookup[base64Chars.charCodeAt(i)] = i;
+for (let i2 = 0;i2 < base64Chars.length; i2++) {
+  base64Lookup[base64Chars.charCodeAt(i2)] = i2;
 }
 var charsetAliases = new Map([
   ["iso88598i", "iso-8859-8"],
@@ -44118,7 +45700,7 @@ var MAX_HEADERS_SIZE = 2 * 1024 * 1024;
 
 // src/workers/archive-import/mbox/connector.ts
 init_archive_formats();
-init_scope_safe_fs();
+init_stop_errors();
 init_sender_rules();
 
 // src/workers/archive-import/mbox/split.ts
@@ -44289,6 +45871,259 @@ var MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 var SKIPPED_LABELS = new Set(["spam", "trash"]);
 var decodableCharsets = new Map;
 
+// src/workers/archive-import/whatsapp/connector.ts
+init_archive_formats();
+init_byte_source();
+
+// src/workers/archive-import/continuation-cache.ts
+var CONTINUATION_CACHE_MAX_ENTRIES = 4;
+var CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+var CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var archiveContinuations = new ContinuationCache;
+
+// src/workers/archive-import/whatsapp/connector.ts
+init_stop_errors();
+init_zip_reader();
+
+// src/workers/archive-import/whatsapp/grammar.ts
+var INVISIBLE = new RegExp("[\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", "g");
+var NARROW_SPACES = new RegExp("[\\u00a0\\u202f\\u2007\\u2009]", "g");
+var DATE = "(\\d{1,4})([./-])\\s?(\\d{1,2})[./-]\\s?(\\d{1,4})";
+var TIME = "(\\d{1,2})([:.])(\\d{2})(?:[:.](\\d{2}))?(?:\\s?([ap])\\.?\\s?m\\.?)?";
+var BRACKETED = new RegExp(`^\\[\\s?${DATE},?\\s+${TIME}\\s?\\]\\s?(.*)$`, "is");
+var DASHED = new RegExp(`^${DATE},?\\s+${TIME}\\s[-\\u2013]\\s(.*)$`, "is");
+var lenientUtf82 = new TextDecoder("utf-8");
+var prefixDecoder = new TextDecoder("utf-8");
+
+// src/workers/archive-import/whatsapp/messages.ts
+init_byte_source();
+var WHATSAPP_LINE_BYTES_KEPT = 4 * 1024 * 1024;
+var WHATSAPP_MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
+var WHATSAPP_ORDER_SCAN_MAX_BYTES = 16 * 1024 * 1024;
+var utf83 = new TextDecoder("utf-8");
+
+// src/workers/archive-import/whatsapp/place.ts
+init_archive_formats();
+var WHATSAPP_WINDOW_MAX_KEYS = 24;
+class IdentityWindow {
+  sentAt = "";
+  keys = new Map;
+  static restore(state) {
+    const window2 = new IdentityWindow;
+    if (state) {
+      window2.sentAt = state.sentAt;
+      for (const [key2, count] of state.keys)
+        window2.keys.set(key2, count);
+    }
+    return window2;
+  }
+  ordinal(sentAt, key2) {
+    if (sentAt < this.sentAt)
+      return;
+    if (sentAt > this.sentAt) {
+      this.sentAt = sentAt;
+      this.keys.clear();
+    }
+    const seen = this.keys.get(key2);
+    if (seen === undefined) {
+      if (this.keys.size >= WHATSAPP_WINDOW_MAX_KEYS)
+        return;
+      this.keys.set(key2, 1);
+      return 0;
+    }
+    this.keys.set(key2, seen + 1);
+    return seen;
+  }
+  state() {
+    return this.keys.size > 0 ? { sentAt: this.sentAt, keys: [...this.keys.entries()] } : undefined;
+  }
+}
+
+// src/workers/archive-import/whatsapp/connector.ts
+var WHATSAPP_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+
+// src/workers/archive-import/reflect/connector.ts
+init_archive_formats();
+
+// src/workers/archive-import/notes/archive.ts
+init_archive_formats();
+init_byte_source();
+init_json_stream();
+init_record_probe();
+
+// src/workers/archive-import/resume-crc.ts
+init_byte_source();
+init_zip_reader();
+
+// src/workers/archive-import/notes/archive.ts
+init_zip_reader();
+
+// src/workers/archive-import/notes/note.ts
+var NOTE_MAX_TEXT_CHARS = 1e6;
+var NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
+
+// src/workers/archive-import/notes/archive.ts
+var NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+var MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
+var LIST_PEEK_BYTES = 64 * 1024;
+var MEMBER_NOT_CHECKED = Object.freeze({ bytes: 0, sizeOk: false, crcOk: undefined });
+
+// src/workers/archive-import/reflect/markdown.ts
+init_archive_formats();
+var FRONT_MATTER_KEYS = new Set([
+  "created",
+  "created_at",
+  "createdat",
+  "created-at",
+  "date",
+  "id",
+  "modified",
+  "subject",
+  "tag",
+  "tags",
+  "title",
+  "uid",
+  "updated",
+  "updated_at",
+  "updatedat",
+  "updated-at"
+]);
+
+// src/workers/archive-import/reflect/parse.ts
+init_archive_formats();
+var BLOCK_EDITOR_NODE_TYPES = new Set([
+  "blockquote",
+  "bulletlist",
+  "checklist",
+  "checklistitem",
+  "codeblock",
+  "doc",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "heading",
+  "horizontalrule",
+  "li",
+  "lic",
+  "listitem",
+  "ol",
+  "orderedlist",
+  "p",
+  "paragraph",
+  "table",
+  "tablecell",
+  "tableheader",
+  "tablerow",
+  "taskitem",
+  "tasklist",
+  "ul"
+]);
+var INLINE_EDITOR_NODE_TYPES = new Set(["hardbreak", "text"]);
+
+// src/workers/archive-import/roam/connector.ts
+init_archive_formats();
+
+// src/workers/archive-import/telegram/connector.ts
+init_archive_formats();
+init_byte_source();
+init_json_stream();
+
+// src/workers/archive-import/telegram/message.ts
+var READ_OBJECTS = new Set([
+  "contact_information",
+  "location_information",
+  "poll",
+  "todo_list",
+  "invoice_information",
+  "text",
+  "text_entities",
+  "reactions",
+  "inline_bot_buttons"
+]);
+
+// src/workers/archive-import/telegram/connector.ts
+var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+var TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+var MESSAGE_PATHS = [
+  ["chats", "list", "*", "messages"],
+  ["left_chats", "list", "*", "messages"],
+  ["messages"]
+];
+var SECTION_PATHS = [
+  { path: ["personal_information"], name: "personal_information" },
+  { path: ["profile_pictures"], name: "profile_pictures" },
+  { path: ["stories"], name: "stories" },
+  { path: ["profile_music"], name: "profile_music" },
+  { path: ["contacts", "list"], name: "contacts" },
+  { path: ["frequent_contacts", "list"], name: "frequent_contacts" },
+  { path: ["sessions", "list"], name: "sessions" },
+  { path: ["web_sessions", "list"], name: "web_sessions" },
+  { path: ["other_data"], name: "other_data" }
+];
+var ITEM_PATHS = [...MESSAGE_PATHS, ...SECTION_PATHS.map((section) => section.path)];
+var SECTION_ROOTS = new Set(SECTION_PATHS.map((section) => section.path[0]));
+var LISTED_SECTIONS = new Set(SECTION_PATHS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+
 // src/workers/archive-import/runtime.ts
 init_lane();
 
@@ -44386,7 +46221,7 @@ init_source_ingestion_policy();
 init_paths();
 import { createHash as createHash24 } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync23, lstatSync as lstatSync10, readFileSync as readFileSync22, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
+import { existsSync as existsSync23, lstatSync as lstatSync11, readFileSync as readFileSync22, readdirSync as readdirSync3, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir14 } from "node:os";
 var NETWORK_FS_TYPES = new Set([
   "nfs",
@@ -44573,9 +46408,9 @@ function probeIgnoresCaseIn(dir) {
     if (swapped === name)
       continue;
     try {
-      const own3 = lstatSync10(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
+      const own3 = lstatSync11(`${dir === "/" ? "" : dir}/${name}`, { bigint: true });
       try {
-        const other = lstatSync10(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
+        const other = lstatSync11(`${dir === "/" ? "" : dir}/${swapped}`, { bigint: true });
         return other.ino === own3.ino && other.dev === own3.dev;
       } catch (error) {
         if (error.code === "ENOENT")
@@ -44675,7 +46510,7 @@ init_file_extraction_source();
 
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
-import { lstatSync as lstatSync11, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
+import { lstatSync as lstatSync12, readdirSync as readdirSync4, realpathSync as realpathSync7 } from "node:fs";
 import { homedir as homedir16 } from "node:os";
 import { join as join30 } from "node:path";
 
@@ -45080,7 +46915,7 @@ function localFilesListing(options, mode) {
     const real = realPathOfScopePath(volumes, entry.key);
     let stat3;
     try {
-      stat3 = real ? lstatSync11(real) : undefined;
+      stat3 = real ? lstatSync12(real) : undefined;
     } catch {
       stat3 = undefined;
     }
@@ -45119,7 +46954,7 @@ function createLocalFilesFolderScopeBrowser(options = {}) {
           throw new Error("A selected disk is not connected right now.");
         let isFolder = false;
         try {
-          isFolder = lstatSync11(real).isDirectory();
+          isFolder = lstatSync12(real).isDirectory();
         } catch {
           isFolder = false;
         }
@@ -45188,6 +47023,7 @@ init_connected_handles();
 // src/workers/source-scope-runtime.ts
 init_source_scope_approval();
 init_file_scope_sources();
+init_this_computer();
 init_connected_handles();
 init_mail_source_scope();
 
@@ -45309,7 +47145,7 @@ init_sniffer();
 init_sniffer_lane();
 init_tier_ledger();
 import { mkdirSync as mkdirSync16, readFileSync as readFileSync23 } from "node:fs";
-import { dirname as dirname27 } from "node:path";
+import { dirname as dirname28 } from "node:path";
 var DEFAULT_SNIFFER_MAX_CALLS_PER_DAY = 20000;
 var DEFAULT_SNIFFER_PASS_TIME_MS = 5000;
 var MAX_CONSECUTIVE_TRANSPORT_FAILURES = 2;
@@ -45347,7 +47183,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync16(dirname27(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync16(dirname28(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -45565,11 +47401,11 @@ async function runSnifferPass(options) {
     if (!screenQuestion(next.target, next.question))
       continue;
     const group = [next];
-    for (let i = pending.length - 1;i >= 0; i--) {
-      const item = pending[i];
+    for (let i2 = pending.length - 1;i2 >= 0; i2--) {
+      const item = pending[i2];
       if (item.question.pass === pass && item.question.materialHash === next.question.materialHash && item.question.mapRevision === next.question.mapRevision && stillOpen(item.target, item.question) && screenQuestion(item.target, item.question)) {
         group.push(item);
-        pending.splice(i, 1);
+        pending.splice(i2, 1);
       }
     }
     const batch = [group];
@@ -46740,7 +48576,7 @@ async function runSourceEmbeddingDrain(options) {
   const progressHeartbeatMs = nonNegativeIntOption(options.progressHeartbeatMs, 0, "progressHeartbeatMs");
   const maxConsecutiveFailures = positiveIntOrUnboundedOption(options.maxConsecutiveFailures, DEFAULT_MAX_CONSECUTIVE_FAILURES, "maxConsecutiveFailures");
   const stopWhenIdle = options.stopWhenIdle ?? false;
-  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
   const startedAt = Date.now();
   const deadlineMs = startedAt + maxRuntimeSeconds * 1000;
   let runs = 0;
@@ -47328,9 +49164,9 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!readinessPath || !isAbsolute11(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
-  const directory = dirname28(readinessPath);
+  const directory = dirname29(readinessPath);
   mkdirSync17(directory, { recursive: true, mode: 448 });
-  const parent = lstatSync12(directory);
+  const parent = lstatSync13(directory);
   if (!parent.isDirectory() || process.platform !== "win32" && (parent.uid !== process.getuid?.() || (parent.mode & 18) !== 0)) {
     throw new Error("Native embedding readiness requires an owner-controlled report directory.");
   }
@@ -47359,7 +49195,7 @@ if (__require.main == __require.module) {
     }
     const json = JSON.stringify(report, null, 2);
     if (args.reportPath) {
-      mkdirSync17(dirname28(args.reportPath), { recursive: true });
+      mkdirSync17(dirname29(args.reportPath), { recursive: true });
       writeFileSync7(args.reportPath, `${json}
 `);
     }
@@ -47369,7 +49205,7 @@ if (__require.main == __require.module) {
   const options = optionsFromEnv(process.env);
   try {
     if (args.reportPath) {
-      mkdirSync17(dirname28(args.reportPath), { recursive: true });
+      mkdirSync17(dirname29(args.reportPath), { recursive: true });
       options.onProgress = (report2) => {
         writeFileSync7(args.reportPath, `${JSON.stringify(report2, null, 2)}
 `);

@@ -13,7 +13,7 @@
     {
       "name": "import-archive",
       "path": "skills/import-archive/SKILL.md",
-      "description": "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder). Offer it when the user mentions one. archive_import only asks: the user approves every import and every removal on the Olympus dashboard on their computer. Never open, read or copy the export yourself, and never retry to get around the approval; status shows progress without any message text."
+      "description": "Import an old export the user wants searched, such as a mail export (an .mbox file from Google Takeout or Thunderbird, or an Apple Mail .mbox folder) or a WhatsApp chat export (the .txt or .zip from Export Chat). Offer it when the user mentions one. archive_import only asks: the user approves every import and every removal on the Olympus dashboard on their computer. Never open, read or copy the export yourself, and never retry to get around the approval; status shows progress without any message text."
     }
   ]
 }

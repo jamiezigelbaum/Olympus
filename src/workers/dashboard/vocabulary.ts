@@ -17,6 +17,7 @@ import type {
 } from '../source-dashboard.ts';
 import type { DashboardSyncName } from '../source-dashboard.ts';
 import { DASHBOARD_FIRST_SYNC_FRESHNESS_LABEL, DASHBOARD_UNSETTLED_CUSTODY_LABELS } from '../source-dashboard.ts';
+import { ARCHIVE_FORMATS } from '../../core/archive-formats.ts';
 import type { WorkerCredentialDegradation } from '../credential-degradation.ts';
 import { answerReadyEligibleItems, clampPercent } from './answer-ready-coverage.ts';
 import { displayText } from './display-text.ts';
@@ -1978,13 +1979,55 @@ export const DASHBOARD_HOST_GATE_COPY = {
  * the person. Names and folders are the person's own; they appear only
  * beside these words, on the computer.
  */
+/**
+ * The picker's opening sentence, from what each registered format says about
+ * the export it reads, so a new format is offered without editing this file.
+ */
+export function archivePickIntro(formats: readonly { label: string; chooseHint?: string }[] = ARCHIVE_FORMATS): string {
+  return `Choose a file or folder on this computer: ${
+    formats.map((format) => format.chooseHint ?? format.label).join('; or ')
+  }. Olympus reads it where it is and never changes it.`;
+}
+
+const ARCHIVE_PICK_INTRO = archivePickIntro();
+
+export interface DashboardArchiveNouns {
+  readonly one: string;
+  readonly many: string;
+  readonly none: string;
+  readonly plural: string;
+  /**
+   * Said beside the archive's dates when its family's exports are a copy of
+   * a conversation as it was on the day it was exported: later messages are
+   * not added. Empty for a family whose archives are not.
+   */
+  readonly snapshot: string;
+}
+
+/**
+ * What an archive's items are called, by the family of the format that made
+ * them (`family` of the archive's entry). A family with no entry says items.
+ */
+export const DASHBOARD_ARCHIVE_NOUNS: Readonly<Record<'email' | 'chat' | 'note' | 'other', DashboardArchiveNouns>> = {
+  email: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages', snapshot: '' },
+  chat: { one: '1 message', many: '{n} messages', none: 'no messages', plural: 'messages', snapshot: 'Snapshot, not updated' },
+  note: { one: '1 note', many: '{n} notes', none: 'no notes', plural: 'notes', snapshot: '' },
+  other: { one: '1 item', many: '{n} items', none: 'no items', plural: 'items', snapshot: '' },
+};
+
+/** The nouns for an archive's family, or the neutral ones. */
+export function dashboardArchiveNouns(family: unknown): DashboardArchiveNouns {
+  const nouns: Readonly<Record<string, DashboardArchiveNouns>> = DASHBOARD_ARCHIVE_NOUNS;
+  return typeof family === 'string' && Object.prototype.hasOwnProperty.call(nouns, family) ? nouns[family]! : DASHBOARD_ARCHIVE_NOUNS.other;
+}
+
 export const DASHBOARD_ARCHIVE_COPY = {
   importAction: 'Import an archive',
   /** The picker in archive mode: one file or folder, no save step. */
   pick: {
     back: 'Back to Olympus',
     title: 'Import an archive',
-    intro: 'Choose a mail export on this computer: an .mbox file from Google Takeout or Thunderbird, or an .mbox folder from Apple Mail. Olympus reads it where it is and never changes it.',
+    intro: ARCHIVE_PICK_INTRO,
     source: 'This computer',
     makePrivate: 'Import',
     makePrivateFor: 'Import {name}',
@@ -1995,11 +2038,25 @@ export const DASHBOARD_ARCHIVE_COPY = {
   listLabel: 'Imported archives',
   status: { importing: 'Importing', imported: 'Imported', stopped: 'Stopped', removing: 'Removing', notRunning: 'Not running' },
   dates: '{earliest} to {latest}',
-  items: { one: '1 message', many: '{n} messages' },
+  nouns: DASHBOARD_ARCHIVE_NOUNS,
   importingLine: '{percent}% read · {items} so far',
   importingLineUncounted: '{percent}% read',
   importedLine: '{items} · imported {when}',
   importedLineNoTime: '{items}',
+  /**
+   * A finished import that found nothing at all (no items, nothing left out,
+   * nothing it could not read): said as that, never as a count of nothing and
+   * never as an index that cannot be read. {none} is "no notes".
+   */
+  emptyImport: 'Imported: {none} found in this archive.',
+  emptyImportWhen: 'Imported {when}: {none} found in this archive.',
+  /**
+   * A finished import that stored nothing although the archive held things it
+   * left out or could not read: never said as an empty archive, and the
+   * reasons stay under See what was not read. {None} is "No notes".
+   */
+  nothingImported: '{None} imported.',
+  nothingImportedWhen: '{None} imported {when}.',
   removingLine: 'Removing everything Olympus made from this archive. The file itself stays where it is.',
   /** An import or a removal this computer's settings keep from running: no progress bar, nothing moving. */
   notRunningLine: '{percent}% read · {items} so far. It goes on from there once imports can run.',
@@ -2014,7 +2071,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
   setUpPrivateModel: 'Set up the private model',
   /** An archive whose index cannot be opened now: never shown as empty. */
   countsUnavailable: {
-    why: "Olympus can't count the messages in this archive right now: its index could not be opened.",
+    why: "Olympus can't count what this archive holds right now: its index could not be opened.",
     fix: 'Open this page again in a minute. If it still says this, restart Olympus, or ask for help at olympusplugin.ai/support.',
   },
   /**
@@ -2051,10 +2108,37 @@ export const DASHBOARD_ARCHIVE_COPY = {
   gaps: {
     message_too_large: { one: '1 message too large to read', many: '{n} messages too large to read' },
     message_unreadable: { one: '1 message could not be read', many: '{n} messages could not be read' },
+    message_content_unsupported: { one: '1 message with a kind of content Olympus cannot read yet', many: '{n} messages with a kind of content Olympus cannot read yet' },
     charset_not_decoded: { one: '1 message in a character set Olympus could not read', many: '{n} messages in a character set Olympus could not read' },
     attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
+    system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
+    message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
+    status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
+    // Notes exports (Reflect, Roam): archive-import/notes/note.ts NOTE_FINDINGS.
+    note_empty: { one: '1 note with nothing written in it left out', many: '{n} notes with nothing written in them left out' },
+    note_unreadable: { one: '1 note could not be read', many: '{n} notes could not be read' },
+    note_too_large: { one: '1 note too large to read', many: '{n} notes too large to read' },
+    note_content_unsupported: { one: '1 note with a kind of content Olympus cannot read yet', many: '{n} notes with a kind of content Olympus cannot read yet' },
+    note_date_assumed: { one: '1 note has no date in the archive: Olympus used the day the file was saved', many: '{n} notes have no date in the archive: Olympus used the day the file was saved' },
+    service_message: { one: '1 service message (a join, a call or a pin) left out', many: '{n} service messages (joins, calls or pins) left out' },
+    message_without_text: { one: '1 message with nothing to read (no text, picture or file) left out', many: '{n} messages with nothing to read (no text, picture or file) left out' },
+    // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
+    media_not_imported: { one: '1 picture, recording or other file the archive refers to was not imported', many: '{n} pictures, recordings or other files the archive refers to were not imported' },
+    item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },
+    // What was taken as given, one sentence for each thing and, where it is known, the value taken.
+    time_zone_assumed: { one: "The times have no time zone, so Olympus read them in this computer's time zone", many: "The times in {n} files have no time zone, so Olympus read them in this computer's time zone" },
+    date_order_assumed: { one: 'The dates do not say which part is the day, so Olympus read them day first', many: 'The dates in {n} files do not say which part is the day, so Olympus read them day first' },
+    item_start_assumed: { one: '1 line that looks like the start of a new message was taken as one, though it is dated before the message above it or written in another style, so it may belong to that message', many: '{n} lines that look like the start of a new message were taken as new messages, though each is dated before the message above it or written in another style, so they may belong to those messages' },
+    zip_overlap_unchecked: { one: '1 zip is too large to check whether its files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)', many: '{n} zips are too large to check whether their files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)' },
+    // Only for an archive recorded before the kinds above: it kept the one kind it was written with.
+    assumption: { one: '1 thing Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)', many: '{n} things Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)' },
+    section_not_imported: { one: '1 part of the archive is not imported', many: '{n} parts of the archive are not imported' },
+    file_damaged: { one: '1 file in the archive looks damaged, so what was read from it may be wrong', many: '{n} files in the archive look damaged, so what was read from them may be wrong' },
+    item_repeated: { one: '1 message was in more than one export file and was imported once', many: '{n} messages were in more than one export file and were imported once' },
+    files_not_looked_at: { one: '1 file in what you chose was not looked at, so it was not imported if it is an export', many: '{n} files in what you chose were not looked at, so any of them that are exports were not imported' },
+    files_unconfirmed: { one: '1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)', many: '{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },
   },
   seeWhy: 'See what was not read',
@@ -2107,12 +2191,12 @@ export const DASHBOARD_ARCHIVE_COPY = {
     request: 'An agent asked to import {name}',
     removal: 'An agent asked to remove {name}',
     failed: 'An import did not start: {name}',
-    counts: "Olympus can't count the messages in {name}",
+    counts: "Olympus can't count what is in {name}",
     scheduler: {
       disabled: "Imports can't run: background syncing is turned off",
       not_selected: "Imports can't run: background syncing leaves out archives",
     },
-    held: { one: '1 imported message waits for the private model', many: '{n} imported messages wait for the private model' },
+    held: { one: '1 imported item waits for the private model', many: '{n} imported items wait for the private model' },
     unreadable: "Olympus can't read its list of imported archives",
     seeWhy: 'See why',
     review: 'Review',

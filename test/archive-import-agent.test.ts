@@ -599,12 +599,64 @@ describe('status carries no content and tells the truth', () => {
     // Not zero: unknown. And no private-model note about messages nobody could count.
     for (const key of ['messages', 'judged', 'waiting_for_private_model']) expect(archive).not.toHaveProperty(key);
     expect(archive!.summary).toContain('40% read');
-    expect(archive!.summary).toContain("can't count the messages");
+    expect(archive!.summary).toContain("can't count what this archive holds");
     expect(status).not.toHaveProperty('private_model_note');
     expect(status.not_running).toEqual({
       setting: 'disabled',
       message: expect.stringContaining("Background syncing is turned off in Olympus's settings"),
     });
+  });
+
+  test('an archive says what its items are by its family: messages for mail, notes for notes, items when unknown; an empty import is said as empty', async () => {
+    const f = fixture();
+    const base = {
+      id: '0b9e4c52-7a1d-4d3e-9f0a-3c1b2a4d5e6f', name: 'Export', format: 'Some export', where: '~/Exports', status: 'imported' as const,
+      items: 12, judged: 12, held: 0, startedAt: '2026-10-23T10:00:00.000Z', importedAt: '2026-10-23T11:00:00.000Z', gaps: [], skipped: [],
+    };
+    const entries = [
+      { ...base, id: 'a-mail', family: 'email' },
+      { ...base, id: 'b-notes', family: 'note' },
+      { ...base, id: 'c-chat', family: 'chat', items: 1 },
+      { ...base, id: 'd-unknown' },
+      { ...base, id: 'e-empty-notes', family: 'note', items: 0, judged: 0, held: 0 },
+      // Found but all left out or not read: nothing imported is not an empty archive.
+      { ...base, id: 'f-nothing-mail', family: 'email', items: 0, judged: 0, held: 0, skipped: [{ kind: 'spam_or_trash', count: 3 }], gaps: [{ kind: 'message_too_large', count: 1 }] },
+      { ...base, id: 'g-nothing-notes', family: 'note', items: 0, judged: 0, held: 0, gaps: [{ kind: 'file_damaged', count: 2, file: 'notes.json' }] },
+      // Reasons of a count of nothing do not count as reasons.
+      { ...base, id: 'h-zero-reasons', family: 'chat', items: 0, judged: 0, held: 0, gaps: [{ kind: 'message_unreadable', count: 0 }] },
+    ];
+    const agent = createArchiveImportAgent({
+      state: f.runtime.state,
+      requests: new ArchiveImportRequestStore({ path: f.requestsPath }),
+      view: () => ({ sourceId: 'archive.imports', archives: entries, requests: [], privateModel: 'ready' }),
+    });
+    const status = agent.status();
+    if (!status.ok) throw new Error('expected a list');
+    // None of these is an index that cannot be read (checked first: a matcher can stand in for the value it matched).
+    for (const archive of status.archives) expect(archive.summary).not.toContain("can't count");
+    const byId = new Map(status.archives.map((archive) => [archive.archive_id, archive]));
+    // (before the matchers below, which can stand in for the values they matched.) A chat export is a snapshot, and an agent is told so; a mail or notes archive is not.
+    expect(byId.get('c-chat')!.summary).toContain('Snapshot, not updated.');
+    expect(byId.get('a-mail')!.summary).not.toContain('Snapshot');
+    expect(byId.get('b-notes')!.summary).not.toContain('Snapshot');
+    expect(byId.get('a-mail')).toMatchObject({ family: 'email', items: 12, messages: 12, summary: expect.stringContaining('12 messages') });
+    expect(byId.get('b-notes')).toMatchObject({ family: 'note', items: 12, summary: expect.stringContaining('12 notes') });
+    expect(byId.get('b-notes')).not.toHaveProperty('messages');
+    expect(byId.get('c-chat')).toMatchObject({ family: 'chat', items: 1, messages: 1, summary: expect.stringContaining('1 message') });
+    expect(byId.get('d-unknown')).toMatchObject({ family: 'other', items: 12, summary: expect.stringContaining('12 items') });
+    expect(byId.get('d-unknown')).not.toHaveProperty('messages');
+    // A finished import that found nothing reads as that, not as a count of nothing or an index that cannot be read.
+    const empty = byId.get('e-empty-notes')!;
+    expect(empty.summary).toBe('Imported: no notes found in this archive.');
+    expect(empty).not.toHaveProperty('counts_unavailable');
+    // Nothing imported although messages were found: said so, with the reasons, never as an empty archive.
+    const nothing = byId.get('f-nothing-mail')!;
+    expect(nothing.summary).toBe('No messages imported. 1 message too large to read; 3 messages in Spam or Trash left out.');
+    expect(nothing.summary).not.toContain('found in this archive');
+    expect(nothing.left_out.map((line) => line.line)).toEqual(['3 messages in Spam or Trash left out']);
+    expect(nothing.not_read.map((line) => line.line)).toEqual(['1 message too large to read']);
+    expect(byId.get('g-nothing-notes')!.summary).toBe('No notes imported. notes.json: 2 files in the archive look damaged, so what was read from them may be wrong.');
+    expect(byId.get('h-zero-reasons')!.summary).toBe('Imported: no messages found in this archive.');
   });
 
   test('one archive can be asked for; an id that is not an imported archive is unknown', async () => {

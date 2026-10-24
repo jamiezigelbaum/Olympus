@@ -108,8 +108,9 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
       if (problem) return { ok: false, detail: problem };
     }
     await ctx.call('POST', '/dashboard/sync-now', { source: 'local.files' });
-    card = await until(async () => { const now = await ctx.cardOf('local_files'); // `synced`, not `syncing`: while the read is under way the row offers fewer actions, and the page would change under the first presses.
-      return connected(now) && now?.connection?.state === 'synced' && items(now) > 0 && (!strict || (now?.schedule?.missing_folders?.length ?? 0) === 0) ? now : undefined; }, strict ? 300_000 : 120_000, 3_000);
+    card = await until(async () => { const now = await ctx.cardOf('local_files');
+      // Strict: `synced`, not `syncing` (while the read is under way the row offers fewer actions, and the page would change under the first presses), and no folder listed as missing. Not strict: the folder has been read, which is all a state that moves it away needs.
+      return connected(now) && items(now) > 0 && (!strict || (now?.connection?.state === 'synced' && (now?.schedule?.missing_folders?.length ?? 0) === 0)) ? now : undefined; }, strict ? 300_000 : 120_000, 3_000);
     // The engine is busy embedding what it just read, and another source's action (a delete) waits behind that: the state is reached once it is quiet (best effort, a source that never embeds is not held up).
     if (card) card = (await until(async () => { const now = await ctx.cardOf('local_files'); return Number(now?.coverage?.embedded_items ?? 0) >= items(now) ? now : undefined; }, 240_000, 5_000)) ?? card;
     return card ? { ok: true, detail: `Files on this computer: ${summary(card)}${(card?.schedule?.missing_folders?.length ?? 0) > 0 ? ` (card still lists ${card.schedule.missing_folders.length} missing folder(s) although the folder is back)` : ''}` } : { ok: false, detail: `Files on this computer: the folder was not indexed (${summary(await ctx.cardOf('local_files'))}; schedule ${JSON.stringify((await ctx.cardOf('local_files'))?.schedule ?? null).slice(0, 600)})` };
@@ -140,7 +141,7 @@ export function localFilesDriver(outer: SeedContext): SourceDriver {
       populated: () => populated(),
       // The chosen folder is gone: the source cannot read it, and the row has to say so and offer a way to fix it.
       failed: async () => {
-        // Not strict: when the crawl reaches this state again the folder was already gone once, and the card goes on listing it as missing until the engine's next recovery check (ten minutes on), although it is back and indexed. It is about to be moved away again either way.
+        // Not strict: when the crawl reaches this state again the folder was already gone once. The card goes on listing it as missing until the engine's next recovery check (ten minutes on), and the source can still be reading it again, although it is back and indexed. It is about to be moved away again either way.
         const first = await populated(false);
         if (!first.ok) return first;
         renameSync(folder, away);

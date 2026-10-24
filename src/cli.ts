@@ -4,7 +4,7 @@ import { readSecretFromTerminal } from './core/interactive-secret.ts';
 import { PastedCallbackError, finishPastedOAuthCallback } from './core/oauth-callback-paste.ts';
 import type { WorkerLaunch } from './core/model-key-reload.ts';
 import { randomBytes } from 'node:crypto';
-import { readFileSync, openSync, closeSync, writeSync } from 'node:fs';
+import { existsSync, readFileSync, openSync, closeSync, writeSync } from 'node:fs';
 import { olympusPackageRoot } from './core/package-root.ts';
 import { pairMessagingSource, type MessagingCaptureScopeApproval } from './core/messaging-pairing.ts';
 import { WHATSAPP_UNOFFICIAL_CLIENT_NOTICE } from './core/whatsapp-notice.ts';
@@ -107,6 +107,7 @@ import {
 import {
   LocalXBookmarksReconcileStateStore,
   defaultXBookmarksReconcileStateDbPath,
+  xBookmarksRecoveryStatusWithoutState,
 } from './workers/x-bookmarks/reconcile-state.ts';
 import {
   LocalSourceSchedulerStateStore,
@@ -1596,9 +1597,14 @@ export function parseXReconcileRecoveryArgs(args: string[]): XReconcileRecoveryC
 }
 
 export function runXReconcileRecovery(options: XReconcileRecoveryCliOptions): unknown {
-  const store = new LocalXBookmarksReconcileStateStore(
-    options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath(),
-  );
+  const stateDbPath = options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath();
+  // Inspecting never creates the state: opening a missing one would make an
+  // empty database in a place the account's placement was never recorded for.
+  if (stateDbPath !== ':memory:' && !existsSync(stateDbPath)) {
+    if (!options.execute) return xBookmarksRecoveryStatusWithoutState();
+    throw new Error('X reconciliation has no staged run to recover.');
+  }
+  const store = new LocalXBookmarksReconcileStateStore(stateDbPath);
   try {
     if (!options.execute) return store.stagedRecoveryStatus(options.account);
     return store.recoverStagedRun({
@@ -2675,6 +2681,7 @@ async function runDataCommand(args: string[]): Promise<unknown> {
           deleteOlympusDataWithCustody({
             sourceId,
             dryRun: options.dryRun,
+            handleRegistryPath: registryPath,
             connectedRegistry: readConnectedHandleRegistry(registryPath),
             thisComputerSources: readThisComputerHandles(registryPath).map((handle) => handle.handle.replace(/\.this_computer$/, '')),
             // A paired-session source is "disconnected" only after a clean Unpair.

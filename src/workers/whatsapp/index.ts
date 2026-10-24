@@ -1,11 +1,4 @@
 export {
-  createWhatsAppSourceConnector,
-  parseWhatsAppChatExport,
-  whatsAppChatNameFromExportFilename,
-  type WhatsAppExportMessage,
-  type WhatsAppSourceConnectorOptions,
-} from './connector.ts';
-export {
   WHATSAPP_LIVE_CONNECTOR_ID,
   createWhatsAppLiveSourceConnector,
   readWhatsAppLiveSpoolStatus,

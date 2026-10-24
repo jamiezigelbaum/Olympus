@@ -12,12 +12,14 @@
  * `removing` from the moment a removal starts until every derived row is gone,
  * so a removal interrupted by a restart carries on from where it was.
  */
-import { olympusDataRoot } from '../../core/olympus-layout.ts';
+import type { LayoutEnv } from '../../core/olympus-layout.ts';
+import { resolvedRawPath } from '../../core/source-placement.ts';
+import { recordAccountPlacement } from '../../core/source-storage.ts';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writePrivateFileAtomicSync } from '../../core/atomic-file.ts';
-import type { ArchiveImportFinding } from '../../core/archive-formats.ts';
+import { ARCHIVE_COMMON_FINDINGS, type ArchiveImportFinding } from '../../core/archive-formats.ts';
 import { withFileLeaseSync } from '../../core/file-lease.ts';
 import type { ArchiveManifestFile } from './manifest.ts';
 
@@ -58,6 +60,21 @@ export interface ArchiveImportFindings {
    * The last position counted: a finding at or before it was counted already.
    */
   through?: { file_index: number; offset: number };
+  /**
+   * The position of the last item whose repeat or not was counted, for
+   * connectors that tell where each item is: an item at or before it was
+   * judged on an earlier pass, whatever pages the replay cuts.
+   */
+  listed_through?: { file_index: number; offset: number };
+}
+
+/**
+ * Items of a page whose positions the connector told: where the repeats are,
+ * and where the page's last item is.
+ */
+export interface ArchiveRepeatedItems {
+  repeatedAt: ReadonlyArray<{ fileIndex: number; offset: number }>;
+  through?: { fileIndex: number; offset: number };
 }
 
 export interface ArchiveImportRecord {
@@ -103,12 +120,8 @@ interface PersistedArchiveImportState {
   archives: ArchiveImportRecord[];
 }
 
-function dataDir(env: Record<string, string | undefined>): string {
-  return olympusDataRoot(env);
-}
-
 export function defaultArchiveImportStatePath(env: Record<string, string | undefined> = process.env): string {
-  return env[ARCHIVE_IMPORTS_STATE_PATH_ENV]?.trim() || join(dataDir(env), 'archive-imports.json');
+  return resolvedRawPath(ARCHIVE_IMPORTS_SOURCE_ID, 'archive-imports.json', env);
 }
 
 export function archiveConnectorId(archiveId: string): string {
@@ -194,15 +207,23 @@ export interface NewArchiveImportRecord {
   chosen_rel_path: string;
   files: ArchiveManifestFile[];
   manifest_sha256: string;
+  /**
+   * What was left out before any file was read, by kind (files of a chosen
+   * folder that were not taken or not looked at). Counted once, here.
+   */
+  skipped?: Record<string, number>;
 }
 
 export class ArchiveImportStateStore {
   readonly path: string;
   private readonly now: () => Date;
+  // The environment the path was resolved in; it decides where the account's placement is recorded.
+  readonly env: LayoutEnv;
 
-  constructor(options: { path: string; now?: () => Date }) {
+  constructor(options: { path: string; now?: () => Date; env?: LayoutEnv }) {
     this.path = options.path;
     this.now = options.now ?? (() => new Date());
+    this.env = options.env ?? process.env;
   }
 
   list(): ArchiveImportRecord[] {
@@ -215,13 +236,14 @@ export class ArchiveImportStateStore {
 
   create(input: NewArchiveImportRecord): ArchiveImportRecord {
     const at = this.now().toISOString();
+    const { skipped, ...rest } = input;
     const record: ArchiveImportRecord = {
       archive_id: randomUUID(),
-      ...input,
+      ...rest,
       status: 'importing',
       created_at: at,
       updated_at: at,
-      findings: emptyArchiveFindings(),
+      findings: { ...emptyArchiveFindings(), skipped: { ...(skipped ?? {}) } },
     };
     this.mutate((state) => {
       state.archives.push(record);
@@ -261,39 +283,75 @@ export class ArchiveImportStateStore {
     archiveId: string,
     findings: readonly ArchiveImportFinding[],
     position?: { fileIndex: number; offset: number },
+    repeated = 0,
+    items?: ArchiveRepeatedItems,
   ): void {
-    if (findings.length === 0 && !position) return;
+    if (findings.length === 0 && !position && !items) return;
     this.update(archiveId, (record) => {
       // How far the import read, for its progress: only forward, and only while it imports.
       const read = record.read_position;
       const movesOn = position !== undefined && record.status === 'importing'
         && (!read || position.fileIndex > read.file_index
           || (position.fileIndex === read.file_index && position.offset > read.offset));
-      if (findings.length === 0 && !movesOn) return false;
+      const listed = record.findings.listed_through;
+      const after = (at: { fileIndex: number; offset: number }): boolean => !listed || at.fileIndex > listed.file_index
+        || (at.fileIndex === listed.file_index && at.offset > listed.offset);
+      const freshRepeats = record.status === 'importing' && items ? items.repeatedAt.filter(after).length : 0;
+      const itemsMoveOn = record.status === 'importing' && items?.through !== undefined && after(items.through);
+      if (findings.length === 0 && !movesOn && freshRepeats === 0 && !itemsMoveOn) return false;
       if (movesOn) record.read_position = { file_index: position!.fileIndex, offset: position!.offset };
       const tally = record.findings;
+      // Items whose positions are known: each repeat is counted once, when the import reads past
+      // the last item it judged, however the pages of a replay are cut.
+      if (freshRepeats > 0) {
+        tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] = (tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] ?? 0) + freshRepeats;
+      }
+      if (itemsMoveOn) tally.listed_through = { file_index: items!.through!.fileIndex, offset: items!.through!.offset };
+      // Items the stores already held from earlier in the archive. Counted only when the import
+      // reads past where it had read: a page listed again after a restart finds its own items
+      // stored, and they are not repeats.
+      if (movesOn && repeated > 0) {
+        tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] = (tally.skipped[ARCHIVE_COMMON_FINDINGS.itemRepeated] ?? 0) + repeated;
+      }
       // Positions counted by an earlier call. One call carries every finding
       // of the messages it covers, so several findings at one position count.
       const through = tally.through;
       const before = (fileIndex: number, offset: number): boolean => through !== undefined
         && (fileIndex < through.file_index || (fileIndex === through.file_index && offset <= through.offset));
       let last = through;
+      const reach = (fileIndex: number, offset: number): void => {
+        if (!last || fileIndex > last.file_index || (fileIndex === last.file_index && offset > last.offset)) {
+          last = { file_index: fileIndex, offset };
+        }
+      };
       for (const finding of findings) {
-        if (before(finding.fileIndex, finding.offset)) continue;
+        // A tally that tells where each of its occurrences is counts the ones past `through`, however it was cut.
+        let counted = Math.max(1, finding.count ?? 1);
+        let firstCounted = finding.offset;
+        let lastCounted = finding.offset;
+        if (finding.at) {
+          counted = 0;
+          for (const offset of finding.at) {
+            if (before(finding.fileIndex, offset)) continue;
+            if (counted === 0 || offset < firstCounted) firstCounted = offset;
+            if (counted === 0 || offset > lastCounted) lastCounted = offset;
+            counted += 1;
+          }
+        } else if (before(finding.fileIndex, finding.offset)) {
+          continue;
+        }
+        if (counted === 0) continue;
         const bucket = finding.class === 'gap' ? tally.gaps : tally.skipped;
-        bucket[finding.kind] = (bucket[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+        bucket[finding.kind] = (bucket[finding.kind] ?? 0) + counted;
         if (finding.class === 'gap') {
           const byFile = (tally.gaps_by_file ??= {});
           const inFile = (byFile[String(finding.fileIndex)] ??= {});
-          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + Math.max(1, finding.count ?? 1);
+          inFile[finding.kind] = (inFile[finding.kind] ?? 0) + counted;
         }
         if (finding.class === 'gap' && tally.samples.length < ARCHIVE_FINDING_SAMPLES_MAX) {
-          tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: finding.offset });
+          tally.samples.push({ kind: finding.kind, file_index: finding.fileIndex, offset: firstCounted });
         }
-        if (!last || finding.fileIndex > last.file_index
-          || (finding.fileIndex === last.file_index && finding.offset > last.offset)) {
-          last = { file_index: finding.fileIndex, offset: finding.offset };
-        }
+        reach(finding.fileIndex, lastCounted);
       }
       if (last) tally.through = last;
     });
@@ -314,6 +372,8 @@ export class ArchiveImportStateStore {
   }
 
   private mutate(change: (state: PersistedArchiveImportState) => boolean | void): void {
+    // This can be the account's first file, with no store opened yet.
+    recordAccountPlacement({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID }, this.path, this.env);
     mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
     withFileLeaseSync(this.path, (lease) => {
       const state = readState(this.path);
