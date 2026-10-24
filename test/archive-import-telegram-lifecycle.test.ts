@@ -305,7 +305,7 @@ describe('a Telegram export imported end to end', () => {
     expect(itemsByArchive(f.env).get(archiveId)?.size).toBe(ACCOUNT_ITEMS);
   });
 
-  test('a time without a zone is counted as one assumption for the whole archive, across passes', async () => {
+  test('a time without a zone is counted as the time zone assumed, once for the whole archive, across passes', async () => {
     const f = fixture();
     const old = telegramJson(telegramFullExport({
       withoutPersonalSections: true,
@@ -315,7 +315,7 @@ describe('a Telegram export imported end to end', () => {
     await importAll(f.runtime, archiveId, { pageSize: 1, maxItems: 1 });
     const record = f.runtime.state.get(archiveId)!;
     expect(record.status).toBe('imported');
-    expect(record.findings.gaps).toEqual({ assumption: 1 });
+    expect(record.findings.gaps).toEqual({ time_zone_assumed: 1 });
     expect(record.date_range?.earliest).toBe(new Date(2015, 0, 5, 10, 0, 0).toISOString());
   });
 

@@ -984,7 +984,20 @@ export const ARCHIVE_COMMON_FINDINGS = {
   mediaNotImported: 'media_not_imported',
   /** An item longer than the import keeps: the start of it is kept. */
   itemTruncated: 'item_truncated',
-  /** Something the import had to take as given because the archive does not say. */
+  // What the import took as given because the archive does not say, one kind for each thing taken, so the dashboard
+  // says exactly what: no kind stands for "something was assumed".
+  /** Times in the archive carry no time zone: they were read in this computer's zone. */
+  timeZoneAssumed: 'time_zone_assumed',
+  /** Dates in a file do not say which part is the day (they read the same either way): they were read day first. */
+  dateOrderAssumed: 'date_order_assumed',
+  /** A line shaped like the start of a new item was taken as one, though it may belong to the item above it. */
+  itemStartAssumed: 'item_start_assumed',
+  /** A zip too large to check its members against each other: they were taken not to share bytes. */
+  zipOverlapUnchecked: 'zip_overlap_unchecked',
+  /**
+   * The fallback for an archive recorded before the specific kinds above: a record keeps what it was written
+   * with, so the dashboard still reads it. Nothing reports this kind now.
+   */
   assumption: 'assumption',
   /** A whole part of the archive the import does not read. */
   sectionNotImported: 'section_not_imported',

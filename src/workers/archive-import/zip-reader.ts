@@ -1170,10 +1170,22 @@ export function zipFindingOffset(memberIndex: number, offsetInMember: number): n
  * The finding a format reports for a zip it read whose members could not all
  * be checked against each other for overlap, so that the import took it as
  * given that no two members share bytes (`ArchiveImportFinding`, kind
- * `assumption`, the dashboard's words say what it means); undefined when they
- * were all checked.
+ * `zip_overlap_unchecked`, the dashboard's words say what it means); undefined
+ * when they were all checked.
  */
 export function zipOverlapAssumption(archive: ZipArchive, fileIndex: number): ArchiveImportFinding | undefined {
   if (!archive.overlapsUnchecked()) return undefined;
-  return { kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap', fileIndex, offset: zipFindingOffset(0, 0), count: 1 };
+  return { kind: ARCHIVE_COMMON_FINDINGS.zipOverlapUnchecked, class: 'gap', fileIndex, offset: zipFindingOffset(0, 0), count: 1 };
+}
+
+/**
+ * What every format that opens a zip does right after opening it: tells
+ * `report` the unchecked-overlap finding when there is one, at the first place
+ * in the file so that a pass that opens the same zip again (a resume) is not
+ * counted twice (the state counts a finding at or before the position it
+ * already counted once). Nothing is reported for a zip that was checked.
+ */
+export function reportZipOverlap(archive: ZipArchive, fileIndex: number, report: (finding: ArchiveImportFinding) => void): void {
+  const finding = zipOverlapAssumption(archive, fileIndex);
+  if (finding) report(finding);
 }

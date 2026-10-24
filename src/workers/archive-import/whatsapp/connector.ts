@@ -19,11 +19,12 @@
  * - Time: the export writes wall time with no zone, and in the order the
  *   phone's locale uses. The order is read from the file's own headers (the
  *   order most of them say; one pasted header does not decide) and, when
- *   nothing does, taken as day first and said so. The time is read in this
- *   computer's zone, and that is said once per archive. A header written in
+ *   nothing does, taken as day first and said so (`date_order_assumed`). The
+ *   time is read in this computer's zone, and that is said once per archive
+ *   (`time_zone_assumed`). A header written in
  *   another style than the file's, or dated before the one above it, may be a
  *   header pasted into a message: it still starts a message (the format
- *   cannot say otherwise) and is counted as an assumption.
+ *   cannot say otherwise) and is counted as `item_start_assumed`.
  * - Left out, and counted: notices from WhatsApp itself, messages with no
  *   text, and the status updates chat. Media is named in the message's text
  *   and counted as not imported. A message longer than the bound is cut and
@@ -69,6 +70,7 @@ import {
   ZIP_REPLAY_STEP_BYTES,
   ZipMemberReader,
   readZipMemberHead,
+  reportZipOverlap,
   stoppableZipSource,
   zipFindingOffset,
   type ZipEntry,
@@ -426,7 +428,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
           return run.page;
         };
         // Said once per archive, before anything else it reports.
-        if (!start) input.report({ kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap', fileIndex: 0, offset: 0 });
+        if (!start) input.report({ kind: ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, class: 'gap', fileIndex: 0, offset: 0 });
 
         async function* readUnit(context: FileContext, index: number, place: Place): AsyncGenerator<SourceConnectorListPage> {
           const unit = context.units[index]!;
@@ -496,7 +498,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
               run.progressed = true;
               order = orderMarkOf(scanned.order, scanned.assumed);
               style = scanned.style ?? '';
-              if (scanned.assumed) report(ARCHIVE_COMMON_FINDINGS.assumption, 'gap', 0);
+              if (scanned.assumed) report(ARCHIVE_COMMON_FINDINGS.dateOrderAssumed, 'gap', 0);
             } catch (error) {
               if (!(error instanceof ZipMemberError)) throw stoppedFrom(error, unit.file.relPath);
               damaged(error, 0);
@@ -647,7 +649,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
               const header = resolveWhatsAppHeader(raw.header, dateOrder);
               const otherStyle = style !== '' && raw.header.style !== style;
               if (otherStyle || (header && prev !== '' && header.sentAt < prev)) {
-                note(ARCHIVE_COMMON_FINDINGS.assumption, 'gap', raw.offset);
+                note(ARCHIVE_COMMON_FINDINGS.itemStartAssumed, 'gap', raw.offset);
               }
               if (header && !otherStyle) prev = header.sentAt;
 
@@ -756,6 +758,7 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
             };
             if (file.members) {
               const opened = openZip(reader, file, fileIndex);
+              reportZipOverlap(opened.zip, fileIndex, (finding) => input.report(finding));
               context.zip = opened.zip;
               context.units = opened.units;
               context.total = opened.total;

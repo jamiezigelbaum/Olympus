@@ -75,22 +75,22 @@ describe('a finding tallied per page is counted once, whatever pages a replay is
 
   test('several kinds told by one page count by their own occurrences, however they interleave', () => {
     const f = recorded();
-    const gap = (offsets: readonly number[]): ArchiveImportFinding => tally(offsets, { kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap' });
+    const gap = (offsets: readonly number[]): ArchiveImportFinding => tally(offsets, { kind: ARCHIVE_COMMON_FINDINGS.itemStartAssumed, class: 'gap' });
     f.state.recordFindings(f.archiveId, [tally([100, 300]), gap([200, 400])]);
     f.state.recordFindings(f.archiveId, [tally([100, 300, 500]), gap([200, 400, 600])]);
     expect(f.findings().skipped).toEqual({ [NOTICE]: 3 });
-    expect(f.findings().gaps).toEqual({ [ARCHIVE_COMMON_FINDINGS.assumption]: 3 });
-    expect(f.findings().gaps_by_file).toEqual({ '0': { [ARCHIVE_COMMON_FINDINGS.assumption]: 3 } });
+    expect(f.findings().gaps).toEqual({ [ARCHIVE_COMMON_FINDINGS.itemStartAssumed]: 3 });
+    expect(f.findings().gaps_by_file).toEqual({ '0': { [ARCHIVE_COMMON_FINDINGS.itemStartAssumed]: 3 } });
     expect(f.findings().through).toEqual({ file_index: 0, offset: 600 });
   });
 
   test('a gap sample names the first occurrence that was counted, not one counted before', () => {
     const f = recorded();
-    f.state.recordFindings(f.archiveId, [tally([100, 200], { kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap' })]);
-    f.state.recordFindings(f.archiveId, [tally([100, 200, 300], { kind: ARCHIVE_COMMON_FINDINGS.assumption, class: 'gap' })]);
+    f.state.recordFindings(f.archiveId, [tally([100, 200], { kind: ARCHIVE_COMMON_FINDINGS.itemStartAssumed, class: 'gap' })]);
+    f.state.recordFindings(f.archiveId, [tally([100, 200, 300], { kind: ARCHIVE_COMMON_FINDINGS.itemStartAssumed, class: 'gap' })]);
     expect(f.findings().samples).toEqual([
-      { kind: ARCHIVE_COMMON_FINDINGS.assumption, file_index: 0, offset: 100 },
-      { kind: ARCHIVE_COMMON_FINDINGS.assumption, file_index: 0, offset: 300 },
+      { kind: ARCHIVE_COMMON_FINDINGS.itemStartAssumed, file_index: 0, offset: 100 },
+      { kind: ARCHIVE_COMMON_FINDINGS.itemStartAssumed, file_index: 0, offset: 300 },
     ]);
   });
 

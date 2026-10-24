@@ -24,6 +24,7 @@ import {
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
+import { ARCHIVE_COMMON_FINDINGS } from '../src/core/archive-formats.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY } from '../src/workers/archive-import/dashboard.ts';
@@ -355,14 +356,13 @@ describe('each archive under the Archives row', () => {
       fill(A.gaps.item_truncated.many, { n: '4' }),
       fill(A.gaps.note_date_assumed.many, { n: '12' }),
       A.gaps.note_too_large.one,
-      A.gaps.assumption.one,
       fill(A.gaps.section_not_imported.many, { n: '2' }),
       A.gaps.file_damaged.one,
       // What was left out on purpose comes after what could not be read.
       fill(A.gaps.note_empty.many, { n: '38' }),
     ]);
     // Every kind has both a one and a many sentence, none of them the catch-all.
-    for (const kind of ['media_not_imported', 'item_truncated', 'assumption', 'section_not_imported', 'file_damaged', 'note_empty', 'note_unreadable', 'note_too_large', 'note_content_unsupported', 'note_date_assumed'] as const) {
+    for (const kind of ['media_not_imported', 'item_truncated', 'section_not_imported', 'file_damaged', 'note_empty', 'note_unreadable', 'note_too_large', 'note_content_unsupported', 'note_date_assumed'] as const) {
       expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
       expect(A.gaps[kind].many).toContain('{n}');
     }
@@ -380,7 +380,9 @@ describe('each archive under the Archives row', () => {
     expect(lines).toEqual([
       fill(A.gaps.media_not_imported.many, { n: '1,870' }),
       fill(A.gaps.item_truncated.many, { n: '2' }),
-      fill(A.gaps.assumption.many, { n: '2' }),
+      A.gaps.time_zone_assumed.one,
+      A.gaps.date_order_assumed.one,
+      fill(A.gaps.item_start_assumed.many, { n: '3' }),
       A.gaps.file_damaged.one,
       fill(A.gaps.system_message.many, { n: '318' }),
       fill(A.gaps.message_empty.many, { n: '6' }),
@@ -405,7 +407,7 @@ describe('each archive under the Archives row', () => {
       fill(A.gaps.section_not_imported.many, { n: '6' }),
       fill(A.gaps.message_content_unsupported.many, { n: '12' }),
       A.gaps.item_truncated.one,
-      A.gaps.assumption.one,
+      A.gaps.time_zone_assumed.one,
       A.gaps.file_damaged.one,
       fill(A.gaps.service_message.many, { n: '3,071' }),
       fill(A.gaps.message_without_text.many, { n: '54' }),
@@ -414,6 +416,59 @@ describe('each archive under the Archives row', () => {
       expect(A.gaps[kind].one).not.toBe(A.gaps.other.one);
       expect(A.gaps[kind].many).toContain('{n}');
     }
+  });
+
+  test('a Reflect archive counts notes, and a note with no date and a note that could not be read are named', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-notes-reflect') });
+    const item = archiveItem(page, 'imported');
+    expect(item.textContent).toContain(fill(A.nouns.note.many, { n: '1,208' }));
+    expect(item.textContent).not.toContain('messages');
+    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([
+      fill(A.gaps.media_not_imported.many, { n: '94' }),
+      A.gaps.item_truncated.one,
+      fill(A.gaps.note_date_assumed.many, { n: '3' }),
+      fill(A.gaps.note_unreadable.many, { n: '2' }),
+      fill(A.gaps.note_empty.many, { n: '17' }),
+    ]);
+  });
+
+  test('every assumption the import makes has its own sentence, in a one and a many form, and none lists the others', () => {
+    const specific = [
+      ARCHIVE_COMMON_FINDINGS.timeZoneAssumed,
+      ARCHIVE_COMMON_FINDINGS.dateOrderAssumed,
+      ARCHIVE_COMMON_FINDINGS.itemStartAssumed,
+      ARCHIVE_COMMON_FINDINGS.zipOverlapUnchecked,
+    ];
+    for (const kind of specific) {
+      const words = (A.gaps as Record<string, { one: string; many: string }>)[kind]!;
+      expect(words, kind).toBeDefined();
+      expect(words.one).not.toBe(A.gaps.other.one);
+      expect(words.many).toContain('{n}');
+      // One thing is said, not a list of maybes.
+      for (const sentence of [words.one, words.many]) expect(sentence).not.toMatch(/such as|had to assume/);
+    }
+    // They say the value that was taken.
+    expect(A.gaps.date_order_assumed.one).toContain('day first');
+    expect(A.gaps.time_zone_assumed.one).toContain("this computer's time zone");
+    // Each kind reports a different thing.
+    expect(new Set(specific.map((kind) => (A.gaps as Record<string, { one: string }>)[kind]!.one)).size).toBe(specific.length);
+    // Every common kind a format can report has a sentence of its own, none of them the catch-all.
+    for (const kind of Object.values(ARCHIVE_COMMON_FINDINGS)) {
+      const words = (A.gaps as Record<string, { one: string; many: string }>)[kind];
+      expect(words, kind).toBeDefined();
+      expect(words!.one).not.toBe(A.gaps.other.one);
+    }
+  });
+
+  test('an archive recorded before the specific kinds still reads: its one assumption has a plain sentence, not the catch-all', async () => {
+    const old = { ...ARCHIVE, family: 'chat', gaps: [{ kind: ARCHIVE_COMMON_FINDINGS.assumption, count: 2 }], skipped: [] };
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });
+    const lines = Array.from(archiveItem(page, 'imported').querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
+    expect(lines).toEqual([fill(A.gaps.assumption.many, { n: '2' })]);
+    expect(lines[0]).not.toBe(fill(A.gaps.other.many, { n: '2' }));
+    // It says why it cannot say which, and what to do.
+    expect(A.gaps.assumption.one).toContain('import it again');
   });
 
   test('an archive from an engine that sends no family says items, and an empty import says it found nothing', async () => {

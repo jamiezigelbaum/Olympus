@@ -16355,6 +16355,10 @@ var init_archive_formats = __esm(() => {
   ARCHIVE_COMMON_FINDINGS = {
     mediaNotImported: "media_not_imported",
     itemTruncated: "item_truncated",
+    timeZoneAssumed: "time_zone_assumed",
+    dateOrderAssumed: "date_order_assumed",
+    itemStartAssumed: "item_start_assumed",
+    zipOverlapUnchecked: "zip_overlap_unchecked",
     assumption: "assumption",
     sectionNotImported: "section_not_imported",
     fileDamaged: "file_damaged",
@@ -41745,7 +41749,11 @@ var init_vocabulary = __esm(() => {
       message_without_text: { one: "1 message with nothing to read (no text, picture or file) left out", many: "{n} messages with nothing to read (no text, picture or file) left out" },
       media_not_imported: { one: "1 picture, recording or other file the archive refers to was not imported", many: "{n} pictures, recordings or other files the archive refers to were not imported" },
       item_truncated: { one: "1 item too long: the start of it is kept", many: "{n} items too long: the start of each is kept" },
-      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (such as a time zone, which part of a date is the day, that a line shaped like the start of a message is one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (such as time zones, which parts of dates are the day, that lines shaped like the start of a message are one, or that no two files in a very large zip share the same bytes, which a damaged zip could break)" },
+      time_zone_assumed: { one: "The times have no time zone, so Olympus read them in this computer's time zone", many: "The times in {n} files have no time zone, so Olympus read them in this computer's time zone" },
+      date_order_assumed: { one: "The dates do not say which part is the day, so Olympus read them day first", many: "The dates in {n} files do not say which part is the day, so Olympus read them day first" },
+      item_start_assumed: { one: "1 line that looks like the start of a new message was taken as one, though it is dated before the message above it or written in another style, so it may belong to that message", many: "{n} lines that look like the start of a new message were taken as new messages, though each is dated before the message above it or written in another style, so they may belong to those messages" },
+      zip_overlap_unchecked: { one: "1 zip is too large to check whether its files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)", many: "{n} zips are too large to check whether their files share the same bytes, so Olympus took it that they do not (a damaged zip could break that)" },
+      assumption: { one: "1 thing Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)", many: "{n} things Olympus had to assume because the archive does not say or is too large to check (this archive was imported before Olympus named each one: remove it and import it again to see which)" },
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
@@ -75292,6 +75300,16 @@ function readZipMemberHead(archive, entry, maxBytes) {
 }
 function zipFindingOffset(memberIndex, offsetInMember) {
   return memberIndex * 8589934592 + Math.min(Math.max(0, offsetInMember), 8589934591);
+}
+function zipOverlapAssumption(archive, fileIndex) {
+  if (!archive.overlapsUnchecked())
+    return;
+  return { kind: ARCHIVE_COMMON_FINDINGS.zipOverlapUnchecked, class: "gap", fileIndex, offset: zipFindingOffset(0, 0), count: 1 };
+}
+function reportZipOverlap(archive, fileIndex, report) {
+  const finding = zipOverlapAssumption(archive, fileIndex);
+  if (finding)
+    report(finding);
 }
 var ZIP_READ_CHUNK_BYTES, ZIP_COMPRESSED_BLOCK_BYTES, ZIP_INFLATE_PUSH_BYTES, ZIP_REPLAY_STEP_BYTES, ZIP_CONTINUATION_MAX_PENDING_BYTES, ZIP_INFLATER_OVERHEAD_BYTES, ZIP_MAX_NAMED_OVERLAPS = 4096, ZIP_OVERLAP_SORT_MAX_ENTRIES = 262144, ZIP_NEIGHBOR_READ_BYTES, MAX_END_SEARCH_BYTES, SIG_END = 101010256, SIG_ZIP64_END = 101075792, SIG_ZIP64_LOCATOR = 117853008, SIG_CENTRAL = 33639248, SIG_LOCAL = 67324752, ZipFormatError, ZipMemberError, CP437_HIGH = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ", strictUtf8, lenientUtf8;
 var init_zip_reader = __esm(() => {
@@ -156273,7 +156291,7 @@ function createWhatsAppArchiveConnector(input) {
           return run2.page;
         };
         if (!start)
-          input.report({ kind: ARCHIVE_COMMON_FINDINGS.assumption, class: "gap", fileIndex: 0, offset: 0 });
+          input.report({ kind: ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, class: "gap", fileIndex: 0, offset: 0 });
         async function* readUnit(context2, index, place) {
           const unit = context2.units[index];
           const report = (kind, findingClass, offset, count) => {
@@ -156334,7 +156352,7 @@ function createWhatsAppArchiveConnector(input) {
               order = orderMarkOf(scanned.order, scanned.assumed);
               style = scanned.style ?? "";
               if (scanned.assumed)
-                report(ARCHIVE_COMMON_FINDINGS.assumption, "gap", 0);
+                report(ARCHIVE_COMMON_FINDINGS.dateOrderAssumed, "gap", 0);
             } catch (error2) {
               if (!(error2 instanceof ZipMemberError))
                 throw stoppedFrom2(error2, unit.file.relPath);
@@ -156479,7 +156497,7 @@ function createWhatsAppArchiveConnector(input) {
               const header = resolveWhatsAppHeader(raw.header, dateOrder);
               const otherStyle = style !== "" && raw.header.style !== style;
               if (otherStyle || header && prev !== "" && header.sentAt < prev) {
-                note(ARCHIVE_COMMON_FINDINGS.assumption, "gap", raw.offset);
+                note(ARCHIVE_COMMON_FINDINGS.itemStartAssumed, "gap", raw.offset);
               }
               if (header && !otherStyle)
                 prev = header.sentAt;
@@ -156580,6 +156598,7 @@ function createWhatsAppArchiveConnector(input) {
             };
             if (file.members) {
               const opened = openZip(reader, file, fileIndex);
+              reportZipOverlap(opened.zip, fileIndex, (finding) => input.report(finding));
               context2.zip = opened.zip;
               context2.units = opened.units;
               context2.total = opened.total;
@@ -157484,6 +157503,7 @@ function createNoteArchiveConnector(input, spec) {
           segment.next = startOfFile(cursor.file + 1);
           return segment;
         }
+        reportZipOverlap(archive, cursor.file, (finding) => input.report(finding));
         try {
           if (source.kind === "json")
             readJsonZip(archive, file, cursor.file, cursor, limits, segment, savedAt);
@@ -158612,7 +158632,7 @@ function createTelegramArchiveConnector(input) {
                   report(finding.kind, "gap", event.start, finding.count);
                 if (outcome.assumedZone && !assumedZone) {
                   assumedZone = true;
-                  report(ARCHIVE_COMMON_FINDINGS.assumption, "gap", event.start);
+                  report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, "gap", event.start);
                 }
               }
             }
