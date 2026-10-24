@@ -9,6 +9,7 @@ import { appendFileSync, readFileSync, statSync, unlinkSync, writeFileSync } fro
 import { join } from 'node:path';
 import {
   ARCHIVE_COMMON_FINDINGS,
+  ARCHIVE_LOOK_INCOMPLETE_ADVICE,
   ArchiveImportStoppedError,
   REFLECT_JSON_ARCHIVE_FORMAT,
   REFLECT_MARKDOWN_ARCHIVE_FORMAT,
@@ -1207,5 +1208,126 @@ describe('the slower look at a file runs only when the first bytes settled nothi
     // With nothing settled by the first bytes the look is made, once for the file.
     expect(formatOf(detectArchiveFormat(probeOf(`{"settings":"${'x'.repeat(5000)}`, calls), ARCHIVE_FORMATS))).toBe('none');
     expect(calls).toEqual(['keys:notes']);
+  });
+});
+
+describe('a second export that the first bytes do not tell is not left out of a folder', () => {
+  const LONG = 'word '.repeat(40_000);
+  const note = (extra: Record<string, unknown> = {}) => ({ id: 'a', content: 'Hello from the harbour.', subject: 'Title', created_at: '2023-01-01T00:00:00Z', ...extra });
+  // The keys that say what it is come after more than the first 4 KB of text.
+  const lateReflect = () => JSON.stringify([{ id: 'late', content: LONG, subject: 'Late title', created_at: '2023-01-02T00:00:00Z' }]);
+  const lateRoam = () => JSON.stringify([{ children: [{ string: LONG }], title: 'Late page', uid: 'p1', 'create-time': 1 }]);
+  const settled = () => JSON.stringify([note(), note({ id: 'b' })]);
+
+  /** A folder holding these files, picked, with an allowance for the look (the default unless given). */
+  function detectFolder(files: Record<string, string | Uint8Array>, scanBytes?: { document?: number; folder?: number }): ArchiveDetection {
+    const dir = tempFolder(cleanups);
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    const root = ScopeRoot.open(dir);
+    try {
+      return detectArchiveFormat(probeArchivePath(root, '', { probeNames: archiveProbeNames(), ...(scanBytes ? { scanBytes } : {}) }));
+    } finally {
+      root.close();
+    }
+  }
+
+  test('two exports, one told by its first bytes and one by keys further in, are refused as two exports are when both are told at once', () => {
+    const both = detectFolder({ 'a.json': settled(), 'b.json': settled() });
+    expect(both.kind).toBe('none');
+    const late = detectFolder({ 'a.json': settled(), 'b.json': lateReflect() });
+    expect(late).toEqual(both);
+    // Either one first in the listing.
+    expect(detectFolder({ 'z.json': settled(), 'b.json': lateReflect() })).toEqual(both);
+    // The same when the late one is the only other file in a folder of other things.
+    expect(detectFolder({ 'a.json': settled(), 'b.json': lateReflect(), 'readme.txt': 'hello' })).toEqual(both);
+  });
+
+  test('a second export of another kind is two kinds of export, which are asked about', () => {
+    const detection = detectFolder({ 'a.json': settled(), 'b.json': lateRoam() });
+    expect(detection).toEqual({ kind: 'ambiguous', formats: ['reflect-json', 'roam-json'] });
+  });
+
+  test('a file that is no export, however long its first record, is left alone and the export beside it is the match', () => {
+    const detection = detectFolder({ 'a.json': settled(), 'other.json': JSON.stringify([{ blob: LONG, other: 1 }]), 'notes.txt': 'x' });
+    expect(detection).toMatchObject({ kind: 'match', files: ['a.json'] });
+    expect(formatOf(detection)).toBe('reflect-json');
+    // A single late export is still found when it is the only candidate.
+    expect(detectFolder({ 'b.json': lateReflect(), 'readme.txt': 'x' })).toMatchObject({ kind: 'match', files: ['b.json'] });
+  });
+
+  test('only the files the first bytes left open are read on through: a file they settled is never asked', () => {
+    const calls: string[] = [];
+    const entry = (name: string, head: string): ArchiveProbe['children'][number] => ({
+      relPath: name,
+      name,
+      kind: 'file',
+      head: new TextEncoder().encode(head),
+      firstRecordKeys: () => { calls.push(`${name}:keys`); return undefined; },
+      listIsEmpty: () => { calls.push(`${name}:empty`); return false; },
+    });
+    const telegram = `{"about":"Here is the data you requested.","personal_information":{"user_id":1,"pad":"${'x'.repeat(5000)}`;
+    const probe: ArchiveProbe = {
+      chosen: { relPath: '', name: 'folder', kind: 'directory' },
+      children: [
+        entry('result.json', telegram),
+        entry('open.json', `[{"content":"${'x'.repeat(5000)}`),
+        entry('short.json', '[{"id":1,"x":2}]'),
+      ],
+    };
+    const detection = detectArchiveFormat(probe, ARCHIVE_FORMATS);
+    expect(formatOf(detection)).toBe('telegram_json');
+    // Only the open one was read on through, once (the formats that ask about it share the read).
+    expect(calls).toEqual(['open.json:keys']);
+  });
+
+  test('a folder whose look ran out of allowance before every file was reached is refused in plain words, not imported with a file left out', () => {
+    const MiB = 1024 * 1024;
+    const filler = (mib: number) => JSON.stringify([{ blob: 'x'.repeat(mib * MiB), other: 1 }]);
+    const lateBig = () => JSON.stringify([{ id: 'late', content: 'x'.repeat(3 * MiB), subject: 'Late title', created_at: '2023-01-02T00:00:00Z' }]);
+    const small = { folder: 4 * MiB };
+    // Enough allowance: the late export is found, and with the first one that is two exports.
+    expect(detectFolder({ 'a.json': settled(), 'b.json': filler(3), 'c.json': lateBig() }, { folder: 64 * MiB }).kind).toBe('none');
+    // Too little: the late export was not reached, so nothing is imported, and the person is told what to do.
+    const refused = detectFolder({ 'a.json': settled(), 'b.json': filler(3), 'c.json': lateBig() }, small);
+    expect(refused).toMatchObject({ kind: 'none', advice: ARCHIVE_LOOK_INCOMPLETE_ADVICE });
+    // The same when the files not reached are no exports at all: the look cannot say so, and says what it could not do.
+    expect(detectFolder({ 'a.json': settled(), 'b.json': filler(3), 'c.json': filler(3) }, small)).toMatchObject({ kind: 'none', advice: ARCHIVE_LOOK_INCOMPLETE_ADVICE });
+    // Within the allowance the same folder is the export beside the files that are none.
+    expect(detectFolder({ 'a.json': settled(), 'b.json': filler(1), 'c.json': filler(1) }, small)).toMatchObject({ kind: 'match', files: ['a.json'] });
+    // A file that ran into its own allowance is one the look could not tell, as before; it is not the folder running out.
+    expect(detectFolder({ 'a.json': settled(), 'b.json': filler(3) }, { document: 1 * MiB, folder: 64 * MiB })).toMatchObject({ kind: 'match', files: ['a.json'] });
+    // The sentence is plain words with no file names, and leaves the person a way out.
+    expect(ARCHIVE_LOOK_INCOMPLETE_ADVICE).toContain('Choose the export file itself');
+    expect(ARCHIVE_LOOK_INCOMPLETE_ADVICE).not.toMatch(/\.json|\.zip|\//);
+  });
+
+  test('a refused folder shows as the supported-formats answer with the advice added; the file picked on its own is not subject to the folder\'s allowance', () => {
+    const MiB = 1024 * 1024;
+    const filler = JSON.stringify([{ blob: 'x'.repeat(3 * MiB), other: 1 }]);
+    const refused = detectFolder({ 'a.json': settled(), 'b.json': filler, 'c.json': filler }, { folder: 4 * MiB });
+    expect(refused.kind).toBe('none');
+    if (refused.kind === 'none') expect(refused.supported).toContain('Reflect notes (JSON)');
+    // The export on its own is picked as a file: a match, whatever sits beside it.
+    const dir = tempFolder(cleanups);
+    writeFileSync(join(dir, 'a.json'), settled());
+    writeFileSync(join(dir, 'b.json'), filler);
+    const root = ScopeRoot.open(dir);
+    try {
+      expect(detectArchiveFormat(probeArchivePath(root, 'a.json', { probeNames: archiveProbeNames(), scanBytes: { folder: 1 } })).kind).toBe('match');
+    } finally {
+      root.close();
+    }
+  });
+
+  test('through the import start: a folder with a second export is refused and nothing is recorded', () => {
+    const dir = tempFolder(cleanups);
+    writeFileSync(join(dir, 'a.json'), settled());
+    writeFileSync(join(dir, 'b.json'), lateReflect());
+    const state = new ArchiveImportStateStore({ path: join(tempFolder(cleanups), 'data', 'archive-imports.json') });
+    expect(startArchiveImport({ state, path: dir })).toMatchObject({ kind: 'unsupported' });
+    expect(state.list()).toEqual([]);
+    // The first export alone is the import.
+    unlinkSync(join(dir, 'b.json'));
+    expect(startArchiveImport({ state, path: dir }).kind).toBe('started');
   });
 });

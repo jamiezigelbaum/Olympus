@@ -35903,17 +35903,17 @@ function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
 function detectArchiveFormat(probe, formats = ARCHIVE_FORMATS) {
-  let matches = matchesOf(probeWithoutFurtherReads(probe), formats);
-  if (matches.length === 0)
-    matches = matchesOf(probe, formats);
-  if (matches.length === 1)
+  const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
+  const settled = new Set(onHeads.flatMap((match) => match.files));
+  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled), formats);
+  const incomplete = probe.readsRanOut?.() === true;
+  if (matches.length === 1 && !incomplete)
     return { kind: "match", format: matches[0].format, files: matches[0].files };
-  if (matches.length === 0) {
-    const supported = formats.map((format) => format.label);
-    const advice = unsupportedAdvice(probe, formats);
-    return advice ? { kind: "none", supported, advice } : { kind: "none", supported };
-  }
-  return { kind: "ambiguous", formats: matches.map((match) => match.format.id) };
+  if (matches.length > 1)
+    return { kind: "ambiguous", formats: matches.map((match) => match.format.id) };
+  const supported = formats.map((format) => format.label);
+  const advice = [unsupportedAdvice(probe, formats), incomplete ? ARCHIVE_LOOK_INCOMPLETE_ADVICE : undefined].filter((said) => said !== undefined).join(" ");
+  return advice ? { kind: "none", supported, advice } : { kind: "none", supported };
 }
 function matchesOf(probe, formats) {
   const matches = [];
@@ -35936,6 +35936,10 @@ function entryWithoutFurtherReads(entry) {
 function probeWithoutFurtherReads(probe) {
   return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
 }
+function probeReadingPastHeadsExcept(probe, settled) {
+  const keep = (entry) => settled.has(entry.relPath) ? entryWithoutFurtherReads(entry) : entry;
+  return { ...probe, chosen: keep(probe.chosen), children: probe.children.map(keep) };
+}
 function unsupportedAdvice(probe, formats) {
   for (const format of formats) {
     for (const variant of format.unsupportedVariants ?? []) {
@@ -35955,7 +35959,7 @@ function registerArchiveFormatConnector(formatId, factory) {
 function archiveFormatConnector(formatId) {
   return CONNECTOR_FACTORIES.get(formatId);
 }
-var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
+var ARCHIVE_PROBE_HEAD_BYTES = 4096, ARCHIVE_PROBE_MAX_CHILDREN = 256, ARCHIVE_PROBE_MAX_NAMED = 1024, FROM_LINE, MBOX_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", ARCHIVE_LOOK_INCOMPLETE_ADVICE = "Olympus could not look through every file in this folder to see which ones are exports, because some are very large. Choose the export file itself, or a folder that holds only the export.", ARCHIVE_COMMON_FINDINGS, ArchiveImportStoppedError, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -52015,7 +52019,8 @@ var init_json_stream = __esm(() => {
 function recordProbeBudget(bytes = RECORD_PROBE_MAX_SCAN_BYTES) {
   return { left: bytes };
 }
-function capped(inner, budget) {
+function capped(inner, budgets) {
+  const drawn = Array.isArray(budgets) ? budgets : [budgets];
   let refused = false;
   return {
     source: {
@@ -52026,11 +52031,14 @@ function capped(inner, budget) {
         const chunk = inner.next();
         if (chunk === undefined)
           return;
-        if (budget.left <= 0) {
+        const spent = drawn.find((budget) => budget.left <= 0);
+        if (spent) {
+          spent.ranOut = true;
           refused = true;
           return;
         }
-        budget.left -= chunk.length;
+        for (const budget of drawn)
+          budget.left -= chunk.length;
         return chunk;
       },
       unread: (count) => inner.unread(count)
@@ -52086,11 +52094,12 @@ function probeListIsEmpty(source, list, budget = recordProbeBudget()) {
   }
   return false;
 }
-var RECORD_PROBE_MAX_KEYS = 256, RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES;
+var RECORD_PROBE_MAX_KEYS = 256, RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
 var init_record_probe = __esm(() => {
   init_json_stream();
   RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
   RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
 });
 
 // node_modules/fflate/esm/browser.js
@@ -53211,13 +53220,20 @@ function fileHead(root, relPath) {
     throw error;
   }
 }
-function fileFirstRecordKeys(root, relPath) {
-  const budget = recordProbeBudget();
+function scanAllowance(options, inFolder) {
+  const folder = inFolder ? recordProbeBudget(options?.folder ?? RECORD_PROBE_MAX_FOLDER_SCAN_BYTES) : undefined;
+  return {
+    budgetsForDocument: () => [recordProbeBudget(options?.document ?? RECORD_PROBE_MAX_SCAN_BYTES), ...folder ? [folder] : []],
+    folderRanOut: () => folder?.ranOut === true
+  };
+}
+function fileFirstRecordKeys(root, relPath, allowance) {
+  const budgets = allowance.budgetsForDocument();
   return (list, enough) => {
     try {
       const reader = root.openFile(relPath);
       try {
-        return probeFirstRecordKeys(fileByteSource(reader), list, enough, budget);
+        return probeFirstRecordKeys(fileByteSource(reader), list, enough, budgets);
       } finally {
         reader.close();
       }
@@ -53228,8 +53244,8 @@ function fileFirstRecordKeys(root, relPath) {
     }
   };
 }
-function zipMemberFirstRecordKeys(root, zipRelPath, memberIndex) {
-  const budget = recordProbeBudget();
+function zipMemberFirstRecordKeys(root, zipRelPath, memberIndex, allowance) {
+  const budgets = allowance.budgetsForDocument();
   return (list, enough) => {
     try {
       const file = root.openFile(zipRelPath);
@@ -53240,7 +53256,7 @@ function zipMemberFirstRecordKeys(root, zipRelPath, memberIndex) {
           return;
         const member = ZipMemberReader.open(archive, entry);
         try {
-          return probeFirstRecordKeys(member, list, enough, budget);
+          return probeFirstRecordKeys(member, list, enough, budgets);
         } finally {
           member.close();
         }
@@ -53258,7 +53274,7 @@ function lastSegment(name) {
   const parts = name.split("/").filter((part) => part !== "");
   return parts[parts.length - 1] ?? name;
 }
-function probeZipMembers(root, relPath, probeNames) {
+function probeZipMembers(root, relPath, probeNames, allowance) {
   let reader;
   try {
     reader = root.openFile(relPath);
@@ -53292,7 +53308,7 @@ function probeZipMembers(root, relPath, probeNames) {
         name: lastSegment(entry.name),
         kind: entry.isDirectory ? "directory" : "file",
         ...head ? { head } : {},
-        ...head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index) } : {}
+        ...head && !entry.isDirectory ? { firstRecordKeys: zipMemberFirstRecordKeys(root, relPath, entry.index, allowance) } : {}
       };
     });
   } catch (error) {
@@ -53311,14 +53327,15 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   const stat2 = chosenRelPath === "" ? root.statRelative("") : root.statEntry(chosenRelPath);
   const name = lastComponent(chosenRelPath, root.path);
   if (stat2.kind === "file") {
+    const alone = scanAllowance(options.scanBytes, false);
     const head = fileHead(root, chosenRelPath);
-    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames) : undefined;
+    const members = ZipArchive.looksLikeZip(head) ? probeZipMembers(root, chosenRelPath, probeNames, alone) : undefined;
     return {
       chosen: {
         relPath: "",
         name,
         kind: "file",
-        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath) } : {},
+        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, chosenRelPath, alone) } : {},
         ...members ? { members } : {}
       },
       children: []
@@ -53326,6 +53343,7 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
   }
   if (stat2.kind !== "directory")
     throw new ScopeSafeError("not_regular", "neither a file nor a folder");
+  const folderAllowance = scanAllowance(options.scanBytes, true);
   const everything = root.list(chosenRelPath);
   const listed = [
     ...everything.slice(0, ARCHIVE_PROBE_MAX_CHILDREN),
@@ -53362,17 +53380,17 @@ function probeArchivePath(root, chosenRelPath, options = {}) {
       children.push({ relPath: entry.name, name: entry.name, kind: "directory" });
     } else if (kind === "file") {
       const head = heads.get(index);
-      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames) : undefined;
+      const members = zips.includes(index) ? probeZipMembers(root, joinRelative(chosenRelPath, entry.name), probeNames, folderAllowance) : undefined;
       children.push({
         relPath: entry.name,
         name: entry.name,
         kind: "file",
-        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name)) } : {},
+        ...head ? { head, firstRecordKeys: fileFirstRecordKeys(root, joinRelative(chosenRelPath, entry.name), folderAllowance) } : {},
         ...members ? { members } : {}
       });
     }
   });
-  return { chosen: { relPath: "", name, kind: "directory" }, children };
+  return { chosen: { relPath: "", name, kind: "directory" }, children, readsRanOut: folderAllowance.folderRanOut };
 }
 function sha256(bytes) {
   return createHash29("sha256").update(bytes).digest("hex");

@@ -74,6 +74,13 @@ export interface ArchiveProbe {
    * names a format asks for (`probeNames`).
    */
   children: readonly ArchiveProbeEntry[];
+  /**
+   * For a chosen folder: whether a read on past a file's first bytes
+   * (`firstRecordKeys`, `listIsEmpty`) was refused because the allowance the
+   * folder's files share was spent, so some file was not looked through as
+   * far as it needed. Absent when the probe keeps no such allowance.
+   */
+  readsRanOut?(): boolean;
 }
 
 export interface ArchiveFormatDefinition {
@@ -671,23 +678,40 @@ export function archiveImportFamilies(formats: readonly ArchiveFormatDefinition[
 }
 
 /**
+ * What the person is told when a folder had more to look through than the
+ * probe may read: nothing is imported, because a file left unchecked could be
+ * a second export that would be dropped without a word.
+ */
+export const ARCHIVE_LOOK_INCOMPLETE_ADVICE = 'Olympus could not look through every file in this folder to see which ones are exports, because some are very large. Choose the export file itself, or a folder that holds only the export.';
+
+/**
  * Which format a probe is. No match says so and lists what is supported; two
  * matches are returned as such for the person to choose, never guessed.
+ *
+ * The first bytes decide when they can, and a file they settle is never read
+ * further (the slower look reads on through a file, and a long export would
+ * pay for it every time). Every other file of the pick gets that look, so a
+ * second export whose first bytes do not say what it is cannot hide beside
+ * one that does: both are found, and the formats' own rules for two exports
+ * apply as they do when both are told by their first bytes. A pick whose
+ * look ran out of allowance before it reached every file is refused, never
+ * imported with a file left out.
  */
 export function detectArchiveFormat(
   probe: ArchiveProbe,
   formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS,
 ): ArchiveDetection {
-  // First on the first bytes alone: a format they settle leaves the slower look (reading on through a file) to no other.
-  let matches = matchesOf(probeWithoutFurtherReads(probe), formats);
-  if (matches.length === 0) matches = matchesOf(probe, formats);
-  if (matches.length === 1) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
-  if (matches.length === 0) {
-    const supported = formats.map((format) => format.label);
-    const advice = unsupportedAdvice(probe, formats);
-    return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
-  }
-  return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+  const onHeads = matchesOf(probeWithoutFurtherReads(probe), formats);
+  const settled = new Set(onHeads.flatMap((match) => match.files));
+  const matches = matchesOf(probeReadingPastHeadsExcept(probe, settled), formats);
+  const incomplete = probe.readsRanOut?.() === true;
+  if (matches.length === 1 && !incomplete) return { kind: 'match', format: matches[0]!.format, files: matches[0]!.files };
+  if (matches.length > 1) return { kind: 'ambiguous', formats: matches.map((match) => match.format.id) };
+  const supported = formats.map((format) => format.label);
+  const advice = [unsupportedAdvice(probe, formats), incomplete ? ARCHIVE_LOOK_INCOMPLETE_ADVICE : undefined]
+    .filter((said): said is string => said !== undefined)
+    .join(' ');
+  return advice ? { kind: 'none', supported, advice } : { kind: 'none', supported };
 }
 
 function matchesOf(
@@ -715,6 +739,12 @@ function entryWithoutFurtherReads(entry: ArchiveProbeEntry): ArchiveProbeEntry {
 
 function probeWithoutFurtherReads(probe: ArchiveProbe): ArchiveProbe {
   return { chosen: entryWithoutFurtherReads(probe.chosen), children: probe.children.map(entryWithoutFurtherReads) };
+}
+
+/** The probe with the way on past the first bytes kept only for the entries not in `settled` (by their `relPath`). */
+function probeReadingPastHeadsExcept(probe: ArchiveProbe, settled: ReadonlySet<string>): ArchiveProbe {
+  const keep = (entry: ArchiveProbeEntry): ArchiveProbeEntry => (settled.has(entry.relPath) ? entryWithoutFurtherReads(entry) : entry);
+  return { ...probe, chosen: keep(probe.chosen), children: probe.children.map(keep) };
 }
 
 function unsupportedAdvice(probe: ArchiveProbe, formats: readonly ArchiveFormatDefinition[]): string | undefined {

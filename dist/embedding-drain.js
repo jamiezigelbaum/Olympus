@@ -39549,11 +39549,12 @@ var init_json_stream = __esm(() => {
 });
 
 // src/workers/archive-import/record-probe.ts
-var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES;
+var RECORD_PROBE_MAX_VALUE_BYTES, RECORD_PROBE_MAX_SCAN_BYTES, RECORD_PROBE_MAX_FOLDER_SCAN_BYTES;
 var init_record_probe = __esm(() => {
   init_json_stream();
   RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
   RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
 });
 
 // node_modules/fflate/esm/browser.js

@@ -6,6 +6,7 @@
 import { describe, expect, test } from 'bun:test';
 import { crc32Update, fileByteSource, type ArchiveByteSource } from '../src/workers/archive-import/byte-source.ts';
 import {
+  RECORD_PROBE_MAX_FOLDER_SCAN_BYTES,
   RECORD_PROBE_MAX_KEYS,
   RECORD_PROBE_MAX_SCAN_BYTES,
   probeFirstRecordKeys,
@@ -249,6 +250,51 @@ describe('how much of a document the looks at it read', () => {
     expect(probeListIsEmpty(second.source, ['notes'], budget)).toBe(false);
     expect(second.megabytes()).toBeLessThan(40);
     expect(budget.left).toBeLessThanOrEqual(0);
+  });
+});
+
+describe('the allowance the files of one folder share', () => {
+  const MiB = 1024 * 1024;
+
+  test('is spent across the documents, and the one that ran into it is told from one that ran into its own', () => {
+    const folder = recordProbeBudget(60 * MiB);
+    const firstOwn = recordProbeBudget();
+    const first = longDocument('{"settings":"', 40, '","other":1}');
+    expect(probeFirstRecordKeys(first.source, ['notes'], undefined, [firstOwn, folder])).toBeUndefined();
+    // Read whole, within both: nothing ran out.
+    expect(first.megabytes()).toBe(40);
+    expect(firstOwn.ranOut).toBeUndefined();
+    expect(folder.ranOut).toBeUndefined();
+    // The next document is cut short by what the folder has left, and the folder says so.
+    const secondOwn = recordProbeBudget();
+    const second = longDocument('{"settings":"', 40, '","notes":[{"a":1,"title":"T"}]}');
+    expect(probeFirstRecordKeys(second.source, ['notes'], undefined, [secondOwn, folder])).toBeUndefined();
+    expect(second.megabytes()).toBeLessThan(25);
+    expect(folder.ranOut).toBe(true);
+    expect(secondOwn.ranOut).toBeUndefined();
+  });
+
+  test('a document past its own allowance is its own limit, not the folder running out', () => {
+    const folder = recordProbeBudget(500 * MiB);
+    const own = recordProbeBudget();
+    const long = longDocument('{"settings":"', 300, '","notes":[{"a":1,"title":"T"}]}');
+    expect(probeFirstRecordKeys(long.source, ['notes'], undefined, [own, folder])).toBeUndefined();
+    expect(own.ranOut).toBe(true);
+    expect(folder.ranOut).toBeUndefined();
+    // The same for the question of an empty list.
+    const own2 = recordProbeBudget();
+    const folder2 = recordProbeBudget(500 * MiB);
+    expect(probeListIsEmpty(longDocument('{"settings":"', 300, '","notes":[]}').source, ['notes'], [own2, folder2])).toBe(false);
+    expect(own2.ranOut).toBe(true);
+    expect(folder2.ranOut).toBeUndefined();
+    const folder3 = recordProbeBudget(10 * MiB);
+    expect(probeListIsEmpty(longDocument('{"settings":"', 40, '","notes":[]}').source, ['notes'], [recordProbeBudget(), folder3])).toBe(false);
+    expect(folder3.ranOut).toBe(true);
+  });
+
+  test('a folder\'s default is bigger than a document\'s, and a document\'s own is unchanged', () => {
+    expect(RECORD_PROBE_MAX_FOLDER_SCAN_BYTES).toBeGreaterThan(RECORD_PROBE_MAX_SCAN_BYTES);
+    expect(recordProbeBudget().left).toBe(RECORD_PROBE_MAX_SCAN_BYTES);
   });
 });
 

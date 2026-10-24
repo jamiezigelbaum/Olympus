@@ -49,11 +49,25 @@ export const RECORD_PROBE_MAX_VALUE_BYTES = 16 * 1024;
 export const RECORD_PROBE_MAX_SCAN_BYTES = 64 * 1024 * 1024;
 
 /**
- * What is left of a document's scan allowance; the looks at one document
- * (its first record's keys, whether its list is empty) draw on one of these.
+ * The most bytes the looks at all the files of one folder read in all (256 MiB),
+ * on top of each document's own allowance. Reading is in whole chunks, so the
+ * last may run past it by up to one.
+ */
+export const RECORD_PROBE_MAX_FOLDER_SCAN_BYTES = 256 * 1024 * 1024;
+
+/**
+ * What is left of a scan allowance. The looks at one document (its first
+ * record's keys, whether its list is empty) draw on one of these, and on a
+ * folder's too when the document is one of a folder's files.
  */
 export interface RecordProbeBudget {
   left: number;
+  /**
+   * A read was refused because this allowance was spent while the document
+   * still had more to read. Set by the looks, read by whoever must say that
+   * something was not looked through.
+   */
+  ranOut?: boolean;
 }
 
 export function recordProbeBudget(bytes: number = RECORD_PROBE_MAX_SCAN_BYTES): RecordProbeBudget {
@@ -68,7 +82,8 @@ interface CappedSource {
   capped(): boolean;
 }
 
-function capped(inner: ArchiveByteSource, budget: RecordProbeBudget): CappedSource {
+function capped(inner: ArchiveByteSource, budgets: RecordProbeBudget | readonly RecordProbeBudget[]): CappedSource {
+  const drawn = Array.isArray(budgets) ? (budgets as readonly RecordProbeBudget[]) : [budgets as RecordProbeBudget];
   let refused = false;
   return {
     source: {
@@ -78,11 +93,14 @@ function capped(inner: ArchiveByteSource, budget: RecordProbeBudget): CappedSour
       next(): Uint8Array | undefined {
         const chunk = inner.next();
         if (chunk === undefined) return undefined;
-        if (budget.left <= 0) {
+        // The first allowance spent is the one refused against: a document's own comes before its folder's.
+        const spent = drawn.find((budget) => budget.left <= 0);
+        if (spent) {
+          spent.ranOut = true;
           refused = true;
           return undefined;
         }
-        budget.left -= chunk.length;
+        for (const budget of drawn) budget.left -= chunk.length;
         return chunk;
       },
       unread: (count) => inner.unread(count),
@@ -102,7 +120,7 @@ export function probeFirstRecordKeys(
   source: ArchiveByteSource,
   list: readonly string[],
   enough?: (keys: ReadonlySet<string>) => boolean,
-  budget: RecordProbeBudget = recordProbeBudget(),
+  budget: RecordProbeBudget | readonly RecordProbeBudget[] = recordProbeBudget(),
 ): ReadonlySet<string> | undefined {
   const keys = new Set<string>();
   let found = false;
@@ -138,7 +156,7 @@ export function probeFirstRecordKeys(
 export function probeListIsEmpty(
   source: ArchiveByteSource,
   list: readonly string[],
-  budget: RecordProbeBudget = recordProbeBudget(),
+  budget: RecordProbeBudget | readonly RecordProbeBudget[] = recordProbeBudget(),
 ): boolean {
   if (list.length === 0) return false;
   const limited = capped(source, budget);
