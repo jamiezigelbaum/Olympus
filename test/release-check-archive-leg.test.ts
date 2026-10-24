@@ -279,9 +279,21 @@ describe('an archive imported with the private model on', () => {
   });
 
   test('a restored drain must see the model as back on', () => {
-    const drain: DrainView = { drained: true, ms: 1, boundMs: 1, last: {}, privateModel: 'off', row: goodRow(heldFx) };
+    const drain: DrainView = { drained: true, ms: 1, boundMs: 1, last: { messages: heldFx.expect.messages, waiting: 0 }, privateModel: 'off', row: goodRow(heldFx) };
     expect(failing(drainChecks('d', drain, heldFx, 'linux', 'restored'))).toEqual(['d']);
     expect(failing(drainChecks('d', { ...drain, privateModel: 'ready' }, heldFx, 'linux', 'restored'))).toEqual([]);
+  });
+
+  test('a drain is proven only by a readable row and the agent\'s own counts', () => {
+    const drained: DrainView = { drained: true, ms: 1, boundMs: 1, last: { messages: heldFx.expect.messages, waiting: 0 }, privateModel: 'ready', row: goodRow(heldFx) };
+    const { row: _row, ...noRow } = drained;
+    const unread = drainChecks('d', noRow, heldFx, 'linux', 'restored');
+    expect(failing(unread)).toEqual(['d']);
+    expect(unread[0]!.detail).toContain('the dashboard row could not be read');
+    const fewer = drainChecks('d', { ...drained, last: { messages: heldFx.expect.messages - 1, waiting: 0 } }, heldFx, 'linux', 'restored');
+    expect(failing(fewer)).toEqual(['d']);
+    expect(fewer[0]!.detail).toContain(`expected 0 of ${heldFx.expect.messages}`);
+    expect(failing(drainChecks('d', { ...drained, last: {} }, heldFx, 'linux', 'restored'))).toEqual(['d']);
   });
 
   test('a search must return the archive\'s word under its citation label', () => {

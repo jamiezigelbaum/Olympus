@@ -634,6 +634,10 @@ export function drainChecks(id: string, drain: DrainView | undefined, fx: LegFix
   const problems: string[] = [];
   if (!drain.drained) problems.push(`${drain.last.waiting ?? '?'} of ${drain.last.messages ?? '?'} messages were still waiting for the private model after ${secs(drain.ms)} (the bound for this machine is ${secs(drain.boundMs)})`);
   const judged = drain.row ? judgedLineOf(drain.row.text) : null;
+  if (drain.drained && (drain.last.waiting !== 0 || drain.last.messages !== fx.expect.messages)) {
+    problems.push(`the agent reports ${drain.last.waiting ?? '?'} of ${drain.last.messages ?? '?'} messages waiting, expected 0 of ${fx.expect.messages}`);
+  }
+  if (drain.drained && !drain.row) problems.push('the dashboard row could not be read, so the judged count is unproven');
   if (drain.drained && drain.row) {
     if (!judged) problems.push('the dashboard row has no judged line');
     else if (judged.held !== 0 || judged.judged !== fx.expect.messages) problems.push(`the dashboard row reads ${judged.judged} judged · ${judged.held} waiting, expected ${fx.expect.messages} judged · 0 waiting`);
