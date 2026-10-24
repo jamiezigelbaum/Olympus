@@ -1,10 +1,12 @@
 # Source storage
 
-Status: proposed 2026-10-24, awaiting owner approval. Replaces the storage
-half of the Delete work in #455/#467 (#467 frozen 2026-10-24). #481 (worker
-restart backoff) is independent and lands first. Where this
-page and the code differ, the code is current; the inventory below was read
-at `be4524c5`.
+Status: approved by the owner 2026-10-24 (decisions 1–5 below); delivery in
+progress. Replaces the storage half of the Delete work in #455/#467 (#467
+frozen 2026-10-24). This page covers storage only: where each account's
+files live, who opens them, and the storage operations that Delete, Export,
+uninstall and ingestion call. The Delete feature itself (dashboard states,
+restart timing) is a separate workstream. Where this page and the code
+differ, the code is current; the inventory below was read at `be4524c5`.
 
 ## Outcome
 
@@ -238,34 +240,10 @@ stopped, credentials removed) and the worker can restart itself.
 
 If a step fails, the entry stays `deleting`. The storage service never
 opens a `deleting` account, so nothing reads or writes a half-deleted
-store, and the dashboard shows "Delete didn't finish" with Try again
-(another restart). Other sources are unaffected and the engine starts
-normally. A crash at any point resumes at the next boot from the registry
-state, because each step is idempotent and the rename is atomic.
-
-**Restart speed.** A restart-based Delete is only as good as the worker's
-restart. The release-check crawl (2026-10-23, Linux VM on Sparta) saw a
-disconnected Readwise delete settle in about 12 s, but over 80 s when Files
-on this computer was also indexed. The delete itself took milliseconds; the
-row waited for the restarted worker. One cause is confirmed in code:
-`src/core/native-process-service.ts` treated the worker's deliberate exit 75
-as a crash and restarted it on the crash backoff (250 ms, 1 s, 5 s, 15 s,
-30 s, reset only after 30 s of stable uptime), so a delete soon after
-another restart waited a climbed delay. #481 restarts a clean exit 75 at the
-first delay without advancing the crash counter, bounded to three in a row.
-Whether that removes the full 80 s is not yet proven: rerun the Linux
-release check (`olympus-ops/scripts/release-check/run-linux.sh`, control
-`explore.disconnected`) after it merges. Step 5 must measure restart-to-ready
-time with every source indexed, and name any boot work (such as the local
-files watch catch-up) that grows with the data.
-
-**While it restarts**, the dashboard must not show the action as still
-available. Today, after OK, the notice says "Indexed data deleted" while the
-row keeps offering "Delete indexed data" until the worker answers. Proposal:
-while the client's `state.deleting[id]` is set, hide that row's action and
-show "Deleting…"; the client already re-reads every 2 s for up to 60 s after
-a delete (`src/workers/dashboard/chatgpt/client.ts`, #462). This moves the
-design pins (owner decision 6).
+store, and the registry state is what the Delete feature reports and
+retries from (another restart). Other sources are unaffected and the engine
+starts normally. A crash at any point resumes at the next boot from the
+registry state, because each step is idempotent and the rename is atomic.
 
 What this removes from #467: the custody lock per store, the delete-fence
 file and its in-memory stand-in stores, canonical-path intent bindings, and
@@ -281,10 +259,14 @@ everything else.
 ## Export and uninstall
 
 - **Export** iterates the registry, snapshots each store with the existing
-  SQLite snapshot code (`data-lifecycle.ts:1391`), copies `raw/`, `session/`
-  and `settings/`, and records the layout version. Verify checks the same
-  shape. Old export archives stay verifiable (keep the current verifier for
-  the previous version).
+  SQLite snapshot code (`data-lifecycle.ts:1391`), copies `settings/`
+  sanitized, and records the layout version. It never copies `raw/` or
+  `session/`: the spool is input the store already holds, and the session
+  holds pairing keys (WhatsApp, Telegram). Both are named as skipped in the
+  manifest, which keeps `secrets_excluded: true`, as export does today
+  (`data-lifecycle.ts:651-657`, `test/data-lifecycle-raw-state.test.ts`).
+  Verify checks the same shape. Old export archives stay verifiable (keep
+  the current verifier for the previous version).
 - **Uninstall** (`site/uninstall.sh`, `site/uninstall-linux.sh --purge`)
   removes the roots from the layout module's list instead of a hand-kept
   one. Today macOS uninstall does not mention `~/.local/share/olympus`,
@@ -298,13 +280,18 @@ One-time, at worker boot, holding the owner lock, before mounting:
 
 1. Read the legacy locations through the current resolvers (kept in one
    `legacy-layout.ts` for this purpose only).
-2. For each source with files there and no registry entry: create the entry
+2. For each source with files there and no registry entry, and whose
+   capture process (Telegram reader, WhatsApp bridge) is confirmed stopped,
+   not merely not yet started: create the entry
    (slot `1`), write a move plan into the registry, rename each file
    (stores, sidecars, `-wal`/`-shm` together, spools, sessions, watch
    snapshots, settings) into the account folder, verify (same file set and
    sizes, `PRAGMA quick_check`, store opens), then mark the plan done. A
    crash mid-move resumes from the plan; a failed verify moves the files
-   back and leaves the source on its legacy paths with a Needs you row.
+   back and leaves the source on its legacy paths with a Needs you row. A
+   source whose capture is still running stays on its legacy paths until
+   the next boot; a capture process that reopened its session by the old
+   path would start an empty, unpaired session.
 3. Renames only. A file on another volume (only possible with a per-store
    env override) is not copied: the source stays on legacy paths and the
    dashboard says why. Public docs must be checked to confirm no user was
@@ -352,20 +339,22 @@ touch the store path (`eval/`).
    it. Fix the drifts on the way (Telegram `HOME`, `handles.json` XDG, X
    reconcile default, `olympusSharedDataFile` missing the Linux root).
    Salvage #467's test isolation (refuse the real HOME, isolated HOME in
-   every package test script, spawn patches). No behavior change.
+   every package test script, spawn patches). No behavior change. Two PRs:
+   test isolation first, then the layout module.
 2. **Registry + storage service + owner lock + guard.** Registry adopted
    from legacy locations without moving files; all store opens through the
    service; drain direct mode removed; CLI and scripts take the owner lock.
+   Two PRs: registry, storage service and guard first; then the owner lock,
+   the CLI through the worker, and the drain's direct mode removed.
 3. **Forget registry.** Forget steps for the shared files above, and the
    guard test.
 4. **Migration into account folders.** Behind the boot pass, with the
-   tests in "What must not break"; first on the olympus-test host and the
-   Omarchy laptop, then default on.
-5. **Delete, export, uninstall on the registry.** Replace #455's Delete and
-   `lifecycleSourceSpecs`; "Deleting…" while the worker restarts, "Delete
-   didn't finish" and Try again (design re-pin; the new states need owner
-   acceptance); measure restart-to-ready time with every source indexed
-   (see Restart speed).
+   tests in "What must not break". Trying it on real installs before it is
+   on by default belongs to release testing.
+5. **Delete, export, uninstall on the registry.** Replace
+   `lifecycleSourceSpecs` with the registry: a per-source delete marks the
+   account `deleting` and the boot pass removes it; export and uninstall
+   read the registry and the layout module.
 6. **Connectors stop naming paths.** Rewrite `docs/CREATE_CONNECTOR.md`
    Leg 3 (it still instructs each connector to define a default path and
    says seven local indexes are grandfathered; the guard allows one), drop
@@ -379,27 +368,25 @@ proven on Mac, standalone Linux and OpenClaw-hosted.
 
 ## Owner decisions
 
+All five approved by the owner, 2026-10-24.
+
 1. **One folder per account, with slots.** Connecting a different account
    for the same source creates a new folder; the old one stays as
-   "Disconnected · indexed data kept" until deleted. Recommended: yes, in
-   two parts: the folder shape and per-slot corpus ids now; a second slot
-   only once every corpus-id consumer is proven with two (see Registry).
-   Until then a different account needs the previous data deleted first.
+   "Disconnected · indexed data kept" until deleted. In two parts: the
+   folder shape and per-slot corpus ids now; a second slot only once every
+   corpus-id consumer is proven with two (see Registry). Until then a
+   different account needs the previous data deleted first.
 2. **Delete forgets that account's choices too** (folder picks, ingestion
    policy, scope approvals), so reconnecting starts clean; Disconnect keeps
-   them. Recommended: yes.
-3. **Drop per-store path overrides**, keep one data-root override.
-   Recommended: yes (they serve development, not users).
-4. **Delete applies by restarting the worker** (about 12 s measured on the
-   Linux VM where search is unavailable, after #481), not live.
-   Recommended: yes for now; a live in-process delete can come later once
-   the scheduler can cancel a running task per source
+   them.
+3. **Drop per-store path overrides**, keep one data-root override (they
+   serve development, not users).
+4. **Removal applies when the worker restarts**, before anything opens the
+   account, not live. A live in-process removal can come later once the
+   scheduler can cancel a running task per source
    (`source-scheduler.ts:516-522` has no cancel today).
 5. **Leave pre-1.0 index files** for Delete all to remove, rather than
-   deleting them during migration. Recommended: yes.
-6. **"Deleting…" on the row while the worker restarts**, with the action
-   hidden, instead of the action staying offered. Recommended: yes; it can
-   ship before the redesign, on today's Delete.
+   deleting them during migration.
 
 ## Out of scope
 
