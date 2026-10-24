@@ -200,6 +200,23 @@ describe('placement: a new account', () => {
     }
   });
 
+  test('an environment whose data folder cannot be worked out places nothing: a resolver that needs the folder fails as it always did, one that does not still answers', () => {
+    // Linux refuses a padded XDG_DATA_HOME; every path under the data folder then throws, on main too.
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    try {
+      const padded = { HOME: dir, XDG_DATA_HOME: `  ${join(dir, 'data')}  ` };
+      expect(placedAccount('x.bookmarks', padded).layout).toBe('legacy');
+      expect(decideAccountLayout('x.bookmarks', padded).layout).toBe('legacy');
+      expect(() => defaultXBookmarksConnectorStoreDbPath(padded)).toThrow('XDG_DATA_HOME must be an absolute path');
+      expect(() => resolvedRawPath('local.files', 'watch', padded)).toThrow('XDG_DATA_HOME must be an absolute path');
+      expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', padded, { usageDbPath: ':memory:' })).toBe(':memory:');
+      expect(resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', padded, { usageDbPath: '/custom/usage.sqlite' })).toBe('/custom/usage.sqlite.reconcile');
+    } finally {
+      Object.defineProperty(process, 'platform', original);
+    }
+  });
+
   test('a dangling link at a legacy path is evidence of legacy, not an absent file', () => {
     const root = olympusDataRoot(env);
     mkdirSync(root, { recursive: true });

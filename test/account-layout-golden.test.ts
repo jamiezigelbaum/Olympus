@@ -132,20 +132,28 @@ function writeLegacyRegistry(env: Env): void {
 
 // What each case sets, besides the home: the same environments the fixture was
 // generated with. An override case sets one variable, padded, to prove the trim.
-function caseEnv(name: string): { env: Env; platform?: string } {
+// Every case runs under the platform it was generated under: darwin unless it says Linux.
+// The data folder depends on the platform (a standalone Linux engine's receipt, and Linux
+// refusing a padded XDG_DATA_HOME), so a case without a pinned platform would change with the machine.
+function caseEnv(name: string): { env: Env; platform: string } {
   const homeOnly = { HOME: home };
-  if (name === 'default') return { env: homeOnly };
-  if (name === 'xdg') return { env: { ...homeOnly, XDG_DATA_HOME: xdg } };
-  if (name === 'xdg-padded') return { env: { ...homeOnly, XDG_DATA_HOME: `  ${xdg}  ` } };
+  if (name === 'default') return { platform: 'darwin', env: homeOnly };
+  if (name === 'xdg') return { platform: 'darwin', env: { ...homeOnly, XDG_DATA_HOME: xdg } };
+  if (name === 'xdg-padded') return { platform: 'darwin', env: { ...homeOnly, XDG_DATA_HOME: `  ${xdg}  ` } };
   if (name === 'linux-receipt') return { platform: 'linux', env: { ...homeOnly, OLYMPUS_STANDALONE: '1' } };
   if (name === 'linux-receipt-xdg') return { platform: 'linux', env: { ...homeOnly, XDG_DATA_HOME: xdg, OLYMPUS_STANDALONE: '1' } };
+  // An OpenClaw-hosted Linux process: no standalone marker, so the hosted namespace.
+  if (name === 'linux-hosted') return { platform: 'linux', env: homeOnly };
+  if (name === 'linux-hosted-xdg') return { platform: 'linux', env: { ...homeOnly, XDG_DATA_HOME: xdg } };
+  if (name === 'linux-hosted-xdg-padded') return { platform: 'linux', env: { ...homeOnly, XDG_DATA_HOME: `  ${xdg}  ` } };
   const single = /^override:(.*)$/.exec(name);
-  if (single) return { env: { ...homeOnly, [single[1]!]: `  /golden/override/${single[1]!.toLowerCase()}.sqlite  ` } };
+  if (single) return { platform: 'darwin', env: { ...homeOnly, [single[1]!]: `  /golden/override/${single[1]!.toLowerCase()}.sqlite  ` } };
   const blank = /^override-blank:(.*)$/.exec(name);
-  if (blank) return { env: { ...homeOnly, ...Object.fromEntries(overrideNames(blank[1]!).map((n) => [n, '   '])) } };
+  if (blank) return { platform: 'darwin', env: { ...homeOnly, ...Object.fromEntries(overrideNames(blank[1]!).map((n) => [n, '   '])) } };
   const all = /^override-all:(.*)$/.exec(name);
   if (all) {
     return {
+      platform: 'darwin',
       env: {
         ...homeOnly,
         XDG_DATA_HOME: xdg,
@@ -154,6 +162,17 @@ function caseEnv(name: string): { env: Env; platform?: string } {
     };
   }
   throw new Error(`unknown golden case ${name}`);
+}
+
+/** What the fixture records for a resolver that throws on main. */
+const throwsOf = (expected: unknown): string | undefined =>
+  expected && typeof expected === 'object' && '$throws' in expected ? String((expected as { $throws: unknown }).$throws) : undefined;
+
+/** A resolver gives the fixture's answer, or throws the fixture's error where main threw. */
+function expectResolves(name: string, key: string, env: Env, expected: unknown): void {
+  const message = throwsOf(expected);
+  if (message !== undefined) expect(() => resolvers[key]!(env), `${name}: ${key}`).toThrow(message);
+  else expect(resolvers[key]!(env), `${name}: ${key}`).toEqual(realized(expected));
 }
 
 const OVERRIDE_GROUPS: Record<string, string[]> = {
@@ -191,8 +210,7 @@ const OVERRIDE_GROUPS: Record<string, string[]> = {
 };
 const overrideNames = (group: string): string[] => OVERRIDE_GROUPS[group] ?? [];
 
-function withPlatform<T>(platform: string | undefined, run: () => T): T {
-  if (!platform) return run();
+function withPlatform<T>(platform: string, run: () => T): T {
   const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
   Object.defineProperty(process, 'platform', { value: platform });
   try {
@@ -207,7 +225,9 @@ describe('a legacy account resolves exactly what main resolved', () => {
 
   test('the fixture covers the default, XDG, Linux receipt and every override of every 4a source', () => {
     const names = cases.map(([name]) => name);
-    expect(names).toEqual(expect.arrayContaining(['default', 'xdg', 'xdg-padded', 'linux-receipt', 'linux-receipt-xdg']));
+    expect(names).toEqual(expect.arrayContaining([
+      'default', 'xdg', 'xdg-padded', 'linux-receipt', 'linux-receipt-xdg', 'linux-hosted', 'linux-hosted-xdg', 'linux-hosted-xdg-padded',
+    ]));
     const everyOverride = Object.values(OVERRIDE_GROUPS).flat();
     for (const override of everyOverride) expect(names).toContain(`override:${override}`);
     for (const group of Object.keys(OVERRIDE_GROUPS)) {
@@ -224,11 +244,18 @@ describe('a legacy account resolves exactly what main resolved', () => {
     const { env, platform } = caseEnv(name);
     const results = (golden.cases as Record<string, Record<string, unknown>>)[name]!;
     withPlatform(platform, () => {
-      writeLegacyRegistry(env);
-      for (const [key, expected] of Object.entries(results)) {
-        expect(resolvers[key]!(env), `${name}: ${key}`).toEqual(realized(expected));
-      }
+      // Where main cannot work out the data folder at all, no registry can be written either.
+      if (!Object.values(results).some((expected) => throwsOf(expected) !== undefined)) writeLegacyRegistry(env);
+      for (const [key, expected] of Object.entries(results)) expectResolves(name, key, env, expected);
     });
+  });
+
+  test('Linux refuses a padded XDG_DATA_HOME as main did, on every resolver that needs the data folder', () => {
+    const results = (golden.cases as Record<string, Record<string, unknown>>)['linux-hosted-xdg-padded']!;
+    const thrown = Object.entries(results).filter(([, expected]) => throwsOf(expected) !== undefined);
+    expect(thrown.length).toBeGreaterThan(30);
+    // The reconcile state beside an in-memory or caller-supplied usage ledger never consulted the data folder.
+    expect(Object.keys(results).filter((key) => !thrown.some(([name]) => name === key)).sort()).toEqual(['x.reconcile+custom', 'x.reconcile+memory']);
   });
 
   test.each(['default', 'xdg', 'linux-receipt'])('with legacy files and no entry: %s', (name) => {
@@ -247,19 +274,17 @@ describe('a legacy account resolves exactly what main resolved', () => {
         'x-bookmarks-connector-store.sqlite-shm',
         'archive-imports.json',
       ]) writeFileSync(join(root, file), '');
-      for (const [key, expected] of Object.entries(results)) {
-        expect(resolvers[key]!(env), `${name}: ${key}`).toEqual(realized(expected));
-      }
+      for (const [key, expected] of Object.entries(results)) expectResolves(name, key, env, expected);
     });
   });
 
   test('an override pins an account that has no entry: the override is honored, nothing moves', () => {
     for (const [name] of cases.filter(([n]) => n.startsWith('override:') || n.startsWith('override-all:'))) {
-      const { env } = caseEnv(name);
+      const { env, platform } = caseEnv(name);
       const results = (golden.cases as Record<string, Record<string, unknown>>)[name]!;
-      for (const [key, expected] of Object.entries(results)) {
-        expect(resolvers[key]!(env), `${name}: ${key}`).toEqual(realized(expected));
-      }
+      withPlatform(platform, () => {
+        for (const [key, expected] of Object.entries(results)) expectResolves(name, key, env, expected);
+      });
     }
   });
 

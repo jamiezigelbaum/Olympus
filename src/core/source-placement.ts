@@ -99,7 +99,9 @@ export function placedAccount(
     entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
   } catch (error) {
     if (error instanceof SourceRegistryError) return { source_id: sourceId, slot, layout: hasAccountFolderOnDisk(sourceId, slot, env) ? 'folder' : 'legacy' };
-    throw error;
+    // The data folder itself cannot be worked out (a Linux layout that refuses this environment, say):
+    // nothing is placed, and the legacy resolvers then fail exactly where they always did.
+    return { source_id: sourceId, slot, layout: 'legacy' };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
 }
@@ -190,7 +192,13 @@ function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
 
 /** Whether the legacy data folder can be told apart from a fresh one. */
 function dataRootState(env: LayoutEnv): 'present' | 'absent' | 'unreadable' {
-  const root = olympusDataRoot(env);
+  let root: string;
+  try {
+    root = olympusDataRoot(env);
+  } catch {
+    // On Linux the root is found by listing the candidate data folders, which fails on one the process may not search.
+    return 'unreadable';
+  }
   try {
     const link = lstatSync(root);
     // A link must lead somewhere: statSync follows it.

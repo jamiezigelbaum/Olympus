@@ -36,6 +36,9 @@ afterEach(() => {
 function freshHome(): { home: string; env: Record<string, string> } {
   const home = mkdtempSync(join(tmpdir(), 'olympus-fresh-folders-'));
   roots.push(home);
+  // On Linux the worker listens on a Unix socket under the user session's runtime
+  // directory and exits at once when that directory is missing or not private.
+  mkdirSync(join(home, 'run'), { mode: 0o700 });
   return {
     home,
     env: {
@@ -77,15 +80,20 @@ describe('a fresh install: the worker boots', () => {
       stderr: 'pipe',
     });
     let output = '';
-    void (async () => {
-      const decoder = new TextDecoder();
-      const reader = child.stdout.getReader();
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) return;
-        output += decoder.decode(value);
-      }
-    })();
+    let errors = '';
+    const collect = (stream: ReadableStream<Uint8Array>, add: (text: string) => void): void => {
+      void (async () => {
+        const decoder = new TextDecoder();
+        const reader = stream.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          add(decoder.decode(value));
+        }
+      })();
+    };
+    collect(child.stdout, (text) => { output += text; });
+    collect(child.stderr, (text) => { errors += text; });
     const registryPath = join(home, '.local', 'share', 'openclaw', 'olympus', 'registry.json');
     try {
       const deadline = Date.now() + 40_000;
@@ -93,13 +101,15 @@ describe('a fresh install: the worker boots', () => {
         let accounts = 0;
         try { accounts = JSON.parse(readFileSync(registryPath, 'utf8')).accounts.length; } catch { /* not written yet */ }
         if (accounts >= 6 && output.includes('worker listening')) break;
+        // A worker that has exited will never listen: say why instead of waiting.
+        if (child.exitCode !== null) break;
         await Bun.sleep(100);
       }
     } finally {
       child.kill('SIGKILL');
       await child.exited;
     }
-    expect(output).toContain('worker listening');
+    expect(output, `the worker did not listen (exit ${child.exitCode}): ${errors.slice(0, 2000)}`).toContain('worker listening');
 
     const registry = JSON.parse(readFileSync(registryPath, 'utf8')) as { schema: number; accounts: Array<{ source_id: string; layout: string; state: string }> };
     // The first folder account made it schema 2.
