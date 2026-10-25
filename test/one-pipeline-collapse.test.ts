@@ -5,6 +5,7 @@
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnectorListPage } from '../src/core/contracts.ts';
+import { connectorStoreItemText } from '../src/workers/connector-store/local-index.ts';
 import { inputConnector, type IntakeObservingInput } from '../src/core/source-inputs.ts';
 import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import {
@@ -199,6 +200,120 @@ function prng(seed: number): () => number {
 }
 
 type Kind = 'ordinary' | 'secret' | 'deleted' | 'names' | 'unversioned' | 'sameVersion';
+
+describe('a crash between legs and a cut between items lose nothing', () => {
+  const crashOnce = (h: OnePipelineHarness): void => {
+    const store = h.stores.secure_local;
+    const orig = store.syncFromConnector.bind(store);
+    let thrown = false;
+    store.syncFromConnector = (async (...args: Parameters<typeof orig>) => {
+      if (!thrown) { thrown = true; throw new Error('injected crash'); }
+      return orig(...args);
+    }) as typeof orig;
+  };
+  const drain = async (h: OnePipelineHarness, id: string, maxItems: number): Promise<void> => {
+    for (let pass = 0; pass < 12 && h.runtime.state.get(id)?.status !== 'imported'; pass += 1) await h.pull(id, { maxItems }).catch(() => undefined);
+    expect(h.runtime.state.get(id)?.status).toBe('imported');
+  };
+
+  test('a names-only update does not hide a body that one leg has not written: replay lands it', async () => {
+    const h = onePipelineHarness(cleanups, { pageSize: 1 });
+    h.connectLive();
+    await h.importAll(await h.startImport('one.mbox', [rec('a', 1, 'first')]));
+    const id = await h.startImport('two.mbox', [rec('a', 2, 'second'), rec('a', 3, undefined)]);
+    crashOnce(h);
+    await drain(h, id, 3);
+    expect(h.textOf('a')).toContain('second');
+    expect(h.rows().filter((row) => row.providerItemId === 'a').map((row) => row.version)).toEqual(['3', '3']);
+  });
+
+  test('a deletion cut off after one leg is finished by the same deletion on replay', async () => {
+    const h = onePipelineHarness(cleanups, { pageSize: 1 });
+    h.connectLive();
+    await h.importAll(await h.startImport('one.mbox', [rec('a', 1, 'doomed words')]));
+    const id = await h.startImport('del.mbox', [rec('a', 2, undefined, { deleted: true })]);
+    crashOnce(h);
+    await drain(h, id, 3);
+    expect(h.textOf('a')).toBe('');
+    expect(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0)).toEqual([]);
+  });
+
+  test('children survive a budget cut before the replacement parent, for names-only and for content', async () => {
+    const kids = [{ key: 'c1', name: 'a.jpg', text: 'one' }, { key: 'c2', name: 'b.jpg', text: 'two' }];
+    for (const second of [undefined, 'second']) {
+      const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary, pageSize: 2 });
+      h.connectLive();
+      const id = await h.startImport('kids.mbox', [rec('p', 1, 'first', { children: kids }), rec('p', 2, second)]);
+      await drain(h, id, 2);
+      expect(h.rows().filter((row) => row.parent !== null && row.tombstoned === 0).length).toBe(2);
+    }
+  });
+
+  test('a cut never loses the body an item still needs: A, B with bodies, A and B names-only later, limit 1', async () => {
+    const records = [rec('A', 1, 'body A'), rec('B', 1, 'body B'), rec('A', 2, undefined), rec('C', 1, 'body C'), rec('B', 2, undefined)];
+    const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary, pageSize: 5 });
+    h.connectLive();
+    await drain(h, await h.startImport('abc.mbox', records), 1);
+    expect(h.textOf('A')).toContain('body A');
+    expect(h.textOf('B')).toContain('body B');
+    expect(h.textOf('C')).toContain('body C');
+  });
+
+  test('over random records and budgets, a parent is emitted before its children and every cut resumes before what is still owed', async () => {
+    for (let seed = 1; seed <= 150; seed += 1) {
+      const random = prng(seed);
+      const ids = ['A', 'B', 'C'];
+      const records: FxRecord[] = [];
+      const versions = new Map<string, number>();
+      for (let at = 0, length = 3 + Math.floor(random() * 6); at < length; at += 1) {
+        const id = ids[Math.floor(random() * ids.length)]!;
+        const version = (versions.get(id) ?? 0) + 1 + Math.floor(random() * 2);
+        versions.set(id, version);
+        const body = random() < 0.6 ? `body ${id}${version}` : undefined;
+        records.push(rec(id, version, body, body !== undefined && random() < 0.5 ? { children: [kid] } : {}));
+      }
+      const pageSize = 1 + Math.floor(random() * 4);
+      // A small stand-in for the store: what a pass emitted is what is stored afterwards (a names-only item keeps its body).
+      const drainWith = async (budget: number | undefined): Promise<string[]> => {
+        const stored = new Map<string, { version: string; body: string }>();
+        let cursor: string | undefined;
+        for (let pass = 0; pass < 60; pass += 1) {
+          const input = { ...inputOf(records), async *records() { await Promise.resolve(); for (let from = 0; from < records.length; from += pageSize) yield { records: records.slice(from, from + pageSize), done: from + pageSize >= records.length }; } };
+          const emitted: RawItem[] = [];
+          let next: string | undefined;
+          let done = false;
+          const lookup = ((identity: { localItemId?: string; providerItemId: string }) => {
+            const held = stored.get(identity.providerItemId);
+            return held ? { version: held.version, hasContent: held.body !== '' } : undefined;
+          }) as never;
+          for await (const page of inputConnector(fixtureBuilder, input).listItems({ ...(budget !== undefined ? { limit: budget } : {}), ...(cursor !== undefined ? { cursor } : {}), storedItem: lookup })) {
+            emitted.push(...page.items);
+            // Within a page a parent is emitted before every child of it.
+            const firstOf = new Map<string, number>();
+            page.items.forEach((item, at) => { if (!firstOf.has(item.identity.providerItemId)) firstOf.set(item.identity.providerItemId, at); });
+            page.items.forEach((item, at) => {
+              if (!item.identity.providerItemId.includes('#child:')) return;
+              const parentAt = firstOf.get(item.identity.providerItemId.split('#child:')[0]!);
+              if (parentAt !== undefined) expect(parentAt <= at, `seed ${seed}: parent before its child`).toBe(true);
+            });
+            next = page.nextCursor;
+            done = page.done;
+          }
+          for (const item of emitted) {
+            const key = item.identity.providerItemId;
+            const text = item.content.kind === 'metadata_only' ? '' : connectorStoreItemText(item) ?? '';
+            stored.set(key, { version: item.identity.sourceVersion ?? '', body: text !== '' ? text : stored.get(key)?.body ?? '' });
+          }
+          if (done) break;
+          cursor = next;
+        }
+        return [...stored].map(([key, value]) => `${key}@${value.version}:${value.body}`).sort();
+      };
+      const whole = await drainWith(undefined);
+      for (const budget of [1, 2, 3]) expect(await drainWith(budget), `seed ${seed} budget ${budget} page ${pageSize}`).toEqual(whole);
+    }
+  });
+});
 
 describe('random sequences settle on the newest accepted state', () => {
   // PROPERTY_SEEDS widens the run on demand; the default is a fixed, quick set.

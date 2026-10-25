@@ -104,6 +104,9 @@ export function decideIntake(args: {
     // Deleted, or a Secret kept as a location only: an older or equal record never brings it back; a newer one does,
     // and live's own word wins a tie (or an unknown version), as it does for any item.
     if (order !== undefined && order > 0) return 'apply';
+    // A deletion cut off between legs (one leg's rows tombstoned, another's still active) is finished by the
+    // deletion of its own version; content never is, so nothing deleted comes back.
+    if (args.deletes === true && stored.incomplete === true && order === 0) return 'apply';
     if (args.input === 'live' && (order === undefined || order === 0)) return 'apply';
     return order !== undefined && order < 0 ? 'skip_older' : 'skip_same';
   }
@@ -334,12 +337,16 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
             }
             units = units.filter((_, at) => kept.has(at));
           }
+          // An item is emitted before its children, whatever records they came from: a pass cut between them
+          // must never leave a child stored ahead of the parent that decides whether it stays.
+          units = [...units.filter((unit) => unit.entry === 0), ...units.filter((unit) => unit.entry !== 0)];
           input.observeIntake?.(outcomes);
           const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
           if (units.length > room) {
             // The page holds more than the pass may store: yield what fits, resume at the first unit that does not.
             if (room <= 0) return;
-            const next = units[room]!;
+            // Resume at the earliest record and entry among the units not yielded: the emit order is not the stream's.
+            const next = units.slice(room).reduce((first, unit) => (unit.record < first.record || (unit.record === first.record && unit.entry < first.entry) ? unit : first));
             yield {
               items: units.slice(0, room).map((unit) => unit.item),
               nextCursor: encodeResume({ inner: base, records: next.record, entries: next.entry }),

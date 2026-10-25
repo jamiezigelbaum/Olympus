@@ -999,7 +999,7 @@ export class TieredStoreSet {
    * accepted record counts. Nothing is checked for a listing that never asked the lookup (a lane's own connector).
    */
   private unstoredAccepted(
-    accepted: { items: readonly RawItem[]; compareVersions?: (a: string, b: string) => number },
+    accepted: { items: readonly RawItem[]; compareVersions?: (a: string, b: string) => number; looked?: readonly SourceItemIdentity[] },
     plannedKind: (item: RawItem) => Plan['kind'] | undefined,
   ): number {
     const compare = accepted.compareVersions;
@@ -1033,6 +1033,13 @@ export class TieredStoreSet {
           || (stored.tombstoned !== true && !storedOlder && stored.incomplete !== true && (!text || stored.hasContent)));
       }
       if (!ok) unstored += 1;
+    }
+    // An item the listing skipped (the same version or an older one) whose stored state is incomplete is not
+    // finished either: it counts as unstored, so the pass is not complete while a half-written item stands.
+    const accepted1 = new Set([...newest.values()].map((item) => item.identity.localItemId));
+    for (const identity of accepted.looked ?? []) {
+      if (accepted1.has(identity.localItemId)) continue;
+      if (this.storedItem(identity, compare)?.incomplete === true) unstored += 1;
     }
     return unstored;
   }
@@ -1539,6 +1546,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   private readonly plans: Map<string, PlanEntry>;
   private readonly copyRemovals: Map<string, SourceItemIdentity>;
   /** Lower copies a replacement made stale: withdrawn once the replacement is written in every leg. */
+  private readonly pendingAdvances: Map<string, SourceItemIdentity>;
   private readonly pendingWithdrawals: Map<string, { item: RawItem; domains: readonly SourceTrustDomain[]; text: readonly SourceTrustDomain[] }>;
   private readonly set: TieredStoreSet;
   private readonly mode: 'shared' | 'per_leg';
@@ -1554,6 +1562,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.plans = new Map();
     this.copyRemovals = new Map();
     this.pendingWithdrawals = new Map();
+    this.pendingAdvances = new Map();
     this.counts = {
       itemsRouted: 0,
       itemsLegacy: 0,
@@ -1606,6 +1615,17 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.pendingWithdrawals.clear();
     for (const identity of this.copyRemovals.values()) this.set.ledger.removeCopies(identity);
     this.copyRemovals.clear();
+    for (const identity of this.pendingAdvances.values()) {
+      // Every active row of the item must hold the same version before it moves: a leg that still holds an
+      // older body (a crash or a failed write) keeps it, and the record is replayed.
+      const versions = new Set<string | undefined>();
+      for (const domain of TIER_DOMAIN_ORDER) {
+        const state = this.set.store(domain)?.storedItemState(identity);
+        if (state && !state.tombstoned) versions.add(state.version);
+      }
+      if (versions.size <= 1) for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity);
+    }
+    this.pendingAdvances.clear();
   }
 
   private routeFor(plan: Plan, corpusId: string, domain: SourceTrustDomain): ConnectorStoreTierRoute {
@@ -1699,7 +1719,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         this.counts.contentUnreadHeld += 1;
         // The record's version is accepted though its names are not written: the stored rows keep their text,
         // and the version the lookup reports moves to it, so an older record can never overwrite them.
-        for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity);
+        // The move waits for `finalize`: it happens only once every leg's rows agree on one version, so a body
+        // an earlier record brought can never be hidden behind a version it has not landed under.
+        this.pendingAdvances.set(identityKey(identity), identity);
         return { kind: 'hold', reason: 'content_unread' };
       }
       // Re-listed without text in a lane whose text arrives later: the names
@@ -1995,14 +2017,16 @@ function stringMetadata(item: RawItem, keys: readonly string[]): string | undefi
 export function recordedTraversal(
   connector: SourceConnector,
   storedItem?: StoredItemLookup,
-): SourceConnector & { accepted(): { items: readonly RawItem[]; compareVersions?: (a: string, b: string) => number } } {
+): SourceConnector & { accepted(): { items: readonly RawItem[]; compareVersions?: (a: string, b: string) => number; looked: readonly SourceItemIdentity[] } } {
   const pages: SourceConnectorListPage[] = [];
   let recorded = false;
   let failed = false;
   // The order of versions the connector's own lookup calls used: the read-back compares by it.
   let compareVersions: ((a: string, b: string) => number) | undefined;
+  // Every item the listing asked the store about, whatever it decided: the read-back also covers the ones it skipped.
+  const looked = new Map<string, SourceItemIdentity>();
   const lookup: StoredItemLookup | undefined = storedItem
-    ? (identity, compare) => { compareVersions = compare; return storedItem(identity, compare); }
+    ? (identity, compare) => { compareVersions = compare; looked.set(identityKey(identity as SourceItemIdentity), identity as SourceItemIdentity); return storedItem(identity, compare); }
     : undefined;
   return {
     id: connector.id,
@@ -2010,7 +2034,7 @@ export function recordedTraversal(
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId: string): Promise<RawItem> => connector.fetchItem(localItemId),
     classificationSignals: (item: RawItem) => connector.classificationSignals(item),
-    accepted: () => ({ items: pages.flatMap((page) => page.items), ...(compareVersions ? { compareVersions } : {}) }),
+    accepted: () => ({ items: pages.flatMap((page) => page.items), looked: [...looked.values()], ...(compareVersions ? { compareVersions } : {}) }),
     listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
       if (recorded) {
         return (async function* (): AsyncGenerator<SourceConnectorListPage> {

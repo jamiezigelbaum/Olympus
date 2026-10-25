@@ -381,6 +381,16 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   its version and a digest of the text and names judged, so two bodies of one
   version are each judged. Known residual: a deletion of an item no pass ever
   stored leaves no row, so a later tie or unversioned body can still be stored.
+- **Order and resume (2026-10-26).** A page emits an item before its
+  children, and a page cut resumes at the earliest record any unyielded item
+  still depends on (a merged names-only item depends on the record that
+  brought its body), so a cut never loses a body or stores a child ahead of
+  its parent. A names-only version move (`content_unread`) waits for the end of
+  the run and happens only when every active row of the item holds one version,
+  so a body one leg has not written is never hidden behind a newer version. A
+  deletion of the version a half-finished deletion holds finishes it (content
+  never does), and an item the listing skipped whose stored state is incomplete
+  counts as unstored.
 - **A refused item is told (2026-10-26).** When placement refuses an item (for
   example a trust domain that does not match), the import still completes but
   shows it as a gap, "Not imported" (`item_refused`), with the count, as the
