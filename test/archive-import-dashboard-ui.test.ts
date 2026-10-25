@@ -1028,6 +1028,26 @@ describe('the import sheet asks which account an export belongs to', () => {
     expect(answers[1]).toEqual({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox', confirm_account: true });
     expect(page.hasButton(A.account.apart)).toBe(false);
   });
+
+  test('asking again after the source changed account offers only Add and Choose another, and says where to keep the export apart', async () => {
+    const asked = { content: [{ type: 'text', text: 'Which account?' }], structuredContent: { status: 'confirm_account', reconfirm: true, name: 'Takeout-2026-10.mbox', source: { id: 'gmail.email', label: 'Gmail' } } };
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      [ARCHIVE_APPROVE_TOOL_NAME]: () => asked,
+    });
+    page.button(A.importAction).click();
+    await settle();
+    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
+    await settle();
+    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    await until(() => page.text().includes(fill(A.account.reconfirm.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })));
+    expect(page.text()).toContain(fill(A.account.reconfirm.note, { source: 'Gmail' }));
+    expect(page.text()).toContain('Other archives');
+    expect(page.hasButton(fill(A.account.addFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }))).toBe(true);
+    expect(page.hasButton(A.account.apart)).toBe(false);
+    expect(page.doc.querySelector('[data-key="picker:confirm-apart"]')).toBeNull();
+  });
 });
 
 describe('the preview states for imports that are inputs of a source', () => {

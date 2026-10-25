@@ -1703,6 +1703,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // kept, hidden, for an owner-approved purge. Either way the side
         // stores forget the item's names and excerpt now.
         forgetSecretInSideStores({ ledger, identity });
+        // Every accepted Secret version advances the version the lookup reports, whether or not the copy rows
+        // are still there to be tombstoned with it.
+        for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity);
         // A Secret is present while its location row is (child-visibility.ts), so it always has
         // one: an item no store ever held gets it in the Private store, location only (no names,
         // no text), written by that store's own pass so its owner row says the provider lists it.

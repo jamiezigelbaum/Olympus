@@ -2150,6 +2150,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
     addFor: 'Add {name} to {source}',
     apartFor: 'Keep {name} under Archives',
     sourceFallback: 'this source',
+    /** The same question for an import already inside a source, stopped because the source now holds another account. */
+    reconfirm: {
+      line: '{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?',
+      note: 'To keep it apart instead, delete this import from the {source} card, then import it again under Other archives.',
+    },
   },
   /**
    * An import that is one input of a source, inside that source's card: its own

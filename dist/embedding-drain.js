@@ -21845,6 +21845,14 @@ var init_local_index = __esm(() => {
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND provider_conversation_id IS NOT NULL
     `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => row.provider_conversation_id);
     }
+    advanceItemVersion(identity) {
+      if (identity.sourceVersion === undefined)
+        return;
+      this.db.query(`
+      UPDATE items SET source_version = ?
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+    `).run(identity.sourceVersion, identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+    }
     hasItemRow(identity) {
       return this.db.query(`
       SELECT 1 FROM items
@@ -34122,7 +34130,11 @@ var init_vocabulary = __esm(() => {
       apart: "Keep it under Archives",
       addFor: "Add {name} to {source}",
       apartFor: "Keep {name} under Archives",
-      sourceFallback: "this source"
+      sourceFallback: "this source",
+      reconfirm: {
+        line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
+        note: "To keep it apart instead, delete this import from the {source} card, then import it again under Other archives."
+      }
     },
     inSource: {
       listLabel: "Imported archives",
@@ -37313,7 +37325,7 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       if (requestId) {
         if (content && content.status === "confirm_account") {
           const source = content.source && typeof content.source.label === "string" ? content.source.label : "";
-          state.archiveConfirm[requestId] = { source };
+          state.archiveConfirm[requestId] = { source, ...content.reconfirm === true ? { reconfirm: true } : {} };
         } else
           delete state.archiveConfirm[requestId];
       }
@@ -37501,9 +37513,9 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     const asked = state.archiveConfirm[request2.id];
     if (request2.status === "pending" && asked) {
       const source = asked.source || A.account.sourceFallback;
-      add(item, isolatedLine("", A.account.line, { name: request2.name, source }));
-      add(item, el("p", "muted", fill2(A.account.note, { source })));
-      add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false), fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
+      add(item, isolatedLine("", asked.reconfirm ? A.account.reconfirm.line : A.account.line, { name: request2.name, source }));
+      add(item, el("p", "muted", fill2(asked.reconfirm ? A.account.reconfirm.note : A.account.note, { source })));
+      add(item, add(el("div", "archive-actions"), fixControl({ label: fill2(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request2.id, confirm_account: true } }, key2 + ":confirm", "plain", false), ...asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request2.id, keep_apart: true } }, key2 + ":apart", "plain", false)], fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request2.id } }, key2 + ":decline", "plain", false)));
       return item;
     }
     if (request2.status === "pending") {
@@ -39133,7 +39145,7 @@ function chatgptPickerProgram(kit) {
         const source = content.source && typeof content.source === "object" && typeof content.source.label === "string" ? content.source.label : "";
         p.saving = false;
         p.savingKey = "";
-        p.confirm = { key: key2, name: typeof content.name === "string" && content.name ? content.name : name, source };
+        p.confirm = { key: key2, name: typeof content.name === "string" && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
         kit.render("picker:confirm");
         return;
       }
@@ -39998,7 +40010,7 @@ function chatgptPickerProgram(kit) {
         control.setAttribute("aria-label", labelFor2);
         return control;
       };
-      add(ask, add(el("div", "banner-body"), el("p", "", fill2(words2.line, { name, source })), el("p", "muted", fill2(words2.note, { name, source })), add(el("div", "actions"), answer({ confirm_account: true }, fill2(words2.add, { name, source }), fill2(words2.addFor, { name, source }), "picker:confirm", "main"), answer({ keep_apart: true }, words2.apart, fill2(words2.apartFor, { name, source }), "picker:confirm-apart", "plain"), kit.button(p.pick.words.chooseAnother, "picker:confirm-other", () => {
+      add(ask, add(el("div", "banner-body"), el("p", "", fill2(p.confirm.reconfirm ? words2.reconfirm.line : words2.line, { name, source })), el("p", "muted", fill2(p.confirm.reconfirm ? words2.reconfirm.note : words2.note, { name, source })), add(el("div", "actions"), answer({ confirm_account: true }, fill2(words2.add, { name, source }), fill2(words2.addFor, { name, source }), "picker:confirm", "main"), ...p.confirm.reconfirm ? [] : [answer({ keep_apart: true }, words2.apart, fill2(words2.apartFor, { name, source }), "picker:confirm-apart", "plain")], kit.button(p.pick.words.chooseAnother, "picker:confirm-other", () => {
         p.confirm = null;
         kit.render(p.path.length ? "picker:up" : "picker:back");
       }, "plain"))));

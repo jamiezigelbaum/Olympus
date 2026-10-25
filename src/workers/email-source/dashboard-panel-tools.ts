@@ -328,6 +328,7 @@ async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<
       name,
       ...(archiveName ? { archive_name: archiveName } : {}),
       ...(status === 'confirm_account' && sourceId ? { source: { id: sourceId, label: sourceLabel } } : {}),
+      ...(status === 'confirm_account' && answer.parsed.reconfirm === true ? { reconfirm: true } : {}),
     },
   };
 }

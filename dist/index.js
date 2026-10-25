@@ -14572,7 +14572,11 @@ var init_vocabulary = __esm(() => {
       apart: "Keep it under Archives",
       addFor: "Add {name} to {source}",
       apartFor: "Keep {name} under Archives",
-      sourceFallback: "this source"
+      sourceFallback: "this source",
+      reconfirm: {
+        line: "{source} now holds a different account than the one you said {name} belongs to. Is {name} from the {source} account Olympus has connected now?",
+        note: "To keep it apart instead, delete this import from the {source} card, then import it again under Other archives."
+      }
     },
     inSource: {
       listLabel: "Imported archives",

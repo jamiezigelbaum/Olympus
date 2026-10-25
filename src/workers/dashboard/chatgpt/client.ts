@@ -161,7 +161,7 @@ export function chatgptDashboardClient(
     /** Computer only: further pages of a source's unreadable files read since the last dashboard result. */
     unreadablePages: Record<string, { files: Array<{ name: string; token?: string }>; more: number; after: string }>;
     /** Computer only: an agent's request whose export did not prove its account, by request id, until the person answers. */
-    archiveConfirm: Record<string, { source: string }>;
+    archiveConfirm: Record<string, { source: string; reconfirm?: boolean }>;
     /** Computer only: the source an open link asked to land on, until the panel has landed there. */
     landing: string;
     /** The source row outlined after landing, until `until` (ms). */
@@ -1345,7 +1345,7 @@ export function chatgptDashboardClient(
       if (requestId) {
         if (content && content.status === 'confirm_account') {
           const source = content.source && typeof content.source.label === 'string' ? content.source.label : '';
-          state.archiveConfirm[requestId] = { source };
+          state.archiveConfirm[requestId] = { source, ...(content.reconfirm === true ? { reconfirm: true } : {}) };
         } else delete state.archiveConfirm[requestId];
       }
     }
@@ -1571,11 +1571,11 @@ export function chatgptDashboardClient(
     if (request.status === 'pending' && asked) {
       // The export does not prove which account it is of: asked here, and nothing is imported until answered.
       const source = asked.source || A.account.sourceFallback;
-      add(item, isolatedLine('', A.account.line, { name: request.name, source }));
-      add(item, el('p', 'muted', fill(A.account.note, { source })));
+      add(item, isolatedLine('', asked.reconfirm ? A.account.reconfirm.line : A.account.line, { name: request.name, source }));
+      add(item, el('p', 'muted', fill(asked.reconfirm ? A.account.reconfirm.note : A.account.note, { source })));
       add(item, add(el('div', 'archive-actions'),
         fixControl({ label: fill(A.account.add, { source }), tool: H.archiveApproveTool, args: { request_id: request.id, confirm_account: true } }, key + ':confirm', 'plain', false),
-        fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request.id, keep_apart: true } }, key + ':apart', 'plain', false),
+        ...(asked.reconfirm ? [] : [fixControl({ label: A.account.apart, tool: H.archiveApproveTool, args: { request_id: request.id, keep_apart: true } }, key + ':apart', 'plain', false)]),
         fixControl({ label: A.decline, tool: H.archiveDeclineTool, args: { request_id: request.id } }, key + ':decline', 'plain', false)));
       return item;
     }

@@ -3171,6 +3171,25 @@ export class LocalConnectorStore {
   }
 
   /** Whether this store has ANY row for the identity, active or tombstoned. */
+  /**
+   * A Secret version accepted for an item this store already holds a row for (its copy rows may be gone): the
+   * row's version moves to it, so the intake lookup reports the newest Secret version and an older record can
+   * not bring the item back. Only the version changes; no names, text or chunks are written.
+   */
+  advanceItemVersion(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'sourceVersion'>): void {
+    if (identity.sourceVersion === undefined) return;
+    this.db.query(`
+      UPDATE items SET source_version = ?
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+    `).run(
+      identity.sourceVersion,
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    );
+  }
+
   hasItemRow(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): boolean {
     return this.db.query(`
       SELECT 1 FROM items

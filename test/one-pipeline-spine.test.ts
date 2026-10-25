@@ -319,7 +319,9 @@ describe('which account an import joins', () => {
     expect(h.rows()).toEqual([]);
 
     // Choosing the same export again asks the question again; a yes binds it to the account that is there.
-    expect(await h.dashboard.approve({ key })).toMatchObject({ ok: true, status: 'confirm_account', source: { id: FIXTURE_SOURCE_ID } });
+    expect(await h.dashboard.approve({ key })).toMatchObject({ ok: true, status: 'confirm_account', reconfirm: true, source: { id: FIXTURE_SOURCE_ID } });
+    // Keeping it apart is not an answer to this question: it asks again, still without importing.
+    expect(await h.dashboard.approve({ key, keepApart: true })).toMatchObject({ ok: true, status: 'confirm_account', reconfirm: true });
     expect(h.runtime.state.get(confirmed.archive_id)?.status).toBe('stopped');
     const again = await h.dashboard.approve({ key, confirmAccount: true });
     expect(again).toMatchObject({ ok: true, status: 'started', archive_id: confirmed.archive_id });

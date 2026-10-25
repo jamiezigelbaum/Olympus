@@ -102,7 +102,7 @@ export type ArchiveApproveResult =
    * owner, then approves again with `confirmAccount` (add it to the account) or
    * `keepApart` (keep it under Archives).
    */
-  | { ok: true; status: 'confirm_account'; name: string; source: { id: string; label: string } }
+  | { ok: true; status: 'confirm_account'; name: string; source: { id: string; label: string }; reconfirm?: true }
   | { ok: true; status: 'checking'; request_id: string; name: string }
   | { ok: true; status: 'already_imported'; archive_id: string; name: string; archive_name: string }
   | { ok: false; code: string; message: string; access?: { state: string; message: string; settings_url?: string } };
@@ -489,6 +489,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
             status: 'confirm_account',
             name,
             source: { id: source?.cardId ?? archive.target.source_id, label: named(source?.label ?? archive.target.source_id) },
+            // An import already in the source: the question has no "keep apart"; the picker words say where that is.
+            reconfirm: true,
           };
         }
         let again: ArchiveImportRecord | undefined;

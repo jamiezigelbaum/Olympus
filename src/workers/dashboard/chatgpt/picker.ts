@@ -123,7 +123,7 @@ export interface ChatGptArchivePickWords extends ChatGptFolderPickWords {
    * When the engine asks which account an export belongs to: the question, what
    * each answer does, and the two answers (`{name}` the file, `{source}` the source).
    */
-  account: { line: string; note: string; add: string; apart: string; addFor: string; apartFor: string; sourceFallback: string };
+  account: { line: string; note: string; add: string; apart: string; addFor: string; apartFor: string; sourceFallback: string; reconfirm: { line: string; note: string } };
 }
 
 /** What came of an archive choice (the approval's answer), for the caller's one line. */
@@ -445,7 +445,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         const source = content.source && typeof content.source === 'object' && typeof content.source.label === 'string' ? content.source.label : '';
         p.saving = false;
         p.savingKey = '';
-        p.confirm = { key, name: typeof content.name === 'string' && content.name ? content.name : name, source };
+        p.confirm = { key, name: typeof content.name === 'string' && content.name ? content.name : name, source, reconfirm: content.reconfirm === true };
         kit.render('picker:confirm');
         return;
       }
@@ -1326,11 +1326,11 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
         return control;
       };
       add(ask, add(el('div', 'banner-body'),
-        el('p', '', fill(words.line, { name, source })),
-        el('p', 'muted', fill(words.note, { name, source })),
+        el('p', '', fill(p.confirm.reconfirm ? words.reconfirm.line : words.line, { name, source })),
+        el('p', 'muted', fill(p.confirm.reconfirm ? words.reconfirm.note : words.note, { name, source })),
         add(el('div', 'actions'),
           answer({ confirm_account: true }, fill(words.add, { name, source }), fill(words.addFor, { name, source }), 'picker:confirm', 'main'),
-          answer({ keep_apart: true }, words.apart, fill(words.apartFor, { name, source }), 'picker:confirm-apart', 'plain'),
+          ...(p.confirm.reconfirm ? [] : [answer({ keep_apart: true }, words.apart, fill(words.apartFor, { name, source }), 'picker:confirm-apart', 'plain')]),
           kit.button(p.pick.words.chooseAnother, 'picker:confirm-other', () => {
             p.confirm = null;
             kit.render(p.path.length ? 'picker:up' : 'picker:back');

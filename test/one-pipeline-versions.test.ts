@@ -98,6 +98,20 @@ describe('every accepted version is classified and routed on its own', () => {
     }
   }
 
+  test('every accepted Secret version advances the version the item is judged against, even once its copy rows are gone: Secret v2, Secret v9, then ordinary v5 is refused and ordinary v10 is accepted', async () => {
+    const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
+    h.connectLive();
+    const run = async (name: string, records: FxRecord[]) => h.importAll(await h.startImport(name, records));
+    await run('s2.mbox', [rec('a', 2, `key two\n${KEY_MARKER}`)]);
+    await run('s9.mbox', [rec('a', 9, `key nine\n${KEY_MARKER}`)]);
+    expect(h.rows().filter((row) => row.providerItemId === 'a').map((row) => row.version)).not.toContain('2');
+    await run('o5.mbox', [rec('a', 5, 'ordinary five')]);
+    expect(h.textOf('a')).toBe('');
+    expect(everyStoredText(h)).not.toContain('PRIVATE KEY');
+    await run('o10.mbox', [rec('a', 10, 'ordinary ten')]);
+    expect(h.textOf('a')).toContain('ordinary ten');
+  });
+
   test('the two versions of an item that are both ordinary end as the later one, routed by its own verdict', async () => {
     const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
     h.connectLive();
