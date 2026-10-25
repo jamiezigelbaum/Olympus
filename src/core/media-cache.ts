@@ -44,10 +44,11 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { olympusDataDir } from './remote-access.ts';
+import { MEDIA_CACHE_DIR_ENV, mediaCacheRoot } from './olympus-layout.ts';
 import { SIPS_PATH } from '../workers/file-extraction/extractors/image-preparers.ts';
 import { readyStillImageFormats } from './still-image-readiness.ts';
 
-export const MEDIA_CACHE_DIR_ENV = 'OLYMPUS_MEDIA_CACHE_DIR';
+export { MEDIA_CACHE_DIR_ENV };
 /** The tool still images are prepared with on a Mac; it ships with macOS only. */
 export { SIPS_PATH };
 /** A file nothing holds is removed once it is older than this. */
@@ -82,7 +83,9 @@ export function stillImagePreparationAvailable(): boolean {
 export function mediaCacheDir(env: Record<string, string | undefined> = process.env): string {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   if (configured && !isAbsolute(configured)) throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
-  return configured ? join(configured, 'olympus-media') : join(olympusDataDir(env), 'media-cache');
+  // The path is the layout module's; without a named folder the data root must be absolute.
+  if (!configured) olympusDataDir(env);
+  return mediaCacheRoot(env);
 }
 
 const EXTENSIONS: Readonly<Record<string, string>> = { 'image/jpeg': '.jpg' };

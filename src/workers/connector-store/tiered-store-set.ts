@@ -531,10 +531,18 @@ export class TieredStoreSet {
        * or fail, its sync.
        */
       embed?: boolean;
+      /**
+       * false: do not settle the items already stored before this run (owner
+       * overrides, rule raises, names-only and row re-homing, below). The run
+       * does only what its own listing says, so a caller that lists a few
+       * deletions is not held up by settlement of unrelated items, which the
+       * next lane run and the sniffer's tick still do. Default true.
+       */
+      settle?: boolean;
     } = {},
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
-    await this.settleStoredItems();
+    if (options.settle !== false) await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];

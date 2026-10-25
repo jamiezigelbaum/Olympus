@@ -95,6 +95,13 @@ export interface LocalFilesProviderStoreSyncHandlerOptions {
   ignore?: readonly string[];
   tierSet?: TieredStoreSet;
   embeddingProvider?: SourceEmbeddingProvider;
+  /**
+   * Asked before each pass. The worker's clean-up of what an earlier version
+   * indexed inside Olympus's own folders (own-roots-cleanup.ts) rides here, so
+   * a clean-up that did not finish at start goes on with the next pass. A
+   * refusal to run never stops the pass.
+   */
+  beforePull?: () => Promise<unknown>;
   /** Test seam. */
   pageSize?: number;
 }
@@ -119,21 +126,13 @@ export function localFilesConnectorIdForScope(
   return `local.files.${hash}`;
 }
 
-export function createLocalFilesProviderStoreSyncHandler(
-  options: LocalFilesProviderStoreSyncHandlerOptions,
-): LocalFilesProviderStoreSyncHandler {
-  if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
-    throw new Error('Local files secure_local embeddings require a local/private or approved Venice embedding provider.');
-  }
-  const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec('secure_local')?.store !== options.store) {
-    throw new Error('The local files tier set\'s secure leg must be the lane\'s own store.');
-  }
-  const connectorIdFor = (approvedScopeKey: string): string => localFilesConnectorIdForScope(approvedScopeKey, options.scope);
-
-  // A deleted path names a file or a whole folder whose items may sit in any
-  // tier store, one item possibly in several (a names copy and a content copy).
-  const storeView: LocalFilesStoreView = tierSet
+/**
+ * The store's side of a deletion: which indexed items a deleted path stands
+ * for. A deleted path names a file or a whole folder whose items may sit in any
+ * tier store, one item possibly in several (a names copy and a content copy).
+ */
+export function localFilesStoreView(store: LocalConnectorStore, tierSet?: TieredStoreSet): LocalFilesStoreView {
+  return tierSet
     ? {
         activeIdentityForLocatorIfIndexed(input) {
           for (const domain of TIER_DOMAIN_ORDER) {
@@ -165,16 +164,34 @@ export function createLocalFilesProviderStoreSyncHandler(
         },
       }
     : {
-        activeIdentityForLocatorIfIndexed: (input) => options.store.activeIdentityForLocatorIfIndexed(input),
-        activeItemsUnderLocatorIfIndexed: (input) => options.store.activeItemsUnderLocatorIfIndexed(input),
-        activeItemsDirectlyUnderRootIfIndexed: (input) => options.store.activeItemsDirectlyUnderRootIfIndexed(input),
-        lookupsReady: () => options.store.locatorIdentityIndexReady(),
+        activeIdentityForLocatorIfIndexed: (input) => store.activeIdentityForLocatorIfIndexed(input),
+        activeItemsUnderLocatorIfIndexed: (input) => store.activeItemsUnderLocatorIfIndexed(input),
+        activeItemsDirectlyUnderRootIfIndexed: (input) => store.activeItemsDirectlyUnderRootIfIndexed(input),
+        lookupsReady: () => store.locatorIdentityIndexReady(),
       };
+}
+
+export function createLocalFilesProviderStoreSyncHandler(
+  options: LocalFilesProviderStoreSyncHandlerOptions,
+): LocalFilesProviderStoreSyncHandler {
+  if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
+    throw new Error('Local files secure_local embeddings require a local/private or approved Venice embedding provider.');
+  }
+  const tierSet = options.tierSet;
+  if (tierSet && tierSet.legSpec('secure_local')?.store !== options.store) {
+    throw new Error('The local files tier set\'s secure leg must be the lane\'s own store.');
+  }
+  const connectorIdFor = (approvedScopeKey: string): string => localFilesConnectorIdForScope(approvedScopeKey, options.scope);
+
+  const storeView = localFilesStoreView(options.store, tierSet);
 
   return {
     connectorIdForScope: connectorIdFor,
 
     async pull(request): Promise<LocalFilesProviderStoreTaskOutcome> {
+      if (options.beforePull) {
+        try { await options.beforePull(); } catch { /* the pass goes on; the clean-up is asked again at the next */ }
+      }
       const approvedScopeKey = request.approved_scope_key.trim();
       const root = localFilesRootOfApprovedScopeKey(approvedScopeKey);
       const connectorId = connectorIdFor(approvedScopeKey);
