@@ -12351,7 +12351,7 @@ var TIER_LEDGER_SQLITE_STORE_ID = "olympus_tier_ledger", TIER_LEDGER_FILE_SUFFIX
 
 // src/workers/classification/tier-ledger.ts
 import { Database } from "bun:sqlite";
-import { chmodSync as chmodSync2, closeSync as closeSync6, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync6 } from "node:fs";
+import { chmodSync as chmodSync2, closeSync as closeSync6, existsSync as existsSync10, mkdirSync as mkdirSync9, openSync as openSync6, statSync as statSync7 } from "node:fs";
 import { dirname as dirname13 } from "node:path";
 function tierLedgerConversationKey(identity) {
   return identity.providerConversationId ?? "";
@@ -13215,17 +13215,23 @@ class TierLedger {
       throw new Error("Tier ledger has no identity.");
     return row.value;
   }
-  static readLedgerId(dbPath) {
+  static readLedgerId(dbPath, options = {}) {
     if (dbPath === ":memory:" || !existsSync10(dbPath))
       return;
-    for (const mode of [{ readwrite: true, create: false }, { readonly: true, create: false }]) {
+    const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 1e4));
+    for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }]) {
+      if ("readwrite" in mode && hasUnmergedWrites(dbPath))
+        return;
       let db;
       try {
         db = new Database(dbPath, mode);
-        db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+        db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
         const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
         return typeof row?.value === "string" && row.value !== "" ? row.value : undefined;
-      } catch {} finally {
+      } catch (error) {
+        if (isSqliteBusy2(error))
+          return;
+      } finally {
         if (db)
           closeSqliteStore(db, { checkpoint: false });
       }
@@ -14332,6 +14338,17 @@ class TierLedger {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(...idParams(identity), generation, metadataTier, contentTier, decidedBy, reasonsJson, state, decidedAt);
   }
+}
+function isSqliteBusy2(error) {
+  const { code, errno } = error ?? {};
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || errno === 5 || errno === 6;
+}
+function hasUnmergedWrites(dbPath) {
+  try {
+    if (statSync7(`${dbPath}-wal`).size > 0)
+      return true;
+  } catch {}
+  return existsSync10(`${dbPath}-journal`);
 }
 function proposalFromRow(row) {
   return {
@@ -16694,7 +16711,7 @@ var init_source_registry = __esm(() => {
 });
 
 // src/core/store-identity.ts
-import { existsSync as existsSync11, realpathSync as realpathSync3, statSync as statSync7 } from "node:fs";
+import { existsSync as existsSync11, realpathSync as realpathSync3, statSync as statSync8 } from "node:fs";
 import { basename as basename3, dirname as dirname14, isAbsolute as isAbsolute8, join as join15, relative as relative3, resolve as resolve6, sep as sep3 } from "node:path";
 function layoutPath(identity, layout, env) {
   if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
@@ -16904,7 +16921,7 @@ function isEarlier(held, current2) {
 }
 function isMissing(path) {
   try {
-    statSync7(path);
+    statSync8(path);
     return false;
   } catch (error) {
     const code = error?.code;
@@ -16935,7 +16952,7 @@ import {
   renameSync as renameSync4,
   rmSync as rmSync5,
   rmdirSync,
-  statSync as statSync8,
+  statSync as statSync9,
   writeFileSync as writeFileSync4
 } from "node:fs";
 import { basename as basename4, dirname as dirname15, isAbsolute as isAbsolute9, join as join16, resolve as resolve7 } from "node:path";
@@ -17016,7 +17033,7 @@ function sweepMediaCache(dir, options = {}) {
   const placement = storePlacementView(options.env ?? process.env);
   const old = (path) => {
     try {
-      return now - statSync8(path).mtimeMs > maxAgeMs;
+      return now - statSync9(path).mtimeMs > maxAgeMs;
     } catch {
       return false;
     }
@@ -18969,7 +18986,7 @@ var init_media_judge = __esm(() => {
 
 // src/workers/connector-store/local-index.ts
 import { createHash as createHash11, randomUUID as randomUUID5 } from "node:crypto";
-import { existsSync as existsSync18, lstatSync as lstatSync7, mkdirSync as mkdirSync13, statSync as statSync9 } from "node:fs";
+import { existsSync as existsSync18, lstatSync as lstatSync7, mkdirSync as mkdirSync13, statSync as statSync10 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
 import { Database as Database5 } from "bun:sqlite";
 function connectorStoreMigrations() {
@@ -21075,7 +21092,7 @@ function fileIdentity(path) {
   if (path === ":memory:" || path === "")
     return;
   try {
-    const stat2 = statSync9(path);
+    const stat2 = statSync10(path);
     return { dev: stat2.dev, ino: stat2.ino };
   } catch {
     return;
@@ -21385,8 +21402,14 @@ var init_local_index = __esm(() => {
       if (found === undefined)
         throw new TierLedgerUnavailableError(this.corpusId);
       this.boundLedgerHandle?.close();
-      this.boundLedgerHandle = new TierLedger({ dbPath: found, now: this.now });
-      return this.boundLedgerHandle;
+      this.boundLedgerHandle = undefined;
+      const opened = new TierLedger({ dbPath: found, now: this.now });
+      if (!holdsBoundId(opened)) {
+        opened.close();
+        throw new TierLedgerUnavailableError(this.corpusId);
+      }
+      this.boundLedgerHandle = opened;
+      return opened;
     }
     tierSetLedgerPath() {
       const binding = this.tierSetBinding();
@@ -23559,8 +23582,8 @@ var init_local_index = __esm(() => {
         throw new Error("Connector store trust reconciliation requires two distinct stores.");
       }
       if (this.dbPath !== ":memory:" && options.stricter.dbPath !== ":memory:") {
-        const looserFile = statSync9(this.dbPath);
-        const stricterFile = statSync9(options.stricter.dbPath);
+        const looserFile = statSync10(this.dbPath);
+        const stricterFile = statSync10(options.stricter.dbPath);
         if (looserFile.dev === stricterFile.dev && looserFile.ino === stricterFile.ino) {
           throw new Error("Connector store trust reconciliation refuses one database as both stores.");
         }
@@ -27653,7 +27676,7 @@ var init_tier_content_purge = __esm(() => {
 });
 // src/workers/source-index/built-in-embedding/litert-runtime.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync19, statSync as statSync10 } from "node:fs";
+import { existsSync as existsSync19, statSync as statSync11 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
 import { delimiter as delimiter2, dirname as dirname21, isAbsolute as isAbsolute10, join as join19 } from "node:path";
 import { createInterface } from "node:readline";
@@ -27889,7 +27912,7 @@ function resolveBun() {
     if (!candidate || !isAbsolute10(candidate))
       continue;
     try {
-      if (statSync10(candidate).isFile())
+      if (statSync11(candidate).isFile())
         return candidate;
     } catch {}
   }
@@ -29507,7 +29530,7 @@ function captureGrantSessionEvidence(source, grantPath) {
 var init_messaging_capture_grant_file = () => {};
 
 // src/core/source-placement.ts
-import { accessSync as accessSync2, constants as constants3, lstatSync as lstatSync9, statSync as statSync11 } from "node:fs";
+import { accessSync as accessSync2, constants as constants3, lstatSync as lstatSync9, statSync as statSync12 } from "node:fs";
 import { resolve as resolve8, sep as sep4 } from "node:path";
 function hasFolderLayout(sourceId) {
   return FOLDER_LAYOUT_SOURCES.includes(sourceId);
@@ -29627,7 +29650,7 @@ function dataRootState(env) {
   }
   try {
     const link = lstatSync9(root);
-    const target = link.isSymbolicLink() ? statSync11(root) : link;
+    const target = link.isSymbolicLink() ? statSync12(root) : link;
     if (!target.isDirectory())
       return "unreadable";
     accessSync2(root, constants3.R_OK | constants3.X_OK);
@@ -48551,6 +48574,7 @@ class TierSnifferService {
   lastTick;
   stopped = false;
   ledgers = new Map;
+  boundLedgerIds = new Map;
   rejudgeCursors = new Map;
   constructor(options) {
     this.options = options;
@@ -48606,6 +48630,12 @@ class TierSnifferService {
       try {
         db = new Database6(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+        const expectedId = this.boundLedgerIds.get(ledgerPath);
+        if (expectedId !== undefined) {
+          const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get();
+          if (row?.value !== expectedId)
+            continue;
+        }
         const path = tierSnifferPathForLedger(ledgerPath);
         const hasQueue = existsSync27(path);
         if (hasQueue)
@@ -48807,9 +48837,13 @@ class TierSnifferService {
       if (store.dbPath === ":memory:")
         continue;
       try {
-        const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : store.tierSetBinding?.()?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync27(bound))
+        const binding = store.tierSetBinding?.();
+        const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
+        if (bound && bound !== ":memory:" && existsSync27(bound)) {
           paths.add(bound);
+          if (binding?.ledgerId)
+            this.boundLedgerIds.set(bound, binding.ledgerId);
+        }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
       if (existsSync27(own3))
@@ -48821,6 +48855,11 @@ class TierSnifferService {
     let ledger = this.ledgers.get(path);
     if (!ledger) {
       ledger = new TierLedger({ dbPath: path, ...this.options.now ? { now: this.options.now } : {} });
+      const expectedId = this.boundLedgerIds.get(path);
+      if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
+        ledger.close();
+        throw new Error("The tier ledger at this path is not the one its store is bound to.");
+      }
       this.ledgers.set(path, ledger);
     }
     return ledger;
@@ -48885,7 +48924,12 @@ class TierSnifferService {
     const rejudged = this.rejudge();
     const targets = [];
     for (const ledgerPath of this.ledgerPaths()) {
-      const ledger2 = this.ledgerAt(ledgerPath);
+      let ledger2;
+      try {
+        ledger2 = this.ledgerAt(ledgerPath);
+      } catch {
+        continue;
+      }
       const planner = tierSetPlannerForLedger(ledgerPath);
       targets.push({
         ledger: ledger2,
