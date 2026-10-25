@@ -157,12 +157,19 @@ export function filePassed(result: FileResult): boolean {
  * running ones (SIGTERM, then SIGKILL after `graceMs`; a second signal kills at
  * once). Returns the lane's exit code.
  */
+export interface PoolOptions {
+  /** How long a running file gets after SIGTERM before SIGKILL. */
+  graceMs?: number;
+  /** Removes a file's throwaway HOME; replaceable so tests can make it fail. */
+  removeHome?: (home: string, file: string) => void;
+}
+
 export async function runFilePool(
   files: readonly string[],
   size: number,
   root: string,
   junitPath?: string,
-  graceMs = 5000,
+  { graceMs = 5000, removeHome = (home) => rmSync(home, { recursive: true, force: true }) }: PoolOptions = {},
 ): Promise<number> {
   const spool = mkdtempSync(join(tmpdir(), 'olympus-lane-pool-'));
   const results: FileResult[] = new Array(files.length);
@@ -223,7 +230,7 @@ export async function runFilePool(
       if (child) await child.exited;
     } finally {
       if (child) running.delete(child);
-      if (home) rmSync(home, { recursive: true, force: true });
+      if (home) removeHome(home, file);
     }
     results[index] = result;
     done += 1;

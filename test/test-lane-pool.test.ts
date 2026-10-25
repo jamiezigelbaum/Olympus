@@ -9,7 +9,7 @@
 // did not have.
 
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -128,37 +128,23 @@ describe('fast lane pool', () => {
   }, 30_000);
 
   test('a runner error after a file (its HOME cannot be removed) ends the running files and fails the lane', async () => {
-    const marks = mkdtempSync(join(tmpdir(), 'lane-pool-cleanup-'));
     const root = fixtureRoot({
-      // Leaves an undeletable directory in its own throwaway HOME.
-      'locks-home.test.ts':
-        `import { test } from 'bun:test';\nimport { chmodSync, mkdirSync, writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\n` +
-        `test('locks its HOME', () => {\n` +
-        `  const dir = join(process.env.HOME!, 'locked');\n` +
-        `  mkdirSync(dir); writeFileSync(join(dir, 'f'), 'x'); chmodSync(dir, 0o500);\n` +
-        `  writeFileSync(${JSON.stringify(join(marks, 'locked'))}, dir);\n` +
-        `});\n`,
+      'cleanup-fails.test.ts': `import { test } from 'bun:test';\ntest('passes', () => {});\n`,
       'slow.test.ts': `import { test } from 'bun:test';\ntest('runs long', async () => { await Bun.sleep(20_000); }, 30_000);\n`,
       'queued.test.ts': `import { test } from 'bun:test';\ntest('never runs', () => { throw new Error('ran'); });\n`,
     });
-    let locked = '';
-    try {
-      const begin = Date.now();
-      const code = await runFilePool(['slow.test.ts', 'locks-home.test.ts', 'queued.test.ts'], 2, root, 'fast.xml', 300);
-      locked = readFileSync(join(marks, 'locked'), 'utf8');
-      expect(code).toBe(1);
-      expect(Date.now() - begin).toBeLessThan(15_000);
-      const report = readFileSync(join(root, 'fast.xml'), 'utf8');
-      expect(report).toContain('test/locks-home.test.ts');
-      expect(report).toMatch(/message="runner error: [^"]*"/);
-      expect(report).toContain('message="killed by SIGTERM, no readable JUnit report"');
-      expect(report).not.toContain('never runs');
-    } finally {
-      if (locked) {
-        chmodSync(locked, 0o700);
-        rmSync(join(locked, '..'), { recursive: true, force: true });
-      }
-    }
+    const removeHome = (home: string, file: string) => {
+      rmSync(home, { recursive: true, force: true });
+      if (file === 'cleanup-fails.test.ts') throw new Error('EACCES: injected cleanup failure');
+    };
+    const begin = Date.now();
+    const code = await runFilePool(['slow.test.ts', 'cleanup-fails.test.ts', 'queued.test.ts'], 2, root, 'fast.xml', { graceMs: 300, removeHome });
+    expect(code).toBe(1);
+    expect(Date.now() - begin).toBeLessThan(15_000);
+    const report = readFileSync(join(root, 'fast.xml'), 'utf8');
+    expect(report).toContain('message="runner error: EACCES: injected cleanup failure, no readable JUnit report"');
+    expect(report).toContain('message="killed by SIGTERM, no readable JUnit report"');
+    expect(report).not.toContain('never runs');
   }, 30_000);
 
   test('a signal stops new files, ends a running one that ignores SIGTERM, and fails the lane', async () => {
@@ -175,7 +161,7 @@ describe('fast lane pool', () => {
     });
     const pool = join(import.meta.dir, '..', 'scripts', 'test-lane-pool.ts');
     const coordinator = Bun.spawn(
-      ['bun', '-e', `import { runFilePool } from ${JSON.stringify(pool)}; process.exit(await runFilePool(['stubborn.test.ts', 'never.test.ts'], 1, ${JSON.stringify(root)}, 'fast.xml', 300));`],
+      ['bun', '-e', `import { runFilePool } from ${JSON.stringify(pool)}; process.exit(await runFilePool(['stubborn.test.ts', 'never.test.ts'], 1, ${JSON.stringify(root)}, 'fast.xml', { graceMs: 300 }));`],
       { stdout: 'pipe', stderr: 'pipe' },
     );
     let fixturePid = 0;
