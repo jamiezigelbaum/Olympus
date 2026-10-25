@@ -30,13 +30,16 @@ export interface Plant {
 
 /** Page-side helpers every plant script starts with: visible elements, and leaf lines of text a person reads as a status. */
 const HELPERS = String.raw`
-  const visible = (el) => { const box = el.getBoundingClientRect(); const style = getComputedStyle(el); return box.width > 0 && box.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && !el.closest('details:not([open]) > :not(summary)'); };
+  // More than a pixel each way: text kept for screen readers only sits in a 1 px box, and a bug planted there would not show.
+  const visible = (el) => { const box = el.getBoundingClientRect(); const style = getComputedStyle(el); return box.width > 1 && box.height > 1 && style.visibility !== 'hidden' && style.display !== 'none' && !el.closest('details:not([open]) > :not(summary)'); };
   const own = (el) => Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join('').replace(/\s+/g, ' ').trim();
   const main = document.querySelector('main') || document.body;
   const leaves = () => Array.from(main.querySelectorAll('p, span, div, li, small, strong, b, h1, h2, h3, summary, label')).filter((el) => visible(el) && own(el).length >= 6 && !el.closest('button, a, textarea, input, select'));
   // A line under a row's name that says its state; else the first short line of ordinary text.
   const statusLine = () => { const lines = leaves().filter((el) => !/^(H1|H2|H3|SUMMARY|LABEL)$/.test(el.tagName)); return lines.find((el) => /^(Not connected|Ready|Connected|Checking|No archives)/.test(own(el))) || lines.find((el) => own(el).length >= 12 && own(el).length <= 90); };
   const hasContent = () => (document.body ? document.body.innerText.trim().length > 40 : false);
+  // The box a run of text is drawn in, which may be narrower than its element.
+  const textBox = (el) => { const range = document.createRange(); range.selectNodeContents(el); return range.getBoundingClientRect(); };
   // What was planted carries a mark, so the capture can tell when the page redrew itself and took the bug away.
   const mark = (el) => { el.setAttribute('data-rc-plant', ''); return true; };
 `;
@@ -69,13 +72,20 @@ export const PLANTS: readonly Plant[] = [
   },
   {
     id: 'text-overlap', kind: 'overlapping-text', heldOut: false,
-    what: 'a status line moved up over the line above it',
+    what: 'a line of text moved up over the line above it',
+    // 2026-10-25: moving the first status line up 13 px planted nothing where that line had no text above it (Keys, Ask). The line
+    // chosen now has another line just above it, is moved up half that line's height into it, and the plant checks they overlap.
     script: plant(String.raw`
-      const line = statusLine();
-      if (!line) return false;
-      line.style.position = 'relative';
-      line.style.top = '-13px';
-      return mark(line);`),
+      const lines = leaves().map((el) => ({ el, r: textBox(el) })).filter((line) => line.r.width > 0 && line.r.height > 0);
+      const pair = lines.flatMap((below) => lines.filter((above) => above.el !== below.el && !above.el.contains(below.el) && !below.el.contains(above.el)
+        && Math.min(above.r.right, below.r.right) - Math.max(above.r.left, below.r.left) > 20 && below.r.top - above.r.bottom >= 0 && below.r.top - above.r.bottom <= 24).map((above) => ({ above, below }))).sort((a, b) => a.below.r.top - b.below.r.top)[0];
+      if (!pair) return false;
+      const { above, below } = pair;
+      below.el.style.position = 'relative';
+      below.el.style.top = '-' + Math.round(below.r.top - above.r.top - above.r.height / 2) + 'px';
+      const moved = textBox(below.el);
+      if (Math.min(moved.bottom, above.r.bottom) - Math.max(moved.top, above.r.top) < 4) { below.el.style.position = ''; below.el.style.top = ''; return false; }
+      return mark(below.el);`),
   },
   {
     id: 'state-contradiction', kind: 'contradiction', heldOut: true,
@@ -93,11 +103,14 @@ export const PLANTS: readonly Plant[] = [
   {
     id: 'label-clipped', kind: 'clipped-text', heldOut: false,
     what: 'a heading cut off part-way through a word',
+    // 2026-10-25: 42% of the heading's box cut nothing where the heading's text was shorter than that (Keys). It is now 42% of the
+    // text itself, and the plant checks the text is cut.
     script: plant(String.raw`
       const heading = leaves().find((el) => /^(H1|H2|H3|STRONG|B|SUMMARY)$/.test(el.tagName) && own(el).length >= 8);
       if (!heading) return false;
-      const width = Math.max(30, Math.round(heading.getBoundingClientRect().width * 0.42));
+      const width = Math.max(30, Math.round(textBox(heading).width * 0.42));
       heading.style.cssText += ';display:inline-block;max-width:' + width + 'px;white-space:nowrap;overflow:hidden;vertical-align:bottom';
+      if (heading.scrollWidth <= heading.clientWidth + 1) return false;
       return mark(heading);`),
   },
   {

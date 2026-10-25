@@ -188,6 +188,8 @@ export interface LayoutScore {
   perPlant: Array<{ plant: string; rule: LayoutRule; looked: number; found: number }>;
   /** Findings on the pictures with nothing planted (each a false alarm or a real problem a person decides). */
   clean: Array<{ picture: string } & LayoutFinding>;
+  /** Rules no planted picture tested. */
+  unproven: LayoutRule[];
   /** Every planted bug caught on every picture, and nothing on the pictures with nothing planted. */
   qualified: boolean;
 }
@@ -211,7 +213,9 @@ export function scoreLayoutRules(pictures: ReadonlyArray<{ picture: string; plan
     perPlant.set(picture.plant, entry);
   }
   const plants = [...perPlant.values()];
-  return { perPlant: plants, clean, qualified: plants.length > 0 && plants.every((entry) => entry.found === entry.looked) && clean.length === 0 };
+  // Every rule is held to a bug planted for it: a plant that took on no page leaves its rule unproven.
+  const unproven = LAYOUT_RULES.filter((rule) => !plants.some((entry) => entry.rule === rule && entry.looked > 0));
+  return { perPlant: plants, clean, unproven, qualified: unproven.length === 0 && plants.every((entry) => entry.found === entry.looked) && clean.length === 0 };
 }
 
 /** The score as a check of the qualification run (never of a release). */
@@ -224,6 +228,7 @@ export function layoutQualificationCheck(score: LayoutScore): CheckResult {
     status: score.qualified ? 'pass' : 'fail',
     detail: score.perPlant.length === 0 ? 'no planted picture was measured' : [
       score.perPlant.map((entry) => `${entry.plant}: ${entry.found}/${entry.looked}`).join(', '),
+      ...(score.unproven.length ? [`no bug was planted for: ${score.unproven.join(', ')}`] : []),
       ...(missed.length ? [`missed: ${missed.join('; ')}`] : []),
       ...(alarms.length ? [`on pictures with nothing planted: ${alarms.join('; ')}`] : []),
     ].join('. ').slice(0, 2_000),

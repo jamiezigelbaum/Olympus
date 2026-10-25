@@ -47,20 +47,29 @@ describe('layout rules', () => {
   const picture = (plant: string | null, kind: string | null, layout?: LayoutFinding[]) => ({ picture: `keys-1280-dark/${plant ?? 'clean'}.png`, plant, kind, ...(layout ? { layout } : {}) });
 
   test('the rules qualify when every planted bug is caught by its rule and nothing is found where nothing was planted', () => {
-    const score = scoreLayoutRules([
+    const every = [
       picture(null, null, []),
       picture('font-monospace', 'monospace-text', [finding('monospace-text')]),
       picture('button-misaligned', 'misaligned-controls', [finding('misaligned-controls'), finding('faint-text')]),
+      picture('text-overlap', 'overlapping-text', [finding('overlapping-text')]),
+      picture('label-clipped', 'clipped-text', [finding('clipped-text')]),
+      picture('faint-text', 'faint-text', [finding('faint-text')]),
       // A reviewer's bug and a picture the rules never measured are not theirs to score.
       picture('developer-words', 'words', []),
       picture('label-clipped', 'clipped-text'),
-    ]);
+    ];
+    const score = scoreLayoutRules(every);
     expect(score.qualified).toBe(true);
-    expect(score.perPlant).toEqual([
-      { plant: 'font-monospace', rule: 'monospace-text', looked: 1, found: 1 },
-      { plant: 'button-misaligned', rule: 'misaligned-controls', looked: 1, found: 1 },
+    expect(score.unproven).toEqual([]);
+    expect(score.perPlant.map((entry) => [entry.plant, entry.rule, entry.looked, entry.found])).toEqual([
+      ['font-monospace', 'monospace-text', 1, 1], ['button-misaligned', 'misaligned-controls', 1, 1], ['text-overlap', 'overlapping-text', 1, 1],
+      ['label-clipped', 'clipped-text', 1, 1], ['faint-text', 'faint-text', 1, 1],
     ]);
-    expect(layoutQualificationCheck(score)).toMatchObject({ id: 'layout.qualification', status: 'pass', detail: 'font-monospace: 1/1, button-misaligned: 1/1' });
+    expect(layoutQualificationCheck(score)).toMatchObject({ id: 'layout.qualification', status: 'pass' });
+    // A rule with no bug planted for it on any page is unproven, however clean the rest.
+    const without = scoreLayoutRules(every.filter((item) => item.plant !== 'text-overlap'));
+    expect(without).toMatchObject({ qualified: false, unproven: ['overlapping-text'] });
+    expect(layoutQualificationCheck(without).detail).toContain('no bug was planted for: overlapping-text');
   });
 
   test('a missed bug, a finding of another rule, or a finding on a clean picture keeps them from qualifying, and says so', () => {

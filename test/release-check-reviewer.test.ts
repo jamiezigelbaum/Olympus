@@ -173,10 +173,22 @@ describe('in the report', () => {
   });
 });
 
-/** A dashboard-like page in a DOM, with boxes, the way the planted bugs meet the panel. */
+/**
+ * A dashboard-like page in a DOM, the way the planted bugs meet the panel, with a stand-in layout: every element a 200 x 24 px box,
+ * stacked in document order 6 px apart and moved by a relative `top`; a box with a max-width shows that much of its 200 px of text.
+ */
 function dashboardPage(): Window {
   const window = new Window({ url: 'http://127.0.0.1:8010/dashboard' });
-  (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = () => ({ left: 10, top: 10, width: 200, height: 24, right: 210, bottom: 34 });
+  type Styled = { style: { top: string; position: string; maxWidth: string }; ownerDocument: { querySelectorAll(selector: string): ArrayLike<unknown> } };
+  const box = (el: Styled) => {
+    const index = Array.from(el.ownerDocument.querySelectorAll('*')).indexOf(el);
+    const top = 10 + index * 30 + (el.style.position === 'relative' ? parseFloat(el.style.top) || 0 : 0);
+    return { left: 10, top, width: 200, height: 24, right: 210, bottom: top + 24 };
+  };
+  (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = function (this: Styled) { return box(this); };
+  (window.Range.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = function (this: { startContainer: Styled }) { return box(this.startContainer); };
+  Object.defineProperty(window.HTMLElement.prototype, 'scrollWidth', { configurable: true, get() { return 200; } });
+  Object.defineProperty(window.HTMLElement.prototype, 'clientWidth', { configurable: true, get(this: Styled) { return parseFloat(this.style.maxWidth) || 200; } });
   window.document.body.innerHTML = `<main class="page"><h1>Olympus</h1><h2>Sources</h2>
     <div class="row"><strong>Readwise</strong><p class="muted">Checking Readwise…</p><button>Sync now</button></div>
     <div class="row"><strong>Gmail</strong><p class="muted">Not connected</p><button>Connect</button></div>
