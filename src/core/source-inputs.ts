@@ -179,6 +179,8 @@ interface PageUnit {
   /** Records of the input's stream since its last page cursor, up to and including this unit's record. */
   record: number;
   entry: number;
+  /** The record's own item: the parent a child belongs to. */
+  parent: string;
   item: RawItem;
 }
 
@@ -290,7 +292,7 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 // Names alone do not bring a deleted item or a Secret back: it stays one, at the newer version.
                 ...(deleted || (before?.tombstoned === true && !hasContent(item)) ? { tombstoned: true as const } : {}),
               });
-              units.push({ record: offset + position, entry: index, item });
+              units.push({ record: offset + position, entry: index, parent: entries[0]!.identity.localItemId, item });
             });
           }
           // Each item of a page is reduced, on its own, to its newest accepted record: parents and children
@@ -325,9 +327,9 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
               });
               // The merged item resumes from the record that brought its content: a pass cut before it reads that
               // record again, so the content is never lost to the cut.
-              if (older) units[at] = { record: older.record, entry: older.entry, item: { ...won.item, content: older.item.content } };
+              if (older) units[at] = { record: older.record, entry: older.entry, parent: older.parent, item: { ...won.item, content: older.item.content } };
               // Names alone never revive a deleted item: after a deletion in this page it stays a deletion, at the newer version.
-              else if (deletion) units[at] = { record: deletion.record, entry: deletion.entry, item: { ...deletion.item, identity: { ...deletion.item.identity, ...(won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {}) } } };
+              else if (deletion) units[at] = { record: deletion.record, entry: deletion.entry, parent: deletion.parent, item: { ...deletion.item, identity: { ...deletion.item.identity, ...(won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {}) } } };
             }
             const kept = new Set(winner.values());
             for (const [at, unit] of units.entries()) {
@@ -339,7 +341,18 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
           }
           // An item is emitted before its children, whatever records they came from: a pass cut between them
           // must never leave a child stored ahead of the parent that decides whether it stays.
-          units = [...units.filter((unit) => unit.entry === 0), ...units.filter((unit) => unit.entry !== 0)];
+          const ordered: PageUnit[] = [];
+          const held = new Map<string, PageUnit[]>();
+          units.forEach((unit, at) => {
+            const parentLater = unit.entry !== 0 && units.some((other, later) => later > at && other.entry === 0 && other.item.identity.localItemId === unit.parent);
+            if (parentLater) {
+              held.set(unit.parent, [...(held.get(unit.parent) ?? []), unit]);
+              return;
+            }
+            ordered.push(unit);
+            if (unit.entry === 0) ordered.push(...(held.get(unit.item.identity.localItemId) ?? []));
+          });
+          units = ordered;
           input.observeIntake?.(outcomes);
           const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
           if (units.length > room) {
