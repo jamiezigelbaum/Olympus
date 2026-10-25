@@ -211,16 +211,21 @@ export const PROBE_SOURCE = String.raw`(() => {
         const heading = section ? Array.from(section.children).find((child) => child.tagName === 'H2' || child.tagName === 'SUMMARY') : null;
         const fix = el.closest('.fix, .source-actions') || el.parentElement;
         const reason = fix ? fix.querySelector('.reason') : null;
+        // Or the reasons right after the control's row (Privacy's Add buttons share one row, each reason a line below it).
+        const below = [];
+        for (let next = fix ? fix.nextElementSibling : null; next && next.classList.contains('reason'); next = next.nextElementSibling) below.push(clean(next.textContent));
+        // A heading's tag (On this computer's "Only here") is not part of the section's name.
+        const headingText = heading ? Array.from(heading.childNodes).filter((node) => !(node.classList && node.classList.contains('tag'))).map((node) => node.textContent).join(' ') : '';
         out.push({
           key: el.getAttribute('data-key'), tag, role: roleOf(el), name: nameOf(el), text: clean(el.textContent).slice(0, 120),
           disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
           visible: isVisible(el), expanded: el.getAttribute('aria-expanded'),
           // The reason shown beside the control, else the one it carries itself (a title or a description a screen reader reads).
-          reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : clean(el.getAttribute('aria-description') || el.getAttribute('title') || '').slice(0, 200),
+          reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : below.length > 0 ? below.join(' ').slice(0, 200) : clean(el.getAttribute('aria-description') || el.getAttribute('title') || '').slice(0, 200),
           rowName: rowName ? clean(rowName.textContent) : '', rowKind: row ? (row.classList.contains('source') ? 'source' : (row.classList.contains('need') ? 'need' : '')) : '',
           menuKey: menu ? menu.getAttribute('data-open-key') : '', href: el.getAttribute('href'),
           openKey: opener && !menu ? opener.getAttribute('data-open-key') : '',
-          section: heading ? clean(heading.textContent).split(/[:·—]/)[0].trim().slice(0, 40) : '',
+          section: clean(headingText).split(/[:·—]/)[0].trim().slice(0, 40),
         });
       }
       return out;
