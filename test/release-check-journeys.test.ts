@@ -12,7 +12,7 @@ import { findChange, outline } from '../scripts/release-check/visual-boxes.ts';
 import { journeyChecks, runJourney, type ElementInfo, type Journey, type JourneyDriver, type PageEvents } from '../scripts/release-check/journey.ts';
 import { PROBE_SOURCE, describeTarget, type WireTarget } from '../scripts/release-check/probe.ts';
 import { JOURNEYS, selectJourneys } from '../scripts/release-check/journeys.ts';
-import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL } from '../src/workers/dashboard/vocabulary.ts';
+import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_CHATGPT_PRIVACY_COPY as PRIVACY } from '../src/workers/dashboard/vocabulary.ts';
 import { DEFAULT_TOLERANCE, SCREENS, compareImages, APPROVAL_FILE, approvalDigestOf, compareScreens, maskScript, normaliseDynamicText, screenName, visualChecks } from '../scripts/release-check/visual.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
 import { buildReport, renderHtml, visualSection, type MachineReport } from '../scripts/release-check/report.ts';
@@ -184,6 +184,62 @@ describe('journey runner', () => {
   });
 });
 
+/** What the fake privacy settings get wrong, one fault at a time. */
+interface PrivacyFaults { leavesWithoutAsking?: boolean; discardKeeps?: boolean; acceptsAnySender?: boolean }
+
+/**
+ * The panel's privacy settings as a person meets them: Edit opens them, Cancel or Back asks before dropping unsaved changes,
+ * Discard changes drops them, and Add a sender takes only an address. Each fault breaks one of those.
+ */
+function privacyPanel(driver: DomDriver, faults: PrivacyFaults = {}): void {
+  const doc = driver.window.document;
+  let saved = { description: '', senders: [] as string[] };
+  let draft = { description: '', senders: [] as string[] };
+  let senderError = '';
+  const textarea = () => doc.querySelector('textarea') as unknown as { value: string } | null;
+  const input = () => doc.querySelector('input') as unknown as { value: string } | null;
+  const keep = () => { const area = textarea(); if (area) draft.description = area.value; };
+  const dashboard = () => { doc.body.innerHTML = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`; };
+  const main = (asking = false) => {
+    doc.body.innerHTML = `<main><button>${PRIVACY.back}</button>${asking ? `<div role="alert"><p>${PRIVACY.discardPrompt}</p><button>${PRIVACY.discard}</button><button>${PRIVACY.keep}</button></div>` : ''}
+      <h1>${PRIVACY.title}</h1><label><span>${PRIVACY.descriptionLabel}</span><textarea></textarea></label>
+      <ul>${draft.senders.map((sender) => `<li>${sender}</li>`).join('')}</ul><button>${PRIVACY.addSender}</button>
+      <button>${PRIVACY.save}</button><button>${PRIVACY.cancel}</button></main>`;
+    textarea()!.value = draft.description;
+  };
+  const sender = (value: string) => {
+    doc.body.innerHTML = `<main><button>${PRIVACY.backToPrivacy}</button><h1>${PRIVACY.senderTitle}</h1><p>${PRIVACY.senderIntro}</p>
+      <label><span>${PRIVACY.senderLabel}</span><input type="text">${senderError ? `<p role="alert">${senderError}</p>` : ''}</label><button>${PRIVACY.senderAdd}</button></main>`;
+    input()!.value = value;
+  };
+  const edited = () => draft.description !== saved.description || draft.senders.join() !== saved.senders.join();
+  const leave = () => { keep(); if (edited() && !faults.leavesWithoutAsking) main(true); else dashboard(); };
+  driver.pagesByPath['/dashboard'] = `<main><h2>${PANEL.sources}</h2><button>${PRIVACY.edit}</button></main>`;
+  driver.onPress.set(PRIVACY.edit, () => { draft = { description: saved.description, senders: [...saved.senders] }; main(); });
+  driver.onPress.set(PRIVACY.cancel, leave);
+  driver.onPress.set(PRIVACY.back, leave);
+  driver.onPress.set(PRIVACY.keep, () => { keep(); main(); });
+  driver.onPress.set(PRIVACY.discard, () => { if (faults.discardKeeps) saved = { description: draft.description, senders: [...draft.senders] }; dashboard(); });
+  driver.onPress.set(PRIVACY.addSender, () => { keep(); senderError = ''; sender(''); });
+  driver.onPress.set(PRIVACY.backToPrivacy, () => main());
+  driver.onPress.set(PRIVACY.senderAdd, () => {
+    const value = input()!.value.trim();
+    if (!faults.acceptsAnySender && !/^([^@\s]+@|@)[^@\s]+\.[^@\s]+$/.test(value)) { senderError = PRIVACY.senderInvalid; sender(value); return; }
+    draft.senders.push(value);
+    main();
+  });
+}
+
+/** The dashboard with its Models line, which opens to the lines inside it; `empty` opens to nothing. */
+function modelsPanel(driver: DomDriver, empty = false): void {
+  const summary = `${PANEL.models} — ${PANEL.modelBuiltIn} · ${PANEL.modelReady}`;
+  const render = (open: boolean) => `<main><h2>${PANEL.sources}</h2><details${open ? ' open' : ''}><summary>${summary}</summary>
+    <ul>${empty ? '' : `<li>${PANEL.modelSearch}: ${PANEL.modelBuiltIn}</li><li>${PANEL.modelAnswers}: ${PANEL.modelBuiltIn}</li>`}</ul></details></main>`;
+  let open = false;
+  driver.pagesByPath['/dashboard'] = render(false);
+  driver.onPress.set(summary, (document) => { open = !open; document.body.innerHTML = render(open); });
+}
+
 describe('the shipped journeys, on a DOM', () => {
   const find = (id: string): Journey => JOURNEYS.find((journey) => journey.id === id)!;
 
@@ -210,6 +266,47 @@ describe('the shipped journeys, on a DOM', () => {
     const bad = await runJourney(new DomDriver(leaky), find('no-public-tier'), options());
     expect(bad.ok).toBe(false);
     expect(bad.steps.find((step) => !step.ok)!.name).toContain('agents');
+  });
+
+  test('privacy-cancel-asks passes when leaving asks first and Discard changes keeps nothing, and FAILS when either is wrong', async () => {
+    const run = async (faults?: PrivacyFaults) => { const driver = new DomDriver({}); privacyPanel(driver, faults); return await runJourney(driver, find('privacy-cancel-asks'), options()); };
+    const good = await run();
+    expect(good.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
+    expect(good.ok).toBe(true);
+    const leaves = await run({ leavesWithoutAsking: true });
+    expect(leaves.ok).toBe(false);
+    expect(leaves.steps.find((step) => !step.ok)!.name).toBe('Press Cancel');
+    const keeps = await run({ discardKeeps: true });
+    expect(keeps.ok).toBe(false);
+    const failed = keeps.steps.find((step) => !step.ok)!;
+    expect(failed.name).toBe('Open the privacy settings again');
+    expect(failed.actual).toContain('the discarded edit was kept');
+  });
+
+  test('privacy-add-sender passes when only an address is taken and Discard changes drops it, and FAILS when it is not', async () => {
+    const run = async (faults?: PrivacyFaults) => { const driver = new DomDriver({}); privacyPanel(driver, faults); return await runJourney(driver, find('privacy-add-sender'), options()); };
+    const good = await run();
+    expect(good.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
+    const anything = await run({ acceptsAnySender: true });
+    expect(anything.ok).toBe(false);
+    expect(anything.steps.find((step) => !step.ok)!.name).toBe('Press Add');
+    const keeps = await run({ discardKeeps: true });
+    expect(keeps.ok).toBe(false);
+    expect(keeps.steps.find((step) => !step.ok)!.name).toBe('Open the privacy settings again');
+    const leaves = await run({ leavesWithoutAsking: true });
+    expect(leaves.steps.find((step) => !step.ok)!.name).toBe('Press Back with the sender unsaved');
+  });
+
+  test('models-section-opens passes when the Models line opens to its lines and closes again, and FAILS when it opens to nothing', async () => {
+    const good = new DomDriver({});
+    modelsPanel(good);
+    const passed = await runJourney(good, find('models-section-opens'), options());
+    expect(passed.steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.actual}`)).toEqual([]);
+    const empty = new DomDriver({});
+    modelsPanel(empty, true);
+    const failed = await runJourney(empty, find('models-section-opens'), options());
+    expect(failed.ok).toBe(false);
+    expect(failed.steps.find((step) => !step.ok)!.name).toBe('Press the Models line');
   });
 
   test('every journey has a source, steps with outcomes, and a unique id; the ones that change the install run last', () => {
