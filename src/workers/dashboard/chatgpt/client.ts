@@ -1135,14 +1135,14 @@ export function chatgptDashboardClient(
     const context = { id, label: String(source.label || id) };
     // Row buttons are all outlined; the accent belongs to the page's one primary action.
     // One fix per row: the Needs-you fix when there is one, else the source's own.
-    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary);
+    const fix = archiveFix(archives, item && item.fix ? item.fix : source.primary, id);
     const isSync = (entry: Any) => !!entry && entry.tool === config.syncTool;
     if (fix && !(checking && isSync(fix))) add(controls, fixControl(fix, 'primary:' + id, 'plain', true, context));
     // A press still checking: its button says so, disabled, in the row's place.
     if (checking) add(controls, checkingControl('primary:' + id));
     // The ⋯ menu keeps only secondary actions, never a copy of the row's fix,
     // and no second Sync now while one is checking.
-    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry: Any) => archiveFix(archives, entry)).filter((entry: Any) =>
+    const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry: Any) => archiveFix(archives, entry, id)).filter((entry: Any) =>
       (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
     // Under Other archives, Import another archive is the section's own button, always in sight, never in ⋯.
     if (other) {
@@ -1156,8 +1156,9 @@ export function chatgptDashboardClient(
     if (unpair) menu.push(unpair);
     // A source that reads its own exports imports them from its ⋯ menu (computer only).
     const own = archiveSourceMeta(id);
-    // It sits before Disconnect and Delete, which stay last.
-    if (own) {
+    // It sits before Disconnect and Delete, which stay last; never twice (an import-only source's card has it as its own fix).
+    const ownImport = (entry: Any) => !!entry && entry.archiveImport === true && entry.archiveSource === (own && own.sourceId);
+    if (own && !ownImport(fix) && !menu.some(ownImport)) {
       const destructive = menu.findIndex((entry: Any) => !!entry && entry.destructive === true);
       menu.splice(destructive < 0 ? menu.length : destructive, 0, { label: H.copy.archives.sourceImport.action, archiveImport: true, archiveSource: own.sourceId });
     }
@@ -1191,19 +1192,33 @@ export function chatgptDashboardClient(
   }
 
   // ---- archives (computer only) ----------------------------------------
-  /** The Archives row's list from the computer meta, when this is that row on the computer. */
-  function archivesMeta(id: string): Any {
+  /**
+   * Every list of imports the computer meta carries: the Archives row's, then
+   * each import-only source's card (Reflect, Roam: `archiveCards`), each named
+   * by its card (`sourceId`).
+   */
+  function archiveGroups(): Any[] {
     const meta = state.computerMeta;
-    if (!onComputer() || !meta || !meta.archives || typeof meta.archives !== 'object') return null;
-    const archives = meta.archives;
-    return archives.sourceId === id && Array.isArray(archives.archives) && Array.isArray(archives.requests) ? archives : null;
+    if (!onComputer() || !meta) return [];
+    const groups = [meta.archives].concat(Array.isArray(meta.archiveCards) ? meta.archiveCards : []);
+    return groups.filter((group: Any) => !!group && typeof group === 'object' && typeof group.sourceId === 'string'
+      && Array.isArray(group.archives) && Array.isArray(group.requests));
   }
 
-  /** On the computer the Archives row's Import an archive opens the picker in place, not this page again. */
-  function archiveFix(archives: Any, fix: Any): Any {
-    return archives && fix && fix.openHref === true && fix.label === H.copy.archives.importAction
-      ? { label: fix.label, archiveImport: true }
-      : fix;
+  /** A row's list of imports from the computer meta, when it is the Archives row or an import-only source's card. */
+  function archivesMeta(id: string): Any {
+    return archiveGroups().filter((group: Any) => group.sourceId === id)[0] || null;
+  }
+
+  /**
+   * On the computer the Archives row's Import another archive, and an import-only
+   * source's Import an archive, open the picker in place, not this page again.
+   */
+  function archiveFix(archives: Any, fix: Any, id: string): Any {
+    if (!fix || fix.openHref !== true) return fix;
+    if (archives && archives === state.computerMeta.archives && fix.label === H.copy.archives.importAction) return { label: fix.label, archiveImport: true };
+    const own = archiveSourceMeta(id);
+    return own && fix.label === H.copy.archives.sourceImport.action ? { label: fix.label, archiveImport: true, archiveSource: own.sourceId } : fix;
   }
 
   /**
@@ -1215,9 +1230,8 @@ export function chatgptDashboardClient(
    */
   function archiveNeedFix(item: Any): Any {
     const fix = item && item.fix;
-    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
     const id = item && typeof item.id === 'string' ? item.id : '';
-    if (!fix || typeof fix.label !== 'string' || !meta || typeof meta !== 'object') return fix;
+    if (!fix || typeof fix.label !== 'string' || archiveGroups().length === 0) return fix;
     if (id === 'archives:held') return { label: fix.label, archiveModels: true };
     if (id === 'archives:unreadable' || id === 'archives:scheduler' || id.indexOf('archive:') === 0 || id.indexOf('archive-request:') === 0) {
       return { label: fix.label, archiveFocus: id };
@@ -1311,11 +1325,10 @@ export function chatgptDashboardClient(
     const joined = onComputer() && state.computerMeta && Array.isArray(state.computerMeta.sourceImports) ? state.computerMeta.sourceImports : [];
     if (joined.some((group: Any) => !!group && !archiveSetting(group) && Array.isArray(group.imports)
       && group.imports.some((entry: Any) => !!entry && entry.status === 'importing'))) return true;
-    const meta = onComputer() && state.computerMeta ? state.computerMeta.archives : null;
-    if (!meta || typeof meta !== 'object') return false;
     // Imports this computer's settings keep from running are not moving.
-    return (!archiveSetting(meta) && Array.isArray(meta.archives) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
-      || (Array.isArray(meta.requests) && meta.requests.some((entry: Any) => !!entry && entry.status === 'checking'));
+    return archiveGroups().some((meta: Any) =>
+      (!archiveSetting(meta) && meta.archives.some((entry: Any) => !!entry && (entry.status === 'importing' || entry.status === 'removing')))
+      || meta.requests.some((entry: Any) => !!entry && entry.status === 'checking'));
   }
 
   /**
@@ -1369,7 +1382,8 @@ export function chatgptDashboardClient(
         ? meta.requests.filter((entry: Any) => entry && entry.id === args.request_id)[0]
         : null;
       const target = asked ? asked.archiveId : args && args.archive_id;
-      const removed = meta && Array.isArray(meta.archives) ? meta.archives.filter((entry: Any) => entry && entry.id === target)[0] : null;
+      // The archive may be on the Archives row or on an import-only source's card.
+      const removed = archiveGroups().flatMap((group: Any) => group.archives).filter((entry: Any) => entry && entry.id === target)[0] || null;
       return removed && typeof removed.name === 'string' ? fill(A.removing, { name: removed.name }) : '';
     }
     if (name === H.archiveStopTool) {

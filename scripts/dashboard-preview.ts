@@ -79,6 +79,7 @@ import {
   TELEGRAM_JSON_ARCHIVE_FORMAT,
   WHATSAPP_ARCHIVE_FORMAT,
   archiveFamilyProvider,
+  archiveSourceCards,
 } from '../src/core/archive-formats.ts';
 import { archivePickIntro } from '../src/workers/dashboard/vocabulary.ts';
 import type { SourceFamily } from '../src/core/source-index/types.ts';
@@ -737,6 +738,9 @@ function localFilesPreview(state: string) {
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
  *   archives-chat-whatsapp  a WhatsApp chat export imported: messages, a snapshot (not updated), and the two lists in plain words
  *   archives-notes-reflect  a Reflect export (a zip of Markdown notes) imported: notes, and what a notes export did not import or only read a certain way
+ *   archives-notes-evernote an Evernote export importing: notes and their attachments, one encrypted passage not read
+ * Reflect, Roam and Evernote are import-only sources (step 7): their imports show in their own card in
+ * Sources, not under Other archives (previewSplitArchives, as archive-import/dashboard.ts cardViews does).
  *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not imported, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
@@ -747,7 +751,7 @@ const ARCHIVE_STATES = [
   'archives-remove-request', 'archives-request-hidden',
   'archives-importing', 'archives-imported', 'archives-waiting', 'archives-stopped', 'archives-removing',
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
-  'archives-chat-whatsapp', 'archives-notes-reflect',
+  'archives-chat-whatsapp', 'archives-notes-reflect', 'archives-notes-evernote',
   'archives-nothing-imported',
   'archives-account-confirm', 'archives-account-request', 'archives-account-apart',
 ] as const;
@@ -809,7 +813,8 @@ function archivesPreview(state: string): SourceDashboardViewModel {
     sovereigntyEngine: engine,
     connectedHandleRegistry: registry([]),
     apiKeyAvailability: {},
-    importedArchives: previewImportedArchives(meta),
+    importedArchives: previewImportedArchives(previewSplitArchives(meta).archives),
+    importedArchivesByCard: Object.fromEntries(previewSplitArchives(meta).cards.map((card) => [card.sourceId, previewImportedArchives(card)])),
     now: NOW,
   });
 }
@@ -967,6 +972,22 @@ function previewImportedArchives(meta: ComputerArchivesMeta, extra: readonly Das
     importing: !meta.notRunning && waiting,
     ...(attention.length > 0 ? { attention } : {}),
   };
+}
+
+/**
+ * A state's list as the computer sends it: what stays under Other archives, and
+ * each import-only source's card with the imports of its formats (by format label).
+ */
+export function previewSplitArchives(meta: ComputerArchivesMeta): { archives: ComputerArchivesMeta; cards: ComputerArchivesMeta[] } {
+  const cardOfLabel = (label: string) => archiveSourceCards().find((card) => card.formats.some((format) => format.label === label));
+  const cards = archiveSourceCards().map((card): ComputerArchivesMeta => ({
+    sourceId: card.id,
+    privateModel: meta.privateModel,
+    archives: meta.archives.filter((entry) => cardOfLabel(entry.format)?.id === card.id),
+    requests: [],
+    ...(meta.notRunning ? { notRunning: meta.notRunning } : {}),
+  }));
+  return { archives: { ...meta, archives: meta.archives.filter((entry) => !cardOfLabel(entry.format)) }, cards };
 }
 
 /** The Archives row's list for an archives-* state: invented names, never anyone's files. */
@@ -1143,6 +1164,28 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       ],
       skipped: [{ kind: 'note_empty', count: 17 }],
     });
+  } else if (state === 'archives-notes-evernote') {
+    // An invented Evernote export: notes, their pictures and files listed as items of their own, one encrypted passage not read.
+    archives.push({
+      ...takeout,
+      id: '2b4d6f80-1a3c-4e5f-8b9d-0c1e2f3a4b5c',
+      name: 'Field notes.enex',
+      format: 'Evernote export (.enex)',
+      family: 'note',
+      where: '~/Downloads',
+      status: 'importing',
+      percent: 64,
+      items: 2_310,
+      judged: 1_480,
+      held: 830,
+      earliest: '2012-03-19',
+      latest: '2024-08-02',
+      gaps: [
+        { kind: 'note_content_unsupported', count: 1 },
+        { kind: 'media_not_imported', count: 4 },
+      ],
+      skipped: [{ kind: 'note_empty', count: 9 }],
+    });
   } else if (state === 'archives-empty') {
     const { earliest: _earliest, latest: _latest, ...dated } = takeout;
     archives.push({ ...dated, name: 'Empty notes.json', format: 'Reflect notes (JSON)', family: 'note', items: 0, judged: 0, held: 0 });
@@ -1232,7 +1275,11 @@ export function previewArchiveSources(state: string): ComputerArchiveSourceMeta[
   if (!state.startsWith('archives-') && !isSourceImportState(state)) return undefined;
   // While the list of imports cannot be read, no card imports (dashboard.ts archiveSources).
   if (state === 'archives-unreadable') return undefined;
-  return PREVIEW_ARCHIVE_SOURCES.map((entry) => ({ sourceId: entry.sourceId, label: entry.label, intro: archivePickIntro(entry.formats) }));
+  return [
+    ...PREVIEW_ARCHIVE_SOURCES.map((entry) => ({ sourceId: entry.sourceId, label: entry.label, intro: archivePickIntro(entry.formats) })),
+    // Import-only sources, as the format registry names them (dashboard.ts archiveSources).
+    ...archiveSourceCards().map((card) => ({ sourceId: card.id, label: card.label, intro: archivePickIntro(card.formats) })),
+  ];
 }
 
 /**
@@ -1676,7 +1723,9 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
         indexFaster: { on: indexFasterOn },
         ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
         ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
-        ...(previewArchivesMeta(state) ? { archives: previewArchivesMeta(state) } : {}),
+        ...(previewArchivesMeta(state) ? { archives: previewSplitArchives(previewArchivesMeta(state)!).archives } : {}),
+        ...(previewArchivesMeta(state) && previewSplitArchives(previewArchivesMeta(state)!).cards.some((card) => card.archives.length > 0)
+          ? { archiveCards: previewSplitArchives(previewArchivesMeta(state)!).cards.filter((card) => card.archives.length > 0) } : {}),
         ...(previewSourceImports(state) ? { sourceImports: previewSourceImports(state) } : {}),
         ...(previewArchiveSources(state) ? { archiveSources: previewArchiveSources(state) } : {}),
       },

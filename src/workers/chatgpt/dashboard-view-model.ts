@@ -19,6 +19,7 @@
 import type { ModelSetupView } from '../../core/model-setup.ts';
 import { formatSpaceToFree, modelInstallSpaceToFree } from '../../core/model-install-failure.ts';
 import {
+  OPEN_ARCHIVES_SOURCE_ID,
   OPEN_CONNECT_SOURCES,
   openPageUrl,
   openUnreadableSourceFor,
@@ -281,7 +282,9 @@ export function buildChatGptDashboardViewModel(
     .filter(({ status }) => status === 'Needs you' || status === 'Failing')
     .flatMap(({ definition, card, actionKind, connecting, progress, sync }) => (card.connection.imports_attention?.length
       ? card.connection.imports_attention.map(importAttentionItem)
-      : [attentionItem(definition, card, actionKind, degraded, connecting, progress, sync)]));
+      : [attentionItem(definition, card, actionKind, degraded, connecting, progress, sync)]))
+    // The same import can be said by two cards (the list of imports cannot be read): once is enough.
+    .filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index);
 
   // Models are status only in ChatGPT (owner decision 2026-10-01): a
   // configured model's fix is to check again; a built-in install that failed
@@ -1051,7 +1054,9 @@ function oauthSource(definition: DashboardSupportedSourceDefinition): ChatGptOAu
 function connectFix(definition: DashboardSupportedSourceDefinition): DashboardFix {
   // An archive is chosen on the computer it is on: the dashboard there.
   if (definition.connect_action.kind === 'archive_import') {
-    return helpLinkFix(CHATGPT_SETUP_LABELS.importArchive, openPageUrl({ kind: 'dashboard' }));
+    // Other archives imports any export; an import-only source's card (Reflect, Roam), its own exports.
+    const label = definition.source_id === OPEN_ARCHIVES_SOURCE_ID ? CHATGPT_SETUP_LABELS.importArchive : DASHBOARD_ARCHIVE_COPY.sourceImport.action;
+    return helpLinkFix(label, openPageUrl({ kind: 'dashboard' }));
   }
   const source = oauthSource(definition);
   return source
@@ -1345,7 +1350,7 @@ export function scrubCard(definition: DashboardSupportedSourceDefinition, card: 
       // Instructions, redirect URIs and client ids stay on the Mac. Import an
       // archive carries none of them, and its kind words the row's line.
       action: card.connection.action.kind === 'archive_import'
-        ? { kind: 'archive_import', label: 'Import another archive' }
+        ? { kind: 'archive_import', label: card.connection.action.label === 'Import an archive' ? 'Import an archive' : 'Import another archive' }
         : { kind: 'none' },
       handles: [],
       ...(pending && finite(pending.expires_in_minutes)
