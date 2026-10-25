@@ -11,6 +11,13 @@
 // receipts in config/source-pipeline-contract-version.json. No change may
 // invent parallel types or branch on a specific source/question downstream of
 // SourceConnector.
+//
+// Version 2.2.0 (docs/design/archive-live-one-dataset.md) lets a source's one
+// connector read more than one input: the live reader and each imported
+// archive, each with its own cursor, through the same record-to-item code, with
+// a per-record intake rule decided against what the store holds and a
+// per-item hold until the private model has judged. 2.1.0 added child items;
+// 2.0.0 moved the tier decision out of the connector.
 
 import type {
   SourceFamily,

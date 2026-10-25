@@ -21,7 +21,7 @@ const ledger = JSON.parse(
 describe('versioned source-pipeline contracts', () => {
   test('current shapes match the latest complete version entry', () => {
     const latest = validateContractVersion(sources, ledger);
-    expect(latest.version).toBe('2.1.0');
+    expect(latest.version).toBe('2.2.0');
     expect(latest.fingerprint).toBe(contractFingerprint(sources));
   });
 
@@ -34,7 +34,7 @@ describe('versioned source-pipeline contracts', () => {
     const changed = { ...sources, contracts: sources.contracts.replace('question: string;', 'question: string;\n  locale?: string;') };
     const incomplete = structuredClone(ledger);
     incomplete.history.push({
-      version: '2.2.0',
+      version: '2.3.0',
       fingerprint: contractFingerprint(changed),
       recordedAt: '2026-08-29',
       compatibility: '',
@@ -49,7 +49,7 @@ describe('versioned source-pipeline contracts', () => {
     const changed = { ...sources, contracts: sources.contracts.replace('question: string;', 'question: string;\n  locale?: string;') };
     const updated = structuredClone(ledger);
     updated.history.push({
-      version: '2.2.0',
+      version: '2.3.0',
       fingerprint: contractFingerprint(changed),
       recordedAt: '2026-08-29',
       compatibility: 'Optional field; existing producers and consumers remain compatible.',
@@ -57,7 +57,7 @@ describe('versioned source-pipeline contracts', () => {
       evalReceipt: 'Fixture receipt for gate behavior.',
       reviewReceipt: 'Fixture independent review receipt.',
     });
-    expect(validateContractVersion(changed, updated).version).toBe('2.2.0');
+    expect(validateContractVersion(changed, updated).version).toBe('2.3.0');
   });
 
   test('reachable imported type drift is rejected without a new version entry', () => {
@@ -181,5 +181,33 @@ describe('versioned source-pipeline contracts', () => {
       '}',
     ].join('\n');
     expect(() => extractExportDeclaration(merged, 'EvidencePack')).toThrow(/declared 2 times/);
+  });
+
+  test('2.2.0: the inputs, the lookup and the per-item hold are part of the fingerprint', () => {
+    const drift = (from: string, to: string) => {
+      expect(sources.contracts).toContain(from);
+      return contractFingerprint({ ...sources, contracts: sources.contracts.replace(from, to) });
+    };
+    const base = contractFingerprint(sources);
+    expect(drift('holdContentUntilJudged?: true;', 'holdContentUntilJudged?: boolean;')).not.toBe(base);
+    expect(drift('forInput?(input: SourceConnectorInput): SourceConnector;', 'forInput?(input: SourceConnectorInput): void;')).not.toBe(base);
+    expect(drift('storedItem?: StoredItemLookup;', 'storedItem?: () => undefined;')).not.toBe(base);
+    expect(drift('export type SourceInputKind = \'live\' | \'archive\';', 'export type SourceInputKind = \'live\' | \'archive\' | \'other\';')).not.toBe(base);
+    expect(drift('hasContent: boolean;', 'hasContent?: boolean;')).not.toBe(base);
+  });
+
+  test('2.2.0: every addition is optional, so a 2.1.0 connector and consumer still satisfy the interfaces', () => {
+    // The interface members the 2.2.0 entry adds are all optional or new types: none can break a producer or consumer that ignores them.
+    for (const added of ['holdContentUntilJudged?:', 'storedItem?:', 'forInput?(']) {
+      expect(sources.contracts).toContain(added);
+    }
+    const connector = extractExportDeclaration(sources.contracts, 'SourceConnector');
+    expect(connector).toContain('forInput?');
+    expect(connector).not.toMatch(/\bforInput\(/);
+    const listOptions = extractExportDeclaration(sources.contracts, 'SourceConnectorListOptions');
+    expect(listOptions).toContain('storedItem?');
+    const entry = ledger.history.at(-1)!;
+    expect(entry.compatibility).toContain('Additive and optional');
+    expect(entry.evalReceipt).toContain('no exception is claimed');
   });
 });

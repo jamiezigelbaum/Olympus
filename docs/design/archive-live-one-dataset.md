@@ -267,11 +267,11 @@ ownership and the delete paths do not change.
 
 ## Order
 
-1. Child items spine (2.1.0, in progress).
-2. One-pipeline spine (2.2.0): connector inputs and their cursors, the
-   intake lookup and rule, the hold on the item, the import record inside a
-   source card with its counts; proved with a fixture source that has a live
-   and an archive input.
+1. Child items spine (2.1.0, merged).
+2. One-pipeline spine (2.2.0, built, awaiting critical review): connector
+   inputs and their cursors, the intake lookup and rule, the hold on the item,
+   the import record inside a source card with its counts; proved with a
+   fixture source that has a live and an archive input (see "Built, step 2").
 3. Live capture fixes from "Best of both", each with its own tests:
    streaming spool reads with bounds, cursor recovery, counted bridge
    drops, WhatsApp captions, freshness told apart from quiet.
@@ -291,6 +291,42 @@ Each step is proved on fresh Mac and Linux installs by the release check's
 archive leg, which gains an import-beside-live case per source with a
 fixture live input. The owner canary with a paired phone checks the real
 apps.
+
+## Built, step 2
+
+Contract 2.2.0 and the machinery, proved with a fixture source and no real
+source or format (`test/support/one-pipeline-harness.ts`,
+`test/one-pipeline-spine.test.ts`, `test/source-inputs.test.ts`,
+`test/eval-one-pipeline.test.ts`). No production source registers an archive
+input yet, so nothing changes for a real install until steps 4 to 7.
+
+- **Where things live.** The intake rule and the connector that applies it
+  are `src/core/source-inputs.ts` (`decideIntake`, `inputConnector`); the
+  lookup is `TieredStoreSet.storedItem`, over the stores' existing columns.
+  The archive layer binds an input's cursor to its files, holds its items,
+  and counts what it read (`src/workers/archive-import/source-input.ts`,
+  `sync.ts`); a source registers what only it knows in `source-targets.ts`.
+- **Cursors.** Each input is a connector id in the set's sync runs: the live
+  input's own, and `archive.<archive id>` per import. An archive's cursor is
+  prefixed with its manifest digest, so a cursor of other files stops the
+  import instead of reading different bytes from where the old ones ended.
+- **Account and lock.** Resolution happens at approval (`start.ts`) and again
+  at every pass, inside the source's exclusive runner when the source has an
+  account guard. A pass whose account is no longer the export's stops with
+  `account_changed` and writes nothing more.
+- **Stop** keeps what was imported. Merged imports have no Remove, so
+  choosing the same export again resumes a stopped import from its cursor.
+- **What the design left unstated.** A newer archive record over an item
+  that live already stored as Personal raises the item to Private (the hold
+  is the item's, so it applies to the replacement); the set's raise hides the
+  Personal copy first, and the move runs in the background (automatically
+  only with local-only embeddings, otherwise on the owner-approved migrate
+  path). At the same version this does not arise unless the stored item lacked
+  its content. Revisit when the first real source adopts inputs.
+- **Counting.** An import counts its own run ("N items from this archive, of
+  which M were already there"), advanced under the position of the record it
+  last read so a replay after a crash counts each record once; the card counts
+  each item once.
 
 ## To verify before step 4
 

@@ -18,11 +18,14 @@ import {
   ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
+  ARCHIVE_STOP_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
+  type ComputerSourceImportEntry,
+  type ComputerSourceImportsMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { ARCHIVE_COMMON_FINDINGS } from '../src/core/archive-formats.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
@@ -863,5 +866,164 @@ describe('the Archives row in ChatGPT', () => {
     expect(opened).toHaveLength(1);
     expect(opened[0]).toContain('olympusplugin.ai/open/dashboard/');
     expect(page.calls(ARCHIVE_BROWSE_TOOL_NAME)).toEqual([]);
+  });
+});
+
+// Imports that joined a live source (contract 2.2.0): listed inside that
+// source's own card, never under Archives, each with its own progress,
+// findings and Stop; the card counts each item once and an import counts its own run.
+describe('an import inside its source\'s card', () => {
+  const SOURCE = 'gmail.email';
+  const IMPORT: ComputerSourceImportEntry = {
+    id: '9d4c3b2a-7f6e-4d8c-9b0a-4e5f6a7b8c93',
+    name: 'Old work mail.mbox',
+    format: 'Mail (mbox)',
+    family: 'email',
+    where: '~/Exports',
+    status: 'imported',
+    read: 1_250,
+    alreadyThere: 300,
+    earliest: '2011-02-03',
+    latest: '2019-12-30',
+    startedAt: '2026-10-22T08:00:00.000Z',
+    importedAt: '2026-10-22T09:00:00.000Z',
+    gaps: [],
+    skipped: [],
+  };
+
+  /** The dashboard with `groups` as the computer's imports that joined a source. */
+  function withSourceImports(groups: ComputerSourceImportsMeta[], archives: ComputerArchivesMeta = meta([])) {
+    const base = dashboard('archives-imported', archives) as { _meta: Record<string, any> };
+    return { ...base, _meta: { ...base._meta, [COMPUTER_META_KEY]: { ...base._meta[COMPUTER_META_KEY], sourceImports: groups } } };
+  }
+
+  /** The source's own row, found by the import list it holds. */
+  function sourceCard(page: Page): Element {
+    const found = page.doc.querySelector('li[data-source-import]')?.closest('li.source');
+    if (!found) throw new Error(`no source card holds an import in: ${page.text()}`);
+    return found;
+  }
+
+  test('an import that joined a source is listed in that card, with its own count and what was already there', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [IMPORT], covers: { importedFrom: '2011-02-03', importedTo: '2019-12-30', liveSince: '2026-05-01' } }]),
+    });
+    const card = sourceCard(page);
+    expect(card.querySelector('.source-name')!.textContent).toBe('Gmail');
+    const text = card.textContent ?? '';
+    expect(text).toContain(IMPORT.name);
+    expect(text).toContain(fill(A.inSource.importedLine, { items: fill(A.nouns.email.many, { n: '1,250' }) }) + fill(A.inSource.alreadyThere.many, { n: '300' }));
+    // Which history each input covers.
+    expect(text).toContain('History imported up to 2019-12-30 · live since 2026-05-01');
+    // It is not an Archives row, and it has no Remove of its own.
+    expect(Array.from(card.querySelectorAll('button')).map((node) => node.textContent)).not.toContain(A.remove);
+    expect(page.doc.querySelectorAll('li.archive[data-archive]').length).toBe(1);
+  });
+
+  test('one that was entirely new says nothing about what was already there; one already there entirely says so in the singular form', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [
+        { ...IMPORT, alreadyThere: 0 },
+        { ...IMPORT, id: 'a1b2c3d4-0000-4000-8000-000000000001', name: 'Second.mbox', read: 40, alreadyThere: 1 },
+      ] }]),
+    });
+    const lines = Array.from(sourceCard(page).querySelectorAll('li[data-source-import]')).map((item) => item.textContent ?? '');
+    expect(lines[0]).not.toContain('already there');
+    expect(lines[1]).toContain(A.inSource.alreadyThere.one);
+  });
+
+  test('importing: how far, and Stop; pressing Stop calls the stop tool and keeps what was imported', async () => {
+    let answer = withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'importing', percent: 42, read: 500, alreadyThere: 120 }] }]);
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => answer,
+      [ARCHIVE_STOP_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Stopped.' }], structuredContent: { ok: true } }),
+    });
+    const item = sourceCard(page).querySelector('li[data-source-import]')!;
+    expect(item.textContent).toContain(fill(A.inSource.importingLine, { percent: '42', items: fill(A.nouns.email.many, { n: '500' }) }) + fill(A.inSource.alreadyThere.many, { n: '120' }));
+    expect(item.querySelector('[role="progressbar"]')).not.toBeNull();
+    answer = withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'stopped', read: 500, alreadyThere: 120, stop: { code: 'stopped_by_owner' } }] }]);
+    page.button(A.inSource.stop).click();
+    await until(() => page.calls(ARCHIVE_STOP_TOOL_NAME).length > 0 && page.doc.querySelector('li[data-source-import][data-archive="stopped"]') !== null);
+    expect(page.calls(ARCHIVE_STOP_TOOL_NAME)).toEqual([{ name: ARCHIVE_STOP_TOOL_NAME, arguments: { archive_id: IMPORT.id } }]);
+    // The person's own Stop is not a problem: it says what stays and how to go on, and is no Needs you line.
+    const stopped = sourceCard(page).querySelector('li[data-source-import][data-archive="stopped"]')!;
+    expect(stopped.textContent).toContain(A.inSource.stoppedWhy.stopped_by_owner.why);
+    expect(stopped.textContent).toContain(A.inSource.stoppedWhy.stopped_by_owner.fix);
+    expect(stopped.textContent).toContain(fill(A.inSource.importedLine, { items: fill(A.nouns.email.many, { n: '500' }) }));
+    expect(stopped.className).not.toContain('stopped');
+    expect(Array.from(stopped.querySelectorAll('button')).map((node) => node.textContent)).not.toContain(A.inSource.stop);
+  });
+
+  test('stopped by something that needs the person: says why and what to do, and the account case names its way forward', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [{ ...IMPORT, status: 'stopped', read: 10, alreadyThere: 0, stop: { code: 'account_changed' } }] }]),
+    });
+    const stopped = sourceCard(page).querySelector('li[data-source-import][data-archive="stopped"]')!;
+    expect(stopped.className).toContain('stopped');
+    expect(stopped.textContent).toContain(A.inSource.stoppedWhy.account_changed.why);
+    expect(stopped.textContent).toContain(A.inSource.stoppedWhy.account_changed.fix);
+    // Never a Remove, and never a code.
+    expect(stopped.textContent).not.toContain('account_changed');
+    expect(Array.from(stopped.querySelectorAll('button')).map((node) => node.textContent)).not.toContain(A.remove);
+  });
+
+  test('findings are plain sentences in the same two lists as an archive\'s', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, imports: [{
+        ...IMPORT,
+        gaps: [{ kind: 'message_too_large', count: 2 }],
+        skipped: [{ kind: 'spam_or_trash', count: 30 }],
+      }] }]),
+    });
+    const item = sourceCard(page).querySelector('li[data-source-import]')!;
+    const lists = archiveLists(item);
+    expect(lists.button).toBeDefined();
+    expect(lists.notImported.join(' ')).toContain('30 messages in Spam or Trash left out');
+    expect(lists.notImported.join(' ')).toContain('2 messages too large to read');
+  });
+
+  test('imports that cannot run say why, with no Stop shown as if they were moving', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSourceImports([{ sourceId: SOURCE, notRunning: 'disabled', imports: [{ ...IMPORT, status: 'importing', percent: 10, read: 5, alreadyThere: 0 }] }]),
+    });
+    const item = sourceCard(page).querySelector('li[data-source-import]')!;
+    expect(item.getAttribute('data-not-running')).toBe('disabled');
+    expect(item.querySelector('[role="progressbar"]')).toBeNull();
+    expect(item.textContent).toContain(fill(A.inSource.notRunningLine, { percent: '10' }));
+  });
+
+  test('in ChatGPT no import list is drawn in the card', async () => {
+    const page = await mount({}, { computer: false, dashboard: () => previewDashboardToolResult('archives-imported', false) });
+    expect(page.doc.querySelector('li[data-source-import]')).toBeNull();
+  });
+});
+
+describe('the import sheet asks which account an export belongs to', () => {
+  test('an export whose account cannot be proved asks in place; Add it joins the source, Keep it apart does not', async () => {
+    const asked = { content: [{ type: 'text', text: 'Which account?' }], structuredContent: { status: 'confirm_account', name: 'Takeout-2026-10.mbox', source: { id: 'gmail.email', label: 'Gmail' } } };
+    const started = { content: [{ type: 'text', text: 'Started.' }], structuredContent: { status: 'started', name: 'Takeout-2026-10.mbox', archive_id: '9d4c3b2a-7f6e-4d8c-9b0a-4e5f6a7b8c93' } };
+    const answers: any[] = [];
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-none', meta([])),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => {
+        answers.push(args);
+        return args.confirm_account === true || args.keep_apart === true ? started : asked;
+      },
+    });
+    page.button(A.importAction).click();
+    await settle();
+    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
+    await settle();
+    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    await until(() => page.text().includes(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })));
+    // Still in the picker, with the question beside the file and no import started.
+    expect(page.text()).toContain(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }));
+    expect(page.text()).toContain(fill(A.account.note, { source: 'Gmail' }));
+    expect(answers).toEqual([{ key: '/Users/you/Mail exports/Takeout-2026-10.mbox' }]);
+    page.button(fill(A.account.addFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })).click();
+    await until(() => answers.length > 1);
+    expect(answers[1]).toEqual({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox', confirm_account: true });
+    expect(page.hasButton(A.account.apart)).toBe(false);
   });
 });
