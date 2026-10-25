@@ -71,8 +71,7 @@ import {
   type SourceAccountBinding,
 } from './source-account-binding.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
-import { assertTelegramHistoryAccount } from './pairing-placement.ts';
-import { followProviderAccountRename } from './source-storage.ts';
+import { assertTelegramHistoryAccount, followProviderAccountRename } from './provider-account-history.ts';
 
 const DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;

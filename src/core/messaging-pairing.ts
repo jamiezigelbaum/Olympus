@@ -12,13 +12,8 @@ import { connectGuidedSession, type ConnectResult } from './connect.ts';
 import { FileLeaseBusyError, withFileLease } from './file-lease.ts';
 import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
-import {
-  assertTelegramHistoryAccount,
-  recordPairingAccount,
-  settlePairingPlacement,
-  telegramHistoryAccount,
-  telegramHistoryAccountError,
-} from './pairing-placement.ts';
+import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
+import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
 export const TELEGRAM_API_ID_SECRET_KEY = 'telegram.personal.app.api_id';
@@ -577,6 +572,7 @@ function copyLogin(from: string, to: string): void {
   let db: Database | undefined;
   try {
     db = new Database(from, { readonly: true });
+    db.run('PRAGMA busy_timeout = 5000');
     db.run('VACUUM INTO ?', [to]);
     chmodSync(to, 0o600);
   } catch {

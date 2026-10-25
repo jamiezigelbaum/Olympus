@@ -21,14 +21,12 @@
  */
 import { mkdirSync, rmdirSync } from 'node:fs';
 import { callWorkerCli, runLocallyOrThroughWorker } from './cli-via-worker.ts';
-import { legacyCaptureClaimDir, TELEGRAM_SOURCE_ID, type LayoutAccountLayout, type LayoutEnv } from './olympus-layout.ts';
-import { compareProviderAccounts } from './provider-account-identity.ts';
+import { legacyCaptureClaimDir, type LayoutAccountLayout, type LayoutEnv } from './olympus-layout.ts';
 import { hasFolderLayout } from './source-placement.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, readSourceRegistryUnderLease, SourceRegistryError } from './source-registry.ts';
 import {
   SourceStorageUnavailableError,
   placeOwnedAccount,
-  recordedProviderAccount,
   recordProviderAccount,
   type ProviderAccountRecord,
   type StorageAccount,
@@ -123,39 +121,3 @@ export async function recordPairingAccount(
   );
 }
 
-/**
- * The Telegram account the account's history names (docs/design/source-storage.md,
- * "One account, live and imported"), or undefined when it names none. An
- * unreadable registry fails the call; a data folder that cannot be worked out
- * names none, as placement records nothing there.
- */
-export function telegramHistoryAccount(env: LayoutEnv): string | undefined {
-  try {
-    return recordedProviderAccount({ sourceId: TELEGRAM_SOURCE_ID }, env);
-  } catch (error) {
-    if (error instanceof SourceRegistryError) throw error;
-    return undefined;
-  }
-}
-
-/**
- * Refuses a Telegram session over a history that names another account, or a
- * session whose account nothing proved (one given by its path), when the
- * history names one. Every registration of a Telegram session passes it: the
- * pairing with the account it proved, `connect --session-path` with none.
- */
-export function assertTelegramHistoryAccount(provedAccount: string | undefined, env: LayoutEnv): void {
-  const recorded = telegramHistoryAccount(env);
-  if (recorded === undefined) return;
-  if (provedAccount !== undefined && compareProviderAccounts(recorded, provedAccount) === 'same') return;
-  throw telegramHistoryAccountError(provedAccount === undefined ? 'unproved' : 'different');
-}
-
-export function telegramHistoryAccountError(kind: 'different' | 'unproved'): Error {
-  const delete_ = 'Unpair Telegram, run `olympus data delete --source telegram.messages` (preview with --dry-run), then connect again.';
-  return new Error(kind === 'different'
-    ? 'This Telegram account is not the one whose messages Olympus already holds, so it was not connected: one source never holds two accounts. '
-      + `To keep that history, pair the Telegram account it came from. To connect this one instead, delete that history first: ${delete_}`
-    : 'The Telegram messages Olympus holds belong to a paired Telegram account, and a session given by its path cannot show which account it is, so it was not connected. '
-      + `Pair with \`olympus connect telegram --pair\` so Olympus can check the account, or delete that history first: ${delete_}`);
-}

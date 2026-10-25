@@ -236,15 +236,6 @@ export function replaceEmptyLegacyAccounts(env: LayoutEnv = process.env): string
 }
 
 /**
- * The provider account an account's history belongs to, as its registry entry
- * names it; undefined when it has no entry, names none, or is not `active`.
- */
-export function recordedProviderAccount(account: StorageAccount, env: LayoutEnv = process.env): string | undefined {
-  const entry = findRegistryAccount(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
-  return entry?.state === 'active' ? entry.provider_account_hash : undefined;
-}
-
-/**
  * What recordProviderAccount found: `recorded` (the entry named no account, or
  * named one for a history the caller saw empty, and now names this one), `same` (it names this one, perhaps by fewer labels, which
  * it now carries too), `different` or `unproven` (it names another, or one this
@@ -297,39 +288,6 @@ export function recordProviderAccount(
     if (entry && decided.write !== undefined) entry.provider_account_hash = decided.write;
   });
   return decided.result;
-}
-
-/**
- * A connect that followed an address-only binding to what the replaced
- * grant's own token names now (followFileSourceRename) follows the history the
- * same way: an entry that names `from`'s account, by that address alone, takes
- * `to`. Otherwise the binding names the renamed account while the entry still
- * names the old address, and every sync is refused (PR #530 review). An entry
- * that knows an immutable label is left as it is: the next sync decides it by
- * that label. No entry, or one being deleted or moved, changes nothing.
- */
-export function followProviderAccountRename(
-  account: StorageAccount,
-  from: string,
-  to: string,
-  env: LayoutEnv = process.env,
-): boolean {
-  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
-  const follows = (registry: SourceRegistry): boolean => {
-    const entry = findRegistryAccount(registry, account.sourceId, slot);
-    return entry !== undefined && unavailableState(entry) === undefined
-      && entry.provider_account_hash !== undefined
-      && compareProviderAccounts(entry.provider_account_hash, from) === 'same'
-      && entry.provider_account_hash !== to;
-  };
-  if (!follows(readSourceRegistry(env))) return false;
-  let followed = false;
-  updateSourceRegistry(env, (registry) => {
-    if (!follows(registry)) return;
-    findRegistryAccount(registry, account.sourceId, slot)!.provider_account_hash = to;
-    followed = true;
-  });
-  return followed;
 }
 
 /**

@@ -318,7 +318,6 @@ import {
   openConnectorStore,
   openSecretLocations,
   recordAccountPlacement,
-  recordedProviderAccount,
   recordProviderAccount,
   replaceEmptyLegacyAccounts,
   sourceAccountUnavailableReason,
@@ -326,6 +325,7 @@ import {
   type StorageAccount,
   type StoreFileOwner,
 } from '../../core/source-storage.ts';
+import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { migrateAccountFolders, type AccountMigrationReport } from '../../core/source-account-migration.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { lifecycleStoreFileOwner } from '../../data-lifecycle.ts';

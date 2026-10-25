@@ -20,10 +20,9 @@ import {
   updateSourceRegistry,
   type SourceRegistryAccountState,
 } from '../src/core/source-registry.ts';
+import { followProviderAccountRename, recordedProviderAccount } from '../src/core/provider-account-history.ts';
 import {
   SourceStorageUnavailableError,
-  followProviderAccountRename,
-  recordedProviderAccount,
   recordProviderAccount,
   resolveImportAccount,
 } from '../src/core/source-storage.ts';
