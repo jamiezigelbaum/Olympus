@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { deleteOlympusData, forgetSourceRowsAgain, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleViews } from './helpers/lifecycle-view.ts';
+import { deleteMarkedAccounts, deleteOlympusData, lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { ForgetStepError } from '../src/core/source-forget-registry.ts';
 import { sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { createTrustedSourceWatchOwnerContext, defaultSourceWatchDbPath, LocalSourceWatchStore } from '../src/core/source-watch.ts';
@@ -18,6 +19,7 @@ import {
   MINE,
   OTHER,
   SEEDED_FILES,
+  SEEDED_FOR_MINE,
   layoutUnder,
   seedAllFiles,
   seedTierLedgerBeside,
@@ -33,7 +35,7 @@ function fixture() {
   roots.push(root);
   const layout = layoutUnder(root);
   const homeDir = join(root, 'home');
-  const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === MINE.source_id)!.connectorStorePaths!({ homeDir })[0]!;
+  const store = lifecycleAccountFiles(MINE.source_id, { homeDir }).stores[0]!;
   mkdirSync(dirname(store), { recursive: true });
   writeFileSync(store, 'indexed');
   // Its tier ledger, beside the store, with the id the seeded redaction claims name.
@@ -49,7 +51,7 @@ function fixture() {
 }
 
 /** Files this source has rows in, in this fixture: not Gmail's mail scope or the computer connection. */
-const dropboxFiles = SEEDED_FILES.filter((file) => file.stepId !== 'mail-source-scopes' && file.stepId !== 'this-computer');
+const dropboxFiles = SEEDED_FOR_MINE;
 
 describe('a per-source Delete forgets the source in the shared files', () => {
   test('removes its rows from every shared file, keeps another source\'s, and reports each file', () => {
@@ -162,9 +164,12 @@ describe('a per-source Delete forgets the source in the shared files', () => {
     expect(existsSync(f.store)).toBe(true);
   });
 
-  test('forgetting again after a delete removes only what was written back', () => {
+  test('the boot that applies a marked delete forgets again only what was written back since', () => {
     const f = fixture();
-    f.run();
+    // The running worker's Delete: the rows are forgotten and the account marked; its files stay until the restart.
+    const marked = deleteOlympusData({ sourceId: MINE.source_id, homeDir: f.homeDir, handleRegistryPath: f.layout.handleRegistryPath, applyAtRestart: true });
+    expect(marked.pending).toBe(true);
+    expect(existsSync(f.store)).toBe(true);
     // A poll that read the deleted stores through handles still open.
     const dashboard = SEEDED_FILES.find((file) => file.stepId === 'source-dashboard')!;
     const before = dashboard.left(f.layout, OTHER);
@@ -182,13 +187,10 @@ describe('a per-source Delete forgets the source in the shared files', () => {
     history.close();
     expect(dashboard.left(f.layout, MINE)).toBeGreaterThan(0);
 
-    const lines = forgetSourceRowsAgain({
-      sourceId: MINE.source_id,
-      homeDir: f.homeDir,
-      handleRegistryPath: f.layout.handleRegistryPath,
-    });
+    const report = deleteMarkedAccounts({ homeDir: f.homeDir, handleRegistryPath: f.layout.handleRegistryPath });
 
-    expect(lines.some((line) => line.includes('source-dashboard.sqlite'))).toBe(true);
+    expect(report).toEqual({ deleted: [{ sourceId: MINE.source_id, removed: expect.any(Number) }], failed: [] });
+    expect(existsSync(f.store)).toBe(false);
     expect(dashboard.left(f.layout, MINE)).toBe(0);
     expect(dashboard.left(f.layout, OTHER)).toBe(before);
   });
@@ -243,7 +245,7 @@ describe('the account\'s corpora', () => {
 
   test('rows filed under an old id go with the source', () => {
     const f = fixture();
-    const whatsapp = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'whatsapp.personal.messages')!;
+    const whatsapp = lifecycleViews().find((entry) => entry.sourceId === 'whatsapp.personal.messages')!;
     expect(whatsapp.sourceAliases).toEqual(['whatsapp.messages']);
     const dashboard = SEEDED_FILES.find((file) => file.stepId === 'source-dashboard')!;
     const legacy = { source_id: 'whatsapp.messages', corpus_id: 'unregistered.corpus', ledger_id: 'whatsapp' };

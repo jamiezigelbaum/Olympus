@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { deleteOlympusData, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { deleteOlympusData, lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../src/workers/classification/secret-locations.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -49,9 +49,7 @@ function seed(secureStorePath: string, publicStorePath: string, provider: string
 describe('tiered store sets are covered by data deletion', () => {
   test('the Public stores are in their sources\' inventory', () => {
     const env = { HOME: '/home/owner', XDG_DATA_HOME: '/data' };
-    const paths = (sourceId: string) => lifecycleSourceSpecs()
-      .find((spec) => spec.sourceId === sourceId)!
-      .connectorStorePaths!({ env });
+    const paths = (sourceId: string) => lifecycleAccountFiles(sourceId, { env }).stores;
     expect(paths('gmail.email')).toContain(defaultGmailPublicConnectorStoreDbPath(env));
     expect(paths('google_drive.docs')).toContain(defaultGoogleDrivePublicConnectorStoreDbPath(env));
   });

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { SourceFamily, SourceTrustDomain } from '../src/core/source-index/types.ts';
-import { deleteOlympusData, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { deleteOlympusData, lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { SecretLocationsIndex, secretLocationsPathForStore } from '../src/workers/classification/secret-locations.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -67,9 +67,7 @@ function seed(input: {
 describe('P1c tier stores are covered by data deletion', () => {
   test('every new tier store is in its source\'s inventory', () => {
     const env = { HOME: '/home/owner', XDG_DATA_HOME: '/data' };
-    const paths = (sourceId: string) => lifecycleSourceSpecs()
-      .find((spec) => spec.sourceId === sourceId)!
-      .connectorStorePaths!({ env });
+    const paths = (sourceId: string) => lifecycleAccountFiles(sourceId, { env }).stores;
     expect(paths('dropbox.files')).toEqual([
       defaultDropboxConnectorStoreDbPath(env),
       defaultDropboxInternalConnectorStoreDbPath(env),

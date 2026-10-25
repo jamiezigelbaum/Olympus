@@ -1,7 +1,7 @@
 # Source storage
 
 Status: approved by the owner 2026-10-24 (decisions 1–5 below); delivery in
-progress (steps 1–3, 4a and 4b done). Replaces the storage half of the Delete work in #455/#467 (#467
+progress (steps 1–3, 4a–4c, 4e and 5 done). Replaces the storage half of the Delete work in #455/#467 (#467
 frozen 2026-10-24). This page covers storage only: where each account's
 files live, who opens them, and the storage operations that Delete, Export,
 uninstall and ingestion call. The Delete feature itself (dashboard states,
@@ -171,8 +171,10 @@ Inside the data root:
 }
 ```
 
-- `state` is `active`, `deleting`, or `deleted` (kept briefly so the
-  dashboard can say so, then dropped).
+- `state` is `active` or `deleting`. Once a Delete has removed an account's
+  files and rows its entry is dropped (step 5), so a reconnect starts a new
+  entry, placed afresh, with a new `created_at`. `deleted` stays a valid value
+  for readers (the media-cache sweep reads it as gone) but nothing writes it.
 - A missing file is an empty registry. A file that cannot be parsed, names
   an unknown schema or lists an account twice is never read as empty: every
   open refuses until it is repaired, since it may hold a delete marker
@@ -458,26 +460,24 @@ so a store renamed before it has held its pictures again keeps them. The store
 replaces the path marker with its identity marker the next time it holds them:
 the marker is written durably first, and a retry that finds the same marker
 already there flushes it and its folder before the path marker goes. The incarnation
-check takes effect once step 5 marks an entry `deleted` and makes a new one on
-reconnect (and then needs the lookup to find the current entry). Today's Delete
-leaves the entry `active` with the same `created_at` and releases the holds
-itself, so until then a reconnect cannot be told from the account it follows,
-and a Delete that stops after removing the folder and before releasing leaves
-its pictures held (kept, never dropped). Step 5 should give each entry a value
-that only ever changes by replacement (an incarnation token): `created_at`
-compared as earlier-than leaks, not drops, when the clock moved backwards between
-the two entries.
+check takes effect from step 5: a Delete drops the entry and a reconnect makes
+a new one with a later `created_at`, so a hold of the deleted account is told
+apart from the new one's, and a hold a Delete left (it stopped after removing
+the files and before releasing them) is dropped by the sweep once the entry is
+gone. No separate incarnation token was added: `created_at` compared as
+earlier-than leaks a hold, never drops one, if the clock moved backwards
+between the two entries.
 
 A per-source Delete runs the steps (`forgotten` in its result lists each file
 and count; a dry run lists what it would forget) after the account's state is
 reset and before any bytes are removed. A failing step fails the delete there.
-Disconnect runs none. The worker repeats the steps marked
-`repeatBeforeRestart` (`waiting-private-questions`, `source-dashboard`,
-`source-watches`) once it has stopped, just before the restart a Delete asks
-for, because until then a private question can be answered, a dashboard poll
-can record counts and the watch pass can queue matches, all through store
-handles still open. No owner-choice step is repeated: the owner can reconnect
-in that window, and a repeat would erase the reconnect.
+Disconnect runs none. The boot that removes a marked account repeats the
+steps marked `repeatBeforeRestart` (`waiting-private-questions`,
+`source-dashboard`, `source-watches`), because until the restart a private
+question can be answered, a dashboard poll can record counts and the watch
+pass can queue matches, all through store handles still open. No owner-choice
+step is repeated: the owner can reconnect in that window, and a repeat would
+erase the reconnect.
 
 ## Delete
 
@@ -513,6 +513,39 @@ History imported into a live source is that account's history: an account's
 Delete takes it, and it is never removed on its own (owner decision 6).
 Imports under `archive.imports` keep their own Remove, by their account scope.
 
+**As built (step 5, #541).** The account comes from the registry, and what
+it owns from `core/account-files.ts`: its folder when it lives in one, else
+the files the layout module's resolvers name for it (`accountStorePath`,
+`accountRawPath`, the pairing module's session paths), which are the paths its
+connector uses, overrides included. `data-lifecycle.ts` names no source
+(`test/delete-on-registry.test.ts`). Source-specific behavior that is not a
+path became a registered step: X's sync positions in the shared usage ledger
+are the forget step `x-bookmarks-sync-state`, and imported archives' approvals
+are a delete hold (`core/source-delete-holds.ts`).
+
+- The running worker's Delete (the dashboard's, and the CLI's while Olympus
+  runs) checks custody, refuses before anything changes if any target is
+  unsafe, runs every forget step, marks the account `deleting` (creating the
+  entry, at the layout its files are in, for an account never adopted) and
+  restarts. From the mark, the storage service opens none of its files.
+- At boot, holding the owner lock and before the empty-account re-placement,
+  the migration and anything else (`deleteMarkedAccountsAtBoot` in
+  `email-source/server.ts`), each `deleting` account is checked again,
+  the forget steps marked `repeatBeforeRestart` run again (the others ran
+  at the mark; repeating them could erase a reconnect made since), its folder
+  is renamed into `.trash/<uuid>` and emptied in the background, a legacy
+  account's files are removed in place (they may be on several volumes, so a
+  rename cannot take them at once; each removal is idempotent), its picture
+  holds are released and its entry is dropped. A failure leaves the entry
+  `deleting` and the account closed; the next boot retries.
+- The CLI with no worker running holds the owner lock and has nothing open,
+  so it marks and removes in one run; a run that stops part way leaves the
+  mark, which the next boot finishes. With an unreadable registry it removes
+  the files without a mark; the running worker refuses instead, since it
+  could not keep the account closed.
+- Delete all also removes the registry and `.trash/` when the data folder is
+  outside every known root.
+
 What this removes from #467: the custody lock per store, the delete-fence
 file and its in-memory stand-in stores, canonical-path intent bindings, and
 recursive-target identity checks. The folder is the unit; there is nothing
@@ -536,12 +569,27 @@ everything else.
   (`data-lifecycle.ts:651-657`, `test/data-lifecycle-raw-state.test.ts`).
   Verify checks the same shape. Old export archives stay verifiable (keep
   the current verifier for the previous version).
+  As built (step 5, #541): an export takes every account the registry lists
+  as `active`, and every source with files on disk but no entry yet; an
+  account being deleted is left out. The manifest stays version 2 and adds
+  `accounts` (`source_id`, `slot`, `layout`), which the verifier ignores.
 - **Uninstall** (`site/uninstall.sh`, `site/uninstall-linux.sh --purge`)
   removes the roots from the layout module's list instead of a hand-kept
   one. Today macOS uninstall does not mention `~/.local/share/olympus`,
   `~/.local/state/olympus` or `~/.cache/olympus`, and a Linux purge leaves
   `~/.local/state/olympus/telegram-*`; after migration those paths are
   either inside a root or gone.
+  As built (step 5, #541): `olympusUninstallRoots` in the layout module is
+  the list. The scripts run no Olympus code, so each spells it, and
+  `test/uninstall-roots.test.ts` holds both to it. The macOS uninstaller now
+  names every folder it keeps (the three above, Telegram's legacy store root
+  and the home spellings beside the XDG ones). The Linux purge removes the
+  install's own folders, which its receipt proves it made, and still nothing
+  else: the legacy capture root and the Telegram reader's state in
+  `<state home>/olympus` may belong to an OpenClaw-hosted install on the same
+  account, so a legacy messaging account's files there are left until its
+  migration (4d) moves them into the data folder. A folder account's are in
+  the data folder already.
 
 ## Migration of existing installs
 
@@ -947,10 +995,14 @@ touch the store path (`eval/`).
      joined by the next connect, waits for the owner when unproven, and stays
      under `archive.imports` when different. A pairing onto another account's
      history is refused, and so is a session given by its path.
-5. **Delete, export, uninstall on the registry.** Replace
+5. **Delete, export, uninstall on the registry (done, #541).** Replace
    `lifecycleSourceSpecs` with the registry: a per-source delete marks the
    account `deleting` and the boot pass removes it; export and uninstall
-   read the registry and the layout module.
+   read the registry and the layout module. Built as "Delete" and "Export and
+   uninstall" say. Not proven on this step's Linux host: the macOS
+   uninstaller's run on a Mac (its list is checked by expanding it under
+   `/bin/sh`), and a Delete through the OpenClaw-hosted Gateway's worker
+   restart.
 6. **Connectors stop naming paths.** Rewrite `docs/CREATE_CONNECTOR.md`
    Leg 3 (it still instructs each connector to define a default path and
    says seven local indexes are grandfathered; the guard allows one), drop

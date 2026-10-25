@@ -182,11 +182,23 @@ main() {
 
   say ""
   say "Olympus is uninstalled. Your data and settings are still on this Mac:"
+  # Every folder Olympus keeps data, settings, state or caches in: the list
+  # olympusUninstallRoots names (src/core/olympus-layout.ts), each said once.
+  seen=''
   for kept in \
     "$HOME/.olympus" \
     "$HOME/.config/olympus" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/openclaw/olympus" \
+    "$HOME/.local/share/openclaw/olympus" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/olympus" \
+    "$HOME/.local/share/olympus" \
+    "${XDG_STATE_HOME:-$HOME/.local/state}/olympus" \
+    "$HOME/.local/state/olympus" \
+    "${XDG_CACHE_HOME:-$HOME/.cache}/olympus" \
+    "$HOME/.cache/olympus" \
     "$LOGDIR"; do
+    case "$seen" in *"|$kept|"*) continue ;; esac
+    seen="$seen|$kept|"
     if [ -e "$kept" ]; then say "  $kept"; fi
   done
   say "Reinstalling Olympus picks them up again. To delete them, reinstall, run"

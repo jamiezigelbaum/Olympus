@@ -1695,7 +1695,8 @@ describe('every file of a plan lost, with no Delete: that is a loss, not a Delet
 
     deleteOlympusData({ sourceId: 'dropbox.files', homeDir: env.HOME!, env });
 
-    expect(sourceAccountMovePending(entryOf(env, 'dropbox.files')!)).toBe(false);
+    // The entry goes with the files and the plan (step 5): nothing is left to report.
+    expect(entryOf(env, 'dropbox.files')).toBeUndefined();
     expect(sourceStorageNotices(env)).toEqual([]);
     expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(true);
     expect(migrateAccountFolders(env)).toMatchObject({ moved: [], stuck: [], movedBack: [], errors: [] });
@@ -1723,8 +1724,8 @@ describe('Delete, with the move', () => {
 
     const result = deleteOlympusData({ sourceId: 'readwise.library', homeDir: env.HOME!, env });
 
-    // The deleted history no longer names an account, so another may connect; the others keep theirs.
-    expect(entryOf(env, 'readwise.library')!.provider_account_hash).toBeUndefined();
+    // The deleted account's entry went with it, so another account may connect; the others keep theirs.
+    expect(entryOf(env, 'readwise.library')).toBeUndefined();
     expect(entryOf(env, 'dropbox.files')!.provider_account_hash).toBe('dropbox.files:owner');
     expect(result.removed).toContain(folder);
     expect(existsSync(folder)).toBe(false);
@@ -1749,17 +1750,15 @@ describe('Delete, with the move', () => {
 
     expect(readdirSync(root).filter((name) => name.startsWith('dropbox'))).toEqual([]);
     expect(existsSync(join(root, 'sources', 'dropbox.files', '1'))).toBe(false);
-    // The Delete is the evidence that the files are gone because the owner said so: the plan went with them, before any boot.
-    expect(sourceAccountMovePending(entryOf(env, 'dropbox.files')!)).toBe(false);
-    expect(entryOf(env, 'dropbox.files')!.migration?.moves).toBeUndefined();
+    // The Delete is the evidence that the files are gone because the owner said so: the plan went with them
+    // (with the entry, step 5), before any boot.
+    expect(entryOf(env, 'dropbox.files')).toBeUndefined();
     expect(sourceStorageNotices(env)).toEqual([]);
     expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(true);
 
     const report = migrateAccountFolders(env);
     expect(report).toMatchObject({ moved: [], resumed: [], movedBack: [], stuck: [], deferred: [], errors: [] });
-    const entry = entryOf(env, 'dropbox.files')!;
-    expect(entry.migration?.moves).toBeUndefined();
-    expect(sourceAccountMovePending(entry)).toBe(false);
+    expect(entryOf(env, 'dropbox.files')).toBeUndefined();
     expect(sourceStorageNotices(env)).toEqual([]);
     expect(readSourceRegistry(env).schema).toBe(1);
   });
@@ -1821,14 +1820,15 @@ describe('Delete, with the move', () => {
     expect(readSourceRegistry(env).schema).toBe(1);
   });
 
-  test('a Delete that finds nothing pending writes nothing to the registry', () => {
+  test('a Delete that finds nothing pending changes no other entry: only its own goes', () => {
     const { env } = fixture();
     install(env, 'dropbox.files');
-    const before = readFileSync(sourceRegistryPath(env), 'utf8');
+    install(env, 'readwise.library');
+    const before = readSourceRegistry(env);
 
     deleteOlympusData({ sourceId: 'dropbox.files', homeDir: env.HOME!, env });
 
-    expect(readFileSync(sourceRegistryPath(env), 'utf8')).toBe(before);
+    expect(readSourceRegistry(env)).toEqual({ ...before, accounts: before.accounts.filter((account) => account.source_id !== 'dropbox.files') });
   });
 });
 

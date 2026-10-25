@@ -283,7 +283,7 @@ test('Bun-free uninstaller tree digest matches lifecycle recursive ordering', ()
 
 test('Mac installer and uninstaller stay byte-for-byte unchanged', () => {
   expect(sha(readFileSync(join(REPO, 'scripts/install-macos.sh')))).toBe('c34567e08d83ca09b88a2bd3453bd0368730800ea1794553879eac17741021bb');
-  expect(sha(readFileSync(join(REPO, 'site/uninstall.sh')))).toBe('074c2fd5d249ce413a900b57ceb0d0e1f6a19b2c17f4157674a9bc5f1a9bc7b8');
+  expect(sha(readFileSync(join(REPO, 'site/uninstall.sh')))).toBe('3dfa9aea2b519900bb8bd1ad6d166339ef6b05eb54ad9dcf830ad7812a309f82');
 });
 
 for (const [env, message] of [

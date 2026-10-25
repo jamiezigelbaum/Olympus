@@ -17,7 +17,7 @@ import {
   isDataOwnerLockName,
   type HeldDataOwnerLock,
 } from '../src/core/data-owner-lock.ts';
-import { deleteOlympusData, exportOlympusData, lifecycleSourceSpecs, verifyOlympusDataExport } from '../src/data-lifecycle.ts';
+import { deleteOlympusData, exportOlympusData, lifecycleAccountFiles, verifyOlympusDataExport } from '../src/data-lifecycle.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { decideLocalFilesPath } from '../src/workers/local-files/scope.ts';
 
@@ -90,8 +90,7 @@ describe('export while this process holds the lock', () => {
     const { dir, homeDir, env } = fixture();
     const lock = holdDataOwnerLock(env);
     held.push(lock);
-    const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
-    const storePath = spec.connectorStorePaths!({ homeDir, env })[0]!;
+    const storePath = lifecycleAccountFiles('x.bookmarks', { homeDir, env }).stores[0]!;
     expect(storePath.startsWith(`${olympusDataRoot(env)}/`)).toBe(true);
     seedStore(storePath);
     expect(existsSync(lock.lockPath)).toBe(true);

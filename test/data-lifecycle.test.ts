@@ -1,3 +1,4 @@
+import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import {
   existsSync,
   mkdirSync,
@@ -18,7 +19,6 @@ import {
   deleteOlympusDataWithCustody,
   exportOlympusData,
   knownOlympusDataRoots,
-  lifecycleSourceSpecs,
   validateDeleteAllConfirmations,
 } from '../src/data-lifecycle.ts';
 import { installWorkerService, workerServicePaths } from '../src/core/worker-service.ts';
@@ -31,7 +31,7 @@ describe('Olympus data lifecycle', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-custody-'));
     const homeDir = join(dir, 'home');
     try {
-      const source = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!;
+      const source = lifecycleViews().find((entry) => entry.sourceId === 'dropbox.files')!;
       const dbPath = source.connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(dirname(dbPath), { recursive: true });
       writeFileSync(dbPath, 'dropbox');
@@ -156,7 +156,7 @@ describe('Olympus data lifecycle', () => {
   // is exactly what the CLI's per-source branch used to send.
   test('CLI custody clears a per-source delete outside the public capability set once the worker is inactive', () => {
     const publicIds = new Set<string>(V0_4_PUBLIC_SOURCE_CAPABILITIES.map((capability) => capability.source_id));
-    const source = lifecycleSourceSpecs().find((spec) =>
+    const source = lifecycleViews().find((spec) =>
       spec.connectorStorePaths !== undefined
       && !publicIds.has(spec.sourceId)
       && !(spec.sourceAliases ?? []).some((alias) => publicIds.has(alias))
@@ -200,7 +200,7 @@ describe('Olympus data lifecycle', () => {
   });
 
   test('every registered source id resolves to one lifecycle owner', () => {
-    const lifecycleIds = new Set(lifecycleSourceSpecs().flatMap((source) => [
+    const lifecycleIds = new Set(lifecycleViews().flatMap((source) => [
       source.sourceId,
       ...(source.sourceAliases ?? []),
     ]));
@@ -216,7 +216,7 @@ describe('Olympus data lifecycle', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const source = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!;
+      const source = lifecycleViews().find((entry) => entry.sourceId === 'dropbox.files')!;
       const dbPath = source.connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(join(homeDir, '.olympus', 'sources'), { recursive: true });
       mkdirSync(join(homeDir, '.config', 'olympus'), { recursive: true });
@@ -400,8 +400,8 @@ describe('Olympus data lifecycle', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-source-'));
     const homeDir = join(dir, 'home');
     try {
-      const dropbox = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!;
-      const gmail = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'gmail.email')!;
+      const dropbox = lifecycleViews().find((entry) => entry.sourceId === 'dropbox.files')!;
+      const gmail = lifecycleViews().find((entry) => entry.sourceId === 'gmail.email')!;
       const dropboxPath = dropbox.connectorStorePaths!({ homeDir })[0]!;
       const gmailPath = gmail.connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(dirname(dropboxPath), { recursive: true });
@@ -439,7 +439,7 @@ describe('Olympus data lifecycle', () => {
   test('every family that owned a legacy per-family index still declares it', () => {
     const homeDir = '/tmp/olympus-lifecycle-legacy-shape';
     const declared = new Map(
-      lifecycleSourceSpecs()
+      lifecycleViews()
         .filter((source) => source.sqlitePath !== undefined)
         .map((source) => [source.sourceId, {
           path: source.sqlitePath!({ homeDir }),
@@ -482,7 +482,7 @@ describe('Olympus data lifecycle', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const gmail = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'gmail.email')!;
+      const gmail = lifecycleViews().find((entry) => entry.sourceId === 'gmail.email')!;
       const legacyPath = gmail.sqlitePath!({ homeDir });
       mkdirSync(dirname(legacyPath), { recursive: true });
       createMarkedSqliteStore(legacyPath, gmail.legacySqliteStoreId!);
@@ -515,7 +515,7 @@ describe('Olympus data lifecycle', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const gmail = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'gmail.email')!;
+      const gmail = lifecycleViews().find((entry) => entry.sourceId === 'gmail.email')!;
       const legacyPath = gmail.sqlitePath!({ homeDir });
 
       const result = exportOlympusData({ destination, sourceId: 'gmail.email', homeDir });
@@ -532,8 +532,8 @@ describe('Olympus data lifecycle', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-legacy-'));
     const homeDir = join(dir, 'home');
     try {
-      const gmail = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'gmail.email')!;
-      const dropbox = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!;
+      const gmail = lifecycleViews().find((entry) => entry.sourceId === 'gmail.email')!;
+      const dropbox = lifecycleViews().find((entry) => entry.sourceId === 'dropbox.files')!;
       const gmailLegacy = gmail.sqlitePath!({ homeDir });
       const dropboxLegacy = dropbox.sqlitePath!({ homeDir });
       mkdirSync(dirname(gmailLegacy), { recursive: true });
@@ -562,7 +562,7 @@ describe('Olympus data lifecycle', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const legacyPaths = lifecycleSourceSpecs()
+      const legacyPaths = lifecycleViews()
         .map((source) => source.sqlitePath?.({ homeDir }))
         .filter((path): path is string => path !== undefined);
       expect(legacyPaths.length).toBeGreaterThan(0);
@@ -627,7 +627,7 @@ describe('a source with no credential', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-this-computer-'));
     const homeDir = join(dir, 'home');
     try {
-      const source = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'local.files')!;
+      const source = lifecycleViews().find((entry) => entry.sourceId === 'local.files')!;
       const dbPath = source.connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(dirname(dbPath), { recursive: true });
       writeFileSync(dbPath, 'local');
@@ -649,7 +649,7 @@ describe('a source with no credential', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-local-files-'));
     const homeDir = join(dir, 'home');
     try {
-      const specs = lifecycleSourceSpecs();
+      const specs = lifecycleViews();
       const local = specs.find((entry) => entry.sourceId === 'local.files')!;
       const dropbox = specs.find((entry) => entry.sourceId === 'dropbox.files')!;
       const localStores = local.connectorStorePaths!({ homeDir });
@@ -707,7 +707,7 @@ describe('a source with no credential', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-delete-local-files-connected-'));
     const homeDir = join(dir, 'home');
     try {
-      const local = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'local.files')!;
+      const local = lifecycleViews().find((entry) => entry.sourceId === 'local.files')!;
       const stores = local.connectorStorePaths!({ homeDir });
       for (const path of stores) {
         mkdirSync(dirname(path), { recursive: true });

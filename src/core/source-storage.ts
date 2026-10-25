@@ -147,7 +147,11 @@ export function openTierSniffer(
  */
 export function recordAccountPlacement(account: StorageAccount, path: string, env: LayoutEnv = process.env): void {
   if (!adoptionEnabled) return;
-  placeBeforeFirstFile(env, readSourceRegistry(env), account, path);
+  const registry = readSourceRegistry(env);
+  // Raw state of an account being deleted or moved is not written either: a
+  // write between a Delete's mark and the restart would be removed at boot.
+  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeBeforeFirstFile(env, registry, account, path);
 }
 
 /**
