@@ -80,6 +80,10 @@ const tally = (findings: readonly ArchiveImportFinding[], kind: 'gap' | 'skipped
   return [...byKind].map(([name, count]) => ({ kind: name, count })).sort((a, b) => a.kind.localeCompare(b.kind));
 };
 const sorted = (rows: ReadonlyArray<{ kind: string; count: number }>) => [...rows].sort((a, b) => a.kind.localeCompare(b.kind));
+/** Everything the connector told, by kind and count, whichever way it classed it (gap or skipped): the page sorts by kind, into two lists. */
+const reported = (findings: readonly ArchiveImportFinding[]) => sorted([...tally(findings, 'gap'), ...tally(findings, 'skipped')]);
+/** Everything the fixture says the two lists hold together. */
+const listed = (expectation: LegFixture['expect']) => sorted([...expectation.notImported, ...expectation.howRead]);
 
 describe('fixture tokens', () => {
   test('are letters and digits only, differ by seed, role and format, and repeat for the same call', () => {
@@ -144,7 +148,7 @@ describe('the fixtures, read by the product', () => {
     if (detected.kind === 'match') expect(detected.format.id).toBe('telegram_json');
   });
 
-  test('the small archive reads as its expectation says: items, days, one unread attachment, one message left out', async () => {
+  test('the small archive reads as its expectation says: items, days, one unread attachment, one message left out as Spam', async () => {
     const root = home();
     const fixture = legFixture('agent', 'seed-small');
     writeFixture(root, fixture);
@@ -154,8 +158,9 @@ describe('the fixtures, read by the product', () => {
     const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
     expect(days[0]).toBe(fixture.expect.earliest);
     expect(days[days.length - 1]).toBe(fixture.expect.latest);
-    expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
-    expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
+    expect(reported(findings)).toEqual(listed(fixture.expect));
+    expect(fixture.expect.notImported).toEqual([{ kind: 'attachments_not_read', count: 1 }, { kind: 'spam_or_trash', count: 1 }]);
+    expect(fixture.expect.howRead).toEqual([]);
     // The attachment is named and not stored; the message that carries it is still an item.
     expect(items.some((item) => item.metadata.attachmentCount === 1)).toBe(true);
   });
@@ -174,26 +179,34 @@ describe('the fixtures, read by the product', () => {
     }
   });
 
-  test('the Telegram archive reads as its expectation says: messages, days, one picture not imported, one part not imported, one service message left out', async () => {
+  test('the Telegram archive reads as its expectation says: messages and a join and the profile, days, one picture not imported, one empty message left out', async () => {
     const root = home();
     const fixture = legFixture('agent', 'seed-telegram', 'telegram_json');
     writeFixture(root, fixture);
     const { connector, findings } = readFixture(root, fixture);
     const items = await readAll(connector);
     expect(items).toHaveLength(fixture.expect.messages);
-    expect(fixture.expect.messages).toBe(5);
-    const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
+    // The five messages, the join (an item like the others) and the profile (the one part of the account the file holds).
+    expect(fixture.expect.messages).toBe(7);
+    // The profile carries no date of a message: the days are the messages' own.
+    const days = items.map((item) => item.metadata.authoredAt).filter((at) => typeof at === 'string').map((at) => String(at).slice(0, 10)).sort();
+    expect(days).toHaveLength(6);
     expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
-    expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
-    expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
-    expect(fixture.expect.gaps).toEqual([{ kind: 'media_not_imported', count: 1 }, { kind: 'section_not_imported', count: 1 }]);
-    expect(fixture.expect.leftOut).toEqual([{ kind: 'service_message', count: 1 }]);
-    // The picture is named in its message and not imported; the message is still an item. The join is the earliest message, and is not counted in the days.
+    expect(reported(findings)).toEqual(listed(fixture.expect));
+    expect(fixture.expect.notImported).toEqual([{ kind: 'media_not_imported', count: 1 }]);
+    expect(fixture.expect.howRead).toEqual([{ kind: 'message_without_text', count: 1 }]);
+    // The picture is named in its message and not imported; the message is still an item. The empty message is the earliest, and is not counted in the days.
     expect(items.filter((item) => item.metadata.attachmentsNotIngested === 1)).toHaveLength(1);
     expect(days).not.toContain('2023-12-30');
-    // One chat, and the account's own details are not messages: nothing of them is an item.
-    expect(new Set(items.map((item) => item.identity.providerThreadId)).size).toBe(1);
-    for (const item of items) expect(JSON.stringify(item)).not.toContain('synthetic_sam');
+    // The join is an item with a plain sentence, in the chat.
+    const join = items.filter((item) => item.content.kind === 'text' && /joined/i.test(item.content.text));
+    expect(join).toHaveLength(1);
+    // Two threads: the chat, and the profile's own ("Telegram account: profile"), which holds the account's details as one item.
+    expect(new Set(items.map((item) => item.identity.providerThreadId)).size).toBe(2);
+    const profile = items.filter((item) => String(item.metadata.title) === 'Telegram account: profile');
+    expect(profile).toHaveLength(1);
+    expect(profile[0]!.metadata.authoredAt).toBeUndefined();
+    expect(items.filter((item) => item !== profile[0]).some((item) => JSON.stringify(item).includes('synthetic_sam'))).toBe(false);
   });
 
   test('the Telegram word is in message bodies only, never in the chat\'s name, a sender or a title', async () => {
@@ -231,10 +244,9 @@ describe('the fixtures, read by the product', () => {
       const { connector, findings } = readFixture(root, fixture);
       const items = await readAll(connector);
       expect(items).toHaveLength(fixture.expect.messages);
-      const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
+      const days = items.map((item) => item.metadata.authoredAt).filter((at) => typeof at === 'string').map((at) => String(at).slice(0, 10)).sort();
       expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
-      expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
-      expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
+      expect(reported(findings)).toEqual(listed(fixture.expect));
       // At least two items say the word, and no name the item carries does.
       const withToken = items.filter((item) => item.content.kind === 'text' && item.content.text.includes(fixture.token));
       expect(withToken.length).toBeGreaterThanOrEqual(2);
@@ -255,8 +267,8 @@ describe('the fixtures, read by the product', () => {
     const { connector, findings } = readFixture(root, fixture);
     const items = await readAll(connector);
     expect(fixture.expect).toMatchObject({ label: 'Reflect notes (JSON)', citationLabel: 'Reflect', family: 'note', messages: 4, earliest: '2024-03-04', latest: '2024-03-09' });
-    expect(fixture.expect.gaps).toEqual([{ kind: 'note_unreadable', count: 1 }]);
-    expect(fixture.expect.leftOut).toEqual([{ kind: 'note_empty', count: 1 }]);
+    expect(fixture.expect.notImported).toEqual([{ kind: 'note_unreadable', count: 1 }]);
+    expect(fixture.expect.howRead).toEqual([{ kind: 'note_empty', count: 1 }]);
     expect(items).toHaveLength(4);
     expect(findings.map((finding) => `${finding.class}:${finding.kind}`).sort()).toEqual(['gap:note_unreadable', 'skipped:note_empty']);
     // The days are the days the notes were written: not the empty note's (the earliest), and not the day one was edited later.
@@ -282,8 +294,8 @@ describe('the fixtures, read by the product', () => {
     const { connector, findings } = readFixture(root, fixture);
     const items = await readAll(connector);
     expect(fixture.expect).toMatchObject({ label: 'Roam notes (JSON)', citationLabel: 'Roam', family: 'note', messages: 4, earliest: '2024-05-06', latest: '2024-05-12' });
-    expect(fixture.expect.gaps).toEqual([{ kind: 'note_content_unsupported', count: 1 }]);
-    expect(fixture.expect.leftOut).toEqual([{ kind: 'note_empty', count: 1 }]);
+    expect(fixture.expect.notImported).toEqual([{ kind: 'note_content_unsupported', count: 1 }]);
+    expect(fixture.expect.howRead).toEqual([{ kind: 'note_empty', count: 1 }]);
     expect(items).toHaveLength(4);
     expect(findings.map((finding) => `${finding.class}:${finding.kind}`).sort()).toEqual(['gap:note_content_unsupported', 'skipped:note_empty']);
     // The days are the days the pages were written (a daily page by its title): not the empty page's (the earliest), and not the day one was edited later.
@@ -297,7 +309,7 @@ describe('the fixtures, read by the product', () => {
     expect(walk?.content.kind === 'text' ? walk.content.text : '').toContain('The harbour walk is flat and takes an hour.');
   });
 
-  test('the WhatsApp archive reads as its expectation says: messages, days, one picture not imported, one assumed zone, one notice left out', async () => {
+  test('the WhatsApp archive reads as its expectation says: messages, days, one picture not imported, one assumed zone and one notice (how it was read)', async () => {
     const root = home();
     const fixture = legFixture('agent', 'seed-whatsapp', 'whatsapp_chat');
     writeFixture(root, fixture);
@@ -307,10 +319,9 @@ describe('the fixtures, read by the product', () => {
     expect(fixture.expect.messages).toBe(5);
     const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
     expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
-    expect(sorted(tally(findings, 'gap'))).toEqual(sorted(fixture.expect.gaps));
-    expect(sorted(tally(findings, 'skipped'))).toEqual(sorted(fixture.expect.leftOut));
-    expect(fixture.expect.gaps).toEqual([{ kind: 'media_not_imported', count: 1 }, { kind: 'time_zone_assumed', count: 1 }]);
-    expect(fixture.expect.leftOut).toEqual([{ kind: 'system_message', count: 1 }]);
+    expect(reported(findings)).toEqual(listed(fixture.expect));
+    expect(fixture.expect.notImported).toEqual([{ kind: 'media_not_imported', count: 1 }]);
+    expect(fixture.expect.howRead).toEqual([{ kind: 'time_zone_assumed', count: 1 }, { kind: 'system_message', count: 1 }]);
     // The picture is named in its message and not imported; the message is still an item. The notice is the earliest line, and is not counted in the days.
     expect(items.filter((item) => item.content.kind === 'text' && item.content.text.includes('<attached:'))).toHaveLength(1);
     expect(days).not.toContain('2023-12-30');
@@ -326,8 +337,8 @@ describe('the fixtures, read by the product', () => {
     const items = await readAll(connector);
     expect(items).toHaveLength(fixture.expect.messages);
     expect(findings).toEqual([]);
-    expect(fixture.expect.gaps).toEqual([]);
-    expect(fixture.expect.leftOut).toEqual([]);
+    expect(fixture.expect.notImported).toEqual([]);
+    expect(fixture.expect.howRead).toEqual([]);
     const days = items.map((item) => String(item.metadata.authoredAt).slice(0, 10)).sort();
     expect([days[0], days[days.length - 1]]).toEqual([fixture.expect.earliest, fixture.expect.latest]);
   });

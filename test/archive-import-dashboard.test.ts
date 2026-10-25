@@ -101,6 +101,35 @@ function mbox(messages: readonly string[]): string {
   return messages.map((message) => `From sender@example.invalid Mon Jan  5 10:00:00 2015\n${message}\n\n`).join('');
 }
 
+/**
+ * A file over 3 MiB that costs almost nothing to import: one short message and a large attachment, which is named and never read.
+ * (A message's text is never cut by length, so a big file made of text would be imported in full, and slowly.)
+ */
+function bigMbox(): string {
+  const filler = `${'A'.repeat(76)}\n`.repeat(Math.ceil((3 * 1024 * 1024) / 77));
+  return mbox([[
+    'From: Sam Example <sam@example.invalid>',
+    'To: Alex Example <alex@example.invalid>',
+    'Subject: Synthetic big note 0',
+    'Date: Mon, 05 Jan 2015 10:00:00 +0000',
+    'Message-ID: <big-0@example.invalid>',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary="b1"',
+    '',
+    '--b1',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'The synthetic big harbour log, entry 0.',
+    '--b1',
+    'Content-Type: application/octet-stream; name="big.bin"',
+    'Content-Disposition: attachment; filename="big.bin"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    filler,
+    '--b1--',
+  ].join('\n')]);
+}
+
 function fixture(options: { model?: ArchivePrivateModelState } = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-dashboard-')));
   cleanups.push(() => rmSync(base, { recursive: true, force: true }));
@@ -282,7 +311,7 @@ describe('approving an import', () => {
 
   test('a possible copy answers "checking" at once, then reads as already imported once its files were read whole', async () => {
     const f = fixture();
-    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const text = bigMbox();
     const first = await approveKey(f, f.write('Big.mbox', text));
     if (!first.ok || first.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, first.archive_id);
@@ -311,7 +340,7 @@ describe('approving an import', () => {
 
   test('a possible copy that differs inside is started once the check has read it', async () => {
     const f = fixture();
-    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const text = bigMbox();
     const first = await approveKey(f, f.write('Big.mbox', text));
     if (!first.ok || first.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, first.archive_id);
@@ -369,7 +398,7 @@ describe('the Archives row\'s list', () => {
     expect(entry.percent).toBeUndefined();
     // Held with no private model to judge them: the person's to set up.
     expect(f.dashboard.present()).toEqual({ archives: 1, importing: false, attention: [{ kind: 'held', count: 3, model: 'off' }] });
-    // What was not read, and what was left out as live Gmail leaves it out, per kind.
+    // What is recorded as a gap and what as left out, per kind (the dashboard sorts them into its two lists by kind).
     expect(entry.gaps).toEqual([{ kind: 'attachments_not_read', count: 1 }]);
     expect(entry.skipped).toEqual([{ kind: 'spam_or_trash', count: 1 }]);
     // Exactly where stays in the record (the third message starts where the
@@ -496,7 +525,7 @@ describe('what the imports need from the person', () => {
 
 describe('a check of a possible copy', () => {
   async function importedBig(f: ReturnType<typeof fixture>) {
-    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const text = bigMbox();
     const first = await approveKey(f, f.write('Big.mbox', text));
     if (!first.ok || first.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, first.archive_id);
@@ -610,7 +639,7 @@ describe('a check of a possible copy', () => {
 describe('Cancel and Dismiss while a path is still being found', () => {
   test('a check a restart left, cancelled as it resumes, reads and imports nothing', async () => {
     const f = fixture();
-    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const text = bigMbox();
     const first = await approveKey(f, f.write('Big.mbox', text));
     if (!first.ok || first.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, first.archive_id);
@@ -664,7 +693,7 @@ describe('Cancel and Dismiss while a path is still being found', () => {
 describe('a check resumed after a restart', () => {
   test('reads nothing of a folder or a file replaced since the approval: each goes under Needs you as replaced', async () => {
     const f = fixture();
-    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const text = bigMbox();
     const first = await approveKey(f, f.write('Big.mbox', text));
     if (!first.ok || first.status !== 'started') throw new Error('expected a start');
     await importAll(f.runtime, first.archive_id);

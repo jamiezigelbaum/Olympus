@@ -282,7 +282,7 @@ export function telegramFullExport(input: {
       first_name: 'Sam',
       last_name: 'Example',
       phone_number: '+1 555 0101',
-      username: 'synthetic_sam',
+      username: '@synthetic_sam',
       bio: 'Synthetic account for tests.',
     },
     profile_pictures: [

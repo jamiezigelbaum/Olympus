@@ -700,19 +700,19 @@ function localFilesPreview(state: string) {
  *   archives-request-hidden  an agent asked for a file whose name holds a zero-width space: the name and the
  *                        whole path show it as U+200B, never as a name that looks plain
  *   archives-importing   one archive 42% read, its messages held for the private model
- *   archives-imported    one archive imported, with what was not read, per kind
+ *   archives-imported    one archive imported, with what was not imported, per kind
  *   archives-waiting     imported, but no private model is set up: the route to set one up
  *   archives-stopped     the file changed during the import: what happened and what to do
  *   archives-removing    Remove pressed: everything Olympus made from it is being deleted
  *   archives-unreadable  the list of imported archives cannot be read: See why, no Import
  *   archives-uncounted   an imported archive whose index cannot be opened now: never "0 messages"
  *   archives-not-running an import waiting while background syncing is turned off: not running, Remove not pressable, See why names the setting
- *   archives-notes       a Roam export imported: its items are notes, with the kinds of gap a notes export or any format can report
- *   archives-chat        a Telegram Desktop export imported: its items are messages, with what a chat export leaves out or cannot carry
+ *   archives-notes       a Roam export imported: its items are notes, with what was not imported and how it was read, in the two lists
+ *   archives-chat        a Telegram Desktop export imported: its items are messages (service messages and the account's parts too), with the two lists
  *   archives-empty       an archive that held nothing: read as an empty import, never as a count of nothing
- *   archives-chat-whatsapp  a WhatsApp chat export imported: messages, a snapshot (not updated), and what was left out in plain words
- *   archives-notes-reflect  a Reflect export (a zip of Markdown notes) imported: notes, and what a notes export left out or could not read
- *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not read, never an empty archive
+ *   archives-chat-whatsapp  a WhatsApp chat export imported: messages, a snapshot (not updated), and the two lists in plain words
+ *   archives-notes-reflect  a Reflect export (a zip of Markdown notes) imported: notes, and what a notes export did not import or only read a certain way
+ *   archives-nothing-imported  an archive whose messages were all left out or not read: No messages imported, the reasons under See what was not imported, never an empty archive
  * A stopped import, an agent's request, a check that ended without importing,
  * an archive that cannot be counted, imports that cannot run, and held
  * messages no private model can judge are each a Needs you line too.
@@ -862,7 +862,6 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       latest: '2026-10-11',
       gaps: [
         { kind: 'media_not_imported', count: 287 },
-        { kind: 'item_truncated', count: 4 },
         { kind: 'note_date_assumed', count: 12 },
         { kind: 'note_too_large', count: 1 },
         { kind: 'section_not_imported', count: 2 },
@@ -871,7 +870,7 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       skipped: [{ kind: 'note_empty', count: 38 }],
     });
   } else if (state === 'archives-chat') {
-    // An invented Telegram Desktop export: messages kept, service messages left out, pictures and files counted not read, a kind of content not read said so.
+    // An invented Telegram Desktop export: messages, service messages and the account's contacts and sessions kept, pictures and files counted not imported, a kind of content not read said so.
     archives.push({
       ...takeout,
       id: '6c2f8a41-9d3e-4b5a-a7c1-2e4f6a8b0c3d',
@@ -886,13 +885,12 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       latest: '2026-10-18',
       gaps: [
         { kind: 'media_not_imported', count: 2_318 },
-        { kind: 'section_not_imported', count: 6 },
+        { kind: 'section_not_imported', count: 1 },
         { kind: 'message_content_unsupported', count: 12 },
-        { kind: 'item_truncated', count: 1 },
         { kind: 'time_zone_assumed', count: 1 },
         { kind: 'file_damaged', count: 1 },
       ],
-      skipped: [{ kind: 'service_message', count: 3_071 }, { kind: 'message_without_text', count: 54 }],
+      skipped: [{ kind: 'message_without_text', count: 54 }],
     });
   } else if (state === 'archives-chat-whatsapp') {
     // An invented chat export: the family's own words, the date range with "Snapshot, not updated" beside it.
@@ -910,7 +908,6 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       latest: '2026-09-30',
       gaps: [
         { kind: 'media_not_imported', count: 1_870 },
-        { kind: 'item_truncated', count: 2 },
         { kind: 'time_zone_assumed', count: 1 },
         { kind: 'date_order_assumed', count: 1 },
         { kind: 'item_start_assumed', count: 3 },
@@ -919,7 +916,6 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       skipped: [
         { kind: 'system_message', count: 318 },
         { kind: 'message_empty', count: 6 },
-        { kind: 'status_updates', count: 41 },
         { kind: 'item_repeated', count: 112 },
         { kind: 'files_unconfirmed', count: 1 },
       ],
@@ -940,7 +936,6 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       latest: '2026-10-17',
       gaps: [
         { kind: 'media_not_imported', count: 94 },
-        { kind: 'item_truncated', count: 1 },
         { kind: 'note_date_assumed', count: 3 },
         { kind: 'note_unreadable', count: 2 },
       ],

@@ -39,8 +39,6 @@ import { MBOX_DEFAULT_MAX_MESSAGE_BYTES, MboxFormatError, MboxSplitter, type Mbo
 export const MBOX_CURSOR_PREFIX = 'mbox1:';
 export const MBOX_DEFAULT_PAGE_SIZE = 100;
 export const MBOX_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-/** Text kept per message; longer bodies are cut and counted as a gap. */
-export const MBOX_MAX_ITEM_TEXT_CHARS = 1_000_000;
 const MAX_ATTACHMENT_NAME_CHARS = 256;
 
 export const MBOX_FINDINGS = {
@@ -48,6 +46,7 @@ export const MBOX_FINDINGS = {
   unreadable: 'message_unreadable',
   charset: 'charset_not_decoded',
   attachments: 'attachments_not_read',
+  /** Old records only: a body used to be cut at a million characters. Nothing reports it now; a body is kept whole. */
   textCut: 'text_cut',
   spamOrTrash: 'spam_or_trash',
 } as const;
@@ -247,12 +246,8 @@ async function messageOutcome(input: ArchiveConnectorInput, span: MboxMessageSpa
   ].filter(Boolean).join('\n');
   const body = email.text?.trim() || (email.html ? stripHtml(email.html) : '');
   // Attachments are named (never read), so a question about one finds its message.
-  let text = [summary, body, attachments.lines.join('\n')].filter((part) => part !== '').join('\n\n')
+  const text = [summary, body, attachments.lines.join('\n')].filter((part) => part !== '').join('\n\n')
     || `Subject: ${subject}`;
-  if (text.length > MBOX_MAX_ITEM_TEXT_CHARS) {
-    text = text.slice(0, MBOX_MAX_ITEM_TEXT_CHARS);
-    findings.push({ kind: MBOX_FINDINGS.textCut });
-  }
 
   const messageId = bareMessageId(email.messageId ?? headerValue(email, 'message-id'));
   const messageHash = sha256(raw);

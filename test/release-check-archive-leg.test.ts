@@ -22,7 +22,7 @@ import { archivesOpenTarget, createArchiveImportAgent } from '../src/workers/arc
 import { previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
 import { FIXTURE_FOLDER, legFixture, type LegFixture } from '../scripts/release-check/archive-fixtures.ts';
 import {
-  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, agentViewProblems, changedChecks, datesWord, drainBoundS, drainChecks, expectedGapLines,
+  ARCHIVE_BOUNDS, ARCHIVE_PANEL_PROBE, agentImportJourney, agentViewProblems, changedChecks, datesWord, drainBoundS, drainChecks, expectedGapLines, expectedHeadings, expectedLists, expectedSeeLabel,
   gapSentence, heldOffChecks, heldSentenceOf, importChecks, judgedLineOf, messagesWord, modelChecks, panelArchivesOf, pickerImportJourney, removalLabel, removeChecks,
   removeJourney, rowNamed, rowProblems, searchChecks, startViewOf, statusViewOf, stoppedJourney,
   type AgentArchiveView, type ChangedObservation, type DrainView, type ImportObservation, type ModelObservation, type RemoveObservation, type RowView,
@@ -58,31 +58,38 @@ describe('the words the leg expects', () => {
     expect(gapSentence('a_kind_nobody_wrote_words_for', 2)).toBe(fill(A.gaps.other.many, { n: '2' }));
     expect(datesWord({ earliest: '2024-03-04', latest: '2024-03-09' })).toBe(fill(A.dates, { earliest: '2024-03-04', latest: '2024-03-09' }));
     expect(datesWord({ earliest: '2024-03-04', latest: '2024-03-04' })).toBe('2024-03-04');
-    // What was not read comes first, then what was left out, as the row lists them.
+    // Mail has nothing under How it was read: Spam and Trash left out is mail Olympus does not have.
+    expect(expectedLists(agentFx.expect)).toEqual({ notImported: [A.gaps.attachments_not_read.one, A.gaps.spam_or_trash.one], howRead: [] });
     expect(expectedGapLines(agentFx.expect)).toEqual([A.gaps.attachments_not_read.one, A.gaps.spam_or_trash.one]);
     expect(expectedGapLines(heldFx.expect)).toEqual([]);
+    // The button is named by which of the two lists a row has.
+    expect(expectedSeeLabel(agentFx.expect)).toBe(A.seeWhy.notImported);
+    expect(expectedSeeLabel(heldFx.expect)).toBe(A.seeWhy.notImported);
+    expect(expectedHeadings(agentFx.expect)).toEqual([A.lists.notImported]);
+    expect(expectedHeadings(heldFx.expect)).toEqual([]);
   });
 
-  test('a Telegram export is held to the dashboard\'s exact words: one file not imported, one part not imported, one service message left out', () => {
+  test('a Telegram export is held to the dashboard\'s exact words: one file not imported, then one message with nothing in it under how it was read', () => {
     expect(tgFx.expect).toMatchObject({
-      label: 'Telegram Desktop export (JSON)', citationLabel: 'Telegram', family: 'chat', messages: 5, earliest: '2024-03-04', latest: '2024-03-09',
+      label: 'Telegram Desktop export (JSON)', citationLabel: 'Telegram', family: 'chat', messages: 7, earliest: '2024-03-04', latest: '2024-03-09',
     });
-    expect(expectedGapLines(tgFx.expect)).toEqual([
-      '1 picture, recording or other file the archive refers to was not imported',
-      '1 part of the archive is not imported',
-      '1 service message (a join, a call or a pin) left out',
-    ]);
-    expect(messagesWord(tgFx.expect.messages, tgFx.expect.family)).toBe('5 messages');
+    expect(expectedLists(tgFx.expect)).toEqual({
+      notImported: ['1 picture, recording or other file the archive refers to was not imported'],
+      howRead: ['1 message with nothing to read (no text, picture or file) left out'],
+    });
+    expect(expectedSeeLabel(tgFx.expect)).toBe(A.seeWhy.both);
+    expect(expectedHeadings(tgFx.expect)).toEqual([A.lists.notImported, A.lists.howRead]);
+    expect(messagesWord(tgFx.expect.messages, tgFx.expect.family)).toBe('7 messages');
     expect(datesWord(tgFx.expect)).toBe('2024-03-04 to 2024-03-09');
   });
 
-  test('the notes exports are held to the dashboard\'s exact words: notes, not messages; what could not be read, then what was left out', () => {
+  test('the notes exports are held to the dashboard\'s exact words: notes, not messages; what is not imported, then how it was read', () => {
     const reflectFx = legFixture('agent', SEED, 'reflect-json');
     const roamFx = legFixture('agent', SEED, 'roam-json');
     expect(reflectFx.expect).toMatchObject({ label: 'Reflect notes (JSON)', citationLabel: 'Reflect', family: 'note', messages: 4, earliest: '2024-03-04', latest: '2024-03-09' });
     expect(roamFx.expect).toMatchObject({ label: 'Roam notes (JSON)', citationLabel: 'Roam', family: 'note', messages: 4, earliest: '2024-05-06', latest: '2024-05-12' });
-    expect(expectedGapLines(reflectFx.expect)).toEqual(['1 note could not be read', '1 note with nothing written in it left out']);
-    expect(expectedGapLines(roamFx.expect)).toEqual(['1 note with a kind of content Olympus cannot read yet', '1 note with nothing written in it left out']);
+    expect(expectedLists(reflectFx.expect)).toEqual({ notImported: ['1 note could not be read'], howRead: ['1 note with nothing written in it left out'] });
+    expect(expectedLists(roamFx.expect)).toEqual({ notImported: ['1 note with a kind of content Olympus cannot read yet'], howRead: ['1 note with nothing written in it left out'] });
     for (const fx of [reflectFx, roamFx]) {
       expect(messagesWord(fx.expect.messages, fx.expect.family)).toBe('4 notes');
       // A row that counts them as messages is not the notes\' row.
@@ -142,8 +149,9 @@ describe('what the agent\'s tool says', () => {
     expect(view.carriesContent).toBe(false);
     const archive = view.archives[0]!;
     expect(archive).toMatchObject({ name: agentFx.fileName, format: 'Mail (mbox)', status: 'imported', messages: 4, judged: 3, waiting: 1, earliest: '2024-03-04', latest: '2024-03-09' });
-    expect(archive.notRead).toEqual([A.gaps.attachments_not_read.one]);
-    expect(archive.leftOut).toEqual([A.gaps.spam_or_trash.one]);
+    // Both are mail Olympus does not have: the agent's list is the dashboard's Not imported, and How it was read is empty.
+    expect(archive.notImported).toEqual([A.gaps.attachments_not_read.one, A.gaps.spam_or_trash.one]);
+    expect(archive.howRead).toEqual([]);
     expect(agentViewProblems({ ...archive, waiting: 0 }, agentFx.expect)).toEqual([]);
   });
 
@@ -174,7 +182,7 @@ describe('what the agent\'s tool says', () => {
   test('the panel\'s rows and requests are read from whatever a probe returns, and junk reads as nothing', () => {
     expect(panelArchivesOf(undefined)).toEqual({ rows: [], requests: [] });
     expect(panelArchivesOf({ rows: [{ name: 5, gapLines: 'x', whyOpen: 'yes' }], requests: 'no' })).toEqual({
-      rows: [{ status: '', name: '', tag: '', facts: '', text: '', gapLines: [], whyOpen: null, buttons: [] }], requests: [],
+      rows: [{ status: '', name: '', tag: '', facts: '', text: '', gapLines: [], notImported: [], howRead: [], headings: [], whyOpen: null, buttons: [] }], requests: [],
     });
   });
 });
@@ -185,12 +193,14 @@ describe('what the agent\'s tool says', () => {
 const trace = (id: string, ok = true): JourneyTrace => ({ id, title: `journey ${id}`, source: 'test', ok, steps: [], ms: 10 });
 
 function goodRow(fx: LegFixture, over: Partial<RowView> = {}): RowView {
+  const lists = expectedLists(fx.expect);
   const lines = expectedGapLines(fx.expect);
   const facts = `${fx.expect.label} · ~/${FIXTURE_FOLDER} · ${datesWord(fx.expect)}`;
   return {
     status: 'imported', name: fx.fileName, tag: A.status.imported, facts,
     text: [fx.fileName, A.status.imported, facts, messagesWord(fx.expect.messages, fx.expect.family), fill(A.judgedLine, { judged: String(fx.expect.messages), held: '0' }), ...lines].join(' '),
-    gapLines: lines, whyOpen: lines.length > 0 ? true : null, buttons: [A.remove], ...over,
+    gapLines: lines, notImported: lists.notImported, howRead: lists.howRead, headings: expectedHeadings(fx.expect),
+    whyOpen: lines.length > 0 ? true : null, buttons: lines.length > 0 ? [expectedSeeLabel(fx.expect), A.remove] : [A.remove], ...over,
   };
 }
 
@@ -200,7 +210,7 @@ function goodStatus(fx: LegFixture, over: Partial<AgentArchiveView> = {}, model 
     archives: [{
       id: 'a1', name: fx.fileName, format: fx.expect.label, status: 'imported', messages: fx.expect.messages, judged: fx.expect.messages, waiting: 0,
       earliest: fx.expect.earliest, latest: fx.expect.latest,
-      notRead: fx.expect.gaps.map((g) => gapSentence(g.kind, g.count)), leftOut: fx.expect.leftOut.map((g) => gapSentence(g.kind, g.count)), ...over,
+      notImported: expectedLists(fx.expect).notImported, howRead: expectedLists(fx.expect).howRead, ...over,
     }],
   };
 }
@@ -237,7 +247,7 @@ describe('an archive imported with the private model on', () => {
 
   test('a good Telegram import passes: its own row, the agent\'s view of it, and a search cited as "Telegram"', () => {
     const search: SearchView = { ok: true, isError: false, evidence: [{ source: 'Telegram', hasToken: true }] };
-    const drain: DrainView = { drained: true, ms: 60_000, boundMs: 900_000, last: { messages: 5, judged: 5, waiting: 0 }, privateModel: 'ready', row: goodRow(tgFx) };
+    const drain: DrainView = { drained: true, ms: 60_000, boundMs: 900_000, last: { messages: 7, judged: 7, waiting: 0 }, privateModel: 'ready', row: goodRow(tgFx) };
     const checks = importChecks(goodImport(tgFx, 'request', { search, drain }), tgFx, 'macos');
     expect(failing(checks)).toEqual([]);
     expect(Object.keys(statuses(checks))).toEqual(expect.arrayContaining([
@@ -250,26 +260,35 @@ describe('an archive imported with the private model on', () => {
   });
 
   test('a Telegram row that is wrong in one thing fails the dashboard check naming it', () => {
-    const [mediaLine, partLine, serviceLine] = expectedGapLines(tgFx.expect);
+    const [mediaLine] = expectedLists(tgFx.expect).notImported;
+    const [emptyLine] = expectedLists(tgFx.expect).howRead;
+    const good = goodRow(tgFx);
     const cases: Array<[Partial<RowView>, string]> = [
-      [{ gapLines: [partLine!, serviceLine!] }, 'left out'],
-      [{ gapLines: [mediaLine!, serviceLine!] }, 'left out'],
-      [{ gapLines: [mediaLine!, partLine!] }, 'left out'],
-      [{ gapLines: [gapSentence('media_not_imported', 2), partLine!, serviceLine!] }, 'left out'],
-      [{ facts: goodRow(tgFx).facts.replace('Telegram Desktop export (JSON)', 'Mail (mbox)') }, 'format'],
-      [{ facts: goodRow(tgFx).facts.replace('2024-03-04', '2023-12-30') }, 'days'],
-      [{ text: goodRow(tgFx).text.replace(messagesWord(5, 'chat'), messagesWord(6, 'chat')) }, messagesWord(5, 'chat')],
+      // A line in the wrong list is as wrong as a missing one: the picture belongs under Not imported.
+      [{ notImported: [], howRead: [emptyLine!, mediaLine!], gapLines: [emptyLine!, mediaLine!] }, 'Not imported holds [nothing]'],
+      [{ notImported: [mediaLine!, emptyLine!], howRead: [], gapLines: [mediaLine!, emptyLine!] }, 'How it was read holds [nothing]'],
+      [{ howRead: [], gapLines: [mediaLine!] }, 'How it was read holds [nothing]'],
+      [{ notImported: [], gapLines: [emptyLine!] }, 'Not imported holds [nothing]'],
+      [{ notImported: [gapSentence('media_not_imported', 2)], gapLines: [gapSentence('media_not_imported', 2), emptyLine!] }, 'Not imported'],
+      // Lines under no heading.
+      [{ gapLines: [mediaLine!, emptyLine!, 'A line under no heading'] }, 'neither list'],
+      [{ headings: [A.lists.howRead, A.lists.notImported] }, 'headings'],
+      [{ buttons: [A.seeWhy.notImported, A.remove] }, 'the button reads'],
+      [{ facts: good.facts.replace('Telegram Desktop export (JSON)', 'Mail (mbox)') }, 'format'],
+      [{ facts: good.facts.replace('2024-03-04', '2023-12-30') }, 'days'],
+      [{ text: good.text.replace(messagesWord(7, 'chat'), messagesWord(6, 'chat')) }, messagesWord(7, 'chat')],
     ];
     for (const [over, mention] of cases) {
       const problems = rowProblems(goodRow(tgFx, over), tgFx.expect);
       expect(problems.join(' | ')).toContain(mention);
       expect(failing(importChecks(goodImport(tgFx, 'request', { row: goodRow(tgFx, over) }), tgFx, 'macos'))).toContain('archive.agent.telegram_json.dashboard');
     }
-    expect(rowProblems(goodRow(tgFx), tgFx.expect)).toEqual([]);
-    // The agent's status says the same in the same words: what was not read, and what was left out.
+    expect(rowProblems(good, tgFx.expect)).toEqual([]);
+    // The agent's status says the same in the same words: what is not imported, and how it was read.
     expect(agentViewProblems(goodStatus(tgFx).archives[0], tgFx.expect)).toEqual([]);
-    expect(agentViewProblems(goodStatus(tgFx, { leftOut: [] }).archives[0], tgFx.expect).join(' ')).toContain('left-out');
-    expect(agentViewProblems(goodStatus(tgFx, { notRead: [gapSentence('media_not_imported', 1)] }).archives[0], tgFx.expect).join(' ')).toContain('not-read');
+    expect(agentViewProblems(goodStatus(tgFx, { howRead: [] }).archives[0], tgFx.expect).join(' ')).toContain('how-it-was-read');
+    expect(agentViewProblems(goodStatus(tgFx, { notImported: [], howRead: [mediaLine!, emptyLine!] }).archives[0], tgFx.expect).join(' ')).toContain('not-imported');
+    expect(agentViewProblems(goodStatus(tgFx, { notImported: [gapSentence('media_not_imported', 1)] }).archives[0], tgFx.expect)).toEqual([]);
   });
 
   test('a picker import has no request check and is held to the same row', () => {
@@ -320,7 +339,7 @@ describe('an archive imported with the private model on', () => {
       [{ facts: goodRow(agentFx).facts.replace('Mail (mbox)', 'Something else') }, 'format'],
       [{ facts: goodRow(agentFx).facts.replace('2024-03-09', '2024-03-10') }, 'days'],
       [{ text: goodRow(agentFx).text.replace(messagesWord(4), messagesWord(5)) }, messagesWord(4)],
-      [{ gapLines: [A.gaps.attachments_not_read.one] }, 'left out'],
+      [{ notImported: [A.gaps.attachments_not_read.one], gapLines: [A.gaps.attachments_not_read.one] }, A.gaps.spam_or_trash.one],
       [{ gapLines: [...expectedGapLines(agentFx.expect), 'An extra line'] }, 'An extra line'],
       [{ whyOpen: false }, 'not open'],
       [{ tag: A.status.importing, status: 'importing' }, 'reads'],
@@ -341,8 +360,8 @@ describe('an archive imported with the private model on', () => {
       goodStatus(agentFx, { messages: 3 }),
       goodStatus(agentFx, { format: 'Other' }),
       goodStatus(agentFx, { latest: '2024-03-10' }),
-      goodStatus(agentFx, { notRead: [] }),
-      goodStatus(agentFx, { leftOut: ['Something else was left out.'] }),
+      goodStatus(agentFx, { notImported: [] }),
+      goodStatus(agentFx, { howRead: ['Something else was left out.'] }),
       { ...goodStatus(agentFx), carriesContent: true },
       { ...goodStatus(agentFx), archives: [] },
     ]) {
@@ -532,10 +551,10 @@ describe('Remove', () => {
 });
 
 describe('a file that changes while it is imported', () => {
-  const stoppedRow = (): RowView => ({ status: 'stopped', name: 'rc-bulk-8000.mbox', tag: A.status.stopped, facts: '', text: 'rc-bulk-8000.mbox', gapLines: [], whyOpen: null, buttons: [A.remove] });
+  const stoppedRow = (): RowView => ({ status: 'stopped', name: 'rc-bulk-8000.mbox', tag: A.status.stopped, facts: '', text: 'rc-bulk-8000.mbox', gapLines: [], notImported: [], howRead: [], headings: [], whyOpen: null, buttons: [A.remove] });
   const stoppedStatus = (code = 'file_changed'): StatusView => ({
     ok: true, requestStates: [], carriesContent: false,
-    archives: [{ id: 'b1', name: 'rc-bulk-8000.mbox', format: 'Mail (mbox)', status: 'stopped', stopCode: code, notRead: [], leftOut: [] }],
+    archives: [{ id: 'b1', name: 'rc-bulk-8000.mbox', format: 'Mail (mbox)', status: 'stopped', stopCode: code, notImported: [], howRead: [] }],
   });
   const good = (over: Partial<ChangedObservation> = {}): ChangedObservation => ({
     ok: true, fileName: 'rc-bulk-8000.mbox', traces: [trace('archive-bulk-8000-approve'), trace('archive-bulk-stopped')],
@@ -626,7 +645,7 @@ afterEach(closeWindows);
 describe('the leg\'s journeys on the product\'s real panel', () => {
   const requestFor = (fx: LegFixture, path: string): ComputerArchivesMeta['requests'] => [{ id: 'req-1', name: fx.fileName, where: `~/${FIXTURE_FOLDER}`, path, origin: 'agent', status: 'pending' }];
 
-  test('the agent path: the owner sees the request, presses Import, the row settles, See what was not read lists the gaps', async () => {
+  test('the agent path: the owner sees the request, presses Import, the row settles, the See button lists what was not imported and how it was read', async () => {
     const path = `/Users/you/${FIXTURE_FOLDER}/${agentFx.fileName}`;
     let archives: ComputerArchiveEntry[] = [];
     let requests = requestFor(agentFx, `~/${FIXTURE_FOLDER}/${agentFx.fileName}`);
@@ -676,13 +695,11 @@ describe('the leg\'s journeys on the product\'s real panel', () => {
     const row = rowNamed(panel, tgFx.fileName)!;
     expect(row).toBeDefined();
     expect(rowProblems(row, tgFx.expect)).toEqual([]);
-    expect([...row.gapLines].sort()).toEqual([
-      '1 picture, recording or other file the archive refers to was not imported',
-      '1 part of the archive is not imported',
-      '1 service message (a join, a call or a pin) left out',
-    ].sort());
+    expect(row.notImported).toEqual(['1 picture, recording or other file the archive refers to was not imported']);
+    expect(row.howRead).toEqual(['1 message with nothing to read (no text, picture or file) left out']);
+    expect(row.headings).toEqual([A.lists.notImported, A.lists.howRead]);
     expect(row.facts).toContain('Telegram Desktop export (JSON)');
-    // The mail archive beside it keeps its own row, with its own lines (its See what was not read was not pressed).
+    // The mail archive beside it keeps its own row, with its own lines (its See button was not pressed).
     expect(rowNamed(panel, agentFx.fileName)!.gapLines).toEqual(expectedGapLines(agentFx.expect));
   });
 

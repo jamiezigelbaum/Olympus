@@ -9,7 +9,7 @@
  *   - The owner can also choose the file herself: Import an archive opens the picker over the computer's files, the folder is opened,
  *     Import is pressed on the file.
  *   - The import settles. The dashboard's row must say what the fixture holds (archive-fixtures.ts): the format, the messages, the
- *     days, what could not be read and what was left out, behind a real press of See what was not read. The agent's own status says
+ *     days, what was not imported and how it was read (two lists), behind a real press of the See button. The agent's own status says
  *     the same and carries no message text. A search for the archive's word is cited as the format's own label ("Imported mail" for
  *     mbox, "Telegram" for a Telegram Desktop export). Every format in ARCHIVE_FORMATS but the stress one goes through this path.
  *   - Remove deletes everything made from it, and only that archive's: counts reach zero, the row is gone, the stores hold none of the
@@ -70,15 +70,36 @@ export const messagesWord = (n: number, family = 'email'): string => {
   return n === 1 ? nouns.one : fill(nouns.many, { n: grouped(n) });
 };
 
-/** One line of "what was not read" or "what was left out" for a kind, as the dashboard writes it. */
+/** One line of "Not imported" or "How it was read" for a kind, as the dashboard writes it. */
 export function gapSentence(kind: string, count: number): string {
   const words = ((A.gaps as unknown as Record<string, { one: string; many: string }>)[kind]) ?? A.gaps.other;
   return count === 1 ? words.one : fill(words.many, { n: grouped(count) });
 }
 
-/** The lines See what was not read must hold for a fixture: what was not read first, then what was left out. */
+/** The lines each of an archive's two lists must hold for a fixture, as the fixture says them (not as the product's table sorts them). */
+export function expectedLists(expect: ArchiveExpectation): { notImported: string[]; howRead: string[] } {
+  return {
+    notImported: expect.notImported.map((entry) => gapSentence(entry.kind, entry.count)),
+    howRead: expect.howRead.map((entry) => gapSentence(entry.kind, entry.count)),
+  };
+}
+
+/** Every line under the See button for a fixture: what was not imported first, then how it was read. */
 export function expectedGapLines(expect: ArchiveExpectation): string[] {
-  return [...expect.gaps, ...expect.leftOut].map((entry) => gapSentence(entry.kind, entry.count));
+  const lists = expectedLists(expect);
+  return [...lists.notImported, ...lists.howRead];
+}
+
+/** What the See button is called for a fixture: by which of the two lists it has. */
+export function expectedSeeLabel(expect: ArchiveExpectation): string {
+  const lists = expectedLists(expect);
+  return lists.notImported.length > 0 && lists.howRead.length > 0 ? A.seeWhy.both : lists.howRead.length > 0 ? A.seeWhy.howRead : A.seeWhy.notImported;
+}
+
+/** The headings the lists carry on the page, for a fixture, in the order they are shown. */
+export function expectedHeadings(expect: ArchiveExpectation): string[] {
+  const lists = expectedLists(expect);
+  return [...(lists.notImported.length > 0 ? [A.lists.notImported] : []), ...(lists.howRead.length > 0 ? [A.lists.howRead] : [])];
 }
 
 /** A path as the dashboard shows it to the person approving: the home folder written as ~ (the same rule as archive-import/dashboard.ts). */
@@ -126,9 +147,13 @@ export interface RowView {
   /** The facts line: format, folder and days. */
   facts: string;
   text: string;
-  /** The lines under See what was not read (present in the page whether or not it is open). */
+  /** Every line under the See button (present in the page whether or not it is open). */
   gapLines: string[];
-  /** Whether See what was not read is open; null when the row has none. */
+  /** The lines under the "Not imported" heading and under "How it was read", and the headings in the order shown. */
+  notImported: string[];
+  howRead: string[];
+  headings: string[];
+  /** Whether the See button's box is open; null when the row has none. */
   whyOpen: boolean | null;
   buttons: string[];
 }
@@ -155,6 +180,10 @@ export const ARCHIVE_PANEL_PROBE = String.raw`(() => {
       facts: clean((li.querySelector('p.archive-facts') || {}).textContent),
       text: clean(li.textContent),
       gapLines: Array.from(li.querySelectorAll('details.why ul.plain li')).map((n) => clean(n.textContent)),
+      lists: Array.from(li.querySelectorAll('details.why .why-head')).map((head) => ({
+        head: clean(head.textContent),
+        lines: head.nextElementSibling && head.nextElementSibling.matches('ul.plain') ? Array.from(head.nextElementSibling.querySelectorAll('li')).map((n) => clean(n.textContent)) : [],
+      })),
       whyOpen: why ? why.open === true : null,
       buttons: buttonsOf(li),
     };
@@ -167,10 +196,17 @@ export function panelArchivesOf(raw: unknown): PanelArchives {
   const record = (raw && typeof raw === 'object' ? raw : {}) as { rows?: unknown; requests?: unknown };
   const text = (value: unknown): string => (typeof value === 'string' ? value : '');
   const list = (value: unknown): string[] => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []);
-  const rows = (Array.isArray(record.rows) ? record.rows : []).map((entry: any): RowView => ({
-    status: text(entry?.status), name: text(entry?.name), tag: text(entry?.tag), facts: text(entry?.facts), text: text(entry?.text),
-    gapLines: list(entry?.gapLines), whyOpen: typeof entry?.whyOpen === 'boolean' ? entry.whyOpen : null, buttons: list(entry?.buttons),
-  }));
+  const rows = (Array.isArray(record.rows) ? record.rows : []).map((entry: any): RowView => {
+    const lists: Array<{ head: string; lines: string[] }> = (Array.isArray(entry?.lists) ? entry.lists : []).map((item: any) => ({ head: text(item?.head), lines: list(item?.lines) }));
+    return {
+      status: text(entry?.status), name: text(entry?.name), tag: text(entry?.tag), facts: text(entry?.facts), text: text(entry?.text),
+      gapLines: list(entry?.gapLines),
+      notImported: lists.filter((item) => item.head === A.lists.notImported).flatMap((item) => item.lines),
+      howRead: lists.filter((item) => item.head === A.lists.howRead).flatMap((item) => item.lines),
+      headings: lists.map((item) => item.head),
+      whyOpen: typeof entry?.whyOpen === 'boolean' ? entry.whyOpen : null, buttons: list(entry?.buttons),
+    };
+  });
   const requests = (Array.isArray(record.requests) ? record.requests : []).map((entry: any) => ({ kind: text(entry?.kind), text: text(entry?.text), buttons: list(entry?.buttons) }));
   return { rows, requests };
 }
@@ -200,8 +236,8 @@ export interface AgentArchiveView {
   waiting?: number;
   earliest?: string;
   latest?: string;
-  notRead: string[];
-  leftOut: string[];
+  notImported: string[];
+  howRead: string[];
   stopCode?: string;
 }
 
@@ -249,8 +285,8 @@ export function statusViewOf(json: unknown, token: string): StatusView {
       ...(optNumber(archive.waiting_for_private_model) !== undefined ? { waiting: optNumber(archive.waiting_for_private_model)! } : {}),
       ...(optText(archive.earliest) ? { earliest: optText(archive.earliest)! } : {}),
       ...(optText(archive.latest) ? { latest: optText(archive.latest)! } : {}),
-      notRead: lines(archive.not_read),
-      leftOut: lines(archive.left_out),
+      notImported: lines(archive.not_imported),
+      howRead: lines(archive.how_read),
       ...(optText(asRecord(archive.stopped).code) ? { stopCode: optText(asRecord(archive.stopped).code)! } : {}),
     };
   });
@@ -397,12 +433,13 @@ const settleStep = (fx: LegFixture, settleS: number): Journey['steps'][number] =
   timeoutMs: settleS * 1_000,
 });
 
-/** See what was not read, opened with a real press, and every line the fixture must leave there. */
+/** The See button, opened with a real press, and the two lists' headings and every line the fixture must leave there. */
 const gapsStep = (fx: LegFixture): Journey['steps'][number] => ({
-  name: 'Open See what was not read',
-  do: { click: { role: 'button', name: A.seeWhy, within: rowTarget(fx.fileName) }, frame: 'panel' },
+  name: `Open ${expectedSeeLabel(fx.expect)}`,
+  do: { click: { role: 'button', name: expectedSeeLabel(fx.expect), within: rowTarget(fx.fileName) }, frame: 'panel' },
   expect: [
     { present: { css: 'li.archive:not(.request) details.why[open]' }, frame: 'panel' },
+    ...expectedHeadings(fx.expect).map((heading) => ({ text: heading, frame: 'panel' as const })),
     ...expectedGapLines(fx.expect).map((line) => ({ text: line, frame: 'panel' as const })),
   ],
 });
@@ -537,9 +574,17 @@ export function rowProblems(row: RowView, expect: ArchiveExpectation): string[] 
   if (!row.facts.includes(FIXTURE_FOLDER)) problems.push(`the folder ${FIXTURE_FOLDER} is not on the facts line ("${row.facts.slice(0, 80)}")`);
   if (!row.facts.includes(datesWord(expect))) problems.push(`the days are not "${datesWord(expect)}" (facts line: "${row.facts.slice(0, 80)}")`);
   if (!row.text.includes(messagesWord(expect.messages, expect.family))) problems.push(`the row does not say "${messagesWord(expect.messages, expect.family)}"`);
-  const expected = expectedGapLines(expect);
-  if (expected.length > 0 && row.whyOpen !== true) problems.push(`See what was not read was not open (${row.whyOpen === null ? 'the row has none' : 'closed'})`);
-  if (!sameSet(row.gapLines, expected)) problems.push(`what was not read or left out is [${row.gapLines.join('; ') || 'nothing'}], expected [${expected.join('; ') || 'nothing'}]`);
+  const expected = expectedLists(expect);
+  const hasLines = expected.notImported.length + expected.howRead.length > 0;
+  const see = expectedSeeLabel(expect);
+  if (hasLines && !row.buttons.includes(see)) problems.push(`the button reads [${row.buttons.join('; ') || 'nothing'}], expected "${see}"`);
+  if (hasLines && row.whyOpen !== true) problems.push(`${see} was not open (${row.whyOpen === null ? 'the row has none' : 'closed'})`);
+  if (!sameSet(row.notImported, expected.notImported)) problems.push(`${A.lists.notImported} holds [${row.notImported.join('; ') || 'nothing'}], expected [${expected.notImported.join('; ') || 'nothing'}]`);
+  if (!sameSet(row.howRead, expected.howRead)) problems.push(`${A.lists.howRead} holds [${row.howRead.join('; ') || 'nothing'}], expected [${expected.howRead.join('; ') || 'nothing'}]`);
+  // Every line is in one of the two lists: none sits under no heading, and no heading is empty or repeated.
+  if (!sameSet(row.gapLines, [...row.notImported, ...row.howRead])) problems.push(`some lines under the button are in neither list: [${row.gapLines.join('; ')}]`);
+  // The order is part of it: what is not imported first, then how it was read.
+  if (row.headings.join('\n') !== expectedHeadings(expect).join('\n')) problems.push(`the headings are [${row.headings.join('; ') || 'none'}], expected [${expectedHeadings(expect).join('; ') || 'none'}]`);
   return problems;
 }
 
@@ -551,10 +596,9 @@ export function agentViewProblems(view: AgentArchiveView | undefined, expect: Ar
   if (view.format !== expect.label) problems.push(`the agent sees the format "${view.format}"`);
   if (view.messages !== expect.messages) problems.push(`the agent sees ${view.messages ?? 'no'} messages, expected ${expect.messages}`);
   if (view.earliest?.slice(0, 10) !== expect.earliest || view.latest?.slice(0, 10) !== expect.latest) problems.push(`the agent sees ${view.earliest ?? '?'} to ${view.latest ?? '?'}`);
-  const notRead = expect.gaps.map((entry) => gapSentence(entry.kind, entry.count));
-  const leftOut = expect.leftOut.map((entry) => gapSentence(entry.kind, entry.count));
-  if (!sameSet(view.notRead, notRead)) problems.push(`the agent's not-read lines are [${view.notRead.join('; ') || 'none'}]`);
-  if (!sameSet(view.leftOut, leftOut)) problems.push(`the agent's left-out lines are [${view.leftOut.join('; ') || 'none'}]`);
+  const expected = expectedLists(expect);
+  if (!sameSet(view.notImported, expected.notImported)) problems.push(`the agent's not-imported lines are [${view.notImported.join('; ') || 'none'}]`);
+  if (!sameSet(view.howRead, expected.howRead)) problems.push(`the agent's how-it-was-read lines are [${view.howRead.join('; ') || 'none'}]`);
   return problems;
 }
 
@@ -605,7 +649,7 @@ function importCoreChecks(obs: ImportObservation, fx: LegFixture): CheckResult[]
     obs.settled && obs.row ? `${obs.row.name} reads ${obs.row.tag} after ${secs(obs.settleMs)}` : `the row did not read ${A.status.imported}${obs.row ? ` (it reads "${obs.row.tag || obs.row.status}")` : ''}`, obs.settleMs));
   if (obs.row) {
     const problems = rowProblems(obs.row, fx.expect);
-    out.push(check(`${prefix}.dashboard`, 'The dashboard row shows the format, the messages, the days, what was not read and what was left out', problems.length === 0,
+    out.push(check(`${prefix}.dashboard`, 'The dashboard row shows the format, the messages, the days, what was not imported and how it was read', problems.length === 0,
       problems.length === 0 ? `${messagesWord(fx.expect.messages, fx.expect.family)}, ${datesWord(fx.expect)}, ${fx.expect.label}${expectedGapLines(fx.expect).length > 0 ? `, ${expectedGapLines(fx.expect).join('; ')}` : ', nothing unread'}` : problems.join('; ')));
     const view = obs.status?.archives.find((archive) => archive.name === fx.fileName);
     const stat = agentViewProblems(view, fx.expect);

@@ -29,7 +29,7 @@ import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveContinuations } from '../src/workers/archive-import/continuation-cache.ts';
 import { registerArchiveFormatConnectors } from '../src/workers/archive-import/format-connectors.ts';
 import { probeArchivePath } from '../src/workers/archive-import/manifest.ts';
-import { NOTE_FINDINGS, NOTE_MAX_RECORD_BYTES, NOTE_MAX_TEXT_CHARS } from '../src/workers/archive-import/notes/note.ts';
+import { NOTE_FINDINGS, NOTE_MAX_RECORD_BYTES } from '../src/workers/archive-import/notes/note.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import { ROAM_CURSOR_PREFIX, createRoamArchiveConnector } from '../src/workers/archive-import/roam/connector.ts';
 import { parseRoamPage, roamDailyPageDate } from '../src/workers/archive-import/roam/parse.ts';
@@ -375,12 +375,14 @@ describe('the Roam connector', () => {
     expect(text.slice(findings[0]!.offset, findings[0]!.offset + 15)).toBe('{"title":"Big",');
   });
 
-  test('a page longer than the import keeps is cut to its start and says so', async () => {
-    const page = { title: 'Long', children: [{ string: `start ${'y'.repeat(NOTE_MAX_TEXT_CHARS + 500)} end`, 'create-time': 1_717_000_000_000 }] };
+  test('a long page is kept whole, past the million characters it used to be cut at, and nothing is said', async () => {
+    const words = `start ${'y'.repeat(1_500_000)} end`;
+    const page = { title: 'Long', children: [{ string: words, 'create-time': 1_717_000_000_000 }] };
     const { connector, findings } = roamConnector('long.json', roamJson([page]));
     const { items } = await listAll(connector);
-    expect(textOf(items[0]!)).toHaveLength(NOTE_MAX_TEXT_CHARS);
-    expect(kinds(findings)).toEqual([`gap:${ARCHIVE_COMMON_FINDINGS.itemTruncated}`]);
+    expect(textOf(items[0]!)).toContain(words);
+    expect(textOf(items[0]!).length).toBeGreaterThan(1_500_000);
+    expect(kinds(findings)).toEqual([]);
   });
 
   test('a file cut short keeps the pages before the cut and reports the file as damaged', async () => {

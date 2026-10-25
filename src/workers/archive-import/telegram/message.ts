@@ -14,7 +14,8 @@
  *   `audio_file`; none for a plain document). A file the export left out is a
  *   sentence in parentheses in place of the path.
  * - `type` is `service` for joins, calls, pins and the like; such a message
- *   has `action` and `actor` instead of `from` and `text`.
+ *   has `action` and `actor` instead of `from` and `text`, and `telegramServiceContent`
+ *   turns it into a plain sentence.
  * - A poll, a to-do list, an invoice, a contact and a place are objects whose
  *   words are read (the words of a poll or a list can be formatted, so they
  *   are text in the `text` form). A giveaway, a rich message, paid media and
@@ -36,14 +37,11 @@ export interface TelegramMessageContent {
   unsupported: boolean;
 }
 
-const MAX_LINE_CHARS = 500;
-const MAX_LIST_ENTRIES = 50;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function text(value: unknown): string | undefined {
+export function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
 }
 
@@ -52,10 +50,6 @@ export function telegramScalar(value: unknown): string | undefined {
   if (typeof value === 'string') return value.trim() === '' ? undefined : value;
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return undefined;
-}
-
-function cut(value: string): string {
-  return value.length > MAX_LINE_CHARS ? `${value.slice(0, MAX_LINE_CHARS)}…` : value;
 }
 
 /**
@@ -98,6 +92,19 @@ function seconds(value: unknown): string | undefined {
   return n >= 60 ? `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, '0')}` : `${Math.floor(n)} s`;
 }
 
+/** The keys `mediaLine` reads, so a caller that prints the rest of a record does not print them twice. */
+export const TELEGRAM_MEDIA_KEYS: ReadonlySet<string> = new Set([
+  'photo', 'file', 'media_type', 'file_name', 'sticker_emoji', 'performer', 'title', 'duration_seconds',
+]);
+
+/** A line for each picture or file a record names (never opened), with the count and the names for search. */
+export function telegramMediaLines(record: Record<string, unknown>): { lines: string[]; mediaFiles: number; attachments: string[] } {
+  const content: TelegramMessageContent = { text: '', mediaFiles: 0, attachments: [], hasContent: false, unsupported: false };
+  const lines: string[] = [];
+  mediaLine(record, content, lines);
+  return { lines, mediaFiles: content.mediaFiles, attachments: content.attachments };
+}
+
 function mediaLine(message: Record<string, unknown>, content: TelegramMessageContent, lines: string[]): void {
   const photo = text(message.photo);
   if (photo) {
@@ -105,9 +112,9 @@ function mediaLine(message: Record<string, unknown>, content: TelegramMessageCon
       lines.push('[Photo (not in the export)]');
       content.mediaFiles += 1;
     } else {
-      lines.push(`[Photo: ${cut(photo)} (not imported)]`);
+      lines.push(`[Photo: ${photo} (not imported)]`);
       content.mediaFiles += 1;
-      content.attachments.push(`Photo: ${cut(photo)}`);
+      content.attachments.push(`Photo: ${photo}`);
     }
   }
   const file = text(message.file);
@@ -118,16 +125,16 @@ function mediaLine(message: Record<string, unknown>, content: TelegramMessageCon
     const name = text(message.file_name);
     if (fileLeftOut(file)) {
       // The export still names the file it left out; the name is what a search for it finds.
-      lines.push(name ? `[${label}: ${cut(name)} (not in the export)]` : `[${label} (not in the export)]`);
+      lines.push(name ? `[${label}: ${name} (not in the export)]` : `[${label} (not in the export)]`);
       content.mediaFiles += 1;
-      if (name) content.attachments.push(`${label}: ${cut(name)}`);
+      if (name) content.attachments.push(`${label}: ${name}`);
     } else {
       const track = [text(message.performer), text(message.title)].filter(Boolean).join(' - ');
       const duration = seconds(message.duration_seconds);
-      const detail = [name && name !== file ? name : undefined, track || undefined, cut(file), duration].filter(Boolean).join(', ');
+      const detail = [name && name !== file ? name : undefined, track || undefined, file, duration].filter(Boolean).join(', ');
       lines.push(`[${label}: ${detail} (not imported)]`);
       content.mediaFiles += 1;
-      content.attachments.push(`${label}: ${name ?? cut(file)}`);
+      content.attachments.push(`${label}: ${name ?? file}`);
     }
   }
 }
@@ -137,10 +144,10 @@ function factLines(message: Record<string, unknown>, lines: string[]): void {
   if (isRecord(contact)) {
     const name = [text(contact.first_name), text(contact.last_name)].filter(Boolean).join(' ');
     const detail = [name || undefined, text(contact.phone_number)].filter(Boolean).join(', ');
-    if (detail) lines.push(`Contact: ${cut(detail)}`);
+    if (detail) lines.push(`Contact: ${detail}`);
   }
   const place = [text(message.place_name), text(message.address)].filter(Boolean).join(', ');
-  if (place) lines.push(`Place: ${cut(place)}`);
+  if (place) lines.push(`Place: ${place}`);
   const location = message.location_information;
   if (isRecord(location) && typeof location.latitude === 'number' && typeof location.longitude === 'number') {
     lines.push(`Location: ${location.latitude}, ${location.longitude}`);
@@ -148,14 +155,14 @@ function factLines(message: Record<string, unknown>, lines: string[]): void {
   const poll = message.poll;
   if (isRecord(poll)) {
     const question = flattenTelegramText(poll.question).trim();
-    if (question) lines.push(`Poll: ${cut(question)}`);
+    if (question) lines.push(`Poll: ${question}`);
     if (Array.isArray(poll.answers)) {
-      for (const answer of poll.answers.slice(0, MAX_LIST_ENTRIES)) {
+      for (const answer of poll.answers) {
         if (!isRecord(answer)) continue;
         const label = flattenTelegramText(answer.text).trim();
         if (!label) continue;
         const voters = typeof answer.voters === 'number' ? ` (${answer.voters} ${answer.voters === 1 ? 'vote' : 'votes'})` : '';
-        lines.push(`- ${cut(label)}${voters}`);
+        lines.push(`- ${label}${voters}`);
       }
     }
   }
@@ -165,19 +172,19 @@ function factLines(message: Record<string, unknown>, lines: string[]): void {
     const title = flattenTelegramText(todo.title).trim();
     const tasks: string[] = [];
     if (Array.isArray(todo.answers)) {
-      for (const task of todo.answers.slice(0, MAX_LIST_ENTRIES)) {
+      for (const task of todo.answers) {
         const label = isRecord(task) ? flattenTelegramText(task.text).trim() : '';
-        if (label) tasks.push(`- ${cut(label)}`);
+        if (label) tasks.push(`- ${label}`);
       }
     }
-    if (title || tasks.length > 0) lines.push(title ? `To-do list: ${cut(title)}` : 'To-do list:', ...tasks);
+    if (title || tasks.length > 0) lines.push(title ? `To-do list: ${title}` : 'To-do list:', ...tasks);
   }
   const invoice = message.invoice_information;
   if (isRecord(invoice)) {
-    const detail = [text(invoice.title), text(invoice.description)].filter(Boolean).map((part) => cut(part!)).join(', ');
+    const detail = [text(invoice.title), text(invoice.description)].filter(Boolean).join(', ');
     if (detail) lines.push(`Invoice: ${detail}`);
   }
-  const game = [text(message.game_title), text(message.game_description)].filter(Boolean).map((part) => cut(part!)).join(', ');
+  const game = [text(message.game_title), text(message.game_description)].filter(Boolean).join(', ');
   if (game) lines.push(`Game: ${game}`);
 }
 
@@ -257,9 +264,223 @@ export function telegramTime(message: Record<string, unknown>, field: 'date' | '
   return Number.isFinite(parsed) ? { iso: new Date(parsed).toISOString(), assumedZone: false } : { assumedZone: false };
 }
 
-/** Cuts text to `limit` characters without splitting a surrogate pair. */
-export function cutText(value: string, limit: number): string {
-  if (value.length <= limit) return value;
-  const end = value.charCodeAt(limit - 1);
-  return value.slice(0, end >= 0xd800 && end <= 0xdbff ? limit - 1 : limit);
+
+// --- Service messages -----------------------------------------------------------
+
+/** Seconds as words: "1 hour 5 minutes 3 seconds". Undefined when it is not a count of seconds. */
+function durationWords(value: unknown): string | undefined {
+  const total = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  if (!Number.isFinite(total) || total < 0) return undefined;
+  const whole = Math.floor(total);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const secs = whole % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours} ${hours === 1 ? 'hour' : 'hours'}`);
+  if (minutes > 0) parts.push(`${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`);
+  if (secs > 0 || parts.length === 0) parts.push(`${secs} ${secs === 1 ? 'second' : 'seconds'}`);
+  return parts.join(' ');
+}
+
+/** The people a service message names (`members`, a list of names), joined; their ids are not names. */
+function peopleOf(value: unknown): string | undefined {
+  const names: string[] = [];
+  if (typeof value === 'string' && value.trim() !== '') names.push(value.trim());
+  if (Array.isArray(value)) {
+    for (const member of value) {
+      if (typeof member === 'string' && member.trim() !== '') names.push(member.trim());
+      else if (isRecord(member)) {
+        const name = text(member.name) ?? text(member.first_name);
+        if (name) names.push(name);
+      }
+    }
+  }
+  if (names.length === 0) return undefined;
+  return names.length <= 2 ? names.join(' and ') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+function quoted(value: unknown): string | undefined {
+  const words = text(value);
+  return words ? `"${words.trim()}"` : undefined;
+}
+
+function plural(count: number, one: string): string {
+  return `${count} ${count === 1 ? one : `${one}s`}`;
+}
+
+/** An amount and its currency as the export gives them (an amount may be in the smallest unit; it is shown as written). */
+function amountOf(message: Record<string, unknown>): string | undefined {
+  const amount = telegramScalar(message.amount) ?? telegramScalar(message.cost);
+  const currency = text(message.currency);
+  return amount ? (currency ? `${amount} ${currency}` : amount) : undefined;
+}
+
+/** Every field a sentence does not use, as `name: value` for the plain ones, so a kind of event this does not know loses nothing. */
+function remainingFacts(message: Record<string, unknown>, used: ReadonlySet<string>): string[] {
+  const facts: string[] = [];
+  for (const [key, value] of Object.entries(message)) {
+    if (used.has(key) || key === 'id' || key === 'type' || key === 'date' || key === 'date_unixtime' || key === 'edited' || key === 'edited_unixtime') continue;
+    if (key === 'photo' || key === 'file') continue; // named by the media lines
+    const label = key.replace(/_/g, ' ');
+    if (typeof value === 'string' && value.trim() !== '') facts.push(`${label}: ${value}`);
+    else if (typeof value === 'number' || typeof value === 'boolean') facts.push(`${label}: ${value}`);
+    else if (Array.isArray(value) || isRecord(value)) {
+      const named = peopleOf(value);
+      facts.push(`${label}: ${named ?? JSON.stringify(value)}`);
+    }
+  }
+  return facts;
+}
+
+/**
+ * What a service message (a join, a call, a pin, a new title, a group made...)
+ * says, as one plain sentence with who did it, built from the writer's own
+ * `action` and the fields that action carries. The common actions have their
+ * own sentence; any other (the writer adds new ones) reads "<who>: <action
+ * words>." followed by every field it carries, so nothing of it is lost.
+ * The sentence names who did it, and the item carries when.
+ */
+export function telegramServiceContent(message: Record<string, unknown>): TelegramMessageContent {
+  const action = text(message.action)?.trim() ?? '';
+  const actor = text(message.actor)?.trim();
+  const who = actor ?? 'Someone';
+  const members = peopleOf(message.members);
+  const title = quoted(message.title);
+  const used = new Set<string>(['action', 'actor', 'actor_id']);
+  const use = (...keys: string[]): void => { for (const key of keys) used.add(key); };
+  let sentence: string;
+  switch (action) {
+    case 'create_group':
+      use('title', 'members');
+      sentence = `${who} created the group${title ? ` ${title}` : ''}${members ? ` with ${members}` : ''}.`;
+      break;
+    case 'create_channel':
+      use('title');
+      sentence = `${actor ? `${actor} created` : 'Created'} the channel${title ? ` ${title}` : ''}.`;
+      break;
+    case 'edit_group_title':
+      use('title');
+      sentence = `${who} changed the group name${title ? ` to ${title}` : ''}.`;
+      break;
+    case 'edit_group_photo':
+      use('photo_file_size', 'width', 'height', 'media_spoiler');
+      sentence = `${who} changed the group photo.`;
+      break;
+    case 'delete_group_photo':
+      sentence = `${who} removed the group photo.`;
+      break;
+    case 'invite_members':
+      use('members');
+      sentence = members ? `${who} added ${members}.` : `${who} added members.`;
+      break;
+    case 'remove_members':
+      use('members');
+      sentence = members ? `${who} removed ${members}.` : `${who} removed members.`;
+      break;
+    case 'join_group_by_link': {
+      const inviter = text(message.inviter);
+      use('inviter');
+      sentence = `${who} joined the group by invite link${inviter ? ` from ${inviter}` : ''}.`;
+      break;
+    }
+    case 'join_group_by_request':
+      sentence = `${who} joined the group by request.`;
+      break;
+    case 'migrate_to_supergroup':
+      sentence = 'This group was upgraded to a supergroup.';
+      break;
+    case 'migrate_from_group':
+      use('title');
+      sentence = `This supergroup was upgraded from the group${title ? ` ${title}` : ''}.`;
+      break;
+    case 'pin_message': {
+      const pinned = telegramScalar(message.message_id);
+      use('message_id', 'reply_to_peer_id');
+      sentence = `${who} pinned ${pinned ? `message ${pinned}` : 'a message'}.`;
+      break;
+    }
+    case 'clear_history':
+      sentence = `${who} cleared the chat history.`;
+      break;
+    case 'phone_call': {
+      const reason = text(message.discard_reason)?.trim();
+      const length = durationWords(message.duration_seconds);
+      use('duration_seconds', 'discard_reason');
+      if (reason === 'missed') sentence = `Missed phone call from ${who}.`;
+      else if (reason === 'busy') sentence = `${who} called; the line was busy.`;
+      else sentence = `${who} made a phone call${length ? ` that lasted ${length}` : ''}.`;
+      break;
+    }
+    case 'conference_call': {
+      const length = durationWords(message.duration_seconds);
+      use('duration_seconds', 'is_active', 'is_missed');
+      sentence = message.is_missed === true
+        ? `Missed group call from ${who}.`
+        : `${who} started a group call${length ? ` that lasted ${length}` : ''}${message.is_active === true ? ' and it is still going' : ''}.`;
+      break;
+    }
+    case 'group_call': {
+      const length = durationWords(message.duration);
+      use('duration');
+      sentence = `${who} started a voice chat${length ? ` that lasted ${length}` : ''}.`;
+      break;
+    }
+    case 'invite_to_group_call':
+      use('members');
+      sentence = members ? `${who} invited ${members} to the voice chat.` : `${who} invited members to the voice chat.`;
+      break;
+    case 'joined_telegram':
+      sentence = `${who} joined Telegram.`;
+      break;
+    case 'set_messages_ttl': {
+      const period = durationWords(message.period);
+      use('period');
+      sentence = period ? `${who} set messages to disappear after ${period}.` : `${who} changed when messages disappear.`;
+      break;
+    }
+    case 'topic_created':
+      use('title');
+      sentence = `${who} created the topic${title ? ` ${title}` : ''}.`;
+      break;
+    case 'topic_edit': {
+      const next = quoted(message.new_title);
+      use('new_title');
+      sentence = `${who} edited the topic${next ? `, now called ${next}` : ''}.`;
+      break;
+    }
+    case 'send_payment': {
+      const amount = amountOf(message);
+      use('amount', 'currency');
+      sentence = `${who} sent a payment${amount ? ` of ${amount}` : ''}.`;
+      break;
+    }
+    case 'take_screenshot':
+      sentence = `${who} took a screenshot.`;
+      break;
+    case 'information_text': {
+      const info = flattenTelegramText(message.text).trim();
+      use('text', 'text_entities');
+      sentence = info !== '' ? info : `${who}: information.`;
+      break;
+    }
+    case 'boost_apply': {
+      const boosts = typeof message.boosts === 'number' ? message.boosts : undefined;
+      use('boosts');
+      sentence = `${who} boosted the chat${boosts !== undefined ? ` with ${plural(boosts, 'boost')}` : ''}.`;
+      break;
+    }
+    default: {
+      const words = action.replace(/_/g, ' ').trim();
+      sentence = words !== '' ? `${who}: ${words}.` : `${who}: a service event.`;
+    }
+  }
+  const media = telegramMediaLines(message);
+  const lines = [sentence, ...media.lines, ...remainingFacts(message, used)];
+  return {
+    text: lines.join('\n'),
+    mediaFiles: media.mediaFiles,
+    attachments: media.attachments,
+    hasContent: true,
+    unsupported: false,
+  };
 }

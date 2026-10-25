@@ -46,9 +46,14 @@ import {
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 
-/** Whole account: 7 messages to keep, 2 service messages and 1 empty one to leave out, 2 media files, 6 parts not imported. */
+/**
+ * Whole account: 9 messages to keep (2 of them service messages), 1 empty one to leave out, 3 media files named
+ * (a photo, a voice message, the profile picture), and the account's own 7 items (the profile, the picture, 2 contacts,
+ * a frequent contact, a session, other data).
+ */
 function accountExport(label = 'The synthetic harbour log'): string {
   return telegramJson(telegramFullExport({
+    contacts: 2,
     chats: [
       telegramChat({ name: 'Alex Example', type: 'personal_chat', id: 11, messages: [
         telegramText(0, `${label}, entry 0.`),
@@ -68,9 +73,9 @@ function accountExport(label = 'The synthetic harbour log'): string {
     ],
   }));
 }
-const ACCOUNT_ITEMS = 7;
-const ACCOUNT_SKIPPED = { service_message: 2, message_without_text: 1 };
-const ACCOUNT_GAPS = { media_not_imported: 2, section_not_imported: 6 };
+const ACCOUNT_ITEMS = 9 + 7;
+const ACCOUNT_SKIPPED = { message_without_text: 1 };
+const ACCOUNT_GAPS = { media_not_imported: 3 };
 
 function fixture() {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-telegram-lifecycle-')));
@@ -239,8 +244,8 @@ describe('a Telegram export imported end to end', () => {
     expect(record.files.map((file) => file.rel_path)).toEqual(['result.json']);
     expect(record.findings.skipped).toEqual(ACCOUNT_SKIPPED);
     expect(record.findings.gaps).toEqual(ACCOUNT_GAPS);
-    // The range of the messages kept: no service message, no contact, no profile date in it.
-    expect(record.date_range).toEqual({ earliest: telegramFixtureIso(0), latest: telegramFixtureIso(8) });
+    // The range of the messages: the last is a service message (a join) and it counts; no contact or profile date is in it.
+    expect(record.date_range).toEqual({ earliest: telegramFixtureIso(0), latest: telegramFixtureIso(9) });
     expect(itemsByArchive(f.env).get(archiveId)?.size).toBe(ACCOUNT_ITEMS);
 
     const lane = f.runtime.lane('chat');
@@ -255,7 +260,7 @@ describe('a Telegram export imported end to end', () => {
     expect(live.snapshot()).toEqual(before);
   });
 
-  test('the content is held Private until judged; contacts, sessions and phone numbers are never stored', async () => {
+  test('the content is held Private until judged: the account\'s contacts, sessions and phone numbers too, in the secure store and nowhere else', async () => {
     const f = fixture();
     const archiveId = f.start('Telegram Desktop', accountExport());
     await importAll(f.runtime, archiveId);
@@ -272,22 +277,32 @@ describe('a Telegram export imported end to end', () => {
     } finally {
       secure.close();
     }
+    const accountWords = ['555', 'Contact0', 'Synthetic Phone', 'synthetic_sam', 'Synthetic other data'];
     for (const domain of ['internal', 'public_safe'] as const) {
       const path = archiveConnectorStoreDbPath(domain, 'chat', f.env);
       if (!existsSync(path)) continue;
       const db = new Database(path, { readonly: true });
       try {
         const chunks = db.query('SELECT c.bounded_text AS text FROM chunks c JOIN items i ON i.item_pk = c.item_pk WHERE i.account_scope = ?').all(archiveId) as Array<{ text: string }>;
-        expect(chunks.filter((chunk) => chunk.text.includes('harbour log'))).toEqual([]);
+        expect(chunks.filter((chunk) => chunk.text.includes('harbour log') || accountWords.some((word) => chunk.text.includes(word)))).toEqual([]);
         expect((db.query('SELECT COUNT(*) AS n FROM chunk_embeddings').get() as { n: number }).n).toBe(0);
       } finally {
         db.close();
       }
     }
 
-    const stored = everyStoredText(f.env);
-    for (const left of ['555', 'Contact0', 'Synthetic Phone', 'synthetic_sam', 'Synthetic other data']) {
-      expect({ left, found: stored.includes(left) }).toEqual({ left, found: false });
+    // The account's own items are held with the messages: in the secure store, where the private model judges each one.
+    const secureAgain = new Database(archiveConnectorStoreDbPath('secure_local', 'chat', f.env), { readonly: true });
+    try {
+      for (const word of accountWords) {
+        const found = secureAgain.query(`
+          SELECT COUNT(DISTINCT i.item_pk) AS n FROM chunks c JOIN items i ON i.item_pk = c.item_pk
+          WHERE i.account_scope = ? AND c.bounded_text LIKE ?
+        `).get(archiveId, `%${word}%`) as { n: number };
+        expect({ word, held: found.n > 0 }).toEqual({ word, held: true });
+      }
+    } finally {
+      secureAgain.close();
     }
   });
 
@@ -337,8 +352,8 @@ describe('a Telegram export imported end to end', () => {
     const record = f.runtime.state.get(archiveId)!;
     expect(record.status).toBe('imported');
     expect(record.findings.gaps.file_damaged).toBe(1);
-    // Messages 0 to 6 came before the cut: five of them are items, one is a service message, one has no text.
-    expect(itemsByArchive(f.env).get(archiveId)?.size).toBe(5);
+    // The account's 7 items, then messages 0 to 6 came before the cut: six of them are items (a service message is one), one has no text.
+    expect(itemsByArchive(f.env).get(archiveId)?.size).toBe(7 + 6);
   });
 });
 

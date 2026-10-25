@@ -12,12 +12,13 @@
  *   keeps one, so a stored zip member can be entered at any line start with
  *   its checksum still running.
  * - Messages: a header line starts one, every line up to the next header
- *   continues it. A message is read for at most MAX_MESSAGE_BYTES and keeps
- *   at most MAX_ITEM_TEXT_CHARS of text; past either it is cut: handed out at
- *   once, with the cut said, and the reader drops lines until the next
- *   header. Only dropped bytes are read in that state, which is where the
- *   reader may be asked to stop (`mayRead`): the resume point then names the
- *   byte and whether it lies inside a line.
+ *   continues it. A message keeps all its text; it is read for at most
+ *   MAX_MESSAGE_BYTES (and a line for LINE_BYTES_KEPT), so one file with no
+ *   headers cannot fill memory. Past that the message is cut: handed out at
+ *   once, with the cut said (the caller keeps nothing of it), and the reader
+ *   drops lines until the next header. Only dropped bytes are read in that
+ *   state, which is where the reader may be asked to stop (`mayRead`): the
+ *   resume point then names the byte and whether it lies inside a line.
  * - Where a pass may stop: at the start of the next message (its header line
  *   is already read), or while dropping the rest of a cut message. `settle`
  *   gives the unread part of the last chunk back to the source, so a zip
@@ -36,11 +37,9 @@ import {
   type WhatsAppHeaderMatch,
 } from './grammar.ts';
 
-/** Text kept per message (characters); longer messages are cut and counted as a gap. */
-export const WHATSAPP_MAX_ITEM_TEXT_CHARS = 1_048_576;
 /** Bytes of one line kept while it is read. */
 export const WHATSAPP_LINE_BYTES_KEPT = 4 * 1024 * 1024;
-/** Bytes one message is read for before it is cut, whatever text it kept. */
+/** Bytes one message is read for before it is cut. WhatsApp itself allows a few tens of thousands of characters in a message, so nothing a person wrote reaches this. */
 export const WHATSAPP_MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 /** Content read looking for the file's date order before it is taken as day first. */
 export const WHATSAPP_ORDER_SCAN_MAX_BYTES = 16 * 1024 * 1024;
@@ -303,7 +302,7 @@ export interface WhatsAppRawMessage {
   sender?: string;
   /** The text after the header, lines joined, trailing space dropped. */
   text: string;
-  /** Some of the text was cut: the message was longer than the bounds. */
+  /** The message was longer than the bounds: its text is the start of it and is not to be kept. */
   cut: boolean;
 }
 
@@ -313,7 +312,6 @@ interface Building {
   header: WhatsAppHeaderMatch;
   sender: string | undefined;
   parts: string[];
-  chars: number;
   bytes: number;
   cut: boolean;
 }
@@ -338,7 +336,6 @@ export type WhatsAppEntry =
 
 export class WhatsAppMessageReader {
   private readonly lines: WhatsAppLineReader;
-  private readonly maxTextChars: number;
   private readonly maxMessageBytes: number;
   private building: Building | undefined;
   /** Lines are dropped until a header: before the first message, and after a message was cut. */
@@ -349,12 +346,11 @@ export class WhatsAppMessageReader {
   constructor(
     private readonly source: ArchiveByteSource,
     entry: WhatsAppEntry = { kind: 'start' },
-    options: { maxTextChars?: number; maxMessageBytes?: number } = {},
+    options: { maxMessageBytes?: number } = {},
   ) {
     this.lines = new WhatsAppLineReader(source, { midLine: entry.kind === 'skip' && entry.midLine });
     this.dropping = entry.kind !== 'message';
     this.expectHeader = entry.kind === 'message';
-    this.maxTextChars = options.maxTextChars ?? WHATSAPP_MAX_ITEM_TEXT_CHARS;
     this.maxMessageBytes = options.maxMessageBytes ?? WHATSAPP_MAX_MESSAGE_BYTES;
   }
 
@@ -433,7 +429,6 @@ export class WhatsAppMessageReader {
           header,
           sender: first.sender,
           parts: [],
-          chars: 0,
           bytes: line.bytes.length + 1,
           cut: line.cut,
         };
@@ -461,21 +456,7 @@ export class WhatsAppMessageReader {
   }
 
   private append(message: Building, text: string): void {
-    if (message.chars >= this.maxTextChars) {
-      if (text.length > 0) message.cut = true;
-      return;
-    }
-    // Lines after the first are joined with a line break, which counts too.
-    const separator = message.parts.length > 0 ? 1 : 0;
-    const room = this.maxTextChars - message.chars - separator;
-    if (text.length > room) {
-      message.parts.push(text.slice(0, Math.max(0, room)));
-      message.chars = this.maxTextChars;
-      message.cut = true;
-      return;
-    }
     message.parts.push(text);
-    message.chars += separator + text.length;
   }
 
   private finish(message: Building): WhatsAppRawMessage {

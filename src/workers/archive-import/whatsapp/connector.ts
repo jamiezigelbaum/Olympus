@@ -25,10 +25,12 @@
  *   another style than the file's, or dated before the one above it, may be a
  *   header pasted into a message: it still starts a message (the format
  *   cannot say otherwise) and is counted as `item_start_assumed`.
- * - Left out, and counted: notices from WhatsApp itself, messages with no
- *   text, and the status updates chat. Media is named in the message's text
- *   and counted as not imported. A message longer than the bound is cut and
- *   counted.
+ * - Left out, and counted: notices from WhatsApp itself and messages with no
+ *   text (neither is a message a person wrote). Every chat is read the same
+ *   way, the status updates chat included. Media is named in the message's
+ *   text and counted as not imported. A message is kept whole, however long;
+ *   only one past the memory bound below (far longer than WhatsApp allows) is
+ *   not kept and is counted (`message_too_large`).
  * - Bounded reads: a pass reads at most its byte budget, plus at most one
  *   message (MAX_MESSAGE_BYTES) or one scan (ORDER_SCAN_MAX_BYTES). The date
  *   scan, entering a deflated member somewhere other than its start (the
@@ -78,7 +80,6 @@ import {
 import {
   WHATSAPP_HEAD_BYTES,
   hasWhatsAppExportName,
-  isWhatsAppStatusChat,
   isWhatsAppZipNoise,
   looksLikeWhatsAppChat,
   resolveWhatsAppHeader,
@@ -123,7 +124,9 @@ export const WHATSAPP_FINDINGS = {
   systemMessage: 'system_message',
   /** Skipped: a message with no text. */
   messageEmpty: 'message_empty',
-  /** Skipped: the status updates chat is not a conversation. */
+  /** A message past the memory bound: nothing of it is kept. */
+  tooLarge: 'message_too_large',
+  /** Old records only: the status updates chat used to be left out. It is read like any chat now. */
   statusUpdates: 'status_updates',
 } as const;
 
@@ -199,7 +202,6 @@ interface Unit {
   conversationId: string;
   /** Names the file and member where a message is told apart by position. */
   sourceKey: string;
-  statusUpdates: boolean;
   /** Uncompressed bytes of the chat text before this unit, in the zip's chat members. */
   base: number;
 }
@@ -270,7 +272,6 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
       chat,
       conversationId: `chat:${sha256(chat).slice(0, 24)}`,
       sourceKey: sha256(`${file.relPath}\0${entry ? entry.name : ''}`).slice(0, 16),
-      statusUpdates: isWhatsAppStatusChat(chat),
       base,
     };
   };
@@ -654,10 +655,11 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
               if (header && !otherStyle) prev = header.sentAt;
 
               // What this message is.
-              if (unit.statusUpdates) {
-                note(WHATSAPP_FINDINGS.statusUpdates, 'skipped', raw.offset);
-              } else if (raw.sender === undefined) {
+              if (raw.sender === undefined) {
                 note(WHATSAPP_FINDINGS.systemMessage, 'skipped', raw.offset);
+              } else if (raw.cut) {
+                // Past the memory bound the rest of the message was not read, so nothing of it is kept.
+                note(WHATSAPP_FINDINGS.tooLarge, 'gap', raw.offset);
               } else if (raw.text.trim() === '' || !header) {
                 note(WHATSAPP_FINDINGS.messageEmpty, 'skipped', raw.offset);
               } else {
@@ -667,7 +669,6 @@ export function createWhatsAppArchiveConnector(input: ArchiveConnectorInput): So
                 run.positions.push({ fileIndex: unit.fileIndex, offset: findingOffsetOf(context, unit, raw.offset) });
                 const media = whatsAppMediaMarkerCount(raw.text);
                 if (media > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', raw.offset, media);
-                if (raw.cut) report(ARCHIVE_COMMON_FINDINGS.itemTruncated, 'gap', raw.offset);
               }
 
               // A page goes out when it is full, or the budget is spent.

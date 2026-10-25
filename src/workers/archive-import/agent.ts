@@ -26,7 +26,7 @@ import type {
   ComputerArchivesMeta,
 } from '../chatgpt/dashboard-contract.ts';
 import { displayText } from '../dashboard/display-text.ts';
-import { DASHBOARD_ARCHIVE_COPY, dashboardArchiveNouns } from '../dashboard/vocabulary.ts';
+import { DASHBOARD_ARCHIVE_COPY, archiveFindingList, dashboardArchiveNouns } from '../dashboard/vocabulary.ts';
 import {
   ARCHIVE_IMPORT_REQUEST_PATH_MAX,
   archivePathLabel,
@@ -90,10 +90,10 @@ export interface AgentArchive {
   started_at: string;
   imported_at?: string;
   stopped?: AgentArchiveStopped;
-  /** What could not be read fully, one plain line per kind (and file). */
-  not_read: AgentArchiveLine[];
-  /** What was left out on purpose. */
-  left_out: AgentArchiveLine[];
+  /** What Olympus does not have: one plain line per kind (and file) for what could not be read or was not imported. */
+  not_imported: AgentArchiveLine[];
+  /** How it was read: what was taken as given or left out on purpose, with nothing lost by it. One plain line per kind (and file). */
+  how_read: AgentArchiveLine[];
   /** One plain line: the state, and how much of it is judged. */
   summary: string;
 }
@@ -208,7 +208,7 @@ function itemsPhrase(family: string | undefined, n: number): string {
 }
 
 function kindLine(kinds: Readonly<Record<string, { one: string; many: string }>>, entry: { kind: string; count: number; file?: string }): AgentArchiveLine {
-  const words = kinds[entry.kind] ?? kinds.other!;
+  const words = Object.prototype.hasOwnProperty.call(kinds, entry.kind) ? kinds[entry.kind]! : kinds.other!;
   const gap = entry.count === 1 ? words.one : words.many.replace('{n}', String(entry.count));
   return {
     kind: entry.kind,
@@ -257,6 +257,7 @@ function summaryOf(entry: ComputerArchiveEntry, stopped: AgentArchiveStopped | u
 
 function archiveOf(entry: ComputerArchiveEntry): AgentArchive {
   const copy = DASHBOARD_ARCHIVE_COPY;
+  const findings = [...entry.gaps, ...entry.skipped];
   let stopped: AgentArchiveStopped | undefined;
   if (entry.status === 'stopped') {
     const words = (copy.stopped as Record<string, { why: string; fix: string }>)[entry.stop?.code ?? ''] ?? copy.stopped.other;
@@ -288,8 +289,8 @@ function archiveOf(entry: ComputerArchiveEntry): AgentArchive {
     started_at: entry.startedAt,
     ...(entry.importedAt ? { imported_at: entry.importedAt } : {}),
     ...(stopped ? { stopped } : {}),
-    not_read: entry.gaps.map((gap) => kindLine(copy.gaps, gap)),
-    left_out: entry.skipped.map((gap) => kindLine(copy.gaps, gap)),
+    not_imported: findings.filter((gap) => archiveFindingList(gap.kind) === 'not_imported').map((gap) => kindLine(copy.gaps, gap)),
+    how_read: findings.filter((gap) => archiveFindingList(gap.kind) === 'how_read').map((gap) => kindLine(copy.gaps, gap)),
     summary: summaryOf(entry, stopped),
   };
 }

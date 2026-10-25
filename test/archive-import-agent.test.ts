@@ -541,8 +541,8 @@ describe('status carries no content and tells the truth', () => {
       waiting_for_private_model: 2,
       earliest: '2015-01-05',
       latest: '2015-01-06',
-      not_read: [],
-      left_out: [],
+      not_imported: [],
+      how_read: [],
       summary: expect.stringContaining('2 messages'),
     })]);
     // The same list the dashboard draws, in the same words and counts.
@@ -623,6 +623,7 @@ describe('status carries no content and tells the truth', () => {
       { ...base, id: 'f-nothing-mail', family: 'email', items: 0, judged: 0, held: 0, skipped: [{ kind: 'spam_or_trash', count: 3 }], gaps: [{ kind: 'message_too_large', count: 1 }] },
       { ...base, id: 'g-nothing-notes', family: 'note', items: 0, judged: 0, held: 0, gaps: [{ kind: 'file_damaged', count: 2, file: 'notes.json' }] },
       // Reasons of a count of nothing do not count as reasons.
+      { ...base, id: 'i-how-read', family: 'chat', gaps: [{ kind: 'media_not_imported', count: 1870 }, { kind: 'time_zone_assumed', count: 1 }, { kind: 'something_new', count: 4 }], skipped: [{ kind: 'system_message', count: 318 }, { kind: 'message_empty', count: 6 }] },
       { ...base, id: 'h-zero-reasons', family: 'chat', items: 0, judged: 0, held: 0, gaps: [{ kind: 'message_unreadable', count: 0 }] },
     ];
     const agent = createArchiveImportAgent({
@@ -653,8 +654,20 @@ describe('status carries no content and tells the truth', () => {
     const nothing = byId.get('f-nothing-mail')!;
     expect(nothing.summary).toBe('No messages imported. 1 message too large to read; 3 messages in Spam or Trash left out.');
     expect(nothing.summary).not.toContain('found in this archive');
-    expect(nothing.left_out.map((line) => line.line)).toEqual(['3 messages in Spam or Trash left out']);
-    expect(nothing.not_read.map((line) => line.line)).toEqual(['1 message too large to read']);
+    // Spam and Trash left out are mail Olympus does not have: under not_imported with the rest, whichever way the engine classed them.
+    expect(nothing.not_imported.map((line) => line.line)).toEqual(['1 message too large to read', '3 messages in Spam or Trash left out']);
+    expect(nothing.how_read).toEqual([]);
+    // How it was read: assumptions and deliberate leave-outs, apart from what was not imported; a kind nobody knows is not_imported.
+    const read = byId.get('i-how-read')!;
+    expect(read.how_read.map((line) => [line.kind, line.line])).toEqual([
+      ['time_zone_assumed', "The times have no time zone, so Olympus read them in this computer's time zone"],
+      ['system_message', '318 notices from WhatsApp itself (such as people joining) left out'],
+      ['message_empty', '6 messages with no text left out'],
+    ]);
+    expect(read.not_imported.map((line) => [line.kind, line.line])).toEqual([
+      ['media_not_imported', '1870 pictures, recordings or other files the archive refers to were not imported'],
+      ['something_new', '4 items not read fully'],
+    ]);
     expect(byId.get('g-nothing-notes')!.summary).toBe('No notes imported. notes.json: 2 files in the archive look damaged, so what was read from them may be wrong.');
     expect(byId.get('h-zero-reasons')!.summary).toBe('Imported: no messages found in this archive.');
   });
