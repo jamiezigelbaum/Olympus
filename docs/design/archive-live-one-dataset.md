@@ -120,15 +120,16 @@ unchanged.
   marked form (users positive, basic groups `-id`, supergroups and channels
   `-100id`, from the export's chat type) and the message id, so its record
   has the live item's key.
-- **Gmail:** exact where the export carries the Gmail id (Takeout, to
-  verify). Otherwise a message is the live item whose `Message-ID`, `Date`,
-  `From` and `Subject` all agree, and its own item when none or several do.
-  Two mails that agree on all four (a list resend) are taken as one, a
-  residual this rule accepts. Live Gmail adds `Message-ID` to the headers it
-  requests; when an mbox of the connected account is imported, a bounded
-  background pass reads it for mail already stored (one metadata read per
-  message, within the provider budget), and matching waits for the pass to
-  finish.
+- **Gmail:** exact where the export carries the Gmail id (Takeout does, on
+  every message: "Built, step 6"). Otherwise a message is the Gmail message
+  whose `Message-ID`, `Date`, `From` and `Subject` all agree, and its own
+  item when none or several do. Two mails that agree on all four (a list
+  resend) are taken as one, a residual this rule accepts. Live Gmail adds
+  `Message-ID` to the headers it requests. A message without the id is
+  looked up in Gmail itself (`rfc822msgid:`, then the four headers of each
+  candidate), under the provider budget and the current mail approval. This
+  replaces the background pass the first draft had, which would have read
+  every stored message's headers into a local index (step 6 explains why).
 - **WhatsApp:** an export has no message ids, so nothing can make it
   certain; this is the closest the data allows. A message's key is its chat,
   its minute, its sender and its text (caption included). The sender is
@@ -200,8 +201,9 @@ steps 4 and 6 below); live connect and pairing record the hash.
 - **Mail:** an mbox with Gmail's own markers (`X-Gmail-Labels`,
   `X-GM-THRID`) and one delivered-to address is a Gmail account, hashed into
   the opaque address label the source binding keeps; matching a connected
-  account needs that label among the account's labels and the owner's
-  confirmation. With no connected account, the account is created with the
+  account needs that label among the account's labels (or none: an account
+  known by immutable labels only) and the owner's confirmation. An account
+  that carries another address is a different account. With no connected account, the account is created with the
   label and a later connect of that address joins it. Absent, mixed or
   conflicting addresses, or no Gmail markers, make it archive mail under
   Archives.
@@ -289,9 +291,10 @@ ownership and the delete paths do not change.
    new record kinds. After storage's account-identity step.
 5. WhatsApp: the export becomes an input (counted keys, zone alignment,
    chat joining); the bridge's records carry the contact's saved name.
-6. Mail: live Gmail requests `Message-ID`, with the background pass, and
-   gains attachments as children; mbox of a Gmail account becomes a Gmail
-   input. After storage's account-identity step.
+6. Mail: live Gmail requests `Message-ID`, and gains attachments as children;
+   mbox of a Gmail account becomes a Gmail input (built, PR #546, see "Built,
+   step 6"; children are built but off until Gmail attachments have a
+   reader).
 7. Reflect, Roam, Evernote: their own sources, assets as children.
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media.
@@ -378,6 +381,71 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   last read so a replay after a crash counts each record once; the card counts
   each item once.
 
+## Built, step 6
+
+Mail (PR #546). An mbox export of a Gmail account is an input of the Gmail
+connector; any other mbox stays under Archives, as before.
+
+- **One record.** Both inputs yield the Gmail connector's own record, a
+  parsed mail (`google-connectors/gmail-mail-record.ts`), and one builder
+  makes the items. Live converts an API message
+  (`gmailMailRecordFromMessage`); the mbox input converts each message
+  (`archive-import/mbox/gmail-input.ts`). Mail does not change, so every
+  version of a message is the same: the intake rule keeps what is stored,
+  fills in the text of mail live holds by name only, and keeps live's copy
+  on a tie.
+- **Ids.** Takeout's `From <decimal>@xxx` is Gmail's id in decimal and
+  `X-GM-THRID` the thread's; both become the API's hex form, so an imported
+  message names the live item. Labels Takeout names are given as live
+  Gmail's ids (`Inbox` is `INBOX`; `Opened` and `Archived` are absences);
+  user labels keep their names, which live gives as `Label_…` ids (a
+  residual: an owner rule on a user label sees imported mail by name).
+- **Header matching** (`google-connectors/gmail-header-match.ts`) for a
+  message without Takeout's id. The first draft had a background pass read
+  every stored message's `Message-ID` into a local index. Gmail already
+  indexes `Message-ID` for every message, so the input asks it directly:
+  one search, and one metadata read per candidate (at most five), only for
+  such messages, under the day budget and only while the mail approval is
+  current. A Takeout import costs no request; no new store is kept. A spent
+  budget fails the pass, and the scheduler's backoff brings it back.
+- **Account** (`archive-import/mbox/gmail-account.ts`). Headers of the first
+  500 messages (or 64 MB) are read: every one must carry a Gmail marker, and
+  the topmost `Delivered-To` of the received ones must name exactly one
+  address. An address is something the export's author wrote, and an
+  address can change hands, so `resolveImportAccount` never takes it as
+  proof: it joins only an entry that carries that address (or no address),
+  at the owner's yes; an entry with another address is another account.
+  With no Gmail account yet, the import makes it, named by the address
+  label, and a later connect of that address joins it.
+- **Lane.** The worker registers the target when the Gmail lane's stores
+  exist. Imports write the Gmail stores and ledger with the live lane's own
+  sync options and the owner's current rules, under Gmail's scheduler key
+  and inside `runExclusiveForSource('gmail.email')`. The account scope is
+  the connected handle's account role, else `personal`, as live's.
+- **What an import does not apply.** The owner's mail scope (skipped
+  senders and categories, the one-time-code filter, the content window)
+  governs what live reads; an import is its own approval, as it was under
+  Archives. Spam and Trash are skipped, as before.
+- **Children: built, off.** The child key is the MIME part path, computed by
+  both inputs as Gmail numbers `partId` (`archive-import/mbox/mime-parts.ts`;
+  a `message/rfc822` part is one attachment). Live listing keeps a message
+  and its attachments within the item budget and can resume inside one
+  message's attachments; `fetchItem` with a locator reads a part's bytes
+  (inline, or `attachments.get`). They stay off (`GmailMailBuild.children`)
+  because nothing reads a Gmail child's bytes yet: the Gmail lane has no
+  extraction roster entry, and an imported child's locator points into the
+  export (`mbox-part1:`), which that reader would also need to open. A child
+  nobody reads stays owed reading on the card for ever. Turning them on is
+  the follow-up, with child-items' step 3.
+- **Release check.** The import-beside-live case is
+  `GMAIL_TAKEOUT_FIXTURES` in `scripts/release-check/archive-fixtures.ts`
+  (`SOURCE_INPUT_FORMATS`), run through the product by
+  `test/release-check-source-input-fixtures.test.ts`. It is not in
+  `ARCHIVE_FORMATS`: the leg's archive path expects a row under Other
+  archives and a Remove, which a merged import does not have, and a fresh
+  machine has no live Gmail input. The leg's journey for it is still to
+  build.
+
 ## To verify before step 4
 
 - Telegram Desktop writes bare chat ids, with the type telling the marked
@@ -403,7 +471,12 @@ input yet, so nothing changes for a real install until steps 4 to 7.
     `personal_information`, so it gives no account hash. It joins the account
     at the owner's confirmation, like a single-chat export (section 7).
 - Takeout's mbox separator line carries the Gmail message id in decimal (the
-  API id is its hex). If not, mail matches by its headers only.
+  API id is its hex). **Checked 2026-10-25 against the published format**
+  (community and vendor samples, and Google's IMAP documentation, which says
+  `X-GM-MSGID` and `X-GM-THRID` are the decimal forms of the API's hex ids):
+  every message starts `From <decimal>@xxx <date>` and carries `X-GM-THRID`
+  in decimal and `X-Gmail-Labels` by name. Not yet checked against a real
+  export: the owner canary confirms the `From` number is the message id.
 - The WhatsApp export's chat names equal the bridge's contact names for
   direct chats. Check with the owner canary.
 
