@@ -70,7 +70,7 @@ export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1_000;
  */
 export interface TierSnifferServiceStore {
   readonly dbPath: string;
-  tierSetBinding?(): { ledgerPath: string } | undefined;
+  tierSetBinding?(): { ledgerId?: string; ledgerPath: string } | undefined;
   /** Where the bound set ledger sits now (found by its identity); a store without it is read by the recorded path. */
   tierSetLedgerPath?(): string | undefined;
   tierLedgerPathInUse?: LocalConnectorStore['tierLedgerPathInUse'];
@@ -257,6 +257,8 @@ export class TierSnifferService {
   private lastTick: TierSnifferTick | undefined;
   private stopped = false;
   private readonly ledgers = new Map<string, TierLedger>();
+  /** The id each bound set ledger must have, by the path it was found at: a file there with another id is not read. */
+  private readonly boundLedgerIds = new Map<string, string>();
   /** Where each set's re-judge page stopped (tier-rejudge.ts). */
   private readonly rejudgeCursors = new Map<string, TierLedgerIdentity>();
 
@@ -321,6 +323,12 @@ export class TierSnifferService {
       try {
         db = new Database(ledgerPath, { readonly: true, create: false });
         db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        const expectedId = this.boundLedgerIds.get(ledgerPath);
+        if (expectedId !== undefined) {
+          const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
+          // Counted for the ledger its store is bound to, not for whatever sits at the path now.
+          if (row?.value !== expectedId) continue;
+        }
         const path = tierSnifferPathForLedger(ledgerPath);
         const hasQueue = existsSync(path);
         if (hasQueue) db.query('ATTACH DATABASE ? AS queue').run(path);
@@ -549,8 +557,12 @@ export class TierSnifferService {
     for (const store of this.options.stores()) {
       if (store.dbPath === ':memory:') continue;
       try {
-        const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : store.tierSetBinding?.()?.ledgerPath;
-        if (bound && bound !== ':memory:' && existsSync(bound)) paths.add(bound);
+        const binding = store.tierSetBinding?.();
+        const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
+        if (bound && bound !== ':memory:' && existsSync(bound)) {
+          paths.add(bound);
+          if (binding?.ledgerId) this.boundLedgerIds.set(bound, binding.ledgerId);
+        }
       } catch {
         // An unreadable binding fails closed elsewhere; the sniffer skips it.
       }
@@ -564,6 +576,15 @@ export class TierSnifferService {
     let ledger = this.ledgers.get(path);
     if (!ledger) {
       ledger = new TierLedger({ dbPath: path, ...(this.options.now ? { now: this.options.now } : {}) });
+      // The path was found by reading the ledger's id on a connection of its
+      // own, so check the handle that is kept: the file can have been replaced
+      // in between. A replacement has had its schema migrated by this open;
+      // that is accepted, since it is closed unused.
+      const expectedId = this.boundLedgerIds.get(path);
+      if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
+        ledger.close();
+        throw new Error('The tier ledger at this path is not the one its store is bound to.');
+      }
       this.ledgers.set(path, ledger);
     }
     return ledger;
@@ -648,7 +669,12 @@ export class TierSnifferService {
     const rejudged = this.rejudge();
     const targets: SnifferTarget[] = [];
     for (const ledgerPath of this.ledgerPaths()) {
-      const ledger = this.ledgerAt(ledgerPath);
+      let ledger: TierLedger;
+      try {
+        ledger = this.ledgerAt(ledgerPath);
+      } catch {
+        continue; // Not the ledger its store is bound to: left alone this pass.
+      }
       const planner = tierSetPlannerForLedger(ledgerPath);
       targets.push({
         ledger,

@@ -19,11 +19,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { OperationError } from '../src/core/operation-error.ts';
 import { accountStorePath, type LayoutEnv } from '../src/core/olympus-layout.ts';
 import { openConnectorStore } from '../src/core/source-storage.ts';
 import { TierSnifferService } from '../src/workers/classification/sniffer-service.ts';
-import { locateTierItem } from '../src/workers/classification/tier-cli.ts';
+import { locateTierItem, runTierExplain, runTierSet } from '../src/workers/classification/tier-cli.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { TierLedgerUnavailableError, type LocalConnectorStore } from '../src/workers/connector-store/index.ts';
@@ -380,15 +381,16 @@ describe('while the rename is half done (the migration resumes, or puts the file
   });
 });
 
-describe('a store never takes a ledger that is not the one it is bound to', () => {
-  function replaceWithOtherLedger(path: string): string {
-    for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
-    const other = new TierLedger({ dbPath: path });
-    const id = other.ledgerId();
-    other.close();
-    return id;
-  }
+/** Another set's ledger in place of the file at `path`; its id. */
+function replaceWithOtherLedger(path: string): string {
+  for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
+  const other = new TierLedger({ dbPath: path });
+  const id = other.ledgerId();
+  other.close();
+  return id;
+}
 
+describe('a store never takes a ledger that is not the one it is bound to', () => {
   function refused(path: string, tier: Tier, env: LayoutEnv): void {
     const store = openReadOnly(path, tier, env);
     try {
@@ -453,6 +455,94 @@ describe('a store never takes a ledger that is not the one it is bound to', () =
   });
 });
 
+/**
+ * The id of a candidate is read on a connection of its own, which is then
+ * closed, and the path is opened again afterwards: the file can be replaced
+ * in between (a restore, a copy over it). This puts another set's ledger at
+ * `path` right after the first read of it, which still returns the id it had.
+ */
+function replaceAfterNextIdRead(path: string): { swapped: () => boolean } {
+  const read = TierLedger.readLedgerId.bind(TierLedger);
+  let done = false;
+  const spy = spyOn(TierLedger, 'readLedgerId').mockImplementation((candidate, options) => {
+    const id = read(candidate, options);
+    if (!done && candidate === path) {
+      done = true;
+      expect(replaceWithOtherLedger(path)).not.toBe(id);
+    }
+    return id;
+  });
+  cleanups.push(() => spy.mockRestore());
+  return { swapped: () => done };
+}
+
+describe('a ledger replaced between the id check and the open is not used', () => {
+  test('the store refuses it: a Private item stays hidden, nothing is served from the replacement', () => {
+    const w = world();
+    renameIntoAccountFolder(w);
+    const folderLedger = tierLedgerPathForStore(folderPath(w, 'secure_local'));
+    const replaced = replaceAfterNextIdRead(folderLedger);
+    const store = openReadOnly(folderPath(w, 'internal'), 'internal', w.env);
+    try {
+      // The replacement is another set's ledger: the store serves nothing by it. The first
+      // resolution is the one that meets the swapped file; taken for the bound ledger it would
+      // show every row of the store as legacy and visible.
+      expect(store.searchItems('harbour', 5)).toEqual([]);
+      expect(replaced.swapped()).toBe(true);
+      expect(() => store.status()).toThrow(TierLedgerUnavailableError);
+      expect(store.tierSetLedgerPath()).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  test('the same at the recorded path of a set that has not moved', () => {
+    const w = world();
+    recordLedgerPathAsWritten(w);
+    const replaced = replaceAfterNextIdRead(join(w.legacy, 'fixture-secure-store.tier-ledger.sqlite'));
+    const store = openReadOnly(legacyPath(w, 'internal'), 'internal', w.env);
+    try {
+      expect(store.searchItems('harbour', 5)).toEqual([]);
+      expect(replaced.swapped()).toBe(true);
+      expect(() => store.status()).toThrow(TierLedgerUnavailableError);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('the tier command stops instead of writing into it', () => {
+    const w = world();
+    renameIntoAccountFolder(w);
+    const folderLedger = tierLedgerPathForStore(folderPath(w, 'secure_local'));
+    const replaced = replaceAfterNextIdRead(folderLedger);
+    expect(() => runTierSet(['garden', 'clear'], { storePaths: [folderPath(w, 'internal')] })).toThrow(/replaced while it was being read/);
+    expect(replaced.swapped()).toBe(true);
+    const other = new TierLedger({ dbPath: folderLedger });
+    try {
+      expect(other.getCurrent(identityOf('garden'))).toBeUndefined();
+    } finally {
+      other.close();
+    }
+  });
+
+  test('the sniffer does not read it', () => {
+    const w = world();
+    renameIntoAccountFolder(w);
+    const folderLedger = tierLedgerPathForStore(folderPath(w, 'secure_local'));
+    const replaced = replaceAfterNextIdRead(folderLedger);
+    const internal = openReadOnly(folderPath(w, 'internal'), 'internal', w.env);
+    try {
+      const service = new TierSnifferService({ stores: () => [internal] } as never);
+      const inner = service as unknown as { ledgerPaths(): string[]; ledgerAt(path: string): TierLedger };
+      expect(inner.ledgerPaths()).toContain(folderLedger);
+      expect(replaced.swapped()).toBe(true);
+      expect(() => inner.ledgerAt(folderLedger)).toThrow(/not the one its store is bound to/);
+    } finally {
+      internal.close();
+    }
+  });
+});
+
 describe('the readers that look for a bound ledger by path', () => {
   test('the tier command finds the set ledger from one renamed store, not at the recorded place', () => {
     const w = world();
@@ -474,5 +564,56 @@ describe('the readers that look for a bound ledger by path', () => {
     } finally {
       internal.close();
     }
+  });
+
+  test('a bound store whose ledger cannot be found stops set and explain; no other ledger is written to', () => {
+    const w = world();
+    recordLedgerPathAsWritten(w);
+    const recorded = join(w.legacy, 'fixture-secure-store.tier-ledger.sqlite');
+    // Some other set's ledger sits where the rows say the set ledger was, and the set ledger is nowhere.
+    const otherId = replaceWithOtherLedger(recorded);
+    const storePaths = TIERS.map((tier) => legacyPath(w, tier));
+    for (const run of [
+      () => runTierSet(['garden', 'private'], { storePaths }),
+      () => runTierSet(['garden', 'clear'], { storePaths }),
+      () => runTierExplain(['garden'], { storePaths }),
+    ]) {
+      expect(run).toThrow(OperationError);
+      expect(run).toThrow(/ledger this item's store is bound to cannot be found/);
+    }
+    const other = new TierLedger({ dbPath: recorded });
+    try {
+      expect(other.ledgerId()).toBe(otherId);
+      expect(other.getOverride(identityOf('garden'))).toBeUndefined();
+      expect(other.getCurrent(identityOf('garden'))).toBeUndefined();
+    } finally {
+      other.close();
+    }
+  });
+
+  test('a binding that cannot be read stops the command too, rather than falling back to the store\'s own ledger', () => {
+    const w = world();
+    const internal = legacyPath(w, 'internal');
+    const db = new Database(internal);
+    try {
+      db.query(`UPDATE sync_runs SET cursor = 'not json' WHERE connector_id = 'tiered_store_set_binding'`).run();
+    } finally {
+      db.close();
+    }
+    expect(() => runTierExplain(['garden'], { storePaths: [internal] })).toThrow(/cannot be found/);
+  });
+
+  test('a store that was never bound still uses its own ledger', () => {
+    const w = world();
+    const internal = legacyPath(w, 'internal');
+    const db = new Database(internal);
+    try {
+      db.query(`DELETE FROM sync_runs WHERE connector_id = 'tiered_store_set_binding'`).run();
+    } finally {
+      db.close();
+    }
+    const [item] = locateTierItem('garden', { storePaths: [internal] });
+    expect(item!.ledgerPath).toBe(tierLedgerPathForStore(internal));
+    expect(item!.boundLedgerId).toBeUndefined();
   });
 });
