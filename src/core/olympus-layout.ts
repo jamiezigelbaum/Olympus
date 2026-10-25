@@ -315,8 +315,35 @@ const LEGACY_STORES: Readonly<Record<string, Readonly<Record<LegacyTier, LegacyF
 const ARCHIVE_IMPORTS = 'archive.imports';
 const ARCHIVE_FILE_LABEL: Readonly<Record<string, string>> = { secure_local: '', internal: '-internal', public_safe: '-public' };
 
-/** The source ids that have a layout for their files: the rest are `legacy` for good (until a later step). */
-export const FOLDER_LAYOUT_SOURCES: readonly string[] = Object.keys(LEGACY_STORES);
+/**
+ * Sources added after account folders, and their stores' tiers: they never had
+ * a legacy place, so every account of one lives in its folder. A new connector
+ * declares its tiers here and nothing else about where its files go
+ * (docs/CREATE_CONNECTOR.md, Leg 3).
+ */
+const FOLDER_ONLY_STORES: Record<string, readonly LegacyTier[]> = {};
+
+/** The source ids that have a layout for their files: the rest (Reflect, Roam) are `legacy` for good. */
+export const FOLDER_LAYOUT_SOURCES: readonly string[] = [...Object.keys(LEGACY_STORES), ...Object.keys(FOLDER_ONLY_STORES)];
+
+/** Whether a source's accounts can have files at legacy paths: every folder-layout source but one added after account folders. */
+export function hasLegacyLayout(sourceId: string): boolean {
+  return sourceId in LEGACY_STORES;
+}
+
+/** Test seam: declare a folder-only source for the length of `run`, as a new connector would. */
+export const __layoutTestHooks = {
+  withFolderOnlySource<T>(sourceId: string, tiers: readonly LegacyTier[], run: () => T): T {
+    FOLDER_ONLY_STORES[sourceId] = tiers;
+    (FOLDER_LAYOUT_SOURCES as string[]).push(sourceId);
+    try {
+      return run();
+    } finally {
+      delete FOLDER_ONLY_STORES[sourceId];
+      (FOLDER_LAYOUT_SOURCES as string[]).splice((FOLDER_LAYOUT_SOURCES as string[]).indexOf(sourceId), 1);
+    }
+  },
+};
 
 function legacyStoreFile(sourceId: string, name: string): LegacyFile {
   if (sourceId === ARCHIVE_IMPORTS) {
@@ -347,6 +374,7 @@ function legacyFilePath(env: LayoutEnv, entry: LegacyFile): string {
 export function accountStorePath(account: LayoutAccount, name: string, env: LayoutEnv = process.env): string {
   if (!STORE_NAME.test(name)) throw new TypeError(`A store name is a tier or <family>.<tier>; got ${JSON.stringify(name)}.`);
   if (account.layout === 'folder') return join(accountFolder(account, env), 'stores', `${name}.sqlite`);
+  if (!hasLegacyLayout(account.source_id)) throw new TypeError(`${account.source_id} has no legacy layout: its stores live in its account folder.`);
   return legacyFilePath(env, legacyStoreFile(account.source_id, name));
 }
 
@@ -465,7 +493,9 @@ export function accountRawPath(
 export function accountStoreNames(sourceId: string, archiveFamilies: readonly string[] = []): string[] {
   return sourceId === ARCHIVE_IMPORTS
     ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`))
-    : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
+    : FOLDER_ONLY_STORES[sourceId]
+      ? [...FOLDER_ONLY_STORES[sourceId]]
+      : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
 }
 
 /**
@@ -535,6 +565,7 @@ export function legacyAccountPaths(
   env: LayoutEnv = process.env,
   archiveFamilies: readonly string[] = [],
 ): { stores: string[]; raw: string[] } {
+  if (!hasLegacyLayout(sourceId)) return { stores: [], raw: [] };
   const names = accountStoreNames(sourceId, archiveFamilies);
   const stores = names.map((name) => {
     const entry = legacyStoreFile(sourceId, name);
@@ -816,9 +847,9 @@ function legacyMessagingPaths(sourceId: string, env: LayoutEnv): { stores: strin
 // override pins the account and the migration skips it), paired with the name
 // the folder layout gives each, and the folders those locations sit in.
 
-/** The sources whose existing accounts the boot migration moves: every one with a folder layout (Telegram and WhatsApp since step 4d). */
+/** The sources whose existing accounts the boot migration moves: every one whose accounts can have legacy paths (Telegram and WhatsApp since step 4d). */
 export function migratableSources(): readonly string[] {
-  return FOLDER_LAYOUT_SOURCES;
+  return Object.keys(LEGACY_STORES);
 }
 
 /** A file or folder an account owns at its legacy location, and what the folder layout calls it. */

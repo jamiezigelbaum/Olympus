@@ -39,6 +39,7 @@ import {
 import { archiveImportFamilies, isArchiveCorpusId } from './archive-formats.ts';
 import {
   FOLDER_LAYOUT_SOURCES,
+  hasLegacyLayout,
   accountExtractionSpoolRoot,
   accountFolder,
   accountRawPath,
@@ -82,6 +83,7 @@ export interface AccountLayoutDecision {
  */
 export function decideAccountLayout(sourceId: string, env: LayoutEnv = process.env): AccountLayoutDecision {
   if (!hasFolderLayout(sourceId)) return { layout: 'legacy', why: 'its source has no folder layout' };
+  if (!hasLegacyLayout(sourceId)) return { layout: 'folder', why: 'its source never had legacy paths' };
   const pin = pinnedLegacyBy(sourceId, env);
   if (pin) return { layout: 'legacy', why: `${pin} pins its files` };
   const root = dataRootState(env);
@@ -111,10 +113,12 @@ export function placedAccount(
   try {
     entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
   } catch (error) {
-    if (error instanceof SourceRegistryError) return { source_id: sourceId, slot, layout: hasAccountFolderOnDisk(sourceId, slot, env) ? 'folder' : 'legacy' };
+    if (error instanceof SourceRegistryError) {
+      return { source_id: sourceId, slot, layout: !hasLegacyLayout(sourceId) || hasAccountFolderOnDisk(sourceId, slot, env) ? 'folder' : 'legacy' };
+    }
     // The data folder itself cannot be worked out (a Linux layout that refuses this environment, say):
     // nothing is placed, and the legacy resolvers then fail exactly where they always did.
-    return { source_id: sourceId, slot, layout: 'legacy' };
+    return { source_id: sourceId, slot, layout: hasLegacyLayout(sourceId) ? 'legacy' : 'folder' };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
 }
