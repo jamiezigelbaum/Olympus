@@ -9,6 +9,8 @@ import { googleAccountIdFromAddress, googleSubjectLabel, composeProviderAccountI
 import { readSourceRegistry } from '../src/core/source-registry.ts';
 import { ACCOUNT, gmailArchiveHarness } from './support/gmail-archive-harness.ts';
 import { OWNER_ADDRESS, apiMessage, mail, takeoutMbox } from './support/archive-fixtures-gmail.ts';
+import type { GmailApiClient, GmailMessage } from '../src/workers/google-connectors/gmail.ts';
+import { gmailHeaderMatch } from '../src/workers/google-connectors/gmail-header-match.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -131,5 +133,54 @@ describe('an export of a Gmail account joins the Gmail source', () => {
     expect(ids).not.toContain(spam.id);
     expect(ids.filter((value) => value.startsWith('mbox-'))).toHaveLength(1);
     expect(ACCOUNT).toBe('personal');
+  });
+});
+
+describe('a message without Takeout\'s id is matched by asking Gmail', () => {
+  const live = mail(20);
+  const api = (messages: GmailMessage[], requests: string[] = []): GmailApiClient => ({
+    async listMessages(request) {
+      requests.push(`list:${request.query}`);
+      const wanted = /^rfc822msgid:(.+)$/.exec(request.query ?? '')?.[1];
+      return { messages: messages.filter((entry) => entry.payload?.headers?.some((header) => header.name === 'Message-ID' && header.value === `<${wanted}>`)).map((entry) => ({ id: entry.id })) };
+    },
+    async getMessage(id) {
+      requests.push(`get:${id}`);
+      const found = messages.find((entry) => entry.id === id)!;
+      return { ...found, payload: { headers: found.payload?.headers ?? [] } };
+    },
+  });
+  const headersOf = (entry: typeof live) => ({
+    messageId: entry.messageId!, date: new Date(entry.date).toUTCString(), from: entry.from, subject: entry.subject,
+  });
+
+  test('exactly one message that agrees on Message-ID, Date, From and Subject is the message', async () => {
+    const requests: string[] = [];
+    const match = gmailHeaderMatch(async () => api([apiMessage(live)], requests));
+    expect(await match(headersOf(live))).toEqual({ id: live.id });
+    expect(requests).toEqual([`list:rfc822msgid:${live.messageId}`, `get:${live.id}`]);
+  });
+
+  test('a subject that differs, two that agree, no Message-ID, or no Gmail: none', async () => {
+    const twin = mail(21, { messageId: live.messageId!, date: live.date, from: live.from, subject: live.subject });
+    expect(await gmailHeaderMatch(async () => api([apiMessage(live)]))({ ...headersOf(live), subject: 'Another subject' })).toBe('none');
+    expect(await gmailHeaderMatch(async () => api([apiMessage(live), apiMessage(twin)]))(headersOf(live))).toBe('none');
+    expect(await gmailHeaderMatch(async () => api([apiMessage(live)]))({ from: live.from })).toBe('none');
+    expect(await gmailHeaderMatch(async () => undefined)(headersOf(live))).toBe('none');
+  });
+
+  test('end to end: the export\'s copy joins the live message instead of standing beside it', async () => {
+    const h = gmailArchiveHarness(cleanups);
+    h.connectLive(OWNER_LABEL);
+    h.mailbox.messages = [apiMessage(live)];
+    await h.pullLive();
+    h.match.current = gmailHeaderMatch(async () => api(h.mailbox.messages));
+    const loose = takeoutMbox([live, mail(22)], { separator: () => 'From someone@example.test Mon Jan  1 00:00:00 2024' });
+    const id = await started(await h.approve('export.mbox', loose, { confirmAccount: true }));
+    await h.importAll(id);
+    const ids = [...new Set(h.rows().filter((row) => row.tombstoned === 0).map((row) => row.id))];
+    expect(ids).toContain(live.id);
+    expect(ids.filter((value) => value.startsWith('mbox-'))).toHaveLength(1);
+    expect(ids).toHaveLength(2);
   });
 });

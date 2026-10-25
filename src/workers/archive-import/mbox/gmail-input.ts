@@ -50,12 +50,12 @@ export interface MboxMessageHeaders {
 }
 
 /**
- * The Gmail message a message is, by its headers (section 4): its id, `none`
- * (no Gmail message agrees, or several do), or `wait` (what Olympus knows of
- * stored mail is not complete yet: the listing stops before this message and
- * the next pass reads it again).
+ * The Gmail message a message is, by its headers (section 4): its id, or
+ * `none` (no Gmail message agrees, or several do). One that cannot be asked
+ * now throws, and the pass fails before anything of its page is stored, so a
+ * later pass reads the message again.
  */
-export type MboxGmailMatch = (headers: MboxMessageHeaders) => { id: string } | 'none' | 'wait';
+export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: string } | 'none'>;
 
 export interface MboxGmailInputOptions {
   build?: GmailMailBuild;
@@ -193,7 +193,6 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
             });
             let page: GmailMailRecord[] = [];
             let positions: Array<{ fileIndex: number; offset: number }> = [];
-            /** Where the page's first message started: a page cut before a message resumes there. */
             let pending = false;
             const out = (nextOffset: number, last: boolean): SourceRecordPage<GmailMailRecord> => {
               current();
@@ -207,7 +206,6 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                 if (pending) yield out(splitter.position, false);
                 return;
               }
-              const before = splitter.position;
               let span: MboxMessageSpan | undefined;
               try {
                 span = splitter.next();
@@ -228,18 +226,12 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                 else {
                   let id = takeoutMessageId(span.separator);
                   if (id === undefined && options.match) {
-                    const matched = options.match({
+                    const matched = await options.match({
                       ...(parsed.messageId ? { messageId: parsed.messageId } : {}),
                       ...(parsed.dateHeader ? { date: parsed.dateHeader } : {}),
                       from: parsed.from,
                       ...(parsed.subject ? { subject: parsed.subject } : {}),
                     });
-                    if (matched === 'wait') {
-                      // What is known of stored mail is not complete: this message is read again next pass,
-                      // after the messages before it go out. Its findings were not reported.
-                      if (pending) yield out(before, false);
-                      return;
-                    }
                     if (matched !== 'none') id = matched.id;
                   }
                   const record = recordOf(parsed, span, fileIndex, id ?? ownId(parsed));

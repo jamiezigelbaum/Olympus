@@ -157,6 +157,7 @@ import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
   GoogleDailyRequestBudget,
+  GoogleGmailSourceConnector,
   createGmailConnectorStoreSyncHandler,
   gmailCursorConnectorId,
   createGmailDailyRequestBudget,
@@ -451,6 +452,7 @@ import {
 import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import { gmailArchiveTarget } from '../google-connectors/gmail-archive-target.ts';
+import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
 import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
 import { archiveSourceTargets } from '../archive-import/source-targets.ts';
 import { createLaneTieredStoreSet } from '../connector-store/tiered-store-set.ts';
@@ -2823,9 +2825,13 @@ export async function main(): Promise<void> {
         // The owner's "always Private" rules of the current mail approval, as the live lane applies them.
         const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
         let ownerRules: NonNullable<ReturnType<typeof gmailConnectorScopeFromApproval>['ownerTierRules']> = [];
+        let approved = false;
         try {
           const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-          if (approval) ownerRules = gmailConnectorScopeFromApproval(approval).ownerTierRules ?? [];
+          if (approval) {
+            ownerRules = gmailConnectorScopeFromApproval(approval).ownerTierRules ?? [];
+            approved = true;
+          }
         } catch {
           // No current approval: no owner rules apply, as live reads nothing without one.
         }
@@ -2848,6 +2854,17 @@ export async function main(): Promise<void> {
           sync: gmailLaneSyncOptions(ownerRules),
           // The account scope live Gmail writes under, so both inputs name one item.
           account: handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle),
+          // A message without Takeout's id is matched by asking Gmail, under the live lane's day budget, and only
+          // while the owner's mail approval is current: nothing of the mailbox is read without one.
+          match: gmailHeaderMatch(async () => {
+            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return undefined;
+            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            return new GoogleGmailSourceConnector({
+              credentialHandle: handle.handle,
+              ...(handle.accountRole ? { account: handle.accountRole } : {}),
+              requestBudget: gmailRequestBudget,
+            }).apiClientForTooling();
+          }),
         };
       },
     }));
