@@ -16679,6 +16679,14 @@ function storePathKey(path) {
   } catch {}
   return join15(real, basename3(path));
 }
+function registryKey(env = process.env) {
+  const path = sourceRegistryPath(env);
+  let folder = resolve6(dirname14(path));
+  try {
+    folder = realpathSync3.native(folder);
+  } catch {}
+  return join15(folder, basename3(path));
+}
 function matchStore(sourceId, slot, dbPath, names, env) {
   const wanted = storePathKey(dbPath);
   for (const store of names) {
@@ -16704,7 +16712,7 @@ function placedStoreHolder(account, store, env = process.env, registry) {
       ...matched,
       identity: { ...matched.identity, incarnation: entry.created_at },
       path: store.dbPath,
-      registry: sourceRegistryPath(env)
+      registry: registryKey(env)
     };
   } catch {
     return;
@@ -16712,9 +16720,11 @@ function placedStoreHolder(account, store, env = process.env, registry) {
 }
 function storePlacementView(env = process.env) {
   let registryPath;
+  let registryName;
   let root;
   try {
     registryPath = sourceRegistryPath(env);
+    registryName = registryKey(env);
     root = olympusDataRoot(env);
   } catch {}
   let loaded;
@@ -16731,13 +16741,7 @@ function storePlacementView(env = process.env) {
     }
     return loaded;
   };
-  const absentForSure = (path) => {
-    if (!isMissing(path))
-      return false;
-    if (!isMissing(dirname14(path)))
-      return true;
-    return root !== undefined && isInside(path, root) && existsSync11(root);
-  };
+  const absentForSure = (path) => isMissing(path) && !isMissing(dirname14(path));
   const verdicts = new Map;
   const storeGone = (identity, seen) => {
     const key2 = JSON.stringify([identity.sourceId, identity.slot, identity.store, identity.incarnation, ...seen]);
@@ -16844,7 +16848,7 @@ function storePlacementView(env = process.env) {
     }
   };
   return {
-    registry: registryPath,
+    registry: registryName,
     storeGone,
     pathMarker(path) {
       let verdict = pathVerdicts.get(path);
@@ -16860,9 +16864,6 @@ function isEarlier(held, current2) {
   const before = Date.parse(held);
   const after = Date.parse(current2);
   return Number.isFinite(before) && Number.isFinite(after) && before < after;
-}
-function isInside(path, folder) {
-  return resolve6(path).startsWith(`${resolve6(folder)}${sep3}`);
 }
 function isMissing(path) {
   try {

@@ -24864,6 +24864,14 @@ function storePathKey(path) {
   } catch {}
   return join29(real, basename4(path));
 }
+function registryKey(env = process.env) {
+  const path = sourceRegistryPath(env);
+  let folder = resolve10(dirname25(path));
+  try {
+    folder = realpathSync8.native(folder);
+  } catch {}
+  return join29(folder, basename4(path));
+}
 function matchStore(sourceId, slot, dbPath, names, env) {
   const wanted = storePathKey(dbPath);
   for (const store of names) {
@@ -24889,7 +24897,7 @@ function placedStoreHolder(account, store, env = process.env, registry) {
       ...matched,
       identity: { ...matched.identity, incarnation: entry.created_at },
       path: store.dbPath,
-      registry: sourceRegistryPath(env)
+      registry: registryKey(env)
     };
   } catch {
     return;
@@ -24900,16 +24908,18 @@ function storeHolderAtPath(sourceId, dbPath, env = process.env) {
     return;
   try {
     const matched = matchStore(sourceId, DEFAULT_ACCOUNT_SLOT, dbPath, accountStoreNames(sourceId, archiveImportFamilies()), env);
-    return matched && { ...matched, path: dbPath, registry: sourceRegistryPath(env) };
+    return matched && { ...matched, path: dbPath, registry: registryKey(env) };
   } catch {
     return;
   }
 }
 function storePlacementView(env = process.env) {
   let registryPath;
+  let registryName;
   let root;
   try {
     registryPath = sourceRegistryPath(env);
+    registryName = registryKey(env);
     root = olympusDataRoot(env);
   } catch {}
   let loaded;
@@ -24926,13 +24936,7 @@ function storePlacementView(env = process.env) {
     }
     return loaded;
   };
-  const absentForSure = (path) => {
-    if (!isMissing(path))
-      return false;
-    if (!isMissing(dirname25(path)))
-      return true;
-    return root !== undefined && isInside(path, root) && existsSync22(root);
-  };
+  const absentForSure = (path) => isMissing(path) && !isMissing(dirname25(path));
   const verdicts = new Map;
   const storeGone = (identity2, seen) => {
     const key2 = JSON.stringify([identity2.sourceId, identity2.slot, identity2.store, identity2.incarnation, ...seen]);
@@ -25039,7 +25043,7 @@ function storePlacementView(env = process.env) {
     }
   };
   return {
-    registry: registryPath,
+    registry: registryName,
     storeGone,
     pathMarker(path) {
       let verdict = pathVerdicts.get(path);
@@ -25055,9 +25059,6 @@ function isEarlier(held, current2) {
   const before = Date.parse(held);
   const after = Date.parse(current2);
   return Number.isFinite(before) && Number.isFinite(after) && before < after;
-}
-function isInside(path, folder) {
-  return resolve10(path).startsWith(`${resolve10(folder)}${sep8}`);
 }
 function isMissing(path) {
   try {
