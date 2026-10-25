@@ -60393,6 +60393,13 @@ class TieredStoreSet {
       if (!ok)
         unstored += 1;
     }
+    const accepted1 = new Set([...newest.values()].map((item) => item.identity.localItemId));
+    for (const identity2 of accepted.looked ?? []) {
+      if (accepted1.has(identity2.localItemId))
+        continue;
+      if (this.storedItem(identity2, compare)?.incomplete === true)
+        unstored += 1;
+    }
     return unstored;
   }
   storedItem(identity2, compareVersions) {
@@ -60665,6 +60672,7 @@ class TieredRoutingRun {
   counts;
   plans;
   copyRemovals;
+  pendingAdvances;
   pendingWithdrawals;
   set;
   mode;
@@ -60678,6 +60686,7 @@ class TieredRoutingRun {
     this.plans = new Map;
     this.copyRemovals = new Map;
     this.pendingWithdrawals = new Map;
+    this.pendingAdvances = new Map;
     this.counts = {
       itemsRouted: 0,
       itemsLegacy: 0,
@@ -60725,6 +60734,18 @@ class TieredRoutingRun {
     for (const identity2 of this.copyRemovals.values())
       this.set.ledger.removeCopies(identity2);
     this.copyRemovals.clear();
+    for (const identity2 of this.pendingAdvances.values()) {
+      const versions = new Set;
+      for (const domain of TIER_DOMAIN_ORDER) {
+        const state = this.set.store(domain)?.storedItemState(identity2);
+        if (state && !state.tombstoned)
+          versions.add(state.version);
+      }
+      if (versions.size <= 1)
+        for (const domain of TIER_DOMAIN_ORDER)
+          this.set.store(domain)?.advanceItemVersion(identity2);
+    }
+    this.pendingAdvances.clear();
   }
   routeFor(plan, corpusId, domain) {
     switch (plan.kind) {
@@ -60785,8 +60806,7 @@ class TieredRoutingRun {
     } else if (!contentRead) {
       if (!deferred) {
         this.counts.contentUnreadHeld += 1;
-        for (const domain of TIER_DOMAIN_ORDER)
-          this.set.store(domain)?.advanceItemVersion(identity2);
+        this.pendingAdvances.set(identityKey(identity2), identity2);
         return { kind: "hold", reason: "content_unread" };
       }
       decision = withRecordedContent(decision, ledger.getCurrent(identity2));
@@ -61001,8 +61021,10 @@ function recordedTraversal(connector, storedItem) {
   let recorded = false;
   let failed = false;
   let compareVersions;
+  const looked = new Map;
   const lookup3 = storedItem ? (identity2, compare) => {
     compareVersions = compare;
+    looked.set(identityKey(identity2), identity2);
     return storedItem(identity2, compare);
   } : undefined;
   return {
@@ -61011,7 +61033,7 @@ function recordedTraversal(connector, storedItem) {
     authenticate: () => connector.authenticate(),
     fetchItem: (localItemId) => connector.fetchItem(localItemId),
     classificationSignals: (item) => connector.classificationSignals(item),
-    accepted: () => ({ items: pages.flatMap((page2) => page2.items), ...compareVersions ? { compareVersions } : {} }),
+    accepted: () => ({ items: pages.flatMap((page2) => page2.items), looked: [...looked.values()], ...compareVersions ? { compareVersions } : {} }),
     listItems(options = {}) {
       if (recorded) {
         return async function* () {
