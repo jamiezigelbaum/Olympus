@@ -65,6 +65,7 @@ import {
   planPairingSessionRemoval,
   removePlannedPairingSessionFile,
   telegramPairingSessionPaths,
+  telegramStagedLogins,
   whatsappPairingSessionPaths,
   type OlympusPathContext,
   type PairingPathRefusal,
@@ -5813,7 +5814,7 @@ async function dashboardPairingSession(
     ...handleCredentialKeys,
     ...sessionKeys.filter((candidate) => candidate.stored).map((candidate) => candidate.key),
   ])].sort();
-  if (fromStored === undefined) return { paths: derived, credentialKeys };
+  if (fromStored === undefined) return { paths: withStagedLogins(source, derived), credentialKeys };
   if (pairingSessionPathOverridden(source, resolved) && !samePathList(fromStored, derived)) {
     throw new EmailSourceWorkerError(
       409,
@@ -5821,7 +5822,18 @@ async function dashboardPairingSession(
       'The registered session path and the configured environment override name different pairing sessions, so Unpair cannot tell which one this computer actually uses. Reconcile OLYMPUS_TELEGRAM_SESSION_PATH or OLYMPUS_WHATSAPP_STATE_DIR with the path this source was connected with, then retry.',
     );
   }
-  return { paths: fromStored, credentialKeys };
+  return { paths: withStagedLogins(source, fromStored), credentialKeys };
+}
+
+/**
+ * A Telegram pairing that was killed can leave the login it made aside
+ * (telegramStagedSessionBase) beside the account's: it is a login too, so
+ * Unpair removes it with the rest.
+ */
+function withStagedLogins(source: 'telegram' | 'whatsapp', paths: string[]): string[] {
+  if (source !== 'telegram') return paths;
+  const bases = paths.filter((path) => path.endsWith('.session')).map((path) => path.slice(0, -'.session'.length));
+  return [...new Set([...paths, ...bases.flatMap((base) => telegramStagedLogins(base).map((left) => left.path))])];
 }
 
 interface DashboardSessionPathKey {

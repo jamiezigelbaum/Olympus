@@ -70,6 +70,8 @@ import {
   type AccountBoundSourceId,
   type SourceAccountBinding,
 } from './source-account-binding.ts';
+import type { LayoutEnv } from './olympus-layout.ts';
+import { assertTelegramHistoryAccount } from './pairing-placement.ts';
 
 const DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
@@ -1537,6 +1539,13 @@ export async function connectGuidedSession(options: {
   now?: () => Date;
   sessionReady?: boolean;
   /**
+   * The Telegram account a pairing proved (`telegram:<account_ref>`); none for
+   * a session given by its path. Checked against the account the history names
+   * (assertTelegramHistoryAccount), from `historyEnv`'s data folder.
+   */
+  provedAccount?: string;
+  historyEnv?: LayoutEnv;
+  /**
    * The latch clear, injectable for fault injection.
    *
    * The atomic writer renames and then fsyncs the directory, so this call can
@@ -1557,6 +1566,7 @@ export async function connectGuidedSession(options: {
 
   const sessionPath = options.sessionPath.trim();
   if (!sessionPath) throw new Error('Session path is required.');
+  if (options.source === 'telegram') assertTelegramHistoryAccount(options.provedAccount, options.historyEnv ?? process.env);
   const secretStore = options.secretStore ?? createDefaultSecretStore();
   const registryPath = options.registryPath ?? defaultHandleRegistryPath();
   const grantEpoch = readConnectedHandleGrantEpoch(registryPath);

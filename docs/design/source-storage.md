@@ -265,7 +265,8 @@ Storage's part (step 4e):
   - an import that carries the id.
 
   The first value stays. A later one may only add labels
-  (`mergeProviderAccountIds`). Delete forgets it, as it forgets the binding.
+  (`mergeProviderAccountIds`). Delete forgets it, as it forgets the binding;
+  Delete-all forgets every entry's.
   WhatsApp has no account id, live or archived. An entry from before this step
   names none until its next sync or pairing.
 - **An import finds its account through the storage service**
@@ -296,11 +297,16 @@ Storage's part (step 4e):
     the two.
   - A Telegram pairing checks the account it proved before anything is
     registered or any credential stored, and refuses with "delete that history
-    first". In a `folder` account with no login of its own, the new login is
-    made aside (`<session>.pairing`) and takes the account's name only once it
-    proves the account, so another account's login is never where capture reads
-    it. A login already there is used where it is and never removed by a
-    refusal.
+    first". Over a history that names its account, the pairing signs in on a
+    copy of its own (`<session>.pairing-<pid>-<tag>`, made from any login
+    already there with SQLite `VACUUM INTO`), so another account's login is
+    never where capture reads it and the login already there is left exactly
+    as it was. The copy becomes the login only once it proves the account, and
+    only if no other pairing changed the login meanwhile. A pairing that fails
+    removes its copy; a copy a killed pairing left is removed by the next
+    pairing and by Unpair.
+  - `connect telegram --session-path` cannot prove an account, so over a
+    history that names one it is refused the same way.
 
   4b's "an account with an entry follows it" compares the id, not only the
   source.
@@ -924,7 +930,7 @@ touch the store path (`eval/`).
      an import joins its live account, creates one when there is none and is
      joined by the next connect, waits for the owner when unproven, and stays
      under `archive.imports` when different. A pairing onto another account's
-     history is refused.
+     history is refused, and so is a session given by its path.
 5. **Delete, export, uninstall on the registry.** Replace
    `lifecycleSourceSpecs` with the registry: a per-source delete marks the
    account `deleting` and the boot pass removes it; export and uninstall

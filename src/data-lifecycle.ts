@@ -847,6 +847,16 @@ export function deleteOlympusData(options: {
       if (!(error instanceof SourceRegistryError)) throw error;
     }
   }
+  // Everything was deleted, but a registry kept outside the folders it removes (a data folder moved by XDG_DATA_HOME) is
+  // still there: none of its accounts' histories names an account any more.
+  if (options.all === true && options.dryRun !== true) {
+    try {
+      const registry = readSourceRegistry(envForContext(options));
+      forgetProviderAccounts(envForContext(options), registry.accounts.map((account) => account.source_id));
+    } catch (error) {
+      if (!(error instanceof SourceRegistryError)) throw error;
+    }
+  }
 
   return {
     ok: true,

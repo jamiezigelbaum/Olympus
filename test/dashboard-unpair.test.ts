@@ -162,6 +162,8 @@ describe('bounded dashboard Unpair', () => {
     const home = fixtureHome();
     const sessionPath = touch(join(home, '.local/share/olympus/telegram/telegram.personal.session'));
     const journalPath = touch(join(home, '.local/share/olympus/telegram/telegram.personal.session-journal'));
+    // A login a killed pairing made aside is a login too (storage step 4e).
+    const stagedLogin = touch(join(home, '.local/share/olympus/telegram/telegram.personal.pairing-99999-abcdef01.session'));
     const spoolItem = touch(join(home, '.local/share/olympus/telegram-capture/spool/0001.jsonl'));
     const registryPath = join(home, 'handles.json');
     writeConnectedHandleRegistry(registryOf(telegramHandle()), registryPath);
@@ -195,7 +197,7 @@ describe('bounded dashboard Unpair', () => {
       ok: true,
       source_id: 'telegram.messages',
       removed_handles: ['telegram.personal'],
-      removed_session_paths: [journalPath, sessionPath].sort(),
+      removed_session_paths: [journalPath, sessionPath, stagedLogin].sort(),
       scheduling_refreshed: true,
       policy: {
         scheduled_reads_stopped: true,
@@ -210,6 +212,7 @@ describe('bounded dashboard Unpair', () => {
     });
     expect(existsSync(sessionPath)).toBe(false);
     expect(existsSync(journalPath)).toBe(false);
+    expect(existsSync(stagedLogin)).toBe(false);
     // The capture spool is the raw corpus, never pairing state.
     expect(existsSync(spoolItem)).toBe(true);
     expect(readConnectedHandleRegistry(registryPath).handles).toEqual([]);

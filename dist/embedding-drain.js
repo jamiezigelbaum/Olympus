@@ -35118,6 +35118,26 @@ var init_source_account_binding = __esm(() => {
   init_provider_account_identity();
 });
 
+// src/core/cli-via-worker.ts
+var init_cli_via_worker = __esm(() => {
+  init_config();
+  init_data_owner_lock();
+  init_olympus_layout();
+  init_operation_error();
+  init_worker_auth();
+  init_worker_transport();
+});
+
+// src/core/pairing-placement.ts
+var init_pairing_placement = __esm(() => {
+  init_cli_via_worker();
+  init_olympus_layout();
+  init_provider_account_identity();
+  init_source_placement();
+  init_source_registry();
+  init_source_storage();
+});
+
 // src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS, DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS, OAUTH_TOKEN_RESPONSE_LIMIT_BYTES, KNOWN_OAUTH_ERROR_CODES;
 var init_connect = __esm(() => {
@@ -35136,6 +35156,7 @@ var init_connect = __esm(() => {
   init_credential_broker();
   init_provider_account_identity();
   init_source_account_binding();
+  init_pairing_placement();
   DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
   DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
   OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -43349,25 +43370,7 @@ init_secret_store();
 init_connect();
 init_olympus_layout();
 init_pairing_session_paths();
-
-// src/core/cli-via-worker.ts
-init_config();
-init_data_owner_lock();
-init_olympus_layout();
-init_operation_error();
-init_worker_auth();
-init_worker_transport();
-
-// src/core/pairing-placement.ts
-init_olympus_layout();
-init_source_placement();
-init_source_registry();
-init_source_storage();
-
-// src/core/messaging-pairing.ts
-init_provider_account_identity();
-init_source_registry();
-init_source_storage();
+init_pairing_placement();
 
 // src/core/native-worker-service.ts
 init_worker_transport();
@@ -45092,9 +45095,11 @@ var CHAT_TITLE_STOPWORDS = new Set([
 // src/workers/email-source/index.ts
 init_this_computer();
 init_data_lifecycle();
+init_cli_via_worker();
 init_remote_access();
 
 // src/workers/cli-operations.ts
+init_cli_via_worker();
 init_config();
 init_data_owner_lock();
 init_olympus_layout();

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -11,6 +12,7 @@ import {
 } from '../src/core/messaging-pairing.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
+import { connectGuidedSession } from '../src/core/connect.ts';
 
 function memorySecretStore(): SecretStore & { values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -429,7 +431,13 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
       created_at: '2026-10-25T00:00:00.000Z',
     });
   });
-  const pair = (root: string, secrets: SecretStore, onRegister: (input: Record<string, unknown>) => void, pairedAt: string[]) => pairMessagingSource({
+  const pair = (
+    root: string,
+    secrets: SecretStore,
+    onRegister: (input: Record<string, unknown>) => void,
+    pairedAt: string[],
+    during: (base: string) => void = () => undefined,
+  ) => pairMessagingSource({
     source: 'telegram',
     packageRoot: root,
     homeDir: join(root, 'home'),
@@ -442,7 +450,8 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
       const base = request.env.OLYMPUS_TELEGRAM_SESSION_PATH!;
       pairedAt.push(base);
       mkdirSync(join(base, '..'), { recursive: true });
-      writeFileSync(`${base}.session`, 'login');
+      during(base);
+      if (!existsSync(`${base}.session`)) writeFileSync(`${base}.session`, 'login');
       return telegramReady(base);
     },
     registerSession: async (input) => {
@@ -450,6 +459,9 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
       return { ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] };
     },
   });
+  const isAside = (root: string, base: string | undefined) => base !== undefined
+    && base.startsWith(`${folderSession(root)}.pairing-${process.pid}-`) && /-[0-9a-f]{8}$/.test(base);
+  const sessionFolder = (root: string) => readdirSync(join(folderSession(root), '..')).sort();
   const hashOf = (root: string) => readSourceRegistry(registryEnv(root)).accounts
     .find((account) => account.source_id === 'telegram.messages')?.provider_account_hash;
 
@@ -470,10 +482,10 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
     const pairedAt: string[] = [];
     await expect(pair(root, secrets, () => { registered = true; }, pairedAt))
       .rejects.toThrow('not the one whose messages Olympus already holds');
-    // Made aside, as the history has no login of its own, and gone again.
-    expect(pairedAt).toEqual([`${folderSession(root)}.pairing`]);
-    expect(existsSync(`${folderSession(root)}.pairing.session`)).toBe(false);
-    expect(existsSync(`${folderSession(root)}.session`)).toBe(false);
+    // Made aside, and gone again.
+    expect(pairedAt).toHaveLength(1);
+    expect(isAside(root, pairedAt[0])).toBe(true);
+    expect(sessionFolder(root)).toEqual([]);
     expect(registered).toBe(false);
     expect(secrets.values.size).toBe(0);
     expect(hashOf(root)).toBe('telegram:0000000000000000');
@@ -486,21 +498,101 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
     const pairedAt: string[] = [];
     const result = await pair(root, memorySecretStore(), (input) => { registration = input; }, pairedAt);
     expect(result.status).toBe('connected');
-    expect(pairedAt).toEqual([`${folderSession(root)}.pairing`]);
-    expect(existsSync(`${folderSession(root)}.session`)).toBe(true);
-    expect(existsSync(`${folderSession(root)}.pairing.session`)).toBe(false);
+    expect(isAside(root, pairedAt[0])).toBe(true);
+    expect(sessionFolder(root)).toEqual(['telegram.session']);
     expect(registration?.sessionPath).toBe(folderSession(root));
+    expect(registration?.provedAccount).toBe(PROVED);
   });
 
-  test('a login already there is used where it is, and is never removed by a refusal', async () => {
+  const sqliteLogin = (path: string, marker: string) => {
+    mkdirSync(join(path, '..'), { recursive: true });
+    const db = new Database(path);
+    db.run('CREATE TABLE sessions (marker TEXT)');
+    db.run('INSERT INTO sessions VALUES (?)', [marker]);
+    db.close();
+  };
+  const markerOf = (path: string) => {
+    const db = new Database(path, { readonly: true });
+    try {
+      return (db.query('SELECT marker FROM sessions').get() as { marker: string }).marker;
+    } finally {
+      db.close();
+    }
+  };
+
+  test('a login already there, signed into another account by a refused pairing, is left exactly as it was (PR #530 review)', async () => {
     const root = packageFixture();
     history(root, 'telegram:0000000000000000');
-    mkdirSync(join(folderSession(root), '..'), { recursive: true });
-    writeFileSync(`${folderSession(root)}.session`, 'login');
+    // A login a failed pairing left, never signed in: the helper would sign it in.
+    sqliteLogin(`${folderSession(root)}.session`, 'not signed in');
+    const before = readFileSync(`${folderSession(root)}.session`);
     const pairedAt: string[] = [];
-    await expect(pair(root, memorySecretStore(), () => undefined, pairedAt)).rejects.toThrow('delete that history first');
-    expect(pairedAt).toEqual([folderSession(root)]);
-    expect(existsSync(`${folderSession(root)}.session`)).toBe(true);
+    await expect(pair(root, memorySecretStore(), () => undefined, pairedAt, (base) => {
+      // The helper signs the copy in as another account.
+      const db = new Database(`${base}.session`);
+      db.run('UPDATE sessions SET marker = ?', ['signed in as the other account']);
+      db.close();
+    })).rejects.toThrow('delete that history first');
+    expect(isAside(root, pairedAt[0])).toBe(true);
+    expect(readFileSync(`${folderSession(root)}.session`)).toEqual(before);
+    expect(sessionFolder(root)).toEqual(['telegram.session']);
+  });
+
+  test('the account\'s valid login is used again from a copy, and the copy becomes the login', async () => {
+    const root = packageFixture();
+    history(root, PROVED);
+    sqliteLogin(`${folderSession(root)}.session`, 'signed in');
+    const seen: string[] = [];
+    const result = await pair(root, memorySecretStore(), () => undefined, [], (base) => { seen.push(markerOf(`${base}.session`)); });
+    expect(result.status).toBe('connected');
+    expect(seen).toEqual(['signed in']);
+    expect(markerOf(`${folderSession(root)}.session`)).toBe('signed in');
+    expect(sessionFolder(root)).toEqual(['telegram.session']);
+  });
+
+  test('a login another pairing put in place meanwhile is never replaced', async () => {
+    const root = packageFixture();
+    history(root, PROVED);
+    await expect(pair(root, memorySecretStore(), () => undefined, [], () => {
+      writeFileSync(`${folderSession(root)}.session`, 'the other pairing\'s login');
+    })).rejects.toThrow('Another Telegram pairing changed the login');
+    expect(readFileSync(`${folderSession(root)}.session`, 'utf8')).toBe('the other pairing\'s login');
+    expect(sessionFolder(root)).toEqual(['telegram.session']);
+  });
+
+  test('a pairing that fails after signing in leaves no login aside, and one a killed pairing left is removed', async () => {
+    const root = packageFixture();
+    history(root, PROVED);
+    mkdirSync(join(folderSession(root), '..'), { recursive: true });
+    // A killed pairing's login: no process has that pid.
+    writeFileSync(`${folderSession(root)}.pairing-999999999-0123abcd.session`, 'left');
+    await expect(pairMessagingSource({
+      source: 'telegram',
+      packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
+      pythonExecutable: '/usr/bin/python3',
+      secretStore: memorySecretStore(),
+      runCommand: async (request) => {
+        writeFileSync(`${request.env.OLYMPUS_TELEGRAM_SESSION_PATH}.session`, 'signed in');
+        return { exitCode: 1, stdoutLines: [], stderr: '{"error":"dialogs_failed"}' };
+      },
+    })).rejects.toThrow('pairing failed safely');
+    expect(sessionFolder(root)).toEqual([]);
+  });
+
+  test('a session given by its path is refused over a history that names its account', async () => {
+    const root = packageFixture();
+    history(root, PROVED);
+    await expect(connectGuidedSession({
+      source: 'telegram',
+      sessionPath: join(root, 'elsewhere', 'telegram'),
+      registryPath: join(root, 'handles.json'),
+      secretStore: memorySecretStore(),
+      sessionReady: true,
+      historyEnv: registryEnv(root),
+    })).rejects.toThrow('cannot show which account it is');
+    expect(existsSync(join(root, 'handles.json'))).toBe(false);
   });
 
   test('a history that names no account takes the pairing\'s', async () => {
