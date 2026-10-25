@@ -218,7 +218,10 @@ export async function resolveArchiveTarget(
       env: options.env,
       ...(options.ownerConfirmed === true ? { ownerConfirmed: true } : {}),
     });
-    const identity = options.ownerConfirmed === true && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
+    // An account this very step created (no entry before, none named by the export) is bound as the confirmed
+    // one: nothing else could have been confirmed about it, and the first pass must see it as the same account.
+    const created = resolution.match === 'new' && resolution.account !== undefined;
+    const identity = (options.ownerConfirmed === true || created) && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
     return { resolution, identity };
   };
   const { resolution: resolved, identity } = target.exclusive ? await target.exclusive(async () => resolve()) : resolve();
@@ -228,7 +231,7 @@ export async function resolveArchiveTarget(
     source_id: source.sourceId,
     slot: resolved.account.slot,
     ...(importAccountId !== undefined ? { import_account_id: importAccountId } : {}),
-    ...(options.ownerConfirmed === true ? { owner_confirmed: true as const } : {}),
+    ...(options.ownerConfirmed === true || (resolved.match === 'new' && identity !== undefined) ? { owner_confirmed: true as const } : {}),
     ...(identity !== undefined ? { confirmed_account: identity } : {}),
   };
   prepared.record.target = joined;

@@ -53454,7 +53454,8 @@ class TieredStoreSet {
   withdrawCopies(item, copies) {
     for (const copy of copies) {
       const domain = this.domainForCorpus(copy.corpusId);
-      this.store(domain)?.tombstoneCopy(item.identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+      const { sourceVersion: _incoming, ...withdrawn } = item.identity;
+      this.store(domain)?.tombstoneCopy(withdrawn, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
     }
   }
   routedWithoutAnyCopy(identity2) {
@@ -163547,7 +163548,8 @@ async function resolveArchiveTarget(prepared, options) {
       env: options.env,
       ...options.ownerConfirmed === true ? { ownerConfirmed: true } : {}
     });
-    const identity3 = options.ownerConfirmed === true && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
+    const created = resolution.match === "new" && resolution.account !== undefined;
+    const identity3 = (options.ownerConfirmed === true || created) && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
     return { resolution, identity: identity3 };
   };
   const { resolution: resolved, identity: identity2 } = target.exclusive ? await target.exclusive(async () => resolve21()) : resolve21();
@@ -163559,7 +163561,7 @@ async function resolveArchiveTarget(prepared, options) {
     source_id: source.sourceId,
     slot: resolved.account.slot,
     ...importAccountId !== undefined ? { import_account_id: importAccountId } : {},
-    ...options.ownerConfirmed === true ? { owner_confirmed: true } : {},
+    ...options.ownerConfirmed === true || resolved.match === "new" && identity2 !== undefined ? { owner_confirmed: true } : {},
     ...identity2 !== undefined ? { confirmed_account: identity2 } : {}
   };
   prepared.record.target = joined;

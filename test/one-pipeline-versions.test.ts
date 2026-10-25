@@ -148,6 +148,27 @@ describe('a newer archive record is stored before its cursor advances, whatever 
     expect(h.ledgerRecord('a')?.reasons).toContain('content:held_until_judged');
     expect(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0).map((row) => row.version)).toEqual(['9', '9']);
   });
+
+  test('a crash right after the lower copy is withdrawn leaves the old body or the new one: the same record, read again, stores the new body', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    h.live.records = [rec('a', 3, 'the live words')];
+    await h.pullLive();
+    const id = await h.startImport('crash.mbox', [rec('a', 9, 'the archive words')]);
+    const original = h.set.withdrawCopies.bind(h.set);
+    let crashed = false;
+    h.set.withdrawCopies = (...args: Parameters<typeof original>) => {
+      original(...args);
+      if (!crashed) { crashed = true; throw new Error('injected crash after the withdrawal'); }
+    };
+    await h.pull(id).catch(() => undefined);
+    expect(crashed).toBe(true);
+    // The withdrawal did not stamp the incoming version: the newer record is still newer than what remains.
+    expect(h.rows().filter((row) => row.providerItemId === 'a').every((row) => row.version !== '9')).toBe(true);
+    const done = await h.importAll(id);
+    expect(done.record?.status).toBe('imported');
+    expect(h.textOf('a')).toBe('the archive words');
+  });
 });
 
 describe('an accepted record no store can take yet is not passed', () => {

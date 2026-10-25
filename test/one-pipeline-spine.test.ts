@@ -327,6 +327,18 @@ describe('which account an import joins', () => {
     expect(h.ids()).toEqual(['a', 'b']);
   });
 
+  test('an export that names no account into a source with no account yet starts without asking, and its first pass is not stopped for the account it just made', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.evidence.current = { kind: 'none' };
+    const key = h.writeExport('fresh.mbox', [rec('a', 1, 'a')]);
+    const started = await h.dashboard.approve({ key });
+    if (!started.ok || started.status !== 'started') throw new Error(`expected a start, got ${JSON.stringify(started)}`);
+    expect(h.runtime.state.get(started.archive_id)?.target?.confirmed_account).toBeDefined();
+    const done = await h.importAll(started.archive_id);
+    expect(done.record?.status).toBe('imported');
+    expect(h.ids()).toEqual(['a']);
+  });
+
   test('keeping an export apart, or one of a different account, stays under Archives with its own Remove', async () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive('someone-elses-account');

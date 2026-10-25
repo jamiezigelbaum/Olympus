@@ -962,7 +962,11 @@ export class TieredStoreSet {
   withdrawCopies(item: RawItem, copies: readonly { corpusId: string }[]): void {
     for (const copy of copies) {
       const domain = this.domainForCorpus(copy.corpusId);
-      this.store(domain!)?.tombstoneCopy(item.identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+      // A withdrawal is not the item's deletion: the incoming version is not stamped on it, so the tombstone
+      // keeps the old body's version and a replay of the same record (a crash before the replacement landed)
+      // still reads as newer and stores it.
+      const { sourceVersion: _incoming, ...withdrawn } = item.identity;
+      this.store(domain!)?.tombstoneCopy(withdrawn, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
     }
   }
 
