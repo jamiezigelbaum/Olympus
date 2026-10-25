@@ -105,6 +105,9 @@ const DASHBOARD_PATH = /^\/dashboard(\/|\?|#|$)/;
 /** The kinds of copy that need the clipboard: a headless browser may refuse it, and the page says nothing then. */
 const CLIPBOARD_REFUSAL = /clipboard|permission|NotAllowed/i;
 
+/** How many presses deep the crawl follows what a press reveals. */
+const MAX_OPENERS = 3;
+
 /** Controls whose press would reach outside the throwaway machine, with why they are not pressed. */
 const NOT_PRESSED: Array<{ test: (control: PageControl) => boolean; reason: string }> = [
   { test: (c) => /^(Turn on remote access|Review agreement|I accept, turn on remote access)$/i.test(c.name) || /agent-kind=remote-(on|accept)/.test(c.formKind), reason: 'it starts a public address and a certificate from a public authority; not on a throwaway machine' },
@@ -490,7 +493,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           if (!ok) summary.failed += 1;
           const trace: StepTrace = {
             n: steps.length + 1,
-            name: `${control.name || control.tag}${item.answer === false ? ' (answer Cancel to its question)' : item.answer === true && control.confirms ? ' (answer OK to its question)' : ''}${item.path.length > 1 ? ` (after ${item.path.length - 1} earlier press)` : ''}`,
+            name: `${control.name || control.tag}${item.answer === false ? ' (answer Cancel to its question)' : item.answer === true && control.confirms ? ' (answer OK to its question)' : ''}${item.path.length > 1 ? ` (after ${item.path.length - 1} earlier press${item.path.length > 2 ? 'es' : ''})` : ''}`,
             action: `press ${control.tag} "${control.name}" on ${page.path}`,
             expected: judged.expected, actual: judged.actual, ok, ms: now() - started,
             at: (after?.url ?? page.path).replace(/token=[^&#]*/g, 'token=…'),
@@ -503,8 +506,8 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           phase = 'taking a picture';
           if (await Promise.race([driver.screenshot(shot).catch(() => false), new Promise<boolean>((done) => setTimeout(() => done(false), 8_000))])) trace.screenshot = shot;
           steps.push(trace);
-          // What the press revealed gets its own turn.
-          if (after && item.path.length < 2) {
+          // What the press revealed gets its own turn, through up to three openers (Connect an agent, then an agent's section, then Add it yourself instead).
+          if (after && item.path.length <= MAX_OPENERS) {
             const revealed = afterControls.filter((candidate) => candidate.visible && !controls.some((was) => was.sig === candidate.sig && was.visible));
             if (revealed.length > 0 && (control.tag === 'summary' || control.expanded !== null || control.attrs.includes('data-sheet-toggle'))) consider(revealed, item.path);
           }
