@@ -21,7 +21,7 @@
 // sender, text or excerpt. The file is created owner-only (0600).
 
 import { Database } from 'bun:sqlite';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SourceItemIdentity, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { runSqliteMigrations, type SqliteMigration } from '../../core/sqlite-migrations.ts';
@@ -1571,26 +1571,36 @@ export class TierLedger {
 
   /**
    * The identity of the ledger file at a path, read without opening it as a
-   * ledger: nothing is created, migrated or written there. Undefined when
-   * the file is not there, is no ledger yet (no identity minted) or cannot
-   * be read. A store bound to a set checks a candidate with this before it
-   * opens anything (classification/tier-set-binding.ts).
+   * ledger: nothing is created, migrated or written to the ledger itself.
+   * Undefined when the file is not there, is no ledger yet (no identity
+   * minted), is busy or cannot be read. A store bound to a set checks a
+   * candidate with this before it opens anything
+   * (classification/tier-set-binding.ts).
    *
-   * The connection is writable but query-only: a read-only connection cannot
-   * open a WAL database that has no -wal file beside it (macOS's SQLite
-   * refuses), which is how a ledger looks after a clean close and a rename.
-   * A ledger that cannot be opened for writing is read read-only.
+   * The file is opened read-only first: a read-only connection never
+   * checkpoints or writes the main file, and it reads what a crash left in
+   * the -wal. SQLite may still create the -shm beside it. macOS's SQLite
+   * refuses a read-only connection to a WAL database that has no -wal file
+   * (how a ledger looks after a clean close and a rename); only then is it
+   * opened read-write with the connection set to query-only. That second open
+   * happens only when no -wal holds frames and no -journal is waiting, so
+   * there is nothing to checkpoint or roll back and the main file stays as it
+   * was; empty -wal and -shm files may appear beside it. A busy file is not
+   * tried a second way: an exclusive holder costs one `busyTimeoutMs`, not two.
    */
-  static readLedgerId(dbPath: string): string | undefined {
+  static readLedgerId(dbPath: string, options: { busyTimeoutMs?: number } = {}): string | undefined {
     if (dbPath === ':memory:' || !existsSync(dbPath)) return undefined;
-    for (const mode of [{ readwrite: true, create: false }, { readonly: true, create: false }] as const) {
+    const busyTimeoutMs = Math.max(0, Math.trunc(options.busyTimeoutMs ?? 10_000));
+    for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
+      if ('readwrite' in mode && hasUnmergedWrites(dbPath)) return undefined;
       let db: Database | undefined;
       try {
         db = new Database(dbPath, mode);
-        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}; PRAGMA query_only = ON;`);
         const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
         return typeof row?.value === 'string' && row.value !== '' ? row.value : undefined;
-      } catch {
+      } catch (error) {
+        if (isSqliteBusy(error)) return undefined;
         // Try the next way of opening it.
       } finally {
         if (db) closeSqliteStore(db, { checkpoint: false });
@@ -3366,6 +3376,26 @@ interface TierMigrationProposalRow {
   moved_generation: number | null;
   outcome_json: string | null;
   updated_at: string;
+}
+
+/** SQLITE_BUSY (5) and SQLITE_LOCKED (6), as bun:sqlite reports them. */
+function isSqliteBusy(error: unknown): boolean {
+  const { code, errno } = (error ?? {}) as { code?: unknown; errno?: unknown };
+  return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED' || errno === 5 || errno === 6;
+}
+
+/**
+ * Whether committed writes sit outside the main file: a -wal that holds
+ * frames, or a -journal waiting to be rolled back. Opening such a file
+ * read-write and closing it would merge them into the main file.
+ */
+function hasUnmergedWrites(dbPath: string): boolean {
+  try {
+    if (statSync(`${dbPath}-wal`).size > 0) return true;
+  } catch {
+    // No -wal.
+  }
+  return existsSync(`${dbPath}-journal`);
 }
 
 function proposalFromRow(row: TierMigrationProposalRow): TierMigrationProposal {

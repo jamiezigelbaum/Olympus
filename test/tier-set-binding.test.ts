@@ -3,7 +3,7 @@
 
 import { createHash } from 'node:crypto';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -162,5 +162,75 @@ describe('reading a ledger\'s identity', () => {
     writeFileSync(garbage, 'this is not a database'.repeat(100));
     expect(TierLedger.readLedgerId(garbage)).toBeUndefined();
     expect(existsSync(`${garbage}-wal`)).toBe(false);
+  });
+});
+
+describe('reading a ledger\'s identity leaves the ledger file as it was', () => {
+  const sha = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex');
+
+  test('a ledger a crash left with frames in its -wal keeps its main file and its frames', () => {
+    const dir = tempDir();
+    const live = join(dir, 'live', 'set.tier-ledger.sqlite');
+    const id = ledgerAt(live);
+    const writer = new TierLedger({ dbPath: live });
+    const crashed = join(dir, 'crashed', 'set.tier-ledger.sqlite');
+    try {
+      writer.writeMeta('resume_point', 'written-before-the-crash');
+      // What a crash leaves behind: the main file and the -wal as they are while the writer still has them open.
+      mkdirSync(dirname(crashed), { recursive: true });
+      copyFileSync(live, crashed);
+      copyFileSync(`${live}-wal`, `${crashed}-wal`);
+    } finally {
+      writer.close();
+    }
+    expect(statSync(`${crashed}-wal`).size).toBeGreaterThan(0);
+    const before = { main: sha(crashed), wal: sha(`${crashed}-wal`), walSize: statSync(`${crashed}-wal`).size };
+
+    expect(TierLedger.readLedgerId(crashed)).toBe(id);
+    expect(TierLedger.readLedgerId(crashed)).toBe(id);
+
+    // Nothing was merged into the main file and the -wal was not truncated (an -shm may have appeared).
+    expect({ main: sha(crashed), wal: sha(`${crashed}-wal`), walSize: statSync(`${crashed}-wal`).size }).toEqual(before);
+    // What the frames held is still there to be recovered by whoever opens the ledger next.
+    const reopened = new TierLedger({ dbPath: crashed });
+    try {
+      expect(reopened.readMeta('resume_point')).toBe('written-before-the-crash');
+    } finally {
+      reopened.close();
+    }
+  });
+
+  test('a missing path, an empty file and files that are not ledgers create nothing in their folder and change nothing', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'empty.sqlite'), '');
+    writeFileSync(join(dir, 'garbage.sqlite'), 'this is not a database'.repeat(100));
+    const other = new Database(join(dir, 'other.sqlite'));
+    other.exec('CREATE TABLE notes (a TEXT); INSERT INTO notes VALUES (\'x\');');
+    other.close();
+    const folder = (): Record<string, string> => Object.fromEntries(readdirSync(dir).sort().map((name) => [name, sha(join(dir, name))]));
+    const before = folder();
+
+    for (const name of ['missing.sqlite', 'empty.sqlite', 'garbage.sqlite', 'other.sqlite']) {
+      expect(TierLedger.readLedgerId(join(dir, name))).toBeUndefined();
+    }
+    expect(folder()).toEqual(before);
+  });
+
+  test('a ledger held exclusively is given up on after one wait, not one for each way of opening it', () => {
+    const dir = tempDir();
+    const path = join(dir, 'set.tier-ledger.sqlite');
+    ledgerAt(path);
+    const holder = new Database(path);
+    holder.exec(`PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; INSERT OR REPLACE INTO tier_ledger_meta (key, value) VALUES ('held', '1');`);
+    try {
+      const started = performance.now();
+      expect(TierLedger.readLedgerId(path, { busyTimeoutMs: 600 })).toBeUndefined();
+      const took = performance.now() - started;
+      expect(took).toBeGreaterThanOrEqual(500);
+      expect(took).toBeLessThan(1000);
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
   });
 });

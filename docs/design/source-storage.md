@@ -625,7 +625,15 @@ and the recorded file name beside the store, for a set moved as a whole
 (`classification/tier-set-binding.ts`). Rows written before this change keep
 working before, during and after a move. The migration therefore renames the
 stores and the ledger and opens no store to repoint a row, which would write
-to a store that may be busy or damaged.
+to a store that may be busy or damaged. A candidate's id is read through a
+read-only connection, which never changes the ledger's main file or checkpoints
+its `-wal` (SQLite may add an `-shm` or an empty `-wal` beside it); where macOS
+refuses that for a ledger with no `-wal`, it is read through a query-only
+connection, and only when no `-wal` holds frames. Because the file can be
+replaced between that read and the open, the handle a store keeps is checked
+against the bound id again, and a different id is refused. `olympus tier set`
+and `explain` stop, rather than fall back to the recorded path or the store's
+own ledger, when a bound store's ledger cannot be found.
 
 No re-embed and no rescan: stores, cursors (`sync_runs.cursor`), tiers,
 embeddings and watch snapshots move as files. Embedding changes stay

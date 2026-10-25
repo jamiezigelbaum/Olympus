@@ -2780,8 +2780,19 @@ export class LocalConnectorStore {
     const found = findTierSetLedger(this.dbPath, binding);
     if (found === undefined) throw new TierLedgerUnavailableError(this.corpusId);
     this.boundLedgerHandle?.close();
-    this.boundLedgerHandle = new TierLedger({ dbPath: found, now: this.now });
-    return this.boundLedgerHandle;
+    this.boundLedgerHandle = undefined;
+    // The lookup read the id through a connection of its own and closed it, so
+    // the file can have been replaced before this open. Judge visibility only
+    // by the handle that is kept: check its id, and refuse a different one. A
+    // replacement has had its schema migrated by this open before it is
+    // checked; that is accepted, since it is closed unused.
+    const opened = new TierLedger({ dbPath: found, now: this.now });
+    if (!holdsBoundId(opened)) {
+      opened.close();
+      throw new TierLedgerUnavailableError(this.corpusId);
+    }
+    this.boundLedgerHandle = opened;
+    return opened;
   }
 
   /**
