@@ -31,6 +31,7 @@ const PLACEMENT = 'src/workers/connector-store/tier-placement.ts';
 /** Shared lines that name the lane option without any lane setting it. */
 const LANE_OPTION_SHARED: ReadonlyArray<{ path: string; snippet: string; why: string }> = [
   { path: PLACEMENT, snippet: 'holdContentUntilJudged?: true;', why: 'the option\'s declaration' },
+  { path: 'src/core/contracts.ts', snippet: 'holdContentUntilJudged?: true;', why: 'RawItem\'s declaration of the same hold, carried by an item an archive input built' },
   {
     path: PLACEMENT,
     snippet: 'explicit.holdContentUntilJudged === true ? { holdContentUntilJudged: true as const } : {}',

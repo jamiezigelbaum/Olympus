@@ -4971,6 +4971,31 @@ export class LocalConnectorStore {
     return { chunkCount: row.chunk_count, ...(row.authored_at ? { authoredAt: row.authored_at } : {}) };
   }
 
+  /**
+   * What this store holds of one item for the intake lookup (contracts.ts
+   * `StoredItemState`): its stored version and how many chunks it has. A
+   * metadata-only row has none. Undefined when absent or tombstoned. A
+   * deferred child (bytes read later) counts as holding no content until its
+   * chunks land.
+   */
+  storedItemState(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): { version?: string; chunkCount: number } | undefined {
+    const row = this.db.query(`
+      SELECT source_version, tombstoned,
+             (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = items.item_pk) AS chunk_count
+      FROM items
+      WHERE provider = ? AND account_scope = ?
+        AND normalized_conversation = ? AND provider_item_id = ?
+      LIMIT 1
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { source_version: string | null; tombstoned: number; chunk_count: number } | null;
+    if (!row || row.tombstoned === 1) return undefined;
+    return { ...(row.source_version ? { version: row.source_version } : {}), chunkCount: row.chunk_count };
+  }
+
   itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
     const row = this.db.query(`
       SELECT source_version, content_hash, tombstoned

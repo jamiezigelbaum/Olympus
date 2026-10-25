@@ -44,7 +44,14 @@
 // branches on which source an item came from.
 
 import { existsSync } from 'node:fs';
-import type { RawItem, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../core/contracts.ts';
+import type {
+  RawItem,
+  SourceConnector,
+  SourceConnectorListOptions,
+  SourceConnectorListPage,
+  StoredItemLookup,
+  StoredItemState,
+} from '../../core/contracts.ts';
 import {
   buildSourceSensitivity,
   type SourceItemIdentity,
@@ -775,7 +782,7 @@ export class TieredStoreSet {
     this.assertLedgerGovernsLegs();
     if (options.settle !== false) await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
-    const traversal = recordedTraversal(connector);
+    const traversal = recordedTraversal(connector, (identity) => this.storedItem(identity));
     const legRuns: TieredStoreLegRun[] = [];
     const ran = new Set<SourceTrustDomain>();
     const embed = options.embed !== false;
@@ -950,6 +957,36 @@ export class TieredStoreSet {
   /** @internal Whether any store of the set has ever held a row for this item. */
   anyLegHasRow(identity: SourceItemIdentity): boolean {
     return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity) === true);
+  }
+
+  /**
+   * The intake lookup (contracts.ts `StoredItemLookup`): what the set holds
+   * of one item, across every leg that exists. `version` is the stored
+   * `sourceVersion`; `hasContent` is whether any leg holds chunks for it.
+   *
+   * A routed item is written leg by leg and the set's resume point is
+   * committed only after every leg did, so a crash between legs leaves an item
+   * in some legs and not others. Such an item reports no version, so the next
+   * record for it applies whatever its version and completes it: the legs
+   * disagree on the version, or the ledger names a current copy whose store
+   * has no active row for the item.
+   */
+  storedItem(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): StoredItemState | undefined {
+    const found: Array<{ domain: SourceTrustDomain; version?: string; chunkCount: number }> = [];
+    for (const domain of TIER_DOMAIN_ORDER) {
+      const state = this.store(domain)?.storedItemState(identity);
+      if (state) found.push({ domain, ...state });
+    }
+    if (found.length === 0) return undefined;
+    const hasContent = found.some((leg) => leg.chunkCount > 0);
+    const versions = new Set(found.map((leg) => leg.version));
+    const cutOff = this.ledger.copies(identity).some((copy) => {
+      if (copy.state === 'superseded') return false;
+      const domain = this.domainForCorpus(copy.corpusId);
+      return domain !== undefined && !found.some((leg) => leg.domain === domain);
+    });
+    const agreed = versions.size === 1 ? [...versions][0] : undefined;
+    return { ...(!cutOff && agreed ? { version: agreed } : {}), hasContent };
   }
 
   /** @internal */
@@ -1780,7 +1817,7 @@ function stringMetadata(item: RawItem, keys: readonly string[]): string | undefi
  * traversal that threw is never replayed: its recording is partial and the
  * run is aborting anyway.
  */
-export function recordedTraversal(connector: SourceConnector): SourceConnector {
+export function recordedTraversal(connector: SourceConnector, storedItem?: StoredItemLookup): SourceConnector {
   const pages: SourceConnectorListPage[] = [];
   let recorded = false;
   let failed = false;
@@ -1798,7 +1835,10 @@ export function recordedTraversal(connector: SourceConnector): SourceConnector {
       }
       return (async function* (): AsyncGenerator<SourceConnectorListPage> {
         try {
-          for await (const page of connector.listItems(options)) {
+          // The store lane tells the connector what is stored, so it decides per record, before it
+          // builds the item, whether the record applies (contracts.ts, 2.2.0). The later legs replay
+          // the recording, so the decision is made once per run.
+          for await (const page of connector.listItems(storedItem && !options.storedItem ? { ...options, storedItem } : options)) {
             pages.push(page);
             yield page;
           }
