@@ -205,6 +205,10 @@ export const PROBE_SOURCE = String.raw`(() => {
         const row = el.closest('li.source, li.row');
         const rowName = row ? row.querySelector('.source-name') : null;
         const menu = el.closest('details.menu');
+        // The section the control is in (Needs you, Privacy, Models, On this computer), named by its heading, and the section it opens from.
+        const opener = el.closest('details[data-open-key]');
+        const section = el.closest('section, details.section');
+        const heading = section ? Array.from(section.children).find((child) => child.tagName === 'H2' || child.tagName === 'SUMMARY') : null;
         const fix = el.closest('.fix, .source-actions') || el.parentElement;
         const reason = fix ? fix.querySelector('.reason') : null;
         out.push({
@@ -215,6 +219,8 @@ export const PROBE_SOURCE = String.raw`(() => {
           reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : clean(el.getAttribute('aria-description') || el.getAttribute('title') || '').slice(0, 200),
           rowName: rowName ? clean(rowName.textContent) : '', rowKind: row ? (row.classList.contains('source') ? 'source' : (row.classList.contains('need') ? 'need' : '')) : '',
           menuKey: menu ? menu.getAttribute('data-open-key') : '', href: el.getAttribute('href'),
+          openKey: opener && !menu ? opener.getAttribute('data-open-key') : '',
+          section: heading ? clean(heading.textContent).split(/[:·—]/)[0].trim().slice(0, 40) : '',
         });
       }
       return out;

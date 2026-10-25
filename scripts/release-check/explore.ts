@@ -13,6 +13,10 @@
  * does nothing. Coverage is reported against the list taken from the product's source (explore-inventory.ts): found, pressed, missed
  * with the reason for each miss. Coverage is advisory; the rules are blocking.
  *
+ * The panel's other sections (Needs you, Privacy, Models, On this computer) do not change with the sources' states, so their controls
+ * are pressed once, from the first state produced, under the same rules; one in a closed section is reached through what opens it, and
+ * one that starts a sign-in at a provider is listed with that reason.
+ *
  * The explorer speaks to a `JourneyDriver` (the machine's Chrome, or a DOM in the tests) and to `Seed`s (what puts the install in a
  * state). The panel is a framed page with a message bridge to the page around it and an Unlock step; the driver already opens it the
  * owner's way, so the explorer works in the panel's frame and presses with real mouse events.
@@ -38,7 +42,14 @@ export interface PanelControl {
   rowKind: '' | 'source' | 'need';
   menuKey: string;
   href: string | null;
+  /** The section (a `details`) the control opens from, when it is not a ⋯ menu. */
+  openKey?: string;
+  /** The heading of the section the control is in. */
+  section?: string;
 }
+
+/** A control of the panel outside the Sources section (Needs you, Privacy, Models, On this computer). */
+export interface SectionControl { section: string; key: string; label: string; pressed: boolean; note?: string }
 
 export interface Seed {
   id: SeedId;
@@ -96,6 +107,8 @@ export interface ExploreResult {
   coverage: CoverageEntry[];
   /** Controls the page showed in the Sources section that the source-derived list does not name. */
   unlisted: Array<{ key: string; label: string; rowName: string; pressed: boolean }>;
+  /** The panel's controls outside the Sources section, pressed once from the first state produced. */
+  sections?: SectionControl[];
   summary: { listed: number; found: number; pressed: number; missed: number; unlisted: number; presses: number };
   /** Sources a seed was meant to drive and could not bring to the state: the machine claims to drive them, so this blocks. */
   sourceFailures?: Array<{ seed: SeedId; source: string; detail: string }>;
@@ -121,6 +134,8 @@ const ALWAYS_ALLOWED_CONSOLE: RegExp[] = [/favicon/i];
 const REFUSAL_REQUESTS: RegExp[] = [/\/dashboard\/tools\/call/];
 /** The kinds of control that open a page of their own: leaving the dashboard is their outcome. Every other kind must stay and show what it did. */
 const LEAVES = new Set<ControlKind>(['connect', 'reconnect', 'scope', 'check-again', 'privacy-settings', 'other']);
+/** Kinds that start a sign-in at a provider: outside the Sources section there is no stand-in to drive them. */
+const SIGN_IN = new Set<ControlKind>(['connect', 'reconnect', 'scope']);
 const CONFIRM_WAIT_MS = 60_000;
 /** How long a page with a busy control (a sync running) is waited on before it is judged. */
 const BUSY_WAIT_MS = 90_000;
@@ -352,6 +367,18 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     return options.inventory.find((entry) => entry.sourceId === source && entry.kind === kind && new RegExp(entry.label, 'i').test(control.name))?.id;
   };
   const inScope = (control: PanelControl): boolean => control.rowKind === 'source' && ['button', 'summary', 'a'].includes(control.tag);
+  /** The panel's other sections (Needs you, Privacy, Models, On this computer): pressed once, from the first state produced. */
+  const otherScope = (control: PanelControl): boolean => control.rowKind !== 'source' && ['button', 'summary', 'a'].includes(control.tag);
+  const sections = new Map<string, SectionControl>();
+  const sectionOf = (control: PanelControl): SectionControl => {
+    const token = `${control.section ?? ''}|${control.key}`;
+    const known = sections.get(token);
+    if (known) return known;
+    const entry: SectionControl = { section: control.section || '(no heading)', key: control.key, label: control.name, pressed: false };
+    sections.set(token, entry);
+    return entry;
+  };
+  let sectionsSeed: SeedId | undefined;
   /** A control the machine can press without leaving the throwaway install in a state it cannot restore, or starting a sign-in at a real provider. */
   const drivable = (control: PanelControl): boolean => {
     return options.inventory.some((entry) => entry.sourceLabel === control.rowName && entry.unreachable === undefined);
@@ -468,6 +495,19 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       if (control.menuKey && control.tag !== 'summary') enqueue([`summary:${control.menuKey}`, control.key], control.rowName);
       else enqueue([control.key], control.rowName);
     }
+    // The other sections do not change with the sources' states, so they are pressed from the first state produced only.
+    let budget = maxPresses;
+    if (sectionsSeed === undefined) {
+      sectionsSeed = seed.id;
+      for (const control of base.filter(otherScope)) {
+        const entry = sectionOf(control);
+        if (SIGN_IN.has(kindOf(control.key, control.name))) { entry.note = 'not pressed: it starts a sign-in at a provider'; continue; }
+        const opener = control.tag === 'summary' ? '' : control.menuKey || (control.visible ? '' : control.openKey ?? '');
+        if (!control.visible && !opener) { entry.note = 'not pressed: it was not showing and nothing on the page opens it'; continue; }
+        enqueue(opener ? [`summary:${opener}`, control.key] : [control.key], `section:${entry.section}`);
+        budget += 1;
+      }
+    }
     const lastKinds = new Set(seed.last ?? []);
     const orderKey = (entry: { path: string[]; parentKind?: ControlKind }): number => (entry.parentKind && lastKinds.has(entry.parentKind) && /:yes$/.test(entry.path[entry.path.length - 1]!) ? 1 : 0);
 
@@ -477,7 +517,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
     let failedHere = 0;
     // Sources whose terminal action (a confirmed delete) has run: the rest of their presses are dropped, the other sources' go on.
     const finishedRows = new Set<string>();
-    while (queue.length > 0 && presses < maxPresses && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
+    while (queue.length > 0 && presses < budget && !(options.deadlineAt !== undefined && now() >= options.deadlineAt)) {
       queue.sort((a, b) => orderKey(a) - orderKey(b));
       const item = queue.shift()!;
       if (finishedRows.has(item.row)) continue;
@@ -534,6 +574,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       totalPresses += 1;
       pressedHere += 1;
       if (listed) { const entry = foundIds.get(listed); if (entry) entry.pressed = true; }
+      else if (item.row.startsWith('section:')) sectionOf(control).pressed = true;
       else for (const entry of unlisted.values()) if (entry.key === control.key && entry.rowName === control.rowName) entry.pressed = true;
       let pagesMax = pagesBefore;
       // Watched while the page settles: a window that opens and goes is still seen.
@@ -617,7 +658,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       const ok = findings.length === 0 && outcomes.every((outcome) => outcome.ok);
       if (!ok) failedHere += 1;
       const trace: StepTrace = {
-        n: steps.length + 1, name: `${control.rowName ? `${control.rowName}: ` : ''}${control.name || control.key}${item.path.length > 1 ? ` (after ${item.path.slice(0, -1).join(', ')})` : ''}`,
+        n: steps.length + 1, name: `${control.rowName ? `${control.rowName}: ` : control.section ? `${control.section}: ` : ''}${control.name || control.key}${item.path.length > 1 ? ` (after ${item.path.slice(0, -1).join(', ')})` : ''}`,
         action: `press ${control.tag} "${control.name}" [${control.key}] from the "${seed.id}" page`,
         expected: outcomes.length > 0 ? outcomes.map((outcome) => outcome.expected).join('; ') : 'something happens, and the generic rules hold',
         actual: `${left ? `the press left the dashboard for ${at || 'another page'}` : outcomes.length > 0 ? outcomes.map((outcome) => outcome.actual).join('; ') : (changed ? 'the page changed' : 'nothing changed')}${tolerated.length > 0 ? `; allowed failures seen: ${tolerated.join(' | ').slice(0, 400)}` : ''}`,
@@ -630,9 +671,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
 
       // What the press opened gets its own turn: a question's Confirm and Cancel (keys that extend the control's own). What a confirmed press
       // leaves behind (the row's Connect) is the next state's control, found by the seed that shows it.
-      const newKeys = afterControls.filter((candidate) => !context.before.keys.includes(candidate.key) && candidate.key.startsWith(`${control.key}:`) && inScope(candidate) && candidate.visible && candidate.tag === 'button');
+      const ownScope = item.row.startsWith('section:') ? otherScope : inScope;
+      const newKeys = afterControls.filter((candidate) => !context.before.keys.includes(candidate.key) && candidate.key.startsWith(`${control.key}:`) && ownScope(candidate) && candidate.visible && candidate.tag === 'button');
       for (const child of newKeys) {
-        record(child, idOf(child));
+        if (item.row.startsWith('section:')) sectionOf(child); else record(child, idOf(child));
         enqueue([...item.path, child.key], item.row, kind);
       }
       if ((seed.resetAfter ?? []).includes(kind) || kind === 'confirm') dirty = true;
@@ -665,7 +707,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
   const pressed = coverage.filter((entry) => entry.status === 'pressed').length;
   const found = coverage.filter((entry) => foundIds.has(entry.id)).length;
   return {
-    seeds, traces, coverage, unlisted: [...unlisted.values()],
+    seeds, traces, coverage, unlisted: [...unlisted.values()], sections: [...sections.values()],
     summary: { listed, found, pressed, missed: listed - pressed, unlisted: unlisted.size, presses: totalPresses },
     sourceFailures,
     accessibility: options.axeSource
@@ -711,11 +753,19 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
   checks.push({
     id: 'explore.coverage', title: 'Coverage of the Sources section\'s controls (advisory)',
     status: s.missed === 0 ? 'pass' : 'warn',
-    detail: `${s.listed} controls listed from the source; ${s.found} found on the page, ${s.pressed} pressed, ${s.missed} missed (reasons in the report); ${s.unlisted} found that the list does not name`,
+    detail: `${s.listed} controls listed from the source; ${s.found} found on the page, ${s.pressed} pressed, ${s.missed} missed (reasons in the report); ${s.unlisted} found that the list does not name${sectionsLine(result.sections)}`,
   });
   checks.push(accessibilityCheck(result.accessibility));
   if (result.pages) checks.push(...pagesChecks(result.pages));
   return checks;
+}
+
+/** The panel's other sections in the coverage line: how many controls each showed, and how many were pressed. */
+function sectionsLine(sections: SectionControl[] | undefined): string {
+  if (!sections || sections.length === 0) return '';
+  const names = [...new Set(sections.map((entry) => entry.section))];
+  const pressed = sections.filter((entry) => entry.pressed).length;
+  return `; the panel's other sections (${names.join(', ')}): ${sections.length} control(s), ${pressed} pressed`;
 }
 
 /** Blocking for serious and critical violations (and for a page the checker could not audit); the lesser ones are in the detail and the report. */
