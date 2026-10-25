@@ -595,6 +595,22 @@ describe('the release manifest, revalidated against current tiers and rules', ()
     expect(output.citations).toEqual([{ label: 'Files', title: 'garden-plan.txt', date: '2026-01-02' }]);
   });
 
+  test('a parent label\'s names input that is gone withholds the whole answer: prose can still carry the parent\'s subject and sender', async () => {
+    const { fixture, check } = await routed();
+    // The answer was written with the parent's names in front of the model; it cites the child only.
+    const labelled = [manifest([input('garden'), input('orchard', { layer: 'names' })])];
+    const answer = leakyAnswer([leakyEvidence('garden')], 'ok');
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }).status).toBe('answered');
+
+    // The parent and the child are both removed after synthesis: the child's citation drops, and the parent's names
+    // are still in the prose, so nothing of the answer may leave.
+    fixture.ledger.removeCopies(identityOf('orchard'));
+    fixture.ledger.removeCopies(identityOf('garden'));
+    expect(check.inputs([input('orchard', { layer: 'names' })])).toEqual([{ tier: 'public_or_personal', gone: true }]);
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }))
+      .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
+  });
+
   test('missing proof withholds: no manifest, an unprovable input, a cited item the manifest lacks, or a check that fails', () => {
     const check = fixedCheck('public_or_personal');
     const unverified = { kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] };

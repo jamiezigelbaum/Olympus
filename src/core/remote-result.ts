@@ -384,6 +384,10 @@ function recheckRelease(
   if (verdicts.some((verdict) => verdict.tier === 'unknown')) return { withhold: REMOTE_ANSWER_UNVERIFIED };
   for (const [index, { input, manifest }] of inputs.entries()) {
     const verdict = verdicts[index]!;
+    // A parent label's names are a dependency of the answer, never a cited item: the prose may carry
+    // the parent's subject and sender, so a dependency that is gone leaves nothing to drop. It
+    // withholds the whole answer.
+    if (input.layer === 'names' && verdict.gone) return { withhold: REMOTE_ANSWER_UNVERIFIED };
     if (!privateInputReleaseAllowed(input, verdict, manifest.constraints, postureNow)) return { withhold: input.privateAtAnswer ? REMOTE_ANSWER_WITHHELD : REMOTE_ANSWER_CHANGED };
   }
   const dropped = new Set<number>();
