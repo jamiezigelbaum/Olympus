@@ -100,9 +100,10 @@ function describeExit(result: FileResult): string {
 
 /**
  * One report for the lane, in file order. A file that crashed, left no
- * readable report, or exited nonzero with no failing test in it (Bun writes
- * the report before it counts an error between tests) gains a failed test
- * case, so the report can never read as a pass the run did not have.
+ * readable report, hit a runner error, or exited nonzero with no failing test
+ * in it (Bun writes the report before it counts an error between tests) gains
+ * a failed test case, so the report can never read as a pass the run did not
+ * have.
  */
 export function mergeJUnit(results: readonly FileResult[]): { xml: string; totals: JUnitTotals } {
   const totals: JUnitTotals = { tests: 0, assertions: 0, failures: 0, skipped: 0, time: 0 };
@@ -113,10 +114,10 @@ export function mergeJUnit(results: readonly FileResult[]): { xml: string; total
       for (const key of Object.keys(totals) as (keyof JUnitTotals)[]) totals[key] += parsed.totals[key];
       if (parsed.body) bodies.push(parsed.body);
     }
-    if (!parsed || (result.exitCode !== 0 && !(result.exitCode !== null && parsed.totals.failures > 0))) {
+    if (!parsed || result.error || (result.exitCode !== 0 && !(result.exitCode !== null && parsed.totals.failures > 0))) {
       const why = !parsed
         ? `${describeExit(result)}, no readable JUnit report`
-        : result.exitCode === null
+        : result.exitCode === null || result.error
           ? describeExit(result)
           : `${describeExit(result)} with no failing test in its report`;
       const name = escapeXml(`test/${result.file}`);

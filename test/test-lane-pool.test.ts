@@ -64,12 +64,15 @@ describe('fast lane pool', () => {
     // Bun writes the report before it counts an error between tests.
     const erroredAfter = { file: 'f.test.ts', exitCode: 1, signal: null, seconds: 1, junit: REPORT('f.test.ts', 1, 0) };
     const runnerError = { file: 'g.test.ts', exitCode: null, signal: null, seconds: 0, junit: null, error: 'ENOSPC' };
-    const all = [ok, failing, killed, truncated, erroredAfter, runnerError];
-    expect(all.map(filePassed)).toEqual([true, false, false, false, false, false]);
+    // A file that passed, then its spool or HOME could not be removed.
+    const passedThenErrored = { ...ok, file: 'h.test.ts', junit: REPORT('h.test.ts', 1, 0), error: 'EACCES' };
+    const all = [ok, failing, killed, truncated, erroredAfter, runnerError, passedThenErrored];
+    expect(all.map(filePassed)).toEqual([true, false, false, false, false, false, false]);
 
     const { xml, totals } = mergeJUnit(all);
-    expect(totals).toEqual({ tests: 10, assertions: 12, failures: 5, skipped: 1, time: 1.5 });
-    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="bun test" tests="10" assertions="12" failures="5" skipped="1" time="1.5">\n')).toBe(true);
+    expect(totals).toEqual({ tests: 12, assertions: 14, failures: 6, skipped: 1, time: 2 });
+    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="bun test" tests="12" assertions="14" failures="6" skipped="1" time="2">\n')).toBe(true);
+    expect(xml).toContain('message="runner error: EACCES"');
     expect(xml).toContain('message="exit 1 with no failing test in its report"');
     expect(xml).toContain('message="runner error: ENOSPC, no readable JUnit report"');
     expect(xml.match(/<testsuites\b/g)).toHaveLength(1);
@@ -78,7 +81,7 @@ describe('fast lane pool', () => {
     expect(xml).toContain('<testsuite name="test/c&amp;d.test.ts"');
     expect(xml).toContain('message="killed by SIGKILL, no readable JUnit report"');
     expect(xml).toContain('message="exit 0, no readable JUnit report"');
-    expect(parseJUnit(xml)?.totals.failures).toBe(5);
+    expect(parseJUnit(xml)?.totals.failures).toBe(6);
   });
 
   test('every file runs once, never more than the pool size at once, and a failure or kill fails the lane', async () => {
