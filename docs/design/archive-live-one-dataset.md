@@ -70,12 +70,15 @@ the classifier only ever judges content that will be kept. A shared,
 source-neutral helper keeps an input table per source:
 `(item key, input, record version, supplied content)`.
 
-- A live record always applies, as live capture does today (edits,
-  reactions, newer versions).
-- An archive record applies only to an item no live record has supplied, or
-  to an item whose content is names-only (Gmail mail outside the window).
-  Otherwise the archive is recorded as a further input of the item and its
-  record is dropped unbuilt.
+- A record applies when it is newer than the stored version, in the
+  source's own order (Telegram: edit date, then reactions; WhatsApp: the
+  message time; mail does not change), whichever input it came from. An
+  older record never overwrites a newer one, so a queued live record cannot
+  undo a later edit the archive holds.
+- At the same version, a record applies only when it brings content the
+  stored item lacks: mail outside the Gmail window is names-only, and a live
+  WhatsApp photo is metadata only (the bridge downloads voice notes alone).
+  Otherwise the stored item stays, and live is kept on a tie.
 - Two archives of the same history: the first applies, and the second is a
   further input. Re-importing an export is caught by its file identity, as
   today.
@@ -102,15 +105,27 @@ extraction. Live items are unchanged.
   account is imported, a bounded background pass reads it for mail already
   stored (one metadata read per message, within the provider budget), before
   matching starts.
-- **WhatsApp:** no fingerprint matching. Live capture records, per chat, the
-  periods it was capturing. The archive input supplies only messages outside
-  them, so history before pairing (and any capture outage) comes from the
-  archive and the rest from live: nothing twice, nothing guessed, by
-  construction. The export's times carry no zone. The input aligns them on
-  the overlap: it finds the whole-quarter-hour offset under which the
-  export's lines after pairing coincide with captured messages (same sender
-  name, same text), and uses it; when no offset fits, it uses this
-  computer's zone and reports that as assumed, as today.
+- **WhatsApp:** an export has no message ids, so nothing can make it
+  certain; this is the closest the data allows. A message's key is its chat,
+  its minute, its sender and its text (caption included). The sender is
+  "me" for the owner's own messages, and otherwise the contact's saved name
+  from the bridge's contact store, which is what the export shows, falling
+  back to the push name. Messages with equal keys are counted on each side,
+  and the dataset keeps as many as the side with more: each side's count is
+  at most the truth, so identical messages are neither lost nor doubled.
+  Live capture periods cannot replace this: the bridge receives missed
+  messages after a reconnect with their original times, and a full queue
+  drops a message while capture is running.
+  - The export's times carry no zone. The input aligns them on the overlap:
+    the whole-quarter-hour offset under which most keys match is used; when
+    none fits, this computer's zone is used and reported as assumed, as
+    today.
+  - A message the two sides show differently can still appear twice: a
+    contact renamed between export and capture, a caption the bridge dropped
+    (until the caption fix), a message the bridge never wrote. The input
+    counts each near-miss (same chat, within a minute, sender or text
+    differing) under "How it was read", by chat and time, so they are
+    findable.
   - The export's chat joins the live chat of the same name, when exactly one
     has it. Otherwise, as for groups (the bridge leaves group names
     unresolved), it is its own conversation in the WhatsApp source, with a
@@ -192,14 +207,15 @@ one is a gap.
 ## Best of both
 
 A stage-by-stage comparison of the two mechanisms on main (2026-10-25)
-decides what the one pipeline keeps. Each choice is proved by the tests of
-the side it comes from, which move with it.
+decides what the one pipeline keeps. What is kept brings its existing tests;
+what is new (the per-item hold, the intake rule, merged-input cases) needs
+its own.
 
 | Stage | Kept | From | Why |
 |---|---|---|---|
-| Reading | chunked streaming, a bound per record and per pass, damage reported as a finding | archive | live Telegram re-reads whole spool files each page and fails every item once the spool passes 768 MB; live WhatsApp scans its whole spool each pull, with no byte bound; neither prunes |
+| Reading | chunked streaming, a bound per record and per pass, damage reported as a finding | archive | live Telegram re-reads whole spool files from its cursor each page and fails once the files one read visits pass 768 MB; live WhatsApp scans its whole spool for freshness each pull, with no byte bound; neither prunes |
 | Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file vanished silently skips the rest |
-| Identity and versions | account, chat and message ids; a version that tracks edits and reactions, with explicit clears | live | archive ids hash file positions and its versions hash text, so a second export of the same chat would not match |
+| Identity and versions | account, chat and message ids; a version that tracks edits and reactions, with explicit clears | live | archive Telegram ids hash file positions, WhatsApp's hash time, sender, text and occurrence, mbox's the raw message, and versions hash text, so a second export of the same chat would not match |
 | Item text | service messages as items, sender names, reply and forward names, captions | archive (Telegram), new (WhatsApp) | live Telegram keeps a sender id without a name and a forward as a bare flag; the WhatsApp bridge drops captions |
 | Privacy signals | chat id as the folder key, priors, protected floors, owner chat rules | live | archive copies today carry file positions as folder keys, so an owner rule on a chat never reached its imported history |
 | Hold | held until judged, per item, for every archive input | archive | section 3 |
@@ -240,8 +256,8 @@ change.
 4. Telegram: the export becomes an input of the Telegram connector (exact
    ids, account check), with folder media as children; reusable builder and
    new record kinds.
-5. WhatsApp: the export becomes an input (capture periods, zone alignment,
-   chat joining); live capture records its periods.
+5. WhatsApp: the export becomes an input (counted keys, zone alignment,
+   chat joining); the bridge's records carry the contact's saved name.
 6. Mail: live Gmail requests `Message-ID`, with the background pass, and
    gains attachments as children; mbox of the connected account becomes a
    Gmail input.
@@ -276,8 +292,8 @@ second connectors. This draft answers them by design rather than patches:
 - The hold travels on the item (section 3).
 - Removal by input through the cascade (section 6) never deletes or
   withdraws by account.
-- WhatsApp matches by capture periods rather than fingerprints (section 4),
-  so it neither duplicates nor merges wrongly.
+- WhatsApp matches by counted keys (section 4), after round 2 showed that
+  capture periods cannot partition history.
 - Gmail ownership no longer depends on live re-reading stored mail, and the
   `Message-ID` backfill is explicit (sections 2 and 4).
 - No re-keying: a mismatched account is refused or re-read (section 7).
