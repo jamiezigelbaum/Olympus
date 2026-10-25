@@ -25,6 +25,7 @@ import {
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
   TELEGRAM_CAPTURE_HEARTBEAT_FILE,
   TELEGRAM_SPOOL_CURSOR_RESET_WARNING,
+  TELEGRAM_TRUST_CLAIM_KEPT_NEWER_WARNING,
   createTelegramConnectorStoreSyncHandler,
   readTelegramCaptureSpool,
   telegramCaptureLiveness,
@@ -432,5 +433,84 @@ describe('review fixes (Astra, #545)', () => {
     expect(lines[4]).not.toContain('zzz');
     expect(JSON.parse(lines[4]!).message.secretRedacted).toBe(true);
     for (const index of [0, 1, 2, 3, 5, 6, 7, 8, 9]) expect(lines[index]).toBe(original[index]);
+  });
+});
+
+describe('review fixes, round 2 (Astra, #545)', () => {
+  /** A record of message A in chat-1, with its own version time, trust and fields. */
+  const versioned = (options: { text?: string; at: string; trust?: 'internal' | 'secure_local'; reactions?: unknown[]; extra?: Record<string, unknown> }): string => {
+    const line = JSON.parse(record('A', { text: options.text ?? 'x' }));
+    const digest = options.reactions ? `:r${sha256(JSON.stringify(options.reactions)).slice(0, 8)}` : '';
+    const sourceVersion = `${ACCOUNT}:chat-1:A:${options.at}${digest}`;
+    line.message.editedAt = options.at;
+    line.message.sourceVersion = sourceVersion;
+    if (options.text === undefined) delete line.message.boundedText;
+    if (options.reactions) line.message.reactions = options.reactions;
+    Object.assign(line.message, options.extra ?? {});
+    if (options.trust === 'secure_local') {
+      line.trust_domain = 'secure_local';
+      line.corpus_id = PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID;
+      line.classification = { trust_domain: 'secure_local', reason: 'fixture' };
+    }
+    line.capture_id = sha256([ACCOUNT, 'chat-1', 'A', sourceVersion].join('\x1f'));
+    return `${JSON.stringify(line)}\n`;
+  };
+  const contentOf = (store: LocalConnectorStore) => store.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ') ?? '';
+
+  test('a protected record older than the copy already captured moves the newest version into the protected lane', async () => {
+    const dir = spool({ '2026-10-22.jsonl': versioned({ text: 'A as edited on the 22nd', at: '2026-10-22T09:00:00Z' }) });
+    const s = stores(dir);
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir });
+      await sync.pull();
+      expect(contentOf(s.internal)).toBe('A as edited on the 22nd');
+      // The chat is protected now, and the backfill brings the 21st's version under that claim.
+      writeFileSync(join(dir, '2026-10-23.jsonl'), versioned({ text: 'A as written on the 21st', at: '2026-10-21T09:00:00Z', trust: 'secure_local' }));
+      const receipt = await sync.pull();
+      // One lane holds it, the protected one, with its newest version.
+      expect(contentOf(s.internal)).toBe('');
+      expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
+      expect(receipt.counts.trust_claims_kept_newer).toBe(0);
+      await sync.pull();
+      expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
+    } finally {
+      s.close();
+    }
+  });
+
+  test('when the spool no longer has the newer version, the newer copy stays rather than give way to the older', async () => {
+    const dir = spool({ '2026-10-22.jsonl': versioned({ text: 'A as edited on the 22nd', at: '2026-10-22T09:00:00Z' }) });
+    const s = stores(dir);
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir });
+      await sync.pull();
+      unlinkSync(join(dir, '2026-10-22.jsonl'));
+      writeFileSync(join(dir, '2026-10-23.jsonl'), versioned({ text: 'A as written on the 21st', at: '2026-10-21T09:00:00Z', trust: 'secure_local' }));
+      const receipt = await sync.pull();
+      expect(contentOf(s.internal)).toBe('A as edited on the 22nd');
+      expect(contentOf(s.secureLocal)).toBe('');
+      expect(receipt.counts.trust_claims_kept_newer).toBe(1);
+      expect(receipt.warnings).toContain(TELEGRAM_TRUST_CLAIM_KEPT_NEWER_WARNING);
+    } finally {
+      s.close();
+    }
+  });
+
+  test('a captionless photo takes a new reaction count at the same version time', async () => {
+    const photo = { attachments: [{ attachmentId: 'photo:1', type: 'image' }] };
+    const one = [{ key: '👍', count: 1 }];
+    const two = [{ key: '👍', count: 2 }];
+    const dir = spool({ '2026-10-20.jsonl': versioned({ at: '2026-10-20T09:00:00Z', reactions: one, extra: photo }) });
+    const s = stores(dir);
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir });
+      await sync.pull();
+      expect(s.internal.itemReactions(`${ACCOUNT}:chat-1:A`)).toEqual(one);
+      writeFileSync(join(dir, '2026-10-21.jsonl'), versioned({ at: '2026-10-20T09:00:00Z', reactions: two, extra: photo }));
+      await sync.pull();
+      expect(s.internal.itemReactions(`${ACCOUNT}:chat-1:A`)).toEqual(two);
+    } finally {
+      s.close();
+    }
   });
 });

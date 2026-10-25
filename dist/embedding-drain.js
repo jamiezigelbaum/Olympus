@@ -33615,6 +33615,7 @@ var TELEGRAM_MESSAGES_SOURCE_ID = "telegram.messages";
 var init_store_sync = __esm(() => {
   init_source_storage();
   init_tiered_store_set();
+  init_record_builder();
   init_capture_spool_secrets();
   init_capture_freshness();
   init_corpus_adapter4();

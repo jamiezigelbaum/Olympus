@@ -10,6 +10,7 @@ import type {
   ConnectorStoreTrustReconciliationSummary,
 } from '../connector-store/index.ts';
 import { createLaneTieredStoreSet, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { compareTelegramVersions } from './record-builder.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import {
@@ -39,6 +40,7 @@ import {
   defaultTelegramCaptureSpoolDir,
   readTelegramCaptureSpool,
   readTelegramCaptureSpoolNewestCapturedAt,
+  readTelegramCaptureSpoolNewest,
   readTelegramCaptureHeartbeat,
   redactTelegramCaptureSpoolSecrets,
   telegramCaptureSpoolCursorState,
@@ -54,6 +56,7 @@ export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_re
 // while older ones stayed, or the file is shorter than the cursor says), so
 // the lane reads the spool again from its start instead of stopping for good.
 export const TELEGRAM_SPOOL_CURSOR_RESET_WARNING = 'telegram_spool_cursor_reset';
+export const TELEGRAM_TRUST_CLAIM_KEPT_NEWER_WARNING = 'telegram_trust_claim_kept_newer';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const TELEGRAM_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:telegram';
 export const DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500;
@@ -94,6 +97,12 @@ export interface TelegramConnectorStoreSyncReceipt {
      * rewrote without their text (blanked ones included).
      */
     spool_records_redacted: number;
+    /**
+     * Items a stricter lane claimed in a record older than the copy the looser
+     * lane holds, whose newer version the spool no longer has to move: the
+     * newer copy stays where it is rather than be replaced by the older one.
+     */
+    trust_claims_kept_newer: number;
     /** Lanes whose cursor named no place in the spool and were read again from its start. */
     spool_cursor_resets: number;
     /**
@@ -285,6 +294,22 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       // sees the record, and resolves it against both stores.
       const admitThroughCursor = preflight.resumeCursor ?? null;
       const claims = resolveTelegramTrustClaims(preflight.records, preflight.trustConflicts, options.stores);
+      // A claim that arrives in an older record than a copy already captured (the
+      // chat was protected after a later edit was read) moves the item whole: the
+      // newest version the spool holds goes into the stricter lane, never the
+      // claim's older one in place of it. When the spool no longer holds that
+      // version, the newer copy is kept where it is and the pull says so.
+      const moving = claims.moveWhole.size > 0
+        ? readTelegramCaptureSpoolNewest({ spoolDir, localItemIds: new Set(claims.moveWhole.keys()), compareVersions: compareTelegramVersions, asTrust: 'secure_local' })
+        : new Map<string, TelegramCaptureSpoolRecord>();
+      // The spool's newest must be at least the newest version known to exist, or it is not the one to move.
+      const keptNewer = [...claims.moveWhole].filter(([localItemId, known]) => {
+        const found = moving.get(localItemId)?.capturedItem.item.identity.sourceVersion;
+        if (found !== undefined && (known === undefined || compareTelegramVersions(found, known) >= 0)) return false;
+        moving.delete(localItemId);
+        return true;
+      }).map(([localItemId]) => localItemId);
+      const evictable = claims.secureClaims.filter((identity) => !keptNewer.includes(identity.localItemId));
       const resolved = claims.resolvedTrustByItemId.size > 0
         ? { resolvedTrustByItemId: claims.resolvedTrustByItemId }
         : {};
@@ -298,7 +323,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       // lane until some future run happens to complete. Either way the secure
       // lane's cursor has not passed its record, so a later pull indexes it.
       const eviction = options.stores.internal.relinquishItems({
-        identities: claims.secureClaims,
+        identities: evictable,
         syncConnectorId: TELEGRAM_TRUST_EVICTION_CONNECTOR_ID,
         ownerConnectorId: TELEGRAM_CAPTURE_CONNECTOR_IDS.internal,
         ownershipKind: 'observed',
@@ -342,6 +367,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
             trustDomain: 'secure_local',
             admitThroughCursor,
             storedItem,
+            ...(moving.size > 0 ? { carried: [...moving.values()] } : {}),
             ...resolved,
           }),
           sync: {
@@ -386,6 +412,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         redacted,
         redactionFailed,
         cursorResets,
+        keptNewer.length,
         telegramCaptureLiveness(
           readTelegramCaptureSpoolNewestCapturedAt(spoolDir),
           readTelegramCaptureHeartbeat(spoolDir),
@@ -477,6 +504,11 @@ interface TelegramTrustClaims {
   resolvedTrustByItemId: Map<string, TelegramMessagesCorpusTrustDomain>;
   /** Identities the secure-local lane claims, whatever the internal lane holds. */
   secureClaims: SourceItemIdentity[];
+  /**
+   * Claimed items with a version newer than the claim's own record somewhere
+   * (the internal copy, a looser record of this window): they move whole.
+   */
+  moveWhole: Map<string, string | undefined>;
 }
 
 /**
@@ -501,19 +533,32 @@ function resolveTelegramTrustClaims(
   // Deduplicated by identity: an edited message has several records in one
   // window and must not be probed, evicted or counted more than once.
   const secureClaims = new Map<string, SourceItemIdentity>();
+  // localItemId -> the newest version known to exist, which the move must carry.
+  const moveWhole = new Map<string, string | undefined>();
+  const newer = (a: string | undefined, b: string | undefined): boolean =>
+    a !== undefined && b !== undefined && compareTelegramVersions(a, b) > 0;
   for (const record of records) {
     const identity = record.capturedItem.item.identity;
     // The spool read already collapsed each identity to its winning reading,
     // so a record still carrying `secure_local` here IS the secure lane's claim.
     if (record.capturedItem.trustDomain === 'secure_local') {
       secureClaims.set(identity.localItemId, identity);
+      const internal = stores.internal.storedItemState(identity);
+      // A looser record of this window was set aside by the read; the spool says which is newest.
+      if (internal && !internal.tombstoned && newer(internal.version, identity.sourceVersion)) {
+        moveWhole.set(identity.localItemId, internal.version);
+      } else if (spoolConflicts.has(identity.localItemId)) {
+        moveWhole.set(identity.localItemId, identity.sourceVersion);
+      }
       continue;
     }
     if (!stores.secureLocal.itemPresence(identity).active) continue;
     resolvedTrustByItemId.set(identity.localItemId, 'secure_local');
     secureClaims.set(identity.localItemId, identity);
+    // This looser record is newer than the claimed copy: it is the version that moves.
+    if (newer(identity.sourceVersion, stores.secureLocal.storedItemState(identity)?.version)) moveWhole.set(identity.localItemId, identity.sourceVersion);
   }
-  return { resolvedTrustByItemId, secureClaims: [...secureClaims.values()] };
+  return { resolvedTrustByItemId, secureClaims: [...secureClaims.values()], moveWhole };
 }
 
 function earlierCursor(left: string, right: string): string {
@@ -537,6 +582,7 @@ function telegramSyncReceipt(
   redacted: CaptureSpoolRedactionResult | undefined,
   redactionFailed: boolean,
   cursorResets: number,
+  trustClaimsKeptNewer: number,
   liveness: CaptureFreshness & { quiet: boolean },
 ): TelegramConnectorStoreSyncReceipt {
   const { quiet, ...capture } = liveness;
@@ -557,6 +603,7 @@ function telegramSyncReceipt(
     trust_conflict_evictions: trustConflictEvictions,
     spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
     spool_cursor_resets: cursorResets,
+    trust_claims_kept_newer: trustClaimsKeptNewer,
     capture_quiet: quiet ? 1 as const : 0 as const,
     ...captureFreshnessCounts(capture),
   };
@@ -565,6 +612,7 @@ function telegramSyncReceipt(
     ...(trustConflictItems > 0 ? [TELEGRAM_TRUST_CONFLICT_WARNING] : []),
     ...(redactionFailed ? [TELEGRAM_SPOOL_REDACTION_FAILED_WARNING] : []),
     ...(cursorResets > 0 ? [TELEGRAM_SPOOL_CURSOR_RESET_WARNING] : []),
+    ...(trustClaimsKeptNewer > 0 ? [TELEGRAM_TRUST_CLAIM_KEPT_NEWER_WARNING] : []),
   ];
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? 'progress' : 'idle',
