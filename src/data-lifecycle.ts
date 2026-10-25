@@ -24,23 +24,32 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { rm } from 'node:fs/promises';
 import {
   ACCOUNT_FOLDERS_DIR,
-  TELEGRAM_SOURCE_ID,
-  WHATSAPP_SOURCE_ID,
-  accountFolder,
+  ACCOUNT_TRASH_DIR,
   accountFoldersRoot,
-  accountRawPath,
-  legacyCaptureDataRoot,
-  legacyTelegramGatewayStateDir,
+  accountTrashRoot,
   olympusDataPath,
   olympusDataRoot,
   type LayoutEnv,
 } from './core/olympus-layout.ts';
-import { declaredConnectorStoreMounts, hasFolderLayout, placedAccount } from './core/source-placement.ts';
+import { declaredConnectorStoreMounts } from './core/source-placement.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
 import { Database } from 'bun:sqlite';
 import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
+import {
+  accountFiles,
+  accountFilesPresent,
+  lifecycleAccount,
+  lifecycleSourceAliases,
+  lifecycleSourceFor,
+  lifecycleSourceIds,
+  lifecycleUnrosteredCorpora,
+  retainedCaptureGrants,
+  type AccountFiles,
+} from './core/account-files.ts';
+import { sourceDeleteHolds, type SourceDeleteHold } from './core/source-delete-holds.ts';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
 import { readSqliteSchemaVersion } from './core/sqlite-migrations.ts';
@@ -54,52 +63,25 @@ import {
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
 import { runForgetSteps, type ForgetAccount } from './core/source-forget-registry.ts';
-import { dropMovePlans, forgetProviderAccountsAt, readSourceRegistry, sourceAccountMovePending, sourceRegistryPath, SourceRegistryError } from './core/source-registry.ts';
-import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
-import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
-import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
-import { archiveImportFamilies } from './core/archive-formats.ts';
-import { archiveConnectorStoreDbPaths, archiveImportCorpora } from './workers/archive-import/store.ts';
-import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
-import { ARCHIVE_MEDIA_BINDINGS_STORE_ID, archiveMediaBindingsPath } from './workers/archive-import/media-bindings.ts';
-import { ArchiveImportRequestStore, archiveImportRequestsPath, withArchiveImportApprovals } from './workers/archive-import/requests.ts';
 import {
-  defaultGmailConnectorStoreDbPath,
-  defaultGmailPublicConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
-  defaultGoogleDriveConnectorStoreDbPath,
-  defaultGoogleDrivePublicConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
-} from './workers/google-connectors/index.ts';
-import {
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
-} from './workers/telegram-messages/index.ts';
-import { defaultReadwiseConnectorStoreDbPath } from './workers/readwise/index.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from './workers/readwise/tier-set.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from './workers/x-bookmarks/index.ts';
-import { defaultXBookmarksSecureConnectorStoreDbPath } from './workers/x-bookmarks/tier-set.ts';
-import {
-  defaultXBookmarksReconcileStateDbPath,
-  X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
-} from './workers/x-bookmarks/reconcile-state.ts';
-import {
-  defaultXBookmarksApiUsageDbPath,
-  LocalXBookmarksApiUsageStore,
-} from './workers/x-bookmarks/live-control.ts';
-import {
-  defaultWhatsAppConnectorStoreDbPath,
-  defaultWhatsAppInternalConnectorStoreDbPath,
-} from './workers/whatsapp/index.ts';
+  DEFAULT_ACCOUNT_SLOT,
+  dropDeletedAccountsAt,
+  dropMovePlans,
+  forgetProviderAccountsAt,
+  markSourceAccountDeleting,
+  readSourceRegistry,
+  sourceAccountMovePending,
+  sourceRegistryPath,
+  SourceRegistryError,
+  updateSourceRegistry,
+  type SourceRegistry,
+  type SourceRegistryAccount,
+} from './core/source-registry.ts';
 import { defaultSovereigntyConfigPath } from './core/sovereignty.ts';
-import { captureGrantPathBeside, captureGrantSessionEvidence, type CaptureGrantSessionEvidence } from './core/messaging-capture-grant-file.ts';
 import {
   olympusDataRoots,
   pairingOwnedRoots,
   pairingSessionPathsFromStoredValue,
-  telegramPairingSessionPaths,
-  whatsappPairingSessionPaths,
-  whatsappStateDir as resolveWhatsAppStateDir,
 } from './core/pairing-session-paths.ts';
 import { artifactPresence, type UnpairedSourcesRead } from './workers/credential-broker/unpaired-sources.ts';
 import { createSourceCorpusRegistry, withSourceCorpora, type SourceCorpusConfig } from './core/source-corpus-registry.ts';
@@ -122,106 +104,23 @@ export interface LifecyclePathContext {
   handleRegistryPath?: string;
 }
 
-export interface LifecycleSourceSpec {
+/**
+ * One account the lifecycle exports or deletes: the registry's entry for it
+ * (else the account a new one would be, for a source whose files exist with no
+ * entry yet), and what it owns on disk (core/account-files.ts). Nothing here
+ * names a source: every source-specific fact comes from the registry, the
+ * layout module's resolvers and the hold list.
+ */
+export interface LifecycleAccount {
   sourceId: string;
-  /** Backward-compatible or registry-owned ids that resolve to this owner. */
-  sourceAliases?: readonly string[];
-  label: string;
-  sqliteStoreId: string;
-  /**
-   * The grandfathered per-family index an install upgraded across the Slice 2
-   * cut still holds on disk. Nothing reads it any more — that commit deleted
-   * the legacy read and replay paths, and the worker helpers that resolved
-   * these paths with them — but the file itself was never removed, and it
-   * lives inside a known root `delete --all` erases recursively. Dropping it
-   * from this inventory therefore did not retire it: it made the documented
-   * export-then-delete exit destroy the owner's entire pre-cutover corpus
-   * with no copy in the export and no mention in the manifest, exactly the
-   * WhatsApp failure recorded above.
-   */
-  sqlitePath?(context?: LifecyclePathContext): string;
-  /**
-   * The retired schema marker the legacy index carries, which is NEVER the
-   * connector store's. The export records it in the manifest and the
-   * external-path delete fence verifies that exact id, so a family declaring
-   * `sqlitePath` must declare this too or both would assert the wrong store.
-   */
-  legacySqliteStoreId?: string;
-  /**
-   * The shared connector-store databases this family reads and writes today.
-   * `delete --all` already erases them with the roots they live in, so export
-   * and per-source delete must see them too or they promise what they do not
-   * deliver.
-   */
-  connectorStorePaths?(context?: LifecyclePathContext): string[];
-  /**
-   * Registry entries for this family's stores that the shipped roster does
-   * not list (stores created on first need). Deleting any source places
-   * the inbox answers that read them, instead of treating an answer it
-   * cannot place as the deleted source's.
-   */
-  registryCorpora?(): readonly SourceCorpusConfig[];
-  /**
-   * Raw ingest and session state a family keeps OUTSIDE its SQLite store.
-   * WhatsApp is the only family whose complete plaintext corpus arrives this
-   * way (a spool the bridge writes and the drain reads) and the only one that
-   * keeps live account credentials on disk, so a per-source delete that erased
-   * the store alone reported `ok: true` over an untouched message history and
-   * a linked-device session. Export never copies these — the spool is raw
-   * ingest and the session is secret material — so it reports them as skipped
-   * rather than letting the manifest imply it took them.
-   */
-  rawStatePaths?(context?: LifecyclePathContext): string[];
-  /**
-   * SQLite state a family keeps beside its store about the provider account
-   * the store was filled from, deleted with the source and never exported.
-   * X keeps its reconciliation snapshots per X user id: left behind, a
-   * per-source delete before connecting a different X account stranded the
-   * new account's reconcile on "explicit account migration or state reset is
-   * required" (PR #264 review).
-   */
-  accountStateSqlite?(context?: LifecyclePathContext): Array<{ path: string; sqliteStoreId: string }>;
-  /**
-   * Account-specific rows a family keeps inside a database that must itself
-   * survive the source (X's sync checkpoints beside its API usage ledger).
-   * Cleared by a per-source delete; returns the databases it cleared (or, in a
-   * dry run, would clear).
-   */
-  resetAccountState?(context: LifecyclePathContext, dryRun: boolean): string[];
-  /**
-   * State that must be preserved before a source is stopped or removed, but
-   * which the generic export intentionally does not copy. Unlike
-   * `rawStatePaths`, these paths are inventory-only and are never added to a
-   * delete command. This keeps preservation discovery from silently widening
-   * a destructive surface.
-   */
-  preservationOnlyPaths?(context?: LifecyclePathContext): string[];
-  /**
-   * The artifacts that make this computer a paired session of the provider
-   * (Telegram's mtproto login, WhatsApp's linked-device session). A family that
-   * names them has no broker credential to disconnect, so "disconnected" means
-   * a CLEAN Unpair: the durable unpaired record says so and none of these is
-   * left on disk. Naming them here is also what lets the per-source delete
-   * refuse a pairing that is still live.
-   */
-  pairingSessionPaths?(context?: LifecyclePathContext): string[];
-  /**
-   * For a source with neither a credential nor a pairing (imported archives):
-   * whether it still holds something the person approved in the dashboard,
-   * which counts as connected for the per-source delete, and how the person
-   * ends it there. A record that cannot be read counts as present.
-   */
-  approvals?: {
-    present(context?: LifecyclePathContext): boolean;
-    nextAction: string;
-    /**
-     * Runs the custody check and the delete under the one exclusion the
-     * dashboard's approvals hold while they move between stores, so an
-     * approval never lands between the check and the delete.
-     */
-    exclusive?<T>(context: LifecyclePathContext | undefined, run: () => T): T;
-  };
-  policyPaths?(context?: LifecyclePathContext): string[];
+  /** Older ids the source answered to, which still name its rows in shared files. */
+  aliases: readonly string[];
+  slot: string;
+  /** The registry's entry, when the account has one. */
+  entry?: SourceRegistryAccount;
+  files: AccountFiles;
+  /** What, other than a credential or a pairing, must end before the account may be deleted. */
+  holds: readonly SourceDeleteHold[];
 }
 
 // The schema marker LocalConnectorStore writes (SQLITE_STORE_ID in
@@ -269,10 +168,13 @@ export interface DataDeleteResult {
   dryRun: boolean;
   removed: string[];
   missing: string[];
-  /** Databases kept with the source's account-specific rows cleared from them. */
-  reset?: string[];
   /** Shared files the source's rows were forgotten from (on a dry run, would be), by the forget registry. */
   forgotten?: string[];
+  /**
+   * The account is marked `deleting` and its files (`removed`) go when the
+   * worker next starts, before anything opens them (`applyAtRestart`).
+   */
+  pending?: true;
 }
 
 export interface DataDeleteCustody {
@@ -288,7 +190,7 @@ export interface DataDeleteWithCustodyResult extends DataDeleteResult {
 
 interface DeleteTarget {
   path: string;
-  kind: 'known_root' | 'service_unit' | 'source_sqlite' | 'source_sqlite_sidecar' | 'source_state_path' | 'policy_file' | 'account_folder';
+  kind: 'known_root' | 'service_unit' | 'source_sqlite' | 'source_sqlite_sidecar' | 'source_state_path' | 'policy_file' | 'account_folder' | 'registry_file';
   allowRecursive: boolean;
   /** An `account_folder`'s data root: the folder must lie under it, through no link. */
   ownedRoot?: string;
@@ -302,327 +204,67 @@ const DELETE_CONFIRMATION_2 = 'DELETE EVERYTHING';
 
 /** The source each store file in the lifecycle's inventory belongs to, by the file itself. */
 export function lifecycleStoreFileOwner(env: Record<string, string | undefined>): StoreFileOwner {
-  return storeFileOwnerLookup(lifecycleSourceSpecs().flatMap((spec) =>
-    (spec.connectorStorePaths?.({ env }) ?? []).map((path) => [path, spec.sourceId] as const)));
+  return storeFileOwnerLookup(knownAccounts({ env }).flatMap((account) =>
+    account.files.stores.map((path) => [path, account.sourceId] as const)));
 }
 
-export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
-  return [
-    {
-      sourceId: 'gmail.email',
-      label: 'Gmail connector stores',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: 'email-index',
-      sqlitePath: (context) =>
-        legacySourceIndexPath(envForContext(context), 'OLYMPUS_EMAIL_INDEX_DB_PATH', 'email-index.sqlite'),
-      // The secure store's co-located tier ledger is the set ledger for all
-      // three stores, and its secret-locations index sits beside it too.
-      connectorStorePaths: (context) => [
-        defaultGmailConnectorStoreDbPath(envForContext(context)),
-        defaultGmailSecureConnectorStoreDbPath(envForContext(context)),
-        defaultGmailPublicConnectorStoreDbPath(envForContext(context)),
-      ],
-    },
-    {
-      sourceId: 'dropbox.files',
-      label: 'Dropbox files connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: 'dropbox-files-index',
-      sqlitePath: (context) => legacySourceIndexPath(
-        envForContext(context),
-        'OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH',
-        'dropbox-files-index.sqlite',
-      ),
-      // Every tier store of the lane (P1c); the set ledger and the
-      // secret-locations index sit beside the secure (first) one.
-      connectorStorePaths: (context) => dropboxTierConnectorStoreDbPaths(envForContext(context)),
-      policyPaths: (context) => [defaultDropboxIngestionPolicyPathForHome(context?.homeDir)],
-    },
-    {
-      // No legacy index ever existed: this family is connector-store only.
-      sourceId: 'local.files',
-      label: 'Files on this computer connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => localFilesTierConnectorStoreDbPaths(envForContext(context)),
-      // The change snapshots that let a restart catch up without a rescan.
-      rawStatePaths: (context) => [localFilesWatchDir(envForContext(context))],
-    },
-    {
-      // Connector stores only: one set per family, every archive's items in it.
-      sourceId: 'archive.imports',
-      label: 'Imported archives connector stores',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => archiveConnectorStoreDbPaths(archiveImportFamilies(), envForContext(context)),
-      registryCorpora: archiveImportCorpora,
-      // The record of each import (the chosen paths, file versions, progress)
-      // and the imports asked for but not yet recorded. The person's own
-      // export files are never touched.
-      rawStatePaths: (context) => {
-        const statePath = defaultArchiveImportStatePath(envForContext(context));
-        return [statePath, archiveImportRequestsPath(statePath)];
-      },
-      // The media files each import bound (their paths under the chosen
-      // folder, with versions): names of the person's files, so deleted with
-      // the source and never exported. The files themselves are never touched.
-      accountStateSqlite: (context) => [{
-        path: archiveMediaBindingsPath(defaultArchiveImportStatePath(envForContext(context))),
-        sqliteStoreId: ARCHIVE_MEDIA_BINDINGS_STORE_ID,
-      }],
-      approvals: {
-        // An approval still being checked for copies counts too: the check
-        // records the import when it finishes, so deleting under it would let
-        // an import land after the delete. Either file unreadable counts as
-        // present.
-        present: (context) => {
-          try {
-            const statePath = defaultArchiveImportStatePath(envForContext(context));
-            if (new ArchiveImportStateStore({ path: statePath }).list().length > 0) return true;
-            return new ArchiveImportRequestStore({ path: archiveImportRequestsPath(statePath) }).list()
-              .some((request) => request.status === 'checking');
-          } catch {
-            return true;
-          }
-        },
-        nextAction: 'Under Archives in the local dashboard, cancel any import still being checked (or let it finish) and remove each archive, then rerun the CLI delete.',
-        exclusive: (context, run) => withArchiveImportApprovals(defaultArchiveImportStatePath(envForContext(context)), run),
-      },
-    },
-    {
-      sourceId: 'google_drive.docs',
-      label: 'Google Drive/Docs connector stores',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: 'google-drive-docs-index',
-      sqlitePath: (context) => legacySourceIndexPath(
-        envForContext(context),
-        'OLYMPUS_SOURCE_INDEX_DRIVE_INDEX_DB_PATH',
-        'google-drive-docs-index.sqlite',
-      ),
-      connectorStorePaths: (context) => [
-        defaultGoogleDriveConnectorStoreDbPath(envForContext(context)),
-        defaultGoogleDriveSecureConnectorStoreDbPath(envForContext(context)),
-        defaultGoogleDrivePublicConnectorStoreDbPath(envForContext(context)),
-      ],
-    },
-    {
-      sourceId: 'telegram.messages',
-      label: 'Telegram messages connector stores',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: 'telegram-messages-index',
-      sqlitePath: (context) => legacySourceIndexPath(
-        envForContext(context),
-        'OLYMPUS_SOURCE_INDEX_TELEGRAM_MESSAGES_DB_PATH',
-        'telegram-messages-index.sqlite',
-      ),
-      connectorStorePaths: (context) => [
-        defaultInternalTelegramConnectorStoreDbPath(envForContext(context)),
-        defaultProtectedTelegramConnectorStoreDbPath(envForContext(context)),
-      ],
-      // The capture spool is Olympus's own copy of every captured message's
-      // text, and the drain cursor and gateway state only record how far the
-      // capture has written into it (forward cursors, counters), so a delete
-      // that left them would keep the raw text and resume from stale marks. The
-      // pairing login itself is NOT here: it is the Unpair's, and a re-pair
-      // needs the account, not these.
-      rawStatePaths: (context) => telegramCaptureStatePaths(envForContext(context)),
-      // A folder account's login sits in its own folder and goes with it (a delete needs a
-      // clean Unpair first, so it is gone by then); naming it here would protect it from that delete.
-      preservationOnlyPaths: (context) => placedAccount(TELEGRAM_SOURCE_ID, envForContext(context)).layout === 'folder'
-        ? []
-        : telegramPairingSessionPaths({ env: envForContext(context) }),
-      pairingSessionPaths: (context) => telegramPairingSessionPaths({ env: envForContext(context) }),
-    },
-    {
-      sourceId: 'readwise.library',
-      label: 'Readwise library connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      legacySqliteStoreId: 'readwise-index',
-      sqlitePath: (context) => legacySourceIndexPath(
-        envForContext(context),
-        'OLYMPUS_SOURCE_INDEX_READWISE_INDEX_DB_PATH',
-        'readwise-index.sqlite',
-      ),
-      // The lane's Private store (P1c) carries the set ledger and the
-      // secret-locations index beside it, created or not.
-      connectorStorePaths: (context) => [
-        defaultReadwiseConnectorStoreDbPath(envForContext(context)),
-        defaultReadwiseSecureConnectorStoreDbPath(envForContext(context)),
-      ],
-    },
-    {
-      // The legacy X bookmarks index was retired and deleted (2026-07-28), so
-      // this family is connector-store only. It was absent from the inventory
-      // entirely, which made its corpus unexportable by any command — and
-      // invisible even in the manifest's `skipped` list.
-      sourceId: 'x.bookmarks',
-      label: 'X bookmarks connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [
-        defaultXBookmarksConnectorStoreDbPath(envForContext(context)),
-        defaultXBookmarksSecureConnectorStoreDbPath(envForContext(context)),
-      ],
-      // The API usage store stays: it is the quota ledger. Its sync
-      // checkpoints are the previous account's and are cleared.
-      resetAccountState: (context, dryRun) => {
-        const usagePath = defaultXBookmarksApiUsageDbPath(envForContext(context));
-        if (usagePath === ':memory:' || !existsSync(usagePath)) return [];
-        if (!dryRun) {
-          const usage = new LocalXBookmarksApiUsageStore(usagePath);
-          try {
-            usage.clearSyncState();
-          } finally {
-            usage.close();
-          }
-        }
-        return [usagePath];
-      },
-      accountStateSqlite: (context) => {
-        const env = envForContext(context);
-        return [{
-          path: defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env)),
-          sqliteStoreId: X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
-        }];
-      },
-    },
-    {
-      // Connector-store only, like X: the WhatsApp corpus never had a legacy
-      // per-family index. It was absent from this inventory while living
-      // inside a known root that `delete --all` removes recursively, so the
-      // documented export-then-delete exit destroyed the S4 chat history and
-      // its local voice-note transcriptions with no copy in the export — and
-      // said nothing about it, because a store that belongs to no spec is not
-      // even reported as skipped.
-      sourceId: 'whatsapp.personal.messages',
-      sourceAliases: ['whatsapp.messages'],
-      label: 'WhatsApp messages connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [
-        defaultWhatsAppConnectorStoreDbPath(envForContext(context)),
-        defaultWhatsAppInternalConnectorStoreDbPath(envForContext(context)),
-      ],
-      rawStatePaths: (context) => whatsappRawStatePaths(envForContext(context)),
-      pairingSessionPaths: (context) => whatsappPairingSessionPaths({ env: envForContext(context) }),
-    },
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_START
-    {
-      // Reflect and Roam reach the read path only through the connector-store
-      // mount list, so — unlike every other family — there is no worker helper
-      // to import: the archive-import connectors hand items to the shared store
-      // and never resolve its path. That made them the last two live corpora
-      // belonging to no spec, with the WhatsApp failure above verbatim: both
-      // sit in `~/.local/share/openclaw/olympus`, a known root `delete --all`
-      // removes recursively, while export copied neither and reported neither
-      // as skipped. Apple Messages is deliberately absent: no install mounts
-      // it and its lane is pinned off (identity air-gap), so it owns no store
-      // to lose. If that ever changes, the mount is what the inventory test
-      // reads, and it will fail until an entry exists here.
-      sourceId: 'reflect.notes',
-      label: 'Reflect notes connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), 'reflect-notes.sqlite')],
-    },
-    {
-      sourceId: 'roam.notes',
-      label: 'Roam notes connector store',
-      sqliteStoreId: CONNECTOR_STORE_SQLITE_STORE_ID,
-      connectorStorePaths: (context) => [mountedConnectorStoreDbPath(envForContext(context), 'roam-notes.sqlite')],
-    },
-    // OLYMPUS_PUBLIC_RUNTIME_EXCLUDE_END
-  ];
+/** Every store of every account the lifecycle knows: the tier CLI's lookup. */
+export function lifecycleStorePaths(context: LifecyclePathContext = {}): string[] {
+  return knownAccounts(context).flatMap((account) => account.files.stores);
 }
 
 /**
- * The default the connector-store mount list declares for a store no worker
- * owns a path helper for (`OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`, whose
- * host value is pinned in `config/private-host.env`). The mount list is data,
- * not code, so nothing type-checks this pairing: a lifecycle test reads that
- * manifest and fails if any mounted `dbPath` is produced by no spec, which is
- * what keeps a future mount from drifting back out of the export inventory.
+ * The account of a source the lifecycle knows (by id or alias): the
+ * registry's entry for its slot, else the account a new one would be placed
+ * as. A registry that cannot be read leaves the layout to what is on disk
+ * (core/source-placement.ts), so a delete or an export still finds the files.
  */
-function mountedConnectorStoreDbPath(env: Record<string, string | undefined>, fileName: string): string {
-  return olympusSharedDataFile(env, fileName);
+function lifecycleAccountOf(sourceId: string, context: LifecyclePathContext, registry?: SourceRegistry | 'unreadable'): LifecycleAccount {
+  const env = envForContext(context);
+  const read = registry ?? readRegistryOrUnreadable(env);
+  const entry = read === 'unreadable'
+    ? undefined
+    : read.accounts.find((account) => account.source_id === sourceId && account.slot === DEFAULT_ACCOUNT_SLOT);
+  const placed = entry
+    ? { source_id: sourceId, slot: entry.slot, layout: entry.layout }
+    : lifecycleAccount(sourceId, env);
+  return {
+    sourceId,
+    aliases: lifecycleSourceAliases(sourceId),
+    slot: placed.slot,
+    ...(entry ? { entry } : {}),
+    files: accountFiles(placed, { env, ...(context.homeDir ? { homeDir: context.homeDir } : {}) }),
+    holds: sourceDeleteHolds(sourceId),
+  };
+}
+
+/** One account per source the lifecycle knows, whether or not it holds anything. */
+function knownAccounts(context: LifecyclePathContext): LifecycleAccount[] {
+  const registry = readRegistryOrUnreadable(envForContext(context));
+  return lifecycleSourceIds().map((sourceId) => lifecycleAccountOf(sourceId, context, registry));
 }
 
 /**
- * Where a grandfathered per-family index sits on an install that upgraded
- * across the Slice 2 cut. The worker helpers that used to resolve these paths
- * were deleted with the readers, so the inventory that must still account for
- * the files owns their resolution now — the same way it owns the mount-list
- * defaults above. `overrideKey` is the env knob the deleted reader honoured,
- * so an install that moved an index is still found where it actually is
- * rather than reported absent while `delete --all` takes it.
+ * The accounts that exist: every registry entry, and every source with files
+ * on disk but no entry yet (an install whose worker never adopted it). An
+ * account being deleted is left out: its data is already on its way out.
  */
-function legacySourceIndexPath(
-  env: Record<string, string | undefined>,
-  overrideKey: string,
-  fileName: string,
-): string {
-  return env[overrideKey]?.trim() || olympusSharedDataFile(env, fileName);
-}
-
-function olympusSharedDataFile(env: Record<string, string | undefined>, fileName: string): string {
-  return olympusDataPath(env, fileName);
+function existingAccounts(context: LifecyclePathContext): LifecycleAccount[] {
+  return knownAccounts(context).filter((account) =>
+    account.entry ? account.entry.state === 'active' : accountFilesPresent(account.files));
 }
 
 /**
- * Resolved the way the canonical capture/store sync runtime resolves it
- * (`scripts/whatsapp-live-sync.ts`), which is the only resolution that finds
- * the corpus where it actually is. The reader-side twin in
- * `src/workers/source-ingestion-ledger.ts` never learned about
- * `OLYMPUS_WHATSAPP_STATE_DIR`, so an install that moves the state directory
- * left the export snapshotting a path the drain had never written while
- * `delete --all` erased the real store with the root around it. With the knob
- * unset — every default install — this returns exactly what it always did.
+ * The registry, or `unreadable` when it cannot be read or the data folder
+ * cannot be worked out: then no entry is known, and placement decides each
+ * account's layout from what is on disk, as it does for every resolver.
  */
-function whatsappStateDir(env: Record<string, string | undefined>): string {
-  return resolveWhatsAppStateDir({ env });
-}
-
-/**
- * Everything the WhatsApp bridge and its drains keep in the state directory
- * beside the connector store. The list mirrors the artifacts the installer
- * itself locks down (`scripts/ops/install-private-host-whatsapp-bridge-systemd.sh`):
- * the JSONL spool that carries every message's full text, the whatsmeow
- * session database holding the linked-device keys, the pairing QR, and the
- * captured audio. The store path has its own independent overrides, so these
- * are resolved from the state-dir knobs rather than from `dirname(store)`.
- */
-function whatsappRawStatePaths(env: Record<string, string | undefined>): string[] {
-  // A folder account keeps all of it in the one state folder, inside its account folder.
-  const account = placedAccount(WHATSAPP_SOURCE_ID, env);
-  if (account.layout === 'folder') return [accountRawPath(account, 'whatsapp', env)];
-  const stateDir = whatsappStateDir(env);
-  // The transcribe drain reads the captured audio through its own knobs, so a
-  // media directory moved out from under the bridge is still named here.
-  const transcribeStateDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR?.trim();
-  const transcribeMediaDir = env.OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR?.trim()
-    || (transcribeStateDir ? join(transcribeStateDir, 'media') : undefined);
-  return [...new Set([
-    env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR?.trim() || join(stateDir, 'spool'),
-    // The pairing artifacts, named once (see core/pairing-session-paths.ts) so
-    // this wider custody list and the dashboard's narrow Unpair cannot drift
-    // onto two different resolutions of the same session.
-    ...whatsappPairingSessionPaths({ env }),
-    join(stateDir, 'media'),
-    ...(transcribeMediaDir ? [transcribeMediaDir] : []),
-  ])];
-}
-
-function telegramCaptureStatePaths(env: Record<string, string | undefined>): string[] {
-  const account = placedAccount(TELEGRAM_SOURCE_ID, env);
-  if (account.layout === 'folder') {
-    return [accountRawPath(account, 'telegram-spool', env), accountRawPath(account, 'telegram-gateway', env)];
+function readRegistryOrUnreadable(env: LayoutEnv): SourceRegistry | 'unreadable' {
+  try {
+    return readSourceRegistry(env);
+  } catch {
+    return 'unreadable';
   }
-  const home = env.HOME?.trim() || homedir();
-  const stateHome = env.XDG_STATE_HOME?.trim() || join(home, '.local', 'state');
-  const spoolDir = env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR?.trim()
-    || env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR?.trim()
-    || join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool');
-  const gatewayStateDir = legacyTelegramGatewayStateDir(env);
-  const drainStateDir = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_STATE_DIR?.trim()
-    || join(stateHome, 'olympus', 'telegram-spool-drain');
-  const cursorPath = env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_CURSOR_PATH?.trim()
-    || join(drainStateDir, 'cursor.json');
-  return [...new Set([spoolDir, cursorPath, gatewayStateDir])];
 }
 
 export function exportOlympusData(options: {
@@ -630,7 +272,7 @@ export function exportOlympusData(options: {
   sourceId?: string;
 } & LifecyclePathContext): DataExportResult {
   const destination = requirePath(options.destination, '--output');
-  const selected = selectSources(options.sourceId);
+  const selected = selectExportAccounts(options.sourceId, options);
   refuseExportDuringMove(selected, options);
   // Computed BEFORE anything is created: once mkdir -p has run, the directories
   // it made are indistinguishable from the ones that were already there.
@@ -650,21 +292,21 @@ export function exportOlympusData(options: {
   for (const source of selected) {
     const sourceRoot = join(destination, 'sources', safePathSegment(source.sourceId));
     makeDurableDirectory(sourceRoot, durabilityBoundary);
-    const legacyIndexPath = source.sqlitePath?.(options);
-    if (legacyIndexPath) {
+    const legacyIndex = source.files.preCutoverIndex;
+    if (legacyIndex) {
       exportSqliteStore({
-        sqlitePath: legacyIndexPath,
+        sqlitePath: legacyIndex.path,
         destinationRoot: sourceRoot,
         exportRoot: destination,
         sourceId: source.sourceId,
         role: 'legacy_store',
-        expectedStoreId: legacyStoreIdFor(source),
+        expectedStoreId: legacyIndex.storeId,
         files,
         skipped,
         artifacts,
       });
     }
-    for (const storePath of source.connectorStorePaths?.(options) ?? []) {
+    for (const storePath of source.files.stores) {
       exportSqliteStore({
         sqlitePath: storePath,
         destinationRoot: sourceRoot,
@@ -677,7 +319,7 @@ export function exportOlympusData(options: {
         artifacts,
       });
     }
-    for (const policyPath of source.policyPaths?.(options) ?? []) {
+    for (const policyPath of source.files.settings) {
       const destinationPath = join(sourceRoot, basename(policyPath));
       if (copySanitizedJsonIfPresent(policyPath, destinationPath, files, skipped)) {
         artifacts.push(fileArtifact(destination, destinationPath, source.sourceId, 'sanitized_config'));
@@ -688,12 +330,12 @@ export function exportOlympusData(options: {
     // this export exists to leave behind. They are still named, because a
     // manifest that omits them entirely is how the owner learns too late that
     // `delete --all` took something the export never had.
-    for (const statePath of source.rawStatePaths?.(options) ?? []) skipped.push(statePath);
-    for (const state of source.accountStateSqlite?.(options) ?? []) skipped.push(state.path);
-    for (const statePath of source.preservationOnlyPaths?.(options) ?? []) skipped.push(statePath);
+    for (const statePath of source.files.raw) skipped.push(statePath);
+    for (const state of source.files.rawDatabases) skipped.push(state.path);
+    for (const statePath of source.files.preserved) skipped.push(statePath);
     // An account folder's own raw and session folders, whatever the source
     // names inside them, are never copied either.
-    const folder = sourceAccountFolder(source, options);
+    const folder = source.files.folder;
     if (folder) {
       for (const name of ACCOUNT_FOLDER_UNEXPORTED) {
         const path = join(folder, name);
@@ -732,6 +374,8 @@ export function exportOlympusData(options: {
     version: 2,
     exported_at: new Date().toISOString(),
     source_ids: selected.map((source) => source.sourceId),
+    // Where each account's files were (additive: a verifier of this version ignores it).
+    accounts: selected.map((source) => ({ source_id: source.sourceId, slot: source.slot, layout: source.files.account.layout })),
     secrets_excluded: true,
     files,
     skipped,
@@ -777,6 +421,12 @@ export function deleteOlympusData(options: {
   all?: boolean;
   sourceId?: string;
   dryRun?: boolean;
+  /**
+   * Mark the account `deleting` and leave its files for the worker's next boot
+   * (deleteMarkedAccounts), instead of removing them now: what the running
+   * worker does, which holds the account's stores open until it restarts.
+   */
+  applyAtRestart?: boolean;
 } & LifecyclePathContext): DataDeleteResult {
   if (options.all === true && options.sourceId) {
     throw new OperationError('invalid_params', 'Use either --all or --source, not both.');
@@ -784,131 +434,334 @@ export function deleteOlympusData(options: {
   if (options.all !== true && !options.sourceId) {
     throw new OperationError('invalid_params', 'Data delete requires --all or --source <id>.');
   }
+  if (options.all === true) return deleteAllOlympusData(options);
 
-  const selectedSource = options.all === true ? undefined : requireSource(options.sourceId);
-  const targets = options.all === true
-    ? allDeleteTargets(options)
-    : sourceDeleteTargets(selectedSource!, options);
-  // The owner lock to keep, resolved once with the targets: removing the
-  // config folder can change what the data root resolves to (on standalone
-  // Linux its receipt lives there), and the lock held is the one found now.
+  const account = requireAccount(options.sourceId, options);
+  const env = envForContext(options);
+  // Every check runs before anything is forgotten, marked or removed: a refusal changes nothing.
+  const plan = planAccountRemoval(account, options);
+  if (options.dryRun === true) {
+    const media = readSourceMedia(account.sourceId, account.files.stores, env);
+    return {
+      ok: true,
+      mode: 'source',
+      sourceId: account.sourceId,
+      dryRun: true,
+      removed: [...plan.present, ...releaseSourceMedia(media, true)],
+      missing: plan.missing,
+      ...optionalList('forgotten', forgetSharedRows(account, { ...options, dryRun: true })),
+    };
+  }
+  // Forget the account's rows in the shared files (the forget registry),
+  // starting with the dependent private answers, before it is marked and any
+  // of its bytes go. A failing step fails the delete here, with every store in
+  // place and the account still open.
+  const forgotten = forgetSharedRows(account, options);
+  if (options.applyAtRestart === true) {
+    // From here the storage service opens none of its files, and the worker's
+    // next boot removes them before anything mounts.
+    markAccountDeleting(account, env);
+    return {
+      ok: true,
+      mode: 'source',
+      sourceId: account.sourceId,
+      dryRun: false,
+      pending: true,
+      removed: plan.present,
+      missing: plan.missing,
+      ...optionalList('forgotten', forgotten),
+    };
+  }
+  // The caller owns the data (the CLI under the owner lock, nothing open): the
+  // marker goes first, so a delete that stops part way is finished by the
+  // worker's next boot, and the files go now.
+  const marked = markAccountDeletingIfReadable(account, env);
+  const { removed, missing } = removeAccount(account, plan, options, { background: false });
+  finishAccountDelete(account, env, plan.registryPath, marked);
+  return {
+    ok: true,
+    mode: 'source',
+    sourceId: account.sourceId,
+    dryRun: false,
+    removed,
+    missing,
+    ...optionalList('forgotten', forgotten),
+  };
+}
+
+/** What a boot's pass over the accounts marked `deleting` did. */
+export interface DeleteMarkedAccountsReport {
+  deleted: Array<{ sourceId: string; removed: number }>;
+  failed: Array<{ sourceId: string; message: string }>;
+}
+
+/**
+ * Worker boot, holding the owner lock and before anything mounts or capture
+ * starts (docs/design/source-storage.md, "Delete"): removes each account the
+ * registry marks `deleting`. Its folder is renamed into `<data>/.trash/` in one
+ * step and emptied in the background; a legacy account's files are removed
+ * where they are; its picture holds are released; the forget steps that the
+ * worker's own background writers could have undone since the account was
+ * marked run again (the others ran when it was marked, and a repeat could
+ * erase a reconnect made since); and the entry is dropped. A failure leaves the
+ * entry `deleting`, so the account stays closed and the next boot retries; the
+ * other accounts are unaffected. An unreadable registry throws: nothing can be
+ * told about any account.
+ */
+export function deleteMarkedAccounts(context: LifecyclePathContext = {}): DeleteMarkedAccountsReport {
+  const env = envForContext(context);
+  const registry = readSourceRegistry(env);
+  const report: DeleteMarkedAccountsReport = { deleted: [], failed: [] };
+  const marked = registry.accounts.filter((entry) => entry.state === 'deleting');
+  for (const entry of marked) {
+    try {
+      const sourceId = lifecycleSourceFor(entry.source_id);
+      if (!sourceId || entry.slot !== DEFAULT_ACCOUNT_SLOT) {
+        throw new Error('Olympus does not know where this account\'s files are');
+      }
+      const account = lifecycleAccountOf(sourceId, context, registry);
+      const plan = planAccountRemoval(account, context);
+      forgetSharedRows(account, context, { repeatableOnly: true });
+      const { removed } = removeAccount(account, plan, context, { background: true });
+      finishAccountDelete(account, env, plan.registryPath, true);
+      report.deleted.push({ sourceId, removed: removed.length });
+    } catch (error) {
+      report.failed.push({ sourceId: entry.source_id, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  emptyAccountTrash(env, { background: true });
+  return report;
+}
+
+/**
+ * Delete all: every account's files, the shared files, the media cache, the
+ * registry and the known legacy leftovers, under the owner lock with the
+ * engine stopped. The owner lock itself stays.
+ */
+function deleteAllOlympusData(options: { dryRun?: boolean } & LifecyclePathContext): DataDeleteResult {
+  const targets = uniqueTargets(allDeleteTargets(options));
+  // Resolved once with the targets: removing the config folder can change
+  // what the data root resolves to (on standalone Linux its receipt lives
+  // there), and the lock held and the registry read are the ones found now.
   const ownerLockPath = dataOwnerLockPath(envForContext(options));
-  // Found before anything goes: a Delete-all can remove what the data folder is found by (PR #530 review).
   const registryPath = sourceRegistryPath(envForContext(options));
-  const removed: string[] = [];
-  const missing: string[] = [];
-  const uniqueDeleteTargets = uniqueTargets(targets);
-  // Before anything is removed or even checked one by one: a recursive raw-state
-  // target must be provably Olympus's own and nobody else's (see
-  // assertRawStateTargetsContained). A refusal here deletes nothing.
-  assertRawStateTargetsContained(uniqueDeleteTargets, options, selectedSource);
-  // The same for everything under the account folders: reached through no
-  // link, so a store inside one account's folder is never another account's.
-  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
-  for (const target of uniqueDeleteTargets) {
+  assertRawStateTargetsContained(targets, options, undefined);
+  assertSourcesFolderTargetsUnlinked(targets, options);
+  for (const target of targets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
-  // A source's photo copies live in the shared media cache. Every store's
-  // references are read before anything is deleted; each copy is released
-  // only once its stores are gone, and removed unless another source's store
-  // still holds it. A store that survives (a failed removal) keeps its holds;
-  // one interrupted after deletion leaves markers the cache sweep drops,
-  // because their holder is gone.
-  const sourceMedia = selectedSource
-    ? readSourceMedia(selectedSource.sourceId, selectedSource.connectorStorePaths?.(options) ?? [], envForContext(options))
-    : [];
-  // Before anything is removed: a database that will not open fails the
-  // delete with every store still in place.
-  const reset = selectedSource?.resetAccountState?.(options, options.dryRun === true) ?? [];
-  // Forget the source's rows in the shared files (the forget registry),
-  // starting with the dependent private answers, before any source bytes go.
-  // A failing step fails the delete here, with every store still in place.
-  const forgotten = selectedSource ? forgetSharedRows(selectedSource, options) : [];
-  // The media reads and the shared-file work above can wait on SQLite locks,
-  // so the link checks run again right before the first removal: a folder
-  // swapped for a link meanwhile is refused, not followed.
-  assertSourcesFolderTargetsUnlinked(uniqueDeleteTargets, options);
-  for (const target of uniqueDeleteTargets) {
-    if (target.kind === 'account_folder' && existsSync(target.path)) assertDeleteTargetSafe(target);
-  }
-  for (const target of uniqueDeleteTargets) {
+  const removed: string[] = [];
+  const missing: string[] = [];
+  for (const target of targets) {
     if (!existsSync(target.path)) {
       missing.push(target.path);
       continue;
     }
     removed.push(target.path);
-    if (options.dryRun !== true) {
-      rmTargetKeepingOwnerLock(target, ownerLockPath);
-    }
+    if (options.dryRun !== true) rmTargetKeepingOwnerLock(target, ownerLockPath);
   }
-  removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
-  // A boot migration that was part way for this source has lost its files to this Delete, wherever it had put them. The plan
-  // goes last, after the files: a Delete that stops in between leaves a plan with files missing, which the next boot reports
-  // (and a second Delete clears), never an account that looks fine with nothing behind it. So does the provider account its
-  // history belonged to (the account binding is forgotten with the shared rows): one left named by a Delete that stops in
-  // between is cleared by a second.
-  if (selectedSource && options.dryRun !== true) {
-    try {
-      const deleted = [selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])];
-      dropMovePlans(envForContext(options), deleted);
-      forgetProviderAccountsAt(registryPath, deleted);
-    } catch (error) {
-      // A registry that cannot be read must not undo a Delete that has taken the files.
-      if (!(error instanceof SourceRegistryError)) throw error;
-    }
-  }
-  // Everything was deleted, but a registry kept outside the folders it removes (a data folder moved by XDG_DATA_HOME) is
-  // still there: none of its accounts' histories names an account any more.
-  if (options.all === true && options.dryRun !== true) {
+  // A registry the targets did not reach (a data folder outside every known
+  // root keeps it there) names no account's history any more.
+  if (options.dryRun !== true) {
     try {
       forgetProviderAccountsAt(registryPath);
     } catch (error) {
       if (!(error instanceof SourceRegistryError)) throw error;
     }
   }
+  return { ok: true, mode: 'all', dryRun: options.dryRun === true, removed, missing };
+}
 
+/** What a per-source delete removes, checked: every refusal happens here, before anything changes. */
+interface AccountRemovalPlan {
+  targets: DeleteTarget[];
+  present: string[];
+  missing: string[];
+  /** The registry the account's entry is in, found before anything is removed. */
+  registryPath: string;
+}
+
+function planAccountRemoval(account: LifecycleAccount, context: LifecyclePathContext): AccountRemovalPlan {
+  const targets = uniqueTargets(sourceDeleteTargets(account, context));
+  // A recursive raw-state target must be provably Olympus's own and nobody
+  // else's (see assertRawStateTargetsContained), and everything under the
+  // account folders is reached through no link, so a store inside one
+  // account's folder is never another account's.
+  assertRawStateTargetsContained(targets, context, account);
+  assertSourcesFolderTargetsUnlinked(targets, context);
+  for (const target of targets) {
+    if (existsSync(target.path)) assertDeleteTargetSafe(target);
+  }
   return {
-    ok: true,
-    mode: options.all === true ? 'all' : 'source',
-    ...(selectedSource ? { sourceId: selectedSource.sourceId } : {}),
-    dryRun: options.dryRun === true,
-    removed,
-    missing,
-    ...(reset.length > 0 ? { reset } : {}),
-    ...(forgotten.length > 0 ? { forgotten } : {}),
+    targets,
+    present: targets.filter((target) => existsSync(target.path)).map((target) => target.path),
+    missing: targets.filter((target) => !existsSync(target.path)).map((target) => target.path),
+    registryPath: sourceRegistryPath(envForContext(context)),
   };
 }
 
 /**
- * Run a source's forget steps again, apart from a delete: the worker repeats
- * them just before the restart a delete asks for, because its own writers (a
- * dashboard poll reading the deleted stores through handles still open, the
- * watch pass) can write the source's rows back while it winds down. Only the
- * steps marked `repeatBeforeRestart` run: the owner can reconnect in that
- * window (it writes scope approvals, the this-computer connection, the account
- * binding), and a repeat of those steps would erase the reconnect. Every step
- * is idempotent, so this removes only what came back.
+ * Removes the account's files: its folder by one rename into the trash (then
+ * emptied, in the background at boot), every other target where it is. Its
+ * photo copies live in the shared media cache: every store's references are
+ * read first, and each copy is released only once its stores are gone, and
+ * removed unless another account's store still holds it. A store that cannot
+ * be read stops the delete with every file in place.
  */
-export function forgetSourceRowsAgain(options: { sourceId: string } & LifecyclePathContext): string[] {
-  return forgetSharedRows(requireSource(options.sourceId), options, { repeatableOnly: true });
+function removeAccount(
+  account: LifecycleAccount,
+  plan: AccountRemovalPlan,
+  context: LifecyclePathContext,
+  options: { background: boolean },
+): { removed: string[]; missing: string[] } {
+  const env = envForContext(context);
+  const ownerLockPath = dataOwnerLockPath(env);
+  const media = readSourceMedia(account.sourceId, account.files.stores, env);
+  // The media reads and the shared-file work before them can wait on SQLite
+  // locks, so the link checks run again right before the first removal: a
+  // folder swapped for a link meanwhile is refused, not followed.
+  assertSourcesFolderTargetsUnlinked(plan.targets, context);
+  for (const target of plan.targets) {
+    if (target.kind === 'account_folder' && existsSync(target.path)) assertDeleteTargetSafe(target);
+  }
+  const removed: string[] = [];
+  const missing: string[] = [];
+  // A file inside the folder goes with the folder's rename, not on its own.
+  const folders = plan.targets.filter((target) => target.kind === 'account_folder').map((target) => resolve(target.path));
+  for (const target of plan.targets) {
+    if (!existsSync(target.path)) {
+      missing.push(target.path);
+      continue;
+    }
+    removed.push(target.path);
+    if (target.kind === 'account_folder') moveAccountFolderToTrash(target.path, env, options);
+    else if (!folders.some((folder) => isStrictlyInside(resolve(target.path), folder))) rmTargetKeepingOwnerLock(target, ownerLockPath);
+  }
+  removed.push(...releaseSourceMedia(media, false));
+  return { removed, missing };
 }
 
 /**
- * The forget registry's steps for one source (core/source-forget-registry.ts),
- * or on a dry run what they would forget. The account's corpora are the
- * registry entry's joined with the shipped corpus registry's for the source
- * (its id and aliases), the way the private answers were placed before.
+ * The account's files are gone: its entry goes too (with any move plan and the
+ * provider account it named), so a reconnect starts a new account, placed
+ * afresh. An entry that was never written (an unreadable registry) has nothing
+ * to drop; one left by a delete that stopped before this is dropped by the
+ * next. A registry that cannot be read must not undo a delete that has taken
+ * the files.
+ */
+function finishAccountDelete(account: LifecycleAccount, env: LayoutEnv, registryPath: string, marked: boolean): void {
+  const own = [account.sourceId, ...account.aliases];
+  try {
+    if (marked) dropDeletedAccountsAt(registryPath, own, account.slot);
+    // A move that was part way had put files in both places, and both are
+    // gone; and the provider account the history belonged to is forgotten,
+    // for an entry that stayed (unmarked).
+    dropMovePlans(env, own);
+    forgetProviderAccountsAt(registryPath, own);
+  } catch (error) {
+    if (!(error instanceof SourceRegistryError)) throw error;
+  }
+}
+
+function markAccountDeleting(account: LifecycleAccount, env: LayoutEnv): void {
+  try {
+    markSourceAccountDeleting(env, {
+      sourceIds: [account.sourceId, ...account.aliases],
+      sourceId: account.sourceId,
+      slot: account.slot,
+      layout: account.files.account.layout,
+    });
+  } catch (error) {
+    if (!(error instanceof SourceRegistryError)) throw error;
+    throw new OperationError(
+      'source_index_error',
+      `${error.message} The account cannot be marked for deletion, so nothing was deleted.`,
+      'Repair or restore that file, then delete again.',
+    );
+  }
+}
+
+/** The marker, when the registry can be read; a CLI delete with nothing open removes the files either way. */
+function markAccountDeletingIfReadable(account: LifecycleAccount, env: LayoutEnv): boolean {
+  try {
+    markAccountDeleting(account, env);
+    return true;
+  } catch (error) {
+    if (error instanceof OperationError && error.code === 'source_index_error') return false;
+    throw error;
+  }
+}
+
+/**
+ * Renames an account's folder into `<data>/.trash/<uuid>` (one rename on the
+ * same volume: the folder either is where it was or is gone from there), then
+ * empties the trash. A trash that is not a plain folder of the data root, or a
+ * rename the file system refuses (the sources folder on another volume), falls
+ * back to removing the folder where it is.
+ */
+function moveAccountFolderToTrash(folder: string, env: LayoutEnv, options: { background: boolean }): void {
+  const trash = accountTrashRoot(env);
+  let moved = false;
+  try {
+    mkdirSync(trash, { recursive: true, mode: 0o700 });
+    const dataRoot = olympusDataRoot(env);
+    if (lstatSync(trash).isDirectory() && canonicalPath(trash) === join(canonicalPath(dataRoot), relative(resolve(dataRoot), resolve(trash)))) {
+      renameSync(folder, join(trash, randomUUID()));
+      moved = true;
+    }
+  } catch {
+    moved = false;
+  }
+  if (!moved) {
+    rmSync(folder, { recursive: true, force: true });
+    return;
+  }
+  emptyAccountTrash(env, options);
+}
+
+/** Empties `<data>/.trash`: what a delete renamed there, and leftovers of one a crash stopped. */
+function emptyAccountTrash(env: LayoutEnv, options: { background: boolean }): void {
+  let trash: string;
+  let names: string[];
+  try {
+    trash = accountTrashRoot(env);
+    if (!lstatSync(trash).isDirectory()) return;
+    names = readdirSync(trash);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const path = join(trash, name);
+    if (options.background) {
+      void rm(path, { recursive: true, force: true }).catch(() => {
+        // Left for the next boot's pass.
+      });
+    } else {
+      rmSync(path, { recursive: true, force: true });
+    }
+  }
+}
+
+function optionalList<K extends string>(key: K, values: string[]): Partial<Record<K, string[]>> {
+  return values.length > 0 ? { [key]: values } as Record<K, string[]> : {};
+}
+
+/**
+ * The forget registry's steps for one account (core/source-forget-registry.ts),
+ * or on a dry run what they would forget; with `repeatableOnly`, just the
+ * steps whose rows the worker's own background writers can write back (the
+ * boot pass's repeat). The account's corpora are the registry entry's joined
+ * with the shipped corpus registry's for the source (its id and aliases), the
+ * way the private answers were placed before.
  */
 function forgetSharedRows(
-  source: LifecycleSourceSpec,
+  source: LifecycleAccount,
   options: { dryRun?: boolean } & LifecyclePathContext,
   only: { repeatableOnly?: boolean } = {},
 ): string[] {
   const env = envForContext(options);
-  const own = new Set([source.sourceId, ...(source.sourceAliases ?? [])]);
-  const shipped = createSourceCorpusRegistry(
-    withSourceCorpora(undefined, lifecycleSourceSpecs().flatMap((spec) => spec.registryCorpora?.() ?? [])),
-  ).list();
+  const own = new Set([source.sourceId, ...source.aliases]);
+  const shipped = createSourceCorpusRegistry(withSourceCorpora(undefined, lifecycleUnrosteredCorpora())).list();
   let registered: string[] = [];
   try {
     registered = readSourceRegistry(env).accounts
@@ -931,17 +784,21 @@ function forgetSharedRows(
   // still exist: they are the claimants of its Secrets redaction claims.
   const ledgers = only.repeatableOnly === true
     ? { ids: [], unreadable: [] }
-    : readTierLedgerIds(source.connectorStorePaths?.(options) ?? []);
+    : readTierLedgerIds(source.files.stores);
   return runForgetSteps(account, {
     env,
-    handleRegistryPath: options.handleRegistryPath
-      || env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
-      || join(resolveHome(options.homeDir), '.config', 'olympus', 'handles.json'),
-    sourceAliases: source.sourceAliases,
+    handleRegistryPath: handleRegistryPathFor(options),
+    sourceAliases: source.aliases,
     knownCorpusIds: shipped.map((corpus) => corpus.corpusId),
     tierLedgerIds: ledgers.ids,
     unreadableTierLedgers: ledgers.unreadable,
   }, { dryRun: options.dryRun === true, ...(only.repeatableOnly === true ? { repeatableOnly: true } : {}) });
+}
+
+function handleRegistryPathFor(context: LifecyclePathContext): string {
+  return context.handleRegistryPath
+    || envForContext(context).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
+    || join(resolveHome(context.homeDir), '.config', 'olympus', 'handles.json');
 }
 
 /**
@@ -988,6 +845,8 @@ export function deleteOlympusDataWithCustody(options: {
   all?: boolean;
   sourceId?: string;
   dryRun?: boolean;
+  /** The running worker: mark the account and remove it at the next boot (see deleteOlympusData). */
+  applyAtRestart?: boolean;
   connectedRegistry?: ConnectedHandleRegistry;
   unpairedSources?: UnpairedSourcesRead;
   artifactPresence?: (path: string) => 'gone' | 'present' | 'unknown';
@@ -1004,11 +863,13 @@ export function deleteOlympusDataWithCustody(options: {
 } & LifecyclePathContext): DataDeleteWithCustodyResult {
   // A source whose approvals move between stores is checked and deleted
   // under their exclusion; every other source as before.
-  const exclusive = options.dryRun !== true && options.sourceId
-    ? lifecycleSourceSpecs().find((entry) => entry.sourceId === options.sourceId?.trim() || entry.sourceAliases?.includes(options.sourceId!.trim()))?.approvals?.exclusive
-    : undefined;
-  const run = (): DataDeleteWithCustodyResult => deleteUnderCustody(options);
-  return exclusive ? exclusive(options, run) : run();
+  const sourceId = options.dryRun !== true && options.sourceId ? lifecycleSourceFor(options.sourceId) : undefined;
+  const holds = sourceId ? sourceDeleteHolds(sourceId) : [];
+  const env = envForContext(options);
+  return holds.reduce<() => DataDeleteWithCustodyResult>(
+    (run, hold) => () => hold.exclusive(env, run),
+    () => deleteUnderCustody(options),
+  )();
 }
 
 function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCustody>[0]): DataDeleteWithCustodyResult {
@@ -1020,7 +881,7 @@ function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCust
         // Unpair or Disconnect by what the SOURCE is (a paired session), never
         // by what custody happened to observe: an unreadable registry on a
         // Dropbox delete is still a Disconnect source.
-        ? requireSource(options.sourceId).pairingSessionPaths
+        ? requireAccount(options.sourceId, options).files.pairing
           ? `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, ' ')}).`
           : `Disconnect ${options.sourceId} before deleting its local data.`
         : custody.observed === 'relay_running'
@@ -1060,10 +921,10 @@ export function dataDeleteCustody(options: {
     throw new OperationError('invalid_params', 'Data delete requires --all or --source <id>.');
   }
 
-  const source = options.sourceId ? requireSource(options.sourceId) : undefined;
+  const source = options.sourceId ? requireAccount(options.sourceId, options) : undefined;
   const publicCapability = source
     ? V0_4_PUBLIC_SOURCE_CAPABILITIES.find((candidate) =>
-        candidate.source_id === source.sourceId || source.sourceAliases?.includes(candidate.source_id)
+        candidate.source_id === source.sourceId || source.aliases.includes(candidate.source_id)
       )
     : undefined;
   if (publicCapability) {
@@ -1081,7 +942,7 @@ export function dataDeleteCustody(options: {
     const connected = (lane !== undefined
       && options.connectedRegistry.handles.some((handle) => handle.provider === lane.provider))
       || (options.thisComputerSources?.includes(source!.sourceId) ?? false);
-    const pairingPaths = source!.pairingSessionPaths?.(options);
+    const pairingPaths = source!.files.pairing;
     if (connected) {
       // A paired-session source ends with Unpair, not Disconnect.
       return pairingPaths
@@ -1098,12 +959,13 @@ export function dataDeleteCustody(options: {
             next_action: 'Use Disconnect in the local dashboard, then rerun the CLI delete.',
           };
     }
-    if (source!.approvals?.present(options)) {
+    const held = source!.holds.find((hold) => hold.present(envForContext(options)));
+    if (held) {
       return {
         requirement: 'source_disconnected',
         ready: false,
         observed: 'connected',
-        next_action: source!.approvals.nextAction,
+        next_action: held.nextAction,
       };
     }
     // A paired-session source (Telegram, WhatsApp) has no handle to disconnect
@@ -1206,7 +1068,9 @@ export function knownOlympusDataRoots(context: LifecyclePathContext = {}): strin
 function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
   const home = resolveHome(context.homeDir);
   return [
-    ...selectSources(undefined).flatMap((source) => sourceDeleteTargets(source, context)),
+    ...knownAccounts(context).flatMap((account) => sourceDeleteTargets(account, context)),
+    // The registry: every account it lists is being deleted.
+    ...registryDeleteTargets(context),
     // Approved remote-agent connections. Removing the database revokes every
     // connection token at once. Named on its own because an explicit
     // OLYMPUS_REMOTE_CONNECTIONS_DB_PATH or XDG_DATA_HOME can put it outside
@@ -1226,6 +1090,7 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // outside the known roots. Named so nothing under it is left behind; the
     // data owner lock lives beside it, not inside, and stays.
     ...accountFoldersTargets(context),
+    ...accountTrashTargets(context),
     serviceUnitTarget(workerServicePaths('darwin', home).unitPath),
     serviceUnitTarget(workerServicePaths('linux', home).unitPath),
     ...globExisting(join(home, 'Library', 'LaunchAgents'), /^(?:(?:com|org)\.openclaw\.olympus.*|ai\.olympusplugin\.engine)\.plist$/)
@@ -1374,29 +1239,16 @@ function looksLikeSqlite(path: string): boolean {
   }
 }
 
-/**
- * The folder of a source's account, when it has one: the registry's `folder`
- * layout, or a folder left on disk under a registry that cannot be read. The
- * folder is the account's whole footprint, so a delete takes it whole.
- */
-function sourceAccountFolder(source: LifecycleSourceSpec, context: LifecyclePathContext | undefined): string | undefined {
-  if (!hasFolderLayout(source.sourceId)) return undefined;
-  const env = envForContext(context);
-  const account = placedAccount(source.sourceId, env);
-  const folder = accountFolder(account, env);
-  return account.layout === 'folder' || existsSync(folder) ? folder : undefined;
-}
-
-function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePathContext): DeleteTarget[] {
-  const legacyIndexPath = source.sqlitePath?.(context);
-  const folder = sourceAccountFolder(source, context);
+function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathContext): DeleteTarget[] {
+  const { files } = source;
+  const folder = files.folder;
   // A file inside the account's own folder is Olympus's by construction; the
   // folder itself is checked below.
   const inFolder = (path: string): boolean => folder !== undefined && isStrictlyInside(resolve(path), resolve(folder));
   const sqliteTargets = (path: string, storeId: string): DeleteTarget[] => sqliteDeleteTargets(path, storeId, context, inFolder(path));
   return [
-    ...(legacyIndexPath ? sqliteTargets(legacyIndexPath, legacyStoreIdFor(source)) : []),
-    ...(source.connectorStorePaths?.(context) ?? []).flatMap((storePath) => [
+    ...(files.preCutoverIndex ? sqliteTargets(files.preCutoverIndex.path, files.preCutoverIndex.storeId) : []),
+    ...files.stores.flatMap((storePath) => [
       ...sqliteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID),
       // Each store's four-tier ledger is co-located with it (tier-ledger-path.ts),
       // so it is found wherever the store is — a *_DB_PATH override, XDG, the
@@ -1416,11 +1268,11 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
         ? []
         : sqliteTargets(tierSnifferPathForStore(storePath), TIER_SNIFFER_SQLITE_STORE_ID)),
     ]),
-    ...(source.accountStateSqlite?.(context) ?? []).flatMap((state) => state.path === ':memory:'
+    ...files.rawDatabases.flatMap((state) => state.path === ':memory:'
       ? []
-      : sqliteTargets(state.path, state.sqliteStoreId)),
+      : sqliteTargets(state.path, state.storeId)),
     // Raw state inside the account's folder goes with the folder.
-    ...(source.rawStatePaths?.(context) ?? []).filter((path) => !inFolder(path)).map((path): DeleteTarget => ({
+    ...files.raw.filter((path) => !inFolder(path)).map((path): DeleteTarget => ({
       path,
       kind: 'source_state_path',
       // Spool and media are directories; the sole point of naming them is to
@@ -1428,7 +1280,7 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
       allowRecursive: true,
       externalSourcePath: !isInsideRawStateRoot(path, context),
     })),
-    ...(source.policyPaths?.(context) ?? []).map((path): DeleteTarget => ({
+    ...files.settings.map((path): DeleteTarget => ({
       path,
       kind: 'policy_file',
       allowRecursive: false,
@@ -1443,6 +1295,18 @@ function sourceDeleteTargets(source: LifecycleSourceSpec, context: LifecyclePath
 function accountFoldersTargets(context: LifecyclePathContext): DeleteTarget[] {
   const root = accountFoldersRoot(envForContext(context));
   return isInsideKnownOlympusRoot(root, context) ? [] : [accountFolderTarget(root, context)];
+}
+
+/** `<data>/.trash`, where a per-source delete renames an account's folder, when it is outside every known root. */
+function accountTrashTargets(context: LifecyclePathContext): DeleteTarget[] {
+  const root = accountTrashRoot(envForContext(context));
+  return isInsideKnownOlympusRoot(root, context) ? [] : [accountFolderTarget(root, context)];
+}
+
+/** The registry, when it is outside every known root (a relocated data folder). */
+function registryDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
+  const path = sourceRegistryPath(envForContext(context));
+  return isInsideKnownOlympusRoot(path, context) ? [] : [{ path, kind: 'registry_file', allowRecursive: false }];
 }
 
 function accountFolderTarget(path: string, context: LifecyclePathContext | undefined): DeleteTarget {
@@ -1501,17 +1365,6 @@ function sqliteDeleteTargets(
 }
 
 /**
- * A legacy index carries its own retired marker, so falling back to the
- * family's connector-store id would make the manifest and the external-path
- * fence assert a store the file is not. The fallback exists only so a spec
- * that declares a path without its marker fails a schema check instead of
- * silently claiming `connector-store`; a lifecycle test pins the pairing.
- */
-function legacyStoreIdFor(source: LifecycleSourceSpec): string {
-  return source.legacySqliteStoreId ?? source.sqliteStoreId;
-}
-
-/**
  * An account the boot migration is part way through moving has some files at
  * the old place and some in its account folder, and the paths an export reads
  * name only one of them: an export now would leave stores out and still call
@@ -1519,8 +1372,8 @@ function legacyStoreIdFor(source: LifecycleSourceSpec): string {
  * so is an export when the registry cannot be read, since then a move cannot be
  * ruled out. Nothing has been written when it refuses.
  */
-function refuseExportDuringMove(selected: readonly LifecycleSourceSpec[], options: LifecyclePathContext): void {
-  const own = new Set(selected.flatMap((source) => [source.sourceId, ...(source.sourceAliases ?? [])]));
+function refuseExportDuringMove(selected: readonly LifecycleAccount[], options: LifecyclePathContext): void {
+  const own = new Set(selected.flatMap((source) => [source.sourceId, ...source.aliases]));
   let moving: string[];
   try {
     moving = readSourceRegistry(envForContext(options)).accounts
@@ -1542,24 +1395,40 @@ function refuseExportDuringMove(selected: readonly LifecycleSourceSpec[], option
   );
 }
 
-function selectSources(sourceId: string | undefined): LifecycleSourceSpec[] {
-  if (!sourceId) return lifecycleSourceSpecs();
-  return [requireSource(sourceId)];
+/**
+ * What an export takes: the one account asked for, else every account that
+ * exists (the registry's, and any with files but no entry yet). An account
+ * being deleted is not exported: its data is on its way out.
+ */
+function selectExportAccounts(sourceId: string | undefined, context: LifecyclePathContext): LifecycleAccount[] {
+  if (!sourceId) return existingAccounts(context);
+  const account = requireAccount(sourceId, context);
+  if (account.entry && account.entry.state !== 'active') {
+    throw new OperationError(
+      'invalid_params',
+      `${account.sourceId}'s data is being deleted, so it was not exported.`,
+      'Its data goes when Olympus next starts; there is nothing left to export.',
+    );
+  }
+  return [account];
 }
 
-export function requireSource(sourceId: string | undefined): LifecycleSourceSpec {
+/** The source an id or alias names, or an error that lists the ones Olympus knows. */
+export function requireSource(sourceId: string | undefined): { sourceId: string } {
   const normalized = requirePath(sourceId, '--source');
-  const source = lifecycleSourceSpecs().find(
-    (entry) => entry.sourceId === normalized || entry.sourceAliases?.includes(normalized),
-  );
-  if (!source) {
+  const known = lifecycleSourceFor(normalized);
+  if (!known) {
     throw new OperationError(
       'invalid_params',
       `Unknown Olympus source id "${normalized}".`,
-      `Use one of: ${lifecycleSourceSpecs().map((entry) => entry.sourceId).join(', ')}.`,
+      `Use one of: ${lifecycleSourceIds().join(', ')}.`,
     );
   }
-  return source;
+  return { sourceId: known };
+}
+
+function requireAccount(sourceId: string | undefined, context: LifecyclePathContext): LifecycleAccount {
+  return lifecycleAccountOf(requireSource(sourceId).sourceId, context);
 }
 
 /**
@@ -1911,7 +1780,7 @@ function assertDeleteTargetSafe(target: DeleteTarget): void {
       throw new OperationError(
         'invalid_params',
         `Refusing to delete source state outside an Olympus-owned root: ${target.path}`,
-        'Check the configured state-directory value (OLYMPUS_WHATSAPP_STATE_DIR and its spool/media overrides), then remove that directory by hand.',
+        'Check the configured state-directory value (the OLYMPUS_* state, spool and media folder overrides), then remove that directory by hand.',
       );
     }
     return;
@@ -1956,8 +1825,12 @@ function assertAccountFolderOwned(target: DeleteTarget): void {
   };
   const owned = target.ownedRoot ? resolve(target.ownedRoot) : undefined;
   const lexical = resolve(target.path);
-  const sources = owned ? join(owned, ACCOUNT_FOLDERS_DIR) : undefined;
-  if (!owned || !sources || !(lexical === sources || isStrictlyInside(lexical, sources))) {
+  // The sources folder, or the trash a deleted account's folder is renamed into.
+  const inside = (name: string): boolean => {
+    const folder = join(owned!, name);
+    return lexical === folder || isStrictlyInside(lexical, folder);
+  };
+  if (!owned || !(inside(ACCOUNT_FOLDERS_DIR) || inside(ACCOUNT_TRASH_DIR))) {
     refuse('because it is not inside the Olympus sources folder');
   }
   if (!lstatSync(target.path).isDirectory()) refuse('because it is not a folder (it may be a symbolic link)');
@@ -2060,7 +1933,7 @@ function isStrictlyInside(path: string, root: string): boolean {
 function assertRawStateTargetsContained(
   targets: readonly DeleteTarget[],
   context: LifecyclePathContext & { handleRegistryPath?: string },
-  selectedSource: LifecycleSourceSpec | undefined,
+  selectedSource: LifecycleAccount | undefined,
 ): void {
   const stateTargets = targets.filter((target) => target.kind === 'source_state_path' && target.allowRecursive);
   // One source's delete also takes its whole account folder recursively, which
@@ -2093,25 +1966,25 @@ function assertRawStateTargetsContained(
   }
   if (!selectedSource) return;
   const home = resolveHome(context.homeDir);
-  const own = new Set([selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
+  const own = new Set([selectedSource.sourceId, ...selectedSource.aliases]);
   const protectedPaths = new Set<string>();
-  for (const other of lifecycleSourceSpecs()) {
+  for (const other of knownAccounts(context)) {
     if (own.has(other.sourceId)) continue;
     for (const path of sourceDeleteTargets(other, context).map((target) => target.path)) protectedPaths.add(path);
-    for (const path of other.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
-    for (const path of other.pairingSessionPaths?.(context) ?? []) protectedPaths.add(path);
+    for (const path of other.files.preserved) protectedPaths.add(path);
+    for (const path of other.files.pairing ?? []) protectedPaths.add(path);
   }
-  for (const path of selectedSource.preservationOnlyPaths?.(context) ?? []) protectedPaths.add(path);
+  for (const path of selectedSource.files.preserved) protectedPaths.add(path);
   // A legacy account's grant keeps the path its session was paired at, which an override lifted since
   // no longer names: it may be inside an account folder this delete is about to take. A grant that exists
   // but cannot be read says nothing, so another account's delete is refused rather than risk its session.
-  for (const grant of retainedGrants(context)) {
+  for (const grant of retainedCaptureGrants(handleRegistryPathFor(context))) {
     if (grant.evidence.kind === 'path') {
       for (const path of pairingSessionPathsFromStoredValue(grant.source, grant.evidence.sessionPath)) protectedPaths.add(path);
     } else if (grant.evidence.kind === 'unreadable' && !own.has(grant.sourceId)) {
       throw new OperationError(
         'invalid_params',
-        `Refusing to delete source state because the ${grant.source === 'telegram' ? 'Telegram' : 'WhatsApp'} capture grant cannot be read, so it cannot be shown that its session is outside what this delete removes.`,
+        `Refusing to delete source state because the ${grant.label} capture grant cannot be read, so it cannot be shown that its session is outside what this delete removes.`,
         'Fix or remove that grant (unpair the account), then delete again. Nothing was deleted.',
       );
     }
@@ -2197,22 +2070,6 @@ function assertSourcesFolderTargetsUnlinked(targets: readonly DeleteTarget[], co
   }
 }
 
-/** What each messaging source's capture grant says about where its session lives (where the delete options name a registry, that one). */
-function retainedGrants(context: LifecyclePathContext & { handleRegistryPath?: string }): Array<{
-  source: 'telegram' | 'whatsapp';
-  sourceId: string;
-  evidence: CaptureGrantSessionEvidence;
-}> {
-  const registryPath = context.handleRegistryPath
-    || envForContext(context).OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim()
-    || join(resolveHome(context.homeDir), '.config', 'olympus', 'handles.json');
-  return ([['telegram', TELEGRAM_SOURCE_ID], ['whatsapp', WHATSAPP_SOURCE_ID]] as const).map(([source, sourceId]) => ({
-    source,
-    sourceId,
-    evidence: captureGrantSessionEvidence(source, captureGrantPathBeside(source, registryPath)),
-  }));
-}
-
 function isInsideKnownOlympusRoot(path: string, context: LifecyclePathContext): boolean {
   return knownOlympusDataRoots(context).some((root) => isSameOrInsidePath(path, root));
 }
@@ -2242,11 +2099,6 @@ function isSameOrInsidePath(path: string, root: string): boolean {
 function defaultSovereigntyConfigPathForHome(homeDir: string | undefined): string {
   if (!homeDir || process.platform === 'linux') return defaultSovereigntyConfigPath(envForHome(homeDir));
   return join(homeDir, '.olympus', 'sovereignty.json');
-}
-
-function defaultDropboxIngestionPolicyPathForHome(homeDir: string | undefined): string {
-  if (!homeDir || process.platform === 'linux') return defaultDropboxIngestionPolicyPath(envForHome(homeDir));
-  return join(homeDir, '.olympus', 'sources', 'dropbox.personal.ingestion.json');
 }
 
 function envForHome(homeDir: string | undefined): Record<string, string | undefined> {

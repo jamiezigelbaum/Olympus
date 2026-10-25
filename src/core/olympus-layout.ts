@@ -145,6 +145,14 @@ export function accountFoldersRoot(env: LayoutEnv = process.env): string {
   return olympusDataPath(env, ACCOUNT_FOLDERS_DIR);
 }
 
+/** The data root's folder of deleted accounts' folders, renamed away and awaiting removal. */
+export const ACCOUNT_TRASH_DIR = '.trash';
+
+/** `<data>/.trash`: a per-source Delete renames the account's folder here, then empties it. */
+export function accountTrashRoot(env: LayoutEnv = process.env): string {
+  return olympusDataPath(env, ACCOUNT_TRASH_DIR);
+}
+
 const TIERS = ['secure_local', 'internal', 'public_safe'] as const;
 type LegacyTier = (typeof TIERS)[number];
 

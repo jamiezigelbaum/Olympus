@@ -25,7 +25,14 @@ import { withFileLeaseSync } from '../../core/file-lease.ts';
 import type { LayoutEnv } from '../../core/olympus-layout.ts';
 import { recordAccountPlacement } from '../../core/source-storage.ts';
 import { archiveManifestSha256 } from './manifest.ts';
-import { ARCHIVE_IMPORTS_SOURCE_ID, ArchiveRecordFormError, isArchiveId, type NewArchiveImportRecord } from './state.ts';
+import {
+  ARCHIVE_IMPORTS_SOURCE_ID,
+  ArchiveImportStateStore,
+  ArchiveRecordFormError,
+  defaultArchiveImportStatePath,
+  isArchiveId,
+  type NewArchiveImportRecord,
+} from './state.ts';
 
 /**
  * Requests an agent may leave waiting at once; one more is refused until the person answers.
@@ -362,3 +369,29 @@ export class ArchiveImportRequestStore {
     });
   }
 }
+
+/**
+ * Imported archives have no credential or pairing to end before their data is
+ * deleted: an archive still recorded, or an approval still being checked for
+ * copies, holds the per-source Delete instead (core/source-delete-holds.ts).
+ * The check records the import when it finishes, so deleting under it would
+ * let an import land after the Delete. Either file unreadable counts as there.
+ */
+export const archiveImportDeleteHold = {
+  id: 'archive-import-approvals',
+  sourceId: ARCHIVE_IMPORTS_SOURCE_ID,
+  present(env: LayoutEnv): boolean {
+    try {
+      const statePath = defaultArchiveImportStatePath(env);
+      if (new ArchiveImportStateStore({ path: statePath }).list().length > 0) return true;
+      return new ArchiveImportRequestStore({ path: archiveImportRequestsPath(statePath) }).list()
+        .some((request) => request.status === 'checking');
+    } catch {
+      return true;
+    }
+  },
+  nextAction: 'Under Archives in the local dashboard, cancel any import still being checked (or let it finish) and remove each archive, then rerun the CLI delete.',
+  exclusive<T>(env: LayoutEnv, run: () => T): T {
+    return withArchiveImportApprovals(defaultArchiveImportStatePath(env), run);
+  },
+};

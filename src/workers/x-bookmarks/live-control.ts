@@ -1,6 +1,6 @@
 import { xBookmarksApiUsageDbPath } from '../../core/olympus-layout.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import {
@@ -10,6 +10,7 @@ import {
 } from '../../core/sqlite-migrations.ts';
 import type { XApiRateLimit } from './api.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
+import { X_BOOKMARKS_SOURCE_ID } from './connector.ts';
 
 export const X_BOOKMARKS_HEAD_INTERVAL_MS = 30_000;
 export const X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60_000;
@@ -416,6 +417,38 @@ export function xBookmarksReconcileEvidenceCounts(evidence: {
  * reserve an expiring undispatched lease; the durable request count then moves
  * atomically only when markRequestDispatched commits immediately before I/O.
  */
+/**
+ * The forget step of X's sync positions in the usage ledger
+ * (core/source-forget-registry.ts): the ledger is the quota ledger and stays
+ * when X is deleted, but its checkpoints are the deleted account's, and a
+ * different X account connected next must not resume from them. Only an X
+ * account's Delete clears them; a ledger that is not there holds none. On a
+ * dry run, counts the rows it would clear. Returns that count.
+ */
+export function forgetXBookmarksSyncState(
+  usageDbPath: string,
+  sourceIds: readonly string[],
+  options: { dryRun: boolean },
+): number {
+  if (!sourceIds.includes(X_BOOKMARKS_SOURCE_ID) || usageDbPath === ':memory:' || !existsSync(usageDbPath)) return 0;
+  if (options.dryRun) {
+    const db = new Database(usageDbPath, { readonly: true });
+    try {
+      db.exec('PRAGMA busy_timeout = 10000;');
+      const table = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'x_bookmarks_live_state'").get();
+      return table ? (db.query('SELECT count(*) AS n FROM x_bookmarks_live_state').get() as { n: number }).n : 0;
+    } finally {
+      closeSqliteStore(db);
+    }
+  }
+  const usage = new LocalXBookmarksApiUsageStore(usageDbPath);
+  try {
+    return usage.clearSyncState();
+  } finally {
+    usage.close();
+  }
+}
+
 export class LocalXBookmarksApiUsageStore {
   readonly dbPath: string;
   private readonly db: Database;
