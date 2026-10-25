@@ -590,7 +590,7 @@ describe('deleting the whole source', () => {
     writeFileSync(recordPath, survivor);
     const outcome = await h.pull(merged);
     expect(outcome.record?.status).toBe('stopped');
-    expect(['account_changed', 'source_unavailable']).toContain(outcome.record?.stop?.code);
+    expect(['account_changed', 'source_unavailable']).toContain(outcome.record?.stop?.code ?? '');
     for (const path of Object.values(h.storePaths)) expect(existsSync(path)).toBe(false);
   });
 });
