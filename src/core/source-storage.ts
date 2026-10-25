@@ -36,12 +36,7 @@ import { closeSqliteStore } from './sqlite-store.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
-import {
-  LocalConnectorStore,
-  TIER_SET_BINDING_CONNECTOR_ID,
-  TIER_SET_BINDING_RUN_ID,
-  type LocalConnectorStoreOptions,
-} from '../workers/connector-store/local-index.ts';
+import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
 import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
 import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
 import { placedStoreHolder } from './store-identity.ts';
@@ -351,13 +346,36 @@ function adoptedLayout(env: LayoutEnv, sourceId: string, slot: string, dbPath: s
 // these are the only opens, and they sit here because this is the only place
 // a store file is opened (test/store-open-guard.test.ts).
 
-/** Whether a store file opens read-only and its schema reads. Creates and changes nothing but SQLite's own `-shm`. */
+/**
+ * Opens a store file to look at it, and proves its schema reads. The connection
+ * is writable but query-only: a read-only connection cannot open a WAL database
+ * that has no `-wal` beside it (macOS's SQLite refuses), which is how a store
+ * looks after a clean close, and a refusal would read as a damaged store. A file
+ * that cannot be opened for writing is opened read-only. Throws when neither way
+ * reads it. Nothing is written to the database: the connection can only query.
+ */
+function openToLookAt(path: string): Database {
+  let failure: unknown;
+  for (const mode of [{ readwrite: true, create: false }, { readonly: true, create: false }] as const) {
+    let db: Database | undefined;
+    try {
+      db = new Database(path, mode);
+      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      db.query('SELECT count(*) AS n FROM sqlite_master').get();
+      return db;
+    } catch (error) {
+      failure = error;
+      if (db) closeSqliteStore(db, { checkpoint: false });
+    }
+  }
+  throw failure;
+}
+
+/** Whether a store file opens and its schema reads. Writes nothing to it (SQLite's own `-wal` and `-shm` aside). */
 export function storeFileReads(path: string): boolean {
   let db: Database | undefined;
   try {
-    db = new Database(path, { readonly: true, create: false });
-    db.exec('PRAGMA busy_timeout = 10000;');
-    db.query('SELECT count(*) AS n FROM sqlite_master').get();
+    db = openToLookAt(path);
     return true;
   } catch {
     return false;
@@ -367,14 +385,13 @@ export function storeFileReads(path: string): boolean {
 }
 
 /**
- * `PRAGMA quick_check` on a store file, read-only: `ok`, or `damaged` for anything else, a file that will not open
+ * `PRAGMA quick_check` on a store file, query-only: `ok`, or `damaged` for anything else, a file that will not open
  * included. It is synchronous and cannot be interrupted, so the caller bounds it by size beforehand.
  */
 export function storeFileQuickCheck(path: string): 'ok' | 'damaged' {
   let db: Database | undefined;
   try {
-    db = new Database(path, { readonly: true, create: false });
-    db.exec('PRAGMA busy_timeout = 10000;');
+    db = openToLookAt(path);
     const rows = db.query('PRAGMA quick_check').all() as Array<Record<string, unknown>>;
     return rows.length === 1 && Object.values(rows[0]!)[0] === 'ok' ? 'ok' : 'damaged';
   } catch {
@@ -384,53 +401,33 @@ export function storeFileQuickCheck(path: string): 'ok' | 'damaged' {
   }
 }
 
+/** What folding one database's write-ahead log into it came to. */
+export type StoreFileCheckpoint = 'folded' | 'busy' | 'not_a_database' | 'failed';
+
 /**
- * A store bound to a tiered set keeps the set ledger's path in its binding
- * (`sync_runs`, see `LocalConnectorStore.tierSetBinding`), and fails closed
- * when the path leads nowhere. `map` is given that path and returns the one
- * to record, or undefined to leave it. Returns whether the binding changed.
- * The ledger's identity is kept. The store is opened for writing only when the
- * binding has to change, so a store without one is not touched, its WAL not
- * folded into the file.
+ * `PRAGMA wal_checkpoint(TRUNCATE)` on a store file: every frame of its
+ * write-ahead log is written into the database file and the log is emptied, so
+ * the file alone is the whole database. The boot migration does it before it
+ * plans a move and writes nothing else to the file. `folded` only when the
+ * checkpoint ran to the end (not busy, and every frame in the log was
+ * checkpointed); a file that is not in write-ahead mode has no log, which is
+ * folded. `busy`: another connection kept it from finishing. `not_a_database`:
+ * the file is not one SQLite can read. `failed`: anything else.
  */
-export function repointTierSetBinding(path: string, map: (ledgerPath: string) => string | undefined): boolean {
-  const readBinding = (db: Database): Record<string, unknown> | undefined => {
-    let row: { cursor: string | null } | null;
-    try {
-      row = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
-        .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
-    } catch (error) {
-      if (/no such table/i.test(String(error))) return undefined; // Not a connector store: it binds to nothing.
-      throw error;
-    }
-    if (!row?.cursor) return undefined;
-    try {
-      const binding = JSON.parse(row.cursor) as Record<string, unknown>;
-      return typeof binding.ledgerPath === 'string' ? binding : undefined;
-    } catch {
-      return undefined; // Unreadable already: the store fails closed on it, moved or not.
-    }
-  };
-  let next: string | undefined;
-  let reader: Database | undefined;
-  try {
-    reader = new Database(path, { readonly: true, create: false });
-    reader.exec('PRAGMA busy_timeout = 10000;');
-    const binding = readBinding(reader);
-    next = binding ? map(binding.ledgerPath as string) : undefined;
-    if (next === undefined || next === binding!.ledgerPath) return false;
-  } finally {
-    if (reader) closeSqliteStore(reader, { checkpoint: false });
-  }
+export function storeFileCheckpoint(path: string, busyTimeoutMs = 2_000): StoreFileCheckpoint {
   let db: Database | undefined;
   try {
     db = new Database(path, { readwrite: true, create: false });
-    db.exec('PRAGMA busy_timeout = 10000;');
-    const binding = readBinding(db);
-    if (!binding) return false;
-    db.query('UPDATE sync_runs SET cursor = ? WHERE sync_run_id = ? AND connector_id = ?')
-      .run(JSON.stringify({ ...binding, ledgerPath: next }), TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID);
-    return true;
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))};`);
+    const row = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as Record<string, unknown> | null;
+    const [busy, log, checkpointed] = row ? Object.values(row) : [];
+    // Not in write-ahead mode: the pragma answers 0, -1, -1.
+    return busy === 0 && log === checkpointed ? 'folded' : 'busy';
+  } catch (error) {
+    const message = String((error as { message?: unknown })?.message ?? error);
+    if (/locked|busy/i.test(message)) return 'busy';
+    if (/not a database|malformed|corrupt/i.test(message)) return 'not_a_database';
+    return 'failed';
   } finally {
     if (db) closeSqliteStore(db, { checkpoint: false });
   }

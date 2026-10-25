@@ -187,7 +187,7 @@ describe('source registry: the migration record', () => {
     accounts: [{ ...account('dropbox.files', ['secure_local.dropbox.files']), ...extra, migration }],
   });
   const schemaOnDisk = (): unknown => JSON.parse(readFileSync(sourceRegistryPath(env), 'utf8')).schema;
-  const pendingPlan = record('moving', { moves: [move()], holders: [{ store: 'sources/dropbox.files/1/stores/secure_local.sqlite', digests: ['a'.repeat(32)] }] });
+  const pendingPlan = record('moving', { moves: [move()] });
 
   test('the schema is 3 for as long as a move is pending, then 2 if any account is a folder, else 1', () => {
     updateSourceRegistry(env, (registry) => {
@@ -232,8 +232,7 @@ describe('source registry: the migration record', () => {
     ['a done record', record('done')],
     ['a skipped record with its reason', record('skipped', { reason: 'other_device', detail: 'A file is on another device.' })],
     ['a failed record that kept how each database was', record('failed', { reason: 'verify_failed', detail: 'x', checked: [{ file: 'sources/a/1/stores/s.sqlite', result: 'ok' }, { file: 'b', result: 'not_checked' }] })],
-    ['a plan with its moves and holders', pendingPlan],
-    ['a plan whose renames were checked', { ...pendingPlan, verified: true }],
+    ['a plan with its moves', pendingPlan],
     ['a folder move', record('moving', { moves: [move({ role: 'raw', kind: 'dir', db: undefined, size: 0 })] })],
   ])('%s reads', (_label, migration) => {
     writeRaw(withRecord(migration));
@@ -251,9 +250,7 @@ describe('source registry: the migration record', () => {
     ['a move that is neither file nor folder', record('moving', { moves: [move({ kind: 'link' })] })],
     ['a move with a size that is not a whole number', record('moving', { moves: [move({ size: -1 })] })],
     ['a move with a device that is a number (identities are kept as text)', record('moving', { moves: [move({ dev: 66306 })] })],
-    ['a holder with no store', record('moving', { moves: [move()], holders: [{ digests: [] }] })],
     ['a check with an unknown result', record('failed', { checked: [{ file: 'a', result: 'maybe' }] })],
-    ['verified that is not true', record('moving', { moves: [move()], verified: 'yes' })],
   ])('%s fails closed, like any malformed entry', (_label, migration) => {
     const path = writeRaw(withRecord(migration));
     expect(() => readSourceRegistry(env)).toThrow(SourceRegistryError);

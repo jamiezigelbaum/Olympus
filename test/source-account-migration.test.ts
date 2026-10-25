@@ -1,13 +1,15 @@
 // The boot migration of existing accounts into their folders (docs/design/
 // source-storage.md, "Migration of existing installs"; delivery step 4c).
-// Everything runs on a throwaway data folder: real SQLite stores (with a
-// pending WAL), real sidecars and raw state, the real registry, and the
-// storage service's own refusals. Expected results are written from the
-// design's rules (a rename keeps the file, a failed check puts everything
-// back), not read back from the code under test.
+// Everything runs on a throwaway data folder: real SQLite stores (some with a
+// pending WAL, which the pass folds in first), real sidecars and raw state, the
+// real registry, and the storage service's own refusals. Expected results are
+// written from the design's rules (the move only renames files: after the log
+// is folded in, the bytes of every store and ledger are what they were; a
+// failed check puts everything back), not read back from the code under test.
 
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
@@ -55,6 +57,7 @@ import {
   sourceStorageNotices,
   updateSourceRegistry,
   type SourceRegistryAccount,
+  type SourceRegistryMove,
 } from '../src/core/source-registry.ts';
 import {
   SourceStorageUnavailableError,
@@ -63,7 +66,9 @@ import {
   openConnectorStore,
   replaceEmptyLegacyAccounts,
   sourceAccountUnavailableReason,
+  storeFileReads,
 } from '../src/core/source-storage.ts';
+import { placedStoreHolder, type StoreHolder } from '../src/core/store-identity.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { SqliteSourceDashboardHistory, defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
 import { migrateAccountFoldersAtBoot } from '../src/workers/email-source/server.ts';
@@ -120,9 +125,11 @@ function sqliteFile(path: string, options: { rows?: number; pendingWal?: boolean
   db.close();
 }
 
+/** The rows of the test table. Opened writable but query-only: a read-only connection cannot open a WAL database with no `-wal` beside it on macOS. */
 function rowsOf(path: string): number {
-  const db = new Database(path, { readonly: true });
+  const db = new Database(path, { readwrite: true });
   try {
+    db.exec('PRAGMA query_only = ON');
     return (db.query('SELECT count(*) AS n FROM t').get() as { n: number }).n;
   } finally {
     db.close();
@@ -230,13 +237,80 @@ const destinationOf = (env: Env, legacy: string, sourceId: string): string => {
 const entryOf = (env: Env, sourceId: string): SourceRegistryAccount | undefined =>
   readSourceRegistry(env).accounts.find((account) => account.source_id === sourceId);
 
+/** `dev:ino` of a path: which file it is, whatever its size (folding a log into a database changes the file's size, not which file it is). */
+const inode = (path: string): string => {
+  const stat = lstatSync(path, { bigint: true });
+  return `${stat.dev}:${stat.ino}`;
+};
+
+const digest = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex');
+
+const isCompanionPath = (path: string): boolean => /-(wal|shm|journal)$/.test(path);
+
+/** The files whose bytes a move must not change: databases, sidecars and raw state, not SQLite's own `-wal`, `-shm` and `-journal`. */
+const contentFiles = (paths: string[]): string[] => paths.filter((path) => !isCompanionPath(path) && lstatSync(path).isFile());
+
+/** Adds a handler to the pass's checkpoints; the ones set before it run first, so a handler that kills the pass goes last. */
+function onCheckpoint(handler: (at: string) => void): void {
+  const previous = __accountMigrationTestHooks.checkpoint;
+  __accountMigrationTestHooks.checkpoint = (at) => {
+    previous?.(at);
+    handler(at);
+  };
+}
+
+/**
+ * The bytes of every given file once the pass has folded the logs in (its `folded` step), keyed by the file's old
+ * path. After the fold the move writes nothing to a database: the same bytes must be where the files end up.
+ */
+function foldedDigests(paths: string[]): Map<string, string> {
+  const digests = new Map<string, string>();
+  onCheckpoint((at) => {
+    if (at !== 'folded' || digests.size > 0) return;
+    for (const path of contentFiles(paths.filter((file) => existsSync(file)))) digests.set(path, digest(path));
+  });
+  return digests;
+}
+
+/** That every file whose bytes were taken at the fold has the same bytes at its new place (`folder`) or its old one (`legacy`). */
+function expectBytesKept(env: Env, sourceId: string, folded: Map<string, string>, where: 'folder' | 'legacy', label = ''): void {
+  expect(folded.size, `${label}: the fold was not reached`).toBeGreaterThan(0);
+  for (const [legacy, bytes] of folded) {
+    const place = where === 'folder' ? destinationOf(env, legacy, sourceId) : legacy;
+    expect(existsSync(place), `${label}: ${place} is missing`).toBe(true);
+    expect(digest(place), `${label}: ${place} changed`).toBe(bytes);
+  }
+}
+
+/** Makes every file at its place in the account folder read as another size, so the identity check fails with nothing changed on disk. */
+function lieAboutSizes(env: Env, sourceId: string): void {
+  const folder = accountFolder({ source_id: sourceId, slot: '1' }, env);
+  __accountMigrationTestHooks.look = (path, actual): MigrationLook | undefined => (
+    path.startsWith(`${folder}/`) && !isCompanionPath(path) && actual.kind === 'file'
+      ? { ...actual, size: actual.size + 1n }
+      : undefined
+  );
+}
+
+/** Whether every database of an account opens, at the place `where` says it is. */
+function expectDatabasesOpen(env: Env, sourceId: string, legacy: string[], where: 'folder' | 'legacy', label = ''): void {
+  const databases = legacy.filter((path) => path.endsWith('.sqlite') && existsSync(where === 'legacy' ? path : destinationOf(env, path, sourceId)));
+  expect(databases.length, label).toBeGreaterThan(0);
+  for (const path of databases) {
+    const place = where === 'folder' ? destinationOf(env, path, sourceId) : path;
+    expect(storeFileReads(place), `${label}: ${place} does not open`).toBe(true);
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 describe('the move', () => {
-  test.each(migratableSources().map((sourceId) => [sourceId]))('%s: every file is renamed into its folder, same file, nothing copied', (sourceId) => {
+  test.each(migratableSources().map((sourceId) => [sourceId]))('%s: every file is renamed into its folder, same file, nothing copied, and no store or ledger is written to beyond the log fold', (sourceId) => {
     const { env, root } = fixture();
     const legacy = install(env, sourceId);
-    const before = new Map(legacy.map((path) => [path, identity(path)]));
+    // The same file (its inode) before and after; the bytes are compared from the fold on, which is the only write to a database.
+    const before = new Map(contentFiles(legacy).map((path) => [path, inode(path)]));
+    const folded = foldedDigests(legacy);
     // Shared files and pre-1.0 index files in the same folder are not the account's.
     const bystanders = ['x-bookmarks-api-usage.sqlite', 'source-watches.sqlite', 'email-index.sqlite', 'file-source-scopes.json']
       .map((name) => join(root, name));
@@ -249,11 +323,13 @@ describe('the move', () => {
     expect(report.errors).toEqual([]);
     expect(report.movedBack).toEqual([]);
     expect(report.stuck).toEqual([]);
-    for (const path of legacy) {
-      expect(existsSync(path), `${path} is still at its old place`).toBe(false);
+    for (const path of legacy) expect(existsSync(path), `${path} is still at its old place`).toBe(false);
+    for (const [path, was] of before) {
       const moved = destinationOf(env, path, sourceId);
-      expect(identity(moved), `${moved} is not the same file`).toBe(before.get(path)!);
+      expect(inode(moved), `${moved} is not the same file`).toBe(was);
     }
+    // The move wrote nothing to any store, ledger, sidecar or raw file: their bytes are what they were once the logs were folded in.
+    expectBytesKept(env, sourceId, folded, 'folder', sourceId);
     // The registry says so, in one entry, with the plan's end and no plan left.
     const entry = entryOf(env, sourceId)!;
     expect(entry.layout).toBe('folder');
@@ -273,17 +349,39 @@ describe('the move', () => {
     expect(readFileSync(sourceRegistryPath(env), 'utf8')).toBe(registryBefore);
   });
 
-  test('a store moves with its pending WAL: the rows that were only in the WAL are read at the new place', () => {
-    const { env } = fixture();
+  test('a store with rows only in its log: the log is folded into the database before anything moves, so the file alone holds every row', () => {
+    const { dir, env } = fixture();
     const [store] = install(env, 'dropbox.files', { walOn: 'first' });
-    expect(existsSync(`${store}-wal`)).toBe(true);
-    expect(rowsOf(store!)).toBe(3);
+    expect(statSync(`${store}-wal`).size, 'the store has a pending log').toBeGreaterThan(0);
+    const alone = join(dir, 'alone.sqlite');
+    const seen: { log?: number; aloneRows?: number } = {};
+    onCheckpoint((at) => {
+      if (at !== 'folded') return;
+      // After the fold and before the plan: the log is empty, and the database file by itself reads all three rows.
+      seen.log = existsSync(`${store}-wal`) ? statSync(`${store}-wal`).size : 0;
+      copyFileSync(store!, alone);
+      seen.aloneRows = rowsOf(alone);
+    });
 
     migrateAccountFolders(env);
 
+    expect(seen).toEqual({ log: 0, aloneRows: 3 });
     const moved = resolvedStorePath('dropbox.files', 'secure_local', env);
     expect(existsSync(`${store}-wal`)).toBe(false);
     expect(rowsOf(moved)).toBe(3);
+    // Where SQLite leaves a closed database's log beside it, what moved is empty; where it removes it, there is none.
+    expect(existsSync(`${moved}-wal`) ? statSync(`${moved}-wal`).size : 0).toBe(0);
+  });
+
+  test('a store with no log or index file beside it (a clean close) moves, and opens at its new place', () => {
+    const { env } = fixture();
+    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+    for (const path of legacy.filter(isCompanionPath)) rmSync(path, { force: true });
+
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+
+    expectDatabasesOpen(env, 'dropbox.files', legacy, 'folder', 'moved');
+    expect(rowsOf(resolvedStorePath('dropbox.files', 'secure_local', env))).toBe(3);
   });
 
   test('the tier sidecars of every tier follow their store, named for it', () => {
@@ -388,7 +486,7 @@ describe('the move', () => {
       if (at !== 'flipped') expect(entry.layout).toBe('legacy');
     };
     migrateAccountFolders(env);
-    expect(seen[0]).toBe('plan:legacy:moving');
+    expect(seen.slice(0, 2)).toEqual(['folded:legacy:undefined', 'plan:legacy:moving']);
     expect(seen.at(-1)).toBe('flipped:folder:done');
     expect(seen.filter((line) => line.endsWith(':folder:done'))).toHaveLength(1);
   });
@@ -452,12 +550,13 @@ describe('a crash at any step', () => {
     return labels;
   }
 
-  test('the steps are named: the plan, the pictures held, every rename, the checks, the old holders released and the flip', () => {
+  test('the steps are named: the fold, the plan, every rename, the checks and the flip', () => {
     const labels = labelsOf('dropbox.files');
-    expect(labels.slice(0, 2)).toEqual(['plan', 'held']);
-    expect(labels.filter((label) => label.startsWith('rename:'))).toHaveLength(labels.length - 6);
-    expect(labels.slice(-4)).toEqual(['verified', 'rebound', 'rekeyed', 'flipped']);
-    expect(labels.length).toBeGreaterThan(20);
+    expect(labels.slice(0, 2)).toEqual(['folded', 'plan']);
+    expect(labels.filter((label) => label.startsWith('rename:'))).toHaveLength(labels.length - 4);
+    expect(labels.slice(-2)).toEqual(['verified', 'flipped']);
+    // Twelve files at least (three stores and their ledger, secret-locations and sniffer files); SQLite's own `-wal` and `-shm` come on top where it leaves them.
+    expect(labels.length).toBeGreaterThanOrEqual(16);
   });
 
   test.each(['dropbox.files', 'x.bookmarks', 'local.files'])('%s: killed after each step, the next boot ends with every file in its folder exactly once', (sourceId) => {
@@ -465,32 +564,39 @@ describe('a crash at any step', () => {
     for (const label of labels) {
       const { env, root } = fixture();
       const legacy = install(env, sourceId, { walOn: 'all' });
-      const before = new Map(legacy.map((path) => [path, identity(path)]));
-      __accountMigrationTestHooks.checkpoint = (at) => {
+      const before = new Map(contentFiles(legacy).map((path) => [path, inode(path)]));
+      const folded = foldedDigests(legacy);
+      onCheckpoint((at) => {
         if (at === label) throw new AccountMigrationKilled(at);
-      };
+      });
       expect(() => migrateAccountFolders(env), label).toThrow(AccountMigrationKilled);
       __accountMigrationTestHooks.reset();
 
-      // While the move is part way the account is closed, whichever file is where.
+      // While the move is part way the account is closed, whichever file is where. Killed right after the fold no plan is
+      // written yet: nothing has moved, and the account is open and waits for a boot that starts moves.
       const entry = entryOf(env, sourceId)!;
-      if (label !== 'flipped') {
+      const planned = label !== 'folded' && label !== 'flipped';
+      if (planned) {
         expect(sourceAccountMovePending(entry), label).toBe(true);
         expect(entry.layout, label).toBe('legacy');
         expect(readSourceRegistry(env).schema, label).toBe(3);
         expect(isSourceAccountOpenable({ sourceId }, env), label).toBe(false);
         expect(sourceAccountUnavailableReason({ sourceId }, env), label).toContain('being moved');
+      } else if (label === 'folded') {
+        expect(sourceAccountMovePending(entry), label).toBe(false);
+        expect(isSourceAccountOpenable({ sourceId }, env), label).toBe(true);
       }
 
-      // A fresh boot, switch or no switch, finishes it.
-      const boot = migrateAccountFolders(label === 'flipped' ? env : withoutSwitch(env));
+      // A fresh boot finishes it: with the switch off when a plan is waiting (it ends whatever the switch says), on when none is.
+      const boot = migrateAccountFolders(planned ? withoutSwitch(env) : env);
       expect(boot.errors, label).toEqual([]);
       expect(boot.stuck, label).toEqual([]);
-      expect(boot.resumed, label).toEqual(label === 'flipped' ? [] : [sourceId]);
-      for (const path of legacy) {
-        expect(existsSync(path), `${label}: ${path} is still at its old place`).toBe(false);
-        expect(identity(destinationOf(env, path, sourceId)), `${label}: ${path}`).toBe(before.get(path)!);
-      }
+      expect(boot.resumed, label).toEqual(planned ? [sourceId] : []);
+      expect(boot.moved, label).toEqual(label === 'flipped' ? [] : [sourceId]);
+      for (const path of legacy) expect(existsSync(path), `${label}: ${path} is still at its old place`).toBe(false);
+      for (const [path, was] of before) expect(inode(destinationOf(env, path, sourceId)), `${label}: ${path}`).toBe(was);
+      expectBytesKept(env, sourceId, folded, 'folder', label);
+      expectDatabasesOpen(env, sourceId, legacy, 'folder', label);
       const done = entryOf(env, sourceId)!;
       expect(done.layout, label).toBe('folder');
       expect(done.migration?.state, label).toBe('done');
@@ -500,6 +606,37 @@ describe('a crash at any step', () => {
       const expected = legacy.filter((path) => !/-(wal|shm)$/.test(path)).map((path) => relative(accountFolder({ source_id: sourceId, slot: '1' }, env), destinationOf(env, path, sourceId)));
       for (const name of expected) expect(inFolder, `${label}: ${name}`).toContain(name);
       expect(readdirSync(root).filter((name) => /connector-store|local-files-watch|reconcile|archive-import/.test(name)), label).toEqual([]);
+    }
+  }, 120_000);
+
+  test.each(['dropbox.files', 'x.bookmarks', 'local.files'])('%s: killed after each step and then found wrong, everything goes back exactly as it was once the logs were folded in', (sourceId) => {
+    const labels = labelsOf(sourceId).filter((label) => label !== 'flipped');
+    for (const label of labels) {
+      const { env, root } = fixture();
+      const legacy = install(env, sourceId, { walOn: 'all' });
+      const before = new Map(contentFiles(legacy).map((path) => [path, inode(path)]));
+      const folded = foldedDigests(legacy);
+      onCheckpoint((at) => {
+        if (at === label) throw new AccountMigrationKilled(at);
+      });
+      expect(() => migrateAccountFolders(env), label).toThrow(AccountMigrationKilled);
+      __accountMigrationTestHooks.reset();
+      // The next boot finds the move wrong at the identity check.
+      lieAboutSizes(env, sourceId);
+
+      const boot = migrateAccountFolders(label === 'folded' ? env : withoutSwitch(env));
+
+      expect(boot.stuck, label).toEqual([]);
+      expect(boot.errors, label).toEqual([]);
+      expect(boot.movedBack, label).toEqual([{ sourceId, reason: 'verify_failed' }]);
+      for (const [path, was] of before) expect(inode(path), `${label}: ${path}`).toBe(was);
+      expectBytesKept(env, sourceId, folded, 'legacy', label);
+      expectDatabasesOpen(env, sourceId, legacy, 'legacy', label);
+      expect(existsSync(join(root, 'sources', sourceId)), label).toBe(false);
+      const done = entryOf(env, sourceId)!;
+      expect(done.layout, label).toBe('legacy');
+      expect(done.migration?.state, label).toBe('failed');
+      expect(isSourceAccountOpenable({ sourceId }, env), label).toBe(true);
     }
   }, 120_000);
 });
@@ -601,17 +738,28 @@ describe.skipIf(process.platform !== 'linux')('on Linux, through a real install 
   });
 });
 
-describe('the media cache: a moved store keeps its pictures', () => {
+describe('the media cache: a moved store keeps its pictures, and the move does not touch the cache', () => {
+  // A sweep that drops every marker whose store is gone and every picture nothing holds, however young.
   const FAR_FUTURE = { maxAgeMs: 0, now: Date.now() + 10 * 24 * 60 * 60_000 };
 
-  interface Picture { path: string; holders: string[] }
+  interface Picture { path: string; holders: StoreHolder[] }
+
+  /** The holder of a store the way picture search takes it: by the store's identity, from the layout and the registry. */
+  function holderOf(env: Env, sourceId: string, store: string): StoreHolder {
+    const file = legacyAccountFiles(sourceId, env, archiveImportFamilies()).find((entry) => entry.area === 'store' && entry.legacy === store)!;
+    const [family, trustDomain] = file.name.includes('.') ? file.name.split('.') as [string, string] : ['file', file.name];
+    const holder = placedStoreHolder({ sourceId }, { dbPath: store, family, trustDomain }, env);
+    expect(holder, `${store} has an identity`).toBeDefined();
+    return holder!;
+  }
 
   /** One picture per store, and one that two stores hold, all held the way picture search holds them. */
   function holdPictures(env: Env, sourceId: string): Picture[] {
     const cache = mediaCacheDir(env);
     const stores = legacyAccountFiles(sourceId, env, archiveImportFamilies()).filter((file) => file.area === 'store').map((file) => file.legacy);
-    const hold = (text: string, holders: string[]): Picture => {
+    const hold = (text: string, held: string[]): Picture => {
       const file = writeMediaCacheFile(cache, new TextEncoder().encode(text), 'image/jpeg');
+      const holders = held.map((store) => holderOf(env, sourceId, store));
       for (const holder of holders) expect(retainMediaCacheFile(file.path, file.sha256, holder, cache)).toBe(true);
       releaseMediaCacheFile(file.path, file.sha256, file.stagingHolder);
       return { path: file.path, holders };
@@ -626,29 +774,58 @@ describe('the media cache: a moved store keeps its pictures', () => {
     readdirSync(`${picture.path}.refs`).sort().map((name) => [name, readFileSync(join(`${picture.path}.refs`, name), 'utf8')]),
   );
 
-  function expectHeld(env: Env, sourceId: string, pictures: Picture[], label: string): void {
-    expect(sweepMediaCache(mediaCacheDir(env), FAR_FUTURE), `${label}: the sweep dropped a picture`).toBe(0);
-    const folder = realpathSync(accountFolder({ source_id: sourceId, slot: '1' }, env));
-    for (const picture of pictures) {
+  /** Everything under the media cache: its pictures and their markers, byte for byte. */
+  const cacheOf = (env: Env): Record<string, string> => (existsSync(mediaCacheDir(env)) ? tree(mediaCacheDir(env)) : {});
+
+  /** The sweep another store's write would run, here at its harshest: nothing may be dropped, because every store is still there. */
+  const sweepDrops = (env: Env): number => sweepMediaCache(mediaCacheDir(env), { ...FAR_FUTURE, env });
+
+  function expectHeld(env: Env, pictures: Picture[], markers: Array<Record<string, string>>, label: string): void {
+    expect(sweepDrops(env), `${label}: the sweep dropped a picture`).toBe(0);
+    for (const [index, picture] of pictures.entries()) {
       expect(existsSync(picture.path), `${label}: ${picture.path}`).toBe(true);
-      const held = Object.values(markersOf(picture));
-      // Held once per store that held it, and by the store where it is now: none leaked under an old name.
-      expect(held, label).toHaveLength(picture.holders.length);
-      for (const name of held) expect(name.startsWith(`${folder}/stores/`), `${label}: ${name}`).toBe(true);
+      // Held once per store that held it, by the same markers: the move wrote none and removed none.
+      expect(markersOf(picture), label).toEqual(markers[index]!);
+      expect(Object.keys(markersOf(picture)), label).toHaveLength(picture.holders.length);
     }
   }
 
-  test('local files: after the move every picture is held by its store at the new place, and a sweep drops none', () => {
+  test('local files: after the move every picture is held by its store, a sweep drops none, and the cache is byte for byte as it was', () => {
     const { env } = fixture();
     install(env, 'local.files');
     const pictures = holdPictures(env, 'local.files');
+    const markers = pictures.map(markersOf);
+    const cache = cacheOf(env);
+    expect(Object.keys(cache).length).toBeGreaterThan(pictures.length);
 
     expect(migrateAccountFolders(env).moved).toEqual(['local.files']);
 
-    expectHeld(env, 'local.files', pictures, 'moved');
+    expect(cacheOf(env)).toEqual(cache);
+    expectHeld(env, pictures, markers, 'moved');
   });
 
-  test('killed at every step and finished by the next boot, no picture is dropped or held twice', () => {
+  test.each(['dropbox.files', 'local.files'])('%s: a sweep before the first file moves, between any two steps and after the last drops no picture', (sourceId) => {
+    const { env } = fixture();
+    install(env, sourceId, { walOn: 'all' });
+    const pictures = holdPictures(env, sourceId);
+    const markers = pictures.map(markersOf);
+    const cache = cacheOf(env);
+    const steps: string[] = [];
+    const dropped: string[] = [];
+    onCheckpoint((at) => {
+      steps.push(at);
+      if (sweepDrops(env) !== 0) dropped.push(at);
+    });
+
+    expect(migrateAccountFolders(env).moved).toEqual([sourceId]);
+
+    expect(dropped, 'the sweeps that dropped a picture').toEqual([]);
+    expect(steps.filter((at) => at.startsWith('rename:')).length).toBeGreaterThan(5);
+    expect(cacheOf(env)).toEqual(cache);
+    expectHeld(env, pictures, markers, 'moved');
+  });
+
+  test('killed at every step and finished by the next boot, or found wrong and put back, no picture is dropped and no marker changes', () => {
     const labels: string[] = [];
     {
       const { env } = fixture();
@@ -657,120 +834,54 @@ describe('the media cache: a moved store keeps its pictures', () => {
       migrateAccountFolders(env);
       __accountMigrationTestHooks.reset();
     }
-    for (const label of labels) {
-      const { env } = fixture();
-      install(env, 'dropbox.files', { walOn: 'all' });
-      const pictures = holdPictures(env, 'dropbox.files');
-      __accountMigrationTestHooks.checkpoint = (at) => {
-        if (at === label) throw new AccountMigrationKilled(at);
-      };
-      expect(() => migrateAccountFolders(env), label).toThrow(AccountMigrationKilled);
-      __accountMigrationTestHooks.reset();
+    for (const way of ['finished', 'put back'] as const) {
+      for (const label of labels.filter((at) => way === 'finished' || at !== 'flipped')) {
+        const { env } = fixture();
+        install(env, 'dropbox.files', { walOn: 'all' });
+        const pictures = holdPictures(env, 'dropbox.files');
+        const markers = pictures.map(markersOf);
+        const cache = cacheOf(env);
+        const dropped: string[] = [];
+        onCheckpoint((at) => {
+          if (sweepDrops(env) !== 0) dropped.push(at);
+          if (at === label) throw new AccountMigrationKilled(at);
+        });
+        expect(() => migrateAccountFolders(env), `${way} ${label}`).toThrow(AccountMigrationKilled);
+        __accountMigrationTestHooks.reset();
+        // A sweep with the move stopped in the middle.
+        expectHeld(env, pictures, markers, `${way} ${label}: killed`);
 
-      expect(migrateAccountFolders(withoutSwitch(env)).errors, label).toEqual([]);
+        if (way === 'put back') lieAboutSizes(env, 'dropbox.files');
+        const boot = migrateAccountFolders(label === 'folded' ? env : withoutSwitch(env));
 
-      expectHeld(env, 'dropbox.files', pictures, label);
+        expect(boot.errors, `${way} ${label}`).toEqual([]);
+        expect(dropped, `${way} ${label}: the sweeps that dropped a picture`).toEqual([]);
+        expect(cacheOf(env), `${way} ${label}`).toEqual(cache);
+        expectHeld(env, pictures, markers, `${way} ${label}: after`);
+      }
     }
-  }, 120_000);
+  }, 240_000);
 
-  test('a move that is put back hands the pictures back: the markers are exactly what they were', () => {
+  test('a move that is put back leaves the pictures held exactly as they were', () => {
     const { env } = fixture();
     install(env, 'dropbox.files');
     const pictures = holdPictures(env, 'dropbox.files');
-    const before = pictures.map(markersOf);
-    const folder = accountFolder({ source_id: 'dropbox.files', slot: '1' }, env);
-    __accountMigrationTestHooks.look = (path, actual): MigrationLook | undefined => (
-      path.startsWith(`${folder}/`) && path.endsWith('.tier-ledger.sqlite') && actual.kind === 'file'
-        ? { ...actual, size: actual.size + 1n }
-        : undefined
-    );
-
-    expect(migrateAccountFolders(env).movedBack).toHaveLength(1);
-
-    expect(pictures.map(markersOf)).toEqual(before);
-    expect(sweepMediaCache(mediaCacheDir(env), FAR_FUTURE)).toBe(0);
-    for (const picture of pictures) expect(existsSync(picture.path)).toBe(true);
-  });
-
-  test('a sweep between any two steps drops no picture: every one is held by its store where it is, before the first file moves', () => {
-    const { env } = fixture();
-    install(env, 'dropbox.files', { walOn: 'none' });
-    const pictures = holdPictures(env, 'dropbox.files');
-    // Pictures of days ago: what the sweeps another store's writes run drop when nothing holds them.
-    const longAgo = new Date(Date.now() - 3 * 24 * 60 * 60_000);
-    for (const picture of pictures) utimesSync(picture.path, longAgo, longAgo);
-    const swept: string[] = [];
+    const markers = pictures.map(markersOf);
+    const cache = cacheOf(env);
+    lieAboutSizes(env, 'dropbox.files');
     const dropped: string[] = [];
-    __accountMigrationTestHooks.checkpoint = (at) => {
-      // The sweep that another store's write would run, at every step: it drops what no store holds.
-      if (sweepMediaCache(mediaCacheDir(env)) !== 0) dropped.push(at);
-      swept.push(at);
-    };
-
-    const report = migrateAccountFolders(env);
-
-    expect(dropped, 'the sweeps that dropped a picture').toEqual([]);
-    expect(report, JSON.stringify(report)).toMatchObject({ moved: ['dropbox.files'] });
-    for (const picture of pictures) expect(existsSync(picture.path), picture.path).toBe(true);
-
-    expect(swept.filter((at) => at.startsWith('rename:')).length).toBeGreaterThan(5);
-    expectHeld(env, 'dropbox.files', pictures, 'moved');
-  });
-
-  test('the same on the way back: a sweep at any step of a move that is put back drops no picture', () => {
-    const { env } = fixture();
-    install(env, 'dropbox.files', { walOn: 'none' });
-    const pictures = holdPictures(env, 'dropbox.files');
-    const before = pictures.map(markersOf);
-    const longAgo = new Date(Date.now() - 3 * 24 * 60 * 60_000);
-    for (const picture of pictures) utimesSync(picture.path, longAgo, longAgo);
-    const folder = accountFolder({ source_id: 'dropbox.files', slot: '1' }, env);
-    __accountMigrationTestHooks.look = (path, actual): MigrationLook | undefined => (
-      path.startsWith(`${folder}/`) && path.endsWith('.tier-ledger.sqlite') && actual.kind === 'file'
-        ? { ...actual, size: actual.size + 1n }
-        : undefined
-    );
-    const dropped: string[] = [];
-    __accountMigrationTestHooks.checkpoint = (at) => {
-      if (sweepMediaCache(mediaCacheDir(env)) !== 0) dropped.push(at);
-    };
+    onCheckpoint((at) => {
+      if (sweepDrops(env) !== 0) dropped.push(at);
+    });
 
     expect(migrateAccountFolders(env).movedBack).toHaveLength(1);
 
     expect(dropped, 'the sweeps that dropped a picture').toEqual([]);
-    for (const picture of pictures) expect(existsSync(picture.path), picture.path).toBe(true);
-    expect(pictures.map(markersOf)).toEqual(before);
+    expect(cacheOf(env)).toEqual(cache);
+    expectHeld(env, pictures, markers, 'put back');
   });
 
-  test('out of time handing the pictures over: nothing has moved, the plan waits, the pictures stay held, and the next start goes on', () => {
-    const { env } = fixture();
-    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
-    const pictures = holdPictures(env, 'dropbox.files');
-    const before = pictures.map(markersOf);
-    __accountMigrationTestHooks.limits = { hardStopMs: -1 };
-
-    const report = migrateAccountFolders(env);
-
-    expect(report.stuck).toEqual([{ sourceId: 'dropbox.files', detail: expect.stringContaining('more than one start') }]);
-    expect(report.moved).toEqual([]);
-    expect(entryOf(env, 'dropbox.files')!.migration?.state).toBe('moving');
-    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(false);
-    for (const path of legacy.filter((file) => !/-(wal|shm)$/.test(file))) expect(existsSync(path), path).toBe(true);
-    // Not a problem for the owner: no Needs you row for time.
-    expect(sourceStorageNotices(env).filter((notice) => notice.kind !== 'stuck')).toEqual([]);
-    // Held as before, and a sweep drops none.
-    expect(sweepMediaCache(mediaCacheDir(env), FAR_FUTURE)).toBe(0);
-    for (const [index, picture] of pictures.entries()) {
-      expect(existsSync(picture.path)).toBe(true);
-      for (const [name, holder] of Object.entries(before[index]!)) expect(markersOf(picture)[name]).toBe(holder);
-    }
-
-    __accountMigrationTestHooks.reset();
-    expect(migrateAccountFolders(withoutSwitch(env)).moved).toEqual(['dropbox.files']);
-    expectHeld(env, 'dropbox.files', pictures, 'finished');
-  });
-
-  test('no picture cache at all: the move needs none', () => {
+  test('no picture cache at all: the move needs none, and makes none', () => {
     const { env } = fixture();
     install(env, 'dropbox.files');
     expect(existsSync(mediaCacheDir(env))).toBe(false);
@@ -792,10 +903,14 @@ describe('a check that fails puts everything back', () => {
     );
   }
 
-  test('files are back where they were, byte for byte; the account stays legacy with a Needs you row; the entry says what failed', () => {
+  test('files are back where they were, byte for byte once the logs were folded in; the account stays legacy with a Needs you row; the entry says what failed', () => {
     const { env, root } = fixture();
     install(env, 'dropbox.files', { walOn: 'all' });
-    const before = tree(root);
+    let before: Record<string, string> = {};
+    onCheckpoint((at) => {
+      // The files as the fold leaves them: from here the pass writes nothing to them.
+      if (at === 'folded') before = tree(root);
+    });
     lieAboutOneSize(env, 'dropbox.files');
 
     const report = migrateAccountFolders(env);
@@ -874,11 +989,14 @@ describe('a check that fails puts everything back', () => {
     for (const label of labels) {
       const { env, root } = fixture();
       install(env, 'dropbox.files', { walOn: 'all' });
-      const before = tree(root);
+      let before: Record<string, string> = {};
+      onCheckpoint((at) => {
+        if (at === 'folded') before = tree(root);
+      });
       lieAboutOneSize(env, 'dropbox.files');
-      __accountMigrationTestHooks.checkpoint = (at) => {
+      onCheckpoint((at) => {
         if (at === label) throw new AccountMigrationKilled(at);
-      };
+      });
       expect(() => migrateAccountFolders(env), label).toThrow(AccountMigrationKilled);
       __accountMigrationTestHooks.reset();
       if (label !== 'reverted') {
@@ -953,26 +1071,90 @@ describe('an account stays where it is, and says why', () => {
     expect(existsSync(join(root, 'sources'))).toBe(false);
   });
 
-  test('a rename that fails with EXDEV in the middle puts back what had moved, and is the same skip', () => {
+  const strip = (all: Record<string, string>) => Object.fromEntries(Object.entries(all).filter(([name]) => !name.startsWith('registry.json') && !name.includes('.lock')));
+
+  /** A hard link that works until its `n`th call and then fails with `code`, as a file system that cannot make one does. */
+  const linkFailsAt = (n: number, code: string): void => {
+    let links = 0;
+    __accountMigrationTestHooks.link = (from, to) => {
+      links += 1;
+      if (links === n) throw Object.assign(new Error(`${code}: link not permitted`), { code });
+      linkSync(from, to);
+    };
+  };
+
+  test('a link that fails with EXDEV in the middle puts back what had moved, and is the same skip as a device that differs', () => {
     const { env, root } = fixture();
     install(env, 'dropbox.files', { walOn: 'all' });
-    const before = tree(root);
-    let renames = 0;
-    __accountMigrationTestHooks.rename = (from, to) => {
-      renames += 1;
-      if (renames === 5) throw Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' });
-      renameSync(from, to);
-    };
+    let before: Record<string, string> = {};
+    onCheckpoint((at) => { if (at === 'folded') before = tree(root); });
+    linkFailsAt(5, 'EXDEV');
 
     const report = migrateAccountFolders(env);
 
     expect(report.skipped).toEqual([{ sourceId: 'dropbox.files', reason: 'other_device' }]);
     expect(report.movedBack).toEqual([]);
-    const strip = (all: Record<string, string>) => Object.fromEntries(Object.entries(all).filter(([name]) => !name.startsWith('registry.json') && !name.includes('.lock')));
     expect(strip(tree(root))).toEqual(strip(before));
     expect(existsSync(join(root, 'sources', 'dropbox.files'))).toBe(false);
     expect(entryOf(env, 'dropbox.files')!.migration).toMatchObject({ state: 'skipped', reason: 'other_device' });
     expect(entryOf(env, 'dropbox.files')!.layout).toBe('legacy');
+  });
+
+  describe.each([['EPERM'], ['ENOTSUP'], ['EOPNOTSUPP'], ['ENOSYS'], ['EMLINK']])('a file system that makes no hard links (%s)', (code) => {
+    test.each([[1, 'at the first file'], [5, 'part way']])('failing %s (%s): the account stays legacy, every file is where and as it was, and the reason is recorded', (n) => {
+      const { env, root } = fixture();
+      const legacy = install(env, 'dropbox.files', { walOn: 'all' });
+      const before = new Map(contentFiles(legacy).map((path) => [path, inode(path)]));
+      const folded = foldedDigests(legacy);
+      linkFailsAt(n, code);
+
+      const report = migrateAccountFolders(env);
+
+      expect(report.skipped, JSON.stringify(report)).toEqual([{ sourceId: 'dropbox.files', reason: 'no_hard_links' }]);
+      expect(report.moved).toEqual([]);
+      expect(report.movedBack).toEqual([]);
+      expect(report.stuck).toEqual([]);
+      for (const [path, was] of before) expect(inode(path), path).toBe(was);
+      expectBytesKept(env, 'dropbox.files', folded, 'legacy', code);
+      expect(existsSync(join(root, 'sources', 'dropbox.files'))).toBe(false);
+      const entry = entryOf(env, 'dropbox.files')!;
+      expect(entry.layout).toBe('legacy');
+      expect(entry.migration).toMatchObject({ state: 'skipped', reason: 'no_hard_links' });
+      expect(entry.migration?.moves).toBeUndefined();
+      expect(entry.migration?.detail).toContain('hard links');
+      expect(JSON.stringify(entry.migration)).not.toContain(env.HOME!);
+      // Not a problem the owner can act on with a click: no Needs you row, and the account opens where it always was.
+      expect(sourceStorageNotices(env)).toEqual([]);
+      expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(true);
+      expect(readSourceRegistry(env).schema).toBe(1);
+    });
+  });
+
+  test('a file system that never makes a link: every boot ends in the same skip, nothing is copied or renamed instead, and nothing is left behind', () => {
+    const { env, root } = fixture();
+    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+    const before = tree(root);
+    __accountMigrationTestHooks.link = () => { throw Object.assign(new Error('EPERM: operation not permitted, link'), { code: 'EPERM' }); };
+
+    for (const boot of [1, 2, 3]) {
+      expect(migrateAccountFolders(env).skipped, `boot ${boot}`).toEqual([{ sourceId: 'dropbox.files', reason: 'no_hard_links' }]);
+      expect(strip(tree(root)), `boot ${boot}`).toEqual(strip(before));
+      for (const path of legacy) expect(existsSync(path), path).toBe(true);
+    }
+    expect(existsSync(join(root, 'sources'))).toBe(false);
+    expect(entryOf(env, 'dropbox.files')).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'no_hard_links' } });
+  });
+
+  test('the same account moves once the file system makes links: the skip is not remembered', () => {
+    const { env } = fixture();
+    install(env, 'dropbox.files', { walOn: 'none' });
+    linkFailsAt(1, 'EPERM');
+    expect(migrateAccountFolders(env).skipped).toEqual([{ sourceId: 'dropbox.files', reason: 'no_hard_links' }]);
+    __accountMigrationTestHooks.reset();
+
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+
+    expect(entryOf(env, 'dropbox.files')).toMatchObject({ layout: 'folder', migration: { state: 'done' } });
   });
 
   test('both the old file and one in the folder: nothing moves, and the owner is told (a Needs you row, entry made for it)', () => {
@@ -1051,6 +1233,95 @@ describe('an account stays where it is, and says why', () => {
     const report = migrateAccountFolders(env);
     expect(report.moved).toEqual([]);
     expect(tree(root)).toEqual(before);
+  });
+});
+
+describe('the logs are folded in first, or the account waits', () => {
+  const opened: Database[] = [];
+  afterEach(() => {
+    for (const db of opened.splice(0)) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // No transaction open.
+      }
+      db.close();
+    }
+  });
+
+  const skippedAsUnfolded = (report: ReturnType<typeof migrateAccountFolders>): void => {
+    expect(report.skipped, JSON.stringify(report)).toEqual([{ sourceId: 'dropbox.files', reason: 'log_not_folded' }]);
+    expect(report.moved).toEqual([]);
+    expect(report.stuck).toEqual([]);
+  };
+
+  test('a store another connection keeps from finishing its checkpoint is not folded: nothing moves, the reason is recorded, and the account moves once the connection ends', () => {
+    const { env, root } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'first' });
+    const reader = new Database(store!, { readwrite: true });
+    opened.push(reader);
+    reader.exec('PRAGMA wal_autocheckpoint = 0; BEGIN');
+    expect((reader.query('SELECT count(*) AS n FROM t').get() as { n: number }).n).toBe(3);
+
+    skippedAsUnfolded(migrateAccountFolders(env));
+
+    expect(existsSync(join(root, 'sources'))).toBe(false);
+    expect(existsSync(store!)).toBe(true);
+    const entry = entryOf(env, 'dropbox.files')!;
+    expect(entry).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'log_not_folded' } });
+    expect(entry.migration?.moves).toBeUndefined();
+    expect(JSON.stringify(entry.migration)).not.toContain(env.HOME!);
+    // The logs are folded in when the store is next closed; waiting costs the owner nothing, so there is no Needs you row.
+    expect(sourceStorageNotices(env)).toEqual([]);
+    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(true);
+    expect(readSourceRegistry(env).schema).toBe(1);
+
+    reader.exec('ROLLBACK');
+    reader.close();
+    opened.length = 0;
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+    expect(rowsOf(resolvedStorePath('dropbox.files', 'secure_local', env))).toBe(3);
+  }, 30_000);
+
+  test('a store written to after its log was folded is not moved with a log that holds new rows: the account waits, and the next boot folds them in', () => {
+    const { env, root } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'none' });
+    let writer: Database | undefined;
+    onCheckpoint((at) => {
+      if (at !== 'folded') return;
+      // Another process writes between the fold and the plan, and leaves its rows in the log.
+      writer = new Database(store!, { readwrite: true });
+      opened.push(writer);
+      writer.exec('PRAGMA wal_autocheckpoint = 0');
+      writer.query('INSERT INTO t VALUES (?)').run('written late');
+    });
+
+    skippedAsUnfolded(migrateAccountFolders(env));
+    __accountMigrationTestHooks.reset();
+
+    expect(existsSync(join(root, 'sources'))).toBe(false);
+    expect(statSync(`${store}-wal`).size, 'the new rows are in the log').toBeGreaterThan(0);
+    expect(entryOf(env, 'dropbox.files')).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'log_not_folded' } });
+    writer!.close();
+    opened.length = 0;
+
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+    const moved = resolvedStorePath('dropbox.files', 'secure_local', env);
+    expect(existsSync(`${moved}-wal`) ? statSync(`${moved}-wal`).size : 0).toBe(0);
+    expect(rowsOf(moved), 'the row written late is in the database file that moved').toBe(4);
+  });
+
+  test('a file that is not a database but has a log with bytes in it is not moved away from that log', () => {
+    const { env, root } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'none' });
+    writeFileSync(store!, Buffer.alloc(64, 9));
+    writeFileSync(`${store}-wal`, Buffer.alloc(100, 1));
+
+    skippedAsUnfolded(migrateAccountFolders(env));
+
+    expect(existsSync(join(root, 'sources'))).toBe(false);
+    expect(existsSync(store!)).toBe(true);
+    expect(entryOf(env, 'dropbox.files')).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'log_not_folded' } });
   });
 });
 
@@ -1274,11 +1545,27 @@ describe('a file lost while the move is part way', () => {
     return { env, root, legacy, moves: entryOf(env, 'dropbox.files')!.migration!.moves! };
   }
 
-  test('a write-ahead log that held data and is gone from both places is a loss, before the move and during it', () => {
+  /**
+   * A log of the store added to the plan, as a plan made where SQLite leaves a closed database's `-wal` and `-shm` beside
+   * it (macOS) carries them: the file is made at its old place and listed with its identity. This build plans only empty
+   * logs (the fold empties them and the pass skips an account whose log has bytes again), but a plan is read as data:
+   * one that says a log held bytes is believed, and that log's loss is a loss.
+   */
+  function withPlannedLog(env: Env, root: string, suffix: '-wal' | '-shm', bytes: number): SourceRegistryMove {
+    const store = entryOf(env, 'dropbox.files')!.migration!.moves!.find((move) => move.role === 'store' && move.db === true && move.from.endsWith('dropbox-files-connector-store.sqlite'))!;
+    const from = `${store.from}${suffix}`;
+    const path = join(root, ...from.split('/'));
+    writeFileSync(path, Buffer.alloc(bytes, 1));
+    const found = lstatSync(path, { bigint: true });
+    const move: SourceRegistryMove = { role: 'store', from, to: `${store.to}${suffix}`, kind: 'file', dev: String(found.dev), ino: String(found.ino), size: bytes };
+    updateSourceRegistry(env, (registry) => { registry.accounts[0]!.migration!.moves!.push(move); });
+    return move;
+  }
+
+  test('a write-ahead log the plan says held data and is gone from both places is a loss, before the move and during it', () => {
     for (const label of ['plan', 'rename:5']) {
-      const { env, root, moves } = killedAt(label, { walOn: 'first' });
-      const wal = moves.find((move) => move.from.endsWith('-wal') && move.size > 0)!;
-      expect(wal, 'the store with a pending log has a log with bytes').toBeDefined();
+      const { env, root } = killedAt(label, { walOn: 'none' });
+      const wal = withPlannedLog(env, root, '-wal', 4096);
       for (const place of [wal.from, wal.to]) rmSync(join(root, ...place.split('/')), { force: true });
 
       const report = migrateAccountFolders(env);
@@ -1291,12 +1578,13 @@ describe('a file lost while the move is part way', () => {
     }
   });
 
-  test('a log that disappears after the move, before the check, fails the check', () => {
-    const { env, root, moves } = killedAt('rename:3', { walOn: 'first' });
-    const wal = moves.find((move) => move.from.endsWith('-wal') && move.size > 0)!;
+  test('a log the plan says held data that disappears after the move, before the check, fails the check', () => {
+    const { env, root } = killedAt('plan', { walOn: 'none' });
+    const wal = withPlannedLog(env, root, '-wal', 4096);
+    const last = entryOf(env, 'dropbox.files')!.migration!.moves!.length - 1;
     __accountMigrationTestHooks.checkpoint = (at) => {
       // After every rename and before the identity check: the log at its new place is removed.
-      if (at === `rename:${moves.length - 1}`) rmSync(join(root, ...wal.to.split('/')), { force: true });
+      if (at === `rename:${last}`) rmSync(join(root, ...wal.to.split('/')), { force: true });
     };
 
     const report = migrateAccountFolders(env);
@@ -1306,16 +1594,16 @@ describe('a file lost while the move is part way', () => {
     expect(entryOf(env, 'dropbox.files')!.migration?.state).toBe('reverting');
   });
 
-  test('only SQLite\'s index file (-shm) may be missing: without it the move goes through', () => {
-    const { env, root, moves } = killedAt('plan', { walOn: 'first' });
-    const shm = moves.filter((move) => move.from.endsWith('-shm'));
-    expect(shm.length).toBeGreaterThan(0);
-    for (const move of shm) rmSync(join(root, ...move.from.split('/')), { force: true });
+  test('only SQLite\'s scratch files may be missing, the index (-shm) and a log that held nothing: without them the move goes through', () => {
+    const { env, root } = killedAt('plan', { walOn: 'none' });
+    const scratch = [withPlannedLog(env, root, '-shm', 32), withPlannedLog(env, root, '-wal', 0)];
+    for (const move of scratch) rmSync(join(root, ...move.from.split('/')), { force: true });
 
     const report = migrateAccountFolders(env);
 
     expect(report.moved).toEqual(['dropbox.files']);
     expect(entryOf(env, 'dropbox.files')!.layout).toBe('folder');
+    expect(storeFileReads(resolvedStorePath('dropbox.files', 'secure_local', env))).toBe(true);
   });
 });
 
@@ -1523,10 +1811,9 @@ describe('a file is never moved onto something that is there', () => {
     const store = legacy[0]!;
     const target = destinationOf(env, store, 'dropbox.files');
     const original = identity(store);
-    __accountMigrationTestHooks.rename = (from, to) => {
-      if (to !== target) return renameSync(from, to);
+    __accountMigrationTestHooks.link = (from, to) => {
       linkSync(from, to);
-      throw new AccountMigrationKilled('between the link and the unlink');
+      if (to === target) throw new AccountMigrationKilled('between the link and the unlink');
     };
     expect(() => migrateAccountFolders(env)).toThrow(AccountMigrationKilled);
     __accountMigrationTestHooks.reset();
@@ -1547,10 +1834,9 @@ describe('a file is never moved onto something that is there', () => {
     const target = destinationOf(env, store, 'dropbox.files');
     const original = identity(store);
     lieAboutOneSize(env);
-    __accountMigrationTestHooks.rename = (from, to) => {
-      if (to !== store) return renameSync(from, to);
+    __accountMigrationTestHooks.link = (from, to) => {
       linkSync(from, to);
-      throw new AccountMigrationKilled('between the link and the unlink');
+      if (to === store) throw new AccountMigrationKilled('between the link and the unlink');
     };
     expect(() => migrateAccountFolders(env)).toThrow(AccountMigrationKilled);
     __accountMigrationTestHooks.reset();
@@ -1564,6 +1850,40 @@ describe('a file is never moved onto something that is there', () => {
     expect(identity(store)).toBe(original);
     expect(existsSync(target)).toBe(false);
     expect(entryOf(env, 'dropbox.files')!.layout).toBe('legacy');
+  });
+
+  test('a log made at the new place after the plan goes back with its store, and a kill between its link and its unlink is finished by the next boot', () => {
+    const { env, root } = fixture();
+    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+    const store = legacy.find((path) => path.endsWith('dropbox-files-connector-store.sqlite'))!;
+    const target = destinationOf(env, store, 'dropbox.files');
+    // A store with no log at the plan, and one at its new place by the time the move is found wrong: its identity is not in the plan.
+    for (const suffix of ['-wal', '-shm', '-journal']) rmSync(`${store}${suffix}`, { force: true });
+    lieAboutOneSize(env);
+    const scratchAtNewPlace = `${target}-journal`;
+    onCheckpoint((at) => {
+      if (at.startsWith('rename:') && !existsSync(scratchAtNewPlace) && existsSync(target)) writeFileSync(scratchAtNewPlace, 'made after the plan');
+    });
+    const original = inode(store);
+    const scratchAtOldPlace = `${store}-journal`;
+    __accountMigrationTestHooks.link = (from, to) => {
+      linkSync(from, to);
+      if (to === scratchAtOldPlace) throw new AccountMigrationKilled('between the link and the unlink');
+    };
+    expect(() => migrateAccountFolders(env)).toThrow(AccountMigrationKilled);
+    __accountMigrationTestHooks.reset();
+    expect(existsSync(scratchAtNewPlace) && existsSync(scratchAtOldPlace), 'one file under two names').toBe(true);
+    expect(inode(scratchAtNewPlace)).toBe(inode(scratchAtOldPlace));
+
+    const report = migrateAccountFolders(withoutSwitch(env));
+
+    expect(report.stuck, JSON.stringify(report)).toEqual([]);
+    expect(report.movedBack).toEqual([{ sourceId: 'dropbox.files', reason: 'verify_failed' }]);
+    expect(readFileSync(scratchAtOldPlace, 'utf8')).toBe('made after the plan');
+    expect(existsSync(scratchAtNewPlace)).toBe(false);
+    expect(inode(store)).toBe(original);
+    expect(existsSync(join(root, 'sources', 'dropbox.files'))).toBe(false);
+    expect(entryOf(env, 'dropbox.files')).toMatchObject({ layout: 'legacy', migration: { state: 'failed', reason: 'verify_failed' } });
   });
 
   test('a folder is moved only onto nothing: a non-empty folder that appears is not replaced', () => {

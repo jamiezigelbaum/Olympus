@@ -75,26 +75,12 @@ export interface SourceRegistryMove {
   size: number;
 }
 
-/**
- * A store's media-cache holder before the move: the marker names (digests) the
- * cache holds for it, and the store's new path, relative to the data root. The
- * markers are re-keyed to the new path before the layout flips, so the cache
- * drops no picture and keeps no marker for a store that has moved.
- */
-export interface SourceRegistryMediaHolder {
-  store: string;
-  digests: string[];
-}
-
 export interface SourceRegistryMigration {
   state: SourceRegistryMigrationState;
   at: string;
   reason?: string;
   detail?: string;
   moves?: SourceRegistryMove[];
-  holders?: SourceRegistryMediaHolder[];
-  /** The renames are complete and every file has its recorded identity; later steps change file sizes. */
-  verified?: true;
   /** `PRAGMA quick_check` of each database before the move, to record how it was; never a reason to stop. */
   checked?: Array<{ file: string; result: 'ok' | 'damaged' | 'not_checked' }>;
 }
@@ -286,8 +272,6 @@ function isValidMigration(value: unknown): value is SourceRegistryMigration {
     && (value.detail === undefined || typeof value.detail === 'string')
     && (value.moves === undefined || (Array.isArray(value.moves) && value.moves.every(isValidMove)))
     && (!pending || Array.isArray(value.moves))
-    && (value.holders === undefined || (Array.isArray(value.holders) && value.holders.every(isValidHolder)))
-    && (value.verified === undefined || value.verified === true)
     && (value.checked === undefined || (Array.isArray(value.checked) && value.checked.every(isValidCheck)));
 }
 
@@ -301,11 +285,6 @@ function isValidMove(value: unknown): value is SourceRegistryMove {
     && nonEmptyString(value.dev)
     && nonEmptyString(value.ino)
     && typeof value.size === 'number' && Number.isSafeInteger(value.size) && value.size >= 0;
-}
-
-function isValidHolder(value: unknown): value is SourceRegistryMediaHolder {
-  return isRecord(value) && nonEmptyString(value.store)
-    && Array.isArray(value.digests) && value.digests.every(nonEmptyString);
 }
 
 function isValidCheck(value: unknown): boolean {

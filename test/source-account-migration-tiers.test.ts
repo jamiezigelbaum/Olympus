@@ -3,21 +3,25 @@
 // secret-locations index were written by the real tiered store set, with
 // embeddings, is moved into its account folder, and then answers exactly as it
 // did: the same hits, the same vectors, the same sync history, nothing
-// re-embedded. A move that is put back leaves the stores bound to the ledger
-// where it was. Expected results are the stores' own content read before the
-// move, not what the migration reports.
+// re-embedded. The move only renames files: no store or ledger is written to,
+// each store's binding row still names the ledger's old place, and each store
+// finds its set's ledger by the ledger's id. A move that is put back, or
+// finished after a crash, ends the same way. Expected results are the stores'
+// own content read before the move, not what the migration reports.
 
 import { Database } from 'bun:sqlite';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createTierVisibilityGate } from '../src/workers/connector-store/tier-visibility.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
-import { secretLocationsPathForStore, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { accountStorePath, legacyAccountFiles, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import {
   __accountMigrationTestHooks,
+  AccountMigrationKilled,
   MIGRATE_ACCOUNT_FOLDERS_ENV,
   migrateAccountFolders,
   type MigrationLook,
@@ -30,6 +34,7 @@ import {
   FIXTURE_PLACEMENT,
   fixtureConnector,
   localId,
+  openLegStore,
   openTierFixture,
   snapshotStore,
   type FixtureSpec,
@@ -131,23 +136,20 @@ async function search(tiered: TierFixture, query: string): Promise<Record<string
   return payload;
 }
 
-/** The rows of a store's sync history, with the one thing a move changes, the tier ledger's path in its binding, left out. */
+/** The rows of a store's sync history, the binding row included: a move writes none of them. */
 function syncHistory(path: string): Array<Record<string, unknown>> {
   const db = new Database(path, { readonly: true });
   try {
-    const rows = db.query(`
+    return db.query(`
       SELECT sync_run_id, connector_id, status, cursor, items_seen, items_indexed, started_at, completed_at
       FROM sync_runs ORDER BY sync_run_id
     `).all() as Array<Record<string, unknown>>;
-    return rows.map((row) => (row['connector_id'] === 'tiered_store_set_binding'
-      ? { ...row, cursor: JSON.stringify({ ledgerId: (JSON.parse(String(row['cursor'])) as { ledgerId: string }).ledgerId }) }
-      : row));
   } finally {
     db.close();
   }
 }
 
-/** The ledger path each bound store names, by tier. */
+/** The ledger path each bound store names: where the ledger was when the store was bound, a hint that is never rewritten. */
 function boundLedger(path: string): string | undefined {
   const db = new Database(path, { readonly: true });
   try {
@@ -156,6 +158,60 @@ function boundLedger(path: string): string | undefined {
   } finally {
     db.close();
   }
+}
+
+/**
+ * Where a store alone (no set around it) finds the ledger it is bound to: by the ledger's id, whatever the binding
+ * row names. Undefined when no ledger with that id can be found.
+ */
+function ledgerFoundBy(paths: Record<Tier, string>, tier: Tier): string | undefined {
+  const store = openLegStore(paths, tier);
+  try {
+    return store.tierSetLedgerPath();
+  } finally {
+    store.close();
+  }
+}
+
+/** The connections the fixtures open are closed but may not be collected yet; a store file must have none open when it is renamed (the engine moves it before it opens any). */
+const settle = (): void => { Bun.gc(true); };
+
+const withoutSwitch = (env: Env): Env => {
+  const { [MIGRATE_ACCOUNT_FOLDERS_ENV]: _removed, ...rest } = env;
+  return rest;
+};
+
+/** Adds a handler to the pass's checkpoints; the ones set before it run first, so a handler that kills the pass goes last. */
+function onCheckpoint(handler: (at: string) => void): void {
+  const previous = __accountMigrationTestHooks.checkpoint;
+  __accountMigrationTestHooks.checkpoint = (at) => {
+    previous?.(at);
+    handler(at);
+  };
+}
+
+const digest = (path: string): string => createHash('sha256').update(readFileSync(path)).digest('hex');
+const siblings = (store: string): string[] => [store, tierLedgerPathForStore(store), secretLocationsPathForStore(store), tierSnifferPathForStore(store)];
+
+/**
+ * The bytes of every store, ledger and sidecar once the pass has folded the logs in (its `folded` step), by the
+ * place they end up when moved (`to`) and the place they are put back to (`from`). The move writes nothing to them.
+ */
+function foldedBytes(from: Record<Tier, string>, to: Record<Tier, string>): Array<{ from: string; to: string; bytes?: string }> {
+  const files = DOMAINS.flatMap((tier) => siblings(from[tier]).map((path, index) => ({ from: path, to: siblings(to[tier])[index]! })));
+  const taken = files.map((file): { from: string; to: string; bytes?: string } => ({ ...file }));
+  onCheckpoint((at) => {
+    if (at !== 'folded') return;
+    for (const file of taken) if (existsSync(file.from)) file.bytes = digest(file.from);
+  });
+  return taken;
+}
+
+function expectBytesKept(taken: Array<{ from: string; to: string; bytes?: string }>, where: 'from' | 'to', label = ''): void {
+  const held = taken.filter((file) => file.bytes !== undefined);
+  // The three stores, and the set's ledger and secret-locations index beside the secure one.
+  expect(held.length, `${label}: the fold was not reached`).toBeGreaterThanOrEqual(5);
+  for (const file of held) expect(digest(file[where]), `${label}: ${file[where]} changed`).toBe(file.bytes!);
 }
 
 const itemIds = SPECS.map((spec) => localId(spec.id));
@@ -179,35 +235,59 @@ const snapshots = (paths: Record<Tier, string>) => Object.fromEntries(
   DOMAINS.map((tier) => [tier, { rows: snapshotStore(paths[tier], itemIds), history: syncHistory(paths[tier]) }]),
 );
 
+/** Every secret-locations index in the folder reads as another size, so the identity check fails with nothing changed on disk. */
+function lieAboutSecretLocations(env: Env): void {
+  const folder = dirname(folderPaths(env).secure_local);
+  __accountMigrationTestHooks.look = (path, actual): MigrationLook | undefined => (
+    path.startsWith(`${folder}/`) && path.endsWith('.secret-locations.sqlite') && actual.kind === 'file'
+      ? { ...actual, size: actual.size + 1n }
+      : undefined
+  );
+}
+
 describe('a tiered source, moved into its folder', () => {
-  test('answers the same, holds the same vectors and sync history, binds to the ledger where it is now, and re-embeds nothing', async () => {
+  test('answers the same, holds the same vectors and sync history, finds its ledger by id where it is now, writes nothing, and re-embeds nothing', async () => {
     const { env } = home();
     const before = await populate(env);
     const answered = await observe(before);
+    settle();
     const held = snapshots(before);
+    settle();
+    const after = folderPaths(env);
+    const bytes = foldedBytes(before, after);
+    const legacyLedger = tierLedgerPathForStore(before.secure_local);
     // The fixture is what it claims to be: every tier has content, vectors and a binding.
     expect(answered.hits.length).toBeGreaterThanOrEqual(3);
     expect(answered.secrets).toHaveLength(1);
     for (const tier of DOMAINS) {
       expect(held[tier]!.rows.items.length, tier).toBeGreaterThan(0);
-      expect(boundLedger(before[tier]), tier).toBe(tierLedgerPathForStore(before.secure_local));
+      expect(boundLedger(before[tier]), tier).toBe(legacyLedger);
+      expect(ledgerFoundBy(before, tier), tier).toBe(legacyLedger);
     }
     expect(held.internal!.rows.vectors.length).toBeGreaterThan(0);
     expect(held.secure_local!.rows.vectors.length).toBeGreaterThan(0);
     expect(held.public_safe!.rows.vectors.length).toBeGreaterThan(0);
     // A cursor was stored by the sync.
     expect(JSON.stringify(held.internal!.history)).toContain('page-2');
+    settle();
 
     const report = migrateAccountFolders(env);
     expect(report, JSON.stringify(report)).toMatchObject({ moved: ['dropbox.files'], movedBack: [], stuck: [] });
 
-    const after = folderPaths(env);
     // The same answers: hits per tier, the Secret location beside them, the policy.
     expect(await observe(after)).toEqual(answered);
-    // The same rows, chunks, vectors (bytes and embedded_at), owners, embedding authority and sync history.
+    settle();
+    // The same rows, chunks, vectors (bytes and embedded_at), owners, embedding authority and sync history, binding rows included.
     expect(snapshots(after)).toEqual(held);
-    // Each store is bound to the ledger where it is now, and the ledger is the one it was.
-    for (const tier of DOMAINS) expect(boundLedger(after[tier]), tier).toBe(tierLedgerPathForStore(after.secure_local));
+    settle();
+    // The move wrote nothing to any store, ledger or sidecar: the bytes at the new places are the bytes after the logs were folded in.
+    expectBytesKept(bytes, 'to', 'moved');
+    // The binding row still names the ledger's old place, which is gone; each store finds the ledger by its id, beside the folder's secure_local store.
+    for (const tier of DOMAINS) {
+      expect(boundLedger(after[tier]), tier).toBe(legacyLedger);
+      expect(existsSync(legacyLedger)).toBe(false);
+      expect(ledgerFoundBy(after, tier), tier).toBe(tierLedgerPathForStore(after.secure_local));
+    }
 
     // Syncing again from the moved stores: no provider sees a byte of what was already embedded.
     const again = open(after);
@@ -220,58 +300,91 @@ describe('a tiered source, moved into its folder', () => {
     for (const tier of DOMAINS) expect(snapshotStore(after[tier], itemIds).vectors, tier).toEqual(held[tier]!.rows.vectors);
   });
 
-  test('a move that fails its check is put back with the stores bound to the ledger where it was', async () => {
+  test('a move that fails its check is put back: the stores are the bytes they were, bound to the ledger where it was', async () => {
     const { env } = home();
     const before = await populate(env);
     const answered = await observe(before);
+    settle();
     const held = snapshots(before);
-    const folder = dirname(folderPaths(env).secure_local);
-    __accountMigrationTestHooks.look = (path, actual): MigrationLook | undefined => (
-      path.startsWith(`${folder}/`) && path.endsWith('.secret-locations.sqlite') && actual.kind === 'file'
-        ? { ...actual, size: actual.size + 1n }
-        : undefined
-    );
+    settle();
+    const bytes = foldedBytes(before, folderPaths(env));
+    lieAboutSecretLocations(env);
 
     const report = migrateAccountFolders(env);
     expect(report.movedBack).toEqual([{ sourceId: 'dropbox.files', reason: 'verify_failed' }]);
     __accountMigrationTestHooks.reset();
 
-    for (const tier of DOMAINS) expect(boundLedger(before[tier]), tier).toBe(tierLedgerPathForStore(before.secure_local));
+    expectBytesKept(bytes, 'from', 'put back');
+    for (const tier of DOMAINS) {
+      expect(boundLedger(before[tier]), tier).toBe(tierLedgerPathForStore(before.secure_local));
+      expect(ledgerFoundBy(before, tier), tier).toBe(tierLedgerPathForStore(before.secure_local));
+    }
     expect(await observe(before)).toEqual(answered);
+    settle();
     expect(snapshots(before)).toEqual(held);
   });
 
-  test('a move that fails after the stores were bound to the new ledger binds them to the old one again', async () => {
+  test('killed at each step, then finished or found wrong and put back: the stores open, answer the same, are the same bytes, and find their ledger', async () => {
+    const labels: string[] = [];
+    {
+      const { env } = home();
+      await populate(env);
+      settle();
+      __accountMigrationTestHooks.checkpoint = (at) => { labels.push(at); };
+      migrateAccountFolders(env);
+      __accountMigrationTestHooks.reset();
+    }
+    expect(labels.length).toBeGreaterThanOrEqual(9);
+    for (const way of ['finished', 'put back'] as const) {
+      for (const label of labels.filter((at) => way === 'finished' || at !== 'flipped')) {
+        const { env } = home();
+        const before = await populate(env);
+        const answered = await observe(before);
+        settle();
+        const held = snapshots(before);
+        settle();
+        const after = folderPaths(env);
+        const bytes = foldedBytes(before, after);
+        onCheckpoint((at) => {
+          if (at === label) throw new AccountMigrationKilled(at);
+        });
+        expect(() => migrateAccountFolders(env), `${way} ${label}`).toThrow(AccountMigrationKilled);
+        __accountMigrationTestHooks.reset();
+        if (way === 'put back') lieAboutSecretLocations(env);
+
+        const boot = migrateAccountFolders(label === 'folded' ? env : withoutSwitch(env));
+
+        expect(boot.errors, `${way} ${label}`).toEqual([]);
+        expect(boot.stuck, `${way} ${label}`).toEqual([]);
+        const where = way === 'finished' ? 'to' : 'from';
+        const paths = way === 'finished' ? after : before;
+        if (way === 'finished') expect(boot.moved, `${way} ${label}`).toEqual(label === 'flipped' ? [] : ['dropbox.files']);
+        else expect(boot.movedBack, `${way} ${label}`).toEqual([{ sourceId: 'dropbox.files', reason: 'verify_failed' }]);
+        expectBytesKept(bytes, where, `${way} ${label}`);
+        for (const tier of DOMAINS) expect(ledgerFoundBy(paths, tier), `${way} ${label}: ${tier}`).toBe(tierLedgerPathForStore(paths.secure_local));
+        expect(await observe(paths), `${way} ${label}`).toEqual(answered);
+        settle();
+        expect(snapshots(paths), `${way} ${label}`).toEqual(held);
+        settle();
+      }
+    }
+  }, 240_000);
+
+  test('a store bound to a ledger that is not in the folder stays refused after the move: it is never handed the set\'s ledger', async () => {
     const { env } = home();
     const before = await populate(env);
-    const answered = await observe(before);
-    const held = snapshots(before);
-    __accountMigrationTestHooks.checkpoint = (at) => {
-      if (at === 'rebound') throw new Error('something stopped the move');
-    };
-
-    const report = migrateAccountFolders(env);
-    expect(report.movedBack).toEqual([{ sourceId: 'dropbox.files', reason: 'move_failed' }]);
-    __accountMigrationTestHooks.reset();
-
-    for (const tier of DOMAINS) expect(boundLedger(before[tier]), tier).toBe(tierLedgerPathForStore(before.secure_local));
-    expect(await observe(before)).toEqual(answered);
-    expect(snapshots(before)).toEqual(held);
-  });
-
-  test('a store bound to a ledger the move does not name keeps its binding', async () => {
-    const { env } = home();
-    const before = await populate(env);
-    // One store bound to some other set's ledger: not this move's to rewrite.
-    const stranger = join(dirname(before.secure_local), 'some-other-set.tier-ledger.sqlite');
+    settle();
+    // One store bound to some other set's ledger (an id nothing here carries).
     const db = new Database(before.internal);
     const binding = JSON.parse((db.query(`SELECT cursor FROM sync_runs WHERE connector_id = 'tiered_store_set_binding'`).get() as { cursor: string }).cursor) as Record<string, string>;
-    db.query(`UPDATE sync_runs SET cursor = ? WHERE connector_id = 'tiered_store_set_binding'`).run(JSON.stringify({ ...binding, ledgerPath: stranger }));
+    db.query(`UPDATE sync_runs SET cursor = ? WHERE connector_id = 'tiered_store_set_binding'`).run(JSON.stringify({ ...binding, ledgerId: 'ledger-of-another-set' }));
     db.close();
+    settle();
 
     expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
 
-    expect(boundLedger(folderPaths(env).internal)).toBe(stranger);
-    expect(boundLedger(folderPaths(env).secure_local)).toBe(tierLedgerPathForStore(folderPaths(env).secure_local));
+    const after = folderPaths(env);
+    expect(ledgerFoundBy(after, 'internal')).toBeUndefined();
+    expect(ledgerFoundBy(after, 'secure_local')).toBe(tierLedgerPathForStore(after.secure_local));
   });
 });

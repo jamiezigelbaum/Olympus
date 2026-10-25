@@ -12,47 +12,48 @@
  * every boot, whatever the switch says, because its account stays closed until
  * one or the other.
  *
+ * The move only renames files. Nothing in a store, a ledger or the media cache
+ * names a path any more (a store finds its set ledger by the ledger's id; a
+ * picture hold names the account and the store), so nothing there is rewritten.
+ * The one write to a database before the move is SQLite's own checkpoint.
+ *
  * Per account, in this order:
  *
  * 1. Look at every file the account owns at its legacy locations. The account
  *    stays where it is, and the reason is recorded, when an override or mount
  *    pins it, a location cannot be looked at, a file is a link or the wrong
  *    kind, a destination already exists, a file is on another device than the
- *    folder, or the registry lists stores that are not there.
- * 2. `PRAGMA quick_check` each database, within a time budget, to record how it
+ *    folder, the registry lists stores that are not there, or its logs are
+ *    large.
+ * 2. Fold each database's write-ahead log into the database
+ *    (`PRAGMA wal_checkpoint(TRUNCATE)`): afterwards the database file is the
+ *    whole database, whatever happens to a `-wal` in the move. The account stays
+ *    where it is when a log cannot be folded completely.
+ * 3. `PRAGMA quick_check` each database, within a time budget, to record how it
  *    was. Never a reason to stop.
- * 3. Write the plan into the registry entry (`migration`, schema 3): each file,
- *    where it goes and its identity (dev, ino, size), and each store's
- *    media-cache holder names. From here the account is closed.
- * 4. Rename every file into the folder (a store with its `-wal`, `-shm` and
- *    tier sidecars). Nothing is copied.
- * 5. Verify: the same identity at every destination, then a read-only open of
- *    each database that opened before. A failure undoes the move.
- * 6. Point each store's tier-set binding (the one path a store keeps inside
- *    itself) at its ledger's new place.
- * 7. Re-key the media cache's holders to the stores' new paths.
- * 8. In one registry write: `layout: 'folder'` and the plan marked done.
+ * 4. Write the plan into the registry entry (`migration`, schema 3): each file,
+ *    where it goes and its identity (dev, ino, size). From here the account is
+ *    closed.
+ * 5. Move every file into the folder (a store with its `-shm` and tier
+ *    sidecars): a hard link to the new name, then the old name removed, so a
+ *    file another process put at the destination is never replaced. Nothing is
+ *    copied. A file system that makes no hard links keeps the account where it is.
+ * 6. Verify: the same identity at every destination, then an open (query-only)
+ *    of each database that opened before. A failure undoes the move.
+ * 7. In one registry write: `layout: 'folder'` and the plan marked done.
  *
  * A crash anywhere resumes from the plan at the next boot. A failed check
- * renames everything back, leaves the account `legacy` and leaves a record the
+ * moves everything back, leaves the account `legacy` and leaves a record the
  * dashboard turns into a Needs you row (`sourceStorageNotices`).
  *
  * Deliberately light, like the registry: no workers. The only database opens
- * are the checks and the binding rewrite in core/source-storage.ts.
+ * are the fold and the checks in core/source-storage.ts.
  */
 import { linkSync, lstatSync, mkdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../workers/classification/tier-ledger-path.ts';
 import { archiveImportFamilies } from './archive-formats.ts';
 import { syncDirectorySync } from './atomic-file.ts';
-import {
-  MediaCacheRekeyStopped,
-  addMediaCacheHolder,
-  dropMediaCacheHolder,
-  mediaCacheDir,
-  mediaHolderDigests,
-  nearRealPath,
-} from './media-cache.ts';
 import {
   accountFolder,
   accountFoldersRoot,
@@ -66,7 +67,7 @@ import {
   type LayoutEnv,
 } from './olympus-layout.ts';
 import { legacyPinFor } from './source-placement.ts';
-import { repointTierSetBinding, storeFileQuickCheck, storeFileReads } from './source-storage.ts';
+import { storeFileCheckpoint, storeFileQuickCheck, storeFileReads } from './source-storage.ts';
 import {
   DEFAULT_ACCOUNT_SLOT,
   findRegistryAccount,
@@ -74,7 +75,6 @@ import {
   sourceAccountMovePending,
   updateSourceRegistry,
   type SourceRegistryAccount,
-  type SourceRegistryMediaHolder,
   type SourceRegistryMigration,
   type SourceRegistryMove,
 } from './source-registry.ts';
@@ -96,10 +96,10 @@ export const QUICK_CHECK_BUDGET_MS = 15_000;
 export const QUICK_CHECK_STORE_MAX_BYTES = 64 * 1024 * 1024;
 /** Most bytes `PRAGMA quick_check` reads in one boot, across all databases. */
 export const QUICK_CHECK_TOTAL_MAX_BYTES = 128 * 1024 * 1024;
-/** Most `-wal` and `-journal` bytes one account may carry into a move: opening a database reads its log once, and the pass opens each a handful of times. */
+/** Most `-wal` and `-journal` bytes one account may have when the pass looks at it: folding them into the databases reads them once, and opening a database reads its log. */
 export const ACCOUNT_LOG_MAX_BYTES = 32 * 1024 * 1024;
-/** After this long from the pass's start no more pictures are handed over; the plan stays and the next boot goes on. */
-export const PASS_HARD_STOP_MS = 90_000;
+/** How long folding one database's log waits for another connection, in milliseconds. The first database that is busy ends the fold for its account. */
+export const FOLD_BUSY_TIMEOUT_MS = 2_000;
 
 /** Why an account stays where it is. Short codes; the registry holds them beside plain words. */
 export type AccountMigrationSkipReason =
@@ -109,7 +109,9 @@ export type AccountMigrationSkipReason =
   | 'destination_exists'
   | 'other_device'
   | 'files_elsewhere'
-  | 'log_large';
+  | 'log_large'
+  | 'log_not_folded'
+  | 'no_hard_links';
 
 /** Why a move was undone. */
 export type AccountMigrationFailureReason = 'verify_failed' | 'move_failed';
@@ -122,6 +124,8 @@ const SKIP_REASONS: ReadonlySet<string> = new Set<AccountMigrationSkipReason>([
   'other_device',
   'files_elsewhere',
   'log_large',
+  'log_not_folded',
+  'no_hard_links',
 ]);
 
 export interface AccountMigrationReport {
@@ -151,15 +155,16 @@ export class AccountMigrationKilled extends Error {
 
 /**
  * Test seams, all off in production. `checkpoint` is called between the steps
- * (`plan`, `rename:<n>`, `verified`, `rebound`, `rekeyed`, `flipped`, and on
- * the way back `revert`, `unrename:<n>`, `reverted`) and may throw
- * `AccountMigrationKilled`. `rename` replaces the rename, and `look` what the
- * pass sees at a path (a device that differs, a folder it may not search),
- * which a test cannot make a file system say.
+ * (`folded`, `plan`, `rename:<n>`, `verified`, `flipped`, and on the way back
+ * `revert`, `unrename:<n>`, `reverted`) and may throw `AccountMigrationKilled`.
+ * `rename` replaces the move of a file, `link` the hard link it starts with, and
+ * `look` what the pass sees at a path (a device that differs, a folder it may
+ * not search), which a test cannot make a file system say.
  */
 export const __accountMigrationTestHooks: {
   checkpoint?: (at: string) => void;
   rename?: (from: string, to: string, kind: 'file' | 'dir') => void;
+  link?: (from: string, to: string) => void;
   look?: (path: string, actual: MigrationLook) => MigrationLook | undefined;
   now?: () => number;
   budgetMs?: number;
@@ -173,13 +178,13 @@ export const __accountMigrationTestHooks: {
     quickCheckStoreMaxBytes: number;
     quickCheckTotalMaxBytes: number;
     accountLogMaxBytes: number;
-    hardStopMs: number;
   }>;
   reset(): void;
 } = {
   reset() {
     delete this.checkpoint;
     delete this.rename;
+    delete this.link;
     delete this.look;
     delete this.now;
     delete this.budgetMs;
@@ -265,14 +270,10 @@ interface Context {
   env: LayoutEnv;
   root: string;
   now: () => number;
-  /** The media cache, or undefined when its location cannot be worked out (nothing can hold a file there). */
-  cacheDir: string | undefined;
   quickCheckSpentMs: number;
   quickCheckBudgetMs: number;
   /** Bytes `PRAGMA quick_check` has read so far this boot. */
   quickCheckBytes: number;
-  /** When the pass must stop handing pictures over (`PASS_HARD_STOP_MS` after it began). */
-  hardStop: number;
 }
 
 /** Paths in the registry are relative to the data root and written with `/`, so the file never names a home folder. */
@@ -292,27 +293,18 @@ const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EMLI
  * linked to its new name (which fails with `EEXIST` if the name is taken, where
  * a rename would replace what is there) and then unlinked from the old one; a
  * kill between the two leaves one file under two names, which the next call
- * finishes (`moveOne`). Node has no portable no-replace rename for folders:
- * `rename(2)` of a folder fails onto a non-empty folder or any file, and
- * replaces only an EMPTY folder, which another process would have to have made
- * in the instant since the look. On a file system without hard links the file
- * is renamed after a last look, and that window is the whole protection.
+ * finishes (`moveOne`). A file system that makes no hard links is not worked
+ * around: the error ends the move (`moveOne` reads it as the account's skip). Node has no
+ * portable no-replace rename for folders: `rename(2)` of a folder fails onto a
+ * non-empty folder or any file, and replaces only an EMPTY folder, which another
+ * process would have to have made in the instant since the look.
  */
 function moveWithoutReplacing(from: string, to: string, kind: 'file' | 'dir'): void {
   if (kind === 'dir') {
     renameSync(from, to);
     return;
   }
-  try {
-    linkSync(from, to);
-  } catch (error) {
-    if (!NO_HARD_LINKS.has(errorCode(error))) throw error;
-    if (lookAt(to).kind !== 'absent') {
-      throw Object.assign(new Error('The destination appeared.'), { code: 'EEXIST' });
-    }
-    renameSync(from, to);
-    return;
-  }
+  (__accountMigrationTestHooks.link ?? linkSync)(from, to);
   unlinkSync(from);
 }
 
@@ -371,7 +363,7 @@ function updateAccount(
 type Inspection =
   | { kind: 'nothing' }
   | { kind: 'skip'; reason: AccountMigrationSkipReason; detail: string }
-  | { kind: 'move'; moves: SourceRegistryMove[]; holders: SourceRegistryMediaHolder[] };
+  | { kind: 'move'; moves: SourceRegistryMove[] };
 
 const skip = (reason: AccountMigrationSkipReason, detail: string): Inspection => ({ kind: 'skip', reason, detail });
 
@@ -386,6 +378,31 @@ function storeNameForCorpus(sourceId: string, corpusId: string): string {
   if (sourceId !== 'archive.imports') return tier;
   const family = /^[^.]+\.archive\.([^.]+)$/.exec(corpusId)?.[1];
   return family ? `${family}.${tier}` : corpusId;
+}
+
+/**
+ * A path's real path whether or not the file is there: the real path of the
+ * nearest folder above it that exists, then the rest of the path.
+ */
+function nearRealPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // Fall through: it is not there.
+  }
+  const rest: string[] = [];
+  let near = resolve(path);
+  for (;;) {
+    rest.unshift(basename(near));
+    const up = dirname(near);
+    if (up === near) return resolve(path);
+    near = up;
+    try {
+      return join(realpathSync(near), ...rest);
+    } catch {
+      // Keep climbing to a folder that is there.
+    }
+  }
 }
 
 /**
@@ -482,10 +499,7 @@ function inspect(ctx: Context, sourceId: string, slot: string, entry: SourceRegi
     ino: String(found.ino),
     size: candidate.kind === 'dir' ? 0 : Number(found.size),
   }));
-  const holders = present
-    .filter(({ candidate }) => candidate.role === 'store' && candidate.db)
-    .map(({ candidate }): SourceRegistryMediaHolder => ({ store: relPath(root, candidate.to), digests: mediaHolderDigests(candidate.from) }));
-  return { kind: 'move', moves, holders };
+  return { kind: 'move', moves };
 }
 
 /**
@@ -530,9 +544,7 @@ function planIsCanonical(ctx: Context, sourceId: string, slot: string, migration
     return false;
   }
   const pairs = new Set(known.map((candidate) => `${relPath(ctx.root, candidate.from)}\n${relPath(ctx.root, candidate.to)}`));
-  const targets = new Set((migration.moves ?? []).map((move) => move.to));
-  return (migration.moves ?? []).every((move) => pairs.has(`${move.from}\n${move.to}`) && !move.from.split('/').includes('..'))
-    && (migration.holders ?? []).every((holder) => targets.has(holder.store));
+  return (migration.moves ?? []).every((move) => pairs.has(`${move.from}\n${move.to}`) && !move.from.split('/').includes('..'));
 }
 
 /**
@@ -639,7 +651,8 @@ function moveOne(ctx: Context, move: SourceRegistryMove, direction: 'forward' | 
     // One file under two names is how a move that was killed between its link and its unlink looks; it is finished by the unlink.
     if (
       move.kind === 'file' && source.kind === 'file' && target.kind === 'file'
-      && source.dev === target.dev && source.ino === target.ino && String(source.ino) === move.ino
+      // A file made after the plan (a companion the pass moves back) has no recorded identity: one inode under both names is proof enough.
+      && source.dev === target.dev && source.ino === target.ino && (move.ino === '' || String(source.ino) === move.ino)
     ) {
       try {
         unlinkSync(from);
@@ -662,6 +675,9 @@ function moveOne(ctx: Context, move: SourceRegistryMove, direction: 'forward' | 
     const code = errorCode(error);
     if (code === 'EXDEV') {
       throw new MoveFault('skipped', 'other_device', `${name} is on a different device than the account folder.`);
+    }
+    if (NO_HARD_LINKS.has(code) && move.kind === 'file') {
+      throw new MoveFault('skipped', 'no_hard_links', 'The file system the data folder is on does not make hard links, which moving a file safely needs, so the account stays where it is.');
     }
     if (code === 'EEXIST' || code === 'ENOTEMPTY' || code === 'ENOTDIR') {
       throw new MoveFault('failed', 'move_failed', `${name} is in both places.`);
@@ -712,83 +728,8 @@ function stateBefore(migration: SourceRegistryMigration, move: SourceRegistryMov
   return migration.checked?.find((checked) => checked.file === move.to)?.result;
 }
 
-/** The set ledger a store's binding names, mapped between the two places. */
-function ledgerMap(ctx: Context, moves: SourceRegistryMove[], direction: 'forward' | 'back'): (ledgerPath: string) => string | undefined {
-  const ledgers = moves.filter((move) => move.role === 'ledger' && move.db === true).map((move) => ({
-    from: absPath(ctx.root, move.from),
-    to: absPath(ctx.root, move.to),
-  }));
-  return (ledgerPath) => {
-    const named = nearRealPath(ledgerPath);
-    const found = ledgers.find((ledger) => nearRealPath(ledger.from) === named || nearRealPath(ledger.to) === named);
-    return found ? (direction === 'forward' ? found.to : found.from) : undefined;
-  };
-}
-
-function rebindStores(ctx: Context, migration: SourceRegistryMigration, moves: SourceRegistryMove[], direction: 'forward' | 'back'): void {
-  const map = ledgerMap(ctx, moves, direction);
-  for (const move of moves) {
-    if (move.role !== 'store' || move.db !== true || isCompanion(move.from)) continue;
-    const path = absPath(ctx.root, direction === 'forward' ? move.to : move.from);
-    try {
-      repointTierSetBinding(path, map);
-    } catch (error) {
-      // A store that did not open before is no worse for the move, and one that does not open now has no
-      // link to put back (the files return to their places all the same).
-      if (stateBefore(migration, move) === 'damaged' || (direction === 'back' && !storeFileReads(path))) continue;
-      throw new MoveFault('failed', 'verify_failed', `${basename(move.from)}'s link to its tier ledger could not be updated (${errorCode(error)}).`);
-    }
-  }
-}
-
-/**
- * The media cache keeps a picture while some store holds it, and names the
- * holder by the store's path, so a store that moves must be handed over, and a
- * sweep by another process can run at any point of the move: it removes the
- * marker of a store that is not at its path, the old one once the store has
- * moved and the new one until it has. So the pictures carry a staging marker for
- * the whole move (the sweep keeps one for a day). In two halves, either side of
- * the renames. BEFORE them (`holdPictures`) the staging marker and a durable
- * marker under the destination's name are added for every picture, the old one
- * kept: the store still sits at its old place, so nothing is lost if this is cut
- * short (`MediaCacheRekeyStopped`, when the pass is out of time, ends the pass
- * with the plan kept; no file has moved). AFTER them (`releasePictures`) the
- * marker under the new name is made sure of once the store is there, then the
- * old markers and the staging marker go; cut short, the pictures not reached
- * stay staged and the plan stays open.
- */
-function holdersAt(ctx: Context, migration: SourceRegistryMigration, direction: 'forward' | 'back'): Array<{ from: readonly string[]; to: string; stagedBy: string }> {
-  const places: Array<{ from: readonly string[]; to: string; stagedBy: string }> = [];
-  for (const holder of migration.holders ?? []) {
-    const move = (migration.moves ?? []).find((candidate) => candidate.to === holder.store);
-    if (!move) continue;
-    const store = absPath(ctx.root, holder.store);
-    // The staging marker belongs to the move, not to a direction: the store's old path names it both ways.
-    const stagedBy = absPath(ctx.root, move.from);
-    places.push(direction === 'forward'
-      ? { from: holder.digests, to: store, stagedBy }
-      : { from: mediaHolderDigests(store), to: stagedBy, stagedBy });
-  }
-  return places;
-}
-
-function holdPictures(ctx: Context, migration: SourceRegistryMigration, direction: 'forward' | 'back'): void {
-  if (!ctx.cacheDir) return;
-  const stop = (): boolean => ctx.now() >= ctx.hardStop;
-  for (const place of holdersAt(ctx, migration, direction)) addMediaCacheHolder(ctx.cacheDir, place.from, place.to, { stop, stagedBy: place.stagedBy });
-}
-
-function releasePictures(ctx: Context, migration: SourceRegistryMigration, direction: 'forward' | 'back'): void {
-  if (!ctx.cacheDir) return;
-  const stop = (): boolean => ctx.now() >= ctx.hardStop;
-  for (const place of holdersAt(ctx, migration, direction)) dropMediaCacheHolder(ctx.cacheDir, place.from, place.to, { stop, stagedBy: place.stagedBy });
-}
-
 function forward(ctx: Context, sourceId: string, slot: string, migration: SourceRegistryMigration): void {
   const moves = migration.moves ?? [];
-  // Before anything moves: every picture gets a holder under the name its store will have.
-  holdPictures(ctx, migration, 'forward');
-  checkpoint('held');
   makeFolders(ctx, moves);
   moves.forEach((move, index) => {
     if (moveOne(ctx, move, 'forward') === 'lost') {
@@ -798,26 +739,14 @@ function forward(ctx: Context, sourceId: string, slot: string, migration: Source
   });
   // The renames are on disk before the registry says anything that depends on them.
   syncMoveFolders(ctx, moves);
-  if (migration.verified !== true) {
-    verifyIdentity(ctx, moves);
-    for (const move of moves) {
-      if (move.db !== true || isCompanion(move.from) || stateBefore(migration, move) === 'damaged') continue;
-      if (!storeFileReads(absPath(ctx.root, move.to))) {
-        throw new MoveFault('failed', 'verify_failed', `${basename(move.from)} does not open after the move.`);
-      }
+  verifyIdentity(ctx, moves);
+  for (const move of moves) {
+    if (move.db !== true || isCompanion(move.from) || stateBefore(migration, move) === 'damaged') continue;
+    if (!storeFileReads(absPath(ctx.root, move.to))) {
+      throw new MoveFault('failed', 'verify_failed', `${basename(move.from)} does not open after the move.`);
     }
-    // Later steps change file sizes, so a resume must not check them again.
-    updateAccount(ctx, sourceId, slot, (account) => {
-      if (account.migration?.state !== 'moving') throw new EntryChanged();
-      account.migration.verified = true;
-    });
-    migration = { ...migration, verified: true };
   }
   checkpoint('verified');
-  rebindStores(ctx, migration, moves, 'forward');
-  checkpoint('rebound');
-  releasePictures(ctx, migration, 'forward');
-  checkpoint('rekeyed');
   // The layout and the plan's end are one write: there is no moment at which an
   // account is a folder with its plan still pending, or done and legacy.
   updateAccount(ctx, sourceId, slot, (account) => {
@@ -842,8 +771,6 @@ function revert(ctx: Context, sourceId: string, slot: string, migration: SourceR
     });
   }
   checkpoint('revert');
-  // Before anything moves back: every picture gets a holder under the name its store is about to have again.
-  holdPictures(ctx, migration, 'back');
   const back = [...moves].reverse();
   // Everything that can go back does, and a file that is in neither place is named at the end: the account stays closed with its plan.
   const lost: string[] = [];
@@ -864,8 +791,6 @@ function revert(ctx: Context, sourceId: string, slot: string, migration: SourceR
   }
   // The plan is cleared only when everything is where it was.
   verifyRestored(ctx, moves);
-  rebindStores(ctx, migration, moves, 'back');
-  releasePictures(ctx, migration, 'back');
   removeEmptyFolders(ctx, moves);
   syncMoveFolders(ctx, moves);
   updateAccount(ctx, sourceId, slot, (account) => {
@@ -899,8 +824,6 @@ function planIsMoot(ctx: Context, migration: SourceRegistryMigration): boolean {
   return moves.length > 0 && moves.every((move) => look(absPath(ctx.root, move.from)).kind === 'absent' && look(absPath(ctx.root, move.to)).kind === 'absent');
 }
 
-const MORE_TIME_DETAIL = 'Handing its pictures to their new place takes more than one start; the next start goes on from where this one stopped.';
-
 /** Finishes or undoes a plan the registry holds. */
 function runPlan(ctx: Context, account: SourceRegistryAccount): Outcome {
   const migration = account.migration!;
@@ -924,8 +847,6 @@ function runPlan(ctx: Context, account: SourceRegistryAccount): Outcome {
     return { kind: 'moved' };
   } catch (error) {
     if (error instanceof AccountMigrationKilled || error instanceof EntryChanged) throw error;
-    // Out of time for handing pictures over: nothing is wrong, the plan stays and the next boot goes on.
-    if (error instanceof MediaCacheRekeyStopped) return { kind: 'stuck', detail: MORE_TIME_DETAIL };
     const fault = error instanceof MoveFault
       ? error
       : new MoveFault('failed', 'move_failed', `The move stopped unexpectedly (${errorCode(error)}).`);
@@ -933,7 +854,6 @@ function runPlan(ctx: Context, account: SourceRegistryAccount): Outcome {
       revert(ctx, sourceId, slot, migration, fault);
     } catch (revertError) {
       if (revertError instanceof AccountMigrationKilled || revertError instanceof EntryChanged) throw revertError;
-      if (revertError instanceof MediaCacheRekeyStopped) return { kind: 'stuck', detail: MORE_TIME_DETAIL };
       const detail = revertError instanceof MoveFault ? revertError.detail : `Putting its files back stopped (${errorCode(revertError)}).`;
       return { kind: 'stuck', detail };
     }
@@ -959,17 +879,59 @@ function recordSkip(ctx: Context, sourceId: string, slot: string, entry: SourceR
   }, { create: true });
 }
 
+/**
+ * Folds every database's write-ahead log into the database
+ * (`PRAGMA wal_checkpoint(TRUNCATE)`, in core/source-storage.ts), so that what
+ * moves is whole files: the database file holds everything and a `-wal` or
+ * `-shm` that is lost in the move costs nothing. Ends the account's fold at the
+ * first database that cannot be folded completely (another connection has it
+ * open, or not every frame could be checkpointed): the account stays where it is
+ * this boot, and says why. A file that is not a database is left alone when it
+ * has no log to lose (it is moved as the opaque file it is, and recorded as
+ * damaged by the check); one with a log that cannot be folded is a skip too.
+ */
+function foldLogs(ctx: Context, moves: SourceRegistryMove[]): Extract<Inspection, { kind: 'skip' }> | undefined {
+  const notFolded = (detail: string): Extract<Inspection, { kind: 'skip' }> => ({ kind: 'skip', reason: 'log_not_folded', detail });
+  for (const move of moves) {
+    if (move.db !== true || isCompanion(move.from)) continue;
+    const path = absPath(ctx.root, move.from);
+    const result = storeFileCheckpoint(path, FOLD_BUSY_TIMEOUT_MS);
+    if (result === 'folded') continue;
+    if (result === 'not_a_database') {
+      // Nothing to fold into: fine unless it has log bytes that would be lost with it.
+      const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
+      if (logs.every((log) => log.size === 0)) continue;
+      return notFolded(`${basename(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+    }
+    return notFolded(result === 'busy'
+      ? `${basename(move.from)} is open elsewhere, so its write-ahead log could not be folded into it; the account stays where it is for now.`
+      : `${basename(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+  }
+  return undefined;
+}
+
 function startMove(ctx: Context, sourceId: string, slot: string, entry: SourceRegistryAccount | undefined): Outcome {
   let inspection = inspect(ctx, sourceId, slot, entry);
   if (inspection.kind === 'move') {
+    // The logs are folded into the databases first, so that what is planned and moved is whole files.
+    const unfolded = foldLogs(ctx, inspection.moves);
+    if (unfolded) {
+      recordSkip(ctx, sourceId, slot, entry, unfolded);
+      return { kind: 'skipped', reason: unfolded.reason };
+    }
+    checkpoint('folded');
     // Reading a database can make its `-shm`, so look again afterwards: the plan names what is there.
     const checked = checkDatabases(ctx, inspection.moves);
     inspection = inspect(ctx, sourceId, slot, entry);
+    // A log with bytes in it again: someone is writing, so the folded file is no longer the whole database.
+    if (inspection.kind === 'move' && inspection.moves.some((move) => move.db !== true && (move.from.endsWith('-wal') || move.from.endsWith('-journal')) && move.size > 0)) {
+      inspection = skip('log_not_folded', 'A store was written to while its write-ahead log was being folded, so the account stays where it is for now.');
+    }
     if (inspection.kind === 'move') {
-      const { moves, holders } = inspection;
+      const { moves } = inspection;
       updateAccount(ctx, sourceId, slot, (account) => {
         if (account.layout !== 'legacy' || sourceAccountMovePending(account)) throw new EntryChanged();
-        account.migration = { state: 'moving', at: new Date(ctx.now()).toISOString(), moves, holders, ...(checked.length > 0 ? { checked } : {}) };
+        account.migration = { state: 'moving', at: new Date(ctx.now()).toISOString(), moves, ...(checked.length > 0 ? { checked } : {}) };
       }, { create: true });
       checkpoint('plan');
       return runPlan(ctx, readSourceRegistryAccount(ctx, sourceId, slot));
@@ -996,22 +958,14 @@ function context(env: LayoutEnv): Context | undefined {
     return undefined; // The data folder cannot be worked out here.
   }
   if (!isAbsolute(root)) return undefined;
-  let cacheDir: string | undefined;
-  try {
-    cacheDir = mediaCacheDir(env);
-  } catch {
-    cacheDir = undefined;
-  }
   const now = __accountMigrationTestHooks.now ?? Date.now;
   return {
     env,
     root,
     now,
-    cacheDir,
     quickCheckSpentMs: 0,
     quickCheckBudgetMs: __accountMigrationTestHooks.quickCheckBudgetMs ?? QUICK_CHECK_BUDGET_MS,
     quickCheckBytes: 0,
-    hardStop: now() + (__accountMigrationTestHooks.limits?.hardStopMs ?? PASS_HARD_STOP_MS),
   };
 }
 

@@ -187,7 +187,7 @@ Inside the data root:
   storage service resolves an account's paths from `layout`, and migration
   selects on it.
 - **`migration` (4c)** is the record of the boot migration on an entry:
-  `{state, at, reason?, detail?, moves?, holders?, verified?, checked?}`.
+  `{state, at, reason?, detail?, moves?, checked?}`.
   `state` is `moving` or `reverting` (a plan is pending; the account is
   closed: the storage service opens none of its files, the same refusal as an
   account being deleted, so it does not mount), `done`,
@@ -195,8 +195,7 @@ Inside the data root:
   plain words) or `failed` (the move was undone). Each entry of `moves` is
   `{role: store|ledger|secrets|sniffer|raw, from, to, kind: file|dir, db?, dev,
   ino, size}` with `from` and `to` relative to the data root and the identity
-  as strings; `holders` names each store's media-cache holder digests;
-  `checked` is what `PRAGMA quick_check` said before the move. A reader that
+  as strings; `checked` is what `PRAGMA quick_check` said before the move. A reader that
   does not know the field passes it through unchanged.
 - **Placement of a new account (4a).** An account with no entry is recorded
   `folder` only if nothing says it lives elsewhere: its source has a folder
@@ -471,76 +470,82 @@ order:
    - `destination_exists`: a file is at its old place and in the account folder
      (nothing is merged);
    - `other_device`: a file's `st_dev` differs from that of the nearest
-     existing folder above the account folder (a rename that answers `EXDEV`
-     later ends the same way, after undoing what it did). Nothing is copied;
+     existing folder above the account folder (a hard link that answers
+     `EXDEV` later ends the same way, after undoing what it did). Nothing is
+     copied;
    - `files_elsewhere`: the registry lists a store that is not at the usual
      place in the data folder, where an override may once have put it. An
      imported archive's corpus `<tier>.archive.<family>` is the store
      `<family>.<tier>` and is checked like any other;
    - `log_large`: the account's `-wal` and `-journal` files total more than
-     32 MiB. Opening a database reads its log, and the pass opens each a
-     handful of times, so the logs it carries are bounded. They are folded into
-     the stores when Olympus next stops cleanly, and the account moves then. Not
-     a Needs you row.
-2. **Plan.** `PRAGMA quick_check` each database to record how it was, bounded
+     32 MiB. Folding a log reads it, so the logs the pass carries are bounded.
+     They are folded into the stores when Olympus next stops cleanly, and the
+     account moves then. Not a Needs you row.
+2. **Fold the logs.** Each database's write-ahead log is folded into the
+   database (`PRAGMA wal_checkpoint(TRUNCATE)`, `storeFileCheckpoint` in
+   `core/source-storage.ts`) before anything is planned, so what moves is whole
+   files: the database file holds everything, and a `-wal` or `-shm` that is
+   lost in the move costs nothing. The pass runs at boot, before any worker has
+   the stores open, but another connection may still hold one (a leftover
+   process, a command-line tool): the checkpoint waits at most 2 s for it, and
+   the first database that is busy, or whose frames could not all be
+   checkpointed, ends the fold. The account then stays where it is this boot
+   (`log_not_folded`) and moves at a later boot, once the other connection is
+   gone; not a Needs you row. A file that is not a database is left alone when
+   none of its logs holds bytes (it moves as the opaque file it is and the
+   check records it `damaged`); with a log that holds bytes it is
+   `log_not_folded` too. The checkpoint is the only write the pass makes to a
+   store, a ledger or a sidecar; everything after it is a rename.
+3. **Plan.** `PRAGMA quick_check` each database to record how it was, bounded
    before it starts (it cannot be interrupted; see Time): a database whose file,
    `-wal` and `-journal` together exceed 64 MiB, or that would take the boot past
    128 MiB read in total, or whose estimated time at 10 MiB/s does not fit in what
    is left of the 15 s check budget, is recorded `not_checked`; one that does not
-   open is `damaged`. This only records and never blocks. Then write the move
-   plan into the entry: `migration: {state: moving, moves, holders, checked}`
-   (see Registry), which also turns the file into schema 3. From here the
-   account is closed. `moves` lists, per tier store, the store, its
+   open is `damaged`. This only records and never blocks. Reading a database may
+   make its `-shm`, so the account is looked at again, and the plan names what is
+   there; a log with bytes in it again (something wrote after the fold, so the
+   folded file is no longer the whole database) is `log_not_folded` too. Then
+   write the move plan into the entry: `migration: {state: moving, moves,
+   checked}` (see Registry), which also turns the file into schema 3. From here
+   the account is closed. `moves` lists, per tier store, the store, its
    `-wal`/`-shm`/`-journal`, its tier ledger, secret locations and sniffer, plus
    raw state (the local files watch folder, X's reconcile state, an archive
    import's state and request files), each with `(dev, ino, size)`. An archive's
    stores go to `stores/<family>.<tier>.sqlite`.
-3. **Hold the pictures.** A cache picture is kept while some store holds it, and
-   a holder is named by a digest of the store's real path, so a store that moves
-   looks gone to the cache's sweep. That sweep also runs in other processes, at
-   any point of the move: it removes the marker of a store that is not at its
-   path (the old one once the store has moved, the new one until it has) and
-   then the picture, once it is a day old. So before any file moves, each picture
-   a store holds gets a staging marker for the move (the sweep keeps a staging
-   marker for a day, whatever becomes of the stores' paths) and a marker under the
-   destination's name, both made durable (file fsynced, then its folder), the old
-   marker left. If the pass is out of time here (see Time) nothing has moved: the
-   plan stays and the next boot goes on, passing over the pictures already held.
 4. **Rename** every planned file into the folder. Nothing is copied, so each is
    atomic and instant whatever its size, and none replaces what is there: a file
    is hard-linked to its new name (which fails with `EEXIST` where `rename(2)`
    would replace what another process put there since the look) and then unlinked
    from the old one; a kill between the two leaves one inode under two names,
    which the next boot finishes. A folder is renamed, which the kernel refuses
-   onto a non-empty folder or a file. Residuals: `rename(2)` of a folder replaces
+   onto a non-empty folder or a file. Residual: `rename(2)` of a folder replaces
    an EMPTY folder that appeared in the instant since the look (it holds nothing
-   to lose, and the planned folder takes its place), and on a file system with no
-   hard links a file is renamed after a last look, which leaves that instant open.
-   Before each rename the destination's folders are checked for links again.
+   to lose, and the planned folder takes its place). A file system that makes no
+   hard links (the link answers `EPERM`, `ENOTSUP`, `EOPNOTSUPP`, `ENOSYS` or
+   `EMLINK`) keeps the account where it is, `no_hard_links`, with what had moved
+   put back and the reason recorded; no other way of moving a file is tried,
+   because a plain rename would replace a file another process put at the
+   destination. Not a Needs you row. Before each rename the destination's
+   folders are checked for links again.
    Every folder the move makes is fsynced with its parent as it is made, and after
    the last rename the folders each file left and went to are fsynced, before the
    registry records anything that depends on the renames.
 5. **Verify.** Each destination has the planned `(dev, ino, size)`, then each
-   database that opened before opens read-only. A failure undoes the move. A file
-   that is in neither place is a failure, and so is a `-wal` or `-journal` that
-   held bytes when the plan was made: that is committed data not yet in its
-   database file, so only a `-shm` (rebuilt from the log on the next open) and a
-   log that was empty may be missing.
-6. **Rebind.** Each tier-set store keeps the path of its tier ledger inside
-   itself (`sync_runs`, `tiered_store_set_binding`), and a stale path fails
-   closed, so that one row is rewritten to the ledger's new place (and back, on
-   an undo). Besides the renames this is the only change to a store, and it
-   is made only when the stored path differs.
-7. **Release the pictures.** The store is at its new path now, so no sweep
-   removes a marker under that name: it is made sure of (durably) for every
-   picture that is still staged, then the old markers and the staging marker go.
-   If the pass is out of time here, the pictures not reached stay staged and the
-   plan stays open for the next boot.
-8. **Flip** `layout` to `folder` and the plan to `done` in one registry write:
+   database that opened before opens (query-only, so a database whose `-wal` is
+   missing still opens on macOS) and its schema reads. A failure undoes the
+   move. A file that is in neither place is a failure, and so is a `-wal` or
+   `-journal` that held bytes when the plan was made: that is committed data not
+   yet in its database file, so only a `-shm` (rebuilt from the log on the next
+   open) and a log that was empty may be missing. (This build plans only empty
+   logs, but a plan is read as data.)
+6. **Flip** `layout` to `folder` and the plan to `done` in one registry write:
    there is no moment at which an account is a folder with its plan pending, or
    done and legacy.
 
-A crash anywhere resumes from the plan at the next boot, switch or no switch
+The move writes nothing but file names: no store, ledger or sidecar is opened
+for writing after the fold, the media cache is not touched (a hold names the
+store's identity, not its path), and a tiered set's stores find their ledger by
+its id. A crash anywhere resumes from the plan at the next boot, switch or no switch
 (the account is closed until the plan ends one way or the other). A failed
 verify, a file that is in neither place, or any other failure moves everything
 back (`reverting`, the same steps in the other direction, then
@@ -575,27 +580,24 @@ and 50 ms per fsync (an old external drive).
 
 - Starting an account, a plan left part way included, stops at 45 s from the
   pass's start; accounts not reached go on at the next boot.
+- Folding the logs reads each log once and writes it once into its database:
+  the account's logs are capped at 32 MiB (`log_large`), so at most 64 MiB of
+  transfer, 6.4 s, and two fsyncs per database (the checkpoint's own), at most
+  38 databases (an imported-archive account with three families), 3.8 s. The
+  wait for another connection is 2 s, once: the first busy database ends the
+  fold and the account waits for the next boot.
 - `quick_check` reads at most 64 MiB per database and 128 MiB per boot
   (12.8 s), and only if the estimate fits the 15 s check budget, decided
-  before it starts.
-- Opening a database reads its log once. The account's logs are capped at
-  32 MiB (`log_large`) and the pass opens a database at most five times (check,
-  quick_check, verify, rebind, and on an undo the rebind back): at most 160 MiB,
-  16 s.
+  before it starts. After the fold the logs are empty, so the opens of the
+  checks and of the verify read no log.
 - An account has at most 152 files to move (an imported-archive account with
   three families; 52 for any other source): a link and an unlink each, 15 s if
   every metadata operation takes 50 ms, and about 12 folders to fsync, 0.6 s.
-- Handing pictures over is bounded by time, not by count: no more is started
-  90 s after the pass began, and the time is asked every 64 pictures (three
-  fsyncs each, 64 x 3 x 50 ms = 9.6 s).
 
-The worst account starts at 44.9 s, spends 12.8 s on `quick_check` and 6.4 s on
-the two opens of its logs while checking (64.1 s), holds pictures until just
-under 90 s plus 9.6 s of overshoot (99.6 s), renames (115.6 s), then verifies and
-rebinds, two more opens of its logs (122 s): about two minutes, inside 180 s. Any
-release step that begins after 90 s stops at once and leaves the plan for the
-next boot, so a cache too big for one boot is finished by the next ones; a
-picture already handed is passed over with two small reads.
+The worst account starts at 44.9 s, folds its logs in 10.2 s (55.1 s), spends
+12.8 s on `quick_check` (67.9 s), renames (83.5 s), and verifies with a
+handful of opens of empty logs: about 85 s, inside 180 s. A move put back costs
+the renames again, 15.6 s more.
 
 **What stays put.** Settings stay in the shared config files (see Layout). The
 X usage ledger stays shared; only X's reconcile state moves. Legacy pre-1.0
@@ -756,15 +758,21 @@ touch the store path (`eval/`).
      to 4d.
    - **4c, the boot migration of existing non-messaging accounts**, behind
      `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
-     default), with the tests in "What must not break". Built: the pass in
-     "Migration of existing installs", the `migration` record and schema 3 in
-     the registry, the tier-set binding rewrite, the media-cache hand-over,
-     and the four Needs you rows. Proof: a kill injected between every pair
-     of steps, and each skip reason, a failed verify moved back, a lost file,
-     a file another process creates at a destination, a media-cache sweep at
-     every step, Delete mid-move and the unreadable registry, on isolated homes,
-     plus a real worker booted on a legacy home with the switch off and on (and,
-     on Linux, through a real install receipt). Retirement: default
+     default), with the tests in "What must not break". Built on two changes
+     that came first, so that moving a store is only renaming files: media-cache
+     holds name a store by its identity (not its path), and a tiered set's
+     stores find their ledger by the ledger's id. Built: the pass in "Migration
+     of existing installs" (fold the logs, plan, rename, verify, flip), the
+     `migration` record and schema 3 in the registry, and the four Needs you
+     rows. Proof: a kill injected between every pair of steps, each followed by
+     a finish and by a put back, with the bytes of every store, ledger and
+     sidecar after the fold compared with the bytes after the move; each skip
+     reason (including a busy log and a file system with no hard links), a
+     failed verify moved back, a lost file, a file another process creates at
+     a destination, a media-cache sweep at every step, Delete mid-move and the
+     unreadable registry, on isolated homes, plus a real worker booted on a
+     legacy home with the switch off and on (and, on Linux, through a real
+     install receipt). Retirement: default
      on, then delete the switch, once release testing records, on Mac
      OpenClaw-hosted, Mac engine and standalone Linux with both receipt
      roots: every source migrated with real data; paired WhatsApp and
