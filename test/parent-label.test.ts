@@ -394,4 +394,33 @@ describe('what the release check is asked', () => {
       ledger.close();
     }
   });
+
+  test('names that were Private when the answer was written still need today\'s Private authorization', async () => {
+    const { TierLedger } = await import('../src/workers/classification/tier-ledger.ts');
+    const { createReleaseTierCheck } = await import('../src/workers/connector-store/tier-visibility.ts');
+    const ledger = new TierLedger({ dbPath: ':memory:' });
+    try {
+      const parent = { provider: 'fixture', accountScope: ACCOUNT, providerItemId: 'm1' };
+      const decision = (names: 'private' | 'secure', content: 'private' | 'secure') => ({
+        metadataTier: names, contentTier: content, decidedBy: 'default', reasons: [], engineVersion: 'test', mapRevision: 'test', modelId: null,
+        contentRead: true, metadataPending: false, contentPending: false, metadataForced: false, metadataFlagged: false,
+      });
+      // The child was Private and so were the parent's names; the answer was written under `allow`.
+      // The child has since been judged Personal; the parent's names stay Private.
+      ledger.recordDecision({ ...parent, family: 'email' }, decision('secure', 'secure') as never);
+      const posture = { now: 'allow' as 'allow' | 'approval' };
+      const check = createReleaseTierCheck(() => [{ ledger, corpusIds: new Set([NAMES_CORPUS]) }], () => posture.now);
+      const names: ReleaseInput = { corpusId: NAMES_CORPUS, ...parent, privateAtAnswer: true, layer: 'names' };
+      const wrote = { secureDerivativeDefault: 'allow' as const, includeSecureLocalContent: false };
+
+      expect(answerReleaseWithheldReason([{ inputs: [names], constraints: wrote }], check)).toBeUndefined();
+      posture.now = 'approval';
+      expect(answerReleaseWithheldReason([{ inputs: [names], constraints: wrote }], check))
+        .toBe('Olympus withheld this answer because current settings require approval for Private content.');
+      // An explicit request for Private content still covers the names it carried.
+      expect(answerReleaseWithheldReason([{ inputs: [names], constraints: { ...wrote, includeSecureLocalContent: true } }], check)).toBeUndefined();
+    } finally {
+      ledger.close();
+    }
+  });
 });

@@ -611,6 +611,25 @@ describe('the release manifest, revalidated against current tiers and rules', ()
       .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
   });
 
+  test('a parent\'s names that were Private when the answer was written need today\'s Private authorization too', async () => {
+    const { fixture, check } = await routed();
+    // The parent's names are Private now, as they were when the answer was written.
+    await moveTieredItem({ set: fixture.set, identity: identityOf('orchard'), target: { metadataTier: 'secure', contentTier: 'secure' } });
+    const wrote = (constraints: Partial<ReleaseConstraints> = {}) =>
+      [manifest([input('garden'), input('orchard', { layer: 'names', privateAtAnswer: true })], constraints)];
+    const answer = leakyAnswer([leakyEvidence('garden')], 'ok');
+    const withPosture = (posture: 'allow' | 'approval'): ReleaseCheck => ({ inputs: check.inputs, secureDerivativeDefault: () => posture });
+
+    // Under `allow` the Private names may still be shared; once the posture is `approval` they may not, unless the request asked.
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: withPosture('allow'), releaseManifests: wrote() }).status).toBe('answered');
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: withPosture('approval'), releaseManifests: wrote() }))
+      .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_WITHHELD, citations: [] });
+    expect(remoteOperationOutput('source_answer_result', answer, {
+      releaseCheck: withPosture('approval'),
+      releaseManifests: wrote({ includeSecureLocalContent: true }),
+    }).status).toBe('answered');
+  });
+
   test('missing proof withholds: no manifest, an unprovable input, a cited item the manifest lacks, or a check that fails', () => {
     const check = fixedCheck('public_or_personal');
     const unverified = { kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] };

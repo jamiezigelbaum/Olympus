@@ -122,11 +122,13 @@ export function privateInputReleaseAllowed(
   postureNow: 'allow' | 'approval',
 ): boolean {
   const privateNow = verdict.tier === 'private' || (verdict.tier === 'legacy' && input.privateAtAnswer);
+  const authorized = constraints.includeSecureLocalContent || postureNow === 'allow';
   // A parent label was cleared for the names tier of its time. Names that became Private since
   // are covered by neither the posture nor a request for Private content: the answer carried
-  // them at a tier they no longer have.
-  if (input.layer === 'names') return !privateNow || input.privateAtAnswer;
-  return !privateNow || constraints.includeSecureLocalContent || postureNow === 'allow';
+  // them at a tier they no longer have. Names that were Private then still need today's
+  // authorization, exactly as any Private text does: the posture may have tightened since.
+  if (input.layer === 'names') return !privateNow || (input.privateAtAnswer && authorized);
+  return !privateNow || authorized;
 }
 
 export function answerReleaseWithheldReason(
