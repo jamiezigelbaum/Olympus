@@ -166420,6 +166420,8 @@ function decideIntake(args) {
   }
   if (order === undefined)
     return "apply";
+  if (args.deletes === true && order >= 0)
+    return "apply";
   if (order > 0)
     return "apply";
   if (order < 0)
@@ -166495,6 +166497,7 @@ function inputConnector(builder, input) {
                 input: input.kind,
                 version: entry.identity.sourceVersion,
                 bringsContent: entry.bringsContent,
+                ...entry.deletes === true ? { deletes: true } : {},
                 stored,
                 compareVersions: builder.compareVersions
               });
@@ -166520,30 +166523,59 @@ function inputConnector(builder, input) {
                 built.set(item.identity.localItemId, item);
             }
             entries.forEach((entry, index) => {
-              const item = built.get(entry.identity.localItemId);
-              if (!item || index < from)
+              const built1 = built.get(entry.identity.localItemId);
+              if (!built1 || index < from)
                 return;
+              const known = stateOf(built1.identity)?.version;
+              const item = built1.identity.sourceVersion === undefined && known !== undefined ? { ...built1, identity: { ...built1.identity, sourceVersion: known } } : built1;
+              const deleted = item.metadata["deleted"] === true;
+              const before = stateOf(item.identity);
               thisPass.set(item.identity.localItemId, {
                 ...item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {},
-                hasContent: hasContent(item)
+                hasContent: hasContent(item) || !deleted && before?.hasContent === true && before.tombstoned !== true,
+                ...deleted ? { tombstoned: true } : {}
               });
               units.push({ record: offset + position, entry: index, item });
             });
           }
-          const lastOf = new Map;
-          units.forEach((unit, at) => lastOf.set(unit.item.identity.localItemId, at));
-          const superseded = new Set;
+          const winner = new Map;
+          const isDeleted = (unit) => unit.item.metadata["deleted"] === true;
           units.forEach((unit, at) => {
-            if (unit.entry === 0 && lastOf.get(unit.item.identity.localItemId) !== at)
-              superseded.add(unit.record);
-          });
-          if (superseded.size > 0 || lastOf.size !== units.length) {
-            for (const record5 of superseded) {
-              const at = outcomeOf.get(record5);
-              if (at !== undefined)
-                outcomes[at] = { ...outcomes[at], decision: "skip_older" };
+            const id = unit.item.identity.localItemId;
+            const best = winner.get(id);
+            if (best === undefined) {
+              winner.set(id, at);
+              return;
             }
-            units = units.filter((unit, at) => !superseded.has(unit.record) && lastOf.get(unit.item.identity.localItemId) === at);
+            const held = units[best];
+            const a = unit.item.identity.sourceVersion;
+            const b = held.item.identity.sourceVersion;
+            const order = a === undefined || b === undefined ? 0 : builder.compareVersions(a, b);
+            if (order > 0 || order === 0 && !(isDeleted(held) && !isDeleted(unit)))
+              winner.set(id, at);
+          });
+          if (winner.size !== units.length) {
+            for (const [id, at] of winner) {
+              const won = units[at];
+              if (isDeleted(won) || hasContent(won.item))
+                continue;
+              let older;
+              units.forEach((unit, from) => {
+                if (from !== at && unit.item.identity.localItemId === id && !isDeleted(unit) && hasContent(unit.item))
+                  older = unit;
+              });
+              if (older)
+                units[at] = { ...won, item: { ...won.item, content: older.item.content } };
+            }
+            const kept = new Set(winner.values());
+            for (const [at, unit] of units.entries()) {
+              if (unit.entry !== 0 || kept.has(at))
+                continue;
+              const told = outcomeOf.get(unit.record);
+              if (told !== undefined)
+                outcomes[told] = { ...outcomes[told], decision: "skip_older" };
+            }
+            units = units.filter((_, at) => kept.has(at));
           }
           input.observeIntake?.(outcomes);
           const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
@@ -170190,7 +170222,6 @@ function mboxGmailInput(archive, options = {}) {
                   yield out(splitter.position, false);
                 return;
               }
-              const before = splitter.position;
               let span;
               try {
                 span = splitter.next();
@@ -170214,17 +170245,12 @@ function mboxGmailInput(archive, options = {}) {
                 else {
                   let id = takeoutMessageId(span.separator);
                   if (id === undefined && options.match) {
-                    const matched = options.match({
+                    const matched = await options.match({
                       ...parsed.messageId ? { messageId: parsed.messageId } : {},
                       ...parsed.dateHeader ? { date: parsed.dateHeader } : {},
                       from: parsed.from,
                       ...parsed.subject ? { subject: parsed.subject } : {}
                     });
-                    if (matched === "wait") {
-                      if (pending)
-                        yield out(before, false);
-                      return;
-                    }
                     if (matched !== "none")
                       id = matched.id;
                   }
@@ -170361,6 +170387,58 @@ var init_gmail_archive_target = __esm(() => {
   init_gmail_account();
   init_gmail_input();
   init_gmail_mail_record();
+});
+
+// src/workers/google-connectors/gmail-header-match.ts
+function sameDate(a, b) {
+  if (!a || !b)
+    return a === b;
+  const left = Date.parse(a);
+  const right = Date.parse(b);
+  return Number.isFinite(left) && Number.isFinite(right) ? left === right : a.trim() === b.trim();
+}
+function readable(value2) {
+  if (!value2)
+    return "";
+  try {
+    return decodeWords(value2).replace(/\s+/g, " ").trim();
+  } catch {
+    return value2.replace(/\s+/g, " ").trim();
+  }
+}
+function gmailHeaderMatch(client) {
+  return async (headers) => {
+    const wanted = bareMessageId(headers.messageId);
+    if (!wanted || !SEARCHABLE.test(wanted))
+      return "none";
+    const api2 = await client();
+    if (!api2)
+      return "none";
+    const listed = await api2.listMessages({ maxResults: MAX_CANDIDATES + 1, query: `rfc822msgid:${wanted}` });
+    const candidates2 = listed.messages.map((message2) => message2.id).filter(Boolean);
+    if (candidates2.length === 0 || candidates2.length > MAX_CANDIDATES)
+      return "none";
+    const agreeing = [];
+    for (const id of candidates2) {
+      const message2 = await api2.getMessage(id, { format: "metadata", metadataHeaders: ["Message-ID", "Date", "From", "Subject"] });
+      const found = new Map;
+      for (const header of message2.payload?.headers ?? []) {
+        const name = header.name?.trim().toLowerCase();
+        if (name && header.value !== undefined && !found.has(name))
+          found.set(name, header.value);
+      }
+      if (bareMessageId(found.get("message-id")) === wanted && sameDate(found.get("date"), headers.date) && same(found.get("from"), headers.from) && same(found.get("subject"), headers.subject)) {
+        agreeing.push(id);
+      }
+    }
+    return agreeing.length === 1 ? { id: agreeing[0] } : "none";
+  };
+}
+var MAX_CANDIDATES = 5, SEARCHABLE, same = (a, b) => readable(a) === readable(b);
+var init_gmail_header_match = __esm(() => {
+  init_postal_mime();
+  init_gmail();
+  SEARCHABLE = /^[^\s"()<>{}]{1,500}$/;
 });
 
 // src/workers/source-account-guard.ts
@@ -172110,7 +172188,7 @@ data:
     }
     const encoder = new TextEncoder;
     let streamController;
-    const readable = new ReadableStream({
+    const readable2 = new ReadableStream({
       start: (controller) => {
         streamController = controller;
       },
@@ -172136,7 +172214,7 @@ data:
         } catch {}
       }
     });
-    return new Response(readable, { headers });
+    return new Response(readable2, { headers });
   }
   async replayEvents(lastEventId) {
     if (!this._eventStore) {
@@ -172166,7 +172244,7 @@ data:
       }
       const encoder = new TextEncoder;
       let streamController;
-      const readable = new ReadableStream({
+      const readable2 = new ReadableStream({
         start: (controller) => {
           streamController = controller;
         },
@@ -172193,7 +172271,7 @@ data:
           } catch {}
         }
       });
-      return new Response(readable, { headers });
+      return new Response(readable2, { headers });
     } catch (error2) {
       this.onerror?.(error2);
       return this.createJsonErrorResponse(500, -32000, "Error replaying events");
@@ -172328,7 +172406,7 @@ data:
       }
       const encoder = new TextEncoder;
       let streamController;
-      const readable = new ReadableStream({
+      const readable2 = new ReadableStream({
         start: (controller) => {
           streamController = controller;
         },
@@ -172373,7 +172451,7 @@ data:
         }
         this.onmessage?.(message2, { authInfo: options?.authInfo, requestInfo, closeSSEStream, closeStandaloneSSEStream });
       }
-      return new Response(readable, { status: 200, headers });
+      return new Response(readable2, { status: 200, headers });
     } catch (error2) {
       this.onerror?.(error2);
       return this.createJsonErrorResponse(400, -32700, "Parse error", { data: String(error2) });
@@ -173607,12 +173685,12 @@ function chatgptPrivateAnswerProgram(config2) {
       }
       return;
     }
-    const same = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
+    const same2 = !!info && !!next && info.count === next.count && info.state === next.state && info.jobId === next.jobId && info.percent === next.percent && info.full === next.full;
     if (!info && !next && landed && !zeroResent) {
       zeroResent = true;
       reportHeight(true);
     }
-    if (same || !info && !next)
+    if (same2 || !info && !next)
       return;
     if (!next || !info || next.jobId !== info.jobId) {
       run2++;
@@ -192373,10 +192451,13 @@ async function main() {
         });
         const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
         let ownerRules = [];
+        let approved = false;
         try {
           const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
-          if (approval)
+          if (approval) {
             ownerRules = gmailConnectorScopeFromApproval(approval).ownerTierRules ?? [];
+            approved = true;
+          }
         } catch {}
         const key2 = JSON.stringify(ownerRules);
         if (gmailArchiveSet?.key !== key2) {
@@ -192395,7 +192476,17 @@ async function main() {
         return {
           set: gmailArchiveSet.set,
           sync: gmailLaneSyncOptions(ownerRules),
-          account: handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle)
+          account: handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle),
+          match: gmailHeaderMatch(async () => {
+            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority)
+              return;
+            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            return new GoogleGmailSourceConnector({
+              credentialHandle: handle.handle,
+              ...handle.accountRole ? { account: handle.accountRole } : {},
+              requestBudget: gmailRequestBudget
+            }).apiClientForTooling();
+          })
         };
       }
     }));
@@ -195583,6 +195674,7 @@ var init_server5 = __esm(async () => {
   init_source_scope_approval();
   init_gmail_scope_browser();
   init_gmail_archive_target();
+  init_gmail_header_match();
   init_gmail_live_sync();
   init_source_targets();
   init_tiered_store_set();

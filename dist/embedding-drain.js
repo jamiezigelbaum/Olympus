@@ -49577,6 +49577,9 @@ var SYSTEM_LABELS = new Map([
 // src/workers/google-connectors/gmail-archive-target.ts
 init_gmail_mail_record();
 
+// src/workers/google-connectors/gmail-header-match.ts
+init_gmail();
+
 // src/workers/email-source/server.ts
 init_gmail_live_sync();
 init_tiered_store_set();
