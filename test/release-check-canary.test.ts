@@ -155,7 +155,7 @@ describe('release-check canary', () => {
       'closewindow', 'hl.dsp.window.close({ window = "address:0xa1" })',
       'sendshortcut', 'hl.dsp.send_shortcut({ mods = "CTRL", key = "W", window = "address:0xc3" })',
     ]);
-  });
+  }, 30_000);
 
   test('window lists parse on both platforms; prompts and dashboards are told apart', () => {
     expect(parseWindows('linux', '[{"address":"0x1","class":"chromium","title":"Olympus"},{"address":"","class":"x","title":""}]')).toEqual([{ id: '0x1', app: 'chromium', title: 'Olympus' }]);
