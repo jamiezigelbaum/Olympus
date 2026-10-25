@@ -1940,6 +1940,13 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
    */
   deleteDataConfirmMessages: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.',
   deleteDataConfirmMessagesMedia: 'Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.',
+  /**
+   * Added to that confirmation, on the computer, for a source with archives
+   * imported into it: their items are the source's own, so the delete takes
+   * them too, and the person's archive files are not touched. {source} is the
+   * source's name.
+   */
+  deleteDataImports: 'Archives you imported into {source} are part of it: their history goes too, and the archive files themselves stay where they are.',
   deleteDataDone: 'Indexed data deleted',
   disconnectConfirm: 'Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.',
   syncCheckingLine: dashboardManualSyncPendingLine('{source}'),

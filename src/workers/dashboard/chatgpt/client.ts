@@ -861,8 +861,10 @@ export function chatgptDashboardClient(
         wrap.className = 'fix confirm';
         // Delete and Disconnect say in the source's name what they do and do not touch.
         const sourceWords = source ? String(source.label || '') : '';
+        // On the computer, a source with archives imported into it says they go with it: their items are the source's own.
+        const importsGo = source && sourceImportsMeta(source.id) ? ' ' + fill(P.deleteDataImports, { source: sourceWords }) : '';
         const named = sourceWords && fix.tool === config.deleteDataTool
-          ? fill(fix.deletesCopies === 'messages_and_media' ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === 'messages' ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords })
+          ? fill(fix.deletesCopies === 'messages_and_media' ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === 'messages' ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) + importsGo
           : sourceWords && fix.tool === config.disconnectTool
             ? fill(P.disconnectConfirm, { source: sourceWords })
             : '';

@@ -21,6 +21,7 @@ import {
   ARCHIVE_STOP_TOOL_NAME,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
+  DELETE_SOURCE_DATA_TOOL_NAME,
   OLYMPUS_HOST_CONTEXT_KEY,
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
@@ -31,7 +32,8 @@ import { ARCHIVE_COMMON_FINDINGS } from '../src/core/archive-formats.ts';
 import { chatgptDashboardPageHtml } from '../src/workers/dashboard/chatgpt/page.ts';
 import { DASHBOARD_ARCHIVE_COPY as A } from '../src/workers/dashboard/vocabulary.ts';
 import { ARCHIVE_APPROVE_COPY, ARCHIVE_NOT_RUNNING_COPY } from '../src/workers/archive-import/dashboard.ts';
-import { previewArchiveApprove, previewArchiveBrowse, previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
+import { DASHBOARD_PREVIEW_STATES, previewArchiveApprove, previewArchiveBrowse, previewDashboardToolResult } from '../scripts/dashboard-preview.ts';
+import { DASHBOARD_CHATGPT_PAGE_COPY } from '../src/workers/dashboard/vocabulary.ts';
 
 type Message = { jsonrpc?: string; id?: number; method?: string; params?: any };
 type Serve = Record<string, (args: any) => unknown>;
@@ -1025,5 +1027,129 @@ describe('the import sheet asks which account an export belongs to', () => {
     await until(() => answers.length > 1);
     expect(answers[1]).toEqual({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox', confirm_account: true });
     expect(page.hasButton(A.account.apart)).toBe(false);
+  });
+});
+
+describe('the preview states for imports that are inputs of a source', () => {
+  const sourceImports = ['sources-import-importing', 'sources-import-imported', 'sources-import-stopped', 'sources-import-not-running', 'sources-import-delete'];
+  const accounts = ['archives-account-confirm', 'archives-account-request', 'archives-account-apart'];
+
+  test('every state is listed in the preview, so the 404 names it', () => {
+    for (const state of [...sourceImports, ...accounts]) expect(DASHBOARD_PREVIEW_STATES as readonly string[]).toContain(state);
+  });
+
+  function gmailCard(page: Page): Element {
+    const found = Array.from(page.doc.querySelectorAll('li.source')).find((card) => card.querySelector('.source-name')?.textContent === 'Gmail');
+    if (!found) throw new Error(`no Gmail card in: ${page.text()}`);
+    return found;
+  }
+
+  test('sources-import-importing: Gmail\'s card shows the import\'s progress, what Gmail already had, findings and Stop', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-importing') });
+    const card = gmailCard(page);
+    expect(card.textContent).toContain(fill(A.inSource.importingLine, { percent: '42', items: fill(A.nouns.email.many, { n: '18,420' }) }) + fill(A.inSource.alreadyThere.many, { n: '3,106' }));
+    expect(card.querySelector('[role="progressbar"]')).not.toBeNull();
+    expect(Array.from(card.querySelectorAll('button')).map((node) => node.textContent)).toContain(A.inSource.stop);
+    expect(archiveLists(card.querySelector('li[data-source-import]')!).notImported.length).toBeGreaterThan(0);
+    // Gmail's own card is the only place it is listed: the Archives row has no entry.
+    expect(page.doc.querySelectorAll('li.archive[data-archive]').length).toBe(1);
+  });
+
+  test('sources-import-imported: the counts say how many were already there, and the card says which history each input covers', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-imported') });
+    const card = gmailCard(page);
+    const lines = Array.from(card.querySelectorAll('li[data-source-import]')).map((item) => item.textContent ?? '');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain(fill(A.inSource.importedLine, { items: fill(A.nouns.email.many, { n: '48,210' }) }) + fill(A.inSource.alreadyThere.many, { n: '5,120' }));
+    expect(lines[1]).toContain(fill(A.nouns.email.many, { n: '3,380' }));
+    expect(lines[1]).not.toContain('already there');
+    expect(card.textContent).toContain('History imported up to 2019-12-30 · live since 2026-05-01');
+    expect(Array.from(card.querySelectorAll('button')).map((node) => node.textContent)).not.toContain(A.remove);
+  });
+
+  test('sources-import-stopped: a stopped file is a Needs you line and says how to go on; the person\'s own Stop is quiet', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-stopped') });
+    const stopped = Array.from(gmailCard(page).querySelectorAll('li[data-source-import][data-archive="stopped"]'));
+    expect(stopped).toHaveLength(2);
+    expect(stopped[0]!.textContent).toContain(fill(A.inSource.stoppedWhy.file_changed.why, { file: 'Mail 2009 to 2019.mbox' }));
+    expect(stopped[0]!.className).toContain('stopped');
+    expect(stopped[1]!.textContent).toContain(A.inSource.stoppedWhy.stopped_by_owner.why);
+    expect(stopped[1]!.className).not.toContain('stopped');
+    const lines = Array.from(needsYou(page).keys());
+    expect(lines.filter((line) => line.includes('Mail 2009 to 2019.mbox'))).toHaveLength(1);
+    expect(lines.some((line) => line.includes('Shared inbox.mbox'))).toBe(false);
+  });
+
+  test('sources-import-not-running: the import says it is waiting, and Gmail\'s card says which setting holds it', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-not-running') });
+    const item = gmailCard(page).querySelector('li[data-source-import]')!;
+    expect(item.getAttribute('data-not-running')).toBe('disabled');
+    expect(item.querySelector('[role="progressbar"]')).toBeNull();
+    expect(item.textContent).toContain(fill(A.inSource.notRunningLine, { percent: '10' }));
+  });
+
+  test('sources-import-delete: deleting the source says the imported history goes with it, and a source with no import does not', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-delete') });
+    const card = gmailCard(page);
+    expect(card.textContent).toContain('Disconnected');
+    const words = DASHBOARD_CHATGPT_PAGE_COPY.deleteDataConfirm.split('{source}').join('Gmail');
+    const imports = DASHBOARD_CHATGPT_PAGE_COPY.deleteDataImports.split('{source}').join('Gmail');
+    expect(page.hasButton('Delete indexed data')).toBe(true);
+    page.button('Delete indexed data').click();
+    await settle();
+    expect(page.text()).toContain(words + ' ' + imports);
+    expect(page.calls()).not.toContainEqual(expect.objectContaining({ name: DELETE_SOURCE_DATA_TOOL_NAME }));
+    // A source nothing was imported into says nothing of imports.
+    const plain = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('delete-data') });
+    plain.button('Delete indexed data').click();
+    await settle();
+    expect(plain.text()).toContain(DASHBOARD_CHATGPT_PAGE_COPY.deleteDataConfirm.split('{source}').join('Dropbox'));
+    expect(plain.text()).not.toContain('Archives you imported');
+  });
+
+  test('archives-account-confirm: the import sheet asks which account, in place, and answering starts the import', async () => {
+    const answers: any[] = [];
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => previewState('archives-account-confirm'),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => {
+        answers.push(args);
+        return previewArchiveApprove(args, 'archives-account-confirm');
+      },
+    });
+    page.button(A.importAction).click();
+    await settle();
+    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
+    await settle();
+    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    await until(() => page.text().includes(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' })));
+    expect(page.text()).toContain(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }));
+    expect(page.hasButton(fill(A.account.addFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }))).toBe(true);
+    expect(page.hasButton(fill(A.account.apartFor, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }))).toBe(true);
+    // The first answer imported nothing; only the owner's choice starts it.
+    expect(answers).toEqual([{ key: '/Users/you/Mail exports/Takeout-2026-10.mbox' }]);
+    expect(previewArchiveApprove({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox', keep_apart: true }, 'archives-account-confirm').structuredContent).toMatchObject({ status: 'started' });
+  });
+
+  test('archives-account-request: an agent\'s request asks which account in its own row until answered', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => previewState('archives-account-request'),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args, 'archives-account-request'),
+    });
+    page.button(A.approve).click();
+    await until(() => page.hasButton(fill(A.account.add, { source: 'Gmail' })));
+    expect(page.text()).toContain(fill(A.account.line, { name: 'Takeout-2026-10.mbox', source: 'Gmail' }));
+    expect(page.hasButton(A.account.apart)).toBe(true);
+    expect(page.hasButton(A.decline)).toBe(true);
+  });
+
+  test('archives-account-apart: a different account\'s export stays under Archives with its Remove, beside Gmail\'s merged import without one', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-account-apart') });
+    const merged = gmailCard(page).querySelector('li[data-source-import]')!;
+    expect(Array.from(merged.querySelectorAll('button')).map((node) => node.textContent)).not.toContain(A.remove);
+    const apart = Array.from(page.doc.querySelectorAll('li.archive[data-archive]')).filter((item) => !item.hasAttribute('data-source-import'));
+    expect(apart).toHaveLength(1);
+    expect(apart[0]!.textContent).toContain('Other address mail.mbox');
+    expect(Array.from(apart[0]!.querySelectorAll('button')).map((node) => node.textContent)).toContain(A.remove);
   });
 });

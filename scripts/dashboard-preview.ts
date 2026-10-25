@@ -23,6 +23,14 @@ import { loadSovereigntyPreset } from '../src/core/sovereignty.ts';
 //                the folder picker (and clicks on) as soon as the panel loads.
 //   &picker=import[,folder:<Name>...]  with an archives-* state: opens the
 //                archive picker (Import an archive) the same way.
+//   &picker=import,folder:Mail exports,pick:Mail exports/Takeout-2026-10.mbox
+//                with archives-account-confirm: picks that file, and the sheet asks
+//                which account it is of. pick:<path under the fake home> clicks
+//                that file's Import; key:<data-key> clicks any control by its key
+//                (sources-import-delete: &picker=key:summary:menu:gmail.email,
+//                key:menu:gmail.email:delete-indexed-data shows the confirmation;
+//                archives-account-request: &picker=key:archive-request:5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f:approve
+//                presses Import on the agent's request, and its row asks which account).
 //
 // Only the dashboard read answers; every other panel tool says it needs a
 // worker.
@@ -54,6 +62,8 @@ import {
   SCOPE_UI_META_KEY,
   type ComputerArchiveEntry,
   type ComputerArchivesMeta,
+  type ComputerSourceImportEntry,
+  type ComputerSourceImportsMeta,
 } from '../src/workers/chatgpt/dashboard-contract.ts';
 import { getFileScopeSource } from '../src/core/file-scope-sources.ts';
 import { ARCHIVE_FORMATS, archiveFamilyProvider } from '../src/core/archive-formats.ts';
@@ -473,6 +483,7 @@ export function buildDashboardPreviewView(state: string): SourceDashboardViewMod
   if (state.startsWith('capture-')) return capturePreview(state);
   if (state.startsWith('local-files')) return localFilesPreview(state.startsWith('local-files-picker') ? 'local-files-connected' : state);
   if (state === 'delete-data' || state === 'delete-data-done') return deleteDataPreview(state === 'delete-data-done');
+  if (isSourceImportState(state)) return sourceImportsPreview(state);
   if (state.startsWith('archives-')) return archivesPreview(state);
   if (state === 'dropbox-initial') return dropboxPreview('initial');
   if (state === 'dropbox-update') return dropboxPreview('update');
@@ -724,7 +735,40 @@ const ARCHIVE_STATES = [
   'archives-unreadable', 'archives-uncounted', 'archives-not-running', 'archives-notes', 'archives-empty', 'archives-chat',
   'archives-chat-whatsapp', 'archives-notes-reflect',
   'archives-nothing-imported',
+  'archives-account-confirm', 'archives-account-request', 'archives-account-apart',
 ] as const;
+
+/**
+ * Imports that are an input of a source (archive-live-one-dataset.md): the
+ * source is Gmail here (connected, reading live), and its card lists each import
+ * under it with its own progress, findings and Stop. Invented names only.
+ *   sources-import-importing    one import 42% read: how many of its items so far,
+ *                               of which how many Gmail already had, findings, Stop
+ *   sources-import-imported     two finished imports: "N items from this archive, of
+ *                               which M were already there", and the history each
+ *                               input covers; no Remove
+ *   sources-import-stopped      one stopped because its file changed (Needs you,
+ *                               with the way to go on) and one the person stopped
+ *   sources-import-not-running  an import waiting while background syncing is off
+ *   sources-import-delete       Gmail disconnected with its index and imported
+ *                               history still here: the ⋯ menu's Delete indexed
+ *                               data, whose confirmation says the imports go too
+ * The account question (which account an export is of), and a different
+ * account's export that stays apart, are the archives-account-* states:
+ *   archives-account-confirm    Import an archive: an export that does not prove its
+ *                               account; the sheet asks in place (picker=import,...)
+ *   archives-account-request    the same question in an agent's request's own row
+ *   archives-account-apart      a different account's export stays under Archives,
+ *                               with its Remove, beside Gmail's merged import
+ */
+const SOURCE_IMPORT_STATES = [
+  'sources-import-importing', 'sources-import-imported', 'sources-import-stopped', 'sources-import-not-running', 'sources-import-delete',
+] as const;
+
+function isSourceImportState(state: string): boolean {
+  return (SOURCE_IMPORT_STATES as readonly string[]).includes(state)
+    || state === 'archives-account-confirm' || state === 'archives-account-request' || state === 'archives-account-apart';
+}
 
 function archivesPreview(state: string): SourceDashboardViewModel {
   const meta = previewArchivesMeta(state)!;
@@ -756,12 +800,138 @@ function archivesPreview(state: string): SourceDashboardViewModel {
   });
 }
 
+/** Gmail's id on the dashboard, and the one live account the source-import states are of. */
+const PREVIEW_SOURCE_ID = 'gmail.email';
+const PREVIEW_LIVE_ITEMS = 6_840;
+const PREVIEW_LIVE_SINCE = '2026-05-01';
+
+/** The mail imports of the source-import states (invented names), as the Gmail card lists them. */
+function previewSourceImportEntries(state: string): ComputerSourceImportEntry[] {
+  const big: ComputerSourceImportEntry = {
+    id: '4e8a1c3b-2d5f-4b7a-9c0e-6f1a2b3c4d5e',
+    name: 'Mail 2009 to 2019.mbox',
+    format: 'Mail (mbox)',
+    family: 'email',
+    where: '~/Downloads/Takeout/Mail',
+    status: 'imported',
+    read: 48_210,
+    alreadyThere: 5_120,
+    earliest: '2009-03-14',
+    latest: '2019-12-30',
+    startedAt: at(6 * 3600),
+    importedAt: at(2 * 3600),
+    gaps: [{ kind: 'attachments_not_read', count: 112 }, { kind: 'message_too_large', count: 3 }, { kind: 'charset_not_decoded', count: 1 }],
+    skipped: [{ kind: 'spam_or_trash', count: 1_204 }],
+  };
+  const small: ComputerSourceImportEntry = {
+    id: '7b2d9e41-6a3c-4f58-8d1b-0c9e8f7a6b5d',
+    name: 'Shared inbox.mbox',
+    format: 'Mail (mbox)',
+    family: 'email',
+    where: '~/Downloads/Takeout/Mail',
+    status: 'imported',
+    read: 3_380,
+    alreadyThere: 0,
+    earliest: '2011-02-03',
+    latest: '2013-09-18',
+    startedAt: at(4 * 3600),
+    importedAt: at(3 * 3600),
+    gaps: [],
+    skipped: [],
+  };
+  if (state === 'sources-import-importing') {
+    const { importedAt: _importedAt, ...started } = big;
+    return [{ ...started, status: 'importing', percent: 42, read: 18_420, alreadyThere: 3_106, latest: '2016-08-02', startedAt: at(95 * 60), gaps: [{ kind: 'attachments_not_read', count: 61 }, { kind: 'message_too_large', count: 2 }], skipped: [{ kind: 'spam_or_trash', count: 640 }] }];
+  }
+  if (state === 'sources-import-imported') return [big, small];
+  if (state === 'sources-import-stopped') {
+    const { importedAt: _importedAt, ...started } = big;
+    const { importedAt: _smallImportedAt, ...smallStarted } = small;
+    return [
+      { ...started, status: 'stopped', read: 9_812, alreadyThere: 1_240, latest: '2012-11-30', stop: { code: 'file_changed', file: 'Mail 2009 to 2019.mbox' }, gaps: [], skipped: [] },
+      { ...smallStarted, status: 'stopped', read: 2_050, alreadyThere: 0, latest: '2012-04-02', stop: { code: 'stopped_by_owner' }, gaps: [], skipped: [] },
+    ];
+  }
+  if (state === 'sources-import-not-running') {
+    const { importedAt: _importedAt, ...started } = big;
+    return [{ ...started, status: 'importing', percent: 10, read: 5_100, alreadyThere: 640, latest: '2010-06-21', gaps: [], skipped: [] }];
+  }
+  if (state === 'sources-import-delete' || state === 'archives-account-apart') return [big];
+  return [];
+}
+
+/** The imports that joined Gmail, with the history Gmail's inputs cover, for a source-import state. */
+export function previewSourceImports(state: string): ComputerSourceImportsMeta[] | undefined {
+  if (!isSourceImportState(state)) return undefined;
+  const imports = previewSourceImportEntries(state);
+  if (imports.length === 0) return undefined;
+  const dated = imports.filter((entry) => entry.earliest && entry.latest);
+  const from = dated.map((entry) => entry.earliest!).sort()[0];
+  const to = dated.map((entry) => entry.latest!).sort().reverse()[0];
+  const covers = {
+    ...(from ? { importedFrom: from } : {}),
+    ...(to ? { importedTo: to } : {}),
+    // A disconnected source is not being read live: the card names no live history.
+    ...(state === 'sources-import-delete' ? {} : { liveSince: PREVIEW_LIVE_SINCE }),
+  };
+  return [{
+    sourceId: PREVIEW_SOURCE_ID,
+    imports,
+    covers,
+    ...(state === 'sources-import-not-running' ? { notRunning: 'disabled' as const } : {}),
+  }];
+}
+
+/**
+ * Gmail, connected and reading live (or disconnected with its index still
+ * here), with the imports of a source-import state counted once in its card:
+ * what live read plus what each import brought that Gmail did not already have.
+ */
+function sourceImportsPreview(state: string): SourceDashboardViewModel {
+  const archives = previewArchivesMeta(state)!;
+  const joined = previewSourceImports(state)?.[0]?.imports ?? [];
+  const brought = joined.reduce((sum, entry) => sum + Math.max(0, entry.read - entry.alreadyThere), 0);
+  const mail = PREVIEW_LIVE_ITEMS + brought;
+  const status = emptyStatus();
+  const moving = joined.some((entry) => entry.status === 'importing');
+  status.corpora = [corpus('internal.email', 'email', 'internal', 'gmail', mail, mail * 3, { withText: mail, embedded: moving ? Math.round(mail * 0.7) : mail })];
+  const apartItems = archives.archives.reduce((sum, entry) => sum + entry.items, 0);
+  if (apartItems > 0) {
+    status.corpora.push({
+      ...corpus('secure_local.archive.email', 'email', 'secure_local', archiveFamilyProvider('email' as SourceFamily), apartItems, apartItems * 3, { withText: apartItems, embedded: apartItems }),
+      last_refresh: { sync_run_id: 'preview-archive-pass', status: 'completed', started_at: at(2 * 3600 + 60), completed_at: at(2 * 3600), items_seen: 2_000, items_indexed: 2_000 },
+    });
+  }
+  const connected = state !== 'sources-import-delete';
+  const sources = connected ? [schedulerSource(PREVIEW_SOURCE_ID, 'internal.email', 1)] : [];
+  if (apartItems > 0) sources.push(schedulerSource('archive.imports', 'secure_local.archive.email', 0.1));
+  const attention: DashboardImportAttention[] = [];
+  for (const entry of joined) if (entry.status === 'stopped' && entry.stop?.code !== 'stopped_by_owner') attention.push({ kind: 'stopped', id: entry.id, name: entry.name });
+  if (state === 'sources-import-not-running') attention.push({ kind: 'scheduler', setting: 'disabled' });
+  const view = buildSourceDashboardViewModel({
+    sourceIndexStatus: status,
+    schedulerStatus: scheduler(sources),
+    sovereigntyEngine: engine,
+    connectedHandleRegistry: registry(connected
+      ? [handle('gmail.personal', 'gmail', ['gmail.email.sync'], ['https://www.googleapis.com/auth/gmail.readonly'])]
+      : []),
+    apiKeyAvailability: {},
+    oauthClientIds: { google: PREVIEW_GOOGLE_CLIENT_ID, gmail: PREVIEW_GOOGLE_CLIENT_ID },
+    oauthClientSecretAvailability: PREVIEW_GOOGLE_SECRET_ON_FILE,
+    googlePilotClientConfigured: true,
+    oauthRedirectBaseUrl: PREVIEW_REDIRECT_BASE_URL,
+    importedArchives: previewImportedArchives(archives, attention),
+    now: NOW,
+  });
+  return view;
+}
+
 /** A file name an agent chose, with a zero-width space the person could not see. */
 const PREVIEW_HIDDEN_NAME = 'Inbox\u200B.mbox';
 
 /** The card's side of a preview list, as archive-import/dashboard.ts present() derives it. */
-function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedArchives {
-  const attention: DashboardImportAttention[] = [];
+function previewImportedArchives(meta: ComputerArchivesMeta, extra: readonly DashboardImportAttention[] = []): DashboardImportedArchives {
+  const attention: DashboardImportAttention[] = [...extra];
   if (meta.unreadable) attention.push({ kind: 'unreadable', reason: meta.unreadable.reason });
   for (const entry of meta.archives) if (entry.status === 'stopped') attention.push({ kind: 'stopped', id: entry.id, name: entry.name });
   const waiting = meta.archives.some((entry) => entry.status === 'importing' || entry.status === 'removing');
@@ -787,7 +957,7 @@ function previewImportedArchives(meta: ComputerArchivesMeta): DashboardImportedA
 
 /** The Archives row's list for an archives-* state: invented names, never anyone's files. */
 export function previewArchivesMeta(state: string): ComputerArchivesMeta | undefined {
-  if (!(ARCHIVE_STATES as readonly string[]).includes(state)) return undefined;
+  if (!(ARCHIVE_STATES as readonly string[]).includes(state) && !(SOURCE_IMPORT_STATES as readonly string[]).includes(state)) return undefined;
   const takeout: ComputerArchiveEntry = {
     id: '0b9e4c52-7a1d-4d3e-9f0a-3c1b2a4d5e6f',
     name: 'All mail Including Spam and Trash.mbox',
@@ -843,6 +1013,24 @@ export function previewArchivesMeta(state: string): ComputerArchivesMeta | undef
       path: displayText(`~/Downloads/${PREVIEW_HIDDEN_NAME}`),
       origin: 'agent',
       status: 'pending',
+    });
+  } else if (state === 'archives-account-request') {
+    // An agent asked to import a file whose export does not say which account it is of.
+    requests.push({ id: '5f0c1d2e-3b4a-4c5d-8e6f-7a8b9c0d1e2f', name: 'Takeout-2026-10.mbox', where: '~/Downloads', path: '~/Downloads/Takeout-2026-10.mbox', origin: 'agent', status: 'pending' });
+  } else if (state === 'archives-account-apart') {
+    // An export of another mail account than the connected one: it stays under Archives, with its own Remove.
+    archives.push({
+      ...takeout,
+      id: '2c5e7a90-4b1d-4e6f-8a3c-9d0b1e2f3a4b',
+      name: 'Other address mail.mbox',
+      where: '~/Downloads/Takeout-other/Mail',
+      items: 9_120,
+      judged: 9_120,
+      held: 0,
+      earliest: '2014-01-09',
+      latest: '2023-04-27',
+      gaps: [{ kind: 'attachments_not_read', count: 31 }],
+      skipped: [{ kind: 'spam_or_trash', count: 212 }],
     });
   } else if (state === 'archives-remove-request') {
     archives.push(takeout);
@@ -1007,15 +1195,26 @@ export function previewArchiveBrowse(args: { parent_key?: unknown }) {
   };
 }
 
-/** The approval's answer in the preview: an .mbox starts; anything else is refused in the engine's words. */
-export function previewArchiveApprove(args: { key?: unknown }) {
+/**
+ * The approval's answer in the preview: an .mbox starts; anything else is
+ * refused in the engine's words. In archives-account-* states an export that
+ * does not prove its account is asked about first, and the answer starts it.
+ */
+export function previewArchiveApprove(args: { key?: unknown; request_id?: unknown; confirm_account?: unknown; keep_apart?: unknown }, state = '') {
   const key = typeof args.key === 'string' ? args.key : '';
-  const name = key.split('/').pop() ?? '';
+  const asked = state === 'archives-account-confirm' || state === 'archives-account-request';
+  const name = typeof args.request_id === 'string' ? 'Takeout-2026-10.mbox' : key.split('/').pop() ?? '';
   if (!name.endsWith('.mbox')) {
     return {
       content: [{ type: 'text', text: ARCHIVE_APPROVE_COPY.unsupported.split('{formats}').join(ARCHIVE_FORMATS.map((format) => format.label).join(', ')) }],
       structuredContent: { error: 'unsupported' },
       isError: true,
+    };
+  }
+  if (asked && args.confirm_account !== true && args.keep_apart !== true) {
+    return {
+      content: [{ type: 'text', text: 'Waiting for which account.' }],
+      structuredContent: { status: 'confirm_account', name, source: { id: PREVIEW_SOURCE_ID, label: 'Gmail' } },
     };
   }
   return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name } };
@@ -1322,6 +1521,7 @@ export const DASHBOARD_PREVIEW_STATES = [
   'delete-data', 'delete-data-done',
   'capture-stale', 'capture-unavailable', 'capture-blocked', 'capture-awaiting', 'capture-helper-down', 'capture-late', 'capture-restarting',
   ...ARCHIVE_STATES,
+  ...SOURCE_IMPORT_STATES,
 ] as const;
 
 /** 'delete-data': set once the preview's delete tool has run, so the next read is the done state. */
@@ -1403,11 +1603,13 @@ export function previewScopeList(state: string, args: { parent_key?: unknown }) 
  * control exists.
  */
 function pickerAutoScript(spec: string): string {
-  const steps = spec.split(',').map((step) => step.trim()).filter((step) => /^[A-Za-z0-9:_ .-]+$/.test(step)).slice(0, 6);
+  const steps = spec.split(',').map((step) => step.trim()).filter((step) => /^[A-Za-z0-9:_ ./-]+$/.test(step)).slice(0, 6);
   return `<script>(function(){var steps=${JSON.stringify(steps)};var i=0;var tries=0;`
     + `function find(step){if(step==='open'||step==='import'){var label=step==='open'?'Choose folders':'Import an archive';return Array.prototype.filter.call(document.querySelectorAll('button'),function(b){return b.textContent===label})[0];}`
     + `if(step==='everything')return document.querySelector('[data-key="picker:seg:@account:ingest"]');`
-    + `if(step.indexOf('folder:')===0)return document.querySelector('[data-key="picker:open:${LOCAL_FILES_HOME}/'+step.slice(7)+'"]');return null;}`
+    + `if(step.indexOf('folder:')===0)return document.querySelector('[data-key="picker:open:${LOCAL_FILES_HOME}/'+step.slice(7)+'"]');`
+    + `if(step.indexOf('pick:')===0)return document.querySelector('[data-key="picker:pick:${LOCAL_FILES_HOME}/'+step.slice(5)+'"]');`
+    + `if(step.indexOf('key:')===0)return document.querySelector('[data-key="'+step.slice(4)+'"]');return null;}`
     + `function tick(){if(i>=steps.length||tries++>200)return;var n=find(steps[i]);if(n&&!n.disabled){n.click();i++;setTimeout(tick,400);return;}setTimeout(tick,150);}`
     + `setTimeout(tick,300);})();</script>`;
 }
@@ -1425,6 +1627,7 @@ export function previewDashboardToolResult(state: string, indexFasterOn: boolean
         ...(state === 'local-files-needs-permission' ? { permissionSettings: [{ sourceId: 'local.files', url: FILES_AND_FOLDERS_URL }] } : {}),
         ...(waitingPrivateQuestions > 0 ? { waitingPrivateQuestions } : {}),
         ...(previewArchivesMeta(state) ? { archives: previewArchivesMeta(state) } : {}),
+        ...(previewSourceImports(state) ? { sourceImports: previewSourceImports(state) } : {}),
       },
     },
   };
@@ -1545,7 +1748,7 @@ if (import.meta.main) {
         return Response.json(previewScopeList(state, body.arguments));
       }
       if (body.name === ARCHIVE_BROWSE_TOOL_NAME && state.startsWith('archives-')) return Response.json(previewArchiveBrowse(body.arguments ?? {}));
-      if (body.name === ARCHIVE_APPROVE_TOOL_NAME && state.startsWith('archives-')) return Response.json(previewArchiveApprove((body.arguments ?? {}) as { key?: unknown }));
+      if (body.name === ARCHIVE_APPROVE_TOOL_NAME && state.startsWith('archives-')) return Response.json(previewArchiveApprove((body.arguments ?? {}) as Parameters<typeof previewArchiveApprove>[0], state));
       if (body.name === DELETE_SOURCE_DATA_TOOL_NAME && state === 'delete-data') {
         previewDataDeleted = true;
         return Response.json({
