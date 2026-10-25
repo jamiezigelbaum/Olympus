@@ -134,6 +134,78 @@ The user can turn any of these back on in the picker:
   (`~/Library/CloudStorage`). These are already indexed through their own
   sources, so this avoids duplicates.
 
+### Never indexed: Olympus's own folders
+
+What Olympus itself writes is not the person's files: its stores, the
+credential references and session secrets beside them, the capture services'
+state, its caches, and on a Mac its app and log folders under `~/Library`.
+These cannot be turned on, by choosing a parent (home, the whole computer) or
+by choosing the folder by name. The list is `olympusOwnLocations` in
+`core/olympus-layout.ts`, built from the same resolvers the writers use, so it
+follows an XDG home, the Linux install receipt and `OLYMPUS_MEDIA_CACHE_DIR`
+to wherever they point. It also follows a capture service that was moved: the
+environment variables `OLYMPUS_WHATSAPP_STATE_DIR`,
+`OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR`, `OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR`,
+`OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR` and `OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR`,
+and the engine's plugin config (`worker.telegramCapture.stateDir` / `spoolDir`,
+`worker.whatsappCapture.stateDir`, read as `loadConfig` reads them). The engine's
+folder listing marks such a folder "Olympus's own data", not selectable and
+without children, which the dashboard shows as its disabled controls ("Olympus
+cannot read this folder."), and a choice of one is refused when it is saved. The
+scope decision denies it and the live watch never reports it.
+
+A moved folder is Olympus's whole only when it is a dedicated folder: not the
+home folder, a base that other things share (`~/.local/share`, `~/.config`,
+`~/.local/state`, `~/.cache`, `~/Library`, `~/Library/Application Support`,
+`~/Library/Logs`, an `XDG_*` value), or a folder above one of those. That is
+judged for the folder as the owner wrote it and for where it really leads: a
+link that carries a move to the home folder or a shared base makes it no own
+folder (`resolvedOwnRoots` in `local-files/paths.ts`; the layout module itself
+reads no file system). A folder that is not dedicated adds nothing: Olympus
+cannot tell its files from the person's there, and excluding the whole folder
+would hide the person's own files. A dedicated folder reached through a link is
+excluded under both spellings.
+
+What an earlier version indexed inside an own folder (a folder the owner had
+chosen by name) is removed at worker start, before the worker answers anything
+(`createLocalFilesOwnRootsCleanup` in `local-files/own-roots-cleanup.ts`, run
+from `email-source/server.ts`). It walks the stored paths under each own folder
+in each tier store, page by page in the index's own order, and keeps those the
+scanner itself would call inside it (`isInsideOwnRoot`, with the case rules of
+the volume holding the path: `~/Capture` beside an own `~/capture` is another
+folder on a volume that keeps case, and stays). It removes them through the
+deletion path every other removal takes, a connector listing deleted items into
+the lane's tier stores, so the item, its text and its entry in the
+secret-locations index go together; that listing settles nothing else first
+(owner overrides and rule raises of unrelated items wait for the lane's own
+run). The walk keeps its position between runs, so however many case siblings
+sort ahead of an own file it goes on past them, and the clean-up is complete
+only when the last page of every own folder in every store has been read. It
+is bounded: 5,000 items removed, 1,000,000 paths read or 10 seconds per run,
+and its caller never waits longer than the 10 seconds, so a large backlog
+cannot hold up start-up. What it leaves goes at the next run: the next pass of
+any chosen folder, which asks first and starts its own sync only once no
+clean-up batch is still writing, or the next start (a restart begins the walk
+again). It covers the case where an own folder was the only folder chosen.
+Reads are not filtered by it: a read scope comes from the saved approval alone,
+as for every file source.
+
+Known limits, places this rule does not cover:
+
+- Single files an owner points at with a per-store override (`*_DB_PATH`) or the
+  Telegram session file, and the WhatsApp live-drain media and transcribe
+  folders and the Telegram drain cursor.
+- A move to a folder that is not dedicated, as above: the writer's files in the
+  home folder or in `~/.local/share` are the person's files as far as this source
+  can tell. Move the writer to a folder of its own to keep them out.
+- A data folder on a disk that is not the computer's own.
+- An OpenClaw-hosted plugin config (`openclaw.json`) is not read, only the
+  engine's own; set the environment variable in `worker.env` there.
+- A clean-up that is cut short, or that waits for the index of stored paths to
+  finish preparing, leaves the rest until the next run. A source whose only
+  chosen folder is an own folder has no pass, so the rest waits for the next
+  start.
+
 ### iCloud Drive
 
 Files kept only in iCloud are placeholders on disk (dataless). Reading one

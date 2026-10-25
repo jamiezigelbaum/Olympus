@@ -397,7 +397,7 @@ export function createFileExtractionRuntime(
   };
   // Copies nothing holds (an extraction that died before its result was
   // stored) are removed once they are a day old.
-  if (extractorConfig.media?.cacheDir) sweepMediaCache(extractorConfig.media.cacheDir);
+  if (extractorConfig.media?.cacheDir) sweepMediaCache(extractorConfig.media.cacheDir, { env });
   const registry = createDefaultExtractorRegistry(extractorConfig);
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
 
