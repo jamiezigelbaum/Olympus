@@ -184,8 +184,9 @@ only when the last page of every own folder in every store has been read. It
 is bounded: 5,000 items removed, 1,000,000 paths read or 10 seconds per run,
 and its caller never waits longer than the 10 seconds, so a large backlog
 cannot hold up start-up. What it leaves goes at the next run: the next pass of
-any chosen folder, which asks first, or the next start (a restart begins the
-walk again). It covers the case where an own folder was the only folder chosen.
+any chosen folder, which asks first and starts its own sync only once no
+clean-up batch is still writing, or the next start (a restart begins the walk
+again). It covers the case where an own folder was the only folder chosen.
 Reads are not filtered by it: a read scope comes from the saved approval alone,
 as for every file source.
 

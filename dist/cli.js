@@ -148524,6 +148524,10 @@ function createLocalFilesOwnRootsCleanup(options) {
         if (timer)
           clearTimeout(timer);
       });
+    },
+    async idle() {
+      while (running)
+        await running;
     }
   };
 }
@@ -184883,7 +184887,10 @@ async function main() {
       hub: localFilesWatchHub,
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
-      ...localFilesOwnRootsCleanup ? { beforePull: () => localFilesOwnRootsCleanup.run() } : {},
+      ...localFilesOwnRootsCleanup ? { beforePull: async () => {
+        await localFilesOwnRootsCleanup.run();
+        await localFilesOwnRootsCleanup.idle();
+      } } : {},
       ...localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) } : {}
     });
     localFilesSyncCache = { key: key2, handler };

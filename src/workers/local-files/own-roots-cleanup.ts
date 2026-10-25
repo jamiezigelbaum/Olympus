@@ -77,6 +77,11 @@ export interface LocalFilesOwnRootsCleanup {
    * at a time; once a run finds nothing left it answers at once. Never throws.
    */
   run(): Promise<LocalFilesOwnRootsCleanupResult>;
+  /**
+   * Settles once no run is in flight. A pass waits for it before its own sync,
+   * so a batch `run` released its caller from is never writing beside it.
+   */
+  idle(): Promise<void>;
 }
 
 export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsCleanupOptions): LocalFilesOwnRootsCleanup {
@@ -187,6 +192,9 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
         (timer as { unref?: () => void }).unref?.();
       });
       return Promise.race([work, bound]).finally(() => { if (timer) clearTimeout(timer); });
+    },
+    async idle() {
+      while (running) await running;
     },
   };
 }

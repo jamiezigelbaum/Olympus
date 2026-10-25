@@ -621,8 +621,8 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const cleanup = server.indexOf('await localFilesOwnRootsCleanup?.run()');
     expect(cleanup).toBeGreaterThan(0);
     expect(cleanup).toBeLessThan(server.indexOf('const startServer = '));
-    // And each pass asks again, so a clean-up cut short goes on.
-    expect(server).toContain('beforePull: () => localFilesOwnRootsCleanup.run()');
+    // And each pass asks again, so a clean-up cut short goes on, and starts only once no batch is in flight.
+    expect(server).toContain('beforePull: async () => { await localFilesOwnRootsCleanup.run(); await localFilesOwnRootsCleanup.idle(); }');
   });
 
   /** A real tier lane (its stores on disk) whose secure store holds `files`. */
@@ -687,6 +687,23 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     await sleep(900);
     expect(present(secure, secret)).toBe(false);
     expect(await cleanup.run()).toEqual({ removed: 0, complete: true });
+  });
+
+  test('a pass that follows waits for a batch the bound released its caller from', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token']]);
+    const sync = lane.set.sync.bind(lane.set);
+    let inFlight = false;
+    lane.set.sync = async (...args: Parameters<typeof sync>) => {
+      inFlight = true;
+      try { await sleep(400); return await sync(...args); } finally { inFlight = false; }
+    };
+    const cleanup = createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext(), maxMs: 50 });
+
+    expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
+    expect(inFlight).toBe(true);
+    await cleanup.idle();
+    expect(inFlight).toBe(false);
+    expect(present(secure, secret)).toBe(false);
   });
 
   test('is bounded by count, and what is left goes with the next pass of a chosen folder', async () => {

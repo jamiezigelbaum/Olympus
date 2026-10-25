@@ -2912,7 +2912,10 @@ export async function main(): Promise<void> {
       hub: localFilesWatchHub,
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
-      ...(localFilesOwnRootsCleanup ? { beforePull: () => localFilesOwnRootsCleanup.run() } : {}),
+      // A pass writes the same stores: it starts only once no clean-up batch is still in flight.
+      ...(localFilesOwnRootsCleanup
+        ? { beforePull: async () => { await localFilesOwnRootsCleanup.run(); await localFilesOwnRootsCleanup.idle(); } }
+        : {}),
       ...(localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)
         ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) }
         : {}),
