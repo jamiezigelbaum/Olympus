@@ -94,7 +94,7 @@ describe('release-check canary', () => {
   test('the published update runs the site install command for the platform', async () => {
     const desktop = fakeDesktop('macos');
     await runCanary(desktop.machine, options('macos', { update: { kind: 'published', site: 'https://example.test/' } }));
-    expect(desktop.scripts[0]).toBe("curl -fsSL --proto '=https' --tlsv1.2 'https://example.test/install.sh' | sh");
+    expect(desktop.scripts[0]).toBe("set -o pipefail; curl -fsSL --proto '=https' --tlsv1.2 'https://example.test/install.sh' | sh");
     expect(SITE_INSTALLER.linux).toBe('install-linux.sh');
   });
 
@@ -121,6 +121,15 @@ describe('release-check canary', () => {
     expect(statusOf(result.checks)['canary.window.launcher']).toBe('pass');
     expect(desktop.scripts.some((s) => s.startsWith("open -a 'Safari'") && s.includes('CGEventCreateKeyboardEvent($(), 12,'))).toBe(true);
     expect(result.checks.some((c) => c.id.endsWith('.closed'))).toBe(false);
+  });
+
+  test('a dashboard already on screen fails the check instead of hiding a tab opened behind it', async () => {
+    const desktop = fakeDesktop('macos', { windows: [{ id: '5', app: 'Safari', title: 'Olympus' }], onLauncher: () => {} });
+    const result = await runCanary(desktop.machine, options('macos'));
+    const check = result.checks.find((c) => c.id === 'canary.window.launcher')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('already open before this check');
+    expect(desktop.scripts.some((s) => s.includes(' dashboard >/dev/null'))).toBe(false);
   });
 
   test('window lists parse on both platforms; prompts and dashboards are told apart', () => {

@@ -149,7 +149,8 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
       return { checks, screens };
     }
   } else if (options.update.kind === 'published') {
-    const result = await sh(`curl -fsSL --proto '=https' --tlsv1.2 ${shellQuote(`${options.update.site.replace(/\/$/, '')}/${SITE_INSTALLER[options.os]}`)} | sh`, 25 * 60_000);
+    // pipefail: a failed download must fail the update, not hand `sh` an empty script that exits 0.
+    const result = await sh(`set -o pipefail; curl -fsSL --proto '=https' --tlsv1.2 ${shellQuote(`${options.update.site.replace(/\/$/, '')}/${SITE_INSTALLER[options.os]}`)} | sh`, 25 * 60_000);
     const last = `${result.stdout}\n${result.stderr}`.trim().split('\n').slice(-3).join(' / ');
     record('canary.update', 'Update with the site\'s install command', result.code === 0 ? 'pass' : 'fail', result.code === 0 ? last.slice(0, 300) : `exit ${result.code}: ${last.slice(0, 600)}`, started);
     if (result.code !== 0) return { checks, screens };
@@ -208,6 +209,9 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
     };
     const before = await listed();
     if (typeof before === 'string') { record(open.id, open.title, 'fail', before, started); continue; }
+    // A dashboard already on screen hides the next one: a browser may open it as a tab behind that window's title.
+    const already = before.find(isDashboard);
+    if (already) { record(open.id, open.title, 'fail', `a dashboard window was already open before this check (${describe(already)}), so a new one could not be told from it; close it and run the canary again`, started); continue; }
     const launched = await sh(open.script);
     let opened: Array<DesktopWindow & { reused: boolean }> = [];
     let outcome: { status: CheckStatus; detail: string } | undefined;
