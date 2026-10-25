@@ -430,7 +430,8 @@ async function setupMachine(run: Run, workDir: string, bundlePath: string, insta
     ms: connect.ms,
   });
   if (connect.result?.ok !== true) return false;
-  await run.agent('sync', '', 60_000);
+  // Connecting starts the first sync. No Sync now press follows (there was one until 2026-10-25): its line ("Checking Readwise…",
+  // then what it found) stays on the card for ten minutes, about when the screens are taken, so the pictures varied by the clock.
 
   return (await settleIngest(run)).settled;
 }

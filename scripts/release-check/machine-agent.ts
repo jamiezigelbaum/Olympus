@@ -311,12 +311,6 @@ async function connectSource(): Promise<never> {
   emit({ ok: true, message: String(response.json?.status_message ?? '') });
 }
 
-async function syncNow(): Promise<never> {
-  const session = await ownerSession();
-  const response = await session.call('POST', '/dashboard/sync-now', { source: 'readwise' });
-  emit({ ok: response.status === 200, status: response.status });
-}
-
 export interface SettleSnapshot {
   seen: number;
   indexed: number;
@@ -1842,7 +1836,6 @@ async function main(): Promise<void> {
     }
     case 'prepare-source': return await prepareSource();
     case 'connect-source': return await connectSource();
-    case 'sync': return await syncNow();
     case 'settle': return await settle(Number(flag('--timeout-s', '600')));
     case 'mcp-token': return await mcpToken();
     case 'mcp-tools': return await mcpTools();
@@ -1880,7 +1873,7 @@ async function main(): Promise<void> {
     case 'await-engine': return await awaitEngine(Number(flag('--timeout-s', '300')));
     case 'upgrade-selftest': return await upgradeSelftest(flag('--mode'));
     default:
-      console.error('usage: agent <prepare-source|connect-source|sync|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
+      console.error('usage: agent <prepare-source|connect-source|settle|mcp-token|mcp-tools|mcp-call|mcp-rpc|smoke|dashboard-json|screenshots|inbox-check|journeys|explore|archive-import|archive-drain|archive-remove|archive-model|archive-changed|archive-cleanup|archive-collect|collect-logs|engine-build|snapshot-state|set-policy-setting|await-engine|upgrade-selftest>');
       process.exit(2);
   }
 }
