@@ -207,8 +207,10 @@ export function storePlacementView(env: LayoutEnv = process.env): StorePlacement
     if (entry.state === 'deleting') return false;
     const own = layoutPath(identity, entry.layout, env);
     if (own === undefined) return false;
+    // The other layout's place only has to be empty: a store caught between a
+    // rename and the registry's `layout` is there, and nothing more is asked of it.
     const other = layoutPath(identity, entry.layout === 'folder' ? 'legacy' : 'folder', env);
-    return [own, other, ...seen].every((path) => path === undefined || absentForSure(path));
+    return [own, ...seen].every(absentForSure) && (other === undefined || isMissing(other));
   };
 
   let placed: Map<string, StoreIdentity> | undefined;

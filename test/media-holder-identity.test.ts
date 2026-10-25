@@ -35,7 +35,7 @@ import type { ExtractionSinkRequest } from '../src/workers/file-extraction/types
 import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 type Env = Record<string, string | undefined>;
-type StoreOf = 'local.files' | 'dropbox.files';
+type StoreOf = 'local.files' | 'dropbox.files' | 'telegram.messages';
 
 const THREE_DAYS = 3 * 24 * 60 * 60_000;
 
@@ -464,6 +464,21 @@ describe('a deleted account', () => {
     // The store file removed by hand while the account is active: gone, as a path marker would be.
     rmSync(dbPath);
     expect(sweep()).toBe(1);
+  });
+
+  test('a folder account whose legacy folder never existed is judged by its own folder', async () => {
+    // Telegram's legacy stores sit outside the data root; on a fresh install nothing was ever there.
+    account('telegram.messages', 'folder');
+    const dbPath = storeFile('telegram.messages', 'folder');
+    const store = serviceStore('telegram.messages', dbPath);
+    const media = await landPicture(store, 35);
+    closeStore(store);
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+    // The delete that today leaves the registry as it was: the folder is gone and a missed release is made up.
+    rmSync(dirname(dirname(dbPath)), { recursive: true, force: true });
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
   });
 
   test('a shared picture stays while another store holds it', async () => {
