@@ -26698,13 +26698,17 @@ function judge(lane, parents, depth) {
     const list = rows.get(key2) ?? [];
     const identity2 = list[0]?.identity;
     const active = list.filter((row) => row.active);
-    if (list.some((row) => row.secret)) {
+    const locations = list.filter((row) => row.secret);
+    if (locations.length > 0) {
+      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key2, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
       verdicts.set(key2, { visible: true, gone: false });
       continue;
     }
     if (!identity2) {
       if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
-        verdicts.set(key2, { visible: true, gone: false });
+        verdicts.set(key2, HIDDEN);
       } else {
         verdicts.set(key2, { visible: false, gone: true });
       }
@@ -26717,10 +26721,8 @@ function judge(lane, parents, depth) {
       const state = states?.get(tierLedgerIdentityKey(identity2));
       const copies = state?.copies ?? [];
       visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && ledger.itemIsSecret(identity2)) {
-        verdicts.set(key2, { visible: true, gone: false });
-        continue;
-      }
+      if (!visible && active.length > 0 && ledger.itemIsSecret(identity2))
+        visible = true;
     }
     if (visible) {
       const above = active.find((row) => row.grandparentLocalItemId !== undefined);
@@ -32152,16 +32154,26 @@ var init_local_index = __esm(() => {
     `).run(conservativeTierForDomain(this.trustDomain), now, now, syncRunId, itemPk);
     }
     keepsSecretLocations() {
-      return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 AND trust_tier = 'S5' LIMIT 1`).get() !== null;
+      return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 LIMIT 1`).get() !== null;
     }
     reobserveSecretLocation(item, connectorId, ownershipKind, syncRunId) {
       const row = this.db.query(`
-      SELECT item_pk FROM items
+      SELECT item_pk, trust_tier FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-        AND tombstoned = 1 AND trust_tier = 'S5'
+        AND tombstoned = 1
     `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
       if (!row)
         return;
+      if (row.trust_tier !== "S5") {
+        if (this.tierLedger()?.itemIsSecret(item.identity) !== true)
+          return;
+        this.db.transaction(() => {
+          this.db.query(`UPDATE items SET trust_tier = 'S5' WHERE item_pk = ? AND tombstoned = 1`).run(row.item_pk);
+          this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+          this.deleteFtsForItem(row.item_pk);
+          this.keepSecretsLocationOnly(row.item_pk);
+        })();
+      }
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneSecretsExtraction(identity2, options) {
@@ -34950,7 +34962,7 @@ var init_local_index = __esm(() => {
             }
             if (route.kind === "delete") {
               const secrets = route.reason === "secrets";
-              if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? "S5" : undefined, true)) {
+              if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? "S5" : undefined, route.keepLocation !== true)) {
                 itemsTombstoned += 1;
                 if (secrets) {
                   secretsTierItemsTombstoned += 1;
@@ -35445,10 +35457,10 @@ var init_local_index = __esm(() => {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-      `).run(identity2.provider, identity2.family, identity2.accountScope, identity2.providerItemId, identity2.providerConversationId ?? null, identity2.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(identity2.provider, identity2.family, identity2.accountScope, identity2.providerItemId, identity2.providerConversationId ?? null, identity2.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity2.parent?.localItemId ?? null);
         const inserted = this.db.query(`SELECT item_pk FROM items
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
@@ -51941,7 +51953,7 @@ class TieredStoreSet {
     const stores = this.openStores();
     const outcomes = stores.map((store) => store.retireSecretLocation(identity2, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID }));
     if (options.record && outcomes.every((outcome) => outcome === "none")) {
-      this.store("secure_local", { create: true })?.retireSecretLocation(identity2, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, record: true });
+      this.store(SECRET_LOCATION_DOMAIN, { create: true })?.retireSecretLocation(identity2, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, record: true });
     }
   }
   store(trustDomain, options = {}) {
@@ -52508,8 +52520,11 @@ class TieredRoutingRun {
         return layers && sensitivity ? { kind: "store", sensitivity, layer: layers } : { kind: "elsewhere", reason: "routed_to_other_tier" };
       }
       case "hold":
-        return { kind: "elsewhere", reason: plan.reason };
+        return plan.location === true && domain === SECRET_LOCATION_DOMAIN ? { kind: "delete", reason: "secrets", keepLocation: true } : { kind: "elsewhere", reason: plan.reason };
       case "delete":
+        if (plan.location === true && domain === SECRET_LOCATION_DOMAIN) {
+          return { kind: "delete", reason: plan.reason, keepLocation: true };
+        }
         return plan.corpora.has(corpusId) ? { kind: "delete", reason: plan.reason } : { kind: "elsewhere", reason: plan.reason === "secrets" ? "secrets" : "routed_to_other_tier" };
     }
   }
@@ -52573,10 +52588,18 @@ class TieredRoutingRun {
       case "secrets":
         this.counts.itemsSecrets += 1;
         forgetSecretInSideStores({ ledger, identity: identity2 });
+        const location = !hasRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined;
+        if (location)
+          this.routedDomains.add(SECRET_LOCATION_DOMAIN);
         if (secretsDisposition() === "hide_until_purge")
-          return { kind: "hold", reason: "secrets" };
+          return { kind: "hold", reason: "secrets", ...location ? { location: true } : {} };
         this.copyRemovals.set(identityKey(identity2), identity2);
-        return { kind: "delete", corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: "secrets" };
+        return {
+          kind: "delete",
+          corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)),
+          reason: "secrets",
+          ...location ? { location: true } : {}
+        };
       case "queued_move":
         this.counts.movesQueued += 1;
         if (contentRead && !recorded.raise) {
@@ -52642,6 +52665,15 @@ class TieredRoutingRun {
           ...plan.reason === "secrets" ? { trustTier: "S5" } : {}
         });
       }
+    }
+    if ((plan.kind === "delete" || plan.kind === "hold") && plan.location === true && listingDomain !== SECRET_LOCATION_DOMAIN) {
+      const store = this.set.store(SECRET_LOCATION_DOMAIN, { create: true });
+      const listing = this.legOptions.get(input.store.corpusId) ?? {};
+      await store.syncFromConnector(handoffConnector(input.connector, input.item), {
+        ...listing.fetchContent !== undefined ? { fetchContent: listing.fetchContent } : {},
+        ...listing.deferMetadataOnlyContent !== undefined ? { deferMetadataOnlyContent: listing.deferMetadataOnlyContent } : {},
+        tierRouting: this
+      });
     }
   }
   recordSecretLocation(input, text2, decision) {
@@ -52771,7 +52803,7 @@ function handoffConnector(source, item) {
     }
   };
 }
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, SECRET_LOCATION_DOMAIN = "secure_local", TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();

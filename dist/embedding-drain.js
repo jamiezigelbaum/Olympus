@@ -18737,13 +18737,17 @@ function judge(lane, parents, depth) {
     const list = rows.get(key2) ?? [];
     const identity = list[0]?.identity;
     const active = list.filter((row) => row.active);
-    if (list.some((row) => row.secret)) {
+    const locations = list.filter((row) => row.secret);
+    if (locations.length > 0) {
+      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key2, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
       verdicts.set(key2, { visible: true, gone: false });
       continue;
     }
     if (!identity) {
       if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
-        verdicts.set(key2, { visible: true, gone: false });
+        verdicts.set(key2, HIDDEN);
       } else {
         verdicts.set(key2, { visible: false, gone: true });
       }
@@ -18756,10 +18760,8 @@ function judge(lane, parents, depth) {
       const state = states?.get(tierLedgerIdentityKey(identity));
       const copies = state?.copies ?? [];
       visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && active.length > 0 && ledger.itemIsSecret(identity)) {
-        verdicts.set(key2, { visible: true, gone: false });
-        continue;
-      }
+      if (!visible && active.length > 0 && ledger.itemIsSecret(identity))
+        visible = true;
     }
     if (visible) {
       const above = active.find((row) => row.grandparentLocalItemId !== undefined);
@@ -22194,16 +22196,26 @@ var init_local_index = __esm(() => {
     `).run(conservativeTierForDomain(this.trustDomain), now, now, syncRunId, itemPk);
     }
     keepsSecretLocations() {
-      return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 AND trust_tier = 'S5' LIMIT 1`).get() !== null;
+      return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 LIMIT 1`).get() !== null;
     }
     reobserveSecretLocation(item, connectorId, ownershipKind, syncRunId) {
       const row = this.db.query(`
-      SELECT item_pk FROM items
+      SELECT item_pk, trust_tier FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-        AND tombstoned = 1 AND trust_tier = 'S5'
+        AND tombstoned = 1
     `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
       if (!row)
         return;
+      if (row.trust_tier !== "S5") {
+        if (this.tierLedger()?.itemIsSecret(item.identity) !== true)
+          return;
+        this.db.transaction(() => {
+          this.db.query(`UPDATE items SET trust_tier = 'S5' WHERE item_pk = ? AND tombstoned = 1`).run(row.item_pk);
+          this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+          this.deleteFtsForItem(row.item_pk);
+          this.keepSecretsLocationOnly(row.item_pk);
+        })();
+      }
       this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneSecretsExtraction(identity, options) {
@@ -24992,7 +25004,7 @@ var init_local_index = __esm(() => {
             }
             if (route.kind === "delete") {
               const secrets = route.reason === "secrets";
-              if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? "S5" : undefined, true)) {
+              if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? "S5" : undefined, route.keepLocation !== true)) {
                 itemsTombstoned += 1;
                 if (secrets) {
                   secretsTierItemsTombstoned += 1;
@@ -25487,10 +25499,10 @@ var init_local_index = __esm(() => {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity.parent?.localItemId ?? null);
         const inserted = this.db.query(`SELECT item_pk FROM items
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
