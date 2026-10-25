@@ -62,6 +62,19 @@ shared classifier hold is built (`holdContentUntilJudged`, change-logged in
 import lane is the only one that sets it. Design and delivery sequence:
 [archive import](design/archive-import.md).
 
+Next (owner, 2026-10-25): ingest everything an archive holds, at least its
+metadata. In flight now:
+
+- Telegram account parts and service messages become items;
+- the WhatsApp status updates chat is imported (WhatsApp notices stay out);
+- long items are kept whole;
+- each archive's list is split into "Not imported" and "How it was read".
+
+Attachments and media become child items, read by the shared extraction
+factory. Each child is judged on its own and takes no tier from its parent.
+This is a contract change (2.1.0), designed first because Gmail and Evernote
+need it too: [child items](design/child-items.md).
+
 ## Source storage (approved 2026-10-24, in delivery)
 
 Every connected account's data moves into one folder owned by the shared
