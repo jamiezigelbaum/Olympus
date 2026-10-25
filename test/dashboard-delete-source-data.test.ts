@@ -5,13 +5,13 @@ import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource, disconnectThisComputerSource } from '../src/core/this-computer.ts';
-import { lifecycleAccountFiles, lifecycleDataRoot } from '../src/data-lifecycle.ts';
-import type { ModelKeyReloadRequest } from '../src/core/model-key-reload.ts';
+import { deleteMarkedAccounts, lifecycleAccountFiles, lifecycleDataRoot } from '../src/data-lifecycle.ts';
 import { defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
 import {
   MINE,
   OTHER,
   SEEDED_FILES,
+  SEEDED_FOR_MINE,
   layoutUnder,
   seedAllFiles,
   seedTierLedgerBeside,
@@ -73,7 +73,9 @@ describe('dashboard Delete indexed data route', () => {
             }),
       },
     });
-    return { root, registryPath, store, restarts, worker };
+    // What the restart does first, at boot: remove the accounts marked for deletion.
+    const boot = () => deleteMarkedAccounts(context);
+    return { root, registryPath, store, restarts, worker, boot };
   }
   const post = (worker: { fetch(request: Request): Promise<Response> }, body: Record<string, unknown>) =>
     worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', {
@@ -82,7 +84,7 @@ describe('dashboard Delete indexed data route', () => {
       body: JSON.stringify(body),
     }));
 
-  test('deletes a disconnected source\'s indexed data, then asks the worker to reopen its stores', async () => {
+  test('marks a disconnected source\'s indexed data for deletion and restarts; the boot removes it', async () => {
     const f = fixture();
     try {
       const response = await post(f.worker, { source_id: 'dropbox.files', acknowledge: true });
@@ -93,8 +95,11 @@ describe('dashboard Delete indexed data route', () => {
         worker_restarting: true,
         policy: { indexed_data_deleted: true, source_files_untouched: true },
       });
-      expect(existsSync(f.store)).toBe(false);
       expect(f.restarts.requested).toBe(1);
+      // This worker holds the store open: the files go at the restart, before anything opens them.
+      expect(existsSync(f.store)).toBe(true);
+      expect(f.boot().deleted.map((entry) => entry.sourceId)).toEqual(['dropbox.files']);
+      expect(existsSync(f.store)).toBe(false);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
@@ -203,7 +208,7 @@ describe('dashboard Delete indexed data route: the shared files', () => {
     writeFileSync(store, 'indexed');
     seedTierLedgerBeside(store, MINE);
     seedAllFiles(layout);
-    const reloads: Array<ModelKeyReloadRequest | undefined> = [];
+    const reloads: unknown[] = [];
     const worker = createEmailSourceWorker({
       sourceDashboard: {
         sovereigntyEngine: createSovereigntyEngine(buildEnvBridgeSovereigntyConfig({})),
@@ -213,20 +218,24 @@ describe('dashboard Delete indexed data route: the shared files', () => {
         workerRestart: { canRestart: () => true, request: (reload) => { reloads.push(reload); return true; } },
       },
     });
+    const boot = () => deleteMarkedAccounts({ ...context, handleRegistryPath: layout.handleRegistryPath });
     const del = (body: Record<string, unknown>) => worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }));
-    return { root, layout, context, store, reloads, worker, del };
+    return { root, layout, context, store, reloads, worker, del, boot };
   }
-  const files = SEEDED_FILES.filter((file) => file.stepId !== 'mail-source-scopes' && file.stepId !== 'this-computer');
+  const files = SEEDED_FOR_MINE;
 
   test('forgets the source in every shared file, the config files beside the worker\'s own registry included', async () => {
     const f = fixture();
     try {
       const response = await f.del({ source_id: 'dropbox.files', acknowledge: true });
       expect(response.status).toBe(200);
+      // Forgotten at once; the store goes at the restart.
+      expect(existsSync(f.store)).toBe(true);
+      f.boot();
       expect(existsSync(f.store)).toBe(false);
       for (const file of files) {
         expect(file.left(f.layout, MINE), file.stepId).toBe(0);
@@ -238,14 +247,12 @@ describe('dashboard Delete indexed data route: the shared files', () => {
     }
   });
 
-  test('a poll that wrote the source back while the worker wound down is forgotten again before the exit', async () => {
+  test('a poll that wrote the source back while the worker wound down is forgotten again at the boot', async () => {
     const f = fixture();
     try {
       const response = await f.del({ source_id: 'dropbox.files', acknowledge: true });
       expect(response.status).toBe(200);
       expect(f.reloads).toHaveLength(1);
-      const reload = f.reloads[0]!;
-      expect(reload.beforeExit).toBeFunction();
 
       // Between the delete and the exit: a dashboard poll records the counts
       // it read through stores that were still open, and an answer lands.
@@ -257,7 +264,7 @@ describe('dashboard Delete indexed data route: the shared files', () => {
       expect(waiting.left(f.layout, MINE)).toBeGreaterThan(0);
       const otherBefore = { dashboard: dashboard.left(f.layout, OTHER), waiting: waiting.left(f.layout, OTHER) };
 
-      await reload.beforeExit!();
+      f.boot();
 
       expect(dashboard.left(f.layout, MINE)).toBe(0);
       // Repeated: a question asked in that window is answered from the
@@ -269,7 +276,7 @@ describe('dashboard Delete indexed data route: the shared files', () => {
     }
   });
 
-  test('a reconnect in the window before the exit survives the repeat; the poll\'s write-back does not', async () => {
+  test('a reconnect in the window before the restart survives the boot\'s repeat; the poll\'s write-back does not', async () => {
     const f = fixture();
     const computer = { source_id: 'local.files', corpus_id: 'secure_local.local.files', ledger_id: 'local_files' };
     const connection = SEEDED_FILES.find((file) => file.stepId === 'this-computer')!;
@@ -279,7 +286,6 @@ describe('dashboard Delete indexed data route: the shared files', () => {
       expect(disconnectThisComputerSource(f.layout.handleRegistryPath, 'local.files')).toBe(true);
       const response = await f.del({ source_id: 'local.files', acknowledge: true });
       expect(response.status).toBe(200);
-      const reload = f.reloads[0]!;
       expect(connection.left(f.layout, computer)).toBe(0);
 
       // The 750 ms before the restart: the owner connects this computer again,
@@ -289,7 +295,7 @@ describe('dashboard Delete indexed data route: the shared files', () => {
       expect(connection.left(f.layout, computer)).toBe(1);
       expect(dashboard.left(f.layout, computer)).toBeGreaterThan(0);
 
-      await reload.beforeExit!();
+      f.boot();
 
       expect(connection.left(f.layout, computer)).toBe(1);
       expect(dashboard.left(f.layout, computer)).toBe(0);
@@ -298,27 +304,26 @@ describe('dashboard Delete indexed data route: the shared files', () => {
     }
   });
 
-  test('a repeat that cannot run does not keep the worker from restarting', async () => {
+  test('a repeat that cannot run at boot leaves the account marked and closed, and a later boot finishes', async () => {
     const f = fixture();
     try {
       await f.del({ source_id: 'dropbox.files', acknowledge: true });
       writeFileSync(defaultSourceDashboardHistoryDbPath(f.layout.env), 'this is not a sqlite file '.repeat(200));
 
-      const logged: unknown[][] = [];
-      const original = console.error;
-      console.error = (...args: unknown[]) => { logged.push(args); };
-      try {
-        await expect(Promise.resolve(f.reloads[0]!.beforeExit!())).resolves.toBeUndefined();
-      } finally {
-        console.error = original;
-      }
-      expect(String(logged[0]?.[0])).toContain('dropbox.files');
+      const report = f.boot();
+
+      expect(report.deleted).toEqual([]);
+      expect(report.failed.map((entry) => entry.sourceId)).toEqual(['dropbox.files']);
+      expect(existsSync(f.store)).toBe(true);
+      rmSync(defaultSourceDashboardHistoryDbPath(f.layout.env));
+      expect(f.boot().deleted.map((entry) => entry.sourceId)).toEqual(['dropbox.files']);
+      expect(existsSync(f.store)).toBe(false);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
   });
 
-  test('a delete that failed on a step restarts the worker without a repeat, and removes no bytes', async () => {
+  test('a delete that failed on a step marks nothing, asks for no restart, and removes no bytes', async () => {
     const f = fixture();
     try {
       writeFileSync(defaultSourceDashboardHistoryDbPath(f.layout.env), 'this is not a sqlite file '.repeat(200));
@@ -328,7 +333,8 @@ describe('dashboard Delete indexed data route: the shared files', () => {
       expect(response.status).toBe(500);
       await expect(response.json()).resolves.toMatchObject({ error: { code: 'delete_failed' } });
       expect(existsSync(f.store)).toBe(true);
-      expect(f.reloads).toEqual([undefined]);
+      expect(f.reloads).toEqual([]);
+      expect(f.boot()).toEqual({ deleted: [], failed: [] });
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }
@@ -437,7 +443,8 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
         },
       },
     });
-    return { root, files, restarts, stops, worker };
+    const boot = () => deleteMarkedAccounts(context);
+    return { root, files, restarts, stops, worker, boot };
   }
   const post = (worker: { fetch(request: Request): Promise<Response> }, body: Record<string, unknown>) =>
     worker.fetch(new Request('http://worker.test/dashboard/delete-source-data', {
@@ -451,6 +458,8 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     try {
       const response = await post(f.worker, { source_id: 'telegram.messages', acknowledge: true });
       expect(response.status).toBe(200);
+      expect(existsSync(f.files.tgStore)).toBe(true);
+      f.boot();
       expect(existsSync(f.files.tgStore)).toBe(false);
       // Olympus's raw copy of the messages goes with the index.
       expect(existsSync(f.files.tgSpool)).toBe(false);
@@ -468,6 +477,8 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     try {
       const response = await post(f.worker, { source_id: 'whatsapp.personal.messages', acknowledge: true });
       expect(response.status).toBe(200);
+      expect(existsSync(f.files.waStore)).toBe(true);
+      f.boot();
       expect(existsSync(f.files.waStore)).toBe(false);
       expect(existsSync(f.files.waSpool)).toBe(false);
       expect(existsSync(f.files.waMedia)).toBe(false);

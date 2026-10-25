@@ -19,6 +19,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
 } from 'node:fs';
@@ -464,7 +465,8 @@ export function deleteOlympusData(options: {
   const forgotten = forgetSharedRows(account, options);
   if (options.applyAtRestart === true) {
     // From here the storage service opens none of its files, and the worker's
-    // next boot removes them before anything mounts.
+    // next boot removes them before anything mounts. Marked even with nothing
+    // on disk: the boot's repeat of the forget steps still runs for it.
     markAccountDeleting(account, env);
     return {
       ok: true,
@@ -480,7 +482,9 @@ export function deleteOlympusData(options: {
   // The caller owns the data (the CLI under the owner lock, nothing open): the
   // marker goes first, so a delete that stops part way is finished by the
   // worker's next boot, and the files go now.
-  const marked = markAccountDeletingIfReadable(account, env);
+  // An account with no entry and nothing on disk (never connected) has nothing to mark.
+  const exists = account.entry !== undefined || plan.present.length > 0;
+  const marked = exists && markAccountDeletingIfReadable(account, env);
   const { removed, missing } = removeAccount(account, plan, options, { background: false });
   finishAccountDelete(account, env, plan.registryPath, marked);
   return {
@@ -735,16 +739,20 @@ function emptyAccountTrash(env: LayoutEnv, options: { background: boolean }): vo
   } catch {
     return;
   }
-  for (const name of names) {
-    const path = join(trash, name);
-    if (options.background) {
-      void rm(path, { recursive: true, force: true }).catch(() => {
-        // Left for the next boot's pass.
-      });
-    } else {
-      rmSync(path, { recursive: true, force: true });
+  // The trash itself goes once it is empty; one still holding something stays for the next pass.
+  const removeEmptyTrash = (): void => {
+    try {
+      rmdirSync(trash);
+    } catch {
+      // Not empty, or already gone.
     }
+  };
+  if (options.background) {
+    void Promise.allSettled(names.map((name) => rm(join(trash, name), { recursive: true, force: true }))).then(removeEmptyTrash);
+    return;
   }
+  for (const name of names) rmSync(join(trash, name), { recursive: true, force: true });
+  removeEmptyTrash();
 }
 
 function optionalList<K extends string>(key: K, values: string[]): Partial<Record<K, string[]>> {

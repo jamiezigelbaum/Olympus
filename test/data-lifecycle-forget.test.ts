@@ -19,6 +19,7 @@ import {
   MINE,
   OTHER,
   SEEDED_FILES,
+  SEEDED_FOR_MINE,
   layoutUnder,
   seedAllFiles,
   seedTierLedgerBeside,
@@ -50,7 +51,7 @@ function fixture() {
 }
 
 /** Files this source has rows in, in this fixture: not Gmail's mail scope or the computer connection. */
-const dropboxFiles = SEEDED_FILES.filter((file) => file.stepId !== 'mail-source-scopes' && file.stepId !== 'this-computer');
+const dropboxFiles = SEEDED_FOR_MINE;
 
 describe('a per-source Delete forgets the source in the shared files', () => {
   test('removes its rows from every shared file, keeps another source\'s, and reports each file', () => {

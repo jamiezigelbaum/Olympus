@@ -546,7 +546,8 @@ describe('a deleted account', () => {
     const oldMedia = await landPicture(old, 35);
     closeStore(old);
     renameStore(dbPath, storeFile('dropbox.files', 'folder'));
-    setAccount('dropbox.files', { layout: 'folder' });
+    // The first Delete dropped the entry (step 5); the store is now a folder account's.
+    account('dropbox.files', 'folder');
     const second = deleteOlympusData({ sourceId: 'dropbox.files', homeDir: base, env });
     expect(second.removed).toContain(oldMedia.path);
     expect(existsSync(oldMedia.path)).toBe(false);

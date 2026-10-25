@@ -12,7 +12,7 @@ import { holdDataOwnerLock, isDataOwnerLockName, type HeldDataOwnerLock } from '
 import { accountFolder, FOLDER_LAYOUT_SOURCES, olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import { resolvedStorePath } from '../src/core/source-placement.ts';
-import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
+import { readSourceRegistry, sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { __sourceStorageTestHooks, enableSourceRegistryAdoption, openConnectorStore } from '../src/core/source-storage.ts';
 import { deleteOlympusData, exportOlympusData, verifyOlympusDataExport } from '../src/data-lifecycle.ts';
 import { createReadwiseConnectorStore, defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
@@ -103,7 +103,7 @@ function everyFile(root: string): string[] {
 }
 
 describe('Delete of one folder account', () => {
-  test('takes its stores and the whole folder, nothing beside it, and keeps the registry entry', () => {
+  test('takes its stores and the whole folder, nothing beside it, and drops its registry entry', () => {
     const { homeDir, env } = fixture();
     const stores = connect(env);
     const usage = put(defaultXBookmarksApiUsageDbPath(env));
@@ -123,11 +123,10 @@ describe('Delete of one folder account', () => {
     // Another account is untouched, with its raw state; the shared X usage ledger is not Readwise's anyway.
     expect(existsSync(stores.x)).toBe(true);
     expect(existsSync(join(xFolder(env), 'raw', 'x-reconcile.sqlite'))).toBe(true);
-    // The registry (step 2 and 3 behavior) still lists the account; the Delete's state markers are step 5's.
+    // The account no longer exists (step 5): its entry went with its files, and the other account's stays.
     const registry = readSourceRegistry(env);
     expect(registry.schema).toBe(2);
     expect(registry.accounts.map((account) => [account.source_id, account.state, account.layout])).toEqual([
-      ['readwise.library', 'active', 'folder'],
       ['x.bookmarks', 'active', 'folder'],
     ]);
 
@@ -158,7 +157,7 @@ describe('Delete of one folder account', () => {
     expect(readSourceRegistry(env).accounts.filter((account) => account.source_id === 'readwise.library')).toHaveLength(1);
   });
 
-  test('an account recorded legacy stays legacy through Delete and reconnect', () => {
+  test('an account recorded legacy loses its legacy files to Delete, and its reconnect is placed afresh in a folder', () => {
     const { homeDir, env } = fixture();
     const legacy = join(olympusDataRoot(env), 'readwise-connector-store.sqlite');
     put(legacy, 'indexed');
@@ -169,12 +168,14 @@ describe('Delete of one folder account', () => {
     expect(result.removed).toContain(legacy);
     expect(existsSync(legacy)).toBe(false);
 
+    // The entry went with the files (step 5), and nothing is left at a legacy path.
+    expect(readSourceRegistry(env).accounts).toEqual([]);
     enableSourceRegistryAdoption();
-    expect(defaultReadwiseConnectorStoreDbPath(env)).toBe(legacy);
-    createReadwiseConnectorStore(defaultReadwiseConnectorStoreDbPath(env), env).close();
-    expect(existsSync(legacy)).toBe(true);
-    expect(existsSync(join(olympusDataRoot(env), 'sources'))).toBe(false);
-    expect(readSourceRegistry(env).accounts[0]?.layout).toBe('legacy');
+    const placed = defaultReadwiseConnectorStoreDbPath(env);
+    expect(placed).toBe(join(readwiseFolder(env), 'stores', 'internal.sqlite'));
+    createReadwiseConnectorStore(placed, env).close();
+    expect(existsSync(legacy)).toBe(false);
+    expect(readSourceRegistry(env).accounts[0]?.layout).toBe('folder');
   });
 
   test('a folder reached through a link is refused before anything is removed', () => {
@@ -362,9 +363,10 @@ describe('Delete all', () => {
 
     const result = deleteOlympusData({ all: true, homeDir, env });
 
-    // The registry outlives the folders here, and no history it lists names an account any more (PR #530 review).
-    expect(readSourceRegistry(env).accounts.length).toBeGreaterThan(0);
-    expect(readSourceRegistry(env).accounts.map((account) => account.provider_account_hash)).toEqual(readSourceRegistry(env).accounts.map(() => undefined));
+    // The registry goes too, though it sits outside every known root here (step 5), so no history names an account.
+    expect(result.removed).toContain(sourceRegistryPath(env));
+    expect(existsSync(sourceRegistryPath(env))).toBe(false);
+    expect(readSourceRegistry(env).accounts).toEqual([]);
 
     expect(result.removed).toContain(join(dataRoot, 'sources'));
     expect(existsSync(join(dataRoot, 'sources'))).toBe(false);

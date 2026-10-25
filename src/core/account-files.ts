@@ -62,9 +62,12 @@ export interface AccountFiles {
   stores: string[];
   /** A pre-1.0 per-family index an upgraded install still holds: exported, and deleted with the account. */
   preCutoverIndex?: AccountDatabase;
-  /** Raw state outside the folder (spools, watch snapshots, capture state): deleted, never exported. */
+  /**
+   * Raw state (spools, watch snapshots, capture state): deleted, never exported.
+   * A folder account's is inside its folder, named so a Delete and an export can say so.
+   */
   raw: string[];
-  /** Per-account databases outside the stores and the folder: deleted, never exported. */
+  /** Per-account databases outside the stores: deleted, never exported. */
   rawDatabases: AccountDatabase[];
   /** The account's own settings files: exported sanitized, deleted with the account. */
   settings: string[];
@@ -174,19 +177,33 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
   const { env } = context;
   const sourceId = account.source_id;
   const hasLayout = FOLDER_LAYOUT_SOURCES.includes(sourceId);
-  const folderPath = hasLayout ? accountFolder(account, env) : undefined;
+  // A data folder that cannot be worked out (a Linux layout that refuses this
+  // environment) fails what lives in it, when it is asked for, and nothing else:
+  // the raw state outside it still resolves, as its writers resolve it.
+  const inDataFolder = <T>(resolve: () => T): { value?: T; error?: unknown } => {
+    try {
+      return { value: resolve() };
+    } catch (error) {
+      return { error };
+    }
+  };
+  const folderPath = hasLayout ? inDataFolder(() => accountFolder(account, env)).value : undefined;
   const folder = folderPath !== undefined && (account.layout === 'folder' || existsOnDisk(folderPath)) ? folderPath : undefined;
-  const stores = hasLayout
+  const stores = inDataFolder(() => hasLayout
     ? (STORE_ORDER[sourceId] ?? accountStoreNames(sourceId, archiveImportFamilies())).map((name) => accountStorePath(account, name, env))
-    : (MOUNTED_STORES[sourceId] ?? []).map((file) => olympusDataPath(env, file));
+    : (MOUNTED_STORES[sourceId] ?? []).map((file) => olympusDataPath(env, file)));
   const preCutover = PRE_CUTOVER_INDEXES[sourceId];
+  const preCutoverPath = preCutover
+    ? inDataFolder(() => env[preCutover.override]?.trim() || olympusDataPath(env, preCutover.file)).value
+    : undefined;
   const files: AccountFiles = {
     account,
     ...(folder ? { folder } : {}),
-    stores,
-    ...(preCutover
-      ? { preCutoverIndex: { path: env[preCutover.override]?.trim() || olympusDataPath(env, preCutover.file), storeId: preCutover.storeId } }
-      : {}),
+    get stores(): string[] {
+      if (stores.error !== undefined) throw stores.error;
+      return stores.value!;
+    },
+    ...(preCutover && preCutoverPath ? { preCutoverIndex: { path: preCutoverPath, storeId: preCutover.storeId } } : {}),
     raw: [],
     rawDatabases: [],
     settings: sourceId === 'dropbox.files' ? [dropboxIngestionPolicyPath(context)] : [],
@@ -195,8 +212,6 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
   const pairingContext = { env, layout: account.layout };
   if (sourceId === TELEGRAM_SOURCE_ID) files.pairing = telegramPairingSessionPaths(pairingContext);
   if (sourceId === WHATSAPP_SOURCE_ID) files.pairing = whatsappPairingSessionPaths(pairingContext);
-  // A folder account's raw state, session included, is inside the folder and goes with it.
-  if (account.layout === 'folder') return files;
   const raw = (name: AccountRawName, options: { usageDbPath?: string } = {}): string => accountRawPath(account, name, env, options);
   switch (sourceId) {
     case 'local.files':
@@ -221,14 +236,20 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
     case TELEGRAM_SOURCE_ID:
       // The capture spool is Olympus's own copy of every captured message's
       // text, and the drain cursor and gateway state record how far capture
-      // has written into it. The login itself is Unpair's, kept back here.
-      files.raw.push(...legacyTelegramCaptureState(account, env));
-      files.preserved.push(...files.pairing!);
+      // has written into it. A legacy account's login is Unpair's, kept back
+      // here; a folder account's is in its folder and goes with it.
+      if (account.layout === 'folder') {
+        files.raw.push(raw('telegram-spool'), raw('telegram-gateway'));
+      } else {
+        files.raw.push(...legacyTelegramCaptureState(account, env));
+        files.preserved.push(...files.pairing!);
+      }
       break;
     case WHATSAPP_SOURCE_ID:
       // The spool carries every message's full text, the session the
-      // linked-device keys, and media the captured audio.
-      files.raw.push(...legacyWhatsAppCaptureState(account, env, files.pairing!));
+      // linked-device keys, and media the captured audio: a folder account
+      // keeps all of it in its one state folder.
+      files.raw.push(...(account.layout === 'folder' ? [raw('whatsapp')] : legacyWhatsAppCaptureState(account, env, files.pairing!)));
       break;
   }
   files.raw = [...new Set(files.raw)];
