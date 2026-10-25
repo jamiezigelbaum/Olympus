@@ -19,7 +19,6 @@ import {
   exportOlympusData,
   knownOlympusDataRoots,
   lifecycleSourceSpecs,
-  runDataMigrations,
   validateDeleteAllConfirmations,
 } from '../src/data-lifecycle.ts';
 import { installWorkerService, workerServicePaths } from '../src/core/worker-service.ts';
@@ -478,38 +477,6 @@ describe('Olympus data lifecycle', () => {
     });
   });
 
-  // A legacy index is a custody artifact, not a store this build owns. The
-  // live ones on an upgraded host sit at schema_version 2 under their own
-  // retired store ids, so migrating them would either write connector-store
-  // migrations into a stranger's schema or refuse outright — and either way
-  // it mutates bytes whose only remaining job is to survive until they are
-  // exported and deleted.
-  test('migrate never touches the legacy per-family indexes it must still preserve', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-migrate-'));
-    const homeDir = join(dir, 'home');
-    try {
-      const context = { homeDir };
-      for (const source of lifecycleSourceSpecs()) {
-        const legacyPath = source.sqlitePath?.(context);
-        if (!legacyPath) continue;
-        mkdirSync(dirname(legacyPath), { recursive: true });
-        createMarkedSqliteStore(legacyPath, source.legacySqliteStoreId!);
-      }
-
-      const dryRun = runDataMigrations({ dryRun: true, ...context });
-      expect(dryRun.ok).toBe(true);
-      expect(dryRun.dryRun).toBe(true);
-      expect(dryRun.stores).toEqual([]);
-      expect(dryRun.skipped).toEqual([]);
-
-      const applied = runDataMigrations({ dryRun: false, ...context });
-      expect(applied.stores).toEqual([]);
-      expect(applied.skipped).toEqual([]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   test('export copies the legacy per-family index an upgraded install still holds', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-data-export-legacy-'));
     const homeDir = join(dir, 'home');
@@ -623,17 +590,6 @@ describe('Olympus data lifecycle', () => {
       }
       expect(exported.artifacts.filter((artifact) => artifact.role === 'legacy_store'))
         .toHaveLength(legacyPaths.length);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('migrate skips every store that does not exist yet', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'olympus-data-migrate-absent-'));
-    try {
-      const result = runDataMigrations({ dryRun: true, homeDir: join(dir, 'home') });
-      expect(result.stores).toEqual([]);
-      expect(result.skipped).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

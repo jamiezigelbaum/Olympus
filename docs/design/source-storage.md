@@ -170,17 +170,33 @@ Inside the data root:
   an unknown schema or lists an account twice is never read as empty: every
   open refuses until it is repaired, since it may hold a delete marker
   (`src/core/source-registry.ts`).
-- **The schema is 1 while every entry is `legacy`, and 2 from the first
-  `folder` entry** (the file is written as 2 whenever any account is a folder).
-  A build that only knows schema 1 (step 3) then reads the file as unreadable
-  and opens nothing, instead of ignoring `layout` and creating empty stores at
-  the legacy paths beside the data in the folder. An install with no folder
-  account keeps a schema-1 file.
+- **The schema is 1 while every entry is `legacy`, 2 from the first `folder`
+  entry, and 3 while any account has a move pending** (the file is written as
+  whichever fits its content). A build that only knows schema 1 (step 3) reads
+  a schema-2 or -3 file as unreadable and opens nothing, instead of ignoring
+  `layout` and creating empty stores at the legacy paths beside the data in the
+  folder. A 4a or 4b build knows 1 and 2, so it refuses a schema-3 file the
+  same way: while a move is pending nothing else opens the data root, and once
+  it is done the file is 2 again and the older build reads the folder accounts
+  as it always did. An install with no folder account keeps a schema-1 file,
+  records of a skipped or failed move included (they are additive fields on a
+  legacy entry, which older readers pass through).
 - `layout` is `legacy` (files still at today's paths, as step 2 adopts
   existing accounts) or `folder` (inside `sources/<source_id>/<slot>/`).
   Whether an account exists and where its files are are tracked apart: the
   storage service resolves an account's paths from `layout`, and migration
   selects on it.
+- **`migration` (4c)** is the record of the boot migration on an entry:
+  `{state, at, reason?, detail?, moves?, checked?}`.
+  `state` is `moving` or `reverting` (a plan is pending; the account is
+  closed: the storage service opens none of its files, the same refusal as an
+  account being deleted, so it does not mount), `done`,
+  `skipped` (the account stays legacy, `reason` is a short code and `detail`
+  plain words) or `failed` (the move was undone). Each entry of `moves` is
+  `{role: store|ledger|secrets|sniffer|raw, from, to, kind: file|dir, db?, dev,
+  ino, size}` with `from` and `to` relative to the data root and the identity
+  as strings; `checked` is what `PRAGMA quick_check` said before the move. A reader that
+  does not know the field passes it through unchanged.
 - **Placement of a new account (4a).** An account with no entry is recorded
   `folder` only if nothing says it lives elsewhere: its source has a folder
   layout, no env override or connector-store mount names its files, no file of
@@ -432,37 +448,219 @@ everything else.
 
 ## Migration of existing installs
 
-One-time, at worker boot, holding the owner lock, before mounting:
+One-time, at worker boot, holding the owner lock, after the re-placement of
+empty accounts and before adoption is enabled and anything mounts
+(`migrateAccountFolders` in `core/source-account-migration.ts`, called from the
+worker's `main()`). Step 4c moves every folder-layout source but Telegram and
+WhatsApp; those two are step 4d and the pass never touches them. For each
+account whose `layout` is `legacy` (the entries step 2 adopted, plus an entry
+created now, slot `1`, for any source with legacy files and none yet), in this
+order:
 
-1. Read the legacy locations through the layout module's legacy resolvers
-   (named in step 1, used for this purpose only).
-2. For each account whose `layout` is `legacy` (the entries step 2
-   adopted, plus an entry created now, slot `1`, for any source with legacy
-   files and none yet), and whose capture process (Telegram reader,
-   WhatsApp bridge) is confirmed stopped, not merely not yet started: write
-   a move plan into the entry, rename each file (stores, sidecars,
-   `-wal`/`-shm` together, spools, sessions, watch snapshots, settings) into
-   the account folder, verify by identity (the same `(dev, ino, size)` for
-   each file, then a read-only open of each store; `PRAGMA quick_check` runs
-   before the move, within a time budget, to record the existing state only),
-   then set `layout` to `folder` and mark the plan done. A
-   crash mid-move resumes from the plan; a failed verify moves the files
-   back and leaves the source on its legacy paths with a Needs you row. A
-   source whose capture is still running stays on its legacy paths until
-   the next boot; a capture process that reopened its session by the old
-   path would start an empty, unpaired session.
-3. Renames only. Legacy roots can sit on another volume without any
-   override (`legacyTelegramStoreRoot` ignores `XDG_DATA_HOME`, the WhatsApp
-   service state is under `$HOME`, the gateway state is under the state home),
-   so the plan compares `st_dev` of each file's legacy folder with the account
-   folder and skips the account on a mismatch: nothing is copied, the source
-   stays on legacy paths and the dashboard says why.
-4. Legacy pre-1.0 index files (`email-index.sqlite`,
-   `dropbox-files-index.sqlite`, `google-drive-docs-index.sqlite`,
-   `telegram-messages-index.sqlite`, `readwise-index.sqlite`; only in
-   `data-lifecycle.ts:292-408` today) are left alone and removed by Delete
-   all (owner decision 5).
-5. `runDataMigrations` (`data-lifecycle.ts:1015`, never called) is deleted.
+1. **Look.** Read the legacy locations through the layout module's legacy
+   resolvers (`legacyAccountFiles`, used for this purpose only). The account
+   stays legacy, and the registry records why (`migration.state: skipped`, a
+   reason code and plain words), when:
+   - `pinned`: an env override or a connector-store mount names its files;
+   - `unreadable`: a legacy location, or the account folder, cannot be looked at;
+   - `unexpected_file`: a legacy path is a link or the wrong kind of file, or a
+     folder between the data folder and a destination is a link. The check is
+     Delete's: the real path of the destination's folder must be its path under
+     the data folder's real path (the data folder itself may be a link);
+   - `destination_exists`: a file is at its old place and in the account folder
+     (nothing is merged);
+   - `other_device`: a file's `st_dev` differs from that of the nearest
+     existing folder above the account folder (a hard link that answers
+     `EXDEV` later ends the same way, after undoing what it did). Nothing is
+     copied;
+   - `files_elsewhere`: the registry lists a store that is not at the usual
+     place in the data folder, where an override may once have put it. An
+     imported archive's corpus `<tier>.archive.<family>` is the store
+     `<family>.<tier>` and is checked like any other;
+   - `log_large`: the account's `-wal` and `-journal` files total more than
+     32 MiB. Folding a log reads it, so the logs the pass carries are bounded.
+     They are folded into the stores when Olympus next stops cleanly, and the
+     account moves then. Not a Needs you row.
+2. **Fold the logs.** Each database's write-ahead log is folded into the
+   database (`PRAGMA wal_checkpoint(TRUNCATE)`, `storeFileCheckpoint` in
+   `core/source-storage.ts`) before anything is planned, so what moves is whole
+   files: the database file holds everything, and a `-wal` or `-shm` that is
+   lost in the move costs nothing. The pass runs at boot, before any worker has
+   the stores open, but another connection may still hold one (a leftover
+   process, a command-line tool): the checkpoint waits at most 2 s for it, and
+   no longer than what is left of the boot's deadline (see Time), and the first
+   database that is busy ends the fold. The account then stays where it is this
+   boot (`busy`) and moves at a later boot, once the other connection is gone;
+   not a Needs you row. A database whose frames could not all be checkpointed
+   for another reason is `log_not_folded`. A file that is not a database is left alone when
+   none of its logs holds bytes (it moves as the opaque file it is and the
+   check records it `damaged`); with a log that holds bytes it is
+   `log_not_folded` too. The checkpoint is the only write the pass makes to a
+   store, a ledger or a sidecar; everything after it is a rename.
+3. **Plan.** `PRAGMA quick_check` each database to record how it was, bounded
+   before it starts (it cannot be interrupted; see Time): a database whose file,
+   `-wal` and `-journal` together exceed 64 MiB, or that would take the boot past
+   128 MiB read in total, or whose estimated time at 10 MiB/s does not fit in what
+   is left of the 15 s check budget, is recorded `not_checked`; one that does not
+   open is `damaged`. This only records and never blocks, with one exception: a
+   database another connection has locked (an exclusive writer, say) is not
+   worked around. Opening it waits at most 2 s, no longer than what is left of
+   the deadline, and is never tried again in another mode; the account stays
+   where it is this boot (`busy`), and the other databases are not waited for. Reading a database may
+   make its `-shm`, so the account is looked at again, and the plan names what is
+   there; a log with bytes in it again (something wrote after the fold, so the
+   folded file is no longer the whole database) is `log_not_folded` too. Then
+   write the move plan into the entry: `migration: {state: moving, moves,
+   checked}` (see Registry), which also turns the file into schema 3. From here
+   the account is closed. `moves` lists, per tier store, the store, its
+   `-wal`/`-shm`/`-journal`, its tier ledger, secret locations and sniffer, plus
+   raw state (the local files watch folder, X's reconcile state, an archive
+   import's state and request files), each with `(dev, ino, size)`. An archive's
+   stores go to `stores/<family>.<tier>.sqlite`.
+4. **Rename** every planned file into the folder. Nothing is copied, so each is
+   atomic and instant whatever its size, and none replaces what is there: a file
+   is hard-linked to its new name (which fails with `EEXIST` where `rename(2)`
+   would replace what another process put there since the look), the folder that
+   now holds the new name is fsynced, and only then is the old name unlinked: at
+   no moment can a power failure find the file with no name that survives it.
+   A kill between the link and the unlink leaves one inode under two names, which
+   the next boot finishes the same way (it fsyncs the folder of the name that
+   stays before it removes the other); going back is the same, the other way. A
+   folder is renamed, which the kernel refuses onto a non-empty folder or a file,
+   and both of its parents are fsynced right after. Residual: `rename(2)` of a
+   folder replaces an EMPTY folder that appeared in the instant since the look (it
+   holds nothing to lose, and the planned folder takes its place). A file system that makes no
+   hard links (the link answers `EPERM`, `ENOTSUP`, `EOPNOTSUPP`, `ENOSYS` or
+   `EMLINK`) keeps the account where it is, `no_hard_links`, with what had moved
+   put back and the reason recorded; no other way of moving a file is tried,
+   because a plain rename would replace a file another process put at the
+   destination. Not a Needs you row. Before each rename the destination's
+   folders are checked for links again.
+   Before any file moves, every folder from the data folder down to each
+   destination folder is fsynced, once per account, the ones that were there
+   already included: a run that died after making a folder and before syncing its
+   parent left an entry that is not on disk, and a folder being there says nothing
+   about that. Going back does the same for the folders the files return to,
+   before the first file goes. After the last rename the folders each file left
+   (the unlinks) and went to are fsynced again, before the registry records
+   anything that depends on the renames.
+5. **Verify.** Each destination has the planned `(dev, ino, size)`, then each
+   database that opened before opens and its schema reads (read-only; a database
+   with no `-wal` beside it, which macOS's SQLite will not open read-only, is
+   opened writable but query-only, and only when no write waits outside its file,
+   because closing a writable connection merges one). A failure undoes the
+   move; a database another program holds at that moment (`busy`, same wait) is
+   not a fault of the move: everything goes back as a skip, with no Needs you row.
+   A file that is in neither place is a failure, and so is a `-wal` or
+   `-journal` that held bytes when the plan was made: that is committed data not
+   yet in its database file, so only a `-shm` (rebuilt from the log on the next
+   open) and a log that was empty may be missing. (This build plans only empty
+   logs, but a plan is read as data.)
+6. **Flip** `layout` to `folder` and the plan to `done` in one registry write:
+   there is no moment at which an account is a folder with its plan pending, or
+   done and legacy.
+
+The move writes nothing but file names: no store, ledger or sidecar is opened
+for writing after the fold, the media cache is not touched (a hold names the
+store's identity, not its path), and a tiered set's stores find their ledger by
+its id. A crash anywhere resumes from the plan at the next boot, switch or no switch
+(the account is closed until the plan ends one way or the other). A failed
+verify, a file that is in neither place, or any other failure moves everything
+back (`reverting`, the same steps in the other direction, then
+`migration.state: failed`) and leaves the account legacy: the final write sets
+`layout: legacy` whatever the entry said when the undo began. A file in both
+places going back (one another process put at the folder's side, which is why
+the move stopped) is left where it is, and the planned file is already home. A
+file that is in neither place while going back keeps the account closed with its
+plan (reported stuck, and a Needs you row), and the plan is cleared only when
+every planned file is at its old place, whoever put it there: a copy restored
+from a backup lets the undo finish. A plan this build did not write is left
+alone and reported stuck. An account that ended in a move back is not started
+again in the same boot. A plan is dropped only by the
+Delete that took the account's files, which removes the plan from the registry
+(under the owner lock, after the files, so a Delete that stops in between leaves a
+plan the next boot reports and a second Delete clears). Without a Delete, a plan
+whose every file is in neither place is the same loss as any other file lost: the
+account stays closed with its plan and a Needs you row, and nothing is made in its
+place. The re-placement of empty accounts, which runs first at
+boot, skips an entry with a plan pending: a crash after the last rename leaves
+an entry that lists no corpus and no file at a legacy place, which is not an
+empty account.
+
+The dashboard turns four states into Needs you rows (`sourceStorageNotices`):
+a failed move ("its files could not be moved, so they were put back"), a plan
+that is part way ("its files are part way through a move") an unreadable
+location ("Olympus cannot open the folder its files are in") and
+`destination_exists` ("its files are in two places"). The other skips are
+logged (`[storage] <id> stays where it is (<reason>)`) and, when the account
+has an entry, recorded with their plain words on it, but are not Needs you
+rows: nothing is wrong, the source works as before.
+
+**Time.** The worker waits 180 s for a boot (startup timeout), so every operation
+of the pass that grows with the data is bounded by a size or a count, and the
+worst case is arithmetic. It assumes a disk no slower than 10 MiB/s sequential
+and 50 ms per fsync (an old external drive).
+
+- Starting an account, a plan left part way included, stops at 45 s from the
+  pass's start; accounts not reached go on at the next boot. That deadline is
+  also the boot's wait for other connections: every open and checkpoint waits at
+  most 2 s, and no longer than what is left of it. A busy database ends its
+  account's pass for this boot, and is never retried in another mode, so an
+  account waits once, and an account started at 44.9 s waits almost not at all.
+- Folding the logs reads each log once and writes it once into its database:
+  the account's logs are capped at 32 MiB (`log_large`), so at most 64 MiB of
+  transfer, 6.4 s, and two fsyncs per database (the checkpoint's own), at most
+  38 databases (an imported-archive account with three families), 3.8 s. The
+  wait for another connection is at most 2 s, once, as above.
+- `quick_check` reads at most 64 MiB per database and 128 MiB per boot
+  (12.8 s), and only if the estimate fits the 15 s check budget, decided
+  before it starts. After the fold the logs are empty, so the opens of the
+  checks and of the verify read no log.
+- An account has at most 152 files to move (an imported-archive account with
+  three families; 52 for any other source): a link, a folder fsync and an
+  unlink each, 22.8 s if every metadata operation takes 50 ms, and about 12
+  folders to fsync at the end, 0.6 s.
+
+The worst account starts at 44.9 s, folds its logs in 10.2 s (55.1 s), spends
+12.8 s on `quick_check` (67.9 s), renames (91.3 s), and verifies with a
+handful of opens of empty logs: about 92 s, inside 180 s. A move put back costs
+the renames again, 23.4 s more.
+
+**What the move does not defend against.** Two things, on purpose, because they
+need a program outside what Olympus controls or one that can already do worse:
+
+- *A program that is not Olympus writing an Olympus store during the move.* Every
+  Olympus writer is excluded by the owner lock the migrating worker holds through
+  the whole pass: the worker holds it for its life, a command-line command takes
+  it or asks the running worker to do the work (`core/cli-via-worker.ts`), and
+  every operator script holds it for its run (`withDataOwnerLock`,
+  `runUnderDataOwnerLock`). The store-open guard lists the one program that runs
+  beside the engine, the release check's machine agent, and it opens read-only.
+  A program that is not Olympus and writes an Olympus store at boot, for example
+  an SQLite connection that commits into a new `-wal` after the pass has looked
+  and stays open, is not excluded by anything: looking once more cannot close
+  that window, and the fold, the second look and the check at the end make only
+  the usual cases (a leftover process, a log left by a crash) safe.
+- *A folder on the way swapped for a link in the instant between its check and
+  the rename.* Every folder on the way is checked for being a link when the plan
+  is made and again before each file, and each destination's identity is checked
+  at the end. Swapping one in that instant takes a process that can already write
+  and remove everything the move touches, so it gains no access it did not have.
+
+**What stays put.** Settings stay in the shared config files (see Layout). The
+X usage ledger stays shared; only X's reconcile state moves. Legacy pre-1.0
+index files (`email-index.sqlite`, `dropbox-files-index.sqlite`,
+`google-drive-docs-index.sqlite`, `telegram-messages-index.sqlite`,
+`readwise-index.sqlite`; only in `data-lifecycle.ts` today) are left alone and
+removed by Delete all (owner decision 5). `runDataMigrations` (never called)
+is deleted.
+
+**An older build.** After 4c, a build that knows schemas 1 and 2 (4a, 4b)
+refuses a schema-3 file, so it opens nothing while a move is pending, and
+reads a finished account as a folder like any other (a test reads the file
+with the 4b reader). A step-3 build refuses schema 2 and 3 alike, as designed.
+A build from before the registry (step 2) does not read it; that it would make
+empty stores at the old places has not been tried.
 
 A store bound to a tiered set finds the set ledger by its identity, so the
 move rewrites nothing inside a store. The binding row keeps the ledger's id
@@ -488,6 +686,10 @@ own ledger, when a bound store's ledger cannot be found.
 No re-embed and no rescan: stores, cursors (`sync_runs.cursor`), tiers,
 embeddings and watch snapshots move as files. Embedding changes stay
 owner-gated and this plan makes none.
+
+The pass is behind `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker's
+environment. With it off, no move starts and the registry and every file are
+byte-identical to 4b's.
 
 ## What must not break
 
@@ -612,7 +814,21 @@ touch the store path (`eval/`).
      to 4d.
    - **4c, the boot migration of existing non-messaging accounts**, behind
      `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
-     default), with the tests in "What must not break". Retirement: default
+     default), with the tests in "What must not break". Built on two changes
+     that came first, so that moving a store is only renaming files: media-cache
+     holds name a store by its identity (not its path), and a tiered set's
+     stores find their ledger by the ledger's id. Built: the pass in "Migration
+     of existing installs" (fold the logs, plan, rename, verify, flip), the
+     `migration` record and schema 3 in the registry, and the four Needs you
+     rows. Proof: a kill injected between every pair of steps, each followed by
+     a finish and by a put back, with the bytes of every store, ledger and
+     sidecar after the fold compared with the bytes after the move; each skip
+     reason (including a busy log and a file system with no hard links), a
+     failed verify moved back, a lost file, a file another process creates at
+     a destination, a media-cache sweep at every step, Delete mid-move and the
+     unreadable registry, on isolated homes, plus a real worker booted on a
+     legacy home with the switch off and on (and, on Linux, through a real
+     install receipt). Retirement: default
      on, then delete the switch, once release testing records, on Mac
      OpenClaw-hosted, Mac engine and standalone Linux with both receipt
      roots: every source migrated with real data; paired WhatsApp and

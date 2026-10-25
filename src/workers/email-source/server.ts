@@ -324,6 +324,7 @@ import {
   type StorageAccount,
   type StoreFileOwner,
 } from '../../core/source-storage.ts';
+import { migrateAccountFolders, type AccountMigrationReport } from '../../core/source-account-migration.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
@@ -2095,6 +2096,30 @@ export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefine
   }
 }
 
+/**
+ * Under the owner lock, after the empty accounts are placed and before
+ * adoption is on and anything mounts (core/source-account-migration.ts): moves
+ * each existing account's files into its folder when
+ * `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1`, and finishes or undoes a move an earlier
+ * boot left part way whatever the switch says. A registry that cannot be read
+ * leaves every account where it is and the worker boots as it always did.
+ */
+export function migrateAccountFoldersAtBoot(env: Record<string, string | undefined>): AccountMigrationReport | undefined {
+  try {
+    const report = migrateAccountFolders(env);
+    for (const sourceId of report.moved) console.log(`[storage] ${sourceId} moved into its account folder.`);
+    for (const { sourceId, reason } of report.movedBack) console.warn(`[storage] ${sourceId} could not be moved (${reason}); its files were put back where they were.`);
+    for (const { sourceId, reason } of report.skipped) console.log(`[storage] ${sourceId} stays where it is (${reason}).`);
+    for (const { sourceId, detail } of report.stuck) console.warn(`[storage] ${sourceId} is part way through a move and stays closed until a restart finishes it: ${detail}`);
+    for (const sourceId of report.deferred) console.log(`[storage] ${sourceId} will be moved at a later start; this one ran out of time.`);
+    for (const { sourceId, message } of report.errors) console.warn(`[storage] ${sourceId} was not moved (${message}).`);
+    return report;
+  } catch (error) {
+    console.warn(`[storage] Could not check which accounts to move into folders (${error instanceof Error ? error.message : 'unknown error'}); they stay as recorded.`);
+    return undefined;
+  }
+}
+
 export async function main(): Promise<void> {
   // First, before anything mounts or opens a store: this worker owns the data
   // root. A second worker on it waits a short while (restarts overlap), then
@@ -2102,6 +2127,8 @@ export async function main(): Promise<void> {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   // An account recorded as legacy that holds nothing is placed in a folder instead.
   replaceEmptyAccountsAtBoot(process.env);
+  // With the switch on, existing accounts move into their folders; a move under way is finished or undone.
+  migrateAccountFoldersAtBoot(process.env);
   // From here on, a writable store open records its account in the registry
   // (core/source-storage.ts). Before any lane mounts.
   enableSourceRegistryAdoption();

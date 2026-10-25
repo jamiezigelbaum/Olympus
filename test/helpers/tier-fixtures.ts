@@ -181,11 +181,19 @@ export function openLegStore(
  */
 export function openTierFixture(
   dir: string,
-  options: { embed?: boolean; splitLayers?: boolean; family?: 'file' | 'email'; exclusions?: SourceExclusionMatcher } = {},
+  options: {
+    embed?: boolean;
+    splitLayers?: boolean;
+    family?: 'file' | 'email';
+    exclusions?: SourceExclusionMatcher;
+    /** Where the three stores and the secret-locations index are, when not the fixture's own names in `dir`. */
+    paths?: Record<SourceTrustDomain, string>;
+    secretsPath?: string;
+  } = {},
 ): TierFixture {
-  const paths = storePaths(dir);
+  const paths = options.paths ?? storePaths(dir);
   const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(paths.secure_local) });
-  const secrets = new SecretLocationsIndex({ dbPath: join(dir, 'secret-locations.sqlite') });
+  const secrets = new SecretLocationsIndex({ dbPath: options.secretsPath ?? join(dir, 'secret-locations.sqlite') });
   const stores: Partial<Record<SourceTrustDomain, LocalConnectorStore>> = {
     internal: openLegStore(paths, 'internal', ledger, options.family, options.exclusions),
     secure_local: openLegStore(paths, 'secure_local', ledger, options.family, options.exclusions),

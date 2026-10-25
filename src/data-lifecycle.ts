@@ -43,12 +43,7 @@ import { Database } from 'bun:sqlite';
 import { DEFAULT_STORAGE_SLOT, storeFileOwnerLookup, type StoreFileOwner } from './core/source-storage.ts';
 import { isUnsupportedDirectorySyncError, writePrivateFileAtomicSync } from './core/atomic-file.ts';
 import { OperationError } from './core/operation-error.ts';
-import {
-  readSqliteSchemaVersion,
-  runSqliteMigrations,
-  type SqliteMigration,
-  type SqliteMigrationResult,
-} from './core/sqlite-migrations.ts';
+import { readSqliteSchemaVersion } from './core/sqlite-migrations.ts';
 import {
   REMOTE_CONNECTIONS_STORE_ID,
   remoteConnectionsPreV2BackupPath,
@@ -59,7 +54,7 @@ import {
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
 import { runForgetSteps, type ForgetAccount } from './core/source-forget-registry.ts';
-import { readSourceRegistry, SourceRegistryError } from './core/source-registry.ts';
+import { dropMovePlans, readSourceRegistry, sourceAccountMovePending, SourceRegistryError } from './core/source-registry.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
@@ -132,12 +127,6 @@ export interface LifecycleSourceSpec {
   sourceAliases?: readonly string[];
   label: string;
   sqliteStoreId: string;
-  /**
-   * Declared only by a family this build still migrates. A legacy per-family
-   * index is a custody artifact, never a migration target, so declaring
-   * `sqlitePath` alone must not put a store back under a writing loop.
-   */
-  sqliteMigrations?: () => SqliteMigration[];
   /**
    * The grandfathered per-family index an install upgraded across the Slice 2
    * cut still holds on disk. Nothing reads it any more — that commit deleted
@@ -294,13 +283,6 @@ export interface DataDeleteCustody {
 
 export interface DataDeleteWithCustodyResult extends DataDeleteResult {
   custody: DataDeleteCustody;
-}
-
-export interface DataMigrationCheckResult {
-  ok: true;
-  dryRun: boolean;
-  stores: SqliteMigrationResult[];
-  skipped: string[];
 }
 
 interface DeleteTarget {
@@ -641,6 +623,7 @@ export function exportOlympusData(options: {
 } & LifecyclePathContext): DataExportResult {
   const destination = requirePath(options.destination, '--output');
   const selected = selectSources(options.sourceId);
+  refuseExportDuringMove(selected, options);
   // Computed BEFORE anything is created: once mkdir -p has run, the directories
   // it made are indistinguishable from the ones that were already there.
   const durabilityBoundary = exportDurabilityBoundary(destination);
@@ -849,6 +832,17 @@ export function deleteOlympusData(options: {
     }
   }
   removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
+  // A boot migration that was part way for this source has lost its files to this Delete, wherever it had put them. The plan
+  // goes last, after the files: a Delete that stops in between leaves a plan with files missing, which the next boot reports
+  // (and a second Delete clears), never an account that looks fine with nothing behind it.
+  if (selectedSource && options.dryRun !== true) {
+    try {
+      dropMovePlans(envForContext(options), [selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
+    } catch (error) {
+      // A registry that cannot be read must not undo a Delete that has taken the files.
+      if (!(error instanceof SourceRegistryError)) throw error;
+    }
+  }
 
   return {
     ok: true,
@@ -1161,49 +1155,6 @@ export function dataDeleteCustody(options: {
       ? { next_action: 'Run olympus worker stop (or olympus worker uninstall), verify status, then retry.' }
       : {}),
   };
-}
-
-export function runDataMigrations(options: {
-  dryRun: boolean;
-  sourceId?: string;
-} & LifecyclePathContext): DataMigrationCheckResult {
-  const stores: SqliteMigrationResult[] = [];
-  const skipped: string[] = [];
-  for (const source of selectSources(options.sourceId)) {
-    // Connector stores run their own migrations when the store opens; the
-    // registry this loop drives does not own them, so a connector-store-only
-    // family has nothing to migrate here.
-    //
-    // A declared `sqlitePath` is NOT an invitation into this loop either. The
-    // legacy per-family indexes are custody artifacts that export preserves
-    // and delete removes; the live ones sit at their own retired schema
-    // versions under retired store ids, so migrating them would write this
-    // build's migrations into a schema it does not own — or refuse outright
-    // on the version check — for files nothing reads. Only a family that
-    // declares its own migration set is migrated here.
-    const migrations = source.sqliteMigrations?.();
-    if (!migrations) continue;
-    const path = source.sqlitePath?.(options);
-    if (!path) continue;
-    if (!existsSync(path)) {
-      skipped.push(path);
-      continue;
-    }
-    // bun:sqlite requires SQLITE_OPEN_READONLY or SQLITE_OPEN_READWRITE, so
-    // `{ readwrite: false, create: false }` was rejected at open and every
-    // dry run threw before reading a single store. A dry run reads the
-    // schema_version table and nothing else, so open it readonly.
-    const db = options.dryRun === true
-      ? new Database(path, { readonly: true })
-      : new Database(path, { readwrite: true, create: false });
-    db.exec('PRAGMA busy_timeout = 10000;');
-    try {
-      stores.push(runSqliteMigrations(db, source.sqliteStoreId, migrations, { dryRun: options.dryRun }));
-    } finally {
-      closeSqliteStore(db);
-    }
-  }
-  return { ok: true, dryRun: options.dryRun, stores, skipped };
 }
 
 export function validateDeleteAllConfirmations(first: string, second: string): void {
@@ -1535,6 +1486,37 @@ function sqliteDeleteTargets(
  */
 function legacyStoreIdFor(source: LifecycleSourceSpec): string {
   return source.legacySqliteStoreId ?? source.sqliteStoreId;
+}
+
+/**
+ * An account the boot migration is part way through moving has some files at
+ * the old place and some in its account folder, and the paths an export reads
+ * name only one of them: an export now would leave stores out and still call
+ * itself complete, and a Delete after it would lose them. So it is refused, and
+ * so is an export when the registry cannot be read, since then a move cannot be
+ * ruled out. Nothing has been written when it refuses.
+ */
+function refuseExportDuringMove(selected: readonly LifecycleSourceSpec[], options: LifecyclePathContext): void {
+  const own = new Set(selected.flatMap((source) => [source.sourceId, ...(source.sourceAliases ?? [])]));
+  let moving: string[];
+  try {
+    moving = readSourceRegistry(envForContext(options)).accounts
+      .filter((account) => own.has(account.source_id) && sourceAccountMovePending(account))
+      .map((account) => account.source_id);
+  } catch (error) {
+    if (!(error instanceof SourceRegistryError)) throw error;
+    throw new OperationError(
+      'source_index_error',
+      `${error.message} Whether an account is part way through moving into its folder cannot be told, so nothing was exported.`,
+      'Repair or restore that file, then export again.',
+    );
+  }
+  if (moving.length === 0) return;
+  throw new OperationError(
+    'invalid_params',
+    `${[...new Set(moving)].join(', ')} ${moving.length === 1 ? 'is' : 'are'} part way through moving into ${moving.length === 1 ? 'its' : 'their'} account folder, so an export now would leave files out; nothing was exported.`,
+    'Start Olympus so it can finish the move or put the files back, then export again. If the move is stuck, its row in Needs you says why.',
+  );
 }
 
 function selectSources(sourceId: string | undefined): LifecycleSourceSpec[] {

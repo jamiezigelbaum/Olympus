@@ -696,6 +696,66 @@ function legacyMessagingPaths(sourceId: string, env: LayoutEnv): { stores: strin
 }
 
 // ---------------------------------------------------------------------------
+// Moving an existing account into its folder (docs/design/source-storage.md,
+// "Migration of existing installs"; delivery step 4c)
+//
+// The boot migration renames an account's files from where they have always
+// been to where `accountStorePath` and `accountRawPath` put them. These two
+// functions are its whole knowledge of the legacy side: the files an account of
+// a source owns at the default legacy locations (no override applied; an
+// override pins the account and the migration skips it), paired with the name
+// the folder layout gives each.
+
+/** The sources whose existing accounts the boot migration moves: every one with a folder layout but the messaging sources (step 4d). */
+export function migratableSources(): readonly string[] {
+  return FOLDER_LAYOUT_SOURCES.filter((sourceId) => sourceId !== TELEGRAM_SOURCE_ID && sourceId !== WHATSAPP_SOURCE_ID);
+}
+
+/** A file or folder an account owns at its legacy location, and what the folder layout calls it. */
+export interface LegacyAccountFile {
+  /** `store`: a tier store (its tier sidecars follow); `raw`: raw state kept outside the stores. */
+  area: 'store' | 'raw';
+  /** The tier (or `<family>.<tier>` for an archive) for a store, the `AccountRawName` for raw state. */
+  name: string;
+  /** Where it sits at the default legacy location, absolute. */
+  legacy: string;
+  /** Raw state only: a folder, a SQLite database (its `-wal` and `-shm` follow) or a plain file. */
+  rawKind?: 'dir' | 'db' | 'file';
+}
+
+/**
+ * Every file or folder an account of a migratable source can own at its default
+ * legacy locations, whether or not it exists. Tier sidecars and `-wal`/`-shm`
+ * are not listed; the migration adds them to each store.
+ */
+export function legacyAccountFiles(
+  sourceId: string,
+  env: LayoutEnv = process.env,
+  archiveFamilies: readonly string[] = [],
+): LegacyAccountFile[] {
+  if (!migratableSources().includes(sourceId)) throw new TypeError(`${sourceId} is not moved by the boot migration.`);
+  const names = sourceId === ARCHIVE_IMPORTS
+    ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`))
+    : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
+  const files: LegacyAccountFile[] = names.map((name) => ({
+    area: 'store',
+    name,
+    legacy: olympusDataPath(env, legacyStoreFile(sourceId, name).file),
+  }));
+  if (sourceId === 'local.files') files.push({ area: 'raw', name: 'watch', legacy: olympusDataPath(env, 'local-files-watch'), rawKind: 'dir' });
+  if (sourceId === 'x.bookmarks') {
+    files.push({ area: 'raw', name: 'x-reconcile.sqlite', legacy: `${olympusDataPath(env, 'x-bookmarks-api-usage.sqlite')}.reconcile`, rawKind: 'db' });
+  }
+  if (sourceId === ARCHIVE_IMPORTS) {
+    files.push(
+      { area: 'raw', name: 'archive-imports.json', legacy: olympusDataPath(env, 'archive-imports.json'), rawKind: 'file' },
+      { area: 'raw', name: 'archive-import-requests.json', legacy: olympusDataPath(env, 'archive-import-requests.json'), rawKind: 'file' },
+    );
+  }
+  return files;
+}
+
+// ---------------------------------------------------------------------------
 // Everything Olympus itself writes
 //
 // Files on this computer never index Olympus's own folders: its stores, the

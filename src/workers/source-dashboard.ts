@@ -3,6 +3,7 @@ import { isRetiredGoogleHandle } from '../core/google-handle-compatibility.ts';
 import { googleDesktopClient } from '../core/publisher-oauth-client.ts';
 import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
+import type { SourceStorageNoticeKind } from '../core/source-registry.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
 import { ARCHIVE_NEUTRAL_PROVIDER, isArchiveProvider } from '../core/archive-formats.ts';
 import { existsSync, mkdirSync } from 'node:fs';
@@ -45,6 +46,7 @@ import {
 import {
   DASHBOARD_CAPTURE_BLOCKED_LABEL,
   DASHBOARD_CAPTURE_COPY,
+  DASHBOARD_STORAGE_NOTICE_COPY,
   DASHBOARD_CAPTURE_STALE_LABEL,
   DASHBOARD_MANY_UNREADABLE_LABEL,
   dashboardCaptureProblem,
@@ -1126,6 +1128,13 @@ export interface DashboardSourceCard {
    */
   account_change?: { next_action: string };
   /**
+   * The boot migration of the source's files into their account folder left
+   * something for the owner (core/source-account-migration.ts): a move that was
+   * undone, one that is part way, a place it cannot look at, or files in two
+   * places. Whatever else the card says, this is a Needs you row.
+   */
+  storage_notice?: { kind: SourceStorageNoticeKind; next_action: string };
+  /**
    * The metadata-sync phase's own folder-walk evidence, when the corpus
    * publishes it (`metadata_sync_folders_*`).
    *
@@ -1378,6 +1387,8 @@ export interface SourceDashboardBuildOptions {
    * (dashboard, CLI, detached) made the change.
    */
   sourceAccountBindings?: SourceAccountBindings['sources'];
+  /** What the boot migration of files into account folders left for the owner, by source id. */
+  storageNotices?: Readonly<Record<string, SourceStorageNoticeKind>>;
   /**
    * Whether `connectedHandleRegistry` is an empty stand-in for a registry the
    * caller could not read, rather than a registry that is genuinely empty.
@@ -2457,6 +2468,11 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       card.answer_readiness = { state: 'needs_attention', label: 'Connected to a different account' };
       card.setup = dashboardSourceSetupStatus(card);
     }
+    const storageNotice = options.storageNotices?.[definition.source_id];
+    if (storageNotice) {
+      card.storage_notice = { kind: storageNotice, next_action: DASHBOARD_STORAGE_NOTICE_COPY.nextAction[storageNotice](card.label) };
+      card.setup = dashboardSourceSetupStatus(card);
+    }
     // How live capture runs on this computer, for a connected chat source. A
     // helper that is not running is a fault whatever the pull says. It never
     // replaces a reason the card already gives: that reason stays the label,
@@ -2970,6 +2986,15 @@ function dashboardSourceSetupStatus(card: DashboardSourceCard): DashboardSourceS
       };
     });
   const dependenciesReady = dependencies.every((dependency) => dependency.status === 'ready');
+  // Whatever state the connection is in, files that are half moved or in two places come first.
+  if (card.storage_notice) {
+    return {
+      stage: 'source_health',
+      condition: card.storage_notice.kind === 'stuck' ? 'blocked' : 'degraded',
+      next_action: card.storage_notice.next_action,
+      dependencies,
+    };
+  }
   if (connection.state === 'not_connected' || connection.state === 'needs_setup') {
     const action = connection.action;
     const pairing = action.kind === 'guided_session';

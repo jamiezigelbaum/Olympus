@@ -5,7 +5,9 @@
  * Every open reads the account registry first. An account whose state is not
  * `active` (being deleted, or deleted) is never opened: the caller gets
  * `SourceStorageUnavailableError`, the same answer as a lane that is not
- * mounted, and never a stand-in store. Paths are the caller's, resolved by the
+ * mounted, and never a stand-in store. So is an account whose files are part
+ * way through the boot migration (core/source-account-migration.ts): its plan,
+ * not its layout, says where they are. Paths are the caller's, resolved by the
  * account's layout (core/olympus-layout.ts, core/source-placement.ts); nothing
  * here moves a file.
  *
@@ -27,8 +29,10 @@
  *
  * No instance cache: callers share the objects they open, as before.
  */
-import { statSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
+import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { closeSqliteStore } from './sqlite-store.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
@@ -41,6 +45,7 @@ import {
   findRegistryAccount,
   readSourceRegistry,
   SourceRegistryError,
+  sourceAccountMovePending,
   updateSourceRegistry,
   type SourceRegistry,
   type SourceRegistryAccountState,
@@ -56,13 +61,16 @@ export interface StorageAccount {
 
 export const DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
 
+/** Why an account may not be opened: it is being deleted or was, or its files are being moved. */
+export type SourceStorageUnavailableState = Exclude<SourceRegistryAccountState, 'active'> | 'moving';
+
 export class SourceStorageUnavailableError extends Error {
   readonly code = 'source_storage_unavailable';
   readonly sourceId: string;
   readonly slot: string;
-  readonly state: Exclude<SourceRegistryAccountState, 'active'>;
+  readonly state: SourceStorageUnavailableState;
 
-  constructor(sourceId: string, slot: string, state: Exclude<SourceRegistryAccountState, 'active'>) {
+  constructor(sourceId: string, slot: string, state: SourceStorageUnavailableState) {
     const account = slot === DEFAULT_STORAGE_SLOT ? sourceId : `${sourceId} (account ${slot})`;
     super(`${account} is not available: ${unavailableStateReason(state)}.`);
     this.name = 'SourceStorageUnavailableError';
@@ -206,6 +214,11 @@ export function replaceEmptyLegacyAccounts(env: LayoutEnv = process.env): string
   const eligible = (account: SourceRegistry['accounts'][number]): boolean =>
     account.state === 'active'
     && account.layout === 'legacy'
+    // A move under way (the boot migration creates an entry that lists no corpus,
+    // and a crash after its last rename leaves no file at a legacy location) is
+    // the migration's to end: a re-placement here would make an account that a
+    // roll-back then restores to the old places a folder with nothing in it.
+    && !sourceAccountMovePending(account)
     && account.corpus_ids.length === 0
     && hasFolderLayout(account.source_id)
     && decideAccountLayout(account.source_id, env).layout === 'folder';
@@ -245,9 +258,9 @@ export function sourceAccountUnavailableReason(account: StorageAccount, env: Lay
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  const state = findRegistryAccount(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT)?.state;
-  if (state === undefined || state === 'active') return undefined;
-  return unavailableStateReason(state);
+  const entry = findRegistryAccount(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  const state = unavailableState(entry);
+  return state === undefined ? undefined : unavailableStateReason(state);
 }
 
 /** Whether an account's stores may be opened now: the mount decision at worker boot. */
@@ -279,13 +292,20 @@ function storeFileKey(dbPath: string): string {
   }
 }
 
-function unavailableStateReason(state: Exclude<SourceRegistryAccountState, 'active'>): string {
+function unavailableStateReason(state: SourceStorageUnavailableState): string {
+  if (state === 'moving') return 'its files are being moved into its folder';
   return state === 'deleting' ? 'its data is being deleted' : 'its data was deleted';
 }
 
+function unavailableState(entry: SourceRegistry['accounts'][number] | undefined): SourceStorageUnavailableState | undefined {
+  if (entry === undefined) return undefined;
+  if (entry.state !== 'active') return entry.state;
+  return sourceAccountMovePending(entry) ? 'moving' : undefined;
+}
+
 function assertOpenable(registry: SourceRegistry, sourceId: string, slot: string): void {
-  const state = findRegistryAccount(registry, sourceId, slot)?.state;
-  if (state !== undefined && state !== 'active') throw new SourceStorageUnavailableError(sourceId, slot, state);
+  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
+  if (state !== undefined) throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
 
 /** Record the account (and the corpus, when a store's open names one) under the registry lease. */
@@ -318,6 +338,132 @@ function adopt(env: LayoutEnv, sourceId: string, slot: string, dbPath: string, c
 function adoptedLayout(env: LayoutEnv, sourceId: string, slot: string, dbPath: string): LayoutAccountLayout {
   if (decideAccountLayout(sourceId, env).layout !== 'folder') return 'legacy';
   return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? 'folder' : 'legacy';
+}
+
+// ---------------------------------------------------------------------------
+// What the boot migration (core/source-account-migration.ts) does to a store
+// file it has just moved. It holds the owner lock and nothing is mounted, so
+// these are the only opens, and they sit here because this is the only place
+// a store file is opened (test/store-open-guard.test.ts).
+
+/**
+ * Whether committed writes sit outside the main file: a `-wal` that holds
+ * frames, or a `-journal` waiting to be rolled back. Opening such a file
+ * read-write and closing it would merge them into the main file.
+ */
+function hasUnmergedWrites(path: string): boolean {
+  try {
+    if (statSync(`${path}-wal`).size > 0) return true;
+  } catch {
+    // No -wal.
+  }
+  return existsSync(`${path}-journal`);
+}
+
+/** Whether an error from SQLite means another connection has the database locked, as opposed to the database being unreadable. */
+function isBusyError(error: unknown): boolean {
+  const code = String((error as { code?: unknown })?.code ?? '');
+  const message = String((error as { message?: unknown })?.message ?? error);
+  return /SQLITE_(BUSY|LOCKED)/.test(code) || /locked|busy/i.test(message);
+}
+
+/** A wait for another connection, in whole milliseconds, never negative. */
+const busyWait = (ms: number): number => Math.max(0, Math.floor(ms));
+
+/**
+ * Opens a store file to look at it, and proves its schema reads. It is opened
+ * read-only first. A read-only connection cannot open a WAL database that has
+ * no `-wal` beside it (macOS's SQLite refuses), which is how a store looks
+ * after a clean close and would read as damaged, so then, and only when no
+ * write waits outside the main file (closing a writable connection merges
+ * it), the file is opened writable but query-only. A file another connection
+ * has locked is an answer and not a reason to try another way, which would
+ * wait again: it throws at once, after at most `busyTimeoutMs`. Throws when
+ * neither way reads it. Nothing is written to the database.
+ */
+function openToLookAt(path: string, busyTimeoutMs: number): Database {
+  let failure: unknown;
+  for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
+    if ('readwrite' in mode && hasUnmergedWrites(path)) break;
+    let db: Database | undefined;
+    try {
+      db = new Database(path, mode);
+      db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)}; PRAGMA query_only = ON;`);
+      db.query('SELECT count(*) AS n FROM sqlite_master').get();
+      return db;
+    } catch (error) {
+      failure = error;
+      if (db) closeSqliteStore(db, { checkpoint: false });
+      if (isBusyError(error)) break;
+    }
+  }
+  throw failure ?? new Error('The store has writes outside its file.');
+}
+
+/** What looking at a store file came to: `busy` when another connection kept it from being read within the wait. */
+export type StoreFileLook = 'reads' | 'damaged' | 'busy';
+
+/** Whether a store file opens and its schema reads. Writes nothing to it (SQLite's own `-wal` and `-shm` aside). */
+export function storeFileReads(path: string, busyTimeoutMs = 2_000): StoreFileLook {
+  let db: Database | undefined;
+  try {
+    db = openToLookAt(path, busyTimeoutMs);
+    return 'reads';
+  } catch (error) {
+    return isBusyError(error) ? 'busy' : 'damaged';
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+/**
+ * `PRAGMA quick_check` on a store file, query-only: `ok`, or `damaged` for anything else, a file that will not open
+ * included; `busy` when another connection kept it from being read within the wait. It is synchronous and cannot be
+ * interrupted, so the caller bounds it by size beforehand.
+ */
+export function storeFileQuickCheck(path: string, busyTimeoutMs = 2_000): 'ok' | 'damaged' | 'busy' {
+  let db: Database | undefined;
+  try {
+    db = openToLookAt(path, busyTimeoutMs);
+    const rows = db.query('PRAGMA quick_check').all() as Array<Record<string, unknown>>;
+    return rows.length === 1 && Object.values(rows[0]!)[0] === 'ok' ? 'ok' : 'damaged';
+  } catch (error) {
+    return isBusyError(error) ? 'busy' : 'damaged';
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
+}
+
+/** What folding one database's write-ahead log into it came to. */
+export type StoreFileCheckpoint = 'folded' | 'busy' | 'not_a_database' | 'failed';
+
+/**
+ * `PRAGMA wal_checkpoint(TRUNCATE)` on a store file: every frame of its
+ * write-ahead log is written into the database file and the log is emptied, so
+ * the file alone is the whole database. The boot migration does it before it
+ * plans a move and writes nothing else to the file. `folded` only when the
+ * checkpoint ran to the end (not busy, and every frame in the log was
+ * checkpointed); a file that is not in write-ahead mode has no log, which is
+ * folded. `busy`: another connection kept it from finishing. `not_a_database`:
+ * the file is not one SQLite can read. `failed`: anything else.
+ */
+export function storeFileCheckpoint(path: string, busyTimeoutMs = 2_000): StoreFileCheckpoint {
+  let db: Database | undefined;
+  try {
+    db = new Database(path, { readwrite: true, create: false });
+    db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)};`);
+    const row = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as Record<string, unknown> | null;
+    const [busy, log, checkpointed] = row ? Object.values(row) : [];
+    // Not in write-ahead mode: the pragma answers 0, -1, -1.
+    return busy === 0 && log === checkpointed ? 'folded' : 'busy';
+  } catch (error) {
+    const message = String((error as { message?: unknown })?.message ?? error);
+    if (isBusyError(error)) return 'busy';
+    if (/not a database|malformed|corrupt/i.test(message)) return 'not_a_database';
+    return 'failed';
+  } finally {
+    if (db) closeSqliteStore(db, { checkpoint: false });
+  }
 }
 
 export const __sourceStorageTestHooks = {

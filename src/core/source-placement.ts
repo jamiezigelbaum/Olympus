@@ -208,6 +208,16 @@ export function declaredConnectorStoreMounts(env: LayoutEnv = process.env): Decl
   return found;
 }
 
+/**
+ * What pins this source's files to their legacy paths, in words, when
+ * something does: an env override, a connector-store mount (and, for
+ * messaging, native capture ownership or a capture grant that names its
+ * session). The boot migration leaves such an account where it is.
+ */
+export function legacyPinFor(sourceId: string, env: LayoutEnv = process.env): string | undefined {
+  return pinnedLegacyBy(sourceId, env);
+}
+
 /** The override or mount that pins this source to the legacy layout, if any. */
 function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
   for (const name of legacyOverrideEnvNames(sourceId)) {
