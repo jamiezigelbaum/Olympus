@@ -26,6 +26,7 @@ const ALLOWED: Record<string, string> = {
   'src/workers/classification/sniffer-store.ts': 'the sniffer store class opening its own database',
   'src/core/file-lease.ts': 'the lock databases themselves',
   'src/workers/apple-messages/connector.ts': 'reads the macOS Messages chat.db, never an Olympus store',
+  'src/core/messaging-pairing.ts': 'copies and writes the Telegram login a pairing proves (telegram.session), never an Olympus store',
   // X's state outside the stores.
   'src/workers/x-bookmarks/live-control.ts':
     'X\'s API usage ledger: the quota ledger, shared across accounts and kept when X is deleted, so it stays in the data folder and outside the account folder; not a tier store',

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -12,7 +12,7 @@ interface FakeWindow { id: string; app: string; title: string }
 
 /** A desktop that answers the canary's scripts: what each launch opens is up to the test. */
 function fakeDesktop(os: 'linux' | 'macos', opts: {
-  version?: string; brief?: string; missing?: string[]; launcherOk?: boolean; upgradeFails?: boolean;
+  version?: string; brief?: string; missing?: string[]; launcherOk?: boolean; upgradeFails?: boolean; linkFails?: boolean;
   windows?: FakeWindow[]; onLauncher?: (windows: FakeWindow[]) => void; onLink?: (windows: FakeWindow[]) => void;
 } = {}) {
   const windows: FakeWindow[] = [...(opts.windows ?? [])];
@@ -33,7 +33,7 @@ function fakeDesktop(os: 'linux' | 'macos', opts: {
       if (script === 'hyprctl clients -j') return ok(JSON.stringify(windows.map((w) => ({ address: w.id, class: w.app, title: w.title }))));
       if (script.includes('CGWindowListCopyWindowInfo')) return ok(JSON.stringify(windows));
       if (script.startsWith('gtk-launch') || script.includes(' dashboard >/dev/null')) { opts.onLauncher?.(windows); return ok(''); }
-      if (script.startsWith('xdg-open') || script.startsWith('open \'olympus://')) { opts.onLink?.(windows); return ok(''); }
+      if (script.includes('xdg-open \'olympus://') || script.startsWith('open \'olympus://')) { opts.onLink?.(windows); return opts.linkFails ? { ...ok(''), code: 124, stderr: 'xdg-open: x-www-browser: command not found' } : ok(''); }
       const closed = /closewindow address:'([^']+)'/g;
       for (const match of script.matchAll(closed)) windows.splice(windows.findIndex((w) => w.id === match[1]), 1);
       const tab = /sendshortcut 'CTRL, W, address:([^']+)'/.exec(script);
@@ -130,6 +130,44 @@ describe('release-check canary', () => {
     expect(check.status).toBe('fail');
     expect(check.detail).toContain('already open before this check');
     expect(desktop.scripts.some((s) => s.includes(' dashboard >/dev/null'))).toBe(false);
+  });
+
+  test('Linux: windows and tabs close on a Hyprland with a classic config and on one with a Lua config', async () => {
+    const desktop = fakeDesktop('linux', {
+      windows: [{ id: '0xc3', app: 'brave-browser', title: '1Password - Brave' }],
+      onLauncher: (w) => w.push({ id: '0xa1', app: 'brave-olympus-Default', title: 'Olympus' }),
+      onLink: (w) => { w[0]!.title = 'Olympus'; },
+    });
+    await runCanary(desktop.machine, options('linux'));
+    const closes = desktop.scripts.filter((s) => s.includes('hyprctl dispatch'));
+    expect(closes).toHaveLength(2);
+    // A stand-in hyprctl that accepts only one config language and logs every dispatch it is given.
+    const bin = mkdtempSync(join(tmpdir(), 'canary-hyprctl-'));
+    writeFileSync(join(bin, 'hyprctl'), '#!/bin/sh\nprintf \'%s\\n\' "$2" >> "$LOG"\ncase "$2" in hl.*) [ "$MODE" = lua ] && echo ok || echo "Invalid dispatcher" ;; *) [ "$MODE" = classic ] && echo ok || echo "error: hl.dispatch: expected a dispatcher" ;; esac\n', { mode: 0o755 });
+    const run = (mode: string) => {
+      const log = join(bin, `${mode}.log`);
+      writeFileSync(log, '');
+      for (const script of closes) Bun.spawnSync(['sh', '-c', script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, MODE: mode, LOG: log } });
+      return readFileSync(log, 'utf8').trim().split('\n');
+    };
+    expect(run('classic')).toEqual(['closewindow', 'sendshortcut']);
+    expect(run('lua')).toEqual([
+      'closewindow', 'hl.dsp.window.close({ window = "address:0xa1" })',
+      'sendshortcut', 'hl.dsp.send_shortcut({ mods = "CTRL", key = "W", window = "address:0xc3" })',
+    ]);
+  }, 30_000);
+
+  test('Linux: a link command that fails still has what it opened closed, and is bounded on the machine', async () => {
+    const desktop = fakeDesktop('linux', {
+      linkFails: true,
+      onLauncher: (w) => w.push({ id: '0xa1', app: 'brave-olympus-Default', title: 'Olympus' }),
+      onLink: (w) => w.push({ id: '0xb2', app: 'chromium', title: 'New Tab - Chromium' }),
+    });
+    const result = await runCanary(desktop.machine, options('linux'));
+    expect(statusOf(result.checks)['canary.window.link']).toBe('fail');
+    expect(result.checks.find((c) => c.id === 'canary.window.link')!.detail).toContain('exit 124');
+    expect(desktop.scripts.find((s) => s.includes('xdg-open'))).toStartWith('timeout -k 5 40 xdg-open ');
+    expect(desktop.windows).toEqual([]);
   });
 
   test('window lists parse on both platforms; prompts and dashboards are told apart', () => {

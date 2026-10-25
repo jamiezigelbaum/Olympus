@@ -16,13 +16,16 @@
  * say why, sideways overflow, a window opened to a page that is not Olympus's own, a press that leaves for a page that is not the
  * dashboard's, a press that does nothing. A link to another site is validated, not followed (the destination must be https and open
  * with no opener); a control whose press would reach outside the throwaway machine (public certificate issuance, a sign-in at a real
- * provider, a question sent to a model) is listed with the reason it is not pressed. Destructive controls are pressed here only
- * because this is the throwaway install, and last.
+ * provider, a question sent to a model outside the machine) is listed with the reason it is not pressed; the local model's Ask is
+ * pressed, since it answers on the machine. Destructive controls are pressed here only because this is the throwaway install, and last.
+ * A page can be prepared first, the way the owner would (`prepare`): the Inbox is filled by asking the local model, so its Read and
+ * Delete are pressed too.
  *
  * Coverage is reported against the list taken from the page templates (explore-pages-inventory.ts): found, pressed, missed. It is
  * advisory; the rules are blocking.
  */
 import type { PageControlEntry, PageInventory } from './explore-pages-inventory.ts';
+import { ASK_VIEW } from './inbox-page.ts';
 import { BLANK_WINDOW } from './probe.ts';
 import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
@@ -51,6 +54,8 @@ export interface PageControl {
   visible: boolean;
   /** `data-*` attribute names on the control and its form. */
   attrs: string[];
+  /** The control's own `data-*` attributes with their values (clipped), as `data-pa-destination` = `computer`. */
+  values?: Record<string, string>;
   /** The form's own kind attribute and value, as `data-agent-kind=pair`. */
   formKind: string;
   expanded: string | null;
@@ -76,6 +81,11 @@ export interface PagesOptions {
   driver: JourneyDriver;
   pages?: readonly PageDef[];
   inventory: PageInventory;
+  /**
+   * Puts the install in the state a page needs before it is crawled (the Inbox needs answers to show its Read and Delete), the way
+   * the owner would. `undefined` when the page needs nothing; `ok: false` fails the page, with why.
+   */
+  prepare?: (page: PageDef, until: number) => Promise<{ ok: boolean; detail: string } | undefined>;
   /** Extra page-level findings (the accessibility audit), judged with the seeded page. */
   audit?: (driver: JourneyDriver, page: PageDef) => Promise<string[]>;
   now?: () => number;
@@ -112,11 +122,14 @@ const MAX_OPENERS = 3;
 const NOT_PRESSED: Array<{ test: (control: PageControl) => boolean; reason: string }> = [
   { test: (c) => /^(Turn on remote access|Review agreement|I accept, turn on remote access)$/i.test(c.name) || /agent-kind=remote-(on|accept)/.test(c.formKind), reason: 'it starts a public address and a certificate from a public authority; not on a throwaway machine' },
   { test: (c) => /data-connect-kind=oauth/.test(c.formKind), reason: 'it starts a sign-in at a real provider' },
-  { test: (c) => /data-pa-destination/.test(c.attrs.join(' ')), reason: 'it sends a question to a model' },
+  // The local model answers on this machine (the Inbox leg asks it too); Venice and zkAPI send the question out.
+  { test: (c) => /data-pa-destination/.test(c.attrs.join(' ')) && c.values?.['data-pa-destination'] !== 'computer', reason: 'it sends a question to a model outside this machine' },
 ];
 
 /** The longest one press (load, press, settle, judge) may take: a page that hangs fails that press, it does not take the run with it. */
 const ITEM_BOUND_MS = 60_000;
+/** The longest a page's preparation may take (the Inbox waits for the local model to answer), and never more than half the time left. */
+const PREPARE_BOUND_MS = 10 * 60_000;
 async function withBound<T>(work: () => Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -159,6 +172,8 @@ const ENUMERATE = String.raw`(() => {
     seen[base] = (seen[base] || 0) + 1;
     const form = el.closest('form');
     const attrs = Array.from(el.getAttributeNames()).filter((a) => a.startsWith('data-') && a !== 'data-rc-n');
+    const values = {};
+    for (const a of attrs) values[a] = String(el.getAttribute(a) || '').slice(0, 40);
     let formKind = '';
     if (form) {
       for (const a of form.getAttributeNames()) {
@@ -184,7 +199,7 @@ const ENUMERATE = String.raw`(() => {
     const submit = (tag === 'button' && (el.getAttribute('type') || 'submit') === 'submit') || (tag === 'input' && type === 'submit');
     out.push({
       n, sig: base + '#' + seen[base], tag, type, name, text: clean(el.textContent).slice(0, 120),
-      href, target: el.getAttribute('target'), rel: el.getAttribute('rel'), disabled, reason: reason.slice(0, 200),
+      href, target: el.getAttribute('target'), rel: el.getAttribute('rel'), disabled, reason: reason.slice(0, 200), values,
       visible: vis(el), attrs, formKind, expanded: el.getAttribute('aria-expanded'),
       copy: el.hasAttribute('data-copy-target'), field,
       invalid: !!(submit && form && typeof form.checkValidity === 'function' && !form.checkValidity()),
@@ -325,7 +340,8 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
   for (let passIndex = 0; passIndex < passes.length; passIndex++) {
     const { page, lockOnly } = passes[passIndex]!;
     // Each page gets an equal share of the time left, so one large page cannot use up the others' turns.
-    const pageDeadline = options.deadlineAt === undefined ? undefined : now() + Math.max(0, options.deadlineAt - now()) / (passes.length - passIndex);
+    const shareLeft = (): number | undefined => options.deadlineAt === undefined ? undefined : now() + Math.max(0, options.deadlineAt - now()) / (passes.length - passIndex);
+    let pageDeadline = shareLeft();
     const reported = new Set<string>();
     const existing = lockOnly ? summaries.find((candidate) => candidate.id === page.id) : undefined;
     const summary: PageSummary = existing ?? { id: page.id, title: page.title, path: page.path, found: 0, pressed: 0, validated: 0, skipped: 0, failed: 0, presses: 0 };
@@ -342,6 +358,31 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
       }
     };
     try {
+      if (!lockOnly && options.prepare) {
+        const started = now();
+        const until = started + Math.min(PREPARE_BOUND_MS, options.deadlineAt === undefined ? PREPARE_BOUND_MS : Math.max(0, options.deadlineAt - started) / 2);
+        // `until` stops the preparation itself; the bound beyond it only guards against a browser that stops answering.
+        const prepared = await withBound(() => options.prepare!(page, until), until - started + 30_000, `preparing the ${page.title} page`)
+          .catch((error: unknown) => ({ ok: false, detail: error instanceof Error ? error.message.slice(0, 200) : String(error) }));
+        const events = driver.drainEvents();
+        if (prepared) {
+          const requests = events.requests.filter((request) => !ALWAYS_ALLOWED_REQUESTS.some((rule) => rule.test(request.url)));
+          const consoleErrors = events.console.filter((message) => !ALWAYS_ALLOWED_CONSOLE.some((rule) => rule.test(message)));
+          const findings = [
+            ...(prepared.ok ? [] : [prepared.detail]),
+            ...consoleErrors.map((message) => `console error while preparing: ${message.slice(0, 200)}`),
+            ...requests.map((request) => `failed request while preparing: ${request.text} -> ${request.status || 'failed'}`),
+          ];
+          steps.push({
+            n: steps.length + 1, name: `Prepare the ${page.title} page`, action: 'put the install in the state the page needs, the way the owner would',
+            expected: 'the page has what its controls act on', actual: prepared.detail, ok: findings.length === 0, ms: now() - started, at: page.path,
+            consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests: requests.map((request) => `${request.text} -> ${request.status || 'failed'}`), findings,
+          });
+          for (const text of findings) reported.add(text);
+          if (findings.length > 0) summary.failed += 1;
+          pageDeadline = shareLeft();
+        }
+      }
       // The first load is bounded like a press, so a browser that stops answering costs this page, not the whole run.
       const base = await withBound(async () => { await loadPage(page); return await enumerate(); }, itemBoundMs, `loading the ${page.title} page`);
       const load = driver.drainEvents();
@@ -354,7 +395,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
         ...loadRequests.map((request) => `failed request while loading: ${request.text} -> ${request.status || 'failed'}`),
       ];
       if (!lockOnly) steps.push({
-        n: 1, name: `The ${page.title} page as loaded`, action: `open ${page.path}`,
+        n: steps.length + 1, name: `The ${page.title} page as loaded`, action: `open ${page.path}`,
         expected: 'the page follows the generic rules (names, reasons for disabled controls, no placeholder words, no sideways scroll)',
         actual: baseFindings.length === 0 ? `${base.filter((c) => c.visible).length} control(s) showing` : baseFindings.join('; '),
         ok: baseFindings.length === 0, ms: 0, at: page.path,
@@ -567,6 +608,44 @@ function validateLink(control: PageControl, page: PageDef, steps: StepTrace[], s
   if (!ok) summary.failed += 1;
   record(control, true);
   steps.push({ n: steps.length + 1, name: `${control.name || href} (link to another site, validated)`, action: `check the link to ${href.slice(0, 80)}`, expected: 'an https destination that opens with no hold on this page', actual: ok ? `${new URL(href, 'https://x.invalid').host}, ${control.target === '_blank' ? 'new window, no opener' : 'same window'}` : findings.join('; '), ok, ms: 0, at: page.path, consoleErrors: [], failedRequests: [], findings });
+}
+
+/**
+ * The Inbox is empty on a fresh install, so its Read, Delete and Delete all would only ever be listed. This preparation fills it the
+ * way the owner would: each question is typed into the Ask page and "Ask the local model" pressed (the local model answers on this
+ * machine), until the Inbox holds one answer per question. Answers already there count, so a run that left some asks fewer. A question
+ * is in the Inbox as soon as it is asked, while the model still answers, so each one waits for the Ask form to show its answer.
+ */
+export function inboxAnswers(driver: JourneyDriver, options: { questions: readonly string[]; sleep?: (ms: number) => Promise<void>; now?: () => number }): NonNullable<PagesOptions['prepare']> {
+  const sleep = options.sleep ?? sleepFor;
+  const now = options.now ?? Date.now;
+  const rowCount = async (): Promise<number> => Number(await driver.probe('host', "document.querySelectorAll('[data-pa-question]').length")) || 0;
+  const localReady = async (): Promise<boolean> => (await driver.probe('host', "!!document.querySelector('form[data-pa-ask] textarea[name=\"question\"]:not([disabled])') && !!document.querySelector('form[data-pa-ask] button[data-pa-destination=\"computer\"]:not([disabled])')")) === true;
+  return async (page, until) => {
+    if (page.id !== 'inbox') return undefined;
+    await driver.go(page.path);
+    let rows = await rowCount();
+    const wanted = options.questions.length;
+    if (rows >= wanted) return { ok: true, detail: `the Inbox already holds ${rows} answer(s)` };
+    for (const question of options.questions.slice(rows)) {
+      while (!(await localReady())) {
+        if (now() >= until) return { ok: false, detail: `"Ask the local model" was not ready to press (the Inbox holds ${rows} of ${wanted} answers)` };
+        await sleep(2_000);
+      }
+      if (!(await driver.type('host', { css: 'form[data-pa-ask] textarea[name="question"]' }, question))) return { ok: false, detail: 'the question field on the Ask page could not be typed into' };
+      if (!(await driver.click('host', { css: 'form[data-pa-ask] button[data-pa-destination="computer"]' }))) return { ok: false, detail: '"Ask the local model" could not be pressed' };
+      const before = rows;
+      for (;;) {
+        const view = JSON.parse(String(await driver.probe('host', ASK_VIEW))) as { found?: boolean; busy?: boolean; answer?: string; error?: boolean; message?: string };
+        if (view.error) return { ok: false, detail: `the local model did not answer: ${String(view.message ?? '').slice(0, 160)}` };
+        rows = await rowCount();
+        if (view.found && !view.busy && view.answer && rows > before) break;
+        if (now() >= until) return { ok: false, detail: `the local model's answer was not finished and in the Inbox in time (${view.answer ? 'answered' : 'no answer yet'}; the Inbox holds ${rows} of ${wanted})` };
+        await sleep(2_000);
+      }
+    }
+    return { ok: true, detail: `the local model answered; the Inbox holds ${rows} answer(s)` };
+  };
 }
 
 function skippedStep(n: number, control: PageControl, reason: string, page: PageDef): StepTrace {

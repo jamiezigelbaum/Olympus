@@ -1,6 +1,6 @@
-import { lstatSync, realpathSync, rmSync, type Stats } from 'node:fs';
+import { lstatSync, readdirSync, realpathSync, rmSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   TELEGRAM_SOURCE_ID,
   WHATSAPP_SOURCE_ID,
@@ -170,6 +170,36 @@ export function telegramSessionBasePath(context: OlympusPathContext = {}): strin
 export function telegramPairingSessionPaths(context: OlympusPathContext = {}): string[] {
   const base = telegramSessionBasePath(context);
   return [`${base}.session`, `${base}.session-journal`];
+}
+
+/**
+ * Where one pairing makes a Telegram login aside, `<base>.pairing-<pid>-<tag>`,
+ * unique to it: for an account whose history names its Telegram account, the
+ * login takes the account's name only once it proves that account, within the
+ * same pairing (core/messaging-pairing.ts). One left by a pairing that was
+ * killed is found by telegramStagedLogins: the next pairing removes it once
+ * its process is gone, and Unpair removes every one.
+ */
+export function telegramStagedSessionBase(base: string, owner: { pid: number; tag: string }): string {
+  return `${base}.pairing-${owner.pid}-${owner.tag}`;
+}
+
+const STAGED_LOGIN_SUFFIX = /^\.pairing-(\d{1,10})-([0-9a-f]{8})\.session(?:-journal)?$/;
+
+/** The logins made aside beside `base` that are there now, each with the pairing process that made it. */
+export function telegramStagedLogins(base: string): Array<{ path: string; pid: number }> {
+  let names: string[];
+  try {
+    names = readdirSync(dirname(base));
+  } catch {
+    return [];
+  }
+  const own = basename(base);
+  return names.flatMap((name) => {
+    if (!name.startsWith(own)) return [];
+    const match = STAGED_LOGIN_SUFFIX.exec(name.slice(own.length));
+    return match ? [{ path: join(dirname(base), name), pid: Number(match[1]) }] : [];
+  });
 }
 
 /**

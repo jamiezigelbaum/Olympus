@@ -105,7 +105,8 @@ Inside the data root:
                                  the raw bytes a file reader is handed while it
                                  reads, under c-<corpus>/a-<account scope>/
                                  (made by the first file written, never at start)
-    session/                     Telegram's pairing session (telegram.session and its -journal);
+    session/                     Telegram's pairing session (telegram.session and its -journal,
+                                 and the pairing lock telegram.pairing.lock.db);
                                  WhatsApp's session.db lives with its bridge state in raw/whatsapp/
     settings/                    reserved; unused (see below)
   shared/                        shared files (dashboard, scheduler, jobs, ledgers)
@@ -239,6 +240,92 @@ Inside the data root:
   Delete). Until then, connecting a different account while the previous
   account's data is kept is refused with "Delete the previous account's
   data first".
+
+### One account, live and imported
+
+Archive imports and live connectors keep one dataset per account
+([archive-live-one-dataset.md](archive-live-one-dataset.md), #524). An archive
+of a source that has a live connector is one more input to that source's
+connector. Its items land in the account's own stores, corpus ids and tier
+ledger, and they converge with the live items rather than sit beside them.
+Storage's part (step 4e):
+
+- **Imports for a live source get no stores of their own.** `archive.imports`
+  stays the source for archive-only formats (Reflect, Roam, Evernote), for mail
+  that matches no Gmail account, and for an archive of another account than the
+  connected one. Its `<family>.<tier>` stores, account scopes and per-import
+  Remove are unchanged. Archive import never shipped in a release, so nothing
+  existing is folded in. Reading `<tier>.archive.<family>` corpora for formats
+  that feed a live source ends once ingestion's per-source steps land.
+- **An entry names its provider account.** `provider_account_hash` holds the
+  id `provider-account-identity.ts` defines, the same one the account binding
+  holds: labels joined with `.`, Google's and Telegram's as digests, so no
+  address is written to the registry (Dropbox's and X's are their own account
+  ids). Whoever first establishes the account writes it
+  (`recordProviderAccount`):
+  - the worker, once a live source's sync is let through on an account it binds
+    in `source-account-bindings.json` (which keeps its own role of stopping a
+    sync on a different account);
+  - a Telegram pairing, `telegram:<account_ref>` from the pairing proof,
+    decided by the worker (`pairing-account`) or under the owner lock, as the
+    placement is;
+  - an import that carries the id.
+
+  The first value stays. A later one may only add labels
+  (`mergeProviderAccountIds`). Delete forgets it, as it forgets the binding;
+  Delete-all forgets every entry's, in the registry found before anything was
+  removed.
+  WhatsApp has no account id, live or archived. An entry from before this step
+  names none until its next sync or pairing.
+- **An import finds its account through the storage service**
+  (`resolveImportAccount`), under the registry lease, by
+  `compareProviderAccounts` against the source's entry:
+  - `same`: that account;
+  - no entry for the source: a new `folder` entry, with the import's id or
+    none, which a later connect or pairing joins;
+  - `unproven` (one side has no id, or only labels that cannot decide) when the
+    source has one account: that account, once the owner confirms in the
+    import sheet;
+  - `different`: not this account; the import stays under `archive.imports` (a
+    second slot once slots exist).
+- **Connect and pairing check the entry.** A different account over a history
+  that names its account is refused until the owner deletes that history:
+  - A file source's account guard reads the entry's account as the binding's
+    when the binding names none (an imported history). A connect of another
+    account then holds the sync as any account change does (`purge_required`,
+    and the guard's message: reconnect the previous account, or Disconnect,
+    delete and connect again). Nothing is deleted on its own.
+  - A sync runs only once the entry and the binding name one account. A binding
+    moved to another account over stores that hold nothing (which the guard
+    allows) moves the entry with it; one that disagrees with an entry over
+    stored items is refused the same way. A connect that follows a binding
+    known by its Google address alone through a rename the replaced grant's
+    own token proves (`followFileSourceRename`) moves an entry known by that
+    address with it (`followProviderAccountRename`).
+  - An import into an account-bound source (Dropbox, Drive, Gmail, X) resolves
+    its account and writes inside the source's exclusive runner
+    (`runExclusiveForSource`), so the guard cannot bind another account between
+    the two.
+  - A Telegram pairing checks the account it proved before anything is
+    registered or any credential stored, and refuses with "delete that history
+    first". Over a history that names its account, the pairing signs in on a
+    copy of its own (`<session>.pairing-<pid>-<tag>`, made from any login
+    already there with SQLite `VACUUM INTO`), so another account's login is
+    never where capture reads it and the login already there is left exactly
+    as it was. The copy becomes the login only once it proves the account: by
+    name when there is none, and otherwise by writing its tables into the
+    login in one SQLite transaction, never by replacing the file, so a capture
+    reader holding it open keeps a consistent database. A pairing that fails
+    removes its copy; a copy a killed pairing left is removed by the next
+    pairing and by Unpair (beside the registered path and the derived one).
+  - One Telegram pairing runs at a time on a login: a kernel lock beside it
+    (`<session>.pairing.lock.db`, empty, dropped when its holder dies) refuses
+    a second with "Another Telegram pairing is running".
+  - `connect telegram --session-path` cannot prove an account, so over a
+    history that names one it is refused the same way.
+
+  4b's "an account with an entry follows it" compares the id, not only the
+  source.
 
 ## Storage service
 
@@ -421,6 +508,10 @@ store, and the registry state is what the Delete feature reports and
 retries from (another restart). Other sources are unaffected and the engine
 starts normally. A crash at any point resumes at the next boot from the
 registry state, because each step is idempotent and the rename is atomic.
+
+History imported into a live source is that account's history: an account's
+Delete takes it, and it is never removed on its own (owner decision 6).
+Imports under `archive.imports` keep their own Remove, by their account scope.
 
 What this removes from #467: the custody lock per store, the delete-fence
 file and its in-memory stand-in stores, canonical-path intent bindings, and
@@ -818,7 +909,8 @@ touch the store path (`eval/`).
      store opened by a 4a worker on a fresh install among them, stays legacy
      until 4d. No existing file moves; the Go bridge's own session lock moves
      to 4d.
-   - **4c, the boot migration of existing non-messaging accounts**, behind
+   - **4c, the boot migration of existing non-messaging accounts (done,
+     #508)**, behind
      `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
      default), with the tests in "What must not break". Built on two changes
      that came first, so that moving a store is only renaming files: media-cache
@@ -843,7 +935,18 @@ touch the store path (`eval/`).
      you row; one crash mid-move resumed; the downgrade behavior. The owner
      signs this off here.
    - **4d, the messaging migration**, including the Go bridge's session
-     lock, which 4b leaves as it is.
+     lock, which 4b leaves as it is. An archive-only Telegram or WhatsApp
+     account (history, no session) is a `folder` account from the start.
+   - **4e, account identity** (done, #530), before archive ingestion's
+     Telegram and mail steps (#524). The registry's `provider_account_hash` is
+     written by connect (from the account binding) and by Telegram pairing. The
+     storage service resolves an import's account as "One account, live and
+     imported" says. Connect and pairing refuse an entry that holds a different
+     account. Proof:
+     an import joins its live account, creates one when there is none and is
+     joined by the next connect, waits for the owner when unproven, and stays
+     under `archive.imports` when different. A pairing onto another account's
+     history is refused, and so is a session given by its path.
 5. **Delete, export, uninstall on the registry.** Replace
    `lifecycleSourceSpecs` with the registry: a per-source delete marks the
    account `deleting` and the boot pass removes it; export and uninstall
@@ -861,7 +964,7 @@ proven on Mac, standalone Linux and OpenClaw-hosted.
 
 ## Owner decisions
 
-All five approved by the owner, 2026-10-24.
+Decisions 1 to 5 approved by the owner on 2026-10-24, and 6 on 2026-10-25.
 
 1. **One folder per account, with slots.** Connecting a different account
    for the same source creates a new folder; the old one stays as
@@ -881,6 +984,10 @@ All five approved by the owner, 2026-10-24.
    (`source-scheduler.ts:516-522` has no cancel today).
 5. **Leave pre-1.0 index files** for Delete all to remove, rather than
    deleting them during migration.
+6. **Imported history joins the account.** An import merged into a live
+   source becomes part of that account's history. It is deleted only with the
+   account's data, never on its own. Imports kept under `archive.imports`
+   keep their own Remove.
 
 ## Out of scope
 

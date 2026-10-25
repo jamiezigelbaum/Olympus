@@ -39,6 +39,7 @@ import { TierLedger, type TierLedgerOptions } from '../workers/classification/ti
 import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
 import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
 import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
+import { compareProviderAccounts, mergeProviderAccountIds } from './provider-account-identity.ts';
 import { placedStoreHolder } from './store-identity.ts';
 import {
   DEFAULT_ACCOUNT_SLOT,
@@ -232,6 +233,126 @@ export function replaceEmptyLegacyAccounts(env: LayoutEnv = process.env): string
     }
   });
   return replaced;
+}
+
+/**
+ * What recordProviderAccount found: `recorded` (the entry named no account, or
+ * named one for a history the caller saw empty, and now names this one), `same` (it names this one, perhaps by fewer labels, which
+ * it now carries too), `different` or `unproven` (it names another, or one this
+ * id cannot be matched to, and stays as it was), `no_entry` (nothing to record
+ * on).
+ */
+export type ProviderAccountRecord = 'recorded' | 'same' | 'different' | 'unproven' | 'no_entry';
+
+/**
+ * Record which provider account an account's history belongs to
+ * (docs/design/source-storage.md, "One account, live and imported"), for whoever
+ * first establishes it: the worker once a live source's binding names its
+ * account, a Telegram pairing, an import that carries the id. The first value
+ * stays; a later one may only add labels, and only when it is the same account.
+ * Never creates an entry. Writes nothing unless the entry changes. For a caller
+ * that owns the data (the worker, or the CLI under the owner lock), as
+ * placeOwnedAccount is. An account being deleted or moved fails the call.
+ */
+export function recordProviderAccount(
+  account: StorageAccount,
+  providerAccountId: string,
+  env: LayoutEnv = process.env,
+  options: {
+    /**
+     * The caller saw the account hold no item (the account guard, about to let
+     * a sync run): the account the entry names has no history here, so it takes
+     * this one instead of staying.
+     */
+    historyEmpty?: boolean;
+  } = {},
+): ProviderAccountRecord {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const decide = (registry: SourceRegistry): { result: ProviderAccountRecord; write?: string } => {
+    assertOpenable(registry, account.sourceId, slot);
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry) return { result: 'no_entry' };
+    const recorded = entry.provider_account_hash;
+    if (recorded === undefined) return { result: 'recorded', write: providerAccountId };
+    const match = compareProviderAccounts(recorded, providerAccountId);
+    if (match !== 'same' && options.historyEmpty === true) return { result: 'recorded', write: providerAccountId };
+    if (match !== 'same') return { result: match };
+    const merged = mergeProviderAccountIds(recorded, providerAccountId);
+    return merged === recorded ? { result: 'same' } : { result: 'same', write: merged };
+  };
+  let decided = decide(readSourceRegistry(env));
+  if (decided.write === undefined) return decided.result;
+  updateSourceRegistry(env, (registry) => {
+    decided = decide(registry);
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (entry && decided.write !== undefined) entry.provider_account_hash = decided.write;
+  });
+  return decided.result;
+}
+
+/**
+ * Where an import of a source's history goes:
+ * - `same`: into that account, the one the source's entry names (or, once the
+ *   owner confirmed it, the one entry the source has);
+ * - `new`: the source had no entry, and now has one, naming the import's
+ *   account when it carries one; a later connect or pairing joins it;
+ * - `unproven`: the entry and the import cannot be matched (one names no
+ *   account, or only by labels that cannot decide). The owner confirms in the
+ *   import sheet, and the import is asked again with `ownerConfirmed`;
+ * - `different`: another account's history; the import stays under
+ *   `archive.imports`.
+ */
+export type ImportAccountMatch = 'same' | 'new' | 'unproven' | 'different';
+
+export interface ImportAccountResolution {
+  match: ImportAccountMatch;
+  /** The account the import joins (`same`, `new`), or would once confirmed (`unproven`). */
+  account?: Required<StorageAccount>;
+}
+
+/**
+ * Resolve the account an import of `sourceId` joins, by its provider account id
+ * when the archive carries one (docs/design/source-storage.md, "One account,
+ * live and imported"), recording what it establishes: a new entry, the import's
+ * account on an entry that named none once the owner confirmed it, or labels the
+ * entry did not have yet. Every source has one account slot today. For a caller
+ * that owns the data, as recordProviderAccount is; an account being deleted or
+ * moved fails the call.
+ */
+export function resolveImportAccount(
+  sourceId: string,
+  importAccountId: string | undefined,
+  options: { ownerConfirmed?: boolean; env?: LayoutEnv } = {},
+): ImportAccountResolution {
+  const env = options.env ?? process.env;
+  const account = { sourceId, slot: DEFAULT_STORAGE_SLOT };
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, sourceId, account.slot);
+  const entry = findRegistryAccount(registry, sourceId, account.slot);
+  if (!entry) {
+    placeOwnedAccount(account, env);
+    if (importAccountId === undefined) return { match: 'new', account };
+    // An entry another writer made in between, naming its account, decides.
+    const written = recordProviderAccount(account, importAccountId, env);
+    if (written === 'different') return { match: 'different' };
+    if (written === 'unproven') return { match: 'unproven', account };
+    return { match: written === 'same' ? 'same' : 'new', account };
+  }
+  const recorded = entry.provider_account_hash;
+  const match = recorded !== undefined && importAccountId !== undefined
+    ? compareProviderAccounts(recorded, importAccountId)
+    : 'unproven';
+  if (match === 'different') return { match };
+  if (match === 'unproven' && options.ownerConfirmed !== true) return { match, account };
+  // Proved, or confirmed by the owner: an entry that named no account takes the
+  // import's, and one that names it by fewer labels takes the rest.
+  if (importAccountId !== undefined && (recorded === undefined || match === 'same')) {
+    const written = recordProviderAccount(account, importAccountId, env);
+    // Named by another writer since the read above: that account decides, and the owner is asked again.
+    if (written === 'different') return { match: 'different' };
+    if (written === 'unproven' && recorded === undefined) return { match: 'unproven', account };
+  }
+  return { match: 'same', account };
 }
 
 function placeSidecar(env: LayoutEnv, account: StorageAccount, path: string, readOnly?: boolean): void {

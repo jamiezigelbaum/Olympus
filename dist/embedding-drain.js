@@ -16667,7 +16667,9 @@ function readSourceRegistry(env = process.env) {
   return readSourceRegistryAt(sourceRegistryPath(env));
 }
 function updateSourceRegistry(env, mutate) {
-  const path = sourceRegistryPath(env);
+  return updateSourceRegistryAt(sourceRegistryPath(env), mutate);
+}
+function updateSourceRegistryAt(path, mutate) {
   return withFileLeaseSync(path, (lease) => {
     const current2 = readSourceRegistryAt(path);
     const next = mutate(current2) ?? current2;
@@ -30264,6 +30266,20 @@ var init_file_ingestion_matcher = __esm(() => {
   });
 });
 
+// src/core/provider-account-identity.ts
+var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
+var init_provider_account_identity = __esm(() => {
+  init_http_timeout();
+  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
+    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
+    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
+    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
+    x: "https://api.x.com/2/users/me",
+    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
+  };
+  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
+});
+
 // src/core/source-storage.ts
 function openConnectorStore(account, options, env = process.env) {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
@@ -30339,6 +30355,7 @@ var init_source_storage = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_source_placement();
+  init_provider_account_identity();
   init_store_identity();
   init_source_registry();
   DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
@@ -35636,25 +35653,18 @@ var init_worker_service = __esm(() => {
   WORKER_LOG_TAIL_BYTES = 64 * 1024;
 });
 
-// src/core/provider-account-identity.ts
-var DEFAULT_PROVIDER_IDENTITY_ENDPOINTS, IDENTITY_RESPONSE_LIMIT_BYTES;
-var init_provider_account_identity = __esm(() => {
-  init_http_timeout();
-  DEFAULT_PROVIDER_IDENTITY_ENDPOINTS = {
-    dropbox: "https://api.dropboxapi.com/2/users/get_current_account",
-    gmail: new URL("users/me/profile", "https://gmail.googleapis.com/gmail/v1/").toString(),
-    google_drive: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,permissionId)",
-    x: "https://api.x.com/2/users/me",
-    google_tokeninfo: "https://oauth2.googleapis.com/tokeninfo"
-  };
-  IDENTITY_RESPONSE_LIMIT_BYTES = 64 * 1024;
-});
-
 // src/core/source-account-binding.ts
 var init_source_account_binding = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_provider_account_identity();
+});
+
+// src/core/provider-account-history.ts
+var init_provider_account_history = __esm(() => {
+  init_provider_account_identity();
+  init_olympus_layout();
+  init_source_registry();
 });
 
 // src/core/connect.ts
@@ -35675,6 +35685,7 @@ var init_connect = __esm(() => {
   init_credential_broker();
   init_provider_account_identity();
   init_source_account_binding();
+  init_provider_account_history();
   DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
   DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
   OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;
@@ -43907,6 +43918,7 @@ function spawnCapture(input) {
 init_atomic_file();
 init_secret_store();
 init_connect();
+init_file_lease();
 init_olympus_layout();
 init_pairing_session_paths();
 
@@ -43923,6 +43935,9 @@ init_olympus_layout();
 init_source_placement();
 init_source_registry();
 init_source_storage();
+
+// src/core/messaging-pairing.ts
+init_provider_account_history();
 
 // src/core/native-worker-service.ts
 init_worker_transport();
@@ -48710,6 +48725,7 @@ init_child_visibility();
 // src/workers/email-source/server.ts
 init_secret_locations();
 init_source_storage();
+init_provider_account_history();
 
 // src/core/source-account-migration.ts
 init_archive_formats();

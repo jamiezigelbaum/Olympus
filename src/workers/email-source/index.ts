@@ -65,6 +65,7 @@ import {
   planPairingSessionRemoval,
   removePlannedPairingSessionFile,
   telegramPairingSessionPaths,
+  telegramStagedLogins,
   whatsappPairingSessionPaths,
   type OlympusPathContext,
   type PairingPathRefusal,
@@ -277,7 +278,7 @@ import { dataDeleteCustody, deleteOlympusDataWithCustody, forgetSourceRowsAgain,
 import type { ModelKeyReloadRequest } from '../../core/model-key-reload.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
-import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, pairingPlacementForCli, tierForCli } from '../cli-operations.ts';
+import { cliDataRootMismatch, exportForCli, ingestionStatusForCli, pairingAccountForCli, pairingPlacementForCli, tierForCli } from '../cli-operations.ts';
 import type {
   WorkerCredentialDegradation,
   WorkerCredentialReadiness,
@@ -1136,6 +1137,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
               case 'data-delete': return json(await deleteSourceDataForCli(body));
               case 'tier': return json(await tierForCli(body));
               case 'pairing-placement': return json(pairingPlacementForCli(body));
+              case 'pairing-account': return json(pairingAccountForCli(body));
             }
           }
         }
@@ -5812,7 +5814,7 @@ async function dashboardPairingSession(
     ...handleCredentialKeys,
     ...sessionKeys.filter((candidate) => candidate.stored).map((candidate) => candidate.key),
   ])].sort();
-  if (fromStored === undefined) return { paths: derived, credentialKeys };
+  if (fromStored === undefined) return { paths: withStagedLogins(source, derived), credentialKeys };
   if (pairingSessionPathOverridden(source, resolved) && !samePathList(fromStored, derived)) {
     throw new EmailSourceWorkerError(
       409,
@@ -5820,7 +5822,20 @@ async function dashboardPairingSession(
       'The registered session path and the configured environment override name different pairing sessions, so Unpair cannot tell which one this computer actually uses. Reconcile OLYMPUS_TELEGRAM_SESSION_PATH or OLYMPUS_WHATSAPP_STATE_DIR with the path this source was connected with, then retry.',
     );
   }
-  return { paths: fromStored, credentialKeys };
+  return { paths: withStagedLogins(source, fromStored, derived), credentialKeys };
+}
+
+/**
+ * A Telegram pairing that was killed can leave the login it made aside
+ * (telegramStagedSessionBase) beside the account's: it is a login too, so
+ * Unpair removes it with the rest. Pairing uses the path this computer derives,
+ * so one is looked for there too when the source was registered elsewhere
+ * (PR #530 review).
+ */
+function withStagedLogins(source: 'telegram' | 'whatsapp', paths: string[], alsoBeside: readonly string[] = []): string[] {
+  if (source !== 'telegram') return paths;
+  const bases = [...paths, ...alsoBeside].filter((path) => path.endsWith('.session')).map((path) => path.slice(0, -'.session'.length));
+  return [...new Set([...paths, ...[...new Set(bases)].flatMap((base) => telegramStagedLogins(base).map((left) => left.path))])];
 }
 
 interface DashboardSessionPathKey {
