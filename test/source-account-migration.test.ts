@@ -70,7 +70,7 @@ import {
   storeFileReads,
 } from '../src/core/source-storage.ts';
 import { placedStoreHolder, type StoreHolder } from '../src/core/store-identity.ts';
-import { deleteOlympusData } from '../src/data-lifecycle.ts';
+import { deleteOlympusData, exportOlympusData } from '../src/data-lifecycle.ts';
 import { SqliteSourceDashboardHistory, defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
 import { migrateAccountFoldersAtBoot } from '../src/workers/email-source/server.ts';
 
@@ -1755,6 +1755,39 @@ describe('Delete, with the move', () => {
     expect(sourceAccountMovePending(entry)).toBe(false);
     expect(sourceStorageNotices(env)).toEqual([]);
     expect(readSourceRegistry(env).schema).toBe(1);
+  });
+
+  test('an export while the move is part way is refused and writes nothing; once the move is finished it exports the moved stores', () => {
+    const { dir, env, root } = fixture();
+    install(env, 'dropbox.files');
+    __accountMigrationTestHooks.checkpoint = (at) => {
+      if (at === 'rename:7') throw new AccountMigrationKilled(at);
+    };
+    expect(() => migrateAccountFolders(env)).toThrow(AccountMigrationKilled);
+    __accountMigrationTestHooks.reset();
+    expect(sourceAccountMovePending(entryOf(env, 'dropbox.files')!)).toBe(true);
+
+    for (const sourceId of ['dropbox.files', undefined]) {
+      const output = join(dir, `export-${sourceId ?? 'all'}`);
+      expect(() => exportOlympusData({ destination: output, ...(sourceId ? { sourceId } : {}), homeDir: env.HOME!, env }), sourceId ?? 'all').toThrow(/part way through moving/);
+      expect(existsSync(output), `${sourceId ?? 'all'}: nothing written`).toBe(false);
+    }
+    // Another source's export is not held up by it.
+    expect(() => exportOlympusData({ destination: join(dir, 'export-readwise'), sourceId: 'readwise.library', homeDir: env.HOME!, env })).not.toThrow();
+
+    expect(migrateAccountFolders(withoutSwitch(env)).resumed).toEqual(['dropbox.files']);
+    const finished = exportOlympusData({ destination: join(dir, 'export-after'), sourceId: 'dropbox.files', homeDir: env.HOME!, env });
+    expect(finished.files.some((file) => file.includes('dropbox'))).toBe(true);
+    expect(readdirSync(root).filter((name) => name.startsWith('dropbox'))).toEqual([]);
+  });
+
+  test('an export is refused when the registry cannot be read, since a move cannot be ruled out', () => {
+    const { dir, env } = fixture();
+    install(env, 'dropbox.files');
+    writeFileSync(sourceRegistryPath(env), '{ not json');
+    const output = join(dir, 'export');
+    expect(() => exportOlympusData({ destination: output, sourceId: 'dropbox.files', homeDir: env.HOME!, env })).toThrow(/nothing was exported/);
+    expect(existsSync(output)).toBe(false);
   });
 
   test('a Delete of another source leaves the plan alone: only the account whose files it took loses its plan', () => {

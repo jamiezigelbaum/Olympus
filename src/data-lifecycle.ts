@@ -54,7 +54,7 @@ import {
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
 import { runForgetSteps, type ForgetAccount } from './core/source-forget-registry.ts';
-import { dropMovePlans, readSourceRegistry, SourceRegistryError } from './core/source-registry.ts';
+import { dropMovePlans, readSourceRegistry, sourceAccountMovePending, SourceRegistryError } from './core/source-registry.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
@@ -623,6 +623,7 @@ export function exportOlympusData(options: {
 } & LifecyclePathContext): DataExportResult {
   const destination = requirePath(options.destination, '--output');
   const selected = selectSources(options.sourceId);
+  refuseExportDuringMove(selected, options);
   // Computed BEFORE anything is created: once mkdir -p has run, the directories
   // it made are indistinguishable from the ones that were already there.
   const durabilityBoundary = exportDurabilityBoundary(destination);
@@ -1485,6 +1486,37 @@ function sqliteDeleteTargets(
  */
 function legacyStoreIdFor(source: LifecycleSourceSpec): string {
   return source.legacySqliteStoreId ?? source.sqliteStoreId;
+}
+
+/**
+ * An account the boot migration is part way through moving has some files at
+ * the old place and some in its account folder, and the paths an export reads
+ * name only one of them: an export now would leave stores out and still call
+ * itself complete, and a Delete after it would lose them. So it is refused, and
+ * so is an export when the registry cannot be read, since then a move cannot be
+ * ruled out. Nothing has been written when it refuses.
+ */
+function refuseExportDuringMove(selected: readonly LifecycleSourceSpec[], options: LifecyclePathContext): void {
+  const own = new Set(selected.flatMap((source) => [source.sourceId, ...(source.sourceAliases ?? [])]));
+  let moving: string[];
+  try {
+    moving = readSourceRegistry(envForContext(options)).accounts
+      .filter((account) => own.has(account.source_id) && sourceAccountMovePending(account))
+      .map((account) => account.source_id);
+  } catch (error) {
+    if (!(error instanceof SourceRegistryError)) throw error;
+    throw new OperationError(
+      'source_index_error',
+      `${error.message} Whether an account is part way through moving into its folder cannot be told, so nothing was exported.`,
+      'Repair or restore that file, then export again.',
+    );
+  }
+  if (moving.length === 0) return;
+  throw new OperationError(
+    'invalid_params',
+    `${[...new Set(moving)].join(', ')} ${moving.length === 1 ? 'is' : 'are'} part way through moving into ${moving.length === 1 ? 'its' : 'their'} account folder, so an export now would leave files out; nothing was exported.`,
+    'Start Olympus so it can finish the move or put the files back, then export again. If the move is stuck, its row in Needs you says why.',
+  );
 }
 
 function selectSources(sourceId: string | undefined): LifecycleSourceSpec[] {
