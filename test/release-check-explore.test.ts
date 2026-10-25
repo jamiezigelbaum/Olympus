@@ -57,6 +57,10 @@ interface PanelState {
   staleLogs?: boolean;
   /** The page logs a console error while it loads. */
   loadLogs?: boolean;
+  /** The panel's other sections: a Needs-you row whose fix is a sign-in, and Privacy's Edit inside a closed section. */
+  otherSections?: boolean;
+  privacyOpen?: boolean;
+  privacyEditing?: boolean;
 }
 
 /** A panel with one source, Readwise, that behaves the way the dashboard's does: a row, a ⋯ menu, a question before Disconnect. */
@@ -91,9 +95,13 @@ class PanelDriver implements JourneyDriver {
       : `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">Not connected</p></div><div class="source-actions"><span class="fix"><button data-key="primary:readwise.library">Connect</button></span></div></li>`;
     const need = s.bareProblem ? '<ul><li class="row need"><div class="need-body"><p class="row-text">Readwise is stuck</p></div></li></ul>' : '';
     const gmail = s.gmailRow ? '<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Gmail</span></p></div><div class="source-actions"><span class="fix"><button data-key="primary:gmail.email">Connect</button></span></div></li>' : '';
-    const computer = s.computerRow ? '<li class="row"><span class="row-text">Keys</span><a data-key="computer:keys" href="/dashboard?keys">Open Keys</a></li>' : '';
+    const computer = s.computerRow ? '<section class="section on-computer"><h2>On this computer</h2><ul><li class="row"><span class="row-text">Keys</span><a data-key="computer:keys" href="/dashboard?keys">Open Keys</a></li></ul></section>' : '';
+    const others = s.otherSections
+      ? '<section class="section"><h2>Needs you</h2><ul><li class="row need"><p class="row-text">Gmail needs you</p><span class="fix"><button data-key="need:1">Connect</button></span></li></ul></section>'
+        + `<section class="section privacy-row"><h2>Privacy</h2><details data-open-key="privacy-more" ${s.privacyOpen ? 'open' : ''}><summary data-key="summary:privacy-more">More</summary><p>${s.privacyEditing ? 'Editing privacy' : 'Private stays here'}</p><button data-key="privacy:edit">Edit</button></details></section>`
+      : '';
     const needRow = s.bareNeedRow ? '<li class="row source need-row"><div class="source-main"><p class="row-text">Gmail needs you</p></div></li>' : '';
-    this.panel.document.body.innerHTML = `<main><h2>Sources</h2>${need}<ul>${row}${gmail}${needRow}</ul><ul>${computer}</ul></main>`;
+    this.panel.document.body.innerHTML = `<main>${others}<h2>Sources</h2>${need}<ul>${row}${gmail}${needRow}</ul>${computer}</main>`;
     evalIn(this.panel, PROBE_SOURCE);
     this.host.document.body.innerHTML = '<iframe id="olympus-panel"></iframe>';
     evalIn(this.host, PROBE_SOURCE);
@@ -112,6 +120,9 @@ class PanelDriver implements JourneyDriver {
     on('menu:readwise.library:1:yes', () => { this.state.confirming = false; if (this.state.staleReads) { this.stale = this.state.staleReads; return; } this.state.connected = false; });
     on('menu:readwise.library:1:no', () => { this.state.confirming = false; if (this.state.cancelDisconnects) this.state.connected = false; });
     on('computer:keys', () => { this.at = '/dashboard?keys'; this.gone = true; });
+    on('need:1', () => { this.opened.push('https://accounts.google.com/o/oauth2'); });
+    on('summary:privacy-more', () => { this.state.privacyOpen = !this.state.privacyOpen; });
+    on('privacy:edit', () => { this.state.privacyEditing = true; });
     on('primary:readwise.library', () => {
       if (this.state.connectLeaves) { this.at = this.state.connectAt ?? '/dashboard?connect'; this.gone = true; return; }
       if (this.state.connectOpens) this.opened.push(this.state.connectOpens);
@@ -149,7 +160,7 @@ class PanelDriver implements JourneyDriver {
   async go(): Promise<void> { this.reset(); }
   async reload(): Promise<void> { this.reset(); }
   /** A fresh page: the server's state (connected or not) stays; the page's own (menu open, question asked, windows opened) starts over. */
-  private reset(): void { if (this.state.loadLogs) this.events.console.push('ReferenceError: boot is not defined'); this.state.menuOpen = false; this.state.confirming = false; this.opened.length = 0; this.at = '/dashboard'; this.gone = false; this.render(); }
+  private reset(): void { if (this.state.loadLogs) this.events.console.push('ReferenceError: boot is not defined'); this.state.menuOpen = false; this.state.privacyOpen = false; this.state.privacyEditing = false; this.state.confirming = false; this.opened.length = 0; this.at = '/dashboard'; this.gone = false; this.render(); }
   async setViewport(): Promise<void> {}
   async where(): Promise<string> { return this.at; }
   async pages(): Promise<number> { return this.pagesOpen; }
@@ -398,10 +409,21 @@ describe('exploring the Sources section', () => {
     expect(EXPECTATIONS['see-why']!(make(false, 'text')).ok).toBe(false);
   });
 
-  test('only source rows are pressed: another row\'s link that leaves the page is never touched', async () => {
-    const driver = new PanelDriver({ computerRow: true });
-    await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
-    expect(driver.pressed).not.toContain('computer:keys');
+  test('the panel\'s other sections are pressed once, from the first state: a link to a page of Olympus\'s own is an outcome, a control in a closed section is reached through it, a sign-in is named and left alone', async () => {
+    const driver = new PanelDriver({ computerRow: true, otherSections: true });
+    const result = await explore({ driver, seeds: [populated(driver), disconnected(driver)], inventory: inventory(), ...quick() });
+    expect(driver.pressed.filter((key) => key === 'computer:keys')).toHaveLength(1);
+    expect(driver.pressed.filter((key) => key === 'privacy:edit')).toHaveLength(1);
+    expect(driver.pressed).not.toContain('need:1');
+    const sections = result.sections ?? [];
+    expect(sections.find((entry) => entry.key === 'computer:keys')).toMatchObject({ section: 'On this computer', pressed: true });
+    expect(sections.find((entry) => entry.key === 'privacy:edit')).toMatchObject({ section: 'Privacy', pressed: true });
+    expect(sections.find((entry) => entry.key === 'need:1')).toMatchObject({ section: 'Needs you', pressed: false, note: 'not pressed: it starts a sign-in at a provider' });
+    const steps = result.traces.flatMap((trace) => trace.steps);
+    expect(steps.find((step) => step.name.startsWith('Privacy: Edit'))?.ok).toBe(true);
+    expect(steps.filter((step) => !step.ok).map((step) => `${step.name}: ${step.findings.join('; ') || step.actual}`)).toEqual([]);
+    expect(exploreChecks(result).find((check) => check.id === 'explore.coverage')!.detail).toContain('the panel\'s other sections (Needs you, Privacy, On this computer): 4 control(s), 3 pressed');
+    expect(exploreSection(result)).toContain('Needs you: Connect <span class="muted">[need:1] not pressed: it starts a sign-in at a provider</span>');
   });
 
   test('a source row that needs the owner but offers nothing fails, as a Needs-you row does', async () => {

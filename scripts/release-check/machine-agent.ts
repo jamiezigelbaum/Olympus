@@ -43,7 +43,7 @@ import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
 import { explore, pagesAccessibilityAudit, withPageAudits, type Seed } from './explore.ts';
 import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
-import { explorePages } from './explore-pages.ts';
+import { explorePages, inboxAnswers } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import { FIXTURE_FOLDER, STRESS_FORMAT, legFixture, type FixtureRole } from './archive-fixtures.ts';
@@ -1362,6 +1362,9 @@ function readwiseSeeds(config: AgentConfig): Seed[] {
   ];
 }
 
+/** What the crawl asks the local model so the Inbox has answers to read and delete; any question does, the answers stay on the machine. */
+const INBOX_SEED_QUESTIONS = ['What is in my files?', 'What did I write most recently?'] as const;
+
 async function exploreCommand(outDir: string, inventoryPath: string, pagesInventoryPath?: string): Promise<never> {
   const startedAt = Date.now();
   const browser = findBrowser();
@@ -1403,7 +1406,9 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
       const pageAudit = axeSource ? pagesAccessibilityAudit(axeSource) : undefined;
-      const pages = await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 75 * 60_000, ...(pageAudit ? { audit: pageAudit.audit } : {}) });
+      // The Inbox is filled first, by asking the local model as the owner would, so its Read and Delete are pressed too.
+      const prepare = inboxAnswers(driver, { questions: INBOX_SEED_QUESTIONS });
+      const pages = await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 75 * 60_000, prepare, ...(pageAudit ? { audit: pageAudit.audit } : {}) });
       result = { ...result, pages, ...(pageAudit ? { accessibility: withPageAudits(result.accessibility, pageAudit) } : {}) };
     }
   } catch (error) {
