@@ -253,15 +253,21 @@ export function reclaimEmptyCaptureClaims(env: LayoutEnv = process.env): string[
     }
     const ownLock = (name: string): boolean => (leaseTarget ? isFileLeaseSidecarName(leaseTarget, name) : name === WHATSAPP_BRIDGE_LOCK_NAME);
     if (!names.every(ownLock)) continue;
-    if (removeClaimUnderItsLock(claim, names, leaseTarget)) reclaimed.push(sourceId);
+    if (removeClaimUnderItsLock(claim, ownLock, leaseTarget)) reclaimed.push(sourceId);
   }
   return reclaimed;
 }
 
-/** Removes the claim folder's lock files and the folder, holding the lock they are, so no pairing starts in between. */
-function removeClaimUnderItsLock(claim: string, names: string[], leaseTarget: string | undefined): boolean {
+/**
+ * Removes the claim folder's lock files and the folder, holding the lock they
+ * make, so no pairing starts in between. Looked at again under the lock (taking
+ * a lease makes its journal): anything but lock files keeps the folder.
+ */
+function removeClaimUnderItsLock(claim: string, ownLock: (name: string) => boolean, leaseTarget: string | undefined): boolean {
   const remove = (): boolean => {
     try {
+      const names = readdirSync(claim);
+      if (!names.every(ownLock)) return false;
       for (const name of names) rmSync(join(claim, name), { force: true });
       rmdirSync(claim);
       return true;
