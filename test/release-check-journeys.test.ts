@@ -621,7 +621,7 @@ describe('visual baselines', () => {
 });
 
 describe('run options and the report', () => {
-  test('--baselines and --update-baselines are parsed, and --update-baselines alone is refused', () => {
+  test('--baselines and --update-baselines are parsed; --update-baselines alone, or from a run that leaves out a leg before the screens, is refused', () => {
     const dir = mkdtempSync(join(tmpdir(), 'rc-journeys-cli-'));
     try {
       const config = join(dir, 'config.json');
@@ -633,6 +633,12 @@ describe('run options and the report', () => {
       expect(parsed.onlyJourneys).toEqual(['a', 'b']);
       expect(parseCli(base).baselinesDir).toBeUndefined();
       expect(() => parseCli([...base, '--update-baselines'])).toThrow('--baselines');
+      // Pictures to approve come from a full run: only the legs after the screens may be left out.
+      const update = [...base, '--baselines', join(dir, 'b'), '--update-baselines'];
+      expect(parseCli([...update, '--skip-explore', '--skip-archive']).updateBaselines).toBe(true);
+      expect(() => parseCli([...update, '--skip-suite', '--skip-inbox'])).toThrow('drop --skip-suite, --skip-inbox');
+      expect(() => parseCli([...update, '--agents', 'codex'])).toThrow('drop --agents');
+      expect(() => parseCli([...update, '--skip-relay'])).toThrow('drop --skip-relay');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
