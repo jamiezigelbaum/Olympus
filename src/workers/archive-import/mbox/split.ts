@@ -35,8 +35,15 @@ export interface MboxMessageSpan {
   length: number;
   /** The message itself; absent when it was over the size bound. */
   raw?: Uint8Array;
+  /**
+   * The `From ` line, without its line end (latin1, at most
+   * `MAX_SEPARATOR_CHARS`): Google Takeout writes the Gmail message id in it.
+   */
+  separator?: string;
   tooLarge: boolean;
 }
+
+export const MAX_SEPARATOR_CHARS = 1024;
 
 export class MboxFormatError extends Error {
   readonly offset: number;
@@ -102,7 +109,7 @@ export class MboxSplitter {
     const length = end - start;
     if (length > this.maxMessageBytes) return { offset: start, length, tooLarge: true };
     const bytes = this.bytesAt(start).subarray(0, length);
-    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), tooLarge: false };
+    return { offset: start, length, raw: unquote(stripSeparatorLines(bytes)), separator: separatorLine(bytes), tooLarge: false };
   }
 
   /** Scans on to the next separator holding at most one read range, for a message over the bound. */
@@ -165,6 +172,13 @@ export class MboxSplitter {
       ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.length)
       : Buffer.concat([this.buffer, chunk]);
   }
+}
+
+/** The `From ` line, bounded, without its line end. */
+function separatorLine(bytes: Buffer): string {
+  const end = bytes.indexOf(LF);
+  const line = bytes.subarray(0, Math.min(end < 0 ? bytes.length : end, MAX_SEPARATOR_CHARS)).toString('latin1');
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
 }
 
 /** Drops the `From ` line and the one blank line before the next message. */
