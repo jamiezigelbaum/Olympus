@@ -215,20 +215,46 @@ describe('review 2: bounded work', () => {
     expect(cpuMs() - started).toBeLessThan(1_500);
   });
   test('a quarter-million-word capitalized identifier: time and memory', () => {
-    const context = ctx([{}], { connectedAccountIdentifiers: ['Abc '.repeat(262_000)] });
+    // Linear in the identifier: the quarter-million words as one identifier
+    // cost about what the same words cost as 16 identifiers of a sixteenth
+    // each, where a quadratic rescan of the identifier costs 16x. Measured
+    // 0.74-1.51x a sample on Linux with up to eight copies of this test on
+    // four CPUs (their CPU time up to 2.4x idle) and 1.1-1.2x on macOS. Under
+    // 2x fails a rescan that costs about as much as the linear work, as the
+    // 1.5 s bound did (a full rescan every 8,192 words fails both). That
+    // bound was absolute: even this thread's CPU runs 2-3x slow while the fast
+    // lane's parallel workers share its core, and it failed unchanged code
+    // (1.55 s on PR #509). Both sizes are timed moments apart on the same
+    // runner, and a slow sample is retaken, up to three of each: the fastest
+    // of each counts. The absolute bound stays as a loose backstop for a
+    // slowdown that is not about size.
+    const words = 262_000;
+    const whole = ctx([{}], { connectedAccountIdentifiers: ['Abc '.repeat(words)] });
+    const parts = Array.from({ length: 16 }, () => ctx([{}], { connectedAccountIdentifiers: ['Abc '.repeat(words / 16)] }));
+    const gateMs = (contexts: readonly ConsultWriterContext[]): number => {
+      const started = cpuMs();
+      for (const context of contexts) evaluateConsultQuestion('Is cat a word?', context);
+      return cpuMs() - started;
+    };
     Bun.gc(true);
     const before = process.memoryUsage();
-    const started = cpuMs();
-    evaluateConsultQuestion('Is cat a word?', context);
-    expect(cpuMs() - started).toBeLessThan(1_500);
+    const wholeMs = [gateMs([whole])];
     Bun.gc(true);
     const after = process.memoryUsage();
+    const partsMs = [gateMs(parts)];
+    const ratio = (): number => Math.min(...wholeMs) / Math.min(...partsMs);
+    while (wholeMs.length < 3 && ratio() >= 2) {
+      partsMs.push(gateMs(parts));
+      wholeMs.push(gateMs([whole]));
+    }
+    expect({ wholeMs, partsMs, nearLinear: ratio() < 2 }).toEqual({ wholeMs, partsMs, nearLinear: true });
+    expect(Math.min(...wholeMs)).toBeLessThan(5_000);
     // Nothing is retained. Peak RSS is allocator churn from tokenizing a
     // megabyte of capitalized words (measured 200-290 MB on macOS arm64);
     // bounded loosely so a real regression still fails.
     expect((after.heapUsed - before.heapUsed) / 1e6).toBeLessThan(50);
     expect((after.rss - before.rss) / 1e6).toBeLessThan(400);
-  });
+  }, 15_000);
 });
 
 describe('review 2: usability probes', () => {
