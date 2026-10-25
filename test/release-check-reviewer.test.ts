@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import type { StepTrace } from '../scripts/release-check/journey.ts';
 import { buildReport, renderHtml, type MachineReport } from '../scripts/release-check/report.ts';
+import { isLayoutRule } from '../scripts/release-check/layout-rules.ts';
 import { PLANTS, PLANT_SCREENS, type PlantedPicture } from '../scripts/release-check/reviewer-plants.ts';
 import { qualificationUnits, scoreQualification, summarise } from '../scripts/release-check/reviewer-qualify.ts';
 import { parseCli } from '../scripts/release-check/run.ts';
@@ -80,16 +81,17 @@ describe('what it keeps of an answer', () => {
 
   test('a finding must name one of the unit\'s pictures and a kind on the checklist, at or above the confidence floor', () => {
     const answer = JSON.stringify({ findings: [
-      { picture: 1, kind: 'layout', what: 'The Connect button sits lower than the others', where: 'Gmail row', confidence: 'high' },
-      { picture: 2, kind: 'layout', what: 'no such picture', confidence: 'high' },
+      { picture: 1, kind: 'words', what: 'The status says ERR_SCOPE_ROOT_MISSING', where: 'Gmail row', confidence: 'high' },
+      { picture: 2, kind: 'words', what: 'no such picture', confidence: 'high' },
       { picture: 1, kind: 'taste', what: 'not a kind on the list', confidence: 'high' },
+      { picture: 1, kind: 'layout', what: 'the look is the layout rules\' since 2026-10-25', confidence: 'high' },
       { picture: 1, kind: 'outcome', what: 'outcome is for journeys only', confidence: 'high' },
       { picture: 1, kind: 'words', what: '', confidence: 'high' },
       { picture: 1, kind: 'words', what: 'unsure', confidence: 'low' },
     ] });
     const read = readFindings(unit, `\`\`\`json\n${answer}\n\`\`\``, 'medium');
-    expect(read.findings).toEqual([{ unit: 'screen:x', unitTitle: 'X', picture: 'review/x.png', kind: 'layout', what: 'The Connect button sits lower than the others', where: 'Gmail row', confidence: 'high', steps: ['Open x'] }]);
-    expect(read.dropped).toBe(5);
+    expect(read.findings).toEqual([{ unit: 'screen:x', unitTitle: 'X', picture: 'review/x.png', kind: 'words', what: 'The status says ERR_SCOPE_ROOT_MISSING', where: 'Gmail row', confidence: 'high', steps: ['Open x'] }]);
+    expect(read.dropped).toBe(6);
   });
 
   test('an answer that is not the JSON asked for is an error, not an empty review', () => {
@@ -171,10 +173,22 @@ describe('in the report', () => {
   });
 });
 
-/** A dashboard-like page in a DOM, with boxes, the way the planted bugs meet the panel. */
+/**
+ * A dashboard-like page in a DOM, the way the planted bugs meet the panel, with a stand-in layout: every element a 200 x 24 px box,
+ * stacked in document order 6 px apart and moved by a relative `top`; a box with a max-width shows that much of its 200 px of text.
+ */
 function dashboardPage(): Window {
   const window = new Window({ url: 'http://127.0.0.1:8010/dashboard' });
-  (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = () => ({ left: 10, top: 10, width: 200, height: 24, right: 210, bottom: 34 });
+  type Styled = { style: { top: string; position: string; maxWidth: string }; ownerDocument: { querySelectorAll(selector: string): ArrayLike<unknown> } };
+  const box = (el: Styled) => {
+    const index = Array.from(el.ownerDocument.querySelectorAll('*')).indexOf(el);
+    const top = 10 + index * 30 + (el.style.position === 'relative' ? parseFloat(el.style.top) || 0 : 0);
+    return { left: 10, top, width: 200, height: 24, right: 210, bottom: top + 24 };
+  };
+  (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = function (this: Styled) { return box(this); };
+  (window.Range.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = function (this: { startContainer: Styled }) { return box(this.startContainer); };
+  Object.defineProperty(window.HTMLElement.prototype, 'scrollWidth', { configurable: true, get() { return 200; } });
+  Object.defineProperty(window.HTMLElement.prototype, 'clientWidth', { configurable: true, get(this: Styled) { return parseFloat(this.style.maxWidth) || 200; } });
   window.document.body.innerHTML = `<main class="page"><h1>Olympus</h1><h2>Sources</h2>
     <div class="row"><strong>Readwise</strong><p class="muted">Checking Readwise…</p><button>Sync now</button></div>
     <div class="row"><strong>Gmail</strong><p class="muted">Not connected</p><button>Connect</button></div>
@@ -187,7 +201,8 @@ const runIn = (window: Window, script: string): unknown => new Function('window'
 describe('qualifying the reviewer', () => {
   test('each planted bug plants itself on a dashboard page and marks what it changed; nothing is planted on an empty page', () => {
     expect(new Set(PLANTS.map((plant) => plant.id)).size).toBe(PLANTS.length);
-    expect(PLANTS.filter((plant) => plant.heldOut).map((plant) => plant.id)).toEqual(expect.arrayContaining(['font-monospace', 'button-misaligned']));
+    // The reviewer's held-out bugs are of its own kinds; the look bugs are the layout rules', written after the plants.
+    expect(PLANTS.filter((plant) => plant.heldOut).map((plant) => plant.id)).toEqual(['state-contradiction']);
     for (const plant of PLANTS) {
       const page = dashboardPage();
       expect(runIn(page, plant.script), plant.id).toBe(true);
@@ -208,9 +223,11 @@ describe('qualifying the reviewer', () => {
 
   const pictures: PlantedPicture[] = [
     { screen: 'dashboard', width: 1280, theme: 'light', picture: 'dashboard-1280-light/clean.png', plant: null, kind: null, heldOut: false },
-    { screen: 'dashboard', width: 1280, theme: 'light', picture: 'dashboard-1280-light/font-monospace.png', plant: 'font-monospace', kind: 'font', heldOut: true },
+    { screen: 'dashboard', width: 1280, theme: 'light', picture: 'dashboard-1280-light/state-contradiction.png', plant: 'state-contradiction', kind: 'contradiction', heldOut: true },
     { screen: 'dashboard', width: 1280, theme: 'light', picture: 'dashboard-1280-light/developer-words.png', plant: 'developer-words', kind: 'words', heldOut: false },
     { screen: 'keys', width: 390, theme: 'dark', picture: 'keys-390-dark/developer-words.png', plant: 'developer-words', kind: 'words', heldOut: false },
+    // A look bug is the layout rules': never put to the reviewer, never in its score.
+    { screen: 'keys', width: 390, theme: 'dark', picture: 'keys-390-dark/font-monospace.png', plant: 'font-monospace', kind: 'monospace-text', heldOut: false },
   ];
   const finding = (unit: string, kind: ReviewFinding['kind']): ReviewFinding => ({ unit, unitTitle: 'x', picture: 'p', kind, what: `a ${kind} problem`, where: 'top', confidence: 'high', steps: [] });
   const trial = (findings: ReviewFinding[], inconclusive: string[] = []) => ({ model: 'fake', status: 'advisory' as const, units: 4, pictures: 4, dropped: 0, ms: 1, findings, inconclusive: inconclusive.map((unit) => ({ unit, reason: 'busy' })) });
@@ -219,6 +236,7 @@ describe('qualifying the reviewer', () => {
   test('the pictures are asked as a run\'s screens, under ids that say nothing of what was planted', () => {
     const units = qualificationUnits(pictures);
     expect(units.map((unit) => unit.id)).toEqual(['picture:1', 'picture:2', 'picture:3', 'picture:4']);
+    expect(PLANTS.every((plant) => plant.kind in REVIEW_KINDS || isLayoutRule(plant.kind))).toBe(true);
     expect(units[3]!.title).toBe('The Keys page, 390 px wide, dark');
     // The model is sent the prompt and the picture; the prompt for a planted picture is word for word the clean one's.
     expect(reviewPrompt(units[1]!)).toBe(reviewPrompt(units[0]!));
@@ -226,28 +244,45 @@ describe('qualifying the reviewer', () => {
   });
 
   test('a reviewer that finds every planted bug and reports nothing on the clean picture qualifies', () => {
-    const perfect = trial([finding('picture:2', 'font'), finding('picture:3', 'words'), finding('picture:4', 'words')]);
+    const perfect = trial([finding('picture:2', 'contradiction'), finding('picture:3', 'words'), finding('picture:4', 'words'), finding('picture:4', 'no-fix')]);
     const score = scoreQualification(pictures, [perfect, perfect], thresholds);
     expect(score.qualified).toBe(true);
+    expect(score.pictures).toBe(4);
     expect(score.perKind.words).toEqual({ planted: 4, found: 4, recall: 1, reported: 4, correct: 4, precision: 1 });
+    // The planted error code is plainly also a problem with no fix, so that report is right too.
+    expect(score.perKind['no-fix']).toEqual({ planted: 0, found: 0, recall: null, reported: 2, correct: 2, precision: 1 });
     expect(score.heldOut).toEqual({ looked: 2, found: 2, recall: 1 });
     expect(score.clean.falseAlarmRate).toBe(0);
     expect(summarise(score)).toContain('QUALIFIED');
   });
 
   test('missed bugs, false alarms, wrong kinds and unanswered looks each keep it from qualifying, and say so', () => {
-    const first = trial([finding('picture:1', 'layout'), finding('picture:3', 'words'), finding('picture:4', 'layout')]);
+    const first = trial([finding('picture:1', 'no-fix'), finding('picture:3', 'words'), finding('picture:4', 'contradiction')]);
     const second = trial([finding('picture:3', 'words'), finding('picture:4', 'words')], ['picture:2']);
     const score = scoreQualification(pictures, [first, second], thresholds);
     expect(score.qualified).toBe(false);
-    expect(score.perKind.font).toEqual({ planted: 1, found: 0, recall: 0, reported: 0, correct: 0, precision: null });
+    expect(score.perKind.contradiction).toEqual({ planted: 1, found: 0, recall: 0, reported: 1, correct: 0, precision: 0 });
     expect(score.perKind.words!.recall).toBe(0.75);
-    expect(score.perKind.layout).toEqual({ planted: 0, found: 0, recall: null, reported: 2, correct: 0, precision: 0 });
+    expect(score.perKind['no-fix']).toEqual({ planted: 0, found: 0, recall: null, reported: 1, correct: 0, precision: 0 });
     expect(score.clean).toMatchObject({ looked: 2, withFindings: 1, falseAlarmRate: 0.5 });
-    expect(score.clean.findings).toEqual([{ picture: 'dashboard-1280-light/clean.png', kind: 'layout', what: 'a layout problem', where: 'top' }]);
+    expect(score.clean.findings).toEqual([{ picture: 'dashboard-1280-light/clean.png', kind: 'no-fix', what: 'a no-fix problem', where: 'top' }]);
     expect(score.inconclusive).toEqual({ asked: 8, unanswered: 1, rate: 0.125 });
     const said = score.shortfalls.join('\n');
-    for (const part of ['font: found 0 of 1', 'words: found 3 of 4', 'layout: 0 of 2 reports', 'held-out bugs: found 0 of 1', 'nothing planted: a problem was reported in 1 of 2', 'no usable answer for 1 of 8']) expect(said).toContain(part);
+    for (const part of ['contradiction: found 0 of 1', 'words: found 3 of 4', 'no-fix: 0 of 1 reports', 'held-out bugs: found 0 of 1', 'nothing planted: a problem was reported in 1 of 2', 'no usable answer for 1 of 8']) expect(said).toContain(part);
+  });
+
+  test('a report of a known issue counts neither way, and an answer of a kind off the checklist is dropped', () => {
+    const known = [{ phrase: 'Worker token', kinds: ['words' as const], note: 'handed off' }];
+    const real = { ...finding('picture:1', 'words'), what: 'The banner says "until the worker token is rotated"' };
+    const old = { ...finding('picture:3', 'words'), kind: 'layout' as unknown as ReviewFinding['kind'] };
+    const answers = trial([real, old, finding('picture:2', 'contradiction'), finding('picture:3', 'words'), finding('picture:4', 'words')]);
+    const score = scoreQualification(pictures, [answers, answers], thresholds, known);
+    expect(score.clean.withFindings).toBe(0);
+    expect(score.known).toEqual([real, real].map((entry) => ({ picture: 'dashboard-1280-light/clean.png', kind: 'words', what: entry.what, phrase: 'Worker token' })));
+    expect(score.qualified).toBe(true);
+    expect(summarise(score)).toContain('known issues, not counted: 2 report(s) of 1 issue(s)');
+    // Without the list the same report is a false alarm.
+    expect(scoreQualification(pictures, [answers, answers], thresholds).clean.withFindings).toBe(2);
   });
 
   test('a qualification run is asked for with --reviewer-plants, needs the screens, and never writes baselines', () => {

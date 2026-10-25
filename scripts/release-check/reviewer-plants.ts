@@ -1,17 +1,26 @@
 /**
- * Planted bugs for qualifying the AI reviewer (reviewer.ts). A qualification run (`run.ts --reviewer-plants`) takes a few dashboard
+ * Planted bugs for qualifying the AI reviewer (reviewer.ts) and the layout rules (layout-rules.ts). A qualification run (`run.ts --reviewer-plants`) takes a few dashboard
  * screens as they are, then again with one bug planted in the page each time, in the test browser only: the product is never
  * changed, and a release candidate's own run never plants anything. reviewer-qualify.ts then asks the reviewer about every picture
  * and measures how often it finds each kind of bug and how often it reports one that is not there.
  *
- * `heldOut` bugs are never used while the reviewer's instructions are being written or tuned; they measure it. The first two are the
- * ones only a human caught in the first baselines (a fixed-width Linux font and misaligned buttons, 2026-10-23).
+ * `heldOut` bugs are never used while the reviewer's instructions are being written or tuned; they measure it. The first two plants
+ * are the bugs only a human caught in the first baselines (a fixed-width Linux font and misaligned buttons, 2026-10-23).
+ *
+ * A bug's kind says who must find it: a reviewer kind (words, contradiction, no-fix) the reviewer, a layout rule the page measurement.
+ * The look bugs moved to the layout rules after the reviewer's first qualification (2026-10-25); the rules were written after the
+ * plants, so for them every plant is a test, not a held-out one, and the pictures with nothing planted hold them to the real pages.
  */
+import type { LayoutFinding, LayoutRule } from './layout-rules.ts';
 import type { ReviewKind } from './reviewer.ts';
+
+export type PlantKind = ReviewKind | LayoutRule;
 
 export interface Plant {
   id: string;
-  kind: ReviewKind;
+  kind: PlantKind;
+  /** Other reviewer kinds a correct report of this bug may carry, where the bug is plainly both (an error code is also a problem with no fix). */
+  also?: ReviewKind[];
   heldOut: boolean;
   /** What the bug is, for the qualification record (never shown to the reviewer). */
   what: string;
@@ -21,13 +30,16 @@ export interface Plant {
 
 /** Page-side helpers every plant script starts with: visible elements, and leaf lines of text a person reads as a status. */
 const HELPERS = String.raw`
-  const visible = (el) => { const box = el.getBoundingClientRect(); const style = getComputedStyle(el); return box.width > 0 && box.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && !el.closest('details:not([open]) > :not(summary)'); };
+  // More than a pixel each way: text kept for screen readers only sits in a 1 px box, and a bug planted there would not show.
+  const visible = (el) => { const box = el.getBoundingClientRect(); const style = getComputedStyle(el); return box.width > 1 && box.height > 1 && style.visibility !== 'hidden' && style.display !== 'none' && !el.closest('details:not([open]) > :not(summary)'); };
   const own = (el) => Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join('').replace(/\s+/g, ' ').trim();
   const main = document.querySelector('main') || document.body;
   const leaves = () => Array.from(main.querySelectorAll('p, span, div, li, small, strong, b, h1, h2, h3, summary, label')).filter((el) => visible(el) && own(el).length >= 6 && !el.closest('button, a, textarea, input, select'));
   // A line under a row's name that says its state; else the first short line of ordinary text.
   const statusLine = () => { const lines = leaves().filter((el) => !/^(H1|H2|H3|SUMMARY|LABEL)$/.test(el.tagName)); return lines.find((el) => /^(Not connected|Ready|Connected|Checking|No archives)/.test(own(el))) || lines.find((el) => own(el).length >= 12 && own(el).length <= 90); };
   const hasContent = () => (document.body ? document.body.innerText.trim().length > 40 : false);
+  // The box a run of text is drawn in, which may be narrower than its element.
+  const textBox = (el) => { const range = document.createRange(); range.selectNodeContents(el); return range.getBoundingClientRect(); };
   // What was planted carries a mark, so the capture can tell when the page redrew itself and took the bug away.
   const mark = (el) => { el.setAttribute('data-rc-plant', ''); return true; };
 `;
@@ -36,7 +48,7 @@ const plant = (body: string): string => `(() => { ${HELPERS}\n${body}\n})()`;
 
 export const PLANTS: readonly Plant[] = [
   {
-    id: 'font-monospace', kind: 'font', heldOut: true,
+    id: 'font-monospace', kind: 'monospace-text', heldOut: false,
     what: 'every piece of text in a fixed-width font, as when the system font is missing',
     script: plant(String.raw`
       if (!hasContent()) return false;
@@ -46,7 +58,7 @@ export const PLANTS: readonly Plant[] = [
       return mark(style);`),
   },
   {
-    id: 'button-misaligned', kind: 'layout', heldOut: true,
+    id: 'button-misaligned', kind: 'misaligned-controls', heldOut: false,
     what: 'one button of a column of like buttons pushed off line',
     script: plant(String.raw`
       const buttons = Array.from(main.querySelectorAll('button')).filter(visible);
@@ -59,14 +71,21 @@ export const PLANTS: readonly Plant[] = [
       return mark(target);`),
   },
   {
-    id: 'text-overlap', kind: 'layout', heldOut: true,
-    what: 'a status line moved up over the line above it',
+    id: 'text-overlap', kind: 'overlapping-text', heldOut: false,
+    what: 'a line of text moved up over the line above it',
+    // 2026-10-25: moving the first status line up 13 px planted nothing where that line had no text above it (Keys, Ask). The line
+    // chosen now has another line just above it, is moved up half that line's height into it, and the plant checks they overlap.
     script: plant(String.raw`
-      const line = statusLine();
-      if (!line) return false;
-      line.style.position = 'relative';
-      line.style.top = '-13px';
-      return mark(line);`),
+      const lines = leaves().map((el) => ({ el, r: textBox(el) })).filter((line) => line.r.width > 0 && line.r.height > 0);
+      const pair = lines.flatMap((below) => lines.filter((above) => above.el !== below.el && !above.el.contains(below.el) && !below.el.contains(above.el)
+        && Math.min(above.r.right, below.r.right) - Math.max(above.r.left, below.r.left) > 20 && below.r.top - above.r.bottom >= 0 && below.r.top - above.r.bottom <= 24).map((above) => ({ above, below }))).sort((a, b) => a.below.r.top - b.below.r.top)[0];
+      if (!pair) return false;
+      const { above, below } = pair;
+      below.el.style.position = 'relative';
+      below.el.style.top = '-' + Math.round(below.r.top - above.r.top - above.r.height / 2) + 'px';
+      const moved = textBox(below.el);
+      if (Math.min(moved.bottom, above.r.bottom) - Math.max(moved.top, above.r.top) < 4) { below.el.style.position = ''; below.el.style.top = ''; return false; }
+      return mark(below.el);`),
   },
   {
     id: 'state-contradiction', kind: 'contradiction', heldOut: true,
@@ -82,17 +101,21 @@ export const PLANTS: readonly Plant[] = [
       return mark(other);`),
   },
   {
-    id: 'label-clipped', kind: 'layout', heldOut: false,
+    id: 'label-clipped', kind: 'clipped-text', heldOut: false,
     what: 'a heading cut off part-way through a word',
+    // 2026-10-25: 42% of the heading's box cut nothing where the heading's text was shorter than that (Keys). It is now 42% of the
+    // text itself, and the plant checks the text is cut.
     script: plant(String.raw`
       const heading = leaves().find((el) => /^(H1|H2|H3|STRONG|B|SUMMARY)$/.test(el.tagName) && own(el).length >= 8);
       if (!heading) return false;
-      const width = Math.max(30, Math.round(heading.getBoundingClientRect().width * 0.42));
+      const width = Math.max(30, Math.round(textBox(heading).width * 0.42));
       heading.style.cssText += ';display:inline-block;max-width:' + width + 'px;white-space:nowrap;overflow:hidden;vertical-align:bottom';
+      if (heading.scrollWidth <= heading.clientWidth + 1) return false;
       return mark(heading);`),
   },
   {
-    id: 'developer-words', kind: 'words', heldOut: false,
+    // also no-fix: the code reads as an error shown with no way to fix it, and the first qualification reported it so (2026-10-25).
+    id: 'developer-words', kind: 'words', also: ['no-fix'], heldOut: false,
     what: 'a status line replaced by an internal error code',
     script: plant(String.raw`
       const line = statusLine();
@@ -123,7 +146,7 @@ export const PLANTS: readonly Plant[] = [
       return mark(card);`),
   },
   {
-    id: 'faint-text', kind: 'contrast', heldOut: false,
+    id: 'faint-text', kind: 'faint-text', heldOut: false,
     what: 'a block of text faded until it is hard to read',
     script: plant(String.raw`
       const line = statusLine() || leaves().find((el) => el.tagName === 'P');
@@ -151,6 +174,8 @@ export interface PlantedPicture {
   /** Relative to the plants folder. */
   picture: string;
   plant: string | null;
-  kind: ReviewKind | null;
+  kind: PlantKind | null;
   heldOut: boolean;
+  /** What the layout rules found on the page as it was pictured. */
+  layout?: LayoutFinding[];
 }

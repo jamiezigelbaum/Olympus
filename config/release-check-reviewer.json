@@ -14,5 +14,50 @@
     "minPrecision": 0.7,
     "maxCleanFalseAlarm": 0.2,
     "maxInconclusive": 0.05
-  }
+  },
+  "knownIssues": [
+    {
+      "phrase": "worker token",
+      "kinds": [
+        "words"
+      ],
+      "note": "Keys page unlocked line; Olympus release-check-findings-handoff-2026-10-24.md item 7"
+    },
+    {
+      "phrase": "sovereignty",
+      "kinds": [
+        "words"
+      ],
+      "note": "Keys page privacy settings; findings handoff item 11"
+    },
+    {
+      "phrase": "network isolation",
+      "kinds": [
+        "words",
+        "no-fix"
+      ],
+      "note": "Keys page anonymous-answers notice; findings handoff item 11"
+    },
+    {
+      "phrase": "anonymous answers",
+      "kinds": [
+        "no-fix"
+      ],
+      "note": "the same notice does not point to Install Tor and zkAPI further down; findings handoff item 11"
+    },
+    {
+      "phrase": "fingerprint",
+      "kinds": [
+        "words"
+      ],
+      "note": "Keys page Install the parts; findings handoff item 11"
+    },
+    {
+      "phrase": "client id",
+      "kinds": [
+        "words"
+      ],
+      "note": "X bookmarks bring-your-own app key: kept by design as the fallback (dashboard is for users ruling, 2026-09-03)"
+    }
+  ]
 }

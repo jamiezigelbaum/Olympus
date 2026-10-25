@@ -1139,7 +1139,7 @@ const JOURNEY_DEBUG_PORT = 9335;
  * a screenshot after each step. The screens are taken first, while the install is as the run left it; the journeys that change the
  * install run last.
  */
-async function journeysCommand(outDir: string, only: string[], skipScreens: boolean, plants: boolean): Promise<never> {
+async function journeysCommand(outDir: string, only: string[], skip: string[], skipScreens: boolean, plants: boolean): Promise<never> {
   const browser = findBrowser();
   if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
   rmSync(outDir, { recursive: true, force: true });
@@ -1175,7 +1175,7 @@ async function journeysCommand(outDir: string, only: string[], skipScreens: bool
     if (plants) {
       try { planted = await capturePlants(driver, outDir); } catch (error) { failure = `the planted pictures could not be captured: ${error instanceof Error ? error.message : String(error)}`; }
     }
-    for (const journey of selectJourneys(only)) {
+    for (const journey of selectJourneys(only, skip)) {
       try {
         traces.push(await runJourney(driver, journey));
       } catch (error) {
@@ -1849,7 +1849,7 @@ async function main(): Promise<void> {
     }
     case 'screenshots': return await screenshots(flag('--out'));
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
-    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'), process.argv.includes('--plants'));
+    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), flag('--skip', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'), process.argv.includes('--plants'));
     case 'explore': return await exploreCommand(flag('--out'), flag('--inventory'), process.argv.includes('--pages-inventory') ? flag('--pages-inventory') : undefined);
     case 'archive-import': return await archiveImportCommand({
       role: flag('--role'), format: flag('--format', STRESS_FORMAT), via: flag('--via'), seed: flag('--seed'),

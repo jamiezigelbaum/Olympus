@@ -75,6 +75,9 @@ import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation }
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
+import { JOURNEYS } from './journeys.ts';
+import { layoutChecks, layoutFindings, layoutQualificationCheck, scoreLayoutRules } from './layout-rules.ts';
+import type { PlantedPicture } from './reviewer-plants.ts';
 import { buildInventory } from './explore-inventory.ts';
 import { buildPageInventory } from './explore-pages-inventory.ts';
 import { exploreChecks, type ExploreResult } from './explore.ts';
@@ -945,7 +948,12 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   if (options.skipJourneys) return;
   const only = options.onlyJourneys?.length ? ` --only ${sh(options.onlyJourneys.join(','))}` : '';
   const plants = options.reviewerPlants ? ' --plants' : '';
-  const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${plants}`, 2_400_000));
+  // A journey whose setup comes from a leg this run skipped is skipped too, and says so: its failure would be the run's, not the product's.
+  const skippedLegs = new Set([...(options.skipSuite ? ['suite'] : []), ...(options.skipInbox ? ['inbox'] : [])]);
+  const unmet = JOURNEYS.filter((journey) => (!options.onlyJourneys?.length || options.onlyJourneys.includes(journey.id)) && journey.needs?.some((leg) => skippedLegs.has(leg)));
+  for (const journey of unmet) run.add({ id: `journey.${journey.id}`, title: journey.title, status: 'skip', detail: `needs the ${journey.needs!.filter((leg) => skippedLegs.has(leg)).join(' and ')} leg, which this run skipped` });
+  const skip = unmet.length ? ` --skip ${sh(unmet.map((journey) => journey.id).join(','))}` : '';
+  const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${skip}${plants}`, 2_400_000));
   const result = done.result;
   if (!result || !Array.isArray(result.traces)) {
     run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
@@ -973,13 +981,18 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
     if (existsSync(join(scratch, 'plants'))) cpSync(join(scratch, 'plants'), join(outDir, 'plants'), { recursive: true });
     mkdirSync(join(outDir, 'plants'), { recursive: true });
     writeFileSync(join(outDir, 'plants', 'index.json'), `${JSON.stringify(planted, null, 2)}\n`);
+    // The layout rules are scored here (they need no model): every bug planted for a rule found, nothing on the clean pictures.
+    const layoutScore = scoreLayoutRules(planted as PlantedPicture[]);
+    writeFileSync(join(outDir, 'plants', 'layout.json'), `${JSON.stringify(layoutScore, null, 2)}\n`);
+    run.add(layoutQualificationCheck(layoutScore));
     run.add({ id: 'reviewer.plants', title: 'The pictures with planted bugs were taken for the reviewer\'s qualification', status: planted.some((item: { plant?: unknown }) => item.plant) ? 'pass' : 'fail', detail: `${planted.length} picture(s), ${planted.filter((item: { plant?: unknown }) => item.plant).length} with a planted bug` });
   }
   const traces = result.traces as JourneyTrace[];
   (run.stage.traces ??= []).push(...traces);
   for (const check of journeyChecks(traces)) run.add(check);
 
-  const screens = (Array.isArray(result.screens) ? result.screens : []) as Array<{ name: string; screen: string; width: number; theme: string }>;
+  const screens = (Array.isArray(result.screens) ? result.screens : []) as Array<{ name: string; screen: string; width: number; theme: string; layout?: unknown[] }>;
+  for (const check of layoutChecks(screens.map((item) => ({ name: item.name, ...(Array.isArray(item.layout) ? { layout: layoutFindings([item.layout]) } : {}) })))) run.add(check);
   if (options.baselinesDir) {
     const names = screens.flatMap((item) => { const screen = SCREENS.find((candidate) => candidate.id === item.screen); return screen ? [{ name: item.name, screen, width: item.width, theme: item.theme }] : []; });
     const compared = compareScreens({ actualDir: join(scratch, 'screens'), baselinesDir: options.baselinesDir, outDir, update: options.updateBaselines === true, approvalDigest: currentApprovalDigest(), names, expected: SCREENS.flatMap((screen) => SCREEN_WIDTHS.flatMap((width) => SCREEN_THEMES.map((theme) => screenName(screen.id, width, theme)))) });
