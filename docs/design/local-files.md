@@ -169,18 +169,25 @@ excluded under both spellings.
 What an earlier version indexed inside an own folder (a folder the owner had
 chosen by name) is removed at worker start, before the worker answers anything
 (`createLocalFilesOwnRootsCleanup` in `local-files/own-roots-cleanup.ts`, run
-from `email-source/server.ts`). It finds the stored items under each own folder
-and keeps those the scanner itself would call inside it (`isInsideOwnRoot`,
-with the case rules of the volume holding the path: `~/Capture` beside an own
-`~/capture` is another folder on a volume that keeps case, and stays). It
-removes them through the deletion path every other removal takes, a connector
-listing deleted items into the lane's tier stores, so the item, its text and
-its entry in the secret-locations index go together. It is bounded (5,000 items
-or 10 seconds per run), so a large backlog cannot hold up start-up; what it
-leaves goes at the next run: the next start, or the next pass of any chosen
-folder, which asks first. It covers the case where an own folder was the only
-folder chosen. Reads are not filtered by it: a read scope comes from the saved
-approval alone, as for every file source.
+from `email-source/server.ts`). It walks the stored paths under each own folder
+in each tier store, page by page in the index's own order, and keeps those the
+scanner itself would call inside it (`isInsideOwnRoot`, with the case rules of
+the volume holding the path: `~/Capture` beside an own `~/capture` is another
+folder on a volume that keeps case, and stays). It removes them through the
+deletion path every other removal takes, a connector listing deleted items into
+the lane's tier stores, so the item, its text and its entry in the
+secret-locations index go together; that listing settles nothing else first
+(owner overrides and rule raises of unrelated items wait for the lane's own
+run). The walk keeps its position between runs, so however many case siblings
+sort ahead of an own file it goes on past them, and the clean-up is complete
+only when the last page of every own folder in every store has been read. It
+is bounded: 5,000 items removed, 1,000,000 paths read or 10 seconds per run,
+and its caller never waits longer than the 10 seconds, so a large backlog
+cannot hold up start-up. What it leaves goes at the next run: the next pass of
+any chosen folder, which asks first, or the next start (a restart begins the
+walk again). It covers the case where an own folder was the only folder chosen.
+Reads are not filtered by it: a read scope comes from the saved approval alone,
+as for every file source.
 
 Known limits, places this rule does not cover:
 

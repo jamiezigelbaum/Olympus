@@ -45,6 +45,7 @@ import {
   LOCAL_FILES_CORPUS_ID,
   createLocalFilesConnectorStore,
   createLocalFilesTierLane,
+  LOCAL_FILES_STORE_PLACEMENT,
 } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
 import { WatchHub, watchIgnoreGlobs } from '../src/workers/local-files/watch-hub.ts';
@@ -525,9 +526,71 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const spool: [string, string] = [`${home}/capture/zspool.jsonl`, 'zzspoolbody'];
     const store = await indexedStore([...siblings, spool]);
     const context = { ...ownContext({ OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: `${home}/capture` }), volumeIgnoresCase: () => false };
-    expect(await createLocalFilesOwnRootsCleanup({ store, context }).run()).toEqual({ removed: 1, complete: true });
+    expect(await createLocalFilesOwnRootsCleanup({ store, context, pageSize: 50 }).run()).toEqual({ removed: 1, complete: true });
     expect(present(store, spool[0])).toBe(false);
     expect(siblings.every(([path]) => present(store, path))).toBe(true);
+  });
+
+  /** `count` case-different siblings that all sort before one own spool file, and that file. */
+  const siblingsBeforeSpool = (count: number) => {
+    const siblings: Array<[string, string]> = Array.from({ length: count }, (_, index) => [`${home}/Capture/a${String(index).padStart(4, '0')}.txt`, `zzsibling${index}`]);
+    const spool: [string, string] = [`${home}/capture/z-secret.jsonl`, 'zzspoolsecret'];
+    const context = { ...ownContext({ OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: `${home}/capture` }), volumeIgnoresCase: () => false };
+    return { siblings, spool, context };
+  };
+
+  test('reaches an own file behind more siblings than one look can hold: the walk has no ceiling that ends it', async () => {
+    const { siblings, spool, context } = siblingsBeforeSpool(40);
+    const store = await indexedStore([...siblings, spool]);
+    expect(await createLocalFilesOwnRootsCleanup({ store, context, pageSize: 6 }).run()).toEqual({ removed: 1, complete: true });
+    expect(present(store, spool[0])).toBe(false);
+    expect(siblings.every(([path]) => present(store, path))).toBe(true);
+  });
+
+  test('a run that stops among the siblings is not complete, and the next run goes on from where it stopped', async () => {
+    const { siblings, spool, context } = siblingsBeforeSpool(40);
+    const store = await indexedStore([...siblings, spool]);
+    // Each run may read only 12 stored paths: from the start again, none would ever get past the siblings.
+    const cleanup = createLocalFilesOwnRootsCleanup({ store, context, pageSize: 6, maxScanned: 12 });
+    const first = await cleanup.run();
+    expect(first).toEqual({ removed: 0, complete: false });
+    expect(present(store, spool[0])).toBe(true);
+    const results = [first];
+    while (!results.at(-1)!.complete && results.length < 8) results.push(await cleanup.run());
+    expect(results.at(-1)).toEqual({ removed: 1, complete: true });
+    expect(results.length).toBeLessThanOrEqual(5);
+    expect(present(store, spool[0])).toBe(false);
+    expect(siblings.every(([path]) => present(store, path))).toBe(true);
+    // Done is done: nothing is asked of the store again.
+    expect(await cleanup.run()).toEqual({ removed: 0, complete: true });
+  });
+
+  test('the store\'s page of a folder carries a position that continues exactly past the last row, ties included', async () => {
+    // `~/capture/a` and `~/Capture/a` fold to the same key: the position must not skip the second.
+    const files: Array<[string, string]> = [
+      [`${home}/capture/a`, 'x1'], [`${home}/Capture/a`, 'x2'], [`${home}/capture/b`, 'x3'],
+      [`${home}/Capture/c`, 'x4'], [`${home}/capture/d`, 'x5'], [`${home}/capture`, 'zzafilenamedlikethefolder'],
+    ];
+    const store = await indexedStore(files);
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (let pages = 0; pages < 10; pages += 1) {
+      // One row a page: the two spellings of `a` are split across two pages.
+      const page = store.pageActiveItemsUnderLocatorIfIndexed({ provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE, locatorUri: `${home}/capture`, limit: 1, ...(after ? { after } : {}) });
+      expect(page.items.length).toBeLessThanOrEqual(1);
+      seen.push(...page.items.map((item) => item.locatorUri));
+      if (!page.next) break;
+      after = page.next;
+    }
+    // Every row under the folder once, in order of the folded path; the folder's own name is not under it.
+    expect([...seen].sort()).toEqual(files.map(([path]) => path).filter((path) => path !== `${home}/capture`).sort());
+    expect(new Set(seen).size).toBe(seen.length);
+    // One position, a longer page: the rest of the folder, and no `next`.
+    const first = store.pageActiveItemsUnderLocatorIfIndexed({ provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE, locatorUri: `${home}/capture`, limit: 2 });
+    expect(first.next).toBeDefined();
+    const rest = store.pageActiveItemsUnderLocatorIfIndexed({ provider: LOCAL_FILES_PROVIDER, accountScope: LOCAL_FILES_ACCOUNT_SCOPE, locatorUri: `${home}/capture`, limit: 50, after: first.next! });
+    expect(rest.next).toBeUndefined();
+    expect(rest.items).toHaveLength(seen.length - 2);
   });
 
   test('a file that is named like an own folder, apart from case, is never touched', async () => {
@@ -562,14 +625,21 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     expect(server).toContain('beforePull: () => localFilesOwnRootsCleanup.run()');
   });
 
-  test('goes through the lane\'s tier set when it has one, and moves no folder\'s cursor', async () => {
+  /** A real tier lane (its stores on disk) whose secure store holds `files`. */
+  async function tierLaneHolding(files: Array<[string, string]>) {
     const base = tempBase();
     const env = { HOME: join(base, 'home'), XDG_DATA_HOME: join(base, 'data'), [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: join(base, 'no-exclusions.json') };
     const policy = defaultLocalFilesIngestionPolicy({ stillImagesRead: false });
     const secure = createLocalFilesConnectorStore(env, { policy });
     const lane = createLocalFilesTierLane({ secureStore: secure, env, policy });
     cleanups.push(() => { lane.internal.current()?.close(); lane.public.current()?.close(); secure.close(); });
-    await indexInto(secure, [[secret, 'zzsecretbody the session token'], [budget, 'zzbudgetbody']]);
+    await indexInto(secure, files);
+    return { secure, lane };
+  }
+  const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+  test('goes through the lane\'s tier set when it has one, and moves no folder\'s cursor', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token'], [budget, 'zzbudgetbody']]);
     const runs: unknown[][] = [];
     const sync = lane.set.sync.bind(lane.set);
     lane.set.sync = (...args: Parameters<typeof sync>) => { runs.push(args.slice(2)); return sync(...args); };
@@ -577,10 +647,46 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     const result = await createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext() }).run();
 
     expect(result).toEqual({ removed: 1, complete: true });
-    expect(runs).toEqual([[{ commitCursor: false }]]);
+    expect(runs).toEqual([[{ commitCursor: false, settle: false }]]);
     expect(present(secure, secret)).toBe(false);
     expect(present(secure, budget)).toBe(true);
     expect(lane.set.committedCursor(LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID)).toBeUndefined();
+  });
+
+  test('settles nothing else first: a backlog of owner overrides is no part of the start-up wait', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token'], [budget, 'zzbudgetbody']]);
+    // The tier-wide settlement reads every routed override of the set.
+    let reads = 0;
+    const listRoutedOverrides = lane.set.ledger.listRoutedOverrides.bind(lane.set.ledger);
+    lane.set.ledger.listRoutedOverrides = () => { reads += 1; return listRoutedOverrides(); };
+
+    expect(await createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext() }).run()).toEqual({ removed: 1, complete: true });
+    expect(present(secure, secret)).toBe(false);
+    expect(reads).toBe(0);
+
+    // The lane's own run still settles, as it always did.
+    await lane.set.sync({
+      id: 'local.files.after', family: 'file', async authenticate() {},
+      async *listItems() { yield { items: [], done: true }; },
+      async fetchItem() { throw new Error('none'); }, classificationSignals() { return {}; },
+    }, { placement: LOCAL_FILES_STORE_PLACEMENT, fetchContent: false });
+    expect(reads).toBeGreaterThan(0);
+  });
+
+  test('the caller waits no longer than the time bound, even while a deletion is still running', async () => {
+    const { secure, lane } = await tierLaneHolding([[secret, 'zzsecretbody the session token']]);
+    const sync = lane.set.sync.bind(lane.set);
+    lane.set.sync = async (...args: Parameters<typeof sync>) => { await sleep(700); return sync(...args); };
+    const cleanup = createLocalFilesOwnRootsCleanup({ store: secure, tierSet: lane.set, context: ownContext(), maxMs: 100 });
+
+    const asked = Date.now();
+    expect(await cleanup.run()).toEqual({ removed: 0, complete: false });
+    expect(Date.now() - asked).toBeLessThan(450);
+
+    // The deletion lands on its own, and the next run finds nothing left.
+    await sleep(900);
+    expect(present(secure, secret)).toBe(false);
+    expect(await cleanup.run()).toEqual({ removed: 0, complete: true });
   });
 
   test('is bounded by count, and what is left goes with the next pass of a chosen folder', async () => {
@@ -618,6 +724,41 @@ describe('5. what an earlier version indexed inside an own folder', () => {
     expect(stopped).toEqual({ removed: 0, complete: false });
     expect(files.every(([path]) => present(store, path))).toBe(true);
     expect(await createLocalFilesOwnRootsCleanup({ store, context }).run()).toEqual({ removed: 2, complete: true });
+  });
+
+  test('a run whose time is up does not read the index at all', async () => {
+    const store = await indexedStore([[secret, 'zzsecretbody']]);
+    let looks = 0;
+    const page = store.pageActiveItemsUnderLocatorIfIndexed.bind(store);
+    store.pageActiveItemsUnderLocatorIfIndexed = (input) => { looks += 1; return page(input); };
+    expect(await createLocalFilesOwnRootsCleanup({ store, context: ownContext(), maxMs: 0 }).run()).toEqual({ removed: 0, complete: false });
+    expect(looks).toBe(0);
+    expect(present(store, secret)).toBe(true);
+  });
+
+  test('the time bound holds while reading, not only between deletions: a slow index is left after the bound', async () => {
+    const { siblings, spool, context } = siblingsBeforeSpool(60);
+    const store = await indexedStore([...siblings, spool]);
+    let looks = 0;
+    const page = store.pageActiveItemsUnderLocatorIfIndexed.bind(store);
+    store.pageActiveItemsUnderLocatorIfIndexed = (input) => {
+      looks += 1;
+      const until = Date.now() + 25;
+      while (Date.now() < until) { /* a page that takes a while */ }
+      return page(input);
+    };
+    const cleanup = createLocalFilesOwnRootsCleanup({ store, context, pageSize: 2, maxMs: 80 });
+    const asked = Date.now();
+    const result = await cleanup.run();
+    expect(result.complete).toBe(false);
+    expect(looks).toBeGreaterThan(0);
+    expect(looks).toBeLessThanOrEqual(6);
+    expect(Date.now() - asked).toBeLessThan(400);
+    // The run itself stops reading at the bound; it does not go on behind the caller.
+    const atReturn = looks;
+    await sleep(300);
+    expect(looks).toBeLessThanOrEqual(atReturn + 1);
+    expect(present(store, spool[0])).toBe(true);
   });
 
   test('waits, and says so, while the index of stored paths is still being prepared', async () => {

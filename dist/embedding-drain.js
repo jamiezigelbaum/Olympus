@@ -21824,6 +21824,53 @@ var init_local_index = __esm(() => {
       }
       return matches;
     }
+    pageActiveItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return { items: [] };
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return { items: [] };
+      let position;
+      if (input.after !== undefined) {
+        try {
+          const parsed = JSON.parse(input.after);
+          if (Array.isArray(parsed) && typeof parsed[0] === "string" && Number.isSafeInteger(parsed[1]))
+            position = [parsed[0], parsed[1]];
+        } catch {}
+      }
+      const start = position ? { sql: "locator.normalized_locator >= ?", params: [position[0]] } : { sql: "locator.normalized_locator >= LOWER(?) || '/'", params: [folder] };
+      const rows = this.db.query(`
+      SELECT
+        locator.item_pk, locator.normalized_locator,
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND ${start.sql}
+        AND locator.normalized_locator < LOWER(?) || '0'
+        ${position ? "AND (locator.normalized_locator > ? OR locator.item_pk > ?)" : ""}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, ...start.params, folder, ...position ? position : [], input.limit);
+      const items = rows.flatMap((row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : []);
+      const last = rows.at(-1);
+      return rows.length >= input.limit && last ? { items, next: JSON.stringify([last.normalized_locator, last.item_pk]) } : { items };
+    }
     activeItemsDirectlyUnderRootIfIndexed(input) {
       if (!this.locatorIdentityIndexState().completed)
         return [];
@@ -44667,6 +44714,9 @@ init_provider_store_sync();
 init_tier_set();
 init_scope();
 init_store();
+
+// src/workers/local-files/own-roots-cleanup.ts
+init_tiered_store_set();
 
 // src/workers/local-files/connector.ts
 init_file_extraction_source();

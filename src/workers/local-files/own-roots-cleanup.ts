@@ -11,17 +11,24 @@
 // Which items are inside an own folder is the scanner's own question, asked of
 // each stored path with the case rules of its volume (`isInsideOwnRoot`). The
 // store narrows by folder ignoring ASCII case; a sibling that differs only by
-// case (`~/Capture` beside `~/capture`) is another folder on a volume that keeps
-// case, and is the person's, so nothing here goes by the store's match alone.
+// case (`~/Capture` beside an own `~/capture`) is another folder on a volume that
+// keeps case, and is the person's, so nothing here goes by the store's match
+// alone.
 //
-// It runs at worker start, before the worker answers anything, and is bounded
-// by count and time so it cannot hold up start-up. What it leaves is removed by
-// the next run: the next start, or the next pass of a chosen folder.
+// The store is walked once, page by page, in its own order, from a position that
+// is kept between runs: however many siblings sort first, a run goes on from
+// where the last one stopped, and the clean-up is complete only when every page
+// of every own folder in every store has been read. It runs at worker start,
+// before the worker answers anything, and is bounded by count, by rows read and
+// by time, so it cannot hold up start-up: the caller never waits longer than
+// the time bound, and the deletion it asks for settles nothing else (the lane's
+// next run does that). What a run leaves is removed by the next: the next pass
+// of a chosen folder, or the next start.
 
 import type { RawItem, SourceConnector } from '../../core/contracts.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
-import type { TieredStoreSet } from '../connector-store/tiered-store-set.ts';
+import { TIER_DOMAIN_ORDER, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import { localFilesDeletedItem } from './connector.ts';
 import { isInsideOwnRoot, type DefaultExclusionContext } from './paths.ts';
 import { localFilesStoreView } from './provider-store-sync.ts';
@@ -31,13 +38,11 @@ import { LOCAL_FILES_STORE_PLACEMENT } from './store.ts';
 /** The store's id for the clean-up's own deletions; it is no folder's connector, and keeps no resume point. */
 export const LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID = 'local.files.own-roots-cleanup';
 
-/** The most indexed items under one own folder one look at the store reads (the walk's own limit). */
-const SCAN_LIMIT = 250_000;
-/** What a look reads first; it reads more only when everything it read belonged to siblings. */
-const FIRST_LOOK = 500;
 const DEFAULT_MAX_ITEMS = 5_000;
 const DEFAULT_MAX_MS = 10_000;
 const DEFAULT_BATCH = 200;
+const DEFAULT_PAGE = 1_000;
+const DEFAULT_MAX_SCANNED = 1_000_000;
 
 export interface LocalFilesOwnRootsCleanupOptions {
   store: LocalConnectorStore;
@@ -47,10 +52,14 @@ export interface LocalFilesOwnRootsCleanupOptions {
   context: Pick<DefaultExclusionContext, 'ownRoots' | 'platform' | 'volumeIgnoresCase'>;
   /** At most this many items are removed by one run. */
   maxItems?: number;
-  /** No new batch starts after this long. */
+  /** A run reads and removes nothing more after this long, and its caller waits no longer than this. */
   maxMs?: number;
   /** Items removed per deletion run of the store. */
   batchSize?: number;
+  /** Stored paths read per page of the index. */
+  pageSize?: number;
+  /** At most this many stored paths are read by one run; the next run goes on from there. */
+  maxScanned?: number;
   /** Told what stopped a run (a message with no path or content in it). */
   log?: (message: string) => void;
 }
@@ -58,7 +67,7 @@ export interface LocalFilesOwnRootsCleanupOptions {
 export interface LocalFilesOwnRootsCleanupResult {
   /** Items this run removed. */
   removed: number;
-  /** Nothing is left inside an own folder. */
+  /** Every stored path under every own folder has been read and nothing is left inside one. */
   complete: boolean;
 }
 
@@ -75,39 +84,22 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
   const maxItems = Math.max(1, options.maxItems ?? DEFAULT_MAX_ITEMS);
   const maxMs = Math.max(0, options.maxMs ?? DEFAULT_MAX_MS);
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH);
+  const pageSize = Math.max(1, options.pageSize ?? DEFAULT_PAGE);
+  const maxScanned = Math.max(1, options.maxScanned ?? DEFAULT_MAX_SCANNED);
   const view = localFilesStoreView(store, tierSet);
-  let finished = (context.ownRoots ?? []).length === 0;
+  // Every store the items may sit in, each walked under every own folder.
+  const stores: LocalConnectorStore[] = tierSet
+    ? TIER_DOMAIN_ORDER.flatMap((domain) => { const leg = tierSet.store(domain); return leg ? [leg] : []; })
+    : [store];
+  interface Walk { store: LocalConnectorStore; root: string; after?: string; done: boolean }
+  const walks: Walk[] = stores.flatMap((leg) => (context.ownRoots ?? []).map((root): Walk => ({ store: leg, root, done: false })));
+  let finished = walks.length === 0;
   let running: Promise<LocalFilesOwnRootsCleanupResult> | undefined;
+  let removedNow = 0;
   let toldWaiting = false;
 
   const inside = (locatorUri: string): boolean => {
     try { return isInsideOwnRoot(locatorUri, context); } catch { return false; }
-  };
-
-  /**
-   * What is indexed inside an own folder, at most `limit` items. The store lists
-   * what lies under a folder ignoring ASCII case, so a look is widened while it
-   * keeps meeting siblings that differ only by case and are not inside.
-   */
-  const found = (limit: number): Array<{ identity: SourceItemIdentity; locatorUri: string }> => {
-    const items = new Map<string, { identity: SourceItemIdentity; locatorUri: string }>();
-    for (const base of context.ownRoots ?? []) {
-      for (let window = Math.max(limit, FIRST_LOOK); ; window = Math.min(window * 4, SCAN_LIMIT)) {
-        const stored = view.activeItemsUnderLocatorIfIndexed?.({
-          provider: LOCAL_FILES_PROVIDER,
-          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-          locatorUri: base,
-          limit: window,
-        }) ?? [];
-        for (const item of stored) {
-          if (items.has(item.identity.providerItemId) || !inside(item.locatorUri)) continue;
-          items.set(item.identity.providerItemId, item);
-          if (items.size >= limit) return [...items.values()];
-        }
-        if (stored.length < window || window >= SCAN_LIMIT) break;
-      }
-    }
-    return [...items.values()];
   };
 
   const deletionsConnector = (items: RawItem[]): SourceConnector => ({
@@ -123,8 +115,8 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
     const at = new Date();
     const connector = deletionsConnector(batch.map((item) => localFilesDeletedItem(item.identity, item.locatorUri, at)));
     const sync = { placement: LOCAL_FILES_STORE_PLACEMENT, fetchContent: false };
-    // Not a resume point of any folder's pass: it must not move the lane's cursor.
-    if (tierSet) await tierSet.sync(connector, sync, { commitCursor: false });
+    // Not a resume point of any folder's pass, and nothing else settled first: the deletion is all it does.
+    if (tierSet) await tierSet.sync(connector, sync, { commitCursor: false, settle: false });
     else await store.syncFromConnector(connector, sync);
   };
 
@@ -136,24 +128,45 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
       return { removed: 0, complete: false };
     }
     const started = Date.now();
-    let removed = 0;
-    let previous = new Set<string>();
-    for (;;) {
-      const left = found(Math.max(1, Math.min(batchSize, maxItems - removed)));
-      if (left.length === 0) {
-        finished = true;
-        return { removed, complete: true };
+    const timeUp = (): boolean => Date.now() - started >= maxMs;
+    removedNow = 0;
+    let scanned = 0;
+    let kept = 0;
+    for (const walk of walks) {
+      while (!walk.done) {
+        if (timeUp() || removedNow >= maxItems || scanned >= maxScanned) return { removed: removedNow, complete: false };
+        const page = walk.store.pageActiveItemsUnderLocatorIfIndexed({
+          provider: LOCAL_FILES_PROVIDER,
+          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+          locatorUri: walk.root,
+          limit: pageSize,
+          ...(walk.after !== undefined ? { after: walk.after } : {}),
+        });
+        scanned += page.items.length;
+        const hits = page.items.filter((item) => inside(item.locatorUri));
+        for (let index = 0; index < hits.length;) {
+          // A page cut short here is read again from its start: what was removed is no longer listed.
+          if (timeUp() || removedNow >= maxItems) return { removed: removedNow, complete: false };
+          const batch = hits.slice(index, index + Math.min(batchSize, maxItems - removedNow));
+          await remove(batch);
+          removedNow += batch.length;
+          index += batch.length;
+          // A deletion the store did not take is left for the next run; it is not asked for again in this one.
+          kept += batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
+        }
+        if (page.next === undefined) walk.done = true;
+        else walk.after = page.next;
+        // The worker stays responsive between pages.
+        await new Promise<void>((resolve) => { setImmediate(resolve); });
       }
-      // The items just removed are still listed: the store did not take the deletion. Stop rather than ask again.
-      if (left.some((item) => previous.has(item.identity.providerItemId))) {
-        options.log?.('The store did not remove some items inside Olympus\'s own folders; they are tried again at the next run.');
-        return { removed, complete: false };
-      }
-      if (removed >= maxItems || Date.now() - started >= maxMs) return { removed, complete: false };
-      await remove(left);
-      removed += left.length;
-      previous = new Set(left.map((item) => item.identity.providerItemId));
     }
+    if (kept > 0) {
+      options.log?.('The store did not remove some items inside Olympus\'s own folders; they are tried again at the next run.');
+      for (const walk of walks) { walk.done = false; delete walk.after; }
+      return { removed: removedNow, complete: false };
+    }
+    finished = true;
+    return { removed: removedNow, complete: true };
   };
 
   return {
@@ -165,7 +178,15 @@ export function createLocalFilesOwnRootsCleanup(options: LocalFilesOwnRootsClean
           return { removed: 0, complete: false };
         })
         .finally(() => { running = undefined; });
-      return running;
+      // The caller waits no longer than the time bound, whatever the store is doing: a batch in flight
+      // finishes on its own, and the next run goes on from there.
+      const work = running;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const bound = new Promise<LocalFilesOwnRootsCleanupResult>((resolve) => {
+        timer = setTimeout(() => resolve({ removed: removedNow, complete: false }), maxMs);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      return Promise.race([work, bound]).finally(() => { if (timer) clearTimeout(timer); });
     },
   };
 }

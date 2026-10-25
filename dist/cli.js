@@ -31935,6 +31935,53 @@ var init_local_index = __esm(() => {
       }
       return matches;
     }
+    pageActiveItemsUnderLocatorIfIndexed(input) {
+      if (!this.locatorIdentityIndexState().completed)
+        return { items: [] };
+      const folder = input.locatorUri.replace(/\/+$/, "");
+      if (folder === "" || !Number.isSafeInteger(input.limit) || input.limit <= 0)
+        return { items: [] };
+      let position;
+      if (input.after !== undefined) {
+        try {
+          const parsed = JSON.parse(input.after);
+          if (Array.isArray(parsed) && typeof parsed[0] === "string" && Number.isSafeInteger(parsed[1]))
+            position = [parsed[0], parsed[1]];
+        } catch {}
+      }
+      const start = position ? { sql: "locator.normalized_locator >= ?", params: [position[0]] } : { sql: "locator.normalized_locator >= LOWER(?) || '/'", params: [folder] };
+      const rows = this.db.query(`
+      SELECT
+        locator.item_pk, locator.normalized_locator,
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND ${start.sql}
+        AND locator.normalized_locator < LOWER(?) || '0'
+        ${position ? "AND (locator.normalized_locator > ? OR locator.item_pk > ?)" : ""}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(input.provider, input.accountScope, ...start.params, folder, ...position ? position : [], input.limit);
+      const items = rows.flatMap((row) => row.locator_uri ? [{
+        identity: {
+          family: this.family,
+          provider: input.provider,
+          accountScope: input.accountScope,
+          providerItemId: row.provider_item_id,
+          ...row.provider_file_id ? { providerFileId: row.provider_file_id } : {},
+          localItemId: row.local_item_id,
+          ...row.source_version ? { sourceVersion: row.source_version } : {}
+        },
+        locatorUri: row.locator_uri
+      }] : []);
+      const last = rows.at(-1);
+      return rows.length >= input.limit && last ? { items, next: JSON.stringify([last.normalized_locator, last.item_pk]) } : { items };
+    }
     activeItemsDirectlyUnderRootIfIndexed(input) {
       if (!this.locatorIdentityIndexState().completed)
         return [];
@@ -50161,7 +50208,8 @@ class TieredStoreSet {
   }
   async sync(connector, sync = {}, options = {}) {
     this.assertLedgerGovernsLegs();
-    await this.settleStoredItems();
+    if (options.settle !== false)
+      await this.settleStoredItems();
     const run = new TieredRoutingRun(this, "shared");
     const traversal = recordedTraversal(connector);
     const legRuns = [];
@@ -148360,9 +148408,17 @@ function createLocalFilesOwnRootsCleanup(options) {
   const maxItems = Math.max(1, options.maxItems ?? DEFAULT_MAX_ITEMS);
   const maxMs = Math.max(0, options.maxMs ?? DEFAULT_MAX_MS);
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH);
+  const pageSize = Math.max(1, options.pageSize ?? DEFAULT_PAGE);
+  const maxScanned = Math.max(1, options.maxScanned ?? DEFAULT_MAX_SCANNED);
   const view3 = localFilesStoreView(store, tierSet);
-  let finished = (context2.ownRoots ?? []).length === 0;
+  const stores = tierSet ? TIER_DOMAIN_ORDER.flatMap((domain) => {
+    const leg = tierSet.store(domain);
+    return leg ? [leg] : [];
+  }) : [store];
+  const walks = stores.flatMap((leg) => (context2.ownRoots ?? []).map((root) => ({ store: leg, root, done: false })));
+  let finished = walks.length === 0;
   let running;
+  let removedNow = 0;
   let toldWaiting = false;
   const inside = (locatorUri) => {
     try {
@@ -148370,29 +148426,6 @@ function createLocalFilesOwnRootsCleanup(options) {
     } catch {
       return false;
     }
-  };
-  const found = (limit) => {
-    const items = new Map;
-    for (const base of context2.ownRoots ?? []) {
-      for (let window2 = Math.max(limit, FIRST_LOOK);; window2 = Math.min(window2 * 4, SCAN_LIMIT)) {
-        const stored = view3.activeItemsUnderLocatorIfIndexed?.({
-          provider: LOCAL_FILES_PROVIDER,
-          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-          locatorUri: base,
-          limit: window2
-        }) ?? [];
-        for (const item of stored) {
-          if (items.has(item.identity.providerItemId) || !inside(item.locatorUri))
-            continue;
-          items.set(item.identity.providerItemId, item);
-          if (items.size >= limit)
-            return [...items.values()];
-        }
-        if (stored.length < window2 || window2 >= SCAN_LIMIT)
-          break;
-      }
-    }
-    return [...items.values()];
   };
   const deletionsConnector = (items) => ({
     id: LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID,
@@ -148413,7 +148446,7 @@ function createLocalFilesOwnRootsCleanup(options) {
     const connector = deletionsConnector(batch.map((item) => localFilesDeletedItem(item.identity, item.locatorUri, at)));
     const sync = { placement: LOCAL_FILES_STORE_PLACEMENT, fetchContent: false };
     if (tierSet)
-      await tierSet.sync(connector, sync, { commitCursor: false });
+      await tierSet.sync(connector, sync, { commitCursor: false, settle: false });
     else
       await store.syncFromConnector(connector, sync);
   };
@@ -148425,24 +148458,51 @@ function createLocalFilesOwnRootsCleanup(options) {
       return { removed: 0, complete: false };
     }
     const started = Date.now();
-    let removed = 0;
-    let previous = new Set;
-    for (;; ) {
-      const left = found(Math.max(1, Math.min(batchSize, maxItems - removed)));
-      if (left.length === 0) {
-        finished = true;
-        return { removed, complete: true };
+    const timeUp = () => Date.now() - started >= maxMs;
+    removedNow = 0;
+    let scanned = 0;
+    let kept = 0;
+    for (const walk of walks) {
+      while (!walk.done) {
+        if (timeUp() || removedNow >= maxItems || scanned >= maxScanned)
+          return { removed: removedNow, complete: false };
+        const page2 = walk.store.pageActiveItemsUnderLocatorIfIndexed({
+          provider: LOCAL_FILES_PROVIDER,
+          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+          locatorUri: walk.root,
+          limit: pageSize,
+          ...walk.after !== undefined ? { after: walk.after } : {}
+        });
+        scanned += page2.items.length;
+        const hits = page2.items.filter((item) => inside(item.locatorUri));
+        for (let index = 0;index < hits.length; ) {
+          if (timeUp() || removedNow >= maxItems)
+            return { removed: removedNow, complete: false };
+          const batch = hits.slice(index, index + Math.min(batchSize, maxItems - removedNow));
+          await remove(batch);
+          removedNow += batch.length;
+          index += batch.length;
+          kept += batch.filter((item) => walk.store.itemPresence(item.identity).active).length;
+        }
+        if (page2.next === undefined)
+          walk.done = true;
+        else
+          walk.after = page2.next;
+        await new Promise((resolve20) => {
+          setImmediate(resolve20);
+        });
       }
-      if (left.some((item) => previous.has(item.identity.providerItemId))) {
-        options.log?.("The store did not remove some items inside Olympus's own folders; they are tried again at the next run.");
-        return { removed, complete: false };
-      }
-      if (removed >= maxItems || Date.now() - started >= maxMs)
-        return { removed, complete: false };
-      await remove(left);
-      removed += left.length;
-      previous = new Set(left.map((item) => item.identity.providerItemId));
     }
+    if (kept > 0) {
+      options.log?.("The store did not remove some items inside Olympus's own folders; they are tried again at the next run.");
+      for (const walk of walks) {
+        walk.done = false;
+        delete walk.after;
+      }
+      return { removed: removedNow, complete: false };
+    }
+    finished = true;
+    return { removed: removedNow, complete: true };
   };
   return {
     run() {
@@ -148454,12 +148514,22 @@ function createLocalFilesOwnRootsCleanup(options) {
       }).finally(() => {
         running = undefined;
       });
-      return running;
+      const work = running;
+      let timer;
+      const bound = new Promise((resolve20) => {
+        timer = setTimeout(() => resolve20({ removed: removedNow, complete: false }), maxMs);
+        timer.unref?.();
+      });
+      return Promise.race([work, bound]).finally(() => {
+        if (timer)
+          clearTimeout(timer);
+      });
     }
   };
 }
-var LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID = "local.files.own-roots-cleanup", SCAN_LIMIT = 250000, FIRST_LOOK = 500, DEFAULT_MAX_ITEMS = 5000, DEFAULT_MAX_MS = 1e4, DEFAULT_BATCH = 200;
+var LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID = "local.files.own-roots-cleanup", DEFAULT_MAX_ITEMS = 5000, DEFAULT_MAX_MS = 1e4, DEFAULT_BATCH = 200, DEFAULT_PAGE = 1000, DEFAULT_MAX_SCANNED = 1e6;
 var init_own_roots_cleanup = __esm(() => {
+  init_tiered_store_set();
   init_connector4();
   init_paths();
   init_provider_store_sync2();
