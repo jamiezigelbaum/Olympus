@@ -274,8 +274,8 @@ async function closeWindows(machine: Machine, options: CanaryOptions, before: re
   if (opened.length === 0) return undefined;
   if (options.os === 'linux') {
     await machine.exec(opened.map((window) => window.reused
-      ? `hyprctl dispatch sendshortcut ${shellQuote(`CTRL, W, address:${window.id}`)} >/dev/null`
-      : `hyprctl dispatch closewindow address:${shellQuote(window.id)} >/dev/null`).join('\n'), { timeoutMs: 30_000 });
+      ? hyprDispatch(`sendshortcut ${shellQuote(`CTRL, W, address:${window.id}`)}`, `hl.dsp.send_shortcut({ mods = "CTRL", key = "W", window = ${JSON.stringify(`address:${window.id}`)} })`)
+      : hyprDispatch(`closewindow address:${shellQuote(window.id)}`, `hl.dsp.window.close({ window = ${JSON.stringify(`address:${window.id}`)} })`)).join('\n'), { timeoutMs: 30_000 });
   } else {
     for (const app of new Set(opened.map((window) => window.app))) {
       const hadWindows = before.some((window) => window.app === app);
@@ -291,6 +291,14 @@ async function closeWindows(machine: Machine, options: CanaryOptions, before: re
   try { after = parseWindows(options.os, result.stdout); } catch { return 'the window list could not be read afterwards'; }
   const left = opened.filter((window) => after.some((other) => other.id === window.id && (!window.reused || other.title === window.title)));
   return left.length === 0 ? undefined : `still open: ${left.map(describe).join(', ')}`;
+}
+
+/**
+ * A Hyprland dispatch for both config languages. The classic form goes first; a Hyprland with a Lua config (0.56 on
+ * test-omarchy, 2026-10-25) answers it with an error instead of "ok", and then the same dispatch goes as Lua.
+ */
+export function hyprDispatch(classic: string, lua: string): string {
+  return `[ "$(hyprctl dispatch ${classic} 2>&1)" = ok ] || hyprctl dispatch ${shellQuote(lua)} >/dev/null`;
 }
 
 export function canaryVerdict(checks: readonly CheckResult[]): 'pass' | 'fail' {
