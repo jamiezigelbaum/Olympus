@@ -23,7 +23,7 @@
  */
 import { kindOf, type ControlKind, type SeedId } from './explore-kinds.ts';
 import type { InventoryControl } from './explore-inventory.ts';
-import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
+import { screenshotWithin, type ElementInfo, type JourneyDriver, type JourneyTrace, type StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
 import { pagesChecks, type PagesOptions, type PagesResult } from './explore-pages.ts';
 import { BLANK_WINDOW } from './probe.ts';
@@ -46,6 +46,8 @@ export interface PanelControl {
   openKey?: string;
   /** The heading of the section the control is in. */
   section?: string;
+  /** Marked busy (aria-busy): its own words say what it is doing ("Checking…" while a sync runs). */
+  busy?: boolean;
 }
 
 /** A control of the panel outside the Sources section (Needs you, Privacy, Models, On this computer). */
@@ -248,7 +250,7 @@ export async function pageFindings(driver: JourneyDriver, controls?: PanelContro
   }
   const list = controls ?? await panelControls(driver);
   for (const control of list) {
-    if (control.visible && control.disabled && !control.reason) findings.push(`"${control.name || control.key}" is disabled and says nothing about why${control.rowName ? ` (${control.rowName})` : ''}`);
+    if (control.visible && control.disabled && !control.busy && !control.reason) findings.push(`"${control.name || control.key}" is disabled and says nothing about why${control.rowName ? ` (${control.rowName})` : ''}`);
   }
   const unfixed = await driver.probe('panel', `(() => {
     const rows = Array.from(document.querySelectorAll('li.row.need, li.row.source.need-row'));
@@ -567,8 +569,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       if (control.disabled) {
         // Pressed: a disabled control must do nothing, and has to say why (the page rule above); it counts as found, not as pressed.
-        steps.push({ n: steps.length + 1, name: `${control.name || control.key} (disabled)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a disabled control says why', actual: control.reason || 'it says nothing', ok: control.reason !== '', ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: control.reason ? [] : [`"${control.name}" is disabled and says nothing about why`] });
-        if (!control.reason) failedHere += 1;
+        // A busy control ("Checking…") says what it is doing in its own words.
+        const why = control.reason || (control.busy ? `it is busy and says so: "${control.name}"` : '');
+        steps.push({ n: steps.length + 1, name: `${control.name || control.key} (disabled)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a disabled control says why', actual: why || 'it says nothing', ok: why !== '', ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: why ? [] : [`"${control.name}" is disabled and says nothing about why`] });
+        if (!why) failedHere += 1;
         continue;
       }
       const beforeText = await panelText(driver);
@@ -672,7 +676,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests: requests.map((request) => `${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`), findings: [...new Set(findings)].slice(0, 10),
       };
       const shot = `explore-${seed.id}/${String(trace.n).padStart(2, '0')}.jpg`;
-      if (await driver.screenshot(shot).catch(() => false)) trace.screenshot = shot;
+      if (await screenshotWithin(driver, shot)) trace.screenshot = shot;
       steps.push(trace);
 
       // What the press opened gets its own turn: a question's Confirm and Cancel (keys that extend the control's own). What a confirmed press
