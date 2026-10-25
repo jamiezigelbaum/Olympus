@@ -65,6 +65,23 @@ export function namesDefaultLegacySession(source: CaptureGrantSource, value: str
   return resolve(whatsappStateDirFromValue(trimmed)) === resolve(legacyWhatsAppDefaultStateDir(env));
 }
 
+/**
+ * A stored session path as it is now: for an account the boot migration moved
+ * (`layout: folder`, `migration.state: done`), a value that names its default
+ * legacy session names the folder's instead; every other value is returned as
+ * it is. For a reader of the records (Unpair) between the move and the rewrite
+ * that follows it, or when the rewrite could not be made.
+ */
+export function movedSessionValue(source: CaptureGrantSource, value: string, env: LayoutEnv): string {
+  try {
+    const entry = findRegistryAccount(readSourceRegistry(env), source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, DEFAULT_ACCOUNT_SLOT);
+    if (!entry || entry.layout !== 'folder' || entry.migration?.state !== 'done') return value;
+  } catch {
+    return value;
+  }
+  return namesDefaultLegacySession(source, value, env) ? folderSessionValue(source, env) : value;
+}
+
 /** What a folder account's records name: connect stores Telegram's login base and WhatsApp's state folder. */
 function folderSessionValue(source: CaptureGrantSource, env: LayoutEnv): string {
   const account: LayoutAccount = { source_id: source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, slot: DEFAULT_ACCOUNT_SLOT, layout: 'folder' };

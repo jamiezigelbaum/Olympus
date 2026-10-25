@@ -24,7 +24,8 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { tryHoldFileFlock, type HeldFileFlock } from '../src/core/data-owner-lock.ts';
 import { withFileLease } from '../src/core/file-lease.ts';
-import { messagingMoveFacts, repointMovedMessagingAccounts } from '../src/core/messaging-account-move.ts';
+import { messagingMoveFacts, movedSessionValue, repointMovedMessagingAccounts } from '../src/core/messaging-account-move.ts';
+import { pairMessagingSource } from '../src/core/messaging-pairing.ts';
 import { MessagingCaptureSupervisor, type CaptureChild } from '../src/core/messaging-capture.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { settlePairingPlacement } from '../src/core/pairing-placement.ts';
@@ -527,6 +528,70 @@ describe('nothing starts on an account part way through a move', () => {
     telegramInstall(h);
     pendingPlan(h, TELEGRAM);
     await expect(settlePairingPlacement({ sourceId: TELEGRAM }, h.env)).rejects.toBeInstanceOf(SourceStorageUnavailableError);
+  });
+});
+
+describe('records that still name the old place (review of #542)', () => {
+  test('Unpair reads a stored path of a moved account as the folder\'s, so a rewrite that did not happen cannot leave the login behind', async () => {
+    const h = fixture();
+    telegramInstall(h);
+    whatsappInstall(h);
+    await boot(h, memorySecretStore());
+    // No repoint: the secret store still names the old place.
+    expect(movedSessionValue('telegram', join(h.capture, 'telegram', 'telegram.personal'), h.env)).toBe(join(folder(h, TELEGRAM), 'session', 'telegram'));
+    expect(movedSessionValue('telegram', `${join(h.capture, 'telegram', 'telegram.personal')}.session`, h.env)).toBe(join(folder(h, TELEGRAM), 'session', 'telegram'));
+    expect(movedSessionValue('whatsapp', join(h.capture, 'whatsapp-live', 'session.db'), h.env)).toBe(join(folder(h, WHATSAPP), 'raw', 'whatsapp'));
+    // A path of its own, and an account that did not move, are what they are.
+    expect(movedSessionValue('telegram', '/srv/other/tg', h.env)).toBe('/srv/other/tg');
+    const other = fixture();
+    telegramInstall(other);
+    const legacy = join(other.capture, 'telegram', 'telegram.personal');
+    expect(movedSessionValue('telegram', legacy, other.env)).toBe(legacy);
+  });
+
+  test('a pairing that a boot\'s move overtakes stops before it registers anything', async () => {
+    const h = fixture();
+    telegramInstall(h);
+    const pkg = join(h.home, 'package');
+    put(join(pkg, 'scripts', 'telegram-pair.py'), '# fixture\n');
+    put(join(pkg, 'scripts', 'telegram-telethon-reader.py'), '# fixture\n');
+    let registered = 0;
+    const pairing = pairMessagingSource({
+      source: 'telegram',
+      packageRoot: pkg,
+      homeDir: h.home,
+      env: h.env,
+      pythonExecutable: '/usr/bin/python3',
+      secretStore: memorySecretStore(),
+      captureScopeApproval: { source: 'telegram', explicitApproval: true, chatScopes: ['telegram.personal:chat:101'] },
+      runCommand: async (request) => {
+        // While the helper runs, a boot moves the account into its folder.
+        updateSourceRegistry(h.env, (registry) => {
+          const entry = registry.accounts.find((account) => account.source_id === TELEGRAM)!;
+          entry.layout = 'folder';
+          entry.migration = { state: 'done', at: '2026-10-25T00:00:00.000Z' };
+        });
+        return {
+          exitCode: 0,
+          stderr: '',
+          stdoutLines: [JSON.stringify({
+            event: 'ready',
+            status: 'ready',
+            session_path: request.env.OLYMPUS_TELEGRAM_SESSION_PATH,
+            proof: { authorized: true, account_ref: 'abcdef0123456789', session_persisted: true, credentials_transferred: true },
+            dialogs: [{ chat_scope: 'telegram.personal:chat:101', kind: 'dm', title: 'Ada' }],
+            capture_started: false,
+          })],
+          privatePayload: '{"api_id":12345,"api_hash":"fixture-hash"}',
+        };
+      },
+      registerSession: async () => {
+        registered += 1;
+        return { ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] };
+      },
+    });
+    await expect(pairing).rejects.toThrow('moved this Telegram account');
+    expect(registered).toBe(0);
   });
 });
 

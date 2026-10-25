@@ -801,8 +801,11 @@ the same look, fold, plan, rename, verify and flip, with these additions
   lock taken in the Go program, which would change the bridge's source: the
   worker runs the bridge build named by the source's fingerprint and does not
   build it, so every install would lose WhatsApp capture until it paired again.
-  Residual: a bridge a pre-4d worker started and left running when it was
-  killed holds no lock, so it is not seen.
+  The lock is not behind the switch: it only stops a second bridge on one
+  session, which never worked. Residual: a bridge a pre-4d worker started and
+  left running when it was killed holds no lock, so it is not seen; nor does
+  the Gateway-run WhatsApp service's bridge take it (an account that service
+  owns is never moved).
 - *Records outside the data folder.* Every legacy pairing wrote the session's
   absolute path into the capture grant (`sessionPath`, and
   `OLYMPUS_TELEGRAM_SESSION_PATH` / `OLYMPUS_WHATSAPP_STATE_DIR` in its
@@ -819,8 +822,17 @@ the same look, fold, plan, rename, verify and flip, with these additions
   `raw/whatsapp`). The records sit in the config folder, so they are not in the
   plan: the flip is the commit and the rewrite follows it; until it runs, the
   capture child is given the folder's paths last (4b) and nothing reads the old
-  ones for a folder account. The rewrite changes the grant, so its child starts
-  once more.
+  ones for a folder account, and Unpair reads a stored path that still names
+  the old place as the folder's (`movedSessionValue`), so a rewrite that could
+  not be made (a secret store that would not answer at boot) never leaves the
+  login behind an Unpair that says it is done. The rewrite changes the grant,
+  so its child starts once more.
+- *A pairing the move overtakes.* A pairing settles the account's layout, then
+  takes its session's lock (the Telegram lease, the bridge's lock); a boot can
+  move the account in between. So, holding the lock, and again before it
+  registers anything, the pairing checks that the account is still where it
+  settled it, with no plan pending, and otherwise stops with nothing paired (a
+  WhatsApp pairing gives back the state folder it had just made).
 - *Paths in data.* The bridge writes each saved file's absolute path into its
   spool lines (`media_path`) and the store keeps it as the item's locator. They
   are not rewritten (the move writes nothing but file names): for an account

@@ -704,6 +704,8 @@ function checkDatabases(ctx: Context, moves: SourceRegistryMove[]): { checked: N
 
 /** The plan as the registry holds it must be one this code could have written: nothing else is ever renamed. */
 function planIsCanonical(ctx: Context, sourceId: string, slot: string, migration: SourceRegistryMigration): boolean {
+  // This build never writes an empty messaging plan; one would flip an account with its session still at the old place.
+  if (isMessaging(sourceId) && (migration.moves ?? []).length === 0) return false;
   let known: Candidate[];
   try {
     known = candidates(sourceId, slot, ctx.env);

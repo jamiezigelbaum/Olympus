@@ -44114,6 +44114,7 @@ init_secret_store();
 init_connect();
 init_file_lease();
 init_olympus_layout();
+init_source_registry();
 init_data_owner_lock();
 init_pairing_session_paths();
 
@@ -45109,6 +45110,13 @@ init_venice_models();
 init_public_surface();
 init_unpaired_sources();
 init_pairing_session_paths();
+
+// src/core/messaging-account-move.ts
+init_atomic_file();
+init_messaging_capture_grant_file();
+init_olympus_layout();
+init_source_registry();
+init_unpaired_sources();
 
 // src/workers/source-index/answer-latency-log.ts
 init_olympus_layout();
@@ -48951,13 +48959,6 @@ var SKIP_REASONS = new Set([
   "no_hard_links"
 ]);
 var NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
-
-// src/core/messaging-account-move.ts
-init_atomic_file();
-init_messaging_capture_grant_file();
-init_olympus_layout();
-init_source_registry();
-init_unpaired_sources();
 
 // src/workers/email-source/server.ts
 init_data_owner_lock();

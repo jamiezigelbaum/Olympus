@@ -37979,7 +37979,7 @@ var init_pairing_placement = __esm(() => {
 
 // src/core/messaging-pairing.ts
 import { Database as Database7 } from "bun:sqlite";
-import { chmodSync as chmodSync8, existsSync as existsSync29, linkSync, lstatSync as lstatSync17, mkdirSync as mkdirSync18, readFileSync as readFileSync27, renameSync as renameSync5, rmSync as rmSync9, statSync as statSync16 } from "node:fs";
+import { chmodSync as chmodSync8, existsSync as existsSync29, linkSync, lstatSync as lstatSync17, mkdirSync as mkdirSync18, readFileSync as readFileSync27, renameSync as renameSync5, rmdirSync as rmdirSync4, rmSync as rmSync9, statSync as statSync16 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { createHash as createHash16, randomBytes as randomBytes6 } from "node:crypto";
 import { homedir as homedir18 } from "node:os";
@@ -38004,6 +38004,8 @@ async function pairMessagingSource(options) {
     mkdirSync18(options.source === "telegram" ? dirname29(sessionPath) : sessionPath, { recursive: true, mode: 448 });
   }
   const pairing = async () => {
+    if (options.source === "telegram")
+      assertPairingPlacement(options.source, layout, registryEnv);
     const historyAccount = options.source === "telegram" ? telegramHistoryAccount(registryEnv) : undefined;
     const sessionExisted = options.source === "telegram" && existsSync29(`${sessionPath}.session`);
     const helper = await resolveHelper(options, packageRoot);
@@ -38022,7 +38024,7 @@ async function pairMessagingSource(options) {
     const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join34(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
     let result;
     let receipt;
-    const bridgeLock = options.source === "whatsapp" ? takeWhatsAppBridgeLock(sessionPath) : undefined;
+    const bridgeLock = options.source === "whatsapp" ? takeWhatsAppBridgeLock(sessionPath, () => assertPairingPlacement(options.source, layout, registryEnv)) : undefined;
     try {
       result = await runner({
         executable: command[0],
@@ -38103,6 +38105,7 @@ async function pairMessagingSource(options) {
     }
     const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
     const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
+    assertPairingPlacement(options.source, layout, registryEnv);
     const register = options.registerSession ?? connectGuidedSession;
     let connected;
     try {
@@ -38151,13 +38154,37 @@ async function pairMessagingSource(options) {
     throw error;
   }
 }
-function takeWhatsAppBridgeLock(stateDir) {
-  mkdirSync18(stateDir, { recursive: true, mode: 448 });
-  const lock = tryHoldFileFlock(join34(stateDir, WHATSAPP_BRIDGE_LOCK_NAME));
+function takeWhatsAppBridgeLock(stateDir, stillPlaced) {
+  const made = mkdirSync18(stateDir, { recursive: true, mode: 448 }) !== undefined;
+  const lockPath = join34(stateDir, WHATSAPP_BRIDGE_LOCK_NAME);
+  const lock = tryHoldFileFlock(lockPath);
   if (!lock) {
-    throw new Error("A WhatsApp bridge is already running on this session (capture, or another pairing). Finish or cancel the other pairing, or Unpair WhatsApp first, then re-run olympus connect whatsapp --pair.");
+    throw new Error("A WhatsApp bridge is already running on this session: WhatsApp capture, or another pairing. Finish or cancel the other pairing; a WhatsApp account that is paired and capturing does not need pairing again.");
+  }
+  try {
+    stillPlaced();
+  } catch (error) {
+    lock.release();
+    if (made) {
+      try {
+        rmSync9(lockPath, { force: true });
+        rmdirSync4(stateDir);
+      } catch {}
+    }
+    throw error;
   }
   return lock;
+}
+function assertPairingPlacement(source, layout, env) {
+  let entry;
+  try {
+    entry = findRegistryAccount(readSourceRegistry(env), source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, DEFAULT_ACCOUNT_SLOT);
+  } catch {
+    return;
+  }
+  if (entry && (sourceAccountMovePending(entry) || entry.layout !== layout)) {
+    throw new Error(`Olympus moved this ${sourceLabel(source)} account's files into its folder while it was pairing, so nothing was paired. Re-run olympus connect ${source} --pair.`);
+  }
 }
 async function resolveHelper(options, packageRoot) {
   if (options.source === "telegram") {
@@ -38631,6 +38658,7 @@ var init_messaging_pairing = __esm(() => {
   init_connect();
   init_file_lease();
   init_olympus_layout();
+  init_source_registry();
   init_data_owner_lock();
   init_pairing_session_paths();
   init_pairing_placement();
@@ -74583,7 +74611,7 @@ var init_source_scheduler_state = __esm(() => {
 
 // src/workers/file-extraction/spool.ts
 import { createHash as createHash46 } from "node:crypto";
-import { chmodSync as chmodSync18, existsSync as existsSync50, mkdirSync as mkdirSync35, readdirSync as readdirSync8, rmSync as rmSync14, rmdirSync as rmdirSync4, statSync as statSync23 } from "node:fs";
+import { chmodSync as chmodSync18, existsSync as existsSync50, mkdirSync as mkdirSync35, readdirSync as readdirSync8, rmSync as rmSync14, rmdirSync as rmdirSync5, statSync as statSync23 } from "node:fs";
 import { dirname as dirname53, isAbsolute as isAbsolute22, join as join62, relative as relative8, sep as sep9 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
   return join62(root, corpusFolder(owner.corpusId), accountFolder2(owner.accountScope));
@@ -74594,7 +74622,7 @@ function extractionSpoolOwnerKey(owner) {
 function pruneExtractionSpoolOwner(root, owner) {
   for (const dir of [extractionSpoolOwnerDir(root, owner), join62(root, corpusFolder(owner.corpusId))]) {
     try {
-      rmdirSync4(dir);
+      rmdirSync5(dir);
     } catch {
       return;
     }
@@ -74626,7 +74654,7 @@ function forgetExtractionSpool(root, scope, options = {}) {
     }
     if (!dryRun) {
       try {
-        rmdirSync4(corpusDir);
+        rmdirSync5(corpusDir);
       } catch {}
     }
   }
@@ -74728,11 +74756,11 @@ function prepareExtractionSpool(dir, options = {}) {
             remove(filePath);
         }
         try {
-          rmdirSync4(accountDir);
+          rmdirSync5(accountDir);
         } catch {}
       }
       try {
-        rmdirSync4(path);
+        rmdirSync5(path);
       } catch {}
     }
     return dir;
@@ -74744,7 +74772,7 @@ function discardExtractionSpoolFile(path, ownerDir) {
   rmSync14(path, { force: true });
   for (const dir of [ownerDir, dirname53(ownerDir)]) {
     try {
-      rmdirSync4(dir);
+      rmdirSync5(dir);
     } catch {
       return;
     }
@@ -88746,7 +88774,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
-import { chmodSync as chmodSync23, closeSync as closeSync18, constants as constants9, copyFileSync, existsSync as existsSync59, fstatSync as fstatSync4, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync30, linkSync as linkSync2, mkdirSync as mkdirSync42, openSync as openSync17, readFileSync as readFileSync50, readlinkSync as readlinkSync4, readdirSync as readdirSync16, realpathSync as realpathSync17, renameSync as renameSync13, rmSync as rmSync19, rmdirSync as rmdirSync5, statSync as statSync28, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
+import { chmodSync as chmodSync23, closeSync as closeSync18, constants as constants9, copyFileSync, existsSync as existsSync59, fstatSync as fstatSync4, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync30, linkSync as linkSync2, mkdirSync as mkdirSync42, openSync as openSync17, readFileSync as readFileSync50, readlinkSync as readlinkSync4, readdirSync as readdirSync16, realpathSync as realpathSync17, renameSync as renameSync13, rmSync as rmSync19, rmdirSync as rmdirSync6, statSync as statSync28, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire6 } from "node:module";
 import { basename as basename13, dirname as dirname62, join as join73, relative as relative11, resolve as resolve17, sep as sep13 } from "node:path";
 import { userInfo } from "node:os";
@@ -89637,7 +89665,7 @@ function cleanupLegacySettingsDirectories(layout) {
       continue;
     assertLinuxManagedPath(path, process.getuid(), "directory");
     if (readdirSync16(path).length === 0) {
-      rmdirSync5(path);
+      rmdirSync6(path);
       syncDirectorySync(dirname62(path));
     }
   }
@@ -133237,6 +133265,159 @@ function packagedGooglePilotClientId() {
 }
 var DEFAULT_GOOGLE_PILOT_CLIENT_ID = "604346037984-oukrdn4ouh8n2fctggracadt0fdd2lps.apps.googleusercontent.com", PACKAGED_GOOGLE_PILOT_CLIENT_ID = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__", GOOGLE_PILOT_CLIENT_ID_SENTINEL = "__OLYMPUS_GOOGLE_PILOT_CLIENT_ID__";
 
+// src/core/messaging-account-move.ts
+import { readFileSync as readFileSync70 } from "node:fs";
+import { homedir as homedir40 } from "node:os";
+import { join as join105, resolve as resolve20 } from "node:path";
+function namesDefaultLegacySession(source, value2, env) {
+  const trimmed2 = value2.trim();
+  if (trimmed2 === "")
+    return false;
+  if (source === "telegram") {
+    const base = trimmed2.endsWith(".session") ? trimmed2.slice(0, -".session".length) : trimmed2;
+    return resolve20(base) === resolve20(legacyTelegramSessionBase(env));
+  }
+  return resolve20(whatsappStateDirFromValue(trimmed2)) === resolve20(legacyWhatsAppDefaultStateDir(env));
+}
+function movedSessionValue(source, value2, env) {
+  try {
+    const entry = findRegistryAccount(readSourceRegistry(env), source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, DEFAULT_ACCOUNT_SLOT);
+    if (!entry || entry.layout !== "folder" || entry.migration?.state !== "done")
+      return value2;
+  } catch {
+    return value2;
+  }
+  return namesDefaultLegacySession(source, value2, env) ? folderSessionValue(source, env) : value2;
+}
+function folderSessionValue(source, env) {
+  const account = { source_id: source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, slot: DEFAULT_ACCOUNT_SLOT, layout: "folder" };
+  return source === "telegram" ? accountSessionPath(account, env) : accountRawPath(account, "whatsapp", env);
+}
+function handleRegistryPath(env) {
+  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join105(env.HOME?.trim() || homedir40(), ".config", "olympus", "handles.json");
+}
+async function sessionPathKeys(source, secretStore) {
+  const keys = new Set([source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path"]);
+  try {
+    for (const key2 of await secretStore.list())
+      if (key2.startsWith(`${source}.`) && key2.endsWith(".session_path"))
+        keys.add(key2);
+  } catch {}
+  return [...keys].sort();
+}
+function grantSessionValues(grant, sessionEnv) {
+  const env = grant.producer.env;
+  const fromEnv = env && typeof env[sessionEnv] === "string" ? [env[sessionEnv]] : [];
+  return [...grant.sessionPath !== undefined ? [grant.sessionPath] : [], ...fromEnv];
+}
+async function messagingMoveFacts(env, secretStore) {
+  const facts = {};
+  const unpaired = readUnpairedSources(handleRegistryPath(env));
+  for (const { sourceId, source, sessionEnv } of SOURCES) {
+    facts[sourceId] = await factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv);
+  }
+  return facts;
+}
+async function factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv) {
+  const read = readCaptureGrantFile(captureGrantPathFromEnv(source, env));
+  if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source) {
+    return { unreadable: "Its capture grant cannot be read, so it cannot be told where its session is." };
+  }
+  if (read.kind === "valid") {
+    if (grantSessionValues(read.grant, sessionEnv).some((value2) => !namesDefaultLegacySession(source, value2, env))) {
+      return { pin: "Its capture grant names a session path of its own, so its files stay there." };
+    }
+    const producerEnv = read.grant.producer.env ?? {};
+    const other = legacyOverrideEnvNames(sourceId).find((name) => name !== sessionEnv && typeof producerEnv[name] === "string" && producerEnv[name].trim() !== "");
+    if (other)
+      return { pin: `Its capture grant starts capture with ${other}, so its files stay where that names.` };
+  }
+  try {
+    for (const key2 of await sessionPathKeys(source, secretStore)) {
+      const value2 = (await secretStore.get(key2))?.trim();
+      if (value2 && !namesDefaultLegacySession(source, value2, env)) {
+        return { pin: "It was connected with a session path of its own, so its files stay there." };
+      }
+    }
+  } catch {
+    return { unreadable: "The session path it was connected with cannot be read from the secret store." };
+  }
+  if (unpaired.status === "unreadable")
+    return { unreadable: "The record of its last Unpair cannot be read." };
+  if (unpaired.status === "ok" && unpaired.records.some((record5) => record5.source_id === sourceId && record5.state !== "unpaired")) {
+    return { pin: "An Unpair that did not finish names its files, so they stay where it can find them." };
+  }
+  return {};
+}
+async function repointMovedMessagingAccounts(env, secretStore) {
+  const report = { rewritten: [], errors: [] };
+  let accounts;
+  try {
+    accounts = readSourceRegistry(env).accounts;
+  } catch {
+    return report;
+  }
+  for (const { sourceId, source, sessionEnv } of SOURCES) {
+    const entry = findRegistryAccount({ schema: 2, accounts }, sourceId, DEFAULT_ACCOUNT_SLOT);
+    if (!entry || entry.state !== "active" || entry.layout !== "folder" || entry.migration?.state !== "done")
+      continue;
+    try {
+      if (repointGrant(env, source, sessionEnv))
+        report.rewritten.push(`${sourceId}: capture grant`);
+    } catch (error2) {
+      report.errors.push({ sourceId, message: `capture grant: ${error2?.code ?? "error"}` });
+    }
+    try {
+      for (const key2 of await sessionPathKeys(source, secretStore)) {
+        const value2 = await secretStore.get(key2);
+        if (value2 === undefined || !namesDefaultLegacySession(source, value2, env))
+          continue;
+        await secretStore.set(key2, folderSessionValue(source, env));
+        report.rewritten.push(`${sourceId}: ${key2}`);
+      }
+    } catch (error2) {
+      report.errors.push({ sourceId, message: `secret store: ${error2?.code ?? "error"}` });
+    }
+  }
+  return report;
+}
+function repointGrant(env, source, sessionEnv) {
+  const path = captureGrantPathFromEnv(source, env);
+  let before;
+  try {
+    before = readFileSync70(path, "utf8");
+  } catch {
+    return false;
+  }
+  const read = readCaptureGrantFile(path);
+  if (read.kind !== "valid" || read.grant.source !== source)
+    return false;
+  const values = grantSessionValues(read.grant, sessionEnv);
+  if (values.length === 0 || !values.every((value2) => namesDefaultLegacySession(source, value2, env)))
+    return false;
+  const { sessionPath: _dropped, ...rest } = read.grant;
+  const producerEnv = { ...read.grant.producer.env ?? {} };
+  delete producerEnv[sessionEnv];
+  const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
+  if (readFileSync70(path, "utf8") !== before)
+    return false;
+  writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
+`);
+  return true;
+}
+var SOURCES;
+var init_messaging_account_move = __esm(() => {
+  init_atomic_file();
+  init_messaging_capture_grant_file();
+  init_olympus_layout();
+  init_source_registry();
+  init_unpaired_sources();
+  SOURCES = [
+    { sourceId: TELEGRAM_SOURCE_ID, source: "telegram", sessionEnv: "OLYMPUS_TELEGRAM_SESSION_PATH" },
+    { sourceId: WHATSAPP_SOURCE_ID, source: "whatsapp", sessionEnv: "OLYMPUS_WHATSAPP_STATE_DIR" }
+  ];
+});
+
 // src/workers/source-index/answer-latency-log.ts
 import {
   chmod as chmod2,
@@ -133566,9 +133747,9 @@ var init_locator_result_projector2 = __esm(() => {
 
 // src/workers/source-watch-runtime.ts
 import { createHash as createHash71 } from "node:crypto";
-import { readFileSync as readFileSync70 } from "node:fs";
+import { readFileSync as readFileSync71 } from "node:fs";
 import { request as httpsRequest2 } from "node:https";
-import { homedir as homedir40 } from "node:os";
+import { homedir as homedir41 } from "node:os";
 import { resolve as resolvePath3 } from "node:path";
 import { checkServerIdentity } from "node:tls";
 function trustedSourceWatchOwnerFromRequest(request) {
@@ -133733,7 +133914,7 @@ class OpenClawSourceWatchDeliveryTransport {
         throw new TypeError("Source watch HTTPS gateway requires gateway.tls.certPath.");
       }
       try {
-        this.caPem = readFileSync70(trustPath, "utf8");
+        this.caPem = readFileSync71(trustPath, "utf8");
       } catch {
         throw new TypeError("Source watch HTTPS gateway public certificate could not be read.");
       }
@@ -133836,7 +134017,7 @@ async function postOpenClawGatewayPluginRoute(input) {
   const url = `${connection.baseUrl}${input.path}`;
   const timeoutMs = input.timeoutMs ?? 30000;
   if (connection.certificatePath) {
-    return requestVerifiedHttps(url, init, timeoutMs, readFileSync70(connection.certificatePath, "utf8"));
+    return requestVerifiedHttps(url, init, timeoutMs, readFileSync71(connection.certificatePath, "utf8"));
   }
   return fetchWithTimeout(input.fetchImpl ?? fetch, url, init, timeoutMs);
 }
@@ -134100,12 +134281,12 @@ function resolvePublicCertificatePath(value2, env, field) {
     throw new TypeError(`OpenClaw ${field} must be a non-empty path.`);
   }
   const trimmed2 = value2.trim();
-  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir40();
+  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir41();
   const expanded = trimmed2 === "~" || trimmed2.startsWith("~/") || trimmed2.startsWith("~\\") ? `${home2}${trimmed2.slice(1)}` : trimmed2;
   return resolvePath3(expanded);
 }
 function resolveOpenClawCommand2(env) {
-  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir40();
+  const home2 = env.OPENCLAW_HOME?.trim() || env.HOME?.trim() || homedir41();
   return resolveOpenClawExecutable({ env, homeDir: home2 }) ?? "openclaw";
 }
 function normalizeGatewayBaseUrl(value2) {
@@ -134132,7 +134313,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
   if (body !== undefined && typeof body !== "string" && !(body instanceof Uint8Array)) {
     throw new TypeError("Source watch HTTPS request body must be text or bytes.");
   }
-  return new Promise((resolve20, reject) => {
+  return new Promise((resolve21, reject) => {
     let settled = false;
     let timer;
     let removeAbortListener;
@@ -134155,7 +134336,7 @@ function requestVerifiedHttps(urlValue, init, timeoutMs, ca) {
         return;
       settled = true;
       cleanup();
-      resolve20(response);
+      resolve21(response);
     };
     const abort = () => {
       const error2 = new Error("Source watch HTTPS request aborted.");
@@ -136860,12 +137041,12 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
   function request(method, params, timeoutMs) {
     const id = nextId++;
     post2({ jsonrpc: "2.0", id, method, params: params || {} });
-    return new Promise((resolve20, reject) => {
+    return new Promise((resolve21, reject) => {
       const timer = timeoutMs ? setTimeout(() => {
         delete pending[id];
         reject(new Error("timeout"));
       }, timeoutMs) : null;
-      pending[id] = { resolve: resolve20, reject, timer };
+      pending[id] = { resolve: resolve21, reject, timer };
     });
   }
   function notify(method, params) {
@@ -145274,7 +145455,7 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync30, copyFileSync as copyFileSync2, existsSync as existsSync79, lstatSync as lstatSync40, mkdirSync as mkdirSync55, readFileSync as readFileSync71 } from "node:fs";
+import { chmodSync as chmodSync30, copyFileSync as copyFileSync2, existsSync as existsSync79, lstatSync as lstatSync40, mkdirSync as mkdirSync55, readFileSync as readFileSync72 } from "node:fs";
 import { dirname as dirname83 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
@@ -145288,7 +145469,7 @@ function readSourceIngestionExclusionsFile(path) {
       rawRulesById: new Map
     };
   }
-  const text3 = readFileSync71(path, "utf8");
+  const text3 = readFileSync72(path, "utf8");
   const raw = JSON.parse(text3);
   const document2 = parseSourceIngestionExclusions(raw, path);
   const rawRulesById = new Map;
@@ -145663,12 +145844,12 @@ class SpawnCommandRunner {
     try {
       return await Promise.race([
         completed,
-        new Promise((resolve20) => {
+        new Promise((resolve21) => {
           termTimer = setTimeout(() => {
             child.kill();
             killTimer = setTimeout(() => {
               child.kill("SIGKILL");
-              resolve20({
+              resolve21({
                 code: COMMAND_TIMEOUT_EXIT_CODE,
                 stdout: "",
                 stderr: command + " timed out after " + timeoutMs + "ms."
@@ -145693,9 +145874,9 @@ var COMMAND_TIMEOUT_EXIT_CODE = 124, COMMAND_TIMEOUT_KILL_GRACE_MS = 500;
 
 // src/workers/email-source/index.ts
 import { createHash as createHash75, randomBytes as randomBytes27, timingSafeEqual as timingSafeEqual8 } from "node:crypto";
-import { readFileSync as readFileSync72, statSync as statSync34 } from "node:fs";
-import { homedir as homedir41 } from "node:os";
-import { join as join106, resolve as resolve20 } from "node:path";
+import { readFileSync as readFileSync73, statSync as statSync34 } from "node:fs";
+import { homedir as homedir42 } from "node:os";
+import { join as join107, resolve as resolve21 } from "node:path";
 
 class GogcliEmailConnectorStub {
   name = "gogcli";
@@ -147705,8 +147886,8 @@ function createEmailSourceWorker(options = {}) {
   async function withDashboardGrantMutation(mutation) {
     const previous = dashboardGrantMutationTail;
     let release;
-    dashboardGrantMutationTail = new Promise((resolve21) => {
-      release = resolve21;
+    dashboardGrantMutationTail = new Promise((resolve22) => {
+      release = resolve22;
     });
     await previous;
     try {
@@ -148022,7 +148203,7 @@ function isSqliteBusyError(error2) {
   return candidate?.code === "SQLITE_BUSY" || String(candidate?.message ?? "").toLowerCase().includes("database is locked");
 }
 function sleep4(ms) {
-  return new Promise((resolve21) => setTimeout(resolve21, ms));
+  return new Promise((resolve22) => setTimeout(resolve22, ms));
 }
 async function parseConsultAskRequest(request) {
   const record5 = await parseObjectBody(request);
@@ -148995,7 +149176,7 @@ async function dashboardPairingSession(sourceId, handleCredentialKeys, secretSto
   const source = sourceId === "telegram.messages" ? "telegram" : "whatsapp";
   const derived = source === "telegram" ? telegramPairingSessionPaths(resolved) : whatsappPairingSessionPaths(resolved);
   const sessionKeys = await dashboardSessionPathSecretKeys(source, handleCredentialKeys, secretStore);
-  const fromStored = await dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore);
+  const fromStored = await dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore, pairingLayoutEnv(resolved));
   const credentialKeys = [...new Set([
     ...handleCredentialKeys,
     ...sessionKeys.filter((candidate) => candidate.stored).map((candidate) => candidate.key)
@@ -149034,7 +149215,7 @@ async function dashboardSessionPathSecretKeys(source, handleCredentialKeys, secr
   }
   return keys;
 }
-async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore) {
+async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore, env) {
   const bySession = new Map;
   for (const candidate of sessionKeys) {
     if (!candidate.stored)
@@ -149042,7 +149223,7 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
     const value2 = (await secretStore.get(candidate.key))?.trim();
     if (!value2)
       continue;
-    const paths = pairingSessionPathsFromStoredValue(source, value2);
+    const paths = pairingSessionPathsFromStoredValue(source, movedSessionValue(source, value2, env));
     if (paths.length === 0)
       continue;
     bySession.set(sessionPathListKey(paths), paths);
@@ -149055,10 +149236,10 @@ async function dashboardStoredSessionPaths(sourceId, source, sessionKeys, secret
   return [...bySession.values()][0];
 }
 function sessionPathListKey(paths) {
-  return [...new Set(paths.map((path) => resolve20(path)))].sort().join("\x00");
+  return [...new Set(paths.map((path) => resolve21(path)))].sort().join("\x00");
 }
 function samePathList(left, right) {
-  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve20(path)))].sort();
+  const normalize5 = (paths) => [...new Set(paths.map((path) => resolve21(path)))].sort();
   const a = normalize5(left);
   const b = normalize5(right);
   return a.length === b.length && a.every((value2, index) => value2 === b[index]);
@@ -149419,7 +149600,7 @@ function dashboardStorageNotices() {
 }
 function dashboardGoogleCloudProjectId() {
   try {
-    const raw = readFileSync72(join106(homedir41(), ".olympus", "google-bootstrap.json"), "utf8");
+    const raw = readFileSync73(join107(homedir42(), ".olympus", "google-bootstrap.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed.projectId !== "string")
       return;
@@ -149979,6 +150160,7 @@ var init_email_source = __esm(() => {
   init_messaging_capture();
   init_unpaired_sources();
   init_pairing_session_paths();
+  init_messaging_account_move();
   init_text();
   init_transcription();
   init_runner();
@@ -150393,8 +150575,8 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire7 } from "node:module";
-import { existsSync as existsSync80, readFileSync as readFileSync73 } from "node:fs";
-import { dirname as dirname84, join as join107 } from "node:path";
+import { existsSync as existsSync80, readFileSync as readFileSync74 } from "node:fs";
+import { dirname as dirname84, join as join108 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
   const globs = IGNORE_SEGMENTS.map((segment) => `**/${segment}`);
@@ -150593,7 +150775,7 @@ class WatchHub {
 }
 function readInotifyLimit() {
   try {
-    const value2 = Number.parseInt(readFileSync73("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
+    const value2 = Number.parseInt(readFileSync74("/proc/sys/fs/inotify/max_user_watches", "utf8").trim(), 10);
     return Number.isFinite(value2) && value2 > 0 ? value2 : undefined;
   } catch {
     return;
@@ -150609,11 +150791,11 @@ async function loadParcelWatcher(extraDirs = []) {
   }
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
-    const candidate = join107(dir, "node_modules");
-    if (!existsSync80(join107(candidate, "@parcel", "watcher")))
+    const candidate = join108(dir, "node_modules");
+    if (!existsSync80(join108(candidate, "@parcel", "watcher")))
       continue;
     try {
-      const requireFrom = createRequire7(join107(dirname84(candidate), "package.json"));
+      const requireFrom = createRequire7(join108(dirname84(candidate), "package.json"));
       return unwrap(requireFrom(specifier));
     } catch (error2) {
       failures.push(error2 instanceof Error ? error2.message : String(error2));
@@ -150654,7 +150836,7 @@ var init_watch_hub = __esm(() => {
 // src/workers/local-files/connector.ts
 import { createHash as createHash76, randomUUID as randomUUID29 } from "node:crypto";
 import { realpathSync as realpathSync18, rmSync as rmSync26, readdirSync as readdirSync19 } from "node:fs";
-import { join as join108, posix as posix3 } from "node:path";
+import { join as join109, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
   for (const part of rel.split("/")) {
@@ -150945,7 +151127,7 @@ function createLocalFilesSourceConnector(options) {
       }
     }
   }
-  const snapshotFile = (gen) => join108(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
+  const snapshotFile = (gen) => join109(options.watch.snapshotDir, `${options.connectorId}.${gen}.snap`);
   const pruneSnapshots = (keep) => {
     if (!options.watch)
       return;
@@ -150953,7 +151135,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync19(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync26(join108(options.watch.snapshotDir, name), { force: true });
+          rmSync26(join109(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -151535,8 +151717,8 @@ function createLocalFilesOwnRootsCleanup(options) {
           walk.done = true;
         else
           walk.after = page2.next;
-        await new Promise((resolve21) => {
-          setImmediate(resolve21);
+        await new Promise((resolve22) => {
+          setImmediate(resolve22);
         });
       }
     }
@@ -151563,8 +151745,8 @@ function createLocalFilesOwnRootsCleanup(options) {
       });
       const work = running;
       let timer;
-      const bound = new Promise((resolve21) => {
-        timer = setTimeout(() => resolve21({ removed: removedNow, complete: false }), maxMs);
+      const bound = new Promise((resolve22) => {
+        timer = setTimeout(() => resolve22({ removed: removedNow, complete: false }), maxMs);
         timer.unref?.();
       });
       return Promise.race([work, bound]).finally(() => {
@@ -151670,7 +151852,7 @@ class SourceScheduler {
     this.allowedSourceIds = options.allowedSourceIds === undefined ? undefined : new Set(options.allowedSourceIds.map(normalizeSchedulerSourceId));
     this.sources = this.filterAllowedSources(options.sources);
     this.now = options.now ?? (() => new Date);
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve21) => setTimeout(resolve21, ms)));
+    this.sleep = options.sleep ?? ((ms) => new Promise((resolve22) => setTimeout(resolve22, ms)));
     this.setIntervalImpl = options.setIntervalImpl ?? setInterval;
     this.clearIntervalImpl = options.clearIntervalImpl ?? clearInterval;
     this.afterTick = options.afterTick;
@@ -153449,9 +153631,9 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync81, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync74 } from "node:fs";
+import { existsSync as existsSync81, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync75 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { dirname as dirname85, join as join109 } from "node:path";
+import { dirname as dirname85, join as join110 } from "node:path";
 function permissionHostKind(env) {
   if (env[ENGINE_HELPER_ENV])
     return "engine_helper";
@@ -153534,10 +153716,10 @@ class MacPermissions {
     if (!this.active)
       return;
     const tops = [
-      ["desktop", join109(this.home, "Desktop")],
-      ["documents", join109(this.home, "Documents")],
-      ["downloads", join109(this.home, "Downloads")],
-      ["icloud", join109(this.home, "Library", "Mobile Documents")]
+      ["desktop", join110(this.home, "Desktop")],
+      ["documents", join110(this.home, "Documents")],
+      ["downloads", join110(this.home, "Downloads")],
+      ["icloud", join110(this.home, "Library", "Mobile Documents")]
     ];
     for (const [kind, root] of tops) {
       if (isWithinScopePath(realPath, root))
@@ -153555,7 +153737,7 @@ class MacPermissions {
       return true;
     if (realPath === "/" || realPath === "/Volumes")
       return true;
-    return [join109(this.home, "Desktop"), join109(this.home, "Documents"), join109(this.home, "Downloads"), join109(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
+    return [join110(this.home, "Desktop"), join110(this.home, "Documents"), join110(this.home, "Downloads"), join110(this.home, "Library", "Mobile Documents")].some((top) => isWithinScopePath(top, realPath));
   }
   nodeAccess(guard) {
     if (this.recall(guard) === "granted")
@@ -153590,7 +153772,7 @@ class MacPermissions {
     return { state: "needs_full_disk_access", message: MAC_ACCESS_COPY.fullDiskAccess(this.appName()), settings_url: FULL_DISK_ACCESS_URL };
   }
   hasFullDiskAccess() {
-    for (const path of [join109(this.home, "Library", "Safari"), join109(this.home, "Library", "Application Support", "com.apple.TCC")]) {
+    for (const path of [join110(this.home, "Library", "Safari"), join110(this.home, "Library", "Application Support", "com.apple.TCC")]) {
       try {
         this.listProtected(path);
         return true;
@@ -153621,8 +153803,8 @@ class MacPermissions {
       });
       this.inFlight.set(guard.root, pending);
     }
-    const waiting = new Promise((resolve21) => {
-      const timer = setTimeout(() => resolve21("waiting"), this.askTimeoutMs);
+    const waiting = new Promise((resolve22) => {
+      const timer = setTimeout(() => resolve22("waiting"), this.askTimeoutMs);
       timer.unref?.();
       pending.finally(() => clearTimeout(timer)).catch(() => {
         return;
@@ -153655,7 +153837,7 @@ class MacPermissions {
     let loaded = {};
     if (this.memoryPath && existsSync81(this.memoryPath)) {
       try {
-        const parsed = JSON.parse(readFileSync74(this.memoryPath, "utf8"));
+        const parsed = JSON.parse(readFileSync75(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
           loaded = parsed;
       } catch {
@@ -153702,7 +153884,7 @@ var init_mac_permissions = __esm(() => {
 
 // src/workers/local-files/scheduler-source.ts
 import { realpathSync as realpathSync19 } from "node:fs";
-import { homedir as homedir42 } from "node:os";
+import { homedir as homedir43 } from "node:os";
 function retryTomorrow(context2, reason, afterMs = DAY_MS3) {
   const attempted = Date.parse(context2?.attemptedAt ?? new Date().toISOString());
   return { at: new Date(attempted + afterMs).toISOString(), effectiveIntervalMs: afterMs, degradedReason: reason };
@@ -153715,7 +153897,7 @@ function createLocalFilesSchedulerSource(input) {
   }
   const roots = input.policy.roots;
   const tasks = [];
-  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync19(homedir42()) });
+  const macPermissions = input.macPermissions ?? new MacPermissions({ home: realpathSync19(homedir43()) });
   const volumeResolver = input.volumes ?? input.watch?.volumes;
   const needsHelper = (scopePath) => {
     if (!macPermissions.active || macPermissions.hasHelper())
@@ -154020,9 +154202,9 @@ async function blobToArrayBuffer(blob) {
     return await blob.arrayBuffer();
   }
   const fr = new FileReader;
-  return new Promise((resolve21, reject) => {
+  return new Promise((resolve22, reject) => {
     fr.onload = () => {
-      resolve21(fr.result);
+      resolve22(fr.result);
     };
     fr.onerror = () => {
       reject(fr.error);
@@ -163804,7 +163986,7 @@ var init_removal = __esm(() => {
 });
 
 // src/workers/archive-import/dashboard.ts
-import { homedir as homedir43 } from "node:os";
+import { homedir as homedir44 } from "node:os";
 import { posix as posix6 } from "node:path";
 function archivePrivateModelFromSniffer(sniffer) {
   if (!sniffer)
@@ -163859,8 +164041,8 @@ function createArchiveImportDashboard(options) {
     env: state.env,
     ...options.now ? { now: options.now } : {}
   });
-  const pause = options.pause ?? (() => new Promise((resolve21) => setImmediate(resolve21)));
-  const home2 = options.home ?? homedir43();
+  const pause = options.pause ?? (() => new Promise((resolve22) => setImmediate(resolve22)));
+  const home2 = options.home ?? homedir44();
   let closed = false;
   let checks4 = Promise.resolve();
   const running = new Set;
@@ -164394,7 +164576,7 @@ var init_dashboard2 = __esm(() => {
 
 // src/workers/file-extraction/connector-source.ts
 import { rmSync as rmSync27, writeFileSync as writeFileSync22 } from "node:fs";
-import { basename as basename17, join as join110, resolve as resolve21, sep as sep15 } from "node:path";
+import { basename as basename17, join as join111, resolve as resolve22, sep as sep15 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
 }
@@ -164423,7 +164605,7 @@ async function readItemToFile(connector, localItemId, options) {
   if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
     throw new FileExtractionSourceError("source_too_large");
   }
-  const path = join110(options.spoolDir, extractionSpoolFileName());
+  const path = join111(options.spoolDir, extractionSpoolFileName());
   const served = () => options.stillServed?.() ?? true;
   const refuseGone = () => {
     discardExtractionSpoolFile(path, options.spoolDir);
@@ -164607,8 +164789,8 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
     async dispose() {
       if (!spooled)
         return;
-      const root = resolve21(spoolDir) + sep15;
-      const target = resolve21(path);
+      const root = resolve22(spoolDir) + sep15;
+      const target = resolve22(path);
       if (!target.startsWith(root) || basename17(target) === "")
         return;
       rmSync27(target, { force: true });
@@ -164912,7 +165094,7 @@ async function digestArchiveFiles(root, files, shouldContinue) {
           steps.return("");
           return;
         }
-        await new Promise((resolve22) => setImmediate(resolve22));
+        await new Promise((resolve23) => setImmediate(resolve23));
       }
     } catch (error2) {
       throw fileStop(error2, file.rel_path);
@@ -165383,8 +165565,8 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash84 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync84, lstatSync as lstatSync42, readFileSync as readFileSync75, readdirSync as readdirSync20, realpathSync as realpathSync22 } from "node:fs";
-import { homedir as homedir44 } from "node:os";
+import { existsSync as existsSync84, lstatSync as lstatSync42, readFileSync as readFileSync76, readdirSync as readdirSync20, realpathSync as realpathSync22 } from "node:fs";
+import { homedir as homedir45 } from "node:os";
 
 class VolumeResolver {
   deps;
@@ -165394,7 +165576,7 @@ class VolumeResolver {
     this.deps = {
       ...deps,
       platform: deps.platform ?? process.platform,
-      home: deps.home ?? homedir44(),
+      home: deps.home ?? homedir45(),
       now: deps.now ?? Date.now
     };
   }
@@ -165553,7 +165735,7 @@ function normalizeNetworkSource(source) {
 function defaultReadMounts(platform2) {
   if (platform2 === "darwin")
     return execFileSync4("/sbin/mount", [], { encoding: "utf8", timeout: 5000 });
-  return readFileSync75("/proc/self/mountinfo", "utf8");
+  return readFileSync76("/proc/self/mountinfo", "utf8");
 }
 function defaultDiskutilPlist(mountPoint) {
   try {
@@ -165898,10 +166080,10 @@ var init_source_scope_browser = __esm(() => {
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn9 } from "node:child_process";
 import { existsSync as existsSync85 } from "node:fs";
-import { homedir as homedir45 } from "node:os";
-import { join as join111 } from "node:path";
-function helperAppPathForHome(home2 = homedir45()) {
-  return join111(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
+import { homedir as homedir46 } from "node:os";
+import { join as join112 } from "node:path";
+function helperAppPathForHome(home2 = homedir46()) {
+  return join112(home2, "Library", "Application Support", "Olympus", ENGINE_HELPER_APP_NAME);
 }
 function revealHelperAndOpenFullDiskAccess(deps = {}) {
   const run2 = deps.run ?? ((command, args) => {
@@ -165918,8 +166100,8 @@ var init_mac_settings = __esm(() => {
 
 // src/workers/local-files/scope-browser.ts
 import { lstatSync as lstatSync43, readdirSync as readdirSync21, realpathSync as realpathSync23 } from "node:fs";
-import { homedir as homedir46 } from "node:os";
-import { join as join112 } from "node:path";
+import { homedir as homedir47 } from "node:os";
+import { join as join113 } from "node:path";
 function safeRealpath(path) {
   try {
     return realpathSync23.native(path);
@@ -165940,7 +166122,7 @@ function ancestorScopePaths(scopePath) {
 }
 function localFilesListing(options, mode) {
   const volumes = options.volumes ?? new VolumeResolver;
-  const home2 = safeRealpath(options.home ?? options.context?.home ?? homedir46());
+  const home2 = safeRealpath(options.home ?? options.context?.home ?? homedir47());
   const context2 = options.context ?? {
     ...defaultExclusionContext(),
     home: home2,
@@ -165949,7 +166131,7 @@ function localFilesListing(options, mode) {
   const readDirectory = options.readDirectory ?? ((realPath) => readdirSync21(realPath, { withFileTypes: true }));
   const permissions = options.permissions ?? new MacPermissions({
     home: home2,
-    memoryPath: join112(olympusDataDir(), "local-files", "folder-access.json")
+    memoryPath: join113(olympusDataDir(), "local-files", "folder-access.json")
   });
   const node = (scopePath, name, parentKey2, access) => {
     const own3 = mode === "folders" && isInsideOwnRoot(scopePath, context2);
@@ -165994,7 +166176,7 @@ function localFilesListing(options, mode) {
     }
     const offered = (entry) => !entry.isSymbolicLink() && (entry.isDirectory() || mode === "archive" && entry.isFile() && !entry.name.startsWith("."));
     return entries.filter(offered).map((entry) => {
-      const childReal = join112(realPath, entry.name);
+      const childReal = join113(realPath, entry.name);
       if (!entry.isDirectory())
         return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
@@ -166429,8 +166611,8 @@ function resolveOne(request, stores, scopes) {
     ...names.authoredAt ? { authoredAt: names.authoredAt } : {}
   };
 }
-function unreadableParentOf(resolve22, request) {
-  const [names] = resolve22([request]);
+function unreadableParentOf(resolve23, request) {
+  const [names] = resolve23([request]);
   if (!names)
     return;
   const label = parentLabelText(names);
@@ -166613,8 +166795,8 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync4, lstatSync as lstatSync44, mkdirSync as mkdirSync57, readdirSync as readdirSync22, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync6, statSync as statSync36, unlinkSync as unlinkSync4 } from "node:fs";
-import { basename as basename18, dirname as dirname86, isAbsolute as isAbsolute34, join as join113, relative as relative13, resolve as resolve22, sep as sep16 } from "node:path";
+import { linkSync as linkSync4, lstatSync as lstatSync44, mkdirSync as mkdirSync57, readdirSync as readdirSync22, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync7, statSync as statSync36, unlinkSync as unlinkSync4 } from "node:fs";
+import { basename as basename18, dirname as dirname86, isAbsolute as isAbsolute34, join as join114, relative as relative13, resolve as resolve23, sep as sep16 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === "1";
 }
@@ -166635,13 +166817,13 @@ function candidates(sourceId, slot, env) {
       add("secrets", secretLocationsPathForStore(file.legacy), secretLocationsPathForStore(to), "file", true);
       add("sniffer", tierSnifferPathForStore(file.legacy), tierSnifferPathForStore(to), "file", true);
     } else {
-      const to = file.folderPath ? join113(accountFolder(account, env), ...file.folderPath.split("/")) : accountRawPath(account, file.name, env);
+      const to = file.folderPath ? join114(accountFolder(account, env), ...file.folderPath.split("/")) : accountRawPath(account, file.name, env);
       add("raw", file.legacy, to, file.rawKind === "dir" ? "dir" : "file", file.rawKind === "db");
     }
   }
   if (sourceId === TELEGRAM_SOURCE_ID) {
     const legacyDir = dirname86(legacyTelegramSessionBase(env));
-    const folderDir = join113(accountFolder(account, env), "session");
+    const folderDir = join114(accountFolder(account, env), "session");
     const own3 = basename18(legacyTelegramSessionBase(env));
     const staged = new Set;
     for (const name of listNames(legacyDir))
@@ -166653,7 +166835,7 @@ function candidates(sourceId, slot, env) {
         staged.add(legacyName);
     }
     for (const name of [...staged].sort()) {
-      found.push({ role: "raw", from: join113(legacyDir, name), to: join113(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
+      found.push({ role: "raw", from: join114(legacyDir, name), to: join114(folderDir, folderNameOfStagedTelegramLogin(name, env)), kind: "file", db: false });
     }
   }
   return found;
@@ -166701,13 +166883,13 @@ function relPath(ctx, path) {
 }
 function absPath(ctx, rel) {
   if (!rel.startsWith("@"))
-    return join113(ctx.root, ...rel.split("/"));
+    return join114(ctx.root, ...rel.split("/"));
   const slash = rel.indexOf("/");
   const tag = rel.slice(1, slash < 0 ? undefined : slash);
   const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== "")?.root;
   if (root === undefined || slash < 0)
     throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
-  return join113(root, ...rel.slice(slash + 1).split("/"));
+  return join114(root, ...rel.slice(slash + 1).split("/"));
 }
 function moveWithoutReplacing(from, to, kind) {
   if (kind === "dir") {
@@ -166754,15 +166936,15 @@ function nearRealPath(path) {
     return realpathSync24(path);
   } catch {}
   const rest = [];
-  let near = resolve22(path);
+  let near = resolve23(path);
   for (;; ) {
     rest.unshift(basename18(near));
     const up = dirname86(near);
     if (up === near)
-      return resolve22(path);
+      return resolve23(path);
     near = up;
     try {
-      return join113(realpathSync24(near), ...rest);
+      return join114(realpathSync24(near), ...rest);
     } catch {}
   }
 }
@@ -166771,10 +166953,10 @@ function destinationIsOurs(ctx, destination) {
   const at = rootOf(ctx, parent);
   if (!at)
     return false;
-  return nearRealPath(parent) === join113(nearRealPath(at.root), at.below);
+  return nearRealPath(parent) === join114(nearRealPath(at.root), at.below);
 }
 function nearestExisting(path) {
-  let near = resolve22(path);
+  let near = resolve23(path);
   for (;; ) {
     try {
       statSync36(near);
@@ -166800,9 +166982,9 @@ function pinFor(ctx, sourceId) {
   if (facts?.pin)
     return skip("pinned", facts.pin);
   if (sourceId === WHATSAPP_SOURCE_ID) {
-    const moving = resolve22(legacyWhatsAppDefaultStateDir(env));
+    const moving = resolve23(legacyWhatsAppDefaultStateDir(env));
     for (const other of [legacyWhatsAppServiceStateDir(env), legacyWhatsAppLiveSyncStateDir(env, env.HOME?.trim() || undefined)]) {
-      if (resolve22(other) === moving)
+      if (resolve23(other) === moving)
         continue;
       const found = look(other);
       if (found.kind === "absent")
@@ -166913,6 +167095,8 @@ function checkDatabases(ctx, moves) {
   return { checked };
 }
 function planIsCanonical(ctx, sourceId, slot, migration) {
+  if (isMessaging(sourceId) && (migration.moves ?? []).length === 0)
+    return false;
   let known;
   try {
     known = candidates(sourceId, slot, ctx.env);
@@ -166938,7 +167122,7 @@ function syncFolderChains(ctx, folders) {
     let current2 = realpathSync24(at.root);
     chain.add(current2);
     for (const part of at.below.split(sep16).filter(Boolean)) {
-      current2 = join113(current2, part);
+      current2 = join114(current2, part);
       chain.add(current2);
     }
   }
@@ -166958,7 +167142,7 @@ function makeFolders(ctx, moves) {
       destinations.add(destination);
       let current2 = real;
       for (const part of relative13(ctx.root, destination).split(sep16).filter(Boolean)) {
-        current2 = join113(current2, part);
+        current2 = join114(current2, part);
         const found = lookAt(current2);
         if (found.kind === "dir")
           continue;
@@ -167001,7 +167185,7 @@ function removeEmptyFolders(ctx, moves) {
   }
   for (const folder of [...folders].sort((a, b) => b.length - a.length)) {
     try {
-      rmdirSync6(folder);
+      rmdirSync7(folder);
     } catch {}
   }
 }
@@ -167271,7 +167455,7 @@ function holdCaptureLocks(ctx, sourceId, slot) {
       continue;
     let lock;
     try {
-      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join113(dir, name));
+      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join114(dir, name));
     } catch {
       return giveBack(skip("unreadable", `Its capture lock (${name}) cannot be taken.`));
     }
@@ -167285,11 +167469,11 @@ function holdCaptureLocks(ctx, sourceId, slot) {
 function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
   if (!isMessaging(sourceId))
     return;
-  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve22(root)));
+  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve23(root)));
   const folders = new Set;
   try {
     for (const candidate of candidates(sourceId, slot, ctx.env)) {
-      const folder = resolve22(dirname86(candidate.from));
+      const folder = resolve23(dirname86(candidate.from));
       if (!rootFolders.has(folder) && rootOf(ctx, folder))
         folders.add(folder);
     }
@@ -167300,7 +167484,7 @@ function removeEmptiedLegacyFolders(ctx, sourceId, slot) {
     if (lookAt(folder).kind !== "dir")
       continue;
     try {
-      rmdirSync6(folder);
+      rmdirSync7(folder);
       syncFolder(dirname86(folder));
     } catch {}
   }
@@ -167514,149 +167698,6 @@ var init_source_account_migration = __esm(() => {
   };
   EntryChanged = class EntryChanged extends Error {
   };
-});
-
-// src/core/messaging-account-move.ts
-import { readFileSync as readFileSync76 } from "node:fs";
-import { homedir as homedir47 } from "node:os";
-import { join as join114, resolve as resolve23 } from "node:path";
-function namesDefaultLegacySession(source, value2, env) {
-  const trimmed2 = value2.trim();
-  if (trimmed2 === "")
-    return false;
-  if (source === "telegram") {
-    const base = trimmed2.endsWith(".session") ? trimmed2.slice(0, -".session".length) : trimmed2;
-    return resolve23(base) === resolve23(legacyTelegramSessionBase(env));
-  }
-  return resolve23(whatsappStateDirFromValue(trimmed2)) === resolve23(legacyWhatsAppDefaultStateDir(env));
-}
-function folderSessionValue(source, env) {
-  const account = { source_id: source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, slot: DEFAULT_ACCOUNT_SLOT, layout: "folder" };
-  return source === "telegram" ? accountSessionPath(account, env) : accountRawPath(account, "whatsapp", env);
-}
-function handleRegistryPath(env) {
-  return env.OLYMPUS_CREDENTIAL_HANDLE_REGISTRY_PATH?.trim() || join114(env.HOME?.trim() || homedir47(), ".config", "olympus", "handles.json");
-}
-async function sessionPathKeys(source, secretStore) {
-  const keys = new Set([source === "telegram" ? "telegram.personal.session_path" : "whatsapp.personal_local.session_path"]);
-  try {
-    for (const key2 of await secretStore.list())
-      if (key2.startsWith(`${source}.`) && key2.endsWith(".session_path"))
-        keys.add(key2);
-  } catch {}
-  return [...keys].sort();
-}
-function grantSessionValues(grant, sessionEnv) {
-  const env = grant.producer.env;
-  const fromEnv = env && typeof env[sessionEnv] === "string" ? [env[sessionEnv]] : [];
-  return [...grant.sessionPath !== undefined ? [grant.sessionPath] : [], ...fromEnv];
-}
-async function messagingMoveFacts(env, secretStore) {
-  const facts = {};
-  const unpaired = readUnpairedSources(handleRegistryPath(env));
-  for (const { sourceId, source, sessionEnv } of SOURCES) {
-    facts[sourceId] = await factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv);
-  }
-  return facts;
-}
-async function factsFor(env, secretStore, unpaired, sourceId, source, sessionEnv) {
-  const read = readCaptureGrantFile(captureGrantPathFromEnv(source, env));
-  if (read.kind === "invalid" || read.kind === "valid" && read.grant.source !== source) {
-    return { unreadable: "Its capture grant cannot be read, so it cannot be told where its session is." };
-  }
-  if (read.kind === "valid") {
-    if (grantSessionValues(read.grant, sessionEnv).some((value2) => !namesDefaultLegacySession(source, value2, env))) {
-      return { pin: "Its capture grant names a session path of its own, so its files stay there." };
-    }
-    const producerEnv = read.grant.producer.env ?? {};
-    const other = legacyOverrideEnvNames(sourceId).find((name) => name !== sessionEnv && typeof producerEnv[name] === "string" && producerEnv[name].trim() !== "");
-    if (other)
-      return { pin: `Its capture grant starts capture with ${other}, so its files stay where that names.` };
-  }
-  try {
-    for (const key2 of await sessionPathKeys(source, secretStore)) {
-      const value2 = (await secretStore.get(key2))?.trim();
-      if (value2 && !namesDefaultLegacySession(source, value2, env)) {
-        return { pin: "It was connected with a session path of its own, so its files stay there." };
-      }
-    }
-  } catch {
-    return { unreadable: "The session path it was connected with cannot be read from the secret store." };
-  }
-  if (unpaired.status === "unreadable")
-    return { unreadable: "The record of its last Unpair cannot be read." };
-  if (unpaired.status === "ok" && unpaired.records.some((record5) => record5.source_id === sourceId && record5.state !== "unpaired")) {
-    return { pin: "An Unpair that did not finish names its files, so they stay where it can find them." };
-  }
-  return {};
-}
-async function repointMovedMessagingAccounts(env, secretStore) {
-  const report = { rewritten: [], errors: [] };
-  let accounts;
-  try {
-    accounts = readSourceRegistry(env).accounts;
-  } catch {
-    return report;
-  }
-  for (const { sourceId, source, sessionEnv } of SOURCES) {
-    const entry = findRegistryAccount({ schema: 2, accounts }, sourceId, DEFAULT_ACCOUNT_SLOT);
-    if (!entry || entry.state !== "active" || entry.layout !== "folder" || entry.migration?.state !== "done")
-      continue;
-    try {
-      if (repointGrant(env, source, sessionEnv))
-        report.rewritten.push(`${sourceId}: capture grant`);
-    } catch (error2) {
-      report.errors.push({ sourceId, message: `capture grant: ${error2?.code ?? "error"}` });
-    }
-    try {
-      for (const key2 of await sessionPathKeys(source, secretStore)) {
-        const value2 = await secretStore.get(key2);
-        if (value2 === undefined || !namesDefaultLegacySession(source, value2, env))
-          continue;
-        await secretStore.set(key2, folderSessionValue(source, env));
-        report.rewritten.push(`${sourceId}: ${key2}`);
-      }
-    } catch (error2) {
-      report.errors.push({ sourceId, message: `secret store: ${error2?.code ?? "error"}` });
-    }
-  }
-  return report;
-}
-function repointGrant(env, source, sessionEnv) {
-  const path = captureGrantPathFromEnv(source, env);
-  let before;
-  try {
-    before = readFileSync76(path, "utf8");
-  } catch {
-    return false;
-  }
-  const read = readCaptureGrantFile(path);
-  if (read.kind !== "valid" || read.grant.source !== source)
-    return false;
-  const values = grantSessionValues(read.grant, sessionEnv);
-  if (values.length === 0 || !values.every((value2) => namesDefaultLegacySession(source, value2, env)))
-    return false;
-  const { sessionPath: _dropped, ...rest } = read.grant;
-  const producerEnv = { ...read.grant.producer.env ?? {} };
-  delete producerEnv[sessionEnv];
-  const grant = { ...rest, producer: { ...read.grant.producer, env: producerEnv } };
-  if (readFileSync76(path, "utf8") !== before)
-    return false;
-  writePrivateFileAtomicSync(path, `${JSON.stringify(grant, null, 2)}
-`);
-  return true;
-}
-var SOURCES;
-var init_messaging_account_move = __esm(() => {
-  init_atomic_file();
-  init_messaging_capture_grant_file();
-  init_olympus_layout();
-  init_source_registry();
-  init_unpaired_sources();
-  SOURCES = [
-    { sourceId: TELEGRAM_SOURCE_ID, source: "telegram", sessionEnv: "OLYMPUS_TELEGRAM_SESSION_PATH" },
-    { sourceId: WHATSAPP_SOURCE_ID, source: "whatsapp", sessionEnv: "OLYMPUS_WHATSAPP_STATE_DIR" }
-  ];
 });
 
 // src/workers/source-scope-runtime.ts
