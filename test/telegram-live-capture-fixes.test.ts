@@ -33,6 +33,7 @@ import {
 } from '../src/workers/telegram-messages/index.ts';
 import { redactTelegramCaptureSpoolSecrets } from '../src/workers/telegram-messages/capture-spool-connector.ts';
 import { forgetSpoolOffsets } from '../src/workers/telegram-messages/spool-lines.ts';
+import { createLaneTieredStoreSet } from '../src/workers/connector-store/tiered-store-set.ts';
 
 const ACCOUNT = 'telegram.personal';
 const CAPTURED_AT = '2026-10-20T10:00:00.000Z';
@@ -346,5 +347,90 @@ describe('the live item carries the richer text', () => {
       { kind: 'metadata_only' },
       { kind: 'text', text: 'Sam changed the group name.' },
     ]);
+  });
+});
+
+describe('review fixes (Astra, #545)', () => {
+  const editedRecord = (text: string, editedAt: string): string => {
+    const line = JSON.parse(record('A', { text }));
+    const sourceVersion = `${ACCOUNT}:chat-1:A:${editedAt}`;
+    line.message.editedAt = editedAt;
+    line.message.sourceVersion = sourceVersion;
+    line.capture_id = sha256([ACCOUNT, 'chat-1', 'A', sourceVersion].join('\x1f'));
+    return `${JSON.stringify(line)}\n`;
+  };
+
+  test('a cursor read again from the start never puts back an older version of a message', async () => {
+    const dir = spool({
+      '2026-10-01.jsonl': editedRecord('A as first written', '2026-10-01T09:00:00Z'),
+      '2026-10-02.jsonl': editedRecord('A after its edit', '2026-10-02T09:00:00Z'),
+    });
+    const s = stores(dir);
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir });
+      await sync.pull();
+      const text = () => s.internal.localContent(`${ACCOUNT}:chat-1:A`)?.chunks.join(' ');
+      expect(text()).toBe('A after its edit');
+      unlinkSync(join(dir, '2026-10-02.jsonl'));
+      writeFileSync(join(dir, '2026-10-03.jsonl'), record('B'));
+      const receipt = await sync.pull();
+      expect(receipt.counts.spool_cursor_resets).toBe(2);
+      // Day 1's first version was read again, and did not replace the newer one.
+      expect(text()).toBe('A after its edit');
+      expect(s.internal.localContent(`${ACCOUNT}:chat-1:B`)?.chunks.join(' ')).toBe('message B');
+      await sync.pull();
+      expect(text()).toBe('A after its edit');
+    } finally {
+      s.close();
+    }
+  });
+
+  test('a forward\'s origin and attachment names are judged as the item\'s names', async () => {
+    const key = '-----BEGIN RSA ' + 'PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----';
+    const dir = spool({
+      '2026-10-01.jsonl': record('1', { text: 'an ordinary note', extra: { forwardSource: 'telegram_forward', forwardFromName: key } })
+        + record('2', { text: 'another ordinary note', extra: { attachments: [{ attachmentId: 'document:1', type: 'file', name: key }] } })
+        + record('3', { text: 'a plain note' }),
+    });
+    const s = stores(dir);
+    const set = createLaneTieredStoreSet({ setId: 'telegram.messages', internalStore: s.internal, secureStore: s.secureLocal, splitLayers: false });
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir, tierSet: set });
+      await sync.pull();
+      const tierOf = (id: string) => set.ledger.getCurrent({ provider: 'telegram', accountScope: ACCOUNT, providerConversationId: 'chat-1', providerItemId: id });
+      expect(tierOf('1')?.metadataTier).toBe('secrets');
+      expect(tierOf('2')?.metadataTier).toBe('secrets');
+      expect(tierOf('3')?.metadataTier).not.toBe('secrets');
+      // Nothing of the key is searchable in either store.
+      expect(s.internal.searchItems('MIIEowIBAAKCAQEA', 5)).toHaveLength(0);
+      expect(s.secureLocal.searchItems('MIIEowIBAAKCAQEA', 5)).toHaveLength(0);
+    } finally {
+      s.close();
+    }
+  });
+
+  test('a Secrets rewrite reads a spool file in chunks and stays inside its window', () => {
+    // Records of about 300 KB each, so the window crosses the reader's 1 MB chunks.
+    let text = '';
+    for (let id = 1; id <= 10; id += 1) text += record(String(id), { text: `${id} ${'z'.repeat(300_000)}` });
+    const dir = spool({ '2026-10-01.jsonl': text });
+    const before = readFileSync(join(dir, '2026-10-01.jsonl'));
+    const judged: string[] = [];
+    const result = redactTelegramCaptureSpoolSecrets({
+      spoolDir: dir,
+      from: '2026-10-01.jsonl:3',
+      through: '2026-10-01.jsonl:7',
+      judge: (identity) => { judged.push(identity.providerItemId); return identity.providerItemId === '5' ? 'content' : undefined; },
+    });
+    // Only lines 4 to 7 were judged; only record 5 lost its text, in place, at its own length.
+    expect(judged).toEqual(['4', '5', '6', '7']);
+    expect(result).toEqual({ recordsRedacted: 1, recordsBlanked: 0 });
+    const after = readFileSync(join(dir, '2026-10-01.jsonl'));
+    expect(after.length).toBe(before.length);
+    const lines = after.toString('utf8').split('\n');
+    const original = before.toString('utf8').split('\n');
+    expect(lines[4]).not.toContain('zzz');
+    expect(JSON.parse(lines[4]!).message.secretRedacted).toBe(true);
+    for (const index of [0, 1, 2, 3, 5, 6, 7, 8, 9]) expect(lines[index]).toBe(original[index]);
   });
 });

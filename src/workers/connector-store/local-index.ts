@@ -3176,11 +3176,13 @@ export class LocalConnectorStore {
    * row's version moves to it, so the intake lookup reports the newest Secret version and an older record can
    * not bring the item back. Only the version changes; no names, text or chunks are written.
    */
-  advanceItemVersion(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'sourceVersion'>): void {
+  advanceItemVersion(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId' | 'sourceVersion'>, options: { onlyTombstoned?: boolean } = {}): void {
     if (identity.sourceVersion === undefined) return;
+    // A live row is moved only with its own tombstone (`tombstoneItem`), never ahead of it.
     this.db.query(`
       UPDATE items SET source_version = ?
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        ${options.onlyTombstoned === true ? 'AND tombstoned = 1' : ''}
     `).run(
       identity.sourceVersion,
       identity.provider,

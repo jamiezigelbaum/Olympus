@@ -356,6 +356,36 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   archives imported into the source go with it and the files stay where they
   are. The ChatGPT surface has no imports list, so its confirmation says
   nothing of them (open).
+- **Read back before moving on (2026-10-26).** The set's resume point passes a
+  listing only once every item the input accepted is read back through the
+  stores with the lookup intake uses (`storedItem`): its version is the one
+  reported or a newer one, brought content is there and complete, a deletion or
+  Secret is no longer active. Anything else counts as unstored, so the import
+  is not marked imported and the next pass replays it. Copy rows and deferred
+  removals are cleanup and moves only; they do not decide completion. A newer
+  names-only record over stored content moves the stored version (the text
+  stays), and a Secret or deletion moves a tombstone's version with the
+  tombstone, or on its own for a row that already is one.
+- **One record per item in a page (2026-10-26).** A page is reduced, per item
+  and independently for parents and children, to its newest accepted record
+  (same version: a deletion beats content, otherwise the later record). A
+  newer names-only record keeps the content an older record of the page
+  brought. A record without a version is accepted as the version the store
+  holds and keeps it. The page's provisional state records deletions and
+  carries content a names-only record did not remove. Children that only a
+  superseded parent listed stay (they are items of their own). Names alone
+  never bring a deletion or a Secret back, within a page or across pages: a
+  names-only record after a deletion stays a deletion at the newer version, and
+  only content from after the item's last deletion is carried forward. A merged
+  item resumes from the record that brought its content, so a pass cut between
+  the two does not lose it. The routing plan is keyed by the item's identity,
+  its version and a digest of the text and names judged, so two bodies of one
+  version are each judged. Known residual: a deletion of an item no pass ever
+  stored leaves no row, so a later tie or unversioned body can still be stored.
+- **A refused item is told (2026-10-26).** When placement refuses an item (for
+  example a trust domain that does not match), the import still completes but
+  shows it as a gap, "Not imported" (`item_refused`), with the count, as the
+  other fail-closed skips do.
 - **Counting.** An import counts its own run ("N items from this archive, of
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts
@@ -385,7 +415,11 @@ message beyond its search context (`src/workers/telegram-messages/`,
   remain, or whose file holds fewer lines than it says, no longer stops the
   lane for good: that lane reads the spool again from its start (writes are
   idempotent; skipping could lose history), and the receipt says so
-  (`telegram_spool_cursor_reset`, `spool_cursor_resets`).
+  (`telegram_spool_cursor_reset`, `spool_cursor_resets`). Reading again never
+  puts back an older version: both lanes now read the spool as the live
+  input of the Telegram connector, through the one record builder
+  (`record-builder.ts`) and the intake rule, so a record older than what the
+  stores hold (by its edit time) is not applied (review, #545).
 - **Quiet is not stale.** After every finished cycle (it read every approved
   chat) the helper writes `.capture-heartbeat.json` beside the spool. The
   receipt's age is from the newer of the newest record and the heartbeat,
@@ -402,7 +436,12 @@ message beyond its search context (`src/workers/telegram-messages/`,
   search context adds the chat, the sender and the forward's origin to the
   words and attachment names. A Secrets rewrite of a spool record now also
   takes the forward's origin and the per-sender names with the names, and a
-  service event's words (a title, an amount) with the text.
+  service event's words (a title, an amount) with the text. Every name the
+  search context adds beyond the chat and the sender (the forward's origin,
+  attachment names) is passed to the classifier as the item's names, so a
+  Secret in one of them makes the names Secrets (review, #545). The Secrets
+  rewrite itself reads a spool file in 1 MB chunks, holding one record at a
+  time, instead of the whole file.
 - **Cost.** An existing item is rewritten only when it is read again, and
   its new search context then re-embeds it once.
 

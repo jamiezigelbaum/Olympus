@@ -59,7 +59,27 @@ export function telegramClassificationSignals(
     title: signalText(item.metadata, 'title'),
     sender: signalText(item.metadata, 'senderDisplayName', 'senderId'),
     folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
+    // Every name the item adds to its search context beside the chat and the sender is judged with them.
+    labels: telegramContextNames(item),
   });
+}
+
+/**
+ * The names in an item's search context that are neither its chat nor its
+ * sender: who a forward came from, and the names of its attachments. They
+ * reach search and embedding input, so they are judged as the item's names.
+ */
+export function telegramContextNames(item: RawItem): string[] {
+  const names: string[] = [];
+  const forwardedFrom = signalText(item.metadata, 'forwardedFrom');
+  if (forwardedFrom) names.push(`Forwarded from ${forwardedFrom}`);
+  const attachmentNames = item.metadata['attachmentNames'];
+  if (Array.isArray(attachmentNames)) {
+    for (const name of attachmentNames) {
+      if (typeof name === 'string' && name.trim() && !names.includes(name.trim())) names.push(name.trim());
+    }
+  }
+  return names;
 }
 
 /** A record and the items it yields: the message, then its children. */

@@ -21867,12 +21867,13 @@ var init_local_index = __esm(() => {
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND provider_conversation_id IS NOT NULL
     `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => row.provider_conversation_id);
     }
-    advanceItemVersion(identity) {
+    advanceItemVersion(identity, options = {}) {
       if (identity.sourceVersion === undefined)
         return;
       this.db.query(`
       UPDATE items SET source_version = ?
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        ${options.onlyTombstoned === true ? "AND tombstoned = 1" : ""}
     `).run(identity.sourceVersion, identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
     }
     hasItemRow(identity) {
@@ -33524,10 +33525,16 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
 // src/workers/connector-store/capture-spool-secrets.ts
+var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
+  SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/spool-lines.ts
@@ -33563,15 +33570,22 @@ var init_message = __esm(() => {
   ]);
 });
 
+// src/workers/telegram-messages/record-builder.ts
+var init_record_builder = __esm(() => {
+  init_capture_spool_connector();
+});
+
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_READ_BYTES, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
   init_olympus_layout();
   init_source_placement();
+  init_source_inputs();
   init_capture_spool_secrets();
   init_corpus_adapter4();
   init_spool_lines();
   init_message();
+  init_record_builder();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
     secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`
@@ -34276,6 +34290,7 @@ var init_vocabulary = __esm(() => {
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      item_refused: { one: "1 item was not imported because the place it belongs in would not take it (nothing was stored in the wrong place)", many: "{n} items were not imported because the place they belong in would not take them (nothing was stored in the wrong place)" },
       files_not_looked_at: { one: "1 file in what you chose was not looked at, so it was not imported if it is an export", many: "{n} files in what you chose were not looked at, so any of them that are exports were not imported" },
       files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
@@ -34291,6 +34306,7 @@ var init_vocabulary = __esm(() => {
       item_truncated: "not_imported",
       section_not_imported: "not_imported",
       file_damaged: "not_imported",
+      item_refused: "not_imported",
       files_not_looked_at: "not_imported",
       files_unconfirmed: "not_imported",
       time_zone_assumed: "how_read",
@@ -48429,12 +48445,14 @@ init_embeddings();
 
 // src/workers/archive-import/sync.ts
 init_archive_formats();
+init_archive_formats();
 init_scope_safe_fs();
 init_source_storage();
 init_tiered_store_set();
 
 // src/workers/archive-import/source-input.ts
 init_archive_formats();
+init_source_inputs();
 
 // src/workers/archive-import/sync.ts
 init_media_bindings();

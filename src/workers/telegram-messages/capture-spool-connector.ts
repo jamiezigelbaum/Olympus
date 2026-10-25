@@ -737,6 +737,7 @@ export function telegramMessageItem(input: {
     replyToMessageId: replyTo,
     forwardSource: optionalString(input.message.forwardSource),
     ...(forwardedFrom ? { forwardedFrom } : {}),
+    ...(attachmentNames.length > 0 ? { attachmentNames } : {}),
     ...(service ? { serviceMessage: true, serviceAction: service.action } : {}),
     ...(optionalString(input.message.recordKind) ? { recordKind: optionalString(input.message.recordKind)! } : {}),
     chatType: optionalString(input.message.chatType),
