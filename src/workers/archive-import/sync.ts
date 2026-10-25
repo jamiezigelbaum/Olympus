@@ -564,7 +564,11 @@ async function runPass(
     // The listing reached its end and every file is unchanged, AND the stores consumed every item of
     // the last page: a page the store did not finish (an item budget ran out inside it) is not stored,
     // so the import is not complete however the listing ended.
-    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete);
+    // A record the source accepted that no store could take (its item is in the middle of a move) is not
+    // stored: the set kept its resume point, so the next pass reads the record again, and the import is not
+    // complete however the listing ended.
+    const waiting = run.routing.itemsUnstored;
+    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete) && waiting === 0;
     const dates = observed.dates();
     const final: { stop?: ArchiveImportStop } = {};
     // Indexing the last page yielded after the bindings were checked: they are checked again as the
@@ -610,9 +614,13 @@ async function runPass(
         }),
         complete,
         stopped: false,
-        warnings: legs.flatMap((leg) => leg.gaps),
+        warnings: [
+          ...legs.flatMap((leg) => leg.gaps),
+          ...(waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : []),
+        ],
       }),
-      continueSoon: !complete,
+      // Nothing more can be stored until the move is done: the next scheduled pass tries again.
+      continueSoon: !complete && waiting === 0,
       ...(updated ? { record: updated } : {}),
     };
   } finally {

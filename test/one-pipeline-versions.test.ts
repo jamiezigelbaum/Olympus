@@ -8,6 +8,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
+import { archiveConnectorId } from '../src/workers/archive-import/state.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import { onePipelineHarness, FIXTURE_ACCOUNT_SCOPE, type FxRecord, type OnePipelineHarness } from './support/one-pipeline-harness.ts';
 
 const cleanups: Array<() => void> = [];
@@ -120,5 +122,68 @@ describe('the version boundary does not depend on how completely an item was wri
     await h.importAll(id);
     expect(h.textOf('a')).toBe('the key is gone');
     expect(stateOf(h, 'a')).toMatchObject({ version: '9', hasContent: true });
+  });
+});
+
+describe('a newer archive record is stored before its cursor advances, whatever the item is doing', () => {
+  const visibleIn = (h: OnePipelineHarness, id: string) => h.rows()
+    .filter((row) => row.providerItemId === id && row.tombstoned === 0 && row.chunks > 0).map((row) => row.domain);
+
+  test('live v3 stored Personal, then archive v9: the v9 body is stored Private, the v3 body is gone, nothing is queued to lose it', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    h.live.records = [rec('a', 3, 'the live words')];
+    await h.pullLive();
+    expect(visibleIn(h, 'a')).toEqual(['internal']);
+
+    const id = await h.startImport('newer.mbox', [rec('a', 9, 'the archive words')]);
+    await h.importAll(id);
+    // The newer body is stored in the Private store, held until judged, and the lower copy no longer holds the old body.
+    expect(h.textOf('a')).toBe('the archive words');
+    expect(visibleIn(h, 'a')).toEqual(['secure_local']);
+    expect(everyStoredText(h)).not.toContain('the live words');
+    // One current copy set, no move waiting that would copy the old body over it.
+    expect(h.set.ledger.copies({ provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' }).map((copy) => copy.state)).not.toContain('superseded');
+    expect(h.ledgerRecord('a')?.state).not.toBe('moving');
+    expect(h.ledgerRecord('a')?.reasons).toContain('content:held_until_judged');
+    expect(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0).map((row) => row.version)).toEqual(['9', '9']);
+  });
+});
+
+describe('an accepted record no store can take yet is not passed', () => {
+  test('an item in the middle of a move holds the record: the import is not complete and its cursor stays; once the move is done the record is stored', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    h.live.records = [rec('a', 3, 'the live words')];
+    await h.pullLive();
+    const key = { provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' };
+    // The private model judges the Personal-first live item Private: its raise is queued and the lower copy hidden.
+    const queued = h.set.ledger.applySnifferVerdict(
+      key,
+      { pass: 'content', tier: 'secure', reason: 'content:sniffer:fixture-waiting:private', modelId: 'fixture' },
+      { placementFor: (decision) => h.set.placementFor(decision) },
+    );
+    expect(queued?.outcome).toBe('queued_move');
+    expect(h.ledgerRecord('a')?.state).toBe('moving');
+
+    const id = await h.startImport('during-move.mbox', [rec('a', 9, 'the archive words')]);
+    const first = await h.pull(id);
+    expect(first.record?.status).toBe('importing');
+    expect(first.continueSoon).toBe(false);
+    expect(first.receipt.warnings?.join(' ')).toContain('archive_items_waiting');
+    // The set did not commit a resume point past the record.
+    expect(h.set.committedCursor(archiveConnectorId(id))?.cursor ?? null).toBeNull();
+
+    // The move runs where moves run; the same record is then read again and stored.
+    const target = h.ledgerRecord('a')!;
+    await moveTieredItem({
+      set: h.set,
+      identity: { ...key, family: 'email', localItemId: `${FIXTURE_ACCOUNT_SCOPE}:a` },
+      target: { metadataTier: target.targetMetadataTier!, contentTier: target.targetContentTier! },
+    });
+    const done = await h.importAll(id);
+    expect(done.record?.status).toBe('imported');
+    expect(h.textOf('a')).toBe('the archive words');
+    expect(h.duplicates()).toEqual([]);
   });
 });

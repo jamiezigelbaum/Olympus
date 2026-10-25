@@ -251,6 +251,12 @@ export interface TieredStoreRoutingCounts {
   movesQueued: number;
   routedDeletions: number;
   contentUnreadHeld: number;
+  /**
+   * Records an archive input accepted that no store could take yet (the item is
+   * mid-move, or its raise is queued): the run does not commit its resume
+   * point, so the record is read again once the item is free.
+   */
+  itemsUnstored: number;
 }
 
 /** What one sweep of children whose parent is gone did: removed, and left for the next pass. */
@@ -801,8 +807,10 @@ export class TieredStoreSet {
     const cursor = legRuns[0]?.sync.cursor;
     // A pass that is not a resume point (a reconcile from the start of the
     // listing) must not overwrite the incremental lane's committed position.
-    if (options.commitCursor !== false) this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
-    return tieredRun(legRuns, run.counts, cursor);
+    // Nor is it one while a record the input accepted is not stored: the next run reads it again.
+    const unstored = run.counts.itemsUnstored > 0;
+    if (options.commitCursor !== false && !unstored) this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
+    return tieredRun(legRuns, run.counts, unstored ? undefined : cursor);
   }
 
   /**
@@ -943,6 +951,19 @@ export class TieredStoreSet {
       const store = domain ? this.store(domain) : undefined;
       return store !== undefined && !store.itemPresence(identity).active;
     });
+  }
+
+  /**
+   * @internal Tombstones the item's rows in the stores that hold its current
+   * copies (chunks, FTS rows and vectors go), so the newer version being
+   * written replaces them. Used only for a record an input brought over an
+   * item stored lower than the record's own verdict.
+   */
+  withdrawCopies(item: RawItem, copies: readonly { corpusId: string }[]): void {
+    for (const copy of copies) {
+      const domain = this.domainForCorpus(copy.corpusId);
+      this.store(domain!)?.tombstoneCopy(item.identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+    }
   }
 
   /**
@@ -1477,6 +1498,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       movesQueued: 0,
       routedDeletions: 0,
       contentUnreadHeld: 0,
+      itemsUnstored: 0,
     };
   }
 
@@ -1491,6 +1513,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     if (!entry) {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key, entry);
+      // An input's record (it carries the hold) that no store takes now is not stored: say so.
+      if (entry.plan.kind === 'hold' && entry.plan.reason === 'move_queued' && input.item.holdContentUntilJudged === true) {
+        this.counts.itemsUnstored += 1;
+      }
     }
     if (this.mode === 'per_leg' && !entry.handedOff) {
       entry.handedOff = true;
@@ -1617,6 +1643,16 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain)
       && !placementIsRaise(currentCopies, placement.copies)) {
       placement = { copies: currentCopies, embedHold: true };
+    }
+    // A record an input brought (it carries the hold) that raises an item stored lower, with the body that
+    // produced the raise, is the item's newer version: it replaces what is stored. The lower copies go BEFORE
+    // the new placement is recorded (a crash between leaves nothing visible and the record is read again),
+    // and the new body lands in its own stores in this write. Queuing a move instead would hide the old body
+    // and later copy it, never the newer one: the input's resume point passes the record at once.
+    if (routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== 'secrets'
+      && currentCopies.length > 0 && ledger.getCurrent(identity)?.state !== 'moving'
+      && placementIsRaise(currentCopies, placement.copies)) {
+      this.set.withdrawCopies(item, currentCopies);
     }
     const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity),

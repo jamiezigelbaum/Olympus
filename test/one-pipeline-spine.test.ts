@@ -84,7 +84,7 @@ describe('live and archive build one dataset', () => {
     expect(h.duplicates()).toEqual([]);
   });
 
-  test('a newer archive record over an item live stored raises it to Private: the new text is not written to Personal', async () => {
+  test('a newer archive record over an item live stored raises it to Private: the new text lands in Private, never in Personal, and no move is left to lose it', async () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive();
     h.live.records = [rec('a', 3, 'live a v3')];
@@ -92,11 +92,13 @@ describe('live and archive build one dataset', () => {
     expect(h.contentDomain('a')).toBe('internal');
     const id = await h.startImport('raise.mbox', [rec('a', 9, 'archive a v9')]);
     const out = await h.importAll(id);
-    // The set queues the move that makes the item Private (the held archive version errs Private);
-    // until it runs, the new version is not written into the Personal store.
-    expect(out.receipt.counts.tier_moves_queued).toBe(1);
-    expect(h.stores.internal.localContent('fixture-account:a')?.chunks.join(' ') ?? '').not.toContain('archive a v9');
-    expect(h.ledgerRecord('a')?.state).toBe('moving');
+    // The held archive version errs Private and replaces the Personal copy in the same write: the item
+    // is not left moving (a move would copy the old body), and nothing of either version stays in Personal.
+    expect(out.receipt.counts.tier_moves_queued).toBe(0);
+    expect(h.contentDomain('a')).toBe('secure_local');
+    expect(h.stores.internal.localContent('fixture-account:a')?.chunks.join(' ') ?? '').toBe('');
+    expect(h.textOf('a')).toBe('archive a v9');
+    expect(h.ledgerRecord('a')?.state).not.toBe('moving');
   });
 
   test('at the same version a record applies only if it brings content the stored item lacks', async () => {

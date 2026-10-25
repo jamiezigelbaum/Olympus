@@ -382,8 +382,12 @@ section consolidates and supersedes all other policy wording.
   and a persisted hold keeps applying to later versions, a live replacement
   included, until the private model has judged the item, so a live replacement
   of a held item errs Private; a newer archive record over an item live stored
-  as Personal raises it through the set's queued move. Items built only from
-  live records are unchanged. Beside the contracts, the archive import layer
+  as Personal replaces it in one write (the lower copies go first and the new
+  body lands in the Private store, so no queued move is left to copy the old
+  body over it), and a record no store can take yet (its item is in the middle
+  of a move) is not passed: the set keeps its resume point and the import is
+  not complete until the record is stored. Items built only from live records
+  are unchanged. Beside the contracts, the archive import layer
   (not a versioned contract) resolves which account an export joins
   (`resolveImportAccount`: same or new writes into that account's stores;
   unproven asks the owner in the import sheet; different stays under Archives),
