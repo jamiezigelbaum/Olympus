@@ -1,3 +1,4 @@
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { FileLeaseBusyError } from '../src/core/file-lease.ts';
 import { writePrivateFileAtomicSync } from '../src/core/atomic-file.ts';
 import { createHash } from 'node:crypto';
@@ -9,14 +10,12 @@ import { withWorkerAuthHeader, workerAuthTokenFromConfig } from '../src/core/wor
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
 import {
   DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
-  defaultDropboxConnectorStoreDbPath,
 } from '../src/workers/dropbox-files/index.ts';
 import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import {
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-  defaultGmailSecureConnectorStoreDbPath,
 } from '../src/workers/google-connectors/index.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import type { SourceTrustDomain } from '../src/core/source-index/types.ts';
@@ -590,7 +589,7 @@ export function secureLocalBackfillDryRunFromEnv(
     {
       corpusId: DROPBOX_CORPUS_ID,
       dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH?.trim()
-        || defaultDropboxConnectorStoreDbPath(env),
+        || resolvedStorePath('dropbox.files', 'secure_local', env),
       family: 'file' as const,
       trustDomain: 'secure_local' as const,
     },
@@ -599,7 +598,7 @@ export function secureLocalBackfillDryRunFromEnv(
       : [{
           corpusId: EMAIL_CORPUS_ID as typeof EMAIL_CORPUS_ID,
           dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_DB_PATH?.trim()
-            || defaultGmailSecureConnectorStoreDbPath(env),
+            || resolvedStorePath('gmail.email', 'secure_local', env),
           family: 'email' as const,
           trustDomain: 'secure_local' as const,
         }]),

@@ -4,6 +4,7 @@
 // functions as they stood on main (test/fixtures/legacy-resolution-golden.json),
 // never computed with the code under test.
 
+import { resolvedStorePath, resolvedRawPath } from '../src/core/source-placement.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,37 +20,16 @@ import {
   DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
   DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV,
   DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV,
-  defaultDropboxConnectorStoreDbPath,
-  defaultDropboxInternalConnectorStoreDbPath,
-  defaultDropboxPublicConnectorStoreDbPath,
   dropboxTierConnectorStoreDbPaths,
 } from '../src/workers/dropbox-files/connector-store.ts';
-import {
-  defaultGmailConnectorStoreDbPath,
-  defaultGmailPublicConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
-} from '../src/workers/google-connectors/gmail.ts';
-import {
-  defaultGoogleDriveConnectorStoreDbPath,
-  defaultGoogleDrivePublicConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
-} from '../src/workers/google-connectors/drive.ts';
 import {
   LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV,
   LOCAL_FILES_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV,
   LOCAL_FILES_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV,
-  defaultLocalFilesConnectorStoreDbPath,
-  defaultLocalFilesInternalConnectorStoreDbPath,
-  defaultLocalFilesPublicConnectorStoreDbPath,
   localFilesTierConnectorStoreDbPaths,
   localFilesWatchDir,
 } from '../src/workers/local-files/store.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/connector.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
-import { defaultXBookmarksReconcileStateDbPath } from '../src/workers/x-bookmarks/reconcile-state.ts';
-import { defaultXBookmarksSecureConnectorStoreDbPath } from '../src/workers/x-bookmarks/tier-set.ts';
 import golden from './fixtures/legacy-resolution-golden.json';
 
 type Env = Record<string, string | undefined>;
@@ -58,30 +38,30 @@ type Resolvers = Record<string, (env: Env) => unknown>;
 const TIERS = ['secure_local', 'internal', 'public_safe'] as const;
 
 const resolvers: Resolvers = {
-  'gmail.internal': (env) => defaultGmailConnectorStoreDbPath(env),
-  'gmail.secure_local': (env) => defaultGmailSecureConnectorStoreDbPath(env),
-  'gmail.public_safe': (env) => defaultGmailPublicConnectorStoreDbPath(env),
-  'google_drive.internal': (env) => defaultGoogleDriveConnectorStoreDbPath(env),
-  'google_drive.secure_local': (env) => defaultGoogleDriveSecureConnectorStoreDbPath(env),
-  'google_drive.public_safe': (env) => defaultGoogleDrivePublicConnectorStoreDbPath(env),
-  'dropbox.secure_local': (env) => defaultDropboxConnectorStoreDbPath(env),
-  'dropbox.internal': (env) => defaultDropboxInternalConnectorStoreDbPath(env),
-  'dropbox.public_safe': (env) => defaultDropboxPublicConnectorStoreDbPath(env),
+  'gmail.internal': (env) => resolvedStorePath('gmail.email', 'internal', env),
+  'gmail.secure_local': (env) => resolvedStorePath('gmail.email', 'secure_local', env),
+  'gmail.public_safe': (env) => resolvedStorePath('gmail.email', 'public_safe', env),
+  'google_drive.internal': (env) => resolvedStorePath('google_drive.docs', 'internal', env),
+  'google_drive.secure_local': (env) => resolvedStorePath('google_drive.docs', 'secure_local', env),
+  'google_drive.public_safe': (env) => resolvedStorePath('google_drive.docs', 'public_safe', env),
+  'dropbox.secure_local': (env) => resolvedStorePath('dropbox.files', 'secure_local', env),
+  'dropbox.internal': (env) => resolvedStorePath('dropbox.files', 'internal', env),
+  'dropbox.public_safe': (env) => resolvedStorePath('dropbox.files', 'public_safe', env),
   'dropbox.all': (env) => dropboxTierConnectorStoreDbPaths(env),
-  'local_files.secure_local': (env) => defaultLocalFilesConnectorStoreDbPath(env),
-  'local_files.internal': (env) => defaultLocalFilesInternalConnectorStoreDbPath(env),
-  'local_files.public_safe': (env) => defaultLocalFilesPublicConnectorStoreDbPath(env),
+  'local_files.secure_local': (env) => resolvedStorePath('local.files', 'secure_local', env),
+  'local_files.internal': (env) => resolvedStorePath('local.files', 'internal', env),
+  'local_files.public_safe': (env) => resolvedStorePath('local.files', 'public_safe', env),
   'local_files.all': (env) => localFilesTierConnectorStoreDbPaths(env),
   'local_files.watch': (env) => localFilesWatchDir(env),
-  'readwise.internal': (env) => defaultReadwiseConnectorStoreDbPath(env),
-  'readwise.secure_local': (env) => defaultReadwiseSecureConnectorStoreDbPath(env),
-  'x.internal': (env) => defaultXBookmarksConnectorStoreDbPath(env),
-  'x.secure_local': (env) => defaultXBookmarksSecureConnectorStoreDbPath(env),
+  'readwise.internal': (env) => resolvedStorePath('readwise.library', 'internal', env),
+  'readwise.secure_local': (env) => resolvedStorePath('readwise.library', 'secure_local', env),
+  'x.internal': (env) => resolvedStorePath('x.bookmarks', 'internal', env),
+  'x.secure_local': (env) => resolvedStorePath('x.bookmarks', 'secure_local', env),
   'x.usage': (env) => defaultXBookmarksApiUsageDbPath(env),
-  'x.reconcile': (env) => defaultXBookmarksReconcileStateDbPath(env),
-  'x.reconcile+usage': (env) => defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env)),
-  'x.reconcile+memory': (env) => defaultXBookmarksReconcileStateDbPath(env, ':memory:'),
-  'x.reconcile+custom': (env) => defaultXBookmarksReconcileStateDbPath(env, '/custom/usage.sqlite'),
+  'x.reconcile': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env),
+  'x.reconcile+usage': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: defaultXBookmarksApiUsageDbPath(env) }),
+  'x.reconcile+memory': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: ':memory:' }),
+  'x.reconcile+custom': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: '/custom/usage.sqlite' }),
   'archive.all': (env) => archiveConnectorStoreDbPaths(archiveImportFamilies(), env),
   'archive.state': (env) => defaultArchiveImportStatePath(env),
   'archive.requests': (env) => archiveImportRequestsPath(defaultArchiveImportStatePath(env)),

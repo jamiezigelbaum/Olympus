@@ -40,7 +40,7 @@ import {
 import { revokeWaitingPrivateQuestions } from './waiting-private-questions.ts';
 import { credentialInstallId, mintCredential } from '../../connect-relay/shared/tokens.ts';
 import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
-import { olympusDataPath } from './olympus-layout.ts';
+import { sharedDataPath } from './olympus-layout.ts';
 
 export const REMOTE_CONNECTIONS_STORE_ID = 'remote-connections';
 export const REMOTE_CONNECTIONS_SCHEMA_VERSION = 3;
@@ -177,7 +177,7 @@ export function resolveRemoteConnectionsDbPathForCli(
 export function defaultRemoteConnectionsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const path = olympusDataPath(env, 'remote-connections.sqlite');
+  const path = sharedDataPath('remote-connections', env);
   if (!isAbsolute(path)) {
     throw new TypeError('Remote connections XDG_DATA_HOME must be an absolute private data root.');
   }

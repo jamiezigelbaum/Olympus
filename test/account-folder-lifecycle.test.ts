@@ -15,9 +15,8 @@ import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry, sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { __sourceStorageTestHooks, enableSourceRegistryAdoption, openConnectorStore } from '../src/core/source-storage.ts';
 import { deleteOlympusData, exportOlympusData, verifyOlympusDataExport } from '../src/data-lifecycle.ts';
-import { createReadwiseConnectorStore, defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
-import { createXBookmarksConnectorStore, defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/connector.ts';
+import { createReadwiseConnectorStore } from '../src/workers/readwise/connector.ts';
+import { createXBookmarksConnectorStore } from '../src/workers/x-bookmarks/connector.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
 
 type Env = Record<string, string>;
@@ -55,22 +54,22 @@ function put(path: string, text = 'x'): string {
 /** A connected Readwise (two tiers), as the worker opens it. */
 function connectReadwise(env: Env): string[] {
   enableSourceRegistryAdoption();
-  const internal = createReadwiseConnectorStore(defaultReadwiseConnectorStoreDbPath(env), env);
+  const internal = createReadwiseConnectorStore(resolvedStorePath('readwise.library', 'internal', env), env);
   internal.close();
-  const secureDb = defaultReadwiseSecureConnectorStoreDbPath(env);
+  const secureDb = resolvedStorePath('readwise.library', 'secure_local', env);
   openConnectorStore({ sourceId: 'readwise.library' }, {
     dbPath: secureDb,
     corpusId: 'secure_local.readwise.library',
     family: 'readwise',
     trustDomain: 'secure_local',
   }, env).close();
-  return [defaultReadwiseConnectorStoreDbPath(env), secureDb];
+  return [resolvedStorePath('readwise.library', 'internal', env), secureDb];
 }
 
 /** A connected Readwise (two tiers) and X, as the worker opens them. */
 function connect(env: Env): { readwise: string[]; x: string } {
   const readwise = connectReadwise(env);
-  const xDb = defaultXBookmarksConnectorStoreDbPath(env);
+  const xDb = resolvedStorePath('x.bookmarks', 'internal', env);
   createXBookmarksConnectorStore(xDb, env).close();
   return { readwise, x: xDb };
 }
@@ -171,7 +170,7 @@ describe('Delete of one folder account', () => {
     // The entry went with the files (step 5), and nothing is left at a legacy path.
     expect(readSourceRegistry(env).accounts).toEqual([]);
     enableSourceRegistryAdoption();
-    const placed = defaultReadwiseConnectorStoreDbPath(env);
+    const placed = resolvedStorePath('readwise.library', 'internal', env);
     expect(placed).toBe(join(readwiseFolder(env), 'stores', 'internal.sqlite'));
     createReadwiseConnectorStore(placed, env).close();
     expect(existsSync(legacy)).toBe(false);
@@ -265,8 +264,8 @@ describe('Delete never reaches into another account', () => {
     __sourceStorageTestHooks.disableAdoption();
     const xStore = join(readwiseFolder(base), 'stores', 'x.sqlite');
     const env = { ...base, OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH: xStore };
-    createXBookmarksConnectorStore(defaultXBookmarksConnectorStoreDbPath(env), env).close();
-    expect(defaultXBookmarksConnectorStoreDbPath(env)).toBe(xStore);
+    createXBookmarksConnectorStore(resolvedStorePath('x.bookmarks', 'internal', env), env).close();
+    expect(resolvedStorePath('x.bookmarks', 'internal', env)).toBe(xStore);
     expect(existsSync(xStore)).toBe(true);
     const before = snapshot(olympusDataRoot(env));
 

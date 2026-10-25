@@ -31,7 +31,6 @@ import {
   ACCOUNT_TRASH_DIR,
   accountFoldersRoot,
   accountTrashRoot,
-  olympusDataPath,
   olympusDataRoot,
   type LayoutEnv,
 } from './core/olympus-layout.ts';

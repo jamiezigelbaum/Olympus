@@ -131,12 +131,9 @@ export {
   DROPBOX_PUBLIC_FILES_CORPUS_ID,
   DROPBOX_TIER_CORPUS_IDS,
   createDropboxTierConnectorStore,
-  defaultDropboxInternalConnectorStoreDbPath,
-  defaultDropboxPublicConnectorStoreDbPath,
   dropboxTierConnectorStoreDbPaths,
   DROPBOX_INGESTION_EXCLUSION_SOURCE,
   DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA,
   createDropboxConnectorStore,
-  defaultDropboxConnectorStoreDbPath,
   dropboxIngestionExclusionMatcher,
 } from './connector-store.ts';

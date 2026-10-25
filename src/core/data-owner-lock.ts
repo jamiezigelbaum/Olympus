@@ -27,7 +27,7 @@ import { closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { constants as osConstants } from 'node:os';
 import { dirname } from 'node:path';
-import { olympusDataRoot, olympusDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { olympusDataRoot, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 const runtimeRequire = createRequire(import.meta.url);
 
@@ -74,7 +74,7 @@ export interface DataOwnerLockOptions {
 
 /** The lock file itself, `<data>/data-owner.lock`. */
 export function dataOwnerLockPath(env: LayoutEnv = process.env): string {
-  return olympusDataPath(env, OWNER_LOCK_NAME);
+  return sharedDataPath('data-owner-lock', env);
 }
 
 /** Whether `name` (a file name, not a path) is the owner lock. */

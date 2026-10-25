@@ -136,12 +136,6 @@ export function defaultWhatsAppMediaRoots(
   return [resolvedRawPath(WHATSAPP_SOURCE_ID, 'whatsapp-media-root', env)];
 }
 
-export function defaultWhatsAppConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env);
-}
-
 /**
  * Where scripts/whatsapp-live-sync.ts reads and writes: the account's own
  * folder when it lives in one, else the places that script always used, which
@@ -154,7 +148,7 @@ export function whatsAppLiveSyncScriptPaths(
   homeDir: string | undefined = homedir(),
 ): { spoolDir: string; dbPath: string } {
   if (placedAccount(WHATSAPP_SOURCE_ID, env).layout === 'folder') {
-    return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: defaultWhatsAppConnectorStoreDbPath(env) };
+    return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env) };
   }
   const stateDir = legacyWhatsAppLiveSyncStateDir(env, homeDir ?? homedir());
   return { spoolDir: join(stateDir, 'spool'), dbPath: join(stateDir, 'connector-store.db') };
@@ -168,12 +162,6 @@ export function sanitizeWhatsAppLiveCursor(cursor: string | undefined): string |
   const file = separator > 0 ? cursor.slice(0, separator) : '';
   const line = separator > 0 ? cursor.slice(separator + 1) : '';
   return file && /^\d+$/.test(line) ? cursor : undefined;
-}
-
-export function defaultWhatsAppInternalConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env);
 }
 
 /**
@@ -205,7 +193,7 @@ export function createWhatsAppTierLane(options: {
     throw new Error('The WhatsApp lane\'s own store is secure_local.');
   }
   const env = options.env ?? process.env;
-  const internalDbPath = defaultWhatsAppInternalConnectorStoreDbPath(env);
+  const internalDbPath = resolvedStorePath(WHATSAPP_SOURCE_ID, 'internal', env);
   return createExistingStoreTierLane({
     setId: WHATSAPP_PERSONAL_SOURCE_ID,
     store: options.store,
@@ -235,7 +223,7 @@ export function createWhatsAppConnectorStore(
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
   return openConnectorStore({ sourceId: WHATSAPP_PERSONAL_SOURCE_ID }, {
-    dbPath: defaultWhatsAppConnectorStoreDbPath(env),
+    dbPath: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env),
     corpusId: WHATSAPP_LIVE_CORPUS_ID,
     family: 'chat',
     trustDomain: 'secure_local',

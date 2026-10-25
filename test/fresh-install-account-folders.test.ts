@@ -4,6 +4,7 @@
 // `sources/<source_id>/1/`. Messaging stays on its legacy paths until a later
 // step. Spawning tests carry an explicit timeout (test/spawn-timeout-guard.test.ts).
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,6 @@ import {
   createRefreshableReadwiseConnectorStoreRuntime,
   createXBookmarksConnectorStoreRuntime,
 } from '../src/workers/email-source/server.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
 import type { SourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
 import { LocalXBookmarksApiUsageStore } from '../src/workers/x-bookmarks/index.ts';
@@ -173,7 +173,7 @@ describe('a fresh install: Readwise, X and an imported archive connect (with fak
     const readwise = createRefreshableReadwiseConnectorStoreRuntime({ enabled: true, embeddingProvider, env });
     expect(readwise).toBeDefined();
     openConnectorStore({ sourceId: 'readwise.library' }, {
-      dbPath: defaultReadwiseSecureConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('readwise.library', 'secure_local', env),
       corpusId: 'secure_local.readwise.library',
       family: 'readwise',
       trustDomain: 'secure_local',

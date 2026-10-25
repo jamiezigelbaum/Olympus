@@ -1,4 +1,4 @@
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { createHash } from 'node:crypto';
@@ -184,7 +184,7 @@ export function defaultReadwiseRequestBudgetStatePath(
 ): string {
   const configured = env[READWISE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV]?.trim();
   if (configured) return configured;
-  return olympusDataPath(env, 'readwise-daily-request-budget.json');
+  return sharedDataPath('readwise-request-budget', env);
 }
 
 interface ReadwiseRequestBudgetStateFile {
@@ -479,7 +479,7 @@ export const READWISE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.free
 });
 
 export function createReadwiseConnectorStore(
-  dbPath = defaultReadwiseConnectorStoreDbPath(),
+  dbPath = resolvedStorePath('readwise.library', 'internal'),
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
   return openConnectorStore({ sourceId: READWISE_SOURCE_ID }, {
@@ -488,12 +488,6 @@ export function createReadwiseConnectorStore(
     family: 'readwise',
     trustDomain: 'internal',
   }, env);
-}
-
-export function defaultReadwiseConnectorStoreDbPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return resolvedStorePath(READWISE_SOURCE_ID, 'internal', env);
 }
 
 export function readwiseDailyRequestBudgetFromEnv(

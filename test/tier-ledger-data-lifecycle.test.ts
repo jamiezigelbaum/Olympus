@@ -5,6 +5,7 @@
 // source's ledgers, and `delete --all` finds every ledger wherever its store
 // was relocated (a *_DB_PATH override, XDG_DATA_HOME, the WhatsApp state dir).
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,9 +14,6 @@ import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { classifyItemTiers } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger, tierLedgerPathForStore } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
-import { defaultGmailConnectorStoreDbPath } from '../src/workers/google-connectors/index.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
-import { defaultWhatsAppConnectorStoreDbPath } from '../src/workers/whatsapp/store-sync.ts';
 
 function seedLedger(storePath: string, provider: string): string {
   const ledgerPath = tierLedgerPathForStore(storePath);
@@ -42,9 +40,9 @@ function fixture(): { dir: string; homeDir: string; env: Record<string, string>;
     OLYMPUS_WHATSAPP_STATE_DIR: join(homeDir, '.local', 'state', 'olympus', 'whatsapp-moved'),
   };
   const paths = {
-    gmail: defaultGmailConnectorStoreDbPath(env),
-    readwise: defaultReadwiseConnectorStoreDbPath(env),
-    whatsapp: defaultWhatsAppConnectorStoreDbPath(env),
+    gmail: resolvedStorePath('gmail.email', 'internal', env),
+    readwise: resolvedStorePath('readwise.library', 'internal', env),
+    whatsapp: resolvedStorePath('whatsapp.personal.messages', 'secure_local', env),
   };
   return { dir, homeDir, env, paths };
 }

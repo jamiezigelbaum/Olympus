@@ -7,6 +7,7 @@
 
 import { accessSync, constants, readFileSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
+import { sharedDataPath } from '../../../core/olympus-layout.ts';
 import { modelInstallFailedReason, type ModelInstallFailedReason } from '../../../core/model-install-failure.ts';
 import type { ModelLoadFailedReason } from '../../chatgpt/dashboard-contract.ts';
 import {
@@ -14,7 +15,6 @@ import {
   installPinnedModel,
   llamaServerRuntimeDir,
   llamaServerRuntimeLockPath,
-  olympusModelsDir,
   readPinnedModelStatus,
   reportPinnedModelState,
   type BuiltInReasoningFailureReason,
@@ -54,7 +54,7 @@ export function builtInTranscriptionLayout(
   runtime: LlamaServerRuntimeSpec = LLAMA_SERVER_RUNTIME,
   platform = currentPlatform(),
 ): PinnedModelLayout {
-  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || join(olympusModelsDir(env), 'built-in-transcription');
+  const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || sharedDataPath('built-in-transcription', env);
   if (!isAbsolute(root)) throw new TypeError('The built-in transcription directory must be an absolute path.');
   return {
     root,

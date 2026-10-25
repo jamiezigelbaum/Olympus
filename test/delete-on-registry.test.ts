@@ -5,6 +5,7 @@
 // the layout's resolvers put them), releases its pictures and drops the entry,
 // so a reconnect starts a new account. data-lifecycle.ts knows no source.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,8 +22,7 @@ import {
   SourceStorageUnavailableError,
 } from '../src/core/source-storage.ts';
 import { accountTrashRemovalsSettled, deleteMarkedAccounts, deleteOlympusData, exportOlympusData, lifecycleAccountFiles } from '../src/data-lifecycle.ts';
-import { createReadwiseConnectorStore, defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
+import { createReadwiseConnectorStore } from '../src/workers/readwise/connector.ts';
 import { defaultXBookmarksApiUsageDbPath, LocalXBookmarksApiUsageStore } from '../src/workers/x-bookmarks/live-control.ts';
 
 type Env = Record<string, string>;
@@ -53,8 +53,8 @@ function fixture(): { dir: string; homeDir: string; env: Env } {
 /** A connected Readwise (two tiers) as the worker opens it: a folder account on a fresh install. */
 function connectReadwise(env: Env): string[] {
   enableSourceRegistryAdoption();
-  createReadwiseConnectorStore(defaultReadwiseConnectorStoreDbPath(env), env).close();
-  const secureDb = defaultReadwiseSecureConnectorStoreDbPath(env);
+  createReadwiseConnectorStore(resolvedStorePath('readwise.library', 'internal', env), env).close();
+  const secureDb = resolvedStorePath('readwise.library', 'secure_local', env);
   openConnectorStore({ sourceId: 'readwise.library' }, {
     dbPath: secureDb,
     corpusId: 'secure_local.readwise.library',
@@ -62,7 +62,7 @@ function connectReadwise(env: Env): string[] {
     trustDomain: 'secure_local',
   }, env).close();
   __sourceStorageTestHooks.disableAdoption();
-  return [defaultReadwiseConnectorStoreDbPath(env), secureDb];
+  return [resolvedStorePath('readwise.library', 'internal', env), secureDb];
 }
 
 function put(path: string, text = 'x'): string {

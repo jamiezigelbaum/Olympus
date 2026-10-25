@@ -4,6 +4,7 @@
 // `delete --source` takes exactly that source's files, relocated or not, and
 // `delete --all` takes every one.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,10 +16,6 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import {
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
-  defaultGmailPublicConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
-  defaultGoogleDrivePublicConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
 } from '../src/workers/google-connectors/index.ts';
 
 function seed(secureStorePath: string, publicStorePath: string, provider: string): string[] {
@@ -50,8 +47,8 @@ describe('tiered store sets are covered by data deletion', () => {
   test('the Public stores are in their sources\' inventory', () => {
     const env = { HOME: '/home/owner', XDG_DATA_HOME: '/data' };
     const paths = (sourceId: string) => lifecycleAccountFiles(sourceId, { env }).stores;
-    expect(paths('gmail.email')).toContain(defaultGmailPublicConnectorStoreDbPath(env));
-    expect(paths('google_drive.docs')).toContain(defaultGoogleDrivePublicConnectorStoreDbPath(env));
+    expect(paths('gmail.email')).toContain(resolvedStorePath('gmail.email', 'public_safe', env));
+    expect(paths('google_drive.docs')).toContain(resolvedStorePath('google_drive.docs', 'public_safe', env));
   });
 
   test('delete --source takes the set ledger, the secret-locations index and the Public store of that source only, even relocated', () => {
@@ -66,8 +63,8 @@ describe('tiered store sets are covered by data deletion', () => {
         OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_SECURE_CONNECTOR_STORE_DB_PATH: join(dir, 'elsewhere', 'drive-secure.sqlite'),
         OLYMPUS_SOURCE_INDEX_GMAIL_PUBLIC_CONNECTOR_STORE_DB_PATH: join(dir, 'elsewhere', 'gmail-public.sqlite'),
       };
-      const gmail = seed(defaultGmailSecureConnectorStoreDbPath(env), defaultGmailPublicConnectorStoreDbPath(env), 'gmail');
-      const drive = seed(defaultGoogleDriveSecureConnectorStoreDbPath(env), defaultGoogleDrivePublicConnectorStoreDbPath(env), 'google_drive');
+      const gmail = seed(resolvedStorePath('gmail.email', 'secure_local', env), resolvedStorePath('gmail.email', 'public_safe', env), 'gmail');
+      const drive = seed(resolvedStorePath('google_drive.docs', 'secure_local', env), resolvedStorePath('google_drive.docs', 'public_safe', env), 'google_drive');
       for (const path of [...gmail, ...drive]) expect(existsSync(path)).toBe(true);
 
       deleteOlympusData({ sourceId: 'google_drive.docs', homeDir, env });

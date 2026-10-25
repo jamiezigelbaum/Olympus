@@ -30,7 +30,7 @@
  * guard's regex-literal heuristic reads a one-line block comment as a regex.
  */
 
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { sharedDataPath } from '../../core/olympus-layout.ts';
 import { existsSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
@@ -45,7 +45,7 @@ export function defaultFileExtractionJobsDbPath(
 ): string {
   const override = env[FILE_EXTRACTION_JOBS_DB_PATH_ENV]?.trim();
   if (override) return override;
-  return olympusDataPath(env, 'file-extraction-jobs.sqlite');
+  return sharedDataPath('file-extraction-jobs', env);
 }
 
 /**

@@ -4,6 +4,7 @@
 // inventory, so `delete --source` takes exactly that source's files, relocated
 // or not, and `delete --all` takes every one.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,19 +15,6 @@ import { SecretLocationsIndex, secretLocationsPathForStore } from '../src/worker
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
-import {
-  defaultDropboxConnectorStoreDbPath,
-  defaultDropboxInternalConnectorStoreDbPath,
-  defaultDropboxPublicConnectorStoreDbPath,
-} from '../src/workers/dropbox-files/index.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
-import {
-  defaultWhatsAppConnectorStoreDbPath,
-  defaultWhatsAppInternalConnectorStoreDbPath,
-} from '../src/workers/whatsapp/index.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
-import { defaultXBookmarksSecureConnectorStoreDbPath } from '../src/workers/x-bookmarks/tier-set.ts';
 
 /** A lane's set ledger and secret index beside its secure path, plus its new tier stores. */
 function seed(input: {
@@ -69,21 +57,21 @@ describe('P1c tier stores are covered by data deletion', () => {
     const env = { HOME: '/home/owner', XDG_DATA_HOME: '/data' };
     const paths = (sourceId: string) => lifecycleAccountFiles(sourceId, { env }).stores;
     expect(paths('dropbox.files')).toEqual([
-      defaultDropboxConnectorStoreDbPath(env),
-      defaultDropboxInternalConnectorStoreDbPath(env),
-      defaultDropboxPublicConnectorStoreDbPath(env),
+      resolvedStorePath('dropbox.files', 'secure_local', env),
+      resolvedStorePath('dropbox.files', 'internal', env),
+      resolvedStorePath('dropbox.files', 'public_safe', env),
     ]);
     expect(paths('readwise.library')).toEqual([
-      defaultReadwiseConnectorStoreDbPath(env),
-      defaultReadwiseSecureConnectorStoreDbPath(env),
+      resolvedStorePath('readwise.library', 'internal', env),
+      resolvedStorePath('readwise.library', 'secure_local', env),
     ]);
     expect(paths('x.bookmarks')).toEqual([
-      defaultXBookmarksConnectorStoreDbPath(env),
-      defaultXBookmarksSecureConnectorStoreDbPath(env),
+      resolvedStorePath('x.bookmarks', 'internal', env),
+      resolvedStorePath('x.bookmarks', 'secure_local', env),
     ]);
     expect(paths('whatsapp.personal.messages')).toEqual([
-      defaultWhatsAppConnectorStoreDbPath(env),
-      defaultWhatsAppInternalConnectorStoreDbPath(env),
+      resolvedStorePath('whatsapp.personal.messages', 'secure_local', env),
+      resolvedStorePath('whatsapp.personal.messages', 'internal', env),
     ]);
   });
 
@@ -104,29 +92,29 @@ describe('P1c tier stores are covered by data deletion', () => {
       const dropbox = seed({
         provider: 'dropbox',
         family: 'file',
-        securePath: defaultDropboxConnectorStoreDbPath(env),
+        securePath: resolvedStorePath('dropbox.files', 'secure_local', env),
         newStores: [
-          { path: defaultDropboxInternalConnectorStoreDbPath(env), trustDomain: 'internal', corpusId: 'internal.dropbox.files' },
-          { path: defaultDropboxPublicConnectorStoreDbPath(env), trustDomain: 'public_safe', corpusId: 'public_safe.dropbox.files' },
+          { path: resolvedStorePath('dropbox.files', 'internal', env), trustDomain: 'internal', corpusId: 'internal.dropbox.files' },
+          { path: resolvedStorePath('dropbox.files', 'public_safe', env), trustDomain: 'public_safe', corpusId: 'public_safe.dropbox.files' },
         ],
       });
       const readwise = seed({
         provider: 'readwise',
         family: 'readwise',
-        securePath: defaultReadwiseSecureConnectorStoreDbPath(env),
-        newStores: [{ path: defaultReadwiseSecureConnectorStoreDbPath(env), trustDomain: 'secure_local', corpusId: 'secure_local.readwise.library' }],
+        securePath: resolvedStorePath('readwise.library', 'secure_local', env),
+        newStores: [{ path: resolvedStorePath('readwise.library', 'secure_local', env), trustDomain: 'secure_local', corpusId: 'secure_local.readwise.library' }],
       });
       const x = seed({
         provider: 'x',
         family: 'x',
-        securePath: defaultXBookmarksSecureConnectorStoreDbPath(env),
-        newStores: [{ path: defaultXBookmarksSecureConnectorStoreDbPath(env), trustDomain: 'secure_local', corpusId: 'secure_local.x.bookmarks' }],
+        securePath: resolvedStorePath('x.bookmarks', 'secure_local', env),
+        newStores: [{ path: resolvedStorePath('x.bookmarks', 'secure_local', env), trustDomain: 'secure_local', corpusId: 'secure_local.x.bookmarks' }],
       });
       const whatsapp = seed({
         provider: 'whatsapp',
         family: 'chat',
-        securePath: defaultWhatsAppConnectorStoreDbPath(env),
-        newStores: [{ path: defaultWhatsAppInternalConnectorStoreDbPath(env), trustDomain: 'internal', corpusId: 'internal.whatsapp.messages' }],
+        securePath: resolvedStorePath('whatsapp.personal.messages', 'secure_local', env),
+        newStores: [{ path: resolvedStorePath('whatsapp.personal.messages', 'internal', env), trustDomain: 'internal', corpusId: 'internal.whatsapp.messages' }],
       });
       const all = [...dropbox, ...readwise, ...x, ...whatsapp];
       for (const path of all) expect(`${path}:${existsSync(path)}`).toBe(`${path}:true`);

@@ -1,3 +1,4 @@
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -26,7 +27,6 @@ import { createSourceIndexStatusHandler } from '../src/workers/source-index/stat
 import type { SourceIndexStatusResult } from '../src/workers/source-index/status.ts';
 import {
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-  defaultProtectedTelegramConnectorStoreDbPath,
 } from '../src/workers/telegram-messages/index.ts';
 
 describe('source ingestion ledger', () => {
@@ -246,7 +246,7 @@ describe('source ingestion ledger', () => {
   test('normal collection includes the canonical protected Telegram connector store', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-telegram-store-'));
     const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'data') };
-    const dbPath = defaultProtectedTelegramConnectorStoreDbPath(env);
+    const dbPath = resolvedStorePath('telegram.messages', 'secure_local', env);
     const store = new LocalConnectorStore({
       dbPath,
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
@@ -283,7 +283,7 @@ describe('source ingestion ledger', () => {
     const dir = mkdtempSync(join(tmpdir(), 'olympus-ingestion-ledger-deleting-'));
     const env = { HOME: join(dir, 'home'), XDG_DATA_HOME: join(dir, 'data') };
     const telegram = new LocalConnectorStore({
-      dbPath: defaultProtectedTelegramConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('telegram.messages', 'secure_local', env),
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'secure_local',

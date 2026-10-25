@@ -7,6 +7,7 @@
 // while omitting the live corpora, and X bookmarks, which has no legacy index
 // at all, could not be exported by any command.
 
+import { resolvedStorePath, resolvedRawPath } from '../src/core/source-placement.ts';
 import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,25 +18,11 @@ import {
   deleteOlympusData,
   exportOlympusData,
 } from '../src/data-lifecycle.ts';
-import { defaultDropboxConnectorStoreDbPath } from '../src/workers/dropbox-files/index.ts';
-import {
-  defaultGmailConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
-  defaultGoogleDriveConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
-} from '../src/workers/google-connectors/index.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/index.ts';
-import {
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
-} from '../src/workers/telegram-messages/index.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/index.ts';
 import {
   defaultXBookmarksApiUsageDbPath,
   LocalXBookmarksApiUsageStore,
 } from '../src/workers/x-bookmarks/live-control.ts';
 import {
-  defaultXBookmarksReconcileStateDbPath,
   LocalXBookmarksReconcileStateStore,
 } from '../src/workers/x-bookmarks/reconcile-state.ts';
 
@@ -45,15 +32,15 @@ import {
 function connectorStorePaths(homeDir: string) {
   const env = { HOME: homeDir, XDG_DATA_HOME: join(homeDir, '.local', 'share') };
   return {
-    gmail: defaultGmailConnectorStoreDbPath(env),
-    gmailSecure: defaultGmailSecureConnectorStoreDbPath(env),
-    drive: defaultGoogleDriveConnectorStoreDbPath(env),
-    driveSecure: defaultGoogleDriveSecureConnectorStoreDbPath(env),
-    dropbox: defaultDropboxConnectorStoreDbPath(env),
-    readwise: defaultReadwiseConnectorStoreDbPath(env),
-    telegramInternal: defaultInternalTelegramConnectorStoreDbPath(env),
-    telegramProtected: defaultProtectedTelegramConnectorStoreDbPath(env),
-    xBookmarks: defaultXBookmarksConnectorStoreDbPath(env),
+    gmail: resolvedStorePath('gmail.email', 'internal', env),
+    gmailSecure: resolvedStorePath('gmail.email', 'secure_local', env),
+    drive: resolvedStorePath('google_drive.docs', 'internal', env),
+    driveSecure: resolvedStorePath('google_drive.docs', 'secure_local', env),
+    dropbox: resolvedStorePath('dropbox.files', 'secure_local', env),
+    readwise: resolvedStorePath('readwise.library', 'internal', env),
+    telegramInternal: resolvedStorePath('telegram.messages', 'internal', env),
+    telegramProtected: resolvedStorePath('telegram.messages', 'secure_local', env),
+    xBookmarks: resolvedStorePath('x.bookmarks', 'internal', env),
     reflect: join(homeDir, '.local', 'share', 'openclaw', 'olympus', 'reflect-notes.sqlite'),
     roam: join(homeDir, '.local', 'share', 'openclaw', 'olympus', 'roam-notes.sqlite'),
   };
@@ -135,7 +122,7 @@ describe('lifecycle inventory covers the connector stores', () => {
       const paths = seedStores(homeDir);
       const env = { HOME: homeDir, XDG_DATA_HOME: join(homeDir, '.local', 'share') };
       const usagePath = defaultXBookmarksApiUsageDbPath(env);
-      const reconcilePath = defaultXBookmarksReconcileStateDbPath(env, usagePath);
+      const reconcilePath = resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: usagePath });
       const seeded = new LocalXBookmarksApiUsageStore(usagePath);
       seeded.recordHeadCheckpoint('personal', '777');
       seeded.close();

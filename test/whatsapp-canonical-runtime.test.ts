@@ -1,3 +1,4 @@
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,6 @@ import {
   WHATSAPP_PRODUCT_CONNECTOR_ID,
   createWhatsAppConnectorStore,
   createWhatsAppConnectorStoreSyncHandler,
-  defaultWhatsAppConnectorStoreDbPath,
   defaultWhatsAppSpoolDir,
   defaultWhatsAppStateDir,
 } from '../src/workers/whatsapp/index.ts';
@@ -39,13 +39,13 @@ describe('WhatsApp canonical product runtime', () => {
       .toBe(join(dataHome, 'olympus', 'whatsapp-live'));
     expect(defaultWhatsAppSpoolDir({ OLYMPUS_WHATSAPP_STATE_DIR: stateDir }))
       .toBe(join(stateDir, 'spool'));
-    expect(defaultWhatsAppConnectorStoreDbPath({ OLYMPUS_WHATSAPP_STATE_DIR: stateDir }))
+    expect(resolvedStorePath('whatsapp.personal.messages', 'secure_local', { OLYMPUS_WHATSAPP_STATE_DIR: stateDir }))
       .toBe(join(stateDir, 'connector-store.db'));
-    expect(defaultWhatsAppConnectorStoreDbPath({
+    expect(resolvedStorePath('whatsapp.personal.messages', 'secure_local', {
       OLYMPUS_WHATSAPP_STATE_DIR: stateDir,
       OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH: join(stateDir, 'preserved.db'),
     })).toBe(join(stateDir, 'preserved.db'));
-    expect(defaultWhatsAppConnectorStoreDbPath({
+    expect(resolvedStorePath('whatsapp.personal.messages', 'secure_local', {
       OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH: join(stateDir, 'legacy.db'),
       OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH: join(stateDir, 'product.db'),
     })).toBe(join(stateDir, 'product.db'));

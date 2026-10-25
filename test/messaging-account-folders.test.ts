@@ -17,7 +17,6 @@ import {
   type CaptureChild,
 } from '../src/core/messaging-capture.ts';
 import { openConnectorStore, __sourceStorageTestHooks, enableSourceRegistryAdoption } from '../src/core/source-storage.ts';
-import { defaultInternalTelegramConnectorStoreDbPath } from '../src/workers/telegram-messages/corpus-adapter.ts';
 import {
   TELEGRAM_API_HASH_SECRET_KEY,
   TELEGRAM_API_ID_SECRET_KEY,
@@ -34,7 +33,7 @@ import {
   whatsappStateDir,
 } from '../src/core/pairing-session-paths.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
-import { decideAccountLayout, placedAccount } from '../src/core/source-placement.ts';
+import { decideAccountLayout, placedAccount, resolvedStorePath } from '../src/core/source-placement.ts';
 import { readSourceRegistry, sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { SourceStorageUnavailableError, placeOwnedAccount, replaceEmptyLegacyAccounts } from '../src/core/source-storage.ts';
 import { settlePairingPlacement } from '../src/core/pairing-placement.ts';
@@ -971,7 +970,7 @@ describe('a capture grant pins its account to the paths it was paired at', () =>
     enableSourceRegistryAdoption();
     try {
       openConnectorStore({ sourceId: TELEGRAM }, {
-        dbPath: defaultInternalTelegramConnectorStoreDbPath(env),
+        dbPath: resolvedStorePath('telegram.messages', 'internal', env),
         corpusId: 'internal.telegram.messages',
         family: 'chat',
         trustDomain: 'internal',

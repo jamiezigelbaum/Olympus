@@ -5,6 +5,7 @@
 // (test/fixtures/messaging-resolution-golden.json), never computed with the
 // code under test.
 
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,12 +21,6 @@ import {
 import { sourceRegistryPath } from '../src/core/source-registry.ts';
 import { defaultTelegramCaptureSpoolDir } from '../src/workers/telegram-messages/capture-spool-connector.ts';
 import {
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
-} from '../src/workers/telegram-messages/corpus-adapter.ts';
-import {
-  defaultWhatsAppConnectorStoreDbPath,
-  defaultWhatsAppInternalConnectorStoreDbPath,
   defaultWhatsAppMediaDir,
   defaultWhatsAppSpoolDir,
   defaultWhatsAppStateDir,
@@ -39,8 +34,8 @@ type Resolvers = Record<string, (env: Env) => unknown>;
 const files = (sourceId: string, env: Env) => lifecycleAccountFiles(sourceId, { env });
 
 const resolvers: Resolvers = {
-  'tg.store.internal': (env) => defaultInternalTelegramConnectorStoreDbPath(env),
-  'tg.store.protected': (env) => defaultProtectedTelegramConnectorStoreDbPath(env),
+  'tg.store.internal': (env) => resolvedStorePath('telegram.messages', 'internal', env),
+  'tg.store.protected': (env) => resolvedStorePath('telegram.messages', 'secure_local', env),
   'tg.spool': (env) => defaultTelegramCaptureSpoolDir(env),
   'tg.gateway_state': (env) => legacyTelegramGatewayStateDir(env),
   'tg.store_root': (env) => legacyTelegramStoreRoot(env),
@@ -55,8 +50,8 @@ const resolvers: Resolvers = {
   'wa.state': (env) => defaultWhatsAppStateDir(env),
   'wa.spool': (env) => defaultWhatsAppSpoolDir(env),
   'wa.media': (env) => defaultWhatsAppMediaDir(env),
-  'wa.store': (env) => defaultWhatsAppConnectorStoreDbPath(env),
-  'wa.internal_store': (env) => defaultWhatsAppInternalConnectorStoreDbPath(env),
+  'wa.store': (env) => resolvedStorePath('whatsapp.personal.messages', 'secure_local', env),
+  'wa.internal_store': (env) => resolvedStorePath('whatsapp.personal.messages', 'internal', env),
   'wa.service_state': (env) => legacyWhatsAppServiceStateDir(env),
   'wa.pair_state': (env) => whatsappStateDir({ env }),
   'wa.pair_state+home': (env) => whatsappStateDir({ env, homeDir: env.HOME! }),

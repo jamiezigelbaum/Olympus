@@ -7,7 +7,10 @@ import {
   accountRawPath,
   accountSessionPath,
   legacyCaptureDataRoot,
+  legacyTelegramSessionBase,
+  legacyWhatsAppDefaultStateDir,
   olympusDataRoot,
+  olympusHomeRoots,
   olympusStateRoot,
   whatsappStateDirFromValue,
   type LayoutAccount,
@@ -76,16 +79,7 @@ export function pairingAccount(source: 'telegram' | 'whatsapp', context: Olympus
  * files.
  */
 export function olympusDataRoots(context: OlympusPathContext = {}): string[] {
-  const home = resolveHomeDir(context);
-  return [
-    join(home, '.olympus'),
-    join(home, '.config', 'olympus'),
-    join(home, '.local', 'share', 'olympus'),
-    join(home, '.local', 'share', 'openclaw', 'olympus'),
-    join(home, '.local', 'state', 'olympus'),
-    join(home, '.cache', 'olympus'),
-    join(home, 'Library', 'Logs', 'Olympus'),
-  ];
+  return olympusHomeRoots(resolveHomeDir(context));
 }
 
 /**
@@ -119,7 +113,7 @@ export function whatsappStateDir(context: OlympusPathContext = {}): string {
   const configured = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
   return configured
     ? whatsappStateDirFromValue(configured)
-    : join(legacyCaptureDataRoot(layoutEnv(context)), 'whatsapp-live');
+    : legacyWhatsAppDefaultStateDir(layoutEnv(context));
 }
 
 /**
@@ -160,7 +154,7 @@ export function telegramSessionBasePath(context: OlympusPathContext = {}): strin
   const configured = env.OLYMPUS_TELEGRAM_SESSION_PATH?.trim();
   return configured
     ? telegramSessionBase(configured)
-    : join(legacyCaptureDataRoot(layoutEnv(context)), 'telegram', 'telegram.personal');
+    : legacyTelegramSessionBase(layoutEnv(context));
 }
 
 /**
