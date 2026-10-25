@@ -36866,9 +36866,10 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
       action = () => openPrivacy(key2);
     } else if (fix.archiveImport === true && picker) {
       action = () => {
-        if (source)
+        const fromMenu = key2.indexOf("menu:") === 0;
+        if (fromMenu && source)
           state.open["menu:" + source.id] = false;
-        startArchivePick(key2, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
+        startArchivePick(fromMenu ? "summary:" + key2.slice(0, key2.lastIndexOf(":")) : key2, typeof fix.archiveSource === "string" ? fix.archiveSource : "");
       };
     } else if (typeof fix.archiveFocus === "string" && fix.archiveFocus) {
       action = () => focusArchive(String(fix.archiveFocus));
