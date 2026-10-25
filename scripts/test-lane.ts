@@ -16,6 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { partitionTestLanes } from '../test/helpers/test-lanes.ts';
+import { poolSize, runFilePool } from './test-lane-pool.ts';
 
 const ROOT = join(import.meta.dir, '..');
 const TEST_DIR = join(ROOT, 'test');
@@ -62,17 +63,15 @@ export function parseTestLaneArgs(args: string[]): TestLaneOptions {
   return { lane, shard: { index, total } };
 }
 
-export function buildTestLaneCommand(selected: string[], junitPath?: string, lane: TestLane = 'fast'): string[] {
-  // The fast lane runs files across one worker per core (each file isolated);
-  // it was CPU-bound on a single process before this. Workers compete for the
-  // same cores, so a CPU-heavy test runs ~2-3x slower than alone (a 2.2 s
-  // corpus test hit Bun's 5 s default): the default per-test timeout scales to
-  // match and still catches hangs. Explicit timeouts win. The deploy and Go
-  // lanes stay serial: they are the process-spawning tests, contention pushed
-  // an installer lock test past its timeout, and its abandoned child then held
-  // the worker open until the job was cancelled. They are sharded instead.
-  const parallel = lane === 'fast' ? ['--parallel', '--timeout=15000'] : [];
-  const command = ['bun', 'test', ...parallel, ...selected.map((name) => join('test', name))];
+/**
+ * The deploy and Go lanes' command: one serial `bun test` over their files.
+ * They are the process-spawning tests; contention pushed an installer lock
+ * test past its timeout, and its abandoned child then held the worker open
+ * until the job was cancelled. They are sharded instead. The fast lane runs
+ * each file in its own process instead (test-lane-pool.ts).
+ */
+export function buildTestLaneCommand(selected: string[], junitPath?: string): string[] {
+  const command = ['bun', 'test', ...selected.map((name) => join('test', name))];
   if (junitPath) command.push('--reporter=junit', `--reporter-outfile=${junitPath}`);
   return command;
 }
@@ -110,7 +109,7 @@ export function planWeightedShards(
   return { shards, weightsMs, unknownFiles: unknownFiles.sort() };
 }
 
-export function runTestLane(args: string[]): number {
+export async function runTestLane(args: string[]): Promise<number> {
   let options: TestLaneOptions;
   try {
     options = parseTestLaneArgs(args);
@@ -140,12 +139,24 @@ export function runTestLane(args: string[]): number {
     return 1;
   }
 
+  let pool = 0;
+  if (options.lane === 'fast') {
+    try {
+      pool = poolSize();
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      return 2;
+    }
+  }
+
   const shard = options.shard ? `, shard ${options.shard.index}/${options.shard.total}` : '';
-  console.log(`[test-lane] ${options.lane}: ${selected.length} of ${total} files${shard}${placement}`);
+  const files = pool ? `, one process per file, ${pool} at a time` : '';
+  console.log(`[test-lane] ${options.lane}: ${selected.length} of ${total} files${shard}${placement}${files}`);
 
   const junitPath = process.env.OLYMPUS_JUNIT_PATH;
+  if (pool) return runFilePool(selected, pool, ROOT, junitPath);
   if (junitPath) mkdirSync(join(ROOT, junitPath, '..'), { recursive: true });
-  const child = Bun.spawnSync(buildTestLaneCommand(selected, junitPath, options.lane), {
+  const child = Bun.spawnSync(buildTestLaneCommand(selected, junitPath), {
     cwd: ROOT,
     stdout: 'inherit',
     stderr: 'inherit',
@@ -161,5 +172,5 @@ function fileKey(file: string): string {
 }
 
 if (import.meta.main) {
-  process.exit(runTestLane(process.argv.slice(2)));
+  process.exit(await runTestLane(process.argv.slice(2)));
 }
