@@ -79587,7 +79587,7 @@ import { basename as basename9, dirname as dirname56, join as join65, relative a
 import { rm as rm3 } from "node:fs/promises";
 import { Database as Database18 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
-  return storeFileOwnerLookup(knownAccounts({ env }).filter((account) => account.entry?.state !== "deleting").flatMap((account) => account.files.stores.map((path) => [path, account.sourceId])));
+  return storeFileOwnerLookup(knownAccounts({ env }).flatMap((account) => account.files.stores.map((path) => [path, account.sourceId])));
 }
 function lifecycleStorePaths(context2 = {}) {
   return knownAccounts(context2).filter((account) => account.entry?.state !== "deleting").flatMap((account) => account.files.stores);
@@ -79696,7 +79696,14 @@ function exportOlympusData(options) {
   }
   if (options.sourceId === undefined) {
     for (const account of deletingAccounts(options)) {
-      for (const path of [account.files.folder, ...account.files.stores].filter((path2) => path2 !== undefined)) {
+      const { files: files2 } = account;
+      for (const path of [
+        files2.folder,
+        ...files2.stores,
+        files2.preCutoverIndex?.path,
+        ...files2.raw,
+        ...files2.rawDatabases.map((database) => database.path)
+      ].filter((path2) => path2 !== undefined)) {
         if (existsSync56(path))
           skipped.push(path);
       }

@@ -205,7 +205,8 @@ const DELETE_CONFIRMATION_2 = 'DELETE EVERYTHING';
 
 /** The source each store file in the lifecycle's inventory belongs to, by the file itself. */
 export function lifecycleStoreFileOwner(env: Record<string, string | undefined>): StoreFileOwner {
-  return storeFileOwnerLookup(knownAccounts({ env }).filter((account) => account.entry?.state !== 'deleting').flatMap((account) =>
+  // Accounts being deleted included: a store of one must still name its owner, so the storage service refuses it.
+  return storeFileOwnerLookup(knownAccounts({ env }).flatMap((account) =>
     account.files.stores.map((path) => [path, account.sourceId] as const)));
 }
 
@@ -373,7 +374,14 @@ export function exportOlympusData(options: {
   // are still on disk until the worker's next start removes them.
   if (options.sourceId === undefined) {
     for (const account of deletingAccounts(options)) {
-      for (const path of [account.files.folder, ...account.files.stores].filter((path): path is string => path !== undefined)) {
+      const { files } = account;
+      for (const path of [
+        files.folder,
+        ...files.stores,
+        files.preCutoverIndex?.path,
+        ...files.raw,
+        ...files.rawDatabases.map((database) => database.path),
+      ].filter((path): path is string => path !== undefined)) {
         if (existsSync(path)) skipped.push(path);
       }
     }
