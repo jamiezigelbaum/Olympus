@@ -10105,6 +10105,28 @@ function legacyMessagingPaths(sourceId, env) {
   }
   return { stores: [], raw: [] };
 }
+function migratableSources() {
+  return FOLDER_LAYOUT_SOURCES.filter((sourceId) => sourceId !== TELEGRAM_SOURCE_ID && sourceId !== WHATSAPP_SOURCE_ID);
+}
+function legacyAccountFiles(sourceId, env = process.env, archiveFamilies = []) {
+  if (!migratableSources().includes(sourceId))
+    throw new TypeError(`${sourceId} is not moved by the boot migration.`);
+  const names = sourceId === ARCHIVE_IMPORTS ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`)) : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => file ? [tier] : []);
+  const files = names.map((name) => ({
+    area: "store",
+    name,
+    legacy: olympusDataPath(env, legacyStoreFile(sourceId, name).file)
+  }));
+  if (sourceId === "local.files")
+    files.push({ area: "raw", name: "watch", legacy: olympusDataPath(env, "local-files-watch"), rawKind: "dir" });
+  if (sourceId === "x.bookmarks") {
+    files.push({ area: "raw", name: "x-reconcile.sqlite", legacy: `${olympusDataPath(env, "x-bookmarks-api-usage.sqlite")}.reconcile`, rawKind: "db" });
+  }
+  if (sourceId === ARCHIVE_IMPORTS) {
+    files.push({ area: "raw", name: "archive-imports.json", legacy: olympusDataPath(env, "archive-imports.json"), rawKind: "file" }, { area: "raw", name: "archive-import-requests.json", legacy: olympusDataPath(env, "archive-import-requests.json"), rawKind: "file" });
+  }
+  return files;
+}
 function mediaCacheRoot(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   return configured ? join19(configured, "olympus-media") : olympusDataPath(env, "media-cache");
@@ -11904,6 +11926,27 @@ var init_source_corpus_registry = __esm(() => {
 
 // src/core/source-registry.ts
 import { readFileSync as readFileSync18 } from "node:fs";
+function sourceAccountMovePending(account) {
+  return account.migration?.state === "moving" || account.migration?.state === "reverting";
+}
+function sourceStorageNotices(env = process.env) {
+  let registry;
+  try {
+    registry = readSourceRegistry(env);
+  } catch {
+    return [];
+  }
+  const notices = [];
+  for (const account of registry.accounts) {
+    const migration = account.migration;
+    if (account.state !== "active" || !migration)
+      continue;
+    const kind = sourceAccountMovePending(account) ? "stuck" : migration.state === "failed" ? "moved_back" : migration.state === "skipped" && migration.reason === "unreadable" ? "unreadable" : migration.state === "skipped" && migration.reason === "destination_exists" ? "in_the_way" : undefined;
+    if (kind)
+      notices.push({ source_id: account.source_id, kind });
+  }
+  return notices;
+}
 function sourceRegistryPath(env = process.env) {
   return olympusDataPath(env, "registry.json");
 }
@@ -11919,7 +11962,7 @@ function updateSourceRegistry(env, mutate) {
   return withFileLeaseSync(path, (lease) => {
     const current = readSourceRegistryAt(path);
     const next = mutate(current) ?? current;
-    next.schema = next.accounts.some((account) => account.layout === "folder") ? SOURCE_REGISTRY_FOLDER_SCHEMA : SOURCE_REGISTRY_SCHEMA;
+    next.schema = next.accounts.some(sourceAccountMovePending) ? SOURCE_REGISTRY_MOVING_SCHEMA : next.accounts.some((account) => account.layout === "folder") ? SOURCE_REGISTRY_FOLDER_SCHEMA : SOURCE_REGISTRY_SCHEMA;
     const text = `${JSON.stringify(validateRegistry(next, path), null, 2)}
 `;
     lease.commit(() => writePrivateFileAtomicSync(path, text));
@@ -11965,7 +12008,19 @@ function validateRegistry(value, path) {
   return value;
 }
 function isValidAccount(value) {
-  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at);
+  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at) && (value.migration === undefined || isValidMigration(value.migration));
+}
+function isValidMigration(value) {
+  if (!isRecord(value))
+    return false;
+  const pending = value.state === "moving" || value.state === "reverting";
+  return typeof value.state === "string" && MIGRATION_STATES.includes(value.state) && nonEmptyString(value.at) && (value.reason === undefined || nonEmptyString(value.reason)) && (value.detail === undefined || typeof value.detail === "string") && (value.moves === undefined || Array.isArray(value.moves) && value.moves.every(isValidMove)) && (!pending || Array.isArray(value.moves)) && (value.checked === undefined || Array.isArray(value.checked) && value.checked.every(isValidCheck));
+}
+function isValidMove(value) {
+  return isRecord(value) && typeof value.role === "string" && MOVE_ROLES.includes(value.role) && nonEmptyString(value.from) && nonEmptyString(value.to) && (value.kind === "file" || value.kind === "dir") && (value.db === undefined || value.db === true) && nonEmptyString(value.dev) && nonEmptyString(value.ino) && typeof value.size === "number" && Number.isSafeInteger(value.size) && value.size >= 0;
+}
+function isValidCheck(value) {
+  return isRecord(value) && nonEmptyString(value.file) && (value.result === "ok" || value.result === "damaged" || value.result === "not_checked");
 }
 function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
@@ -11973,12 +12028,12 @@ function nonEmptyString(value) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-var SOURCE_REGISTRY_SCHEMA = 1, SOURCE_REGISTRY_FOLDER_SCHEMA = 2, KNOWN_SCHEMAS, DEFAULT_ACCOUNT_SLOT = "1", SourceRegistryError, STATES, LAYOUTS;
+var SOURCE_REGISTRY_SCHEMA = 1, SOURCE_REGISTRY_FOLDER_SCHEMA = 2, SOURCE_REGISTRY_MOVING_SCHEMA = 3, KNOWN_SCHEMAS, DEFAULT_ACCOUNT_SLOT = "1", SourceRegistryError, STATES, LAYOUTS, MIGRATION_STATES, MOVE_ROLES;
 var init_source_registry = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_olympus_layout();
-  KNOWN_SCHEMAS = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA];
+  KNOWN_SCHEMAS = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA, SOURCE_REGISTRY_MOVING_SCHEMA];
   SourceRegistryError = class SourceRegistryError extends Error {
     code = "source_registry_unreadable";
     path;
@@ -11990,6 +12045,8 @@ var init_source_registry = __esm(() => {
   };
   STATES = ["active", "deleting", "deleted"];
   LAYOUTS = ["legacy", "folder"];
+  MIGRATION_STATES = ["moving", "reverting", "done", "skipped", "failed"];
+  MOVE_ROLES = ["store", "ledger", "secrets", "sniffer", "raw"];
 });
 
 // src/core/source-placement.ts
@@ -12080,6 +12137,9 @@ function declaredConnectorStoreMounts(env = process.env) {
     found.push({ sourceId: owner.sourceId, corpusId, ...dbPath ? { dbPath } : {} });
   }
   return found;
+}
+function legacyPinFor(sourceId, env = process.env) {
+  return pinnedLegacyBy(sourceId, env);
 }
 function pinnedLegacyBy(sourceId, env) {
   for (const name of legacyOverrideEnvNames(sourceId)) {
@@ -16150,6 +16210,16 @@ var init_cli_via_worker = __esm(() => {
   };
 });
 
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
+
 // src/core/sqlite-migrations.ts
 function currentStoreMigrations() {
   return [
@@ -16254,16 +16324,6 @@ var SQLITE_SCHEMA_VERSION_TABLE = "schema_version", CURRENT_OLYMPUS_SQLITE_SCHEM
 var init_sqlite_migrations = __esm(() => {
   init_operation_error();
 });
-
-// src/core/sqlite-store.ts
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint !== false) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  }
-  db.close();
-}
 
 // node_modules/entities/dist/esm/decode-codepoint.js
 function replaceCodePoint(codePoint) {
@@ -36504,6 +36564,7 @@ var init_local_index = __esm(() => {
 });
 
 // src/core/source-storage.ts
+import { Database as Database6 } from "bun:sqlite";
 import { statSync as statSync14 } from "node:fs";
 import { resolve as resolve12 } from "node:path";
 function enableSourceRegistryAdoption() {
@@ -36573,7 +36634,7 @@ function placeOwnedAccount(account, env = process.env) {
   return layout ?? "legacy";
 }
 function replaceEmptyLegacyAccounts(env = process.env) {
-  const eligible = (account) => account.state === "active" && account.layout === "legacy" && account.corpus_ids.length === 0 && hasFolderLayout(account.source_id) && decideAccountLayout(account.source_id, env).layout === "folder";
+  const eligible = (account) => account.state === "active" && account.layout === "legacy" && !sourceAccountMovePending(account) && account.corpus_ids.length === 0 && hasFolderLayout(account.source_id) && decideAccountLayout(account.source_id, env).layout === "folder";
   if (!readSourceRegistry(env).accounts.some(eligible))
     return [];
   const replaced = [];
@@ -36608,10 +36669,9 @@ function sourceAccountUnavailableReason(account, env = process.env) {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  const state = findRegistryAccount(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT)?.state;
-  if (state === undefined || state === "active")
-    return;
-  return unavailableStateReason(state);
+  const entry = findRegistryAccount(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  const state = unavailableState(entry);
+  return state === undefined ? undefined : unavailableStateReason(state);
 }
 function storeFileOwnerLookup(owned) {
   const owners = new Map;
@@ -36628,11 +36688,20 @@ function storeFileKey(dbPath) {
   }
 }
 function unavailableStateReason(state) {
+  if (state === "moving")
+    return "its files are being moved into its folder";
   return state === "deleting" ? "its data is being deleted" : "its data was deleted";
 }
+function unavailableState(entry) {
+  if (entry === undefined)
+    return;
+  if (entry.state !== "active")
+    return entry.state;
+  return sourceAccountMovePending(entry) ? "moving" : undefined;
+}
 function assertOpenable(registry, sourceId, slot) {
-  const state = findRegistryAccount(registry, sourceId, slot)?.state;
-  if (state !== undefined && state !== "active")
+  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
+  if (state !== undefined)
     throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
 function adopt(env, sourceId, slot, dbPath, corpusId) {
@@ -36657,6 +36726,68 @@ function adoptedLayout(env, sourceId, slot, dbPath) {
   if (decideAccountLayout(sourceId, env).layout !== "folder")
     return "legacy";
   return isInsideAccountFolder(dbPath, { source_id: sourceId, slot }, env) ? "folder" : "legacy";
+}
+function openToLookAt(path) {
+  let failure;
+  for (const mode of [{ readwrite: true, create: false }, { readonly: true, create: false }]) {
+    let db;
+    try {
+      db = new Database6(path, mode);
+      db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
+      db.query("SELECT count(*) AS n FROM sqlite_master").get();
+      return db;
+    } catch (error) {
+      failure = error;
+      if (db)
+        closeSqliteStore(db, { checkpoint: false });
+    }
+  }
+  throw failure;
+}
+function storeFileReads(path) {
+  let db;
+  try {
+    db = openToLookAt(path);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (db)
+      closeSqliteStore(db, { checkpoint: false });
+  }
+}
+function storeFileQuickCheck(path) {
+  let db;
+  try {
+    db = openToLookAt(path);
+    const rows = db.query("PRAGMA quick_check").all();
+    return rows.length === 1 && Object.values(rows[0])[0] === "ok" ? "ok" : "damaged";
+  } catch {
+    return "damaged";
+  } finally {
+    if (db)
+      closeSqliteStore(db, { checkpoint: false });
+  }
+}
+function storeFileCheckpoint(path, busyTimeoutMs = 2000) {
+  let db;
+  try {
+    db = new Database6(path, { readwrite: true, create: false });
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))};`);
+    const row = db.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    const [busy, log, checkpointed] = row ? Object.values(row) : [];
+    return busy === 0 && log === checkpointed ? "folded" : "busy";
+  } catch (error) {
+    const message2 = String(error?.message ?? error);
+    if (/locked|busy/i.test(message2))
+      return "busy";
+    if (/not a database|malformed|corrupt/i.test(message2))
+      return "not_a_database";
+    return "failed";
+  } finally {
+    if (db)
+      closeSqliteStore(db, { checkpoint: false });
+  }
 }
 var DEFAULT_STORAGE_SLOT, SourceStorageUnavailableError, adoptionEnabled = false;
 var init_source_storage = __esm(() => {
@@ -38400,7 +38531,7 @@ __export(exports_waiting_private_questions, {
   WAITING_PRIVATE_QUESTIONS_FILE_NAME: () => WAITING_PRIVATE_QUESTIONS_FILE_NAME,
   CHATGPT_INBOX_GRACE_MS: () => CHATGPT_INBOX_GRACE_MS
 });
-import { Database as Database6 } from "bun:sqlite";
+import { Database as Database7 } from "bun:sqlite";
 import { createHash as createHash20, randomBytes as randomBytes9 } from "node:crypto";
 import { chmodSync as chmodSync9, existsSync as existsSync31, lstatSync as lstatSync18, mkdirSync as mkdirSync21 } from "node:fs";
 import { homedir as homedir21 } from "node:os";
@@ -38488,7 +38619,7 @@ function openWaitingPrivateQuestionStore(dbPath, options = {}) {
       listener();
   });
   hardenPrivatePath(dbPath);
-  const db = new Database6(dbPath, { create: true });
+  const db = new Database7(dbPath, { create: true });
   try {
     chmodSync9(dbPath, 384);
     const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? STORE_BUSY_TIMEOUT_MS));
@@ -38811,7 +38942,7 @@ function forgetWaitingPrivateQuestions(dbPath, input, options = {}) {
       store.close();
     }
   }
-  const db = new Database6(dbPath, { readonly: true });
+  const db = new Database7(dbPath, { readonly: true });
   try {
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS};`);
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'waiting_questions'").get())
@@ -39008,7 +39139,7 @@ __export(exports_remote_connections, {
   REMOTE_CONNECTIONS_SCHEMA_VERSION: () => REMOTE_CONNECTIONS_SCHEMA_VERSION,
   REMOTE_CONNECTIONS_DB_PATH_ENV: () => REMOTE_CONNECTIONS_DB_PATH_ENV
 });
-import { Database as Database7 } from "bun:sqlite";
+import { Database as Database8 } from "bun:sqlite";
 import { createHash as createHash21, randomBytes as randomBytes10, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import { chmodSync as chmodSync10, existsSync as existsSync32, lstatSync as lstatSync19, mkdirSync as mkdirSync22 } from "node:fs";
 import { homedir as homedir22 } from "node:os";
@@ -39058,7 +39189,7 @@ function hashRemoteConnectionToken(token) {
 function openRemoteConnectionStore(dbPath = defaultRemoteConnectionsDbPath(), options = {}) {
   const now = options.now ?? (() => new Date);
   hardenPrivateDatabasePath(dbPath);
-  const db = new Database7(dbPath, { create: true });
+  const db = new Database8(dbPath, { create: true });
   try {
     chmodSync10(dbPath, 384);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS2}; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;`);
@@ -39281,7 +39412,7 @@ import {
 } from "node:fs";
 import { homedir as homedir23 } from "node:os";
 import { dirname as dirname34, isAbsolute as isAbsolute17 } from "node:path";
-import { Database as Database8 } from "bun:sqlite";
+import { Database as Database9 } from "bun:sqlite";
 function sourceWatchAuthenticatedRouteHeaders(route) {
   const headers = new Headers({
     [SOURCE_WATCH_OWNER_HEADER]: route.ownerId,
@@ -39303,7 +39434,7 @@ function forgetSourceWatches(dbPath, scope, options = {}) {
     return 0;
   const dryRun = options.dryRun === true;
   const filters = filterFor("source_watches", [["corpus_id", scope.corpusIds]]);
-  const db = new Database8(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database9(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec(`PRAGMA busy_timeout = 10000; ${dryRun ? "" : "PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;"}`);
     return forgetSqliteRows(db, filters, dryRun).reduce((sum, count) => sum + count, 0);
@@ -39349,7 +39480,7 @@ class LocalSourceWatchStore {
     this.dbPath = dbPath;
     this.clock = options.clock ?? SYSTEM_CLOCK;
     hardenPrivateDatabasePath2(dbPath);
-    this.db = new Database8(dbPath, { create: true });
+    this.db = new Database9(dbPath, { create: true });
     try {
       chmodSync11(dbPath, 384);
       this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;");
@@ -41825,6 +41956,8 @@ function dashboardStatusResolution(input) {
     return unknownStatus(unknownValue);
   if ((source.connection.imports_attention?.length ?? 0) > 0)
     return { status: "Needs you", mappedUnknown: false };
+  if (source.storage_notice)
+    return { status: "Needs you", mappedUnknown: false };
   const connectionStatus = DASHBOARD_CONNECTION_STATE_STATUS[source.connection.state];
   const readinessStatus = DASHBOARD_ANSWER_READINESS_STATUS[source.answer_readiness.state];
   const queueStatus = DASHBOARD_QUEUE_HEALTH_STATUS[source.queue_health.label];
@@ -41904,6 +42037,8 @@ function dashboardAttentionParts(source, options) {
   }
   if (source.connection.provider_refusal)
     return withCapture(dashboardProviderRefusalLine(source, options));
+  if (source.storage_notice)
+    return withCapture(DASHBOARD_STORAGE_NOTICE_COPY.reason[source.storage_notice.kind]);
   switch (source.connection.state) {
     case "reauth_required":
       return withCapture(DASHBOARD_SIGNED_OUT);
@@ -42347,7 +42482,7 @@ function dashboardImportAttentionSentence(entry) {
       return words2.unreadable;
   }
 }
-var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
+var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", DASHBOARD_STORAGE_NOTICE_COPY, READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
   init_archive_formats();
@@ -42395,6 +42530,20 @@ var init_vocabulary = __esm(() => {
     "not_connected",
     "needs_setup"
   ]);
+  DASHBOARD_STORAGE_NOTICE_COPY = {
+    reason: {
+      moved_back: "its files could not be moved, so they were put back",
+      stuck: "its files are part way through a move",
+      unreadable: "Olympus cannot open the folder its files are in",
+      in_the_way: "its files are in two places"
+    },
+    nextAction: {
+      moved_back: (label) => `Olympus tried to move ${label}'s files into their own folder, a check failed, and it put everything back, so nothing was lost and ${label} works as before. Ask your agent to find out what failed before the move is tried again.`,
+      stuck: (label) => `${label}'s files are part way through a move and ${label} is closed until it ends. Restart Olympus to finish it; if this stays after a restart, ask your agent to look at it.`,
+      unreadable: (label) => `Olympus cannot open the folder where ${label}'s files are, so it cannot move them. Ask your agent to check that your user account may open Olympus's data folder.`,
+      in_the_way: (label) => `${label}'s files are where they have always been and in their own folder too, so Olympus moved nothing. Ask your agent to compare the two before anything is moved.`
+    }
+  };
   READINESS_REASONS = {
     "Reauthenticate this source": DASHBOARD_SIGNED_OUT,
     "Embedding lane needs attention": "indexing has stopped",
@@ -44309,7 +44458,7 @@ import {
   renameSync as renameSync7
 } from "node:fs";
 import { dirname as dirname40 } from "node:path";
-import { Database as Database9 } from "bun:sqlite";
+import { Database as Database10 } from "bun:sqlite";
 
 class GoogleDailyRequestBudget {
   utcDay = "";
@@ -44505,7 +44654,7 @@ function recoverPersistentFutureUtcDay(input) {
   });
 }
 function withLedger(ledgerPath, run, options = {}) {
-  const db = new Database9(ledgerPath, { create: true });
+  const db = new Database10(ledgerPath, { create: true });
   hardenLedgerFiles(ledgerPath);
   try {
     db.exec(options.journalModeWal ? "PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;" : "PRAGMA busy_timeout = 10000;");
@@ -57182,7 +57331,7 @@ var init_grant_fence = __esm(() => {
 import { createHash as createHash34, randomUUID as randomUUID12 } from "node:crypto";
 import { chmodSync as chmodSync13, lstatSync as lstatSync21, mkdirSync as mkdirSync28 } from "node:fs";
 import { dirname as dirname45 } from "node:path";
-import { Database as Database10 } from "bun:sqlite";
+import { Database as Database11 } from "bun:sqlite";
 function xApiInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
@@ -57274,7 +57423,7 @@ class LocalXBookmarksApiUsageStore {
     this.dbPath = dbPath;
     if (dbPath !== ":memory:")
       mkdirSync28(dirname45(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database10(dbPath, { create: true });
+    this.db = new Database11(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync13(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -58118,7 +58267,7 @@ var init_live_control2 = __esm(() => {
 import { createHash as createHash35, randomUUID as randomUUID13 } from "node:crypto";
 import { chmodSync as chmodSync14, mkdirSync as mkdirSync29 } from "node:fs";
 import { dirname as dirname46 } from "node:path";
-import { Database as Database11 } from "bun:sqlite";
+import { Database as Database12 } from "bun:sqlite";
 function defaultXBookmarksReconcileStateDbPath(env = process.env, usageDbPath) {
   return resolvedRawPath(X_BOOKMARKS_SOURCE_ID, "x-reconcile.sqlite", env, usageDbPath === undefined ? {} : { usageDbPath });
 }
@@ -58132,7 +58281,7 @@ class LocalXBookmarksReconcileStateStore {
       recordAccountPlacement({ sourceId: X_BOOKMARKS_SOURCE_ID }, dbPath, env);
       mkdirSync29(dirname46(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database11(dbPath, { create: true });
+    this.db = new Database12(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync14(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -67993,7 +68142,7 @@ __export(exports_source_ingestion_ledger, {
 });
 import { existsSync as existsSync45, mkdirSync as mkdirSync32 } from "node:fs";
 import { dirname as dirname50 } from "node:path";
-import { Database as Database12 } from "bun:sqlite";
+import { Database as Database13 } from "bun:sqlite";
 function buildSourceIngestionLedgerSnapshot(status, options = {}) {
   const now = options.now ?? new Date(status.generated_at);
   const assign = ledgerSourceAssignment(options.sourceCorpusRegistry);
@@ -68051,7 +68200,7 @@ class SqliteSourceIngestionLedgerStore {
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
       mkdirSync32(dirname50(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database12(dbPath);
+    this.db = new Database13(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS source_dashboard_samples (
@@ -69589,7 +69738,7 @@ __export(exports_source_dashboard, {
 });
 import { existsSync as existsSync47, mkdirSync as mkdirSync33 } from "node:fs";
 import { dirname as dirname51 } from "node:path";
-import { Database as Database13 } from "bun:sqlite";
+import { Database as Database14 } from "bun:sqlite";
 function dashboardSchedulerTaskFailing(task) {
   if (task.consecutive_failures <= 0)
     return false;
@@ -69699,7 +69848,7 @@ function forgetSourceDashboardRows(dbPath, scope, options = {}) {
   ])];
   const corpusIds = [...new Set([...scope.corpusIds, ...cards.map((card) => card.primary_corpus_id)])];
   const dryRun = options.dryRun === true;
-  const db = new Database13(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database14(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     if (!dryRun)
@@ -69734,7 +69883,7 @@ class SqliteSourceDashboardHistory {
   constructor(dbPath = defaultSourceDashboardHistoryDbPath()) {
     if (dbPath !== ":memory:")
       mkdirSync33(dirname51(dbPath), { recursive: true, mode: 448 });
-    this.db = new Database13(dbPath);
+    this.db = new Database14(dbPath);
     this.db.exec("PRAGMA busy_timeout = 10000;");
     runSqliteMigrations(this.db, DASHBOARD_SQLITE_STORE_ID, currentStoreMigrations());
     this.db.exec(`
@@ -69980,6 +70129,11 @@ function buildSourceDashboardViewModel(options) {
         next_action: `${card.label} is now connected to a different account than the items already stored, so nothing syncs. ` + `Reconnect the previous account to resume, or Disconnect ${card.label}, ask your agent to delete its stored data, and connect the new account.`
       };
       card.answer_readiness = { state: "needs_attention", label: "Connected to a different account" };
+      card.setup = dashboardSourceSetupStatus(card);
+    }
+    const storageNotice = options.storageNotices?.[definition.source_id];
+    if (storageNotice) {
+      card.storage_notice = { kind: storageNotice, next_action: DASHBOARD_STORAGE_NOTICE_COPY.nextAction[storageNotice](card.label) };
       card.setup = dashboardSourceSetupStatus(card);
     }
     if (card.configured && captureRuntime && (captureRuntime.supervisor || captureRuntime.scope)) {
@@ -70262,6 +70416,14 @@ function dashboardSourceSetupStatus(card) {
     };
   });
   const dependenciesReady = dependencies.every((dependency) => dependency.status === "ready");
+  if (card.storage_notice) {
+    return {
+      stage: "source_health",
+      condition: card.storage_notice.kind === "stuck" ? "blocked" : "degraded",
+      next_action: card.storage_notice.next_action,
+      dependencies
+    };
+  }
   if (connection.state === "not_connected" || connection.state === "needs_setup") {
     const action = connection.action;
     const pairing = action.kind === "guided_session";
@@ -72087,7 +72249,7 @@ var init_source_dashboard = __esm(() => {
 // src/workers/source-scheduler-state.ts
 import { chmodSync as chmodSync17, existsSync as existsSync48, mkdirSync as mkdirSync34 } from "node:fs";
 import { dirname as dirname52 } from "node:path";
-import { Database as Database14 } from "bun:sqlite";
+import { Database as Database15 } from "bun:sqlite";
 function defaultSourceSchedulerStateDbPath(env = process.env) {
   return olympusDataPath(env, "source-scheduler.sqlite");
 }
@@ -72096,7 +72258,7 @@ function forgetSourceSchedulerState(dbPath, scope, options = {}) {
     return 0;
   const dryRun = options.dryRun === true;
   const keys = [["source_id", scope.sourceIds], ["corpus_id", scope.corpusIds]];
-  const db = new Database14(dbPath, dryRun ? { readonly: true } : { readwrite: true });
+  const db = new Database15(dbPath, dryRun ? { readonly: true } : { readwrite: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     return forgetSqliteRows(db, [
@@ -72116,7 +72278,7 @@ class LocalSourceSchedulerStateStore {
     if (dbPath !== ":memory:") {
       mkdirSync34(dirname52(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = new Database14(dbPath, { create: true });
+    this.db = new Database15(dbPath, { create: true });
     if (dbPath !== ":memory:")
       chmodSync17(dbPath, 384);
     this.db.exec("PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
@@ -77301,7 +77463,7 @@ import {
 } from "node:fs";
 import { homedir as homedir27 } from "node:os";
 import { basename as basename9, dirname as dirname54, join as join62, relative as relative8, resolve as resolve16, sep as sep10 } from "node:path";
-import { Database as Database15 } from "bun:sqlite";
+import { Database as Database16 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
   return storeFileOwnerLookup(lifecycleSourceSpecs().flatMap((spec) => (spec.connectorStorePaths?.({ env }) ?? []).map((path) => [path, spec.sourceId])));
 }
@@ -77699,7 +77861,7 @@ function readTierLedgerIds(storePaths) {
       continue;
     let db;
     try {
-      db = new Database15(ledgerPath, { readonly: true });
+      db = new Database16(ledgerPath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
       const meta = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tier_ledger_meta'").get();
       const row = meta ? db.query("SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'").get() : null;
@@ -77904,7 +78066,7 @@ function readSourceMedia(sourceId, storePaths, env) {
     let rows = [];
     let db;
     try {
-      db = new Database15(storePath, { readonly: true });
+      db = new Database16(storePath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
     } catch {
       throw unreadable();
@@ -78090,7 +78252,7 @@ function snapshotSqliteStore(sqlitePath, staging) {
   rmSync13(staging, { force: true });
   let db;
   try {
-    db = new Database15(sqlitePath, { readonly: true });
+    db = new Database16(sqlitePath, { readonly: true });
   } catch {
     return false;
   }
@@ -78111,7 +78273,7 @@ function assertSqliteSnapshotIntact(snapshotPath, sqlitePath) {
   inspectSqliteSnapshot(snapshotPath, sqlitePath, "unknown");
 }
 function inspectSqliteSnapshot(snapshotPath, sqlitePath, expectedStoreId) {
-  const db = new Database15(snapshotPath, { readonly: true });
+  const db = new Database16(snapshotPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const rows = db.query("PRAGMA integrity_check").all();
@@ -78328,7 +78490,7 @@ function assertVerifiedExternalSqliteStore(path, storeId) {
   assertRegularFileTarget(path);
   let db;
   try {
-    db = new Database15(path, { readonly: true, create: false });
+    db = new Database16(path, { readonly: true, create: false });
     db.exec("PRAGMA busy_timeout = 10000;");
   } catch {
     throw new OperationError("invalid_params", `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`, "Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.");
@@ -97698,7 +97860,7 @@ var init_tier_migration_cli = __esm(() => {
 });
 
 // src/workers/classification/tier-cli.ts
-import { Database as Database16 } from "bun:sqlite";
+import { Database as Database17 } from "bun:sqlite";
 import { existsSync as existsSync67 } from "node:fs";
 function tierCommandOpensStores(args) {
   return args[0] === "set" || args[0] === "explain" || args[0] === "migrate";
@@ -97733,7 +97895,7 @@ function knownStorePaths(context2) {
   return [...new Set(paths)].filter((path) => path !== ":memory:" && existsSync67(path));
 }
 function matchStore2(dbPath, needle) {
-  const db = new Database16(dbPath, { readonly: true });
+  const db = new Database17(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 10000;");
     const rows = db.query(`
@@ -122046,7 +122208,7 @@ var init_drive_extraction_source = __esm(() => {
 import { chmodSync as chmodSync27, mkdirSync as mkdirSync51 } from "node:fs";
 import { createHash as createHash65, randomUUID as randomUUID27 } from "node:crypto";
 import { dirname as dirname76 } from "node:path";
-import { Database as Database17 } from "bun:sqlite";
+import { Database as Database18 } from "bun:sqlite";
 function settleUnreadable(candidates, classify2) {
   const items = [];
   let blocked = 0;
@@ -122091,7 +122253,7 @@ class LocalFileExtractionJobStore {
     if (!inMemory && !this.readonly) {
       mkdirSync51(dirname76(dbPath), { recursive: true, mode: 448 });
     }
-    this.db = this.readonly ? new Database17(dbPath, { readonly: true }) : new Database17(dbPath, { create: true });
+    this.db = this.readonly ? new Database18(dbPath, { readonly: true }) : new Database18(dbPath, { create: true });
     if (!inMemory && !this.readonly)
       chmodSync27(dbPath, 384);
     const busyTimeoutMs = options.busyTimeoutMs ?? (this.readonly ? DEFAULT_READ_ONLY_SQLITE_BUSY_TIMEOUT_MS : DEFAULT_SQLITE_BUSY_TIMEOUT_MS);
@@ -143609,6 +143771,7 @@ function createEmailSourceWorker(options = {}) {
               connectedHandleRegistry: registry2,
               ...registryRead.unreadable ? { connectedHandleRegistryUnreadable: true } : {},
               ...dashboardSourceAccountBindings(sourceDashboard.registryPath),
+              ...dashboardStorageNotices(),
               unpairedSources: dashboardUnpairedSourceStates(dashboardUnpairedSources, sourceDashboard.registryPath ?? defaultHandleRegistryPath()),
               manualSyncs: Object.fromEntries(dashboardManualSyncs),
               ...sourceDashboard.captureRuntime ? { captureRuntime: sourceDashboard.captureRuntime() } : {},
@@ -146775,6 +146938,10 @@ function dashboardSourceAccountBindings(registryPath) {
     return {};
   }
 }
+function dashboardStorageNotices() {
+  const notices = sourceStorageNotices(process.env);
+  return notices.length > 0 ? { storageNotices: Object.fromEntries(notices.map((notice) => [notice.source_id, notice.kind])) } : {};
+}
 function dashboardGoogleCloudProjectId() {
   try {
     const raw = readFileSync72(join102(homedir41(), ".olympus", "google-bootstrap.json"), "utf8");
@@ -147316,6 +147483,7 @@ var init_email_source = __esm(() => {
   init_release_manifest();
   init_google_handle_compatibility();
   init_source_account_binding();
+  init_source_registry();
   init_consent_page();
   init_analyst();
   init_types();
@@ -162946,6 +163114,683 @@ var init_tier_visibility = __esm(() => {
   init_tier_ledger();
 });
 
+// src/core/source-account-migration.ts
+import { linkSync as linkSync3, lstatSync as lstatSync43, mkdirSync as mkdirSync55, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync4, statSync as statSync33, unlinkSync as unlinkSync4 } from "node:fs";
+import { basename as basename15, dirname as dirname84, isAbsolute as isAbsolute32, join as join108, relative as relative11, resolve as resolve21, sep as sep14 } from "node:path";
+function accountFolderMigrationEnabled(env = process.env) {
+  return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === "1";
+}
+function candidates(sourceId, slot, env) {
+  const account = { source_id: sourceId, slot, layout: "folder" };
+  const found = [];
+  const add = (role, from, to, kind, db) => {
+    found.push({ role, from, to, kind, db });
+    if (db)
+      for (const suffix of COMPANION_SUFFIXES)
+        found.push({ role, from: `${from}${suffix}`, to: `${to}${suffix}`, kind: "file", db: false });
+  };
+  for (const file of legacyAccountFiles(sourceId, env, archiveImportFamilies())) {
+    if (file.area === "store") {
+      const to = accountStorePath(account, file.name, env);
+      add("store", file.legacy, to, "file", true);
+      add("ledger", tierLedgerPathForStore(file.legacy), tierLedgerPathForStore(to), "file", true);
+      add("secrets", secretLocationsPathForStore(file.legacy), secretLocationsPathForStore(to), "file", true);
+      add("sniffer", tierSnifferPathForStore(file.legacy), tierSnifferPathForStore(to), "file", true);
+    } else {
+      add("raw", file.legacy, accountRawPath(account, file.name, env), file.rawKind === "dir" ? "dir" : "file", file.rawKind === "db");
+    }
+  }
+  return found;
+}
+function look(path) {
+  const actual = lookAt(path);
+  return __accountMigrationTestHooks.look?.(path, actual) ?? actual;
+}
+function lookAt(path) {
+  try {
+    const stat6 = lstatSync43(path, { bigint: true });
+    if (stat6.isSymbolicLink())
+      return { kind: "link" };
+    if (stat6.isDirectory())
+      return { kind: "dir", dev: stat6.dev, ino: stat6.ino, size: stat6.size };
+    if (stat6.isFile())
+      return { kind: "file", dev: stat6.dev, ino: stat6.ino, size: stat6.size };
+    return { kind: "other" };
+  } catch (error2) {
+    return { kind: error2?.code === "ENOENT" ? "absent" : "unreadable" };
+  }
+}
+function moveWithoutReplacing(from, to, kind) {
+  if (kind === "dir") {
+    renameSync20(from, to);
+    return;
+  }
+  (__accountMigrationTestHooks.link ?? linkSync3)(from, to);
+  unlinkSync4(from);
+}
+function errorCode2(error2) {
+  return error2?.code ?? "error";
+}
+function updateAccount(ctx, sourceId, slot, change, options = {}) {
+  updateSourceRegistry(ctx.env, (registry2) => {
+    let account = findRegistryAccount(registry2, sourceId, slot);
+    if (!account && options.create) {
+      account = {
+        source_id: sourceId,
+        slot,
+        state: "active",
+        layout: "legacy",
+        corpus_ids: [],
+        created_at: new Date(ctx.now()).toISOString()
+      };
+      registry2.accounts.push(account);
+    }
+    if (!account || account.state !== "active")
+      throw new EntryChanged;
+    change(account);
+  });
+}
+function storeNameForCorpus(sourceId, corpusId) {
+  const tier = corpusId.split(".")[0] ?? "";
+  if (sourceId !== "archive.imports")
+    return tier;
+  const family = /^[^.]+\.archive\.([^.]+)$/.exec(corpusId)?.[1];
+  return family ? `${family}.${tier}` : corpusId;
+}
+function nearRealPath(path) {
+  try {
+    return realpathSync24(path);
+  } catch {}
+  const rest = [];
+  let near = resolve21(path);
+  for (;; ) {
+    rest.unshift(basename15(near));
+    const up = dirname84(near);
+    if (up === near)
+      return resolve21(path);
+    near = up;
+    try {
+      return join108(realpathSync24(near), ...rest);
+    } catch {}
+  }
+}
+function destinationIsOurs(ctx, destination) {
+  const parent = dirname84(destination);
+  const below = relative11(ctx.root, parent);
+  if (below === ".." || below.startsWith(`..${sep14}`) || isAbsolute32(below))
+    return false;
+  return nearRealPath(parent) === join108(nearRealPath(ctx.root), below);
+}
+function nearestExisting(path) {
+  let near = resolve21(path);
+  for (;; ) {
+    try {
+      statSync33(near);
+      return near;
+    } catch {
+      const up = dirname84(near);
+      if (up === near)
+        return near;
+      near = up;
+    }
+  }
+}
+function inspect(ctx, sourceId, slot, entry) {
+  const { env, root } = ctx;
+  const pin = legacyPinFor(sourceId, env);
+  if (pin)
+    return skip("pinned", `${pin} names where its files are, so they stay there.`);
+  const present = [];
+  for (const candidate of candidates(sourceId, slot, env)) {
+    const found = look(candidate.from);
+    if (found.kind === "absent")
+      continue;
+    const name = basename15(candidate.from);
+    if (found.kind === "unreadable")
+      return skip("unreadable", `${name} cannot be looked at.`);
+    if (found.kind === "link" || found.kind === "other" || found.kind !== candidate.kind) {
+      return skip("unexpected_file", `${name} is not an ordinary ${candidate.kind === "dir" ? "folder" : "file"}.`);
+    }
+    present.push({ candidate, found });
+  }
+  if (present.length === 0) {
+    return entry && entry.corpus_ids.length > 0 ? skip("files_elsewhere", "Its stores are not at the usual place in the data folder.") : { kind: "nothing" };
+  }
+  let folderDevice;
+  try {
+    folderDevice = statSync33(nearestExisting(accountFolder({ source_id: sourceId, slot }, env)), { bigint: true }).dev;
+  } catch {
+    return skip("unreadable", "The account folder cannot be looked at.");
+  }
+  for (const { candidate, found } of present) {
+    const name = basename15(candidate.from);
+    if (!destinationIsOurs(ctx, candidate.to))
+      return skip("unexpected_file", `A folder on the way to ${name}'s place in the account folder is a link.`);
+    const destination = look(candidate.to);
+    if (destination.kind === "unreadable")
+      return skip("unreadable", `${name}'s place in the account folder cannot be looked at.`);
+    if (destination.kind !== "absent")
+      return skip("destination_exists", `${name} is at its old place and in the account folder.`);
+    if (found.dev !== folderDevice)
+      return skip("other_device", `${name} is on a different device than the account folder.`);
+  }
+  const logBytes = present.filter(({ candidate }) => candidate.from.endsWith("-wal") || candidate.from.endsWith("-journal")).reduce((total, { found }) => total + Number(found.size), 0);
+  if (logBytes > limit("accountLogMaxBytes", ACCOUNT_LOG_MAX_BYTES)) {
+    return skip("log_large", "Its write-ahead logs are large; they are folded into the stores the next time Olympus stops cleanly, and then it moves.");
+  }
+  if (entry) {
+    const stores = new Set(present.filter(({ candidate }) => candidate.role === "store" && candidate.db).map(({ candidate }) => candidate.to));
+    const account = { source_id: sourceId, slot, layout: "folder" };
+    for (const corpusId of entry.corpus_ids) {
+      let expected;
+      try {
+        expected = accountStorePath(account, storeNameForCorpus(sourceId, corpusId), env);
+      } catch {
+        continue;
+      }
+      if (!stores.has(expected))
+        return skip("files_elsewhere", "Its stores are not at the usual place in the data folder.");
+    }
+  }
+  const moves = present.map(({ candidate, found }) => ({
+    role: candidate.role,
+    from: relPath(root, candidate.from),
+    to: relPath(root, candidate.to),
+    kind: candidate.kind,
+    ...candidate.db ? { db: true } : {},
+    dev: String(found.dev),
+    ino: String(found.ino),
+    size: candidate.kind === "dir" ? 0 : Number(found.size)
+  }));
+  return { kind: "move", moves };
+}
+function checkDatabases(ctx, moves) {
+  const storeMax = limit("quickCheckStoreMaxBytes", QUICK_CHECK_STORE_MAX_BYTES);
+  const totalMax = limit("quickCheckTotalMaxBytes", QUICK_CHECK_TOTAL_MAX_BYTES);
+  return moves.filter((move) => move.db).map((move) => {
+    const path = absPath(ctx.root, move.from);
+    if (!storeFileReads(path))
+      return { file: move.to, result: "damaged" };
+    const bytes = moves.filter((other) => other.from === move.from || other.from === `${move.from}-wal` || other.from === `${move.from}-journal`).reduce((total, other) => total + other.size, 0);
+    const estimateMs = bytes / ASSUMED_BYTES_PER_SECOND * 1000;
+    if (bytes > storeMax || ctx.quickCheckBytes + bytes > totalMax || ctx.quickCheckSpentMs + estimateMs > ctx.quickCheckBudgetMs) {
+      return { file: move.to, result: "not_checked" };
+    }
+    const started = ctx.now();
+    const result = storeFileQuickCheck(path);
+    ctx.quickCheckSpentMs += ctx.now() - started;
+    ctx.quickCheckBytes += bytes;
+    return { file: move.to, result };
+  });
+}
+function planIsCanonical(ctx, sourceId, slot, migration) {
+  let known;
+  try {
+    known = candidates(sourceId, slot, ctx.env);
+  } catch {
+    return false;
+  }
+  const pairs = new Set(known.map((candidate) => `${relPath(ctx.root, candidate.from)}
+${relPath(ctx.root, candidate.to)}`));
+  return (migration.moves ?? []).every((move) => pairs.has(`${move.from}
+${move.to}`) && !move.from.split("/").includes(".."));
+}
+function makeFolders(ctx, moves) {
+  try {
+    const real = realpathSync24(ctx.root);
+    for (const move of moves) {
+      const destination = dirname84(absPath(ctx.root, move.to));
+      if (!destinationIsOurs(ctx, absPath(ctx.root, move.to)))
+        throw Object.assign(new Error("link"), { code: "ELOOP" });
+      let current2 = real;
+      for (const part of relative11(ctx.root, destination).split(sep14).filter(Boolean)) {
+        current2 = join108(current2, part);
+        const found = lookAt(current2);
+        if (found.kind === "dir")
+          continue;
+        if (found.kind !== "absent")
+          throw Object.assign(new Error("not a folder"), { code: "ENOTDIR" });
+        mkdirSync55(current2, { mode: 448 });
+        syncFolder(dirname84(current2));
+        syncFolder(current2);
+      }
+    }
+  } catch (error2) {
+    throw new MoveFault("failed", "move_failed", `The account folder could not be made (${errorCode2(error2)}).`);
+  }
+}
+function syncMoveFolders(ctx, moves) {
+  const folders = new Set;
+  for (const move of moves) {
+    folders.add(dirname84(absPath(ctx.root, move.from)));
+    folders.add(dirname84(absPath(ctx.root, move.to)));
+  }
+  try {
+    for (const folder of folders) {
+      if (lookAt(folder).kind === "dir")
+        syncFolder(folder);
+    }
+  } catch (error2) {
+    throw new MoveFault("failed", "move_failed", `The move could not be made durable (${errorCode2(error2)}).`);
+  }
+}
+function removeEmptyFolders(ctx, moves) {
+  const stop = accountFoldersRoot(ctx.env);
+  const folders = new Set;
+  for (const move of moves) {
+    for (let folder = dirname84(absPath(ctx.root, move.to));folder === stop || folder.startsWith(`${stop}${sep14}`); folder = dirname84(folder)) {
+      folders.add(folder);
+      if (folder === stop)
+        break;
+    }
+  }
+  for (const folder of [...folders].sort((a, b) => b.length - a.length)) {
+    try {
+      rmdirSync4(folder);
+    } catch {}
+  }
+}
+function moveOne(ctx, move, direction) {
+  const [from, to] = direction === "forward" ? [absPath(ctx.root, move.from), absPath(ctx.root, move.to)] : [absPath(ctx.root, move.to), absPath(ctx.root, move.from)];
+  const source = look(from);
+  const target = look(to);
+  const name = basename15(move.from);
+  if (source.kind === "absent") {
+    if (target.kind !== "absent")
+      return "there";
+    return isDisposable(move) ? "there" : "lost";
+  }
+  if (target.kind !== "absent") {
+    if (direction === "back" && move.ino !== "" && !isPlanned(source, move) && isPlanned(target, move))
+      return "there";
+    if (move.kind === "file" && source.kind === "file" && target.kind === "file" && source.dev === target.dev && source.ino === target.ino && (move.ino === "" || String(source.ino) === move.ino)) {
+      try {
+        unlinkSync4(from);
+      } catch (error2) {
+        throw new MoveFault("failed", "move_failed", `${name} could not be moved (${errorCode2(error2)}).`);
+      }
+      return "moved";
+    }
+    throw new MoveFault("failed", "move_failed", `${name} is in both places.`);
+  }
+  if (!destinationIsOurs(ctx, to) || !destinationIsOurs(ctx, from)) {
+    throw new MoveFault("failed", "move_failed", `A folder on the way to ${name} is a link.`);
+  }
+  try {
+    __accountMigrationTestHooks.beforeMove?.(from, to);
+    moveFile(from, to, move.kind);
+  } catch (error2) {
+    if (error2 instanceof AccountMigrationKilled)
+      throw error2;
+    const code = errorCode2(error2);
+    if (code === "EXDEV") {
+      throw new MoveFault("skipped", "other_device", `${name} is on a different device than the account folder.`);
+    }
+    if (NO_HARD_LINKS.has(code) && move.kind === "file") {
+      throw new MoveFault("skipped", "no_hard_links", "The file system the data folder is on does not make hard links, which moving a file safely needs, so the account stays where it is.");
+    }
+    if (code === "EEXIST" || code === "ENOTEMPTY" || code === "ENOTDIR") {
+      throw new MoveFault("failed", "move_failed", `${name} is in both places.`);
+    }
+    throw new MoveFault("failed", "move_failed", `${name} could not be renamed (${code}).`);
+  }
+  return "moved";
+}
+function verifyIdentity(ctx, moves) {
+  for (const move of moves) {
+    const found = look(absPath(ctx.root, move.to));
+    if (found.kind === "absent" && isDisposable(move))
+      continue;
+    if (found.kind !== "file" && found.kind !== "dir" || found.kind !== move.kind) {
+      throw new MoveFault("failed", "verify_failed", `${basename15(move.from)} is not there after the move.`);
+    }
+    if (String(found.dev) !== move.dev || String(found.ino) !== move.ino) {
+      throw new MoveFault("failed", "verify_failed", `${basename15(move.from)} is not the same file after the move.`);
+    }
+    if (move.kind === "file" && !move.from.endsWith("-shm") && Number(found.size) !== move.size) {
+      throw new MoveFault("failed", "verify_failed", `${basename15(move.from)} changed size in the move (${move.size} bytes, now ${Number(found.size)}).`);
+    }
+  }
+}
+function verifyRestored(ctx, moves) {
+  for (const move of moves) {
+    const back = look(absPath(ctx.root, move.from));
+    if (isPlanned(look(absPath(ctx.root, move.to)), move)) {
+      throw new MoveFault("failed", "move_failed", `${basename15(move.from)} is still in the account folder.`);
+    }
+    if (back.kind === "absent" && isDisposable(move))
+      continue;
+    if (back.kind !== "file" && back.kind !== "dir" || back.kind !== move.kind) {
+      throw new MoveFault("failed", "move_failed", `${basename15(move.from)} is not back at its old place.`);
+    }
+  }
+}
+function stateBefore(migration, move) {
+  return migration.checked?.find((checked) => checked.file === move.to)?.result;
+}
+function forward(ctx, sourceId, slot, migration) {
+  const moves = migration.moves ?? [];
+  makeFolders(ctx, moves);
+  moves.forEach((move, index) => {
+    if (moveOne(ctx, move, "forward") === "lost") {
+      throw new MoveFault("failed", "move_failed", `${basename15(move.from)} is in neither place.`);
+    }
+    checkpoint(`rename:${index}`);
+  });
+  syncMoveFolders(ctx, moves);
+  verifyIdentity(ctx, moves);
+  for (const move of moves) {
+    if (move.db !== true || isCompanion(move.from) || stateBefore(migration, move) === "damaged")
+      continue;
+    if (!storeFileReads(absPath(ctx.root, move.to))) {
+      throw new MoveFault("failed", "verify_failed", `${basename15(move.from)} does not open after the move.`);
+    }
+  }
+  checkpoint("verified");
+  updateAccount(ctx, sourceId, slot, (account) => {
+    if (account.migration?.state !== "moving")
+      throw new EntryChanged;
+    account.layout = "folder";
+    account.migration = {
+      state: "done",
+      at: new Date(ctx.now()).toISOString(),
+      ...migration.checked ? { checked: migration.checked } : {}
+    };
+  });
+  checkpoint("flipped");
+}
+function revert(ctx, sourceId, slot, migration, fault) {
+  const moves = migration.moves ?? [];
+  if (migration.state !== "reverting") {
+    updateAccount(ctx, sourceId, slot, (account) => {
+      if (!account.migration || !sourceAccountMovePending(account))
+        throw new EntryChanged;
+      account.migration = { ...account.migration, state: "reverting", reason: fault.reason, detail: fault.detail };
+    });
+  }
+  checkpoint("revert");
+  const back = [...moves].reverse();
+  const lost = [];
+  back.forEach((move, index) => {
+    if (moveOne(ctx, move, "back") === "lost")
+      lost.push(basename15(move.from));
+    checkpoint(`unrename:${index}`);
+  });
+  for (const move of moves) {
+    if (move.db !== true)
+      continue;
+    for (const suffix of COMPANION_SUFFIXES) {
+      const extra = { ...move, from: `${move.from}${suffix}`, to: `${move.to}${suffix}`, kind: "file", size: 0, ino: "" };
+      if (!moves.some((planned) => planned.to === extra.to))
+        moveOne(ctx, extra, "back");
+    }
+  }
+  if (lost.length > 0) {
+    throw new MoveFault("failed", "move_failed", `${lost.join(", ")} ${lost.length === 1 ? "is" : "are"} in neither place, so the account stays closed until found.`);
+  }
+  verifyRestored(ctx, moves);
+  removeEmptyFolders(ctx, moves);
+  syncMoveFolders(ctx, moves);
+  updateAccount(ctx, sourceId, slot, (account) => {
+    if (account.migration?.state !== "reverting")
+      throw new EntryChanged;
+    account.layout = "legacy";
+    account.migration = {
+      state: SKIP_REASONS.has(fault.reason) ? "skipped" : "failed",
+      at: new Date(ctx.now()).toISOString(),
+      reason: fault.reason,
+      detail: fault.detail,
+      ...migration.checked ? { checked: migration.checked } : {}
+    };
+  });
+  checkpoint("reverted");
+}
+function planIsMoot(ctx, migration) {
+  const moves = migration.moves ?? [];
+  return moves.length > 0 && moves.every((move) => look(absPath(ctx.root, move.from)).kind === "absent" && look(absPath(ctx.root, move.to)).kind === "absent");
+}
+function runPlan(ctx, account) {
+  const migration = account.migration;
+  const { source_id: sourceId, slot } = account;
+  if (!migratableSources().includes(sourceId) || !planIsCanonical(ctx, sourceId, slot, migration)) {
+    return { kind: "stuck", detail: "Its move plan is not one this build wrote, so nothing was touched." };
+  }
+  if (planIsMoot(ctx, migration)) {
+    updateAccount(ctx, sourceId, slot, (entry) => {
+      if (!entry.migration || !sourceAccountMovePending(entry))
+        throw new EntryChanged;
+      delete entry.migration;
+    });
+    return { kind: "nothing" };
+  }
+  try {
+    if (migration.state === "reverting") {
+      const reason = migration.reason ?? "verify_failed";
+      throw new MoveFault(SKIP_REASONS.has(reason) ? "skipped" : "failed", reason, migration.detail ?? "A move was undone.");
+    }
+    forward(ctx, sourceId, slot, migration);
+    return { kind: "moved" };
+  } catch (error2) {
+    if (error2 instanceof AccountMigrationKilled || error2 instanceof EntryChanged)
+      throw error2;
+    const fault = error2 instanceof MoveFault ? error2 : new MoveFault("failed", "move_failed", `The move stopped unexpectedly (${errorCode2(error2)}).`);
+    try {
+      revert(ctx, sourceId, slot, migration, fault);
+    } catch (revertError) {
+      if (revertError instanceof AccountMigrationKilled || revertError instanceof EntryChanged)
+        throw revertError;
+      const detail = revertError instanceof MoveFault ? revertError.detail : `Putting its files back stopped (${errorCode2(revertError)}).`;
+      return { kind: "stuck", detail };
+    }
+    return fault.state === "skipped" ? { kind: "skipped", reason: fault.reason } : { kind: "movedBack", reason: fault.reason };
+  }
+}
+function recordSkip(ctx, sourceId, slot, entry, inspection) {
+  const before = entry?.migration;
+  if (before?.state === "skipped" && before.reason === inspection.reason && before.detail === inspection.detail)
+    return;
+  if (!entry && inspection.reason !== "unreadable" && inspection.reason !== "destination_exists")
+    return;
+  updateAccount(ctx, sourceId, slot, (account) => {
+    if (account.layout !== "legacy" || sourceAccountMovePending(account))
+      throw new EntryChanged;
+    account.migration = {
+      state: "skipped",
+      at: new Date(ctx.now()).toISOString(),
+      reason: inspection.reason,
+      detail: inspection.detail
+    };
+  }, { create: true });
+}
+function foldLogs(ctx, moves) {
+  const notFolded = (detail) => ({ kind: "skip", reason: "log_not_folded", detail });
+  for (const move of moves) {
+    if (move.db !== true || isCompanion(move.from))
+      continue;
+    const path = absPath(ctx.root, move.from);
+    const result = storeFileCheckpoint(path, FOLD_BUSY_TIMEOUT_MS);
+    if (result === "folded")
+      continue;
+    if (result === "not_a_database") {
+      const logs = moves.filter((other) => other.from === `${move.from}-wal` || other.from === `${move.from}-journal`);
+      if (logs.every((log) => log.size === 0))
+        continue;
+      return notFolded(`${basename15(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
+    }
+    return notFolded(result === "busy" ? `${basename15(move.from)} is open elsewhere, so its write-ahead log could not be folded into it; the account stays where it is for now.` : `${basename15(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+  }
+  return;
+}
+function startMove(ctx, sourceId, slot, entry) {
+  let inspection = inspect(ctx, sourceId, slot, entry);
+  if (inspection.kind === "move") {
+    const unfolded = foldLogs(ctx, inspection.moves);
+    if (unfolded) {
+      recordSkip(ctx, sourceId, slot, entry, unfolded);
+      return { kind: "skipped", reason: unfolded.reason };
+    }
+    checkpoint("folded");
+    const checked = checkDatabases(ctx, inspection.moves);
+    inspection = inspect(ctx, sourceId, slot, entry);
+    if (inspection.kind === "move" && inspection.moves.some((move) => move.db !== true && (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size > 0)) {
+      inspection = skip("log_not_folded", "A store was written to while its write-ahead log was being folded, so the account stays where it is for now.");
+    }
+    if (inspection.kind === "move") {
+      const { moves } = inspection;
+      updateAccount(ctx, sourceId, slot, (account) => {
+        if (account.layout !== "legacy" || sourceAccountMovePending(account))
+          throw new EntryChanged;
+        account.migration = { state: "moving", at: new Date(ctx.now()).toISOString(), moves, ...checked.length > 0 ? { checked } : {} };
+      }, { create: true });
+      checkpoint("plan");
+      return runPlan(ctx, readSourceRegistryAccount(ctx, sourceId, slot));
+    }
+  }
+  if (inspection.kind === "skip") {
+    recordSkip(ctx, sourceId, slot, entry, inspection);
+    return { kind: "skipped", reason: inspection.reason };
+  }
+  return { kind: "nothing" };
+}
+function readSourceRegistryAccount(ctx, sourceId, slot) {
+  const account = findRegistryAccount(readSourceRegistry(ctx.env), sourceId, slot);
+  if (!account)
+    throw new EntryChanged;
+  return account;
+}
+function context2(env) {
+  let root;
+  try {
+    root = olympusDataRoot(env);
+  } catch {
+    return;
+  }
+  if (!isAbsolute32(root))
+    return;
+  const now = __accountMigrationTestHooks.now ?? Date.now;
+  return {
+    env,
+    root,
+    now,
+    quickCheckSpentMs: 0,
+    quickCheckBudgetMs: __accountMigrationTestHooks.quickCheckBudgetMs ?? QUICK_CHECK_BUDGET_MS,
+    quickCheckBytes: 0
+  };
+}
+function migrateAccountFolders(env = process.env) {
+  const report = { moved: [], resumed: [], movedBack: [], skipped: [], stuck: [], deferred: [], errors: [] };
+  const registry2 = readSourceRegistry(env);
+  const ctx = context2(env);
+  if (!ctx)
+    return report;
+  const run2 = (sourceId, work, resumed = false) => {
+    try {
+      const outcome = work();
+      if (outcome.kind === "moved") {
+        report.moved.push(sourceId);
+        if (resumed)
+          report.resumed.push(sourceId);
+      } else if (outcome.kind === "movedBack")
+        report.movedBack.push({ sourceId, reason: outcome.reason });
+      else if (outcome.kind === "skipped")
+        report.skipped.push({ sourceId, reason: outcome.reason });
+      else if (outcome.kind === "stuck")
+        report.stuck.push({ sourceId, detail: outcome.detail });
+    } catch (error2) {
+      if (error2 instanceof AccountMigrationKilled)
+        throw error2;
+      report.errors.push({ sourceId, message: error2 instanceof EntryChanged ? "its registry entry changed" : errorCode2(error2) });
+    }
+  };
+  const handled = new Set;
+  const deadline = ctx.now() + (__accountMigrationTestHooks.budgetMs ?? MIGRATION_BUDGET_MS);
+  for (const account of registry2.accounts.filter(sourceAccountMovePending)) {
+    handled.add(account.source_id);
+    if (ctx.now() >= deadline) {
+      report.deferred.push(account.source_id);
+      continue;
+    }
+    run2(account.source_id, () => runPlan(ctx, account), true);
+  }
+  if (!accountFolderMigrationEnabled(env))
+    return report;
+  for (const sourceId of migratableSources()) {
+    if (handled.has(sourceId))
+      continue;
+    const entry = findRegistryAccount(readSourceRegistry(env), sourceId, DEFAULT_ACCOUNT_SLOT);
+    if (entry && (entry.state !== "active" || entry.layout !== "legacy" || sourceAccountMovePending(entry)))
+      continue;
+    if (ctx.now() >= deadline) {
+      report.deferred.push(sourceId);
+      continue;
+    }
+    run2(sourceId, () => startMove(ctx, sourceId, DEFAULT_ACCOUNT_SLOT, entry));
+  }
+  return report;
+}
+var MIGRATE_ACCOUNT_FOLDERS_ENV = "OLYMPUS_MIGRATE_ACCOUNT_FOLDERS", ASSUMED_BYTES_PER_SECOND, MIGRATION_BUDGET_MS = 45000, QUICK_CHECK_BUDGET_MS = 15000, QUICK_CHECK_STORE_MAX_BYTES, QUICK_CHECK_TOTAL_MAX_BYTES, ACCOUNT_LOG_MAX_BYTES, FOLD_BUSY_TIMEOUT_MS = 2000, SKIP_REASONS, AccountMigrationKilled, __accountMigrationTestHooks, COMPANION_SUFFIXES, isCompanion = (path) => COMPANION_SUFFIXES.some((suffix) => path.endsWith(suffix)), relPath = (root, path) => relative11(root, path).split(sep14).join("/"), absPath = (root, rel) => join108(root, ...rel.split("/")), checkpoint = (at) => __accountMigrationTestHooks.checkpoint?.(at), limit = (name, fallback) => __accountMigrationTestHooks.limits?.[name] ?? fallback, NO_HARD_LINKS, moveFile = (from, to, kind) => (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind), syncFolder = (path) => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path), MoveFault, EntryChanged, skip = (reason, detail) => ({ kind: "skip", reason, detail }), isDisposable = (move) => move.from.endsWith("-shm") || (move.from.endsWith("-wal") || move.from.endsWith("-journal")) && move.size === 0, isPlanned = (found, move) => (found.kind === "file" || found.kind === "dir") && found.kind === move.kind && String(found.dev) === move.dev && String(found.ino) === move.ino;
+var init_source_account_migration = __esm(() => {
+  init_archive_formats();
+  init_atomic_file();
+  init_olympus_layout();
+  init_source_placement();
+  init_source_storage();
+  init_source_registry();
+  ASSUMED_BYTES_PER_SECOND = 10 * 1024 * 1024;
+  QUICK_CHECK_STORE_MAX_BYTES = 64 * 1024 * 1024;
+  QUICK_CHECK_TOTAL_MAX_BYTES = 128 * 1024 * 1024;
+  ACCOUNT_LOG_MAX_BYTES = 32 * 1024 * 1024;
+  SKIP_REASONS = new Set([
+    "pinned",
+    "unreadable",
+    "unexpected_file",
+    "destination_exists",
+    "other_device",
+    "files_elsewhere",
+    "log_large",
+    "log_not_folded",
+    "no_hard_links"
+  ]);
+  AccountMigrationKilled = class AccountMigrationKilled extends Error {
+    at;
+    constructor(at) {
+      super(`killed at ${at}`);
+      this.at = at;
+      this.name = "AccountMigrationKilled";
+    }
+  };
+  __accountMigrationTestHooks = {
+    reset() {
+      delete this.checkpoint;
+      delete this.rename;
+      delete this.link;
+      delete this.look;
+      delete this.now;
+      delete this.budgetMs;
+      delete this.quickCheckBudgetMs;
+      delete this.beforeMove;
+      delete this.syncDirectory;
+      delete this.limits;
+    }
+  };
+  COMPANION_SUFFIXES = ["-wal", "-shm", "-journal"];
+  NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
+  MoveFault = class MoveFault extends Error {
+    state;
+    reason;
+    detail;
+    constructor(state, reason, detail) {
+      super(detail);
+      this.state = state;
+      this.reason = reason;
+      this.detail = detail;
+      this.name = "MoveFault";
+    }
+  };
+  EntryChanged = class EntryChanged extends Error {
+  };
+});
+
 // src/workers/source-scope-runtime.ts
 function isMailSourceScopePolicyRef(ref) {
   return ref.sourceId === "gmail.email";
@@ -163230,9 +164075,9 @@ function scopeBoundSchedulerSource(input) {
     tasks: input.source.tasks.map((task) => ({
       ...task,
       id: `${task.id}:scope:${suffix}`,
-      async run(context2) {
+      async run(context3) {
         input.authority.assertRefCurrent(input.ref);
-        return task.run(context2);
+        return task.run(context3);
       }
     }))
   };
@@ -163259,12 +164104,12 @@ var init_source_scope_runtime = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-scope-browser.ts
-import { dirname as dirname84, join as join108 } from "node:path";
+import { dirname as dirname85, join as join109 } from "node:path";
 function createGmailPickerRequestBudget(options) {
   return new GoogleDailyRequestBudget({
     provider: "Gmail mail picker",
     dailyRequestBudget: GMAIL_PICKER_DAILY_REQUEST_BUDGET,
-    statePath: join108(dirname84(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
+    statePath: join109(dirname85(options.laneStatePath), "gmail-picker-daily-request-budget.json"),
     ...options.now ? { now: options.now } : {}
   });
 }
@@ -163527,7 +164372,7 @@ function accountBoundSchedulerSource(input) {
     ...input.source,
     tasks: input.source.tasks.map((task) => ({
       ...task,
-      run: (context2) => runGuarded(input.guard, () => task.run(context2))
+      run: (context3) => runGuarded(input.guard, () => task.run(context3))
     }))
   };
 }
@@ -163628,8 +164473,8 @@ var init_installed_tier_classification = __esm(() => {
 });
 
 // src/workers/classification/sniffer-resolver.ts
-import { mkdirSync as mkdirSync55, readFileSync as readFileSync76 } from "node:fs";
-import { dirname as dirname85 } from "node:path";
+import { mkdirSync as mkdirSync56, readFileSync as readFileSync76 } from "node:fs";
+import { dirname as dirname86 } from "node:path";
 
 class SnifferCallBudget {
   maxCallsPerDay;
@@ -163663,7 +164508,7 @@ class SnifferCallBudget {
     if (!this.statePath)
       return;
     try {
-      mkdirSync55(dirname85(this.statePath), { recursive: true, mode: 448 });
+      mkdirSync56(dirname86(this.statePath), { recursive: true, mode: 448 });
       writePrivateFileAtomicSync(this.statePath, `${JSON.stringify({ day: this.day, used: this.used })}
 `);
     } catch {}
@@ -164002,7 +164847,7 @@ var init_sniffer_resolver = __esm(() => {
 });
 
 // src/workers/classification/sniffer-service.ts
-import { Database as Database18 } from "bun:sqlite";
+import { Database as Database19 } from "bun:sqlite";
 import { existsSync as existsSync82 } from "node:fs";
 
 class TierSnifferService {
@@ -164078,7 +164923,7 @@ class TierSnifferService {
     for (const ledgerPath of this.ledgerPaths()) {
       let db;
       try {
-        db = new Database18(ledgerPath, { readonly: true, create: false });
+        db = new Database19(ledgerPath, { readonly: true, create: false });
         db.exec("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;");
         const path = tierSnifferPathForLedger(ledgerPath);
         const hasQueue = existsSync82(path);
@@ -165235,9 +166080,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve21) => {
+        return new Promise((resolve22) => {
           this._streamMapping.set(streamId2, {
-            resolveJson: resolve21,
+            resolveJson: resolve22,
             cleanup: () => {
               this._streamMapping.delete(streamId2);
             }
@@ -166469,11 +167314,11 @@ function chatgptPrivateAnswerProgram(config2) {
     else if (message2.method === "ui/notifications/host-context-changed")
       hostContext(message2.params);
   });
-  function hostContext(context2) {
-    if (!context2 || typeof context2 !== "object")
+  function hostContext(context3) {
+    if (!context3 || typeof context3 !== "object")
       return;
-    if (context2.theme === "light" || context2.theme === "dark") {
-      theme = context2.theme;
+    if (context3.theme === "light" || context3.theme === "dark") {
+      theme = context3.theme;
       render();
     }
   }
@@ -166591,7 +167436,7 @@ function chatgptPrivateAnswerProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve21) => {
+    return new Promise((resolve22) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -166602,7 +167447,7 @@ function chatgptPrivateAnswerProgram(config2) {
           return;
         }
         settled = true;
-        resolve21(db);
+        resolve22(db);
       };
       try {
         const factory = window.indexedDB;
@@ -166629,7 +167474,7 @@ function chatgptPrivateAnswerProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve21) => {
+    return new Promise((resolve22) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -166638,7 +167483,7 @@ function chatgptPrivateAnswerProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve21(value2);
+        resolve22(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -166773,10 +167618,10 @@ function chatgptPrivateAnswerProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve21) => setTimeout(resolve21, ms));
+    return new Promise((resolve22) => setTimeout(resolve22, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve21, reject) => {
+    return new Promise((resolve22, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -166786,7 +167631,7 @@ function chatgptPrivateAnswerProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve21(value2);
+        resolve22(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -167589,8 +168434,8 @@ async function askAnonymously(input, deps) {
     questions = written.questions;
     rewritten = true;
   }
-  const context2 = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
-  const gate = (draft) => evaluateConsultRequest([...draft], context2, {}, {}, strict ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: "general", askedQuestionTexts: [typed], net: writer ? "thin" : "full" } : { net: "secrets" });
+  const context3 = { entries: [{ kind: "text", text: typed, path: "writerVisible[]", group: -2 }], overflow: false };
+  const gate = (draft) => evaluateConsultRequest([...draft], context3, {}, {}, strict ? { ...consultGateOptionsFromSettings(settings ?? DEFAULT_CONSULT_SETTINGS), level: "general", askedQuestionTexts: [typed], net: writer ? "thin" : "full" } : { net: "secrets" });
   let verdict = gate(questions);
   const feedback = verdict.decision !== "pass" && strict && rewritten && !writer ? consultGateRetryFeedback(verdict.reasons) : undefined;
   if (feedback !== undefined) {
@@ -167801,11 +168646,11 @@ function chatgptPrivateQuestionProgram(config2) {
     else if (message2.method === "ui/notifications/host-context-changed")
       hostContext(message2.params);
   });
-  function hostContext(context2) {
-    if (!context2 || typeof context2 !== "object")
+  function hostContext(context3) {
+    if (!context3 || typeof context3 !== "object")
       return;
-    if (context2.theme === "light" || context2.theme === "dark") {
-      theme = context2.theme;
+    if (context3.theme === "light" || context3.theme === "dark") {
+      theme = context3.theme;
       render();
     }
   }
@@ -168001,7 +168846,7 @@ function chatgptPrivateQuestionProgram(config2) {
   }
   const KS = config2.keyStore;
   function openStore2() {
-    return new Promise((resolve21) => {
+    return new Promise((resolve22) => {
       let settled = false;
       const finish2 = (db) => {
         if (settled) {
@@ -168012,7 +168857,7 @@ function chatgptPrivateQuestionProgram(config2) {
           return;
         }
         settled = true;
-        resolve21(db);
+        resolve22(db);
       };
       try {
         const factory = window.indexedDB;
@@ -168039,7 +168884,7 @@ function chatgptPrivateQuestionProgram(config2) {
     const db = await openStore2();
     if (!db)
       return;
-    return new Promise((resolve21) => {
+    return new Promise((resolve22) => {
       let settled = false;
       const finish2 = (value2) => {
         if (settled)
@@ -168048,7 +168893,7 @@ function chatgptPrivateQuestionProgram(config2) {
         try {
           db.close();
         } catch {}
-        resolve21(value2);
+        resolve22(value2);
       };
       try {
         const tx = db.transaction(KS.store, mode);
@@ -168112,10 +168957,10 @@ function chatgptPrivateQuestionProgram(config2) {
     } catch {}
   }
   function wait(ms) {
-    return new Promise((resolve21) => setTimeout(resolve21, ms));
+    return new Promise((resolve22) => setTimeout(resolve22, ms));
   }
   function bounded(work, ms, controller) {
-    return new Promise((resolve21, reject) => {
+    return new Promise((resolve22, reject) => {
       const timer = setTimeout(() => {
         if (controller)
           try {
@@ -168125,7 +168970,7 @@ function chatgptPrivateQuestionProgram(config2) {
       }, Math.max(0, ms));
       work.then((value2) => {
         clearTimeout(timer);
-        resolve21(value2);
+        resolve22(value2);
       }, (error2) => {
         clearTimeout(timer);
         reject(error2);
@@ -168347,10 +169192,10 @@ function chatgptPrivateQuestionProgram(config2) {
     field.value = draft;
     field.setAttribute("data-key", "question");
     const count2 = el("div", "q-count");
-    const limit = current2.maxChars;
+    const limit2 = current2.maxChars;
     const recount = () => {
-      count2.textContent = fill4(T.count, { n: num(draft.length), max: num(limit) });
-      count2.classList.toggle("over", draft.length > limit);
+      count2.textContent = fill4(T.count, { n: num(draft.length), max: num(limit2) });
+      count2.classList.toggle("over", draft.length > limit2);
     };
     field.addEventListener("input", () => {
       draft = field.value;
@@ -169622,7 +170467,7 @@ function mintErrorRef2() {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 function errorToolResult(error2) {
-  const code = errorCode2(error2);
+  const code = errorCode3(error2);
   if (!REFERENCED_ERROR_CODES2.has(code)) {
     return {
       content: [{ type: "text", text: ERROR_TEXT[code] }],
@@ -169639,7 +170484,7 @@ function errorToolResult(error2) {
     isError: true
   };
 }
-function errorCode2(error2) {
+function errorCode3(error2) {
   if (error2 instanceof OperationError && Object.prototype.hasOwnProperty.call(ERROR_TEXT, error2.code))
     return error2.code;
   if (error2 instanceof ChatGptSurfaceError)
@@ -170715,8 +171560,8 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const question = typeof args.question === "string" ? args.question.trim() : "";
         if (!question || question.length > 2000)
           throw new ChatGptSurfaceError("invalid_params");
-        const limit = typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit >= 1 && args.limit <= 48 ? args.limit : undefined;
-        if (args.limit !== undefined && limit === undefined)
+        const limit2 = typeof args.limit === "number" && Number.isInteger(args.limit) && args.limit >= 1 && args.limit <= 48 ? args.limit : undefined;
+        if (args.limit !== undefined && limit2 === undefined)
           throw new ChatGptSurfaceError("invalid_params");
         const detail = detailArgument(args.detail);
         if (!options.evidenceSearch)
@@ -170724,7 +171569,7 @@ async function runChatGptTool(name, args, ctx, options, signal, detachedContext)
         const probe = options.privateMatchProbe ?? defaultPrivateMatchProbe;
         const ticket = waitingTicket(ctx, options);
         const [raw, probed] = await Promise.all([
-          options.evidenceSearch({ question, ...limit ? { limit } : {} }, signal),
+          options.evidenceSearch({ question, ...limit2 ? { limit: limit2 } : {} }, signal),
           probeWithinDeadline(probe, question, ctx, options, "search")
         ]);
         const match = normalizeProbe(probed);
@@ -170836,10 +171681,10 @@ function probeWithinDeadline(probe, question, ctx, options = {}, stage = "search
   const log = options.privateMatchProbeLog ?? defaultProbeLog;
   const startedAt = Date.now();
   let timer;
-  const timeout = new Promise((resolve21) => {
+  const timeout = new Promise((resolve22) => {
     timer = setTimeout(() => {
       log(`[chatgpt] private match probe timed_out stage=${stage} timeout_ms=${timeoutMs}`);
-      resolve21(false);
+      resolve22(false);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -170881,8 +171726,8 @@ function privateCaller(ctx) {
   const id = ctx.caller?.connectionId;
   return id ? `${ctx.caller?.surface ?? "remote"}:${id}` : undefined;
 }
-function privateRefresh(question, probe, context2, options) {
-  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context2(), options, "refresh")).evidence;
+function privateRefresh(question, probe, context3, options) {
+  return async () => normalizeProbe(await probeWithinDeadline(probe, question, context3(), options, "refresh")).evidence;
 }
 function beginPrivateAnswer(pending, options) {
   const { question, match, refresh, caller, detail, waiting } = pending;
@@ -170910,8 +171755,8 @@ async function defaultPrivateMatchProbe(question, ctx) {
   if (corpora.length === 0)
     return none2;
   const searches = corpora.map((corpus) => ctx.email.sourceIndexSearch({ query, corpusId: corpus.corpusId, maxResults: PROBE_HITS_PER_CORPUS, allTiers: false }).then((result) => (Array.isArray(result.hits) ? result.hits : []).filter((hit) => typeof hit === "object" && hit !== null && !Array.isArray(hit)), () => []));
-  const timeout = new Promise((resolve21) => {
-    const timer = setTimeout(() => resolve21(none2), PROBE_TIMEOUT_MS2);
+  const timeout = new Promise((resolve22) => {
+    const timer = setTimeout(() => resolve22(none2), PROBE_TIMEOUT_MS2);
     timer.unref?.();
   });
   return Promise.race([
@@ -178618,21 +179463,21 @@ function hiddenWithoutAnswerModel(listed) {
     hidden.add("source_answer_result");
   return hidden;
 }
-async function runSearch(args, options, authorized, context2, signal) {
+async function runSearch(args, options, authorized, context3, signal) {
   const question = typeof args.question === "string" ? args.question.trim() : "";
   if (!question || question.length > MAX_QUESTION_CHARS2)
     return invalidParams("question");
-  let limit;
+  let limit2;
   if (args.limit !== undefined) {
     if (typeof args.limit !== "number" || !Number.isInteger(args.limit) || args.limit < 1 || args.limit > MAX_LIMIT)
       return invalidParams("limit");
-    limit = args.limit;
+    limit2 = args.limit;
   }
-  const privateCall = context2.privatePart?.start(REMOTE_SEARCH_TOOL.name, { question }, signal ? { signal } : undefined);
+  const privateCall = context3.privatePart?.start(REMOTE_SEARCH_TOOL.name, { question }, signal ? { signal } : undefined);
   const manifests = createReleaseManifestSink();
   let raw;
   try {
-    raw = await runWithReleaseManifestSink(manifests, () => options.evidenceSearch({ question, ...limit ? { limit } : {} }, signal));
+    raw = await runWithReleaseManifestSink(manifests, () => options.evidenceSearch({ question, ...limit2 ? { limit: limit2 } : {} }, signal));
   } catch (error2) {
     return errorResult(remoteErrorOutput(error2));
   }
@@ -178650,7 +179495,7 @@ async function runSearch(args, options, authorized, context2, signal) {
     if (afterWait !== "active")
       return refusedAccess(afterWait);
     const evidence = result.structuredContent?.evidence;
-    if (context2.releaseCheck && Array.isArray(evidence) && evidence.length > 0 && answerReleaseWithheldReason(manifests.manifests, context2.releaseCheck, "personal") !== undefined) {
+    if (context3.releaseCheck && Array.isArray(evidence) && evidence.length > 0 && answerReleaseWithheldReason(manifests.manifests, context3.releaseCheck, "personal") !== undefined) {
       const rawRecord = raw;
       const withheldBefore = typeof rawRecord.withheld === "number" && Number.isFinite(rawRecord.withheld) && rawRecord.withheld > 0 ? rawRecord.withheld : 0;
       result = searchToolResult({ ...rawRecord, evidence: [], withheld: withheldBefore + evidence.length });
@@ -179235,7 +180080,7 @@ function createRemoteOAuthHandler(options) {
   const pending = new Map;
   const codes = new Map;
   const completed = new Map;
-  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve21) => setTimeout(resolve21, ms))));
+  const pacer = pairingPacer(now, options.sleep ?? ((ms) => new Promise((resolve22) => setTimeout(resolve22, ms))));
   const sweep = () => {
     const at = now();
     for (const [id, entry] of pending)
@@ -180193,7 +181038,7 @@ __export(exports_private_answer_jobs, {
   PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS: () => PRIVATE_ANSWER_ANALYSIS_TIMEOUT_MS
 });
 import { randomBytes as randomBytes28, timingSafeEqual as timingSafeEqual11 } from "node:crypto";
-import { lstatSync as lstatSync43 } from "node:fs";
+import { lstatSync as lstatSync44 } from "node:fs";
 function formatAnalysisTiming(timing) {
   const fields = [`outcome=${timing.outcome}`];
   if (timing.outcome === "failed")
@@ -180405,8 +181250,8 @@ class PrivateAnswerJobs {
       const holdMs = this.options.claimHoldMs ?? PRIVATE_ANSWER_CLAIM_HOLD_MS;
       if (holdMs > 0) {
         let timer;
-        await Promise.race([settled, new Promise((resolve21) => {
-          timer = setTimeout(resolve21, holdMs);
+        await Promise.race([settled, new Promise((resolve22) => {
+          timer = setTimeout(resolve22, holdMs);
           timer.unref?.();
         })]);
         clearTimeout(timer);
@@ -180446,7 +181291,7 @@ class PrivateAnswerJobs {
       return gone();
     let isFile = false;
     try {
-      isFile = lstatSync43(path).isFile();
+      isFile = lstatSync44(path).isFile();
     } catch {
       isFile = false;
     }
@@ -180566,8 +181411,8 @@ class PrivateAnswerJobs {
     let settle = () => {
       return;
     };
-    const settled = new Promise((resolve21) => {
-      settle = resolve21;
+    const settled = new Promise((resolve22) => {
+      settle = resolve22;
     });
     const analysis = {
       key: key2,
@@ -180763,10 +181608,10 @@ class PrivateAnswerJobs {
     work.catch(() => {
       return;
     });
-    const stopped = new Promise((resolve21) => {
+    const stopped = new Promise((resolve22) => {
       if (abort.signal.aborted)
-        resolve21();
-      abort.signal.addEventListener("abort", () => resolve21(), { once: true });
+        resolve22();
+      abort.signal.addEventListener("abort", () => resolve22(), { once: true });
     });
     try {
       const done = await Promise.race([work, stopped]);
@@ -180793,8 +181638,8 @@ class PrivateAnswerJobs {
     let claimSettled = () => {
       return;
     };
-    const done = new Promise((resolve21) => {
-      claimSettled = resolve21;
+    const done = new Promise((resolve22) => {
+      claimSettled = resolve22;
     });
     const abort = new AbortController;
     job.claimAbort = abort;
@@ -180833,10 +181678,10 @@ class PrivateAnswerJobs {
     }, this.timeoutFor(job.detail));
     deadlineTimer.unref?.();
     abort.signal.addEventListener("abort", () => settle({ kind: "failed" }, "aborted"), { once: true });
-    const stopped = new Promise((resolve21) => {
+    const stopped = new Promise((resolve22) => {
       if (abort.signal.aborted)
-        resolve21();
-      abort.signal.addEventListener("abort", () => resolve21(), { once: true });
+        resolve22();
+      abort.signal.addEventListener("abort", () => resolve22(), { once: true });
     });
     const record5 = (analysis) => {
       timing.recheckMs = analysis.stats.recheckMs;
@@ -180967,8 +181812,8 @@ class PrivateAnswerJobs {
       return;
     }
     let timer;
-    const timeout = new Promise((resolve21) => {
-      timer = setTimeout(resolve21, this.resetTimeoutMs);
+    const timeout = new Promise((resolve22) => {
+      timer = setTimeout(resolve22, this.resetTimeoutMs);
       timer.unref?.();
     });
     const settled = Promise.race([reset.then(() => {
@@ -181252,9 +182097,9 @@ class PrivateQuestionJobs {
     if (!installId)
       return;
     if (origin.readOnly) {
-      const limit = this.dailyLimit();
-      if (limit !== "available")
-        return { refused: limit === "reached" ? "daily_limit_reached" : "daily_limit_unset" };
+      const limit2 = this.dailyLimit();
+      if (limit2 !== "available")
+        return { refused: limit2 === "reached" ? "daily_limit_reached" : "daily_limit_unset" };
     }
     this.sweep();
     while (this.jobs.size >= this.maxJobs) {
@@ -181372,9 +182217,9 @@ class PrivateQuestionJobs {
   }
   async run(job, plaintext) {
     let result;
-    const limit = job.origin.readOnly ? this.dailyLimit() : "available";
-    if (limit !== "available") {
-      result = { v: 1, state: "refused", ...PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS[limit === "reached" ? "daily_limit_reached" : "daily_limit_unset"] };
+    const limit2 = job.origin.readOnly ? this.dailyLimit() : "available";
+    if (limit2 !== "available") {
+      result = { v: 1, state: "refused", ...PRIVATE_QUESTION_DAILY_LIMIT_REFUSALS[limit2 === "reached" ? "daily_limit_reached" : "daily_limit_unset"] };
     } else {
       try {
         const outcome = await this.options.ask({
@@ -181593,10 +182438,10 @@ function untilCancelled(pending, signal) {
     return pending;
   if (signal.aborted)
     return Promise.resolve(undefined);
-  return new Promise((resolve21, reject) => {
-    const onAbort = () => resolve21(undefined);
+  return new Promise((resolve22, reject) => {
+    const onAbort = () => resolve22(undefined);
     signal.addEventListener("abort", onAbort, { once: true });
-    pending.then(resolve21, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    pending.then(resolve22, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 function asRecord21(value2) {
@@ -181610,7 +182455,7 @@ function remotePrivateOutcome(raw, released) {
   if (!audit)
     return "none";
   const decision = asRecord21(asRecord21(record5.opsec)?.release_decision)?.decision;
-  const reasons = Array.isArray(audit.skipped_corpora) ? audit.skipped_corpora.map((skip) => asRecord21(skip)?.reason).filter((reason) => typeof reason === "string") : [];
+  const reasons = Array.isArray(audit.skipped_corpora) ? audit.skipped_corpora.map((skip2) => asRecord21(skip2)?.reason).filter((reason) => typeof reason === "string") : [];
   if (decision === "needs_approval" || reasons.includes(BULK_REASON))
     return "approval_required";
   if (decision === "deny")
@@ -181668,8 +182513,8 @@ function createRemotePrivateParts(options) {
     try {
       return await Promise.race([
         options.probe(request, timeoutMs),
-        new Promise((resolve21) => {
-          timer = setTimeout(() => resolve21("unknown"), timeoutMs);
+        new Promise((resolve22) => {
+          timer = setTimeout(() => resolve22("unknown"), timeoutMs);
           timer.unref?.();
         })
       ]);
@@ -181851,9 +182696,9 @@ function createRemotePrivateParts(options) {
   return {
     forConnection(connectionId) {
       return {
-        start(operation, args, context2) {
+        start(operation, args, context3) {
           if (operation === "olympus_search")
-            return startSearch(connectionId, args, context2?.signal);
+            return startSearch(connectionId, args, context3?.signal);
           if (operation === "source_answer") {
             const ticket = ticketFor(connectionId);
             let answerId;
@@ -181864,7 +182709,7 @@ function createRemotePrivateParts(options) {
               async settle(raw, released) {
                 const pending = asRecord21(raw);
                 if (pending?.status === "working" && typeof pending.job_id === "string") {
-                  const settled = settleWhenFinished(context2?.jobs, pending.job_id, args, ticket, context2?.releaseCheck, (id) => {
+                  const settled = settleWhenFinished(context3?.jobs, pending.job_id, args, ticket, context3?.releaseCheck, (id) => {
                     answerId = id;
                     const handoff = handoffs.get(`${connectionId}\x00${pending.job_id}`);
                     if (handoff)
@@ -182555,8 +183400,8 @@ var init_setup_backend = __esm(() => {
 });
 
 // src/core/consult-settings-writer.ts
-import { chmodSync as chmodSync29, lstatSync as lstatSync44, mkdirSync as mkdirSync56, statSync as statSync33 } from "node:fs";
-import { dirname as dirname86, isAbsolute as isAbsolute32 } from "node:path";
+import { chmodSync as chmodSync29, lstatSync as lstatSync45, mkdirSync as mkdirSync57, statSync as statSync34 } from "node:fs";
+import { dirname as dirname87, isAbsolute as isAbsolute33 } from "node:path";
 function writeConsultSettings(input, location = {}) {
   let path;
   try {
@@ -182564,7 +183409,7 @@ function writeConsultSettings(input, location = {}) {
   } catch {
     return { ok: false, reason: "directory_unavailable" };
   }
-  if (path === undefined || !isAbsolute32(path))
+  if (path === undefined || !isAbsolute33(path))
     return { ok: false, reason: "no_home" };
   const nextRevision = input.expectedRevision + 1;
   const candidate = parseConsultSettings({
@@ -182584,7 +183429,7 @@ function writeConsultSettings(input, location = {}) {
   });
   if (!candidate || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
     return { ok: false, reason: "invalid_input" };
-  const custody = ensureSettingsDirectory(dirname86(path));
+  const custody = ensureSettingsDirectory(dirname87(path));
   if (custody !== "ok")
     return { ok: false, reason: custody };
   let published = false;
@@ -182636,23 +183481,23 @@ function writeConsultSettings(input, location = {}) {
 function ensureSettingsDirectory(directory) {
   let stats;
   try {
-    stats = lstatSync44(directory);
+    stats = lstatSync45(directory);
   } catch (error2) {
     if (error2?.code !== "ENOENT")
       return "directory_unavailable";
     try {
-      statSync33(dirname86(directory));
+      statSync34(dirname87(directory));
     } catch {
       return "home_missing";
     }
     try {
-      mkdirSync56(directory, { mode: 448 });
+      mkdirSync57(directory, { mode: 448 });
       chmodSync29(directory, 448);
     } catch {
       return "directory_unavailable";
     }
     try {
-      stats = lstatSync44(directory);
+      stats = lstatSync45(directory);
     } catch {
       return "directory_unavailable";
     }
@@ -182684,7 +183529,7 @@ __export(exports_dashboard_consult, {
   DASHBOARD_ZKAPI_DEFAULT_MODEL: () => DASHBOARD_ZKAPI_DEFAULT_MODEL,
   DASHBOARD_ZKAPI_API_KEY_ENV: () => DASHBOARD_ZKAPI_API_KEY_ENV
 });
-import { delimiter as delimiter9, dirname as dirname87 } from "node:path";
+import { delimiter as delimiter9, dirname as dirname88 } from "node:path";
 function acknowledgementsCurrent(acknowledgements) {
   return acknowledgements?.version === ZKAPI_RISK_ACKNOWLEDGEMENTS_VERSION && ACKNOWLEDGEMENT_IDS.every((id) => acknowledgements.accepted.includes(id));
 }
@@ -182733,7 +183578,7 @@ function createDashboardConsultAdapter(options) {
         return { tool: entry.tool, label: entry.label, source: "outdated", installedVersion: entry.outdatedVersion, version: entry.version };
       }
       const system = entry.installed ? undefined : resolveExecutable(entry.tool, undefined, env);
-      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname87(system)) ? system : undefined;
+      const executable = entry.installed ? entry.executable : system && !(env.PATH ?? "").split(delimiter9).includes(dirname88(system)) ? system : undefined;
       return {
         tool: entry.tool,
         label: entry.label,
@@ -183387,16 +184232,16 @@ __export(exports_dashboard_panel_tools, {
 function refused2(text6, code) {
   return { content: [{ type: "text", text: text6 }], structuredContent: { error: code }, isError: true };
 }
-function computerSetup(options, context2, privacyConfirmationScope) {
+function computerSetup(options, context3, privacyConfirmationScope) {
   return {
     ...options.setup,
     privacyConfirmationScope,
     directSignIn: true,
     async startOAuth(source) {
       const headers = { "Content-Type": "application/json" };
-      if (context2.gatewayOrigin)
-        headers[DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER] = context2.gatewayOrigin;
-      const response = await options.workerFetch(new Request(`${context2.origin}/dashboard/connect/oauth/start`, {
+      if (context3.gatewayOrigin)
+        headers[DASHBOARD_GATEWAY_PUBLIC_ORIGIN_HEADER] = context3.gatewayOrigin;
+      const response = await options.workerFetch(new Request(`${context3.origin}/dashboard/connect/oauth/start`, {
         method: "POST",
         headers,
         body: JSON.stringify({ source })
@@ -183456,8 +184301,8 @@ async function unpairSource(options, args) {
 function archiveArg(value2) {
   return typeof value2 === "string" && value2.length > 0 && value2.length <= ARCHIVE_ARG_MAX && !value2.includes("\x00");
 }
-async function archiveRoute(options, route, body, context2) {
-  if (context2.localSession !== true) {
+async function archiveRoute(options, route, body, context3) {
+  if (context3.localSession !== true) {
     return { ok: false, result: refused2(ARCHIVE_LOCAL_SESSION_REFUSAL, "mac_dashboard_only") };
   }
   const response = await options.workerFetch(new Request(`http://olympus-worker.internal/dashboard/archive-import/${route}`, {
@@ -183486,12 +184331,12 @@ async function archiveRoute(options, route, body, context2) {
     }
   };
 }
-async function archiveBrowse(options, args, context2) {
+async function archiveBrowse(options, args, context3) {
   const keys = Object.keys(args);
   if (keys.some((key2) => key2 !== "parent_key" && key2 !== "cursor") || args.parent_key !== undefined && !archiveArg(args.parent_key) || args.cursor !== undefined && !archiveArg(args.cursor)) {
     return refused2("parent_key and cursor must be from the picker.", "invalid_params");
   }
-  const answer = await archiveRoute(options, "browse", args, context2);
+  const answer = await archiveRoute(options, "browse", args, context3);
   if (!answer.ok)
     return answer.result;
   const nodes = Array.isArray(answer.parsed.nodes) ? answer.parsed.nodes : [];
@@ -183507,13 +184352,13 @@ async function archiveBrowse(options, args, context2) {
     }
   };
 }
-async function archiveApprove(options, args, context2) {
+async function archiveApprove(options, args, context3) {
   const keys = Object.keys(args);
   const byKey = keys.length === 1 && keys[0] === "key" && archiveArg(args.key);
   const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
   if (!byKey && !byRequest)
     return refused2("Give the chosen key or a request id.", "invalid_params");
-  const answer = await archiveRoute(options, "approve", args, context2);
+  const answer = await archiveRoute(options, "approve", args, context3);
   if (!answer.ok)
     return answer.result;
   const status = answer.parsed.status;
@@ -183526,22 +184371,22 @@ async function archiveApprove(options, args, context2) {
     structuredContent: { status, name, ...archiveName ? { archive_name: archiveName } : {} }
   };
 }
-async function archiveDecline(options, args, context2) {
+async function archiveDecline(options, args, context3) {
   const keys = Object.keys(args);
   if (keys.length !== 1 || keys[0] !== "request_id" || !archiveArg(args.request_id))
     return refused2("request_id is required.", "invalid_params");
-  const answer = await archiveRoute(options, "decline", args, context2);
+  const answer = await archiveRoute(options, "decline", args, context3);
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Declined." }], structuredContent: { status: "declined" } };
 }
-async function archiveRemove(options, args, context2) {
+async function archiveRemove(options, args, context3) {
   const keys = Object.keys(args);
   const byArchive = keys.length === 1 && keys[0] === "archive_id" && archiveArg(args.archive_id);
   const byRequest = keys.length === 1 && keys[0] === "request_id" && archiveArg(args.request_id);
   if (!byArchive && !byRequest)
     return refused2("Give an archive id or a request id.", "invalid_params");
-  const answer = await archiveRoute(options, "remove", { ...byArchive ? { archive_id: args.archive_id } : { request_id: args.request_id }, acknowledge: true }, context2);
+  const answer = await archiveRoute(options, "remove", { ...byArchive ? { archive_id: args.archive_id } : { request_id: args.request_id }, acknowledge: true }, context3);
   if (!answer.ok)
     return answer.result;
   return { content: [{ type: "text", text: "Removing." }], structuredContent: { status: "removing" } };
@@ -183553,14 +184398,14 @@ function archivesMeta(options) {
     return;
   }
 }
-async function openUnreadableFile(options, args, context2) {
+async function openUnreadableFile(options, args, context3) {
   const keys = Object.keys(args);
   if (typeof args.token !== "string" || keys.some((key2) => key2 !== "token"))
     return refused2("token must be a file token from the dashboard.", "invalid_params");
   const files = options.unreadableFiles?.();
-  if (!files || !context2.opener)
+  if (!files || !context3.opener)
     return refused2("Olympus cannot open this file here.", "unavailable");
-  const opened = await files.open(args.token, context2.opener);
+  const opened = await files.open(args.token, context3.opener);
   switch (opened.status) {
     case "opened":
       return { content: [{ type: "text", text: "Opened the file on this computer." }], structuredContent: { status: "opened" } };
@@ -183576,23 +184421,23 @@ async function openUnreadableFile(options, args, context2) {
       return refused2("This file is no longer in the list. Refresh the dashboard.", "gone");
   }
 }
-async function unreadableFilesPage(options, args, context2) {
+async function unreadableFilesPage(options, args, context3) {
   const keys = Object.keys(args);
   const after = args.after;
   if (typeof args.source_id !== "string" || !isUnreadablePageCursor(after) || keys.some((key2) => key2 !== "source_id" && key2 !== "after")) {
     return refused2("source_id and after must come from the dashboard.", "invalid_params");
   }
   const files = options.unreadableFiles?.();
-  if (!files || !context2.opener)
+  if (!files || !context3.opener)
     return refused2("Olympus cannot list these files here.", "unavailable");
   const sourceId = args.source_id;
-  const view3 = await options.surface().dashboardView(context2.signal).catch(() => {
+  const view3 = await options.surface().dashboardView(context3.signal).catch(() => {
     return;
   });
   const corpusIds = view3?.sources.find((card) => card.source_id === sourceId)?.unreadable_files?.corpus_ids;
   if (!corpusIds?.length)
     return refused2("This list changed. Refresh the dashboard.", "gone");
-  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { after, opener: context2.opener });
+  const listed = files.computerList(corpusIds, COMPUTER_UNREADABLE_FILES_LIMIT, { after, opener: context3.opener });
   const page3 = entriesOf(listed.files);
   return {
     content: [{ type: "text", text: `${page3.length} more files.` }],
@@ -183653,7 +184498,7 @@ function createDashboardPanelTools(options) {
   const privacyConfirmationScope = {};
   return {
     allows: (name) => allowed.has(name),
-    async call(name, args, context2) {
+    async call(name, args, context3) {
       if (!allowed.has(name))
         return refused2("This tool is not available here.", "unknown_tool");
       if (name === INDEX_FASTER_TOOL_NAME)
@@ -183661,23 +184506,23 @@ function createDashboardPanelTools(options) {
       if (name === UNPAIR_SOURCE_TOOL_NAME)
         return await unpairSource(options, args);
       if (name === OPEN_UNREADABLE_FILE_TOOL_NAME)
-        return await openUnreadableFile(options, args, context2);
+        return await openUnreadableFile(options, args, context3);
       if (name === UNREADABLE_FILES_PAGE_TOOL_NAME)
-        return await unreadableFilesPage(options, args, context2);
+        return await unreadableFilesPage(options, args, context3);
       if (name === ARCHIVE_BROWSE_TOOL_NAME)
-        return await archiveBrowse(options, args, context2);
+        return await archiveBrowse(options, args, context3);
       if (name === ARCHIVE_APPROVE_TOOL_NAME)
-        return await archiveApprove(options, args, context2);
+        return await archiveApprove(options, args, context3);
       if (name === ARCHIVE_DECLINE_TOOL_NAME)
-        return await archiveDecline(options, args, context2);
+        return await archiveDecline(options, args, context3);
       if (name === ARCHIVE_REMOVE_TOOL_NAME)
-        return await archiveRemove(options, args, context2);
-      const signal = context2.signal ?? new AbortController().signal;
+        return await archiveRemove(options, args, context3);
+      const signal = context3.signal ?? new AbortController().signal;
       const base = options.surface();
       let view3;
       const surface = {
         ...base,
-        setup: computerSetup(options, context2, privacyConfirmationScope),
+        setup: computerSetup(options, context3, privacyConfirmationScope),
         dashboardView: async (viewSignal) => view3 = await base.dashboardView(viewSignal)
       };
       const result = await callChatGptTool(name, args, options.makeContext(signal), surface, signal);
@@ -183687,10 +184532,10 @@ function createDashboardPanelTools(options) {
         return;
       });
       const unpair = computerUnpairEntries(view3);
-      const unreadable = computerUnreadableEntries(view3, options.unreadableFiles?.(), context2.opener);
+      const unreadable = computerUnreadableEntries(view3, options.unreadableFiles?.(), context3.opener);
       const missingFolders = (view3?.sources ?? []).flatMap((source) => source.schedule?.missing_folders?.length ? [{ sourceId: source.source_id, paths: source.schedule.missing_folders }] : []);
       const permissionSettings = process.platform === "darwin" ? (view3?.sources ?? []).flatMap((source) => source.schedule?.degraded_reason === "scope_root_permission_needed" ? [{ sourceId: source.source_id, url: FILES_AND_FOLDERS_URL }] : []) : [];
-      const waiting = context2.localSession === true ? waitingCount(options) : 0;
+      const waiting = context3.localSession === true ? waitingCount(options) : 0;
       const archives = archivesMeta(options);
       if (on === undefined && unpair.length === 0 && unreadable.length === 0 && waiting === 0 && missingFolders.length === 0 && permissionSettings.length === 0 && !archives)
         return result;
@@ -183753,6 +184598,7 @@ __export(exports_server2, {
   parseOptionalNonNegativeInteger: () => parseOptionalNonNegativeInteger,
   parseConnectorStoreMountsFromEnv: () => parseConnectorStoreMountsFromEnv,
   openIngestionDispositionsRuntime: () => openIngestionDispositionsRuntime,
+  migrateAccountFoldersAtBoot: () => migrateAccountFoldersAtBoot,
   main: () => main,
   localPrivateEmbeddingTargets: () => localPrivateEmbeddingTargets,
   loadSourceWorkerSovereignty: () => loadSourceWorkerSovereignty,
@@ -183777,7 +184623,7 @@ __export(exports_server2, {
 });
 import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync84 } from "node:fs";
-import { dirname as dirname88, isAbsolute as isAbsolute33, join as join109 } from "node:path";
+import { dirname as dirname89, isAbsolute as isAbsolute34, join as join110 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
   const nativeOwners = {
@@ -184782,9 +185628,31 @@ function replaceEmptyAccountsAtBoot(env) {
     return [];
   }
 }
+function migrateAccountFoldersAtBoot(env) {
+  try {
+    const report = migrateAccountFolders(env);
+    for (const sourceId of report.moved)
+      console.log(`[storage] ${sourceId} moved into its account folder.`);
+    for (const { sourceId, reason } of report.movedBack)
+      console.warn(`[storage] ${sourceId} could not be moved (${reason}); its files were put back where they were.`);
+    for (const { sourceId, reason } of report.skipped)
+      console.log(`[storage] ${sourceId} stays where it is (${reason}).`);
+    for (const { sourceId, detail } of report.stuck)
+      console.warn(`[storage] ${sourceId} is part way through a move and stays closed until a restart finishes it: ${detail}`);
+    for (const sourceId of report.deferred)
+      console.log(`[storage] ${sourceId} will be moved at a later start; this one ran out of time.`);
+    for (const { sourceId, message: message2 } of report.errors)
+      console.warn(`[storage] ${sourceId} was not moved (${message2}).`);
+    return report;
+  } catch (error2) {
+    console.warn(`[storage] Could not check which accounts to move into folders (${error2 instanceof Error ? error2.message : "unknown error"}); they stay as recorded.`);
+    return;
+  }
+}
 async function main() {
   dataOwnerLock = takeWorkerDataOwnerLock(process.env);
   replaceEmptyAccountsAtBoot(process.env);
+  migrateAccountFoldersAtBoot(process.env);
   enableSourceRegistryAdoption();
   let closeDesktopBridge = () => {};
   const shutdownSignals = installWorkerShutdownSignals({ closeOwnerBridge: () => closeDesktopBridge(), exit: (code) => process.exit(code) });
@@ -185316,13 +186184,13 @@ async function main() {
     }
     if (!await eligible())
       throw new Error("open refused");
-    await new Promise((resolve21, reject) => {
+    await new Promise((resolve22, reject) => {
       const args = localOpenArguments(path, roots);
       if (!args) {
         reject(new Error("open refused"));
         return;
       }
-      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve21());
+      execFile4("/usr/bin/open", args, { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve22());
     });
   };
   const whatsappConnectorStoreLane = sourceIndexLaneAccountDecision(sourceIndexLaneStorageDecision(process.env, "OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_ENABLED", sourceIndexReadEnabled), { sourceId: WHATSAPP_PERSONAL_SOURCE_ID });
@@ -186730,7 +187598,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     ...sourceAnswerLatencyLog ? { sourceAnswerLatencyLog } : {},
     ...sourceIndexStatus ? { sourceIndexStatus } : {},
     ...unreadableFiles ? {
-      unreadableFileNames: (corpusIds, limit) => unreadableFiles.names(corpusIds, limit),
+      unreadableFileNames: (corpusIds, limit2) => unreadableFiles.names(corpusIds, limit2),
       unreadableRecheck: (corpusId) => unreadableFiles.recheck(corpusId)
     } : {},
     currentReadwiseSync,
@@ -186777,10 +187645,10 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         connectModelKey,
         panelTools: {
           allows: (name) => dashboardPanelTools?.allows(name) === true,
-          call: (name, args, context2) => {
+          call: (name, args, context3) => {
             if (!dashboardPanelTools)
               throw new Error("dashboard panel tools are not ready");
-            return dashboardPanelTools.call(name, args, context2);
+            return dashboardPanelTools.call(name, args, context3);
           }
         },
         ...sourceAnswerLanes ? {
@@ -187088,7 +187956,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         openUrl: async (url, eligible) => {
           if (!await eligible())
             throw new Error("open refused");
-          await new Promise((resolve21, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve21()));
+          await new Promise((resolve22, reject) => execFile4("/usr/bin/open", [url], { timeout: 1e4 }, (error2) => error2 ? reject(error2) : resolve22()));
         }
       } : {}
     });
@@ -187606,7 +188474,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       modelState: () => workerBuiltInModel?.model.status().state
     } : {},
     ownerContext: privacyOwnerWords,
-    budgetStatePath: join109(dirname88(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
+    budgetStatePath: join110(dirname89(resolveClassificationLedgerPath(process.env)), "tier-sniffer-budget.json"),
     intervalMs: snifferEnv.intervalMs,
     ...snifferEnv.maxCallsPerPass !== undefined ? { maxCallsPerPass: snifferEnv.maxCallsPerPass } : {},
     maxCallsPerDay: snifferEnv.maxCallsPerDay,
@@ -187750,17 +188618,17 @@ function activeCredentialHandle(handles, match) {
 }
 function selectCredentialHandle(handles, match) {
   const eligible = handles.filter((handle) => handle.provider === match.provider && handle.allowedCapabilities.includes(match.capability) && handle.backendState?.status !== "reauth_required");
-  const candidates = eligible.map((handle) => handle.handle);
+  const candidates2 = eligible.map((handle) => handle.handle);
   const pinnedHandle = match.pinnedHandle?.trim();
   if (pinnedHandle) {
     const pinned = eligible.find((handle) => handle.handle === pinnedHandle);
-    return pinned ? { handle: pinned, reason: "selected", candidates } : { reason: "pinned_missing", candidates };
+    return pinned ? { handle: pinned, reason: "selected", candidates: candidates2 } : { reason: "pinned_missing", candidates: candidates2 };
   }
   if (eligible.length === 0)
-    return { reason: "none", candidates };
+    return { reason: "none", candidates: candidates2 };
   if (eligible.length > 1)
-    return { reason: "ambiguous", candidates };
-  return { handle: eligible[0], reason: "selected", candidates };
+    return { reason: "ambiguous", candidates: candidates2 };
+  return { handle: eligible[0], reason: "selected", candidates: candidates2 };
 }
 function connectorStoreLaneHandle(input) {
   const handle = selectedSourceCredentialHandle(input);
@@ -188155,7 +189023,7 @@ function validateConnectorStoreMountDeclaration(entry) {
   if (!dbPath || !corpusId || !family || !trustDomain) {
     throw new Error("Connector store entries require dbPath, corpusId, family, trustDomain.");
   }
-  if (!isAbsolute33(dbPath)) {
+  if (!isAbsolute34(dbPath)) {
     throw new Error("Connector store dbPath must be absolute.");
   }
   if (!isDeclarableSourceFamily(family)) {
@@ -188305,6 +189173,7 @@ var init_server5 = __esm(async () => {
   init_tier_visibility();
   init_secret_locations();
   init_source_storage();
+  init_source_account_migration();
   init_data_owner_lock();
   init_data_lifecycle();
   init_chat_scope_filter();
@@ -188813,7 +189682,7 @@ import { randomBytes as randomBytes30 } from "node:crypto";
 import { existsSync as existsSync85, readFileSync as readFileSync77, openSync as openSync21, closeSync as closeSync22, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve as resolve21 } from "node:path";
+import { resolve as resolve22 } from "node:path";
 
 // src/core/open-handler.ts
 init_open_targets();
@@ -191214,7 +192083,7 @@ function expectNoArgs(command, args) {
 init_engine_service();
 init_remote_access();
 function olympusCommandHint2(input2 = {}) {
-  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve21(olympusPackageRoot(), "bin", "olympus") });
+  return olympusCommandHint({ ...input2, pluginBin: input2.pluginBin ?? resolve22(olympusPackageRoot(), "bin", "olympus") });
 }
 var PUBLIC_CLI_COMMAND_NAMES = new Set(V0_4_PUBLIC_CLI_COMMANDS);
 var ZKAPI_TEST_WRITER_USAGE = "olympus zkapi test-writer [--level unnamed|general] [--base-url <url> --model <name> [--secret-ref <ref>]] [--json]";
@@ -191957,10 +192826,10 @@ function parseTerminalContentRequalifyArgs(args) {
   if (limitValue === undefined === !noLimit) {
     throw new OperationError("invalid_params", "Terminal requalify requires exactly one of --limit N or --no-limit.");
   }
-  let limit;
+  let limit2;
   if (limitValue !== undefined) {
-    limit = Number(limitValue);
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
+    limit2 = Number(limitValue);
+    if (!Number.isSafeInteger(limit2) || limit2 <= 0) {
       throw new OperationError("invalid_params", "--limit must be a positive integer.");
     }
   }
@@ -191978,7 +192847,7 @@ function parseTerminalContentRequalifyArgs(args) {
     ...statuses ? { source_statuses: [...new Set(statuses)] } : {},
     target_extractor_kind: targetKind,
     target_extractor_version: targetVersion,
-    ...limit !== undefined ? { limit } : {},
+    ...limit2 !== undefined ? { limit: limit2 } : {},
     ...noLimit ? { no_limit: true } : {},
     ...includeSuperseded ? { include_superseded: true } : {},
     ...values.get("reason")?.trim() ? { reason: values.get("reason").trim() } : {},
@@ -192045,10 +192914,10 @@ function parseQueuedContentRetargetArgs(args) {
   if (limitValue === undefined === !noLimit) {
     throw new OperationError("invalid_params", "Queued retarget requires exactly one of --limit N or --no-limit.");
   }
-  let limit;
+  let limit2;
   if (limitValue !== undefined) {
-    limit = Number(limitValue);
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
+    limit2 = Number(limitValue);
+    if (!Number.isSafeInteger(limit2) || limit2 <= 0) {
       throw new OperationError("invalid_params", "--limit must be a positive integer.");
     }
   }
@@ -192058,7 +192927,7 @@ function parseQueuedContentRetargetArgs(args) {
     source_extractor_kind: sourceKind,
     target_extractor_kind: targetKind,
     target_extractor_version: targetVersion,
-    ...limit !== undefined ? { limit } : {},
+    ...limit2 !== undefined ? { limit: limit2 } : {},
     ...noLimit ? { no_limit: true } : {},
     dry_run: !execute
   };
@@ -192120,7 +192989,7 @@ function parseEvalShardExportArgs(args) {
     account,
     approved_scope_key: approvedScopeKey,
     count: count2,
-    out_dir: resolve21(out),
+    out_dir: resolve22(out),
     ...docTypes ? { doc_types: docTypes } : {},
     dry_run: !execute
   };
@@ -192170,7 +193039,7 @@ function parseOwnerTierOverrideArgs(args) {
     throw new OperationError("invalid_params", "Owner tier override requires --reason <string>.");
   let raw;
   try {
-    raw = readFileSync77(resolve21(input2), "utf8");
+    raw = readFileSync77(resolve22(input2), "utf8");
   } catch (error2) {
     throw new OperationError("invalid_params", `Owner tier override --input file could not be read: ${error2.message}`);
   }
@@ -192422,22 +193291,22 @@ var COMMAND_GROUP_HELP = {
 };
 function parseXContentRecoveryArgs(args) {
   let execute = false;
-  let limit;
+  let limit2;
   for (let index = 0;index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--execute")
       execute = true;
     else if (arg === "--limit")
-      limit = Number(requireOptionValue(args, index += 1, arg));
+      limit2 = Number(requireOptionValue(args, index += 1, arg));
     else if (arg?.startsWith("--limit="))
-      limit = Number(arg.slice("--limit=".length));
+      limit2 = Number(arg.slice("--limit=".length));
     else
       throw new OperationError("invalid_params", `Unknown X content recovery option: ${arg}`);
   }
-  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+  if (limit2 !== undefined && (!Number.isSafeInteger(limit2) || limit2 < 1 || limit2 > 100)) {
     throw new OperationError("invalid_params", "X content recovery limit must be between 1 and 100.");
   }
-  return { execute, ...limit !== undefined ? { limit } : {} };
+  return { execute, ...limit2 !== undefined ? { limit: limit2 } : {} };
 }
 function parseXReconcileRecoveryArgs(args) {
   let account = "personal";
@@ -192477,7 +193346,7 @@ function parseXReconcileRecoveryArgs(args) {
   }
   return {
     account,
-    ...stateDbPath ? { stateDbPath: resolve21(stateDbPath) } : {},
+    ...stateDbPath ? { stateDbPath: resolve22(stateDbPath) } : {},
     execute,
     ...expectedStagedDigestSha256 ? { expectedStagedDigestSha256 } : {}
   };
@@ -193371,7 +194240,7 @@ async function runDataCommand(args) {
     const options = parseDataOptions(args.slice(1));
     if (!options.output.trim())
       throw new OperationError("invalid_params", "--output must be provided.");
-    const destination = resolve21(options.output.trim());
+    const destination = resolve22(options.output.trim());
     return runLocallyOrThroughWorker(() => exportOlympusData({
       destination,
       ...options.sourceId ? { sourceId: options.sourceId } : {}

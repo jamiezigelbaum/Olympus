@@ -16609,6 +16609,9 @@ var init_archive_formats = __esm(() => {
 
 // src/core/source-registry.ts
 import { readFileSync as readFileSync14 } from "node:fs";
+function sourceAccountMovePending(account) {
+  return account.migration?.state === "moving" || account.migration?.state === "reverting";
+}
 function sourceRegistryPath(env = process.env) {
   return olympusDataPath(env, "registry.json");
 }
@@ -16620,7 +16623,7 @@ function updateSourceRegistry(env, mutate) {
   return withFileLeaseSync(path, (lease) => {
     const current2 = readSourceRegistryAt(path);
     const next = mutate(current2) ?? current2;
-    next.schema = next.accounts.some((account) => account.layout === "folder") ? SOURCE_REGISTRY_FOLDER_SCHEMA : SOURCE_REGISTRY_SCHEMA;
+    next.schema = next.accounts.some(sourceAccountMovePending) ? SOURCE_REGISTRY_MOVING_SCHEMA : next.accounts.some((account) => account.layout === "folder") ? SOURCE_REGISTRY_FOLDER_SCHEMA : SOURCE_REGISTRY_SCHEMA;
     const text2 = `${JSON.stringify(validateRegistry(next, path), null, 2)}
 `;
     lease.commit(() => writePrivateFileAtomicSync(path, text2));
@@ -16666,7 +16669,19 @@ function validateRegistry(value, path) {
   return value;
 }
 function isValidAccount(value) {
-  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at);
+  return isRecord(value) && nonEmptyString(value.source_id) && nonEmptyString(value.slot) && typeof value.state === "string" && STATES.includes(value.state) && typeof value.layout === "string" && LAYOUTS.includes(value.layout) && Array.isArray(value.corpus_ids) && value.corpus_ids.every(nonEmptyString) && (value.provider_account_hash === undefined || nonEmptyString(value.provider_account_hash)) && nonEmptyString(value.created_at) && (value.migration === undefined || isValidMigration(value.migration));
+}
+function isValidMigration(value) {
+  if (!isRecord(value))
+    return false;
+  const pending = value.state === "moving" || value.state === "reverting";
+  return typeof value.state === "string" && MIGRATION_STATES.includes(value.state) && nonEmptyString(value.at) && (value.reason === undefined || nonEmptyString(value.reason)) && (value.detail === undefined || typeof value.detail === "string") && (value.moves === undefined || Array.isArray(value.moves) && value.moves.every(isValidMove)) && (!pending || Array.isArray(value.moves)) && (value.checked === undefined || Array.isArray(value.checked) && value.checked.every(isValidCheck));
+}
+function isValidMove(value) {
+  return isRecord(value) && typeof value.role === "string" && MOVE_ROLES.includes(value.role) && nonEmptyString(value.from) && nonEmptyString(value.to) && (value.kind === "file" || value.kind === "dir") && (value.db === undefined || value.db === true) && nonEmptyString(value.dev) && nonEmptyString(value.ino) && typeof value.size === "number" && Number.isSafeInteger(value.size) && value.size >= 0;
+}
+function isValidCheck(value) {
+  return isRecord(value) && nonEmptyString(value.file) && (value.result === "ok" || value.result === "damaged" || value.result === "not_checked");
 }
 function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
@@ -16674,12 +16689,12 @@ function nonEmptyString(value) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-var SOURCE_REGISTRY_SCHEMA = 1, SOURCE_REGISTRY_FOLDER_SCHEMA = 2, KNOWN_SCHEMAS, DEFAULT_ACCOUNT_SLOT = "1", SourceRegistryError, STATES, LAYOUTS;
+var SOURCE_REGISTRY_SCHEMA = 1, SOURCE_REGISTRY_FOLDER_SCHEMA = 2, SOURCE_REGISTRY_MOVING_SCHEMA = 3, KNOWN_SCHEMAS, DEFAULT_ACCOUNT_SLOT = "1", SourceRegistryError, STATES, LAYOUTS, MIGRATION_STATES, MOVE_ROLES;
 var init_source_registry = __esm(() => {
   init_atomic_file();
   init_file_lease();
   init_olympus_layout();
-  KNOWN_SCHEMAS = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA];
+  KNOWN_SCHEMAS = [SOURCE_REGISTRY_SCHEMA, SOURCE_REGISTRY_FOLDER_SCHEMA, SOURCE_REGISTRY_MOVING_SCHEMA];
   SourceRegistryError = class SourceRegistryError extends Error {
     code = "source_registry_unreadable";
     path;
@@ -16691,6 +16706,8 @@ var init_source_registry = __esm(() => {
   };
   STATES = ["active", "deleting", "deleted"];
   LAYOUTS = ["legacy", "folder"];
+  MIGRATION_STATES = ["moving", "reverting", "done", "skipped", "failed"];
+  MOVE_ROLES = ["store", "ledger", "secrets", "sniffer", "raw"];
 });
 
 // src/core/store-identity.ts
@@ -29720,11 +29737,20 @@ function placeBeforeFirstFile(env, registry, account, path) {
   adopt(env, account.sourceId, slot, path);
 }
 function unavailableStateReason(state) {
+  if (state === "moving")
+    return "its files are being moved into its folder";
   return state === "deleting" ? "its data is being deleted" : "its data was deleted";
 }
+function unavailableState(entry) {
+  if (entry === undefined)
+    return;
+  if (entry.state !== "active")
+    return entry.state;
+  return sourceAccountMovePending(entry) ? "moving" : undefined;
+}
 function assertOpenable(registry, sourceId, slot) {
-  const state = findRegistryAccount(registry, sourceId, slot)?.state;
-  if (state !== undefined && state !== "active")
+  const state = unavailableState(findRegistryAccount(registry, sourceId, slot));
+  if (state !== undefined)
     throw new SourceStorageUnavailableError(sourceId, slot, state);
 }
 function adopt(env, sourceId, slot, dbPath, corpusId) {
@@ -44209,6 +44235,7 @@ init_source_scope_approval();
 init_release_manifest();
 init_google_handle_compatibility();
 init_source_account_binding();
+init_source_registry();
 init_consent_page();
 init_analyst();
 init_types();
@@ -48003,6 +48030,32 @@ init_tier_ledger();
 // src/workers/email-source/server.ts
 init_secret_locations();
 init_source_storage();
+
+// src/core/source-account-migration.ts
+init_archive_formats();
+init_atomic_file();
+init_olympus_layout();
+init_source_placement();
+init_source_storage();
+init_source_registry();
+var ASSUMED_BYTES_PER_SECOND = 10 * 1024 * 1024;
+var QUICK_CHECK_STORE_MAX_BYTES = 64 * 1024 * 1024;
+var QUICK_CHECK_TOTAL_MAX_BYTES = 128 * 1024 * 1024;
+var ACCOUNT_LOG_MAX_BYTES = 32 * 1024 * 1024;
+var SKIP_REASONS = new Set([
+  "pinned",
+  "unreadable",
+  "unexpected_file",
+  "destination_exists",
+  "other_device",
+  "files_elsewhere",
+  "log_large",
+  "log_not_folded",
+  "no_hard_links"
+]);
+var NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
+
+// src/workers/email-source/server.ts
 init_data_owner_lock();
 init_data_lifecycle();
 init_credential_broker();
