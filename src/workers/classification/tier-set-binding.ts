@@ -45,8 +45,8 @@ export function tierSetLedgerCandidates(storeDbPath: string, recordedLedgerPath:
 
 /**
  * The path of the ledger a store is bound to, or undefined when none of the
- * candidates holds a ledger with the bound identity. Opens nothing but the
- * candidates' identity rows, read-only, and creates nothing.
+ * candidates holds a ledger with the bound identity. It reads only each
+ * candidate's identity row (`TierLedger.readLedgerId`) and creates nothing.
  */
 export function findTierSetLedger(storeDbPath: string, binding: TierSetBindingRecord): string | undefined {
   for (const candidate of tierSetLedgerCandidates(storeDbPath, binding.ledgerPath)) {

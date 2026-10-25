@@ -123,9 +123,14 @@ function fileStates(dir: string): Record<string, FileState> {
   }));
 }
 
-/** The files of the stores themselves (not the ledgers beside them) and their -wal, as they stand. */
+/** The files of the stores themselves, not the ledgers beside them or any -wal and -shm. */
 function storeFiles(states: Record<string, FileState>): Record<string, FileState> {
-  return Object.fromEntries(Object.entries(states).filter(([name]) => !name.includes('tier-ledger') && !name.endsWith('-shm')));
+  return Object.fromEntries(Object.entries(states).filter(([name]) => name.endsWith('.sqlite') && !name.includes('tier-ledger')));
+}
+
+/** The -wal files there are (a clean close leaves an empty one on macOS and none on Linux): none may hold anything. */
+function walSizes(states: Record<string, FileState>): number[] {
+  return Object.entries(states).filter(([name]) => name.endsWith('-wal')).map(([, state]) => state.size);
 }
 
 const SEARCHES = ['harbour', 'compost', 'ferry', 'vault', 'notice', 'rota'] as const;
@@ -245,10 +250,11 @@ describe('a set written the old way (recorded ledger path), before and after a r
     expect(ledgerState(tierLedgerPathForStore(folderPath(w, 'secure_local')))).toEqual(ledgerBefore);
     expect(TierLedger.readLedgerId(tierLedgerPathForStore(folderPath(w, 'secure_local')))).toBe(SET_LEDGER_ID);
 
-    // Nothing was written to any store: bytes, size and mtime as they were, and every -wal still empty.
-    const stores = storeFiles(fileStates(dir));
-    expect(stores).toEqual(storeFiles(filesBefore));
-    expect(Object.keys(stores).filter((name) => name.endsWith('-wal')).map((name) => stores[name]!.size)).toEqual([0, 0, 0]);
+    // Nothing was written to any store: bytes, size and mtime as they were, and no -wal holds anything.
+    const filesAfter = fileStates(dir);
+    expect(Object.keys(storeFiles(filesAfter))).toHaveLength(3);
+    expect(storeFiles(filesAfter)).toEqual(storeFiles(filesBefore));
+    expect(walSizes(filesAfter).every((size) => size === 0)).toBe(true);
   });
 
   test('a renamed store opened for writing and only read leaves its file as it was; its -wal stays empty', () => {
@@ -269,10 +275,9 @@ describe('a set written the old way (recorded ledger path), before and after a r
       for (const store of stores) store.close();
       ledger.close();
     }
-    const after = storeFiles(fileStates(dir));
-    const mainFiles = (states: Record<string, FileState>) => Object.fromEntries(Object.entries(states).filter(([name]) => name.endsWith('.sqlite')));
-    expect(mainFiles(after)).toEqual(mainFiles(before));
-    expect(Object.entries(after).filter(([name]) => name.endsWith('-wal')).map(([, state]) => state.size)).toEqual([0, 0, 0]);
+    const after = fileStates(dir);
+    expect(storeFiles(after)).toEqual(before);
+    expect(walSizes(after).every((size) => size === 0)).toBe(true);
   });
 
   test('the same set opened for normal work after the rename syncs through, and its binding rows are not rewritten', async () => {
