@@ -113,14 +113,13 @@ export function layoutRulesScript(): string {
     }
   }
 
-  // misaligned-controls: buttons of one repeated structure (rows of a list, the same label) stacked in one column that line up by
-  // nothing, off by a few pixels. Buttons of unrelated parts of the page may sit a few pixels apart on purpose, so they are not compared.
+  // misaligned-controls: buttons of one repeated structure (rows of a list) stacked in one column that line up by nothing, off by a few
+  // pixels. Buttons of unrelated parts of the page may sit a few pixels apart on purpose, so they are not compared, whatever their
+  // label (2026-10-25: an "Open" inside a padded notice was compared with the "Open" buttons of the list below it).
   const controls = Array.from(document.body.querySelectorAll('button, [role="button"], a.button, input[type="submit"], input[type="button"]')).filter(shown);
   const shape = (el) => { const parts = []; for (let node = el.parentElement, depth = 0; node && depth < 3; node = node.parentElement, depth += 1) parts.push(node.tagName + '.' + Array.from(node.classList).sort().join('.')); return parts.join('<'); };
   const groups = new Map();
-  for (const el of controls) {
-    for (const key of ['shape:' + shape(el), 'label:' + words(el)]) groups.set(key, [...(groups.get(key) || []), { el, r: el.getBoundingClientRect() }]);
-  }
+  for (const el of controls) groups.set(shape(el), [...(groups.get(shape(el)) || []), { el, r: el.getBoundingClientRect() }]);
   const misaligned = new Set();
   for (const group of groups.values()) {
     if (group.length < 2) continue;

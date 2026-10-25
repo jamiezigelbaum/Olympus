@@ -35,7 +35,6 @@ if (verb === 'provision') {
   if (sub === 'engine-build') say({ ok: true, build: '1.1.0+abc', version: '1.1.0', remoteMode: 'relay', relay: {} });
   else if (sub === 'prepare-source') say({ ok: true, rules: 2, engineReadyMs: 1000 });
   else if (sub === 'connect-source') say({ ok: true, message: 'Connected' });
-  else if (sub === 'sync') say({ ok: true, status: 200 });
   else if (sub === 'settle') say({ ok: true, settled: true, polls: 2, waitedMs: 1000, snapshot: counts });
   else if (sub === 'dashboard-json') say({ ok: true, status: 200, body: '{}' });
   else if (sub === 'collect-logs') say({ ok: true, files: [] });
