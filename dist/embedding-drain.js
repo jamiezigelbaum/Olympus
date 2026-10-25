@@ -48137,6 +48137,7 @@ var SKIP_REASONS = new Set([
   "files_elsewhere",
   "log_large",
   "log_not_folded",
+  "busy",
   "no_hard_links"
 ]);
 var NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
