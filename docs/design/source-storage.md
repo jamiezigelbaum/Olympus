@@ -1038,9 +1038,20 @@ touch the store path (`eval/`).
      startup timeout; one injected verify failure moved back with its Needs
      you row; one crash mid-move resumed; the downgrade behavior. The owner
      signs this off here.
-   - **4d, the messaging migration**, including the Go bridge's session
-     lock, which 4b leaves as it is. An archive-only Telegram or WhatsApp
-     account (history, no session) is a `folder` account from the start.
+   - **4d, the messaging migration (done, #542)**, including the Go bridge's
+     session lock, which 4b leaves as it is. An archive-only Telegram or WhatsApp
+     account (history, no session) is a `folder` account from the start. Built:
+     "Messaging accounts (step 4d)" under Migration, behind the same switch: the
+     two sources in the pass (plan paths outside the data root tagged by
+     root), the capture helpers' locks held through it, the bridge's session
+     lock handed to it by its spawner, the grant and stored session paths
+     weighed before and rewritten after, media paths read at their new place,
+     no capture or pairing on an account part way, and empty claim folders of a
+     failed pairing taken back. Proof: `test/source-account-migration-messaging.test.ts`
+     on isolated homes (default, relocated XDG and standalone Linux roots; each
+     skip reason, a live reader, pairing and bridge; a kill at each step resumed
+     and a failed check put back). Paired devices on Mac and Linux are on 4c's
+     retirement list.
    - **4e, account identity** (done, #530), before archive ingestion's
      Telegram and mail steps (#524). The registry's `provider_account_hash` is
      written by connect (from the account binding) and by Telegram pairing. The
