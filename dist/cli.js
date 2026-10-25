@@ -53871,8 +53871,10 @@ class TieredRoutingRun {
       staleCopiesGone: replacesInPlace || routed && this.set.routedCopiesGone(identity2),
       ...deferred ? { stagedLandingAllowed: true } : {}
     });
-    if (recorded.outcome !== "secrets")
+    if (recorded.outcome !== "secrets") {
       retireSecretRedactions(ledger, { identity: identity2 });
+      this.copyRemovals.delete(identityKey(identity2));
+    }
     switch (recorded.outcome) {
       case "secrets":
         this.counts.itemsSecrets += 1;

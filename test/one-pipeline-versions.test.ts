@@ -56,6 +56,23 @@ describe('every accepted version is classified and routed on its own', () => {
     expect(h.set.ledger.itemIsSecret({ provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' })).toBe(true);
   });
 
+  test('a Secret version followed by a newer ordinary one in the same listing keeps the newer version\'s copy rows; the reverse order still removes them', async () => {
+    const key = { provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' };
+    const forward = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
+    forward.connectLive();
+    const idForward = await forward.startImport('forward.mbox', [rec('a', 1, `key\n${KEY_MARKER}`), rec('a', 2, 'ordinary words now')]);
+    await forward.importAll(idForward);
+    expect(forward.textOf('a')).toContain('ordinary words now');
+    expect(forward.set.ledger.copies(key).filter((copy) => copy.state === 'current').length).toBeGreaterThan(0);
+
+    const reverse = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
+    reverse.connectLive();
+    const idReverse = await reverse.startImport('reverse.mbox', [rec('a', 1, 'ordinary words first'), rec('a', 2, `key\n${KEY_MARKER}`)]);
+    await reverse.importAll(idReverse);
+    expect(everyStoredText(reverse)).not.toContain('PRIVATE KEY');
+    expect(reverse.set.ledger.copies(key).filter((copy) => copy.state === 'current')).toEqual([]);
+  });
+
   test('the two versions of an item that are both ordinary end as the later one, routed by its own verdict', async () => {
     const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
     h.connectLive();

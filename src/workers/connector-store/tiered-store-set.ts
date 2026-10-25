@@ -1679,7 +1679,12 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     });
     // Left Secrets in this write (the owner's restore): its extraction jobs
     // keep their names again from this listing's enqueue on.
-    if (recorded.outcome !== 'secrets') retireSecretRedactions(ledger, { identity });
+    if (recorded.outcome !== 'secrets') {
+      retireSecretRedactions(ledger, { identity });
+      // The newest accepted version's plan wins: an earlier version of this listing that was a Secret (or a
+      // deletion) left its copy rows to be forgotten at the end of the run; this version keeps its own.
+      this.copyRemovals.delete(identityKey(identity));
+    }
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;
