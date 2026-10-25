@@ -1,0 +1,152 @@
+import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  canaryVerdict, isDashboard, isSystemPrompt, openedWindows, parseWindows, pinnedVersion, renderCanaryHtml, runCanary,
+  SITE_INSTALLER, type CanaryOptions, type CanaryReport,
+} from '../scripts/release-check/canary.ts';
+import type { ExecResult, Machine } from '../scripts/release-check/machine.ts';
+
+interface FakeWindow { id: string; app: string; title: string }
+
+/** A desktop that answers the canary's scripts: what each launch opens is up to the test. */
+function fakeDesktop(os: 'linux' | 'macos', opts: {
+  version?: string; brief?: string; missing?: string[]; launcherOk?: boolean; upgradeFails?: boolean;
+  windows?: FakeWindow[]; onLauncher?: (windows: FakeWindow[]) => void; onLink?: (windows: FakeWindow[]) => void;
+} = {}) {
+  const windows: FakeWindow[] = [...(opts.windows ?? [])];
+  const initial = new Set(windows.map((w) => w.id));
+  const scripts: string[] = [];
+  const ok = (stdout: string, code = 0): ExecResult => ({ code, stdout, stderr: '', timedOut: false, ms: 1 });
+  const machine: Machine = {
+    handle: 'test-box', label: 'test-box', os, driver: 'fake',
+    upgrade: async () => { if (opts.upgradeFails) throw new Error('driver upgrade failed (exit 1)'); },
+    put: async () => {},
+    get: async (_from, to) => { writeFileSync(to, 'png'); },
+    exec: async (script) => {
+      scripts.push(script);
+      if (script.endsWith('--version')) return ok(`olympus ${opts.version ?? '1.1.0'}\n`);
+      if (script.endsWith('engine status --brief')) return ok(JSON.stringify({ schema: 'olympus.engine.brief.v1', state: opts.brief ?? 'running', progress: null, blocker: null, needsYou: null }));
+      if (script.endsWith('engine status')) return ok(JSON.stringify({ missing: opts.missing ?? [] }));
+      if (script.includes('xdg-mime query') || script.includes('URLForApplicationToOpenURL')) return ok('olympus:// opens\n', opts.launcherOk === false ? 1 : 0);
+      if (script === 'hyprctl clients -j') return ok(JSON.stringify(windows.map((w) => ({ address: w.id, class: w.app, title: w.title }))));
+      if (script.includes('CGWindowListCopyWindowInfo')) return ok(JSON.stringify(windows));
+      if (script.startsWith('gtk-launch') || script.includes(' dashboard >/dev/null')) { opts.onLauncher?.(windows); return ok(''); }
+      if (script.startsWith('xdg-open') || script.startsWith('open \'olympus://')) { opts.onLink?.(windows); return ok(''); }
+      const closed = /closewindow address:'([^']+)'/g;
+      for (const match of script.matchAll(closed)) windows.splice(windows.findIndex((w) => w.id === match[1]), 1);
+      const tab = /sendshortcut 'CTRL, W, address:([^']+)'/.exec(script);
+      if (tab) { const w = windows.find((x) => x.id === tab[1]); if (w) w.title = 'New Tab'; }
+      if (script.startsWith('open -a ')) {
+        const app = /open -a '([^']+)'/.exec(script)![1];
+        if (/CGEventCreateKeyboardEvent\(\$\(\), 12,/.test(script)) for (let i = windows.length - 1; i >= 0; i -= 1) { if (windows[i]!.app === app) windows.splice(i, 1); }
+        if (/CGEventCreateKeyboardEvent\(\$\(\), 13,/.test(script)) {
+          // Command-W closes a window the check opened, or the tab it opened in a window that was already there.
+          const at = windows.findIndex((x) => x.app === app && /Olympus/.test(x.title));
+          if (at >= 0 && initial.has(windows[at]!.id)) windows[at]!.title = 'Start Page'; else if (at >= 0) windows.splice(at, 1);
+        }
+      }
+      return ok('');
+    },
+  };
+  return { machine, windows, scripts };
+}
+
+const options = (os: 'linux' | 'macos', extra: Partial<CanaryOptions> = {}): CanaryOptions => ({
+  os, update: { kind: 'installed' }, screensDir: mkdtempSync(join(tmpdir(), 'canary-test-')),
+  pollMs: 1, windowTimeoutMs: 50, engineTimeoutMs: 0, sleep: async () => {}, ...extra,
+});
+const statusOf = (checks: Array<{ id: string; status: string }>) => Object.fromEntries(checks.map((check) => [check.id, check.status]));
+
+describe('release-check canary', () => {
+  test('Linux: the launcher opens the dashboard, a keyring prompt on the link is a failure that names it, and both are closed again', async () => {
+    const desktop = fakeDesktop('linux', {
+      onLauncher: (w) => w.push({ id: '0xa1', app: 'chrome-127.0.0.1__-Default', title: 'Olympus' }),
+      onLink: (w) => w.push({ id: '0xb2', app: 'gcr-prompter', title: '' }),
+    });
+    const result = await runCanary(desktop.machine, options('linux', { expectVersion: '1.1.0' }));
+    expect(statusOf(result.checks)).toEqual({
+      'canary.version': 'pass', 'canary.bar': 'pass', 'canary.engine': 'pass', 'canary.launcher': 'pass',
+      'canary.window.launcher': 'pass', 'canary.window.link': 'fail',
+    });
+    expect(result.checks.find((c) => c.id === 'canary.window.link')!.detail).toContain('needs a person at the machine: gcr-prompter');
+    expect(result.screens.map((s) => s.label)).toEqual(['Dashboard window from the launcher', 'Dashboard window from an olympus:// link']);
+    expect(desktop.windows).toEqual([]);
+  });
+
+  test('no window at all, a stopped engine, something missing and the wrong version all fail', async () => {
+    const desktop = fakeDesktop('linux', { version: '1.0.9', brief: 'stopped', missing: ['The engine agent is not installed: run olympus engine install.'], launcherOk: false });
+    const result = await runCanary(desktop.machine, options('linux', { expectVersion: '1.1.0' }));
+    const statuses = statusOf(result.checks);
+    for (const id of ['canary.version', 'canary.bar', 'canary.engine', 'canary.launcher', 'canary.window.launcher', 'canary.window.link']) expect(statuses[id]).toBe('fail');
+    expect(result.checks.find((c) => c.id === 'canary.window.launcher')!.detail).toBe('no new window opened');
+    expect(result.checks.find((c) => c.id === 'canary.version')!.detail).toContain('should have installed 1.1.0');
+  });
+
+  test('a failed update stops the canary there', async () => {
+    const desktop = fakeDesktop('linux', { upgradeFails: true });
+    const result = await runCanary(desktop.machine, options('linux', { update: { kind: 'candidate', dir: '/nowhere' } }));
+    expect(statusOf(result.checks)).toEqual({ 'canary.update': 'fail' });
+    expect(desktop.scripts).toEqual([]);
+  });
+
+  test('the published update runs the site install command for the platform', async () => {
+    const desktop = fakeDesktop('macos');
+    await runCanary(desktop.machine, options('macos', { update: { kind: 'published', site: 'https://example.test/' } }));
+    expect(desktop.scripts[0]).toBe("curl -fsSL --proto '=https' --tlsv1.2 'https://example.test/install.sh' | sh");
+    expect(SITE_INSTALLER.linux).toBe('install-linux.sh');
+  });
+
+  test('macOS: a tab in a browser window that was already open counts, and only that tab is closed', async () => {
+    const desktop = fakeDesktop('macos', {
+      windows: [{ id: '7', app: 'Safari', title: 'Start Page' }],
+      onLauncher: (w) => { w[0]!.title = 'Olympus'; },
+      onLink: (w) => w.push({ id: '9', app: 'Safari', title: 'Olympus' }),
+    });
+    const result = await runCanary(desktop.machine, options('macos'));
+    expect(statusOf(result.checks)['canary.window.launcher']).toBe('pass');
+    expect(statusOf(result.checks)['canary.window.link']).toBe('pass');
+    // The window that was there before stays; the dashboard tab in it was closed with Command-W.
+    expect(desktop.windows.find((w) => w.id === '7')!.title).toBe('Start Page');
+    expect(desktop.scripts.some((s) => s.startsWith("open -a 'Safari'") && s.includes('CGEventCreateKeyboardEvent($(), 13,'))).toBe(true);
+    expect(desktop.scripts.some((s) => s.includes('CGEventCreateKeyboardEvent($(), 12,'))).toBe(false);
+    expect(desktop.windows.map((w) => w.id)).toEqual(['7']);
+    expect(result.checks.some((c) => c.id.endsWith('.closed'))).toBe(false);
+  });
+
+  test('macOS: a browser that had no window is quit with the keyboard after the check', async () => {
+    const desktop = fakeDesktop('macos', { onLauncher: (w) => w.push({ id: '3', app: 'Safari', title: 'Olympus' }) });
+    const result = await runCanary(desktop.machine, options('macos'));
+    expect(statusOf(result.checks)['canary.window.launcher']).toBe('pass');
+    expect(desktop.scripts.some((s) => s.startsWith("open -a 'Safari'") && s.includes('CGEventCreateKeyboardEvent($(), 12,'))).toBe(true);
+    expect(result.checks.some((c) => c.id.endsWith('.closed'))).toBe(false);
+  });
+
+  test('window lists parse on both platforms; prompts and dashboards are told apart', () => {
+    expect(parseWindows('linux', '[{"address":"0x1","class":"chromium","title":"Olympus"},{"address":"","class":"x","title":""}]')).toEqual([{ id: '0x1', app: 'chromium', title: 'Olympus' }]);
+    expect(parseWindows('macos', '[{"id":"12","app":"Safari","title":"Olympus"}]')).toEqual([{ id: '12', app: 'Safari', title: 'Olympus' }]);
+    expect(() => parseWindows('linux', '{}')).toThrow('not a list');
+    expect(openedWindows([{ id: '1', app: 'a', title: 'x' }, { id: '2', app: 'a', title: 'y' }], [{ id: '1', app: 'a', title: 'x' }, { id: '2', app: 'a', title: 'Olympus' }, { id: '3', app: 'b', title: '' }]))
+      .toEqual([{ id: '2', app: 'a', title: 'Olympus', reused: true }, { id: '3', app: 'b', title: '', reused: false }]);
+    expect(isSystemPrompt({ id: '1', app: 'gcr-prompter', title: '' })).toBe(true);
+    expect(isDashboard({ id: '1', app: 'gcr-prompter', title: 'Olympus' })).toBe(false);
+    expect(isDashboard({ id: '1', app: 'Safari', title: 'Olympus' })).toBe(true);
+    expect(isDashboard({ id: '1', app: 'Safari', title: 'Olympusish' })).toBe(false);
+  });
+
+  test('the bundle pins its version; a canary with no checks never passes; the page escapes what it shows', () => {
+    expect(pinnedVersion('#!/bin/sh\nOLYMPUS_VERSION=1.1.0\nOLYMPUS_SHA256=ab\n')).toBe('1.1.0');
+    expect(pinnedVersion('OLYMPUS_VERSION=@OLYMPUS_VERSION@\n')).toBeUndefined();
+    expect(canaryVerdict([])).toBe('fail');
+    expect(canaryVerdict([{ id: 'a', title: 'a', status: 'warn' }])).toBe('pass');
+    const report: CanaryReport = {
+      schema: 'olympus.release-check.canary.v1', runId: 'r', machine: { handle: 'test-box', os: 'linux' },
+      candidate: { label: 'main', source: 'candidate' }, startedAt: 's', finishedAt: 'f', verdict: 'fail',
+      counts: { pass: 0, fail: 1, warn: 0, skip: 0 }, checks: [{ id: 'x', title: '<b>', status: 'fail', detail: '"q"' }], screens: [{ label: 'shot', path: '/run/screens/a.png' }],
+    };
+    const html = renderCanaryHtml(report, (path) => path.replace('/run/', ''));
+    expect(html).toContain('&lt;b&gt;');
+    expect(html).toContain('src="screens/a.png"');
+  });
+});
