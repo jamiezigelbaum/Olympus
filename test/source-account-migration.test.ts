@@ -2099,14 +2099,15 @@ describe('a file always has a name that survives a power failure', () => {
    * (`old`). That places a sync in the window of the one file it belongs to, and says whether the old name was still there.
    */
   function spy(env: Env, root: string) {
-    type Sync = { done: number; folder: string; states: Map<string, 'both' | 'new' | 'old' | 'none'> };
+    type Sync = { done: number; folder: string; afterRevert: boolean; states: Map<string, 'both' | 'new' | 'old' | 'none'> };
     const syncs: Sync[] = [];
     let moves: SourceRegistryMove[] = [];
     let done = 0;
+    let afterRevert = false;
     const at = (rel: string): string => join(root, ...rel.split('/'));
     onCheckpoint((point) => {
       if (point === 'plan') moves = entryOf(env, 'dropbox.files')?.migration?.moves ?? entryOf(env, 'local.files')?.migration?.moves ?? [];
-      if (point === 'revert') done = 0;
+      if (point === 'revert') { done = 0; afterRevert = true; }
       else if (point.startsWith('rename:') || point.startsWith('unrename:')) done += 1;
     });
     __accountMigrationTestHooks.syncDirectory = (folder) => {
@@ -2116,7 +2117,7 @@ describe('a file always has a name that survives a power failure', () => {
         const to = existsSync(at(move.to));
         states.set(move.to, from && to ? 'both' : to ? 'new' : from ? 'old' : 'none');
       }
-      syncs.push({ done, folder, states });
+      syncs.push({ done, folder, afterRevert, states });
     };
     return { syncs, moves: () => moves, at };
   }
@@ -2211,6 +2212,65 @@ describe('a file always has a name that survives a power failure', () => {
       expect(report.stuck, direction).toEqual([]);
       expect(syncedWhileTwoNames, `${direction}: the folder of the name that stays was not synced before the other name went`).toBe(true);
       expect(existsSync(direction === 'forward' ? store : target), direction).toBe(false);
+    }
+  });
+
+  /** The folders from the data root down to the stores folder of the Dropbox account. */
+  const chainOf = (root: string): string[] => {
+    const folder = join(root, 'sources', 'dropbox.files', '1');
+    return [root, join(root, 'sources'), join(root, 'sources', 'dropbox.files'), folder, join(folder, 'stores')];
+  };
+
+  test('a run that died after making its folders and before syncing them: the next boot syncs every folder from the data root down before it removes the first old name', () => {
+    for (const variant of ['the first run was killed at its first sync', 'part of the chain was there already']) {
+      const { env, root } = fixture();
+      install(env, 'dropbox.files', { walOn: 'none' });
+      if (variant.startsWith('the first run')) {
+        // The folders are made, and the worker dies before anything about them is on disk.
+        __accountMigrationTestHooks.syncDirectory = () => { throw new AccountMigrationKilled('after the folders were made, before any sync'); };
+      } else {
+        // The worker died with the plan written and only the first folder made.
+        __accountMigrationTestHooks.checkpoint = (at) => {
+          if (at !== 'plan') return;
+          mkdirSync(join(root, 'sources', 'dropbox.files'), { recursive: true });
+          throw new AccountMigrationKilled(at);
+        };
+      }
+      expect(() => migrateAccountFolders(env), variant).toThrow(AccountMigrationKilled);
+      __accountMigrationTestHooks.reset();
+      const moves = entryOf(env, 'dropbox.files')!.migration!.moves!;
+      expect(moves.length, variant).toBeGreaterThan(5);
+      expect(moves.every((move) => existsSync(join(root, ...move.from.split('/')))), `${variant}: nothing had moved`).toBe(true);
+      if (variant.startsWith('the first run')) expect(existsSync(chainOf(root).at(-1)!), variant).toBe(true);
+
+      // The restarted worker finds the folders, makes none, and must still make the whole chain durable first.
+      const syncedBeforeAnyOldNameWent = new Set<string>();
+      __accountMigrationTestHooks.syncDirectory = (folder) => {
+        const anOldNameWent = moves.some((move) => !existsSync(join(root, ...move.from.split('/'))));
+        if (!anOldNameWent) syncedBeforeAnyOldNameWent.add(folder);
+      };
+      const report = migrateAccountFolders(withoutSwitch(env));
+
+      expect(report.moved, variant).toEqual(['dropbox.files']);
+      for (const folder of chainOf(root)) expect(syncedBeforeAnyOldNameWent.has(folder), `${variant}: ${relative(root, folder) || 'the data folder'} was not synced before the first old name went`).toBe(true);
+    }
+  });
+
+  test('going back, the folders the files return to are synced before the first file is moved back', () => {
+    const { env, root } = fixture();
+    install(env, 'dropbox.files');
+    lieAboutLedgerSize(env);
+    const watch = spy(env, root);
+
+    expect(migrateAccountFolders(env).movedBack).toHaveLength(1);
+
+    const moves = watch.moves();
+    const legacyFolders = new Set(moves.map((move) => dirname(watch.at(move.from))));
+    expect(legacyFolders.size).toBeGreaterThan(0);
+    // Syncs after the put-back began and before any file had its old name again.
+    const beforeFirstLink = watch.syncs.filter((sync) => sync.afterRevert && [...sync.states.values()].every((state) => state === 'new'));
+    for (const folder of legacyFolders) {
+      expect(beforeFirstLink.some((sync) => sync.folder === folder), `${relative(root, folder) || 'the data folder'} was not synced before the first file went back`).toBe(true);
     }
   });
 });

@@ -584,16 +584,46 @@ function planIsCanonical(ctx: Context, sourceId: string, slot: string, migration
 }
 
 /**
- * Makes the folders the files are going to, each made durable (the folder and
- * the folder that holds it are fsynced) before the next is made. Never through a
- * link: a component that is there must be a real folder.
+ * Makes every folder from the data root down to each of `folders` durable: each
+ * one is fsynced, which is what persists the entries in it, so the chain of
+ * entries that leads to a file survives a power failure. A folder that was made
+ * by an earlier run that died before it synced anything is in the chain like one
+ * made now: whether a folder is new or already there says nothing about whether
+ * its entry is on disk. A folder that is not there is skipped. Each folder is
+ * synced once per call, the root first.
+ */
+function syncFolderChains(ctx: Context, folders: string[]): void {
+  const chain = new Set<string>();
+  for (const folder of folders) {
+    let current = ctx.root;
+    chain.add(current);
+    for (const part of relative(ctx.root, folder).split(sep).filter(Boolean)) {
+      current = join(current, part);
+      chain.add(current);
+    }
+  }
+  for (const folder of chain) {
+    if (lookAt(folder).kind === 'dir') syncFolder(folder);
+  }
+}
+
+/**
+ * Makes the folders the files are going to, never through a link: a component
+ * that is there must be a real folder. Then the whole chain from the data root
+ * to each destination folder is made durable, the folders that were already there
+ * included (a run that died after making one and before syncing its parent left
+ * an entry that is not on disk), before any file is moved: past this, the first
+ * old name that is removed has a destination whose every ancestor survives a
+ * power failure.
  */
 function makeFolders(ctx: Context, moves: SourceRegistryMove[]): void {
   try {
     const real = realpathSync(ctx.root);
+    const destinations = new Set<string>();
     for (const move of moves) {
       const destination = dirname(absPath(ctx.root, move.to));
       if (!destinationIsOurs(ctx, absPath(ctx.root, move.to))) throw Object.assign(new Error('link'), { code: 'ELOOP' });
+      destinations.add(destination);
       let current = real;
       for (const part of relative(ctx.root, destination).split(sep).filter(Boolean)) {
         current = join(current, part);
@@ -601,11 +631,11 @@ function makeFolders(ctx: Context, moves: SourceRegistryMove[]): void {
         if (found.kind === 'dir') continue;
         if (found.kind !== 'absent') throw Object.assign(new Error('not a folder'), { code: 'ENOTDIR' });
         mkdirSync(current, { mode: 0o700 });
-        syncFolder(dirname(current));
-        syncFolder(current);
       }
     }
+    syncFolderChains(ctx, [...destinations]);
   } catch (error) {
+    if (error instanceof AccountMigrationKilled) throw error;
     throw new MoveFault('failed', 'move_failed', `The account folder could not be made (${errorCode(error)}).`);
   }
 }
@@ -812,6 +842,14 @@ function revert(ctx: Context, sourceId: string, slot: string, migration: SourceR
     });
   }
   checkpoint('revert');
+  // The folders the files go back to are made durable first, as the account folder's were: nothing is removed from the account
+  // folder before the places the files return to have survived a power failure.
+  try {
+    syncFolderChains(ctx, moves.map((move) => dirname(absPath(ctx.root, move.from))));
+  } catch (error) {
+    if (error instanceof AccountMigrationKilled) throw error;
+    throw new MoveFault('failed', 'move_failed', `The folders the files go back to could not be made durable (${errorCode(error)}).`);
+  }
   const back = [...moves].reverse();
   // Everything that can go back does, and a file that is in neither place is named at the end: the account stays closed with its plan.
   const lost: string[] = [];
