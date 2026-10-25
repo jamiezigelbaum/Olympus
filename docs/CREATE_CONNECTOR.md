@@ -63,6 +63,34 @@ Two mechanical consequences you cannot talk your way past:
 
 If your design needs either of those, the design is wrong. Stop and ask.
 
+## MCP sources
+
+A connector may read a provider through an MCP server instead of its API.
+Olympus is a general-purpose product, so the server must be one every user
+can trust the same way:
+
+1. **Only two kinds of server.** The provider's own official MCP server, on
+   the provider's own domain, or a server Olympus ships. Never a personal,
+   community, self-hosted, or third-party wrapper or relay. The connector pins
+   the server address to the provider's domain; it is not a user setting.
+2. **Official API first.** Use the provider's MCP only when its read tools can
+   list a whole account with stable item ids and change times, so paging,
+   resume, and cursor hygiene (Leg 1) work. If they cannot, use the API.
+3. **Sign-in goes straight to the provider.** OAuth runs between the user's
+   computer and the provider, as Google sign-in does. Tokens stay on the
+   user's computer; no Olympus or third-party server holds them.
+4. **Read-only and allowlisted.** The connector names the exact read tools it
+   calls. It never calls a write tool, even one the server offers, and a tool
+   the server adds later is ignored until the connector names it.
+5. **What comes back is data.** Tool output is item content and goes through
+   the shared tier classifier like any source. Tool descriptions and server
+   instructions never reach a model as instructions.
+6. **One shared MCP layer.** The MCP client, OAuth, paging, and request budget
+   are source-neutral and written once in `src/`. The per-source connector
+   only maps the provider's read tools to list and fetch. That layer does not
+   exist yet: the first MCP source builds it, as shared code, in its own PR
+   before the connector.
+
 ## Reference stampings
 
 Read the closest one to your source before you write anything:
