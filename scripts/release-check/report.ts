@@ -10,6 +10,7 @@ import type { JourneyTrace } from './journey.ts';
 import type { VisualResult } from './visual.ts';
 import type { ExploreResult } from './explore.ts';
 import type { PagesResult } from './explore-pages.ts';
+import type { ReviewResult } from './reviewer.ts';
 
 export type CheckStatus = 'pass' | 'fail' | 'warn' | 'skip';
 
@@ -109,6 +110,8 @@ export interface MachineReport {
   /** Bounded exploration of the Sources section: coverage against the source-derived list. */
   explore?: ExploreResult;
   upgrade?: UpgradeReport;
+  /** The AI reviewer's findings (reviewer.ts), added after the run; advisory, so they never change the verdict. */
+  review?: ReviewResult;
 }
 
 export interface ReleaseReportInput {
@@ -371,6 +374,19 @@ export function visualSection(results: readonly VisualResult[] | undefined): str
   return `<h3>Visual baselines</h3>${rows.join('')}`;
 }
 
+/** The AI reviewer's findings, each with its picture and the steps that reach it. Advisory: listed, never counted in the verdict. */
+export function reviewSection(review: ReviewResult | undefined): string {
+  if (!review) return '';
+  const order = { high: 0, medium: 1, low: 2 } as const;
+  const rows = [...review.findings].sort((a, b) => order[a.confidence] - order[b.confidence] || a.unit.localeCompare(b.unit)).map((finding) => `<details><summary><span class="badge warn">${escapeHtml(finding.kind.toUpperCase())}</span> ${escapeHtml(finding.what)} <span class="muted">${escapeHtml(finding.unitTitle)} · ${escapeHtml(finding.confidence)}</span></summary>`
+    + `<div class="trio"><figure><a href="${safeRelative(finding.picture)}"><img loading="lazy" src="${safeRelative(finding.picture)}" alt="${escapeHtml(finding.unitTitle)}"></a><figcaption>${escapeHtml(finding.where || 'where: not said')}</figcaption></figure></div>`
+    + `<p>To see it:</p><ol>${finding.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></details>`);
+  const unanswered = review.inconclusive.length > 0 ? `<p>Not answered (${review.inconclusive.length}):</p><ul>${review.inconclusive.map((entry) => `<li>${escapeHtml(entry.unit)}: ${escapeHtml(entry.reason)}</li>`).join('')}</ul>` : '';
+  return `<h3>AI reviewer <span class="badge warn">${review.status === 'qualified' ? 'QUALIFIED' : 'ADVISORY'}</span></h3>`
+    + `<p class="muted">${escapeHtml(review.model)} looked at ${review.pictures} picture(s) in ${review.units} request(s) and reported ${review.findings.length} problem(s)${review.dropped > 0 ? `; ${review.dropped} more named no picture, no listed kind of problem, or were unsure, and were dropped` : ''}. ${review.status === 'qualified' ? '' : 'Until it qualifies against planted bugs, its findings do not change the verdict.'}</p>`
+    + (rows.length > 0 ? rows.join('') : '<p>No problems reported.</p>') + unanswered;
+}
+
 function machineSection(machine: MachineReport): string {
   const head = `<section class="machine"><h2>${escapeHtml(machine.label)}</h2>`
     + `<p class="muted">${escapeHtml(machine.os)} · driver ${escapeHtml(machine.driver)}${machine.build ? ` · build ${escapeHtml(machine.build)}` : ''}</p>`;
@@ -381,7 +397,7 @@ function machineSection(machine: MachineReport): string {
       + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
       + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
       + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
-      + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual)
+      + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual) + reviewSection(machine.review)
       + `<h3>Logs</h3>${fileLinks(machine.logs)}</section>`;
   }
   const { from, step } = machine.upgrade;
@@ -402,7 +418,7 @@ function machineSection(machine: MachineReport): string {
     + `<h3>Machine checks</h3>${checkTable(machine.checks)}`
     + `<h3>Agents</h3>${machine.agents.map(agentSection).join('') || '<p class="muted">No agents.</p>'}`
     + `<h3>Dashboard screenshots</h3>${screenshotGrid(machine.screenshots)}`
-    + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual)
+    + traceSections(machine.traces) + exploreSection(machine.explore) + visualSection(machine.visual) + reviewSection(machine.review)
     + `<h3>Logs</h3>${fileLinks(from.logs)}${fileLinks(machine.logs)}</section>`;
 }
 
