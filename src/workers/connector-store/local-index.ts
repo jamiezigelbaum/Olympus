@@ -2590,6 +2590,7 @@ export class LocalConnectorStore {
   // tiered store set (if any) once the writing transaction has committed, so it
   // can hide and remove their children (docs/design/child-items.md, "Removal").
   private parentTombstoneObserver: ((parents: SourceItemIdentity[]) => void) | undefined;
+  private parentDeletionOwed: ((parent: SourceItemIdentity) => void) | undefined;
   private tombstonedParents: Map<string, SourceItemIdentity> | undefined;
   /**
    * Items a sync handed to this store's embedding sweep instead of embedding
@@ -3262,9 +3263,20 @@ export class LocalConnectorStore {
    * tombstoned (a provider deletion, or absence from a full snapshot) that
    * other items came inside. A Secret is not a deletion: its children are
    * judged on their own and are not reported.
+   *
+   * `owed` is called BEFORE the tombstone can commit (inside the writing
+   * transaction, with the parent's identity): the caller makes the deletion
+   * durable where a crash cannot lose it, so a crash after this store commits
+   * still finds the children's removal owed. A throw from it fails the
+   * writing transaction: a deletion that cannot be made durable is not
+   * committed.
    */
-  observeParentTombstones(observer: ((parents: SourceItemIdentity[]) => void) | undefined): void {
+  observeParentTombstones(
+    observer: ((parents: SourceItemIdentity[]) => void) | undefined,
+    owed?: ((parent: SourceItemIdentity) => void) | undefined,
+  ): void {
     this.parentTombstoneObserver = observer;
+    this.parentDeletionOwed = owed;
   }
 
   /**
@@ -3283,7 +3295,9 @@ export class LocalConnectorStore {
       | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'>
       & { trust_tier: string }) | null;
     if (!row || row.trust_tier === 'S5') return;
-    (this.tombstonedParents ??= new Map()).set(row.local_item_id, sourceItemFromRow({ ...row, rank: 0 } as ItemRow));
+    const parent = sourceItemFromRow({ ...row, rank: 0 } as ItemRow);
+    this.parentDeletionOwed?.(parent);
+    (this.tombstonedParents ??= new Map()).set(row.local_item_id, parent);
   }
 
   /**

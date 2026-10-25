@@ -293,6 +293,14 @@ floor from its parent.
   - A worker then deletes each child's copies in every tier store that holds
     one, with retry.
   - A crash between stores leaves the children hidden, never visible.
+  - The parent's own store commits its tombstone before that ledger
+    transaction, so the deletion is made durable first: a store about to
+    tombstone a parent that has children writes an intent row to the ledger
+    inside its writing transaction (if the row cannot be written, the
+    tombstone does not commit). The next start settles any intent a crash
+    left: the parent is gone, so the children are hidden and owed; the parent
+    is still held, so the intent is dropped and the children stay. The
+    ledger's intent table is `tier_parent_deletion_intent` (schema 11).
 - **Media.** Prepared photo copies in the media cache are released by the
   chunk triggers that already release them.
 

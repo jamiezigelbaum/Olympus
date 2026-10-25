@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 10;
+export const TIER_LEDGER_SCHEMA_VERSION = 11;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -3202,6 +3202,7 @@ export class TierLedger {
         'secret_side_store_scrubs',
         'secret_redaction_retirement',
         'tier_child_cascade',
+        'tier_parent_deletion_intent',
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
@@ -3239,6 +3240,11 @@ export class TierLedger {
         if (changed > 0) hidden += 1;
       };
       hide(parent);
+      // The deletion was owed (`oweParentDeletion`); it is recorded now.
+      this.db.query(`
+        DELETE FROM tier_parent_deletion_intent
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(parent));
       const queue = this.db.query(`
         INSERT OR IGNORE INTO tier_child_cascade (
           provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
@@ -3252,6 +3258,50 @@ export class TierLedger {
       }
       return { hidden, queued };
     })();
+  }
+
+  /**
+   * Written BEFORE a store commits the tombstone of an item that has children
+   * (its own transaction, durable on return): the deletion is owed. A crash
+   * after the store commits leaves this row, so the next start hides the
+   * children (`pendingParentDeletions`, settled by the tiered store set)
+   * instead of leaving them served with no cascade row at all. A row for a
+   * parent that was not in fact deleted (the store's transaction rolled
+   * back) is cleared, never acted on.
+   */
+  oweParentDeletion(parent: SourceItemIdentity): void {
+    this.db.query(`
+      INSERT OR IGNORE INTO tier_parent_deletion_intent (
+        provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(parent), parent.family, parent.localItemId, this.now().toISOString());
+  }
+
+  /** The parents whose deletion is owed and not yet recorded, oldest first. */
+  pendingParentDeletions(limit = 100): SourceItemIdentity[] {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, family, local_item_id
+      FROM tier_parent_deletion_intent ORDER BY noted_at, rowid LIMIT ?
+    `).all(Math.max(1, Math.floor(limit))) as Array<{
+      provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+      family: string; local_item_id: string;
+    }>;
+    return rows.map((row) => ({
+      family: row.family as SourceItemIdentity['family'],
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      localItemId: row.local_item_id,
+      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+    }));
+  }
+
+  /** The parent was not deleted after all (it is held, moved tiers, or is a Secret), or has no children. */
+  clearParentDeletion(parent: TierLedgerIdentity): void {
+    this.db.query(`
+      DELETE FROM tier_parent_deletion_intent
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(parent));
   }
 
   /** Whether this item's removal is owed because its parent was tombstoned. */
@@ -4283,7 +4333,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // the transaction that hides the parent and its children, so a crash
       // leaves the children hidden with their removal still owed, never
       // visible. The row goes when the last store's copy is gone.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 10,
       name: 'tier_child_cascade',
       up(db) {
         db.exec(`
@@ -4298,6 +4348,30 @@ function tierLedgerMigrations(): SqliteMigration[] {
             queued_at TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
             last_attempt_at TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      },
+    },
+    {
+      // A deletion owed before the store commits it: one row per parent that
+      // has children and is being tombstoned. A crash between the store's
+      // commit and the cascade transaction above leaves this row; the next
+      // start settles it (hides the children if the parent is gone, drops it
+      // if the parent was not deleted after all). docs/design/child-items.md,
+      // "Removal".
+      version: 11,
+      name: 'tier_parent_deletion_intent',
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_parent_deletion_intent (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            family TEXT NOT NULL DEFAULT '',
+            local_item_id TEXT NOT NULL DEFAULT '',
+            noted_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);

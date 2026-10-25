@@ -9,8 +9,12 @@
 // Secret takes nothing with it; and removing the archive clears what is owed.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import { getArchiveFormat } from '../src/core/archive-formats.ts';
 import { ARCHIVE_STORE_PLACEMENT } from '../src/workers/archive-import/store.ts';
+import { createArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
+import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
+import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
 import type { TierCopy } from '../src/workers/classification/tier-ledger.ts';
 import type { SourceItemIdentity } from '../src/core/source-index/types.ts';
@@ -210,5 +214,99 @@ describe('a store reports a parent it tombstoned', () => {
     expect(lane.set.reconcileOrphanedChildren(Date.now() + 10 * 60_000)).toBe(M1_CHILDREN.length);
     lane.set.runChildCascade();
     expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
+  });
+});
+
+describe('a crash between the parent store\'s commit and the ledger', () => {
+  /** What a restarted process sees: every handle closed, the same files opened afresh. */
+  function restart(h: ChildItemsArchiveHarness) {
+    for (const lane of h.runtime.existingLanes()) {
+      for (const store of lane.set.openStores()) store.close();
+      lane.secretLocations?.close();
+      lane.ledger.close();
+    }
+    h.runtime.media.close();
+    const runtime = createArchiveImportRuntime({
+      env: h.env,
+      statePath: join(h.base, 'xdg', 'archive-imports.json'),
+      waitingQuestionsDbPath: join(h.base, 'waiting-private-questions.sqlite'),
+      openSecretLocations: (secureDbPath) => new SecretLocationsIndex({ dbPath: secretLocationsPathForStore(secureDbPath) }),
+    });
+    cleanups.push(() => {
+      runtime.media.close();
+      for (const lane of runtime.existingLanes()) {
+        for (const store of lane.set.openStores()) store.close();
+        lane.secretLocations?.close();
+        lane.ledger.close();
+      }
+    });
+    return runtime;
+  }
+
+  test('the process dies after the parent is tombstoned and before the children are hidden: the restart finds them hidden, not served', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    // The process dies between the parent store's commit and the ledger's transaction.
+    lane.ledger.hideAndQueueChildren = () => { throw new Error('process died'); };
+    for (const store of lane.set.openStores()) {
+      store.tombstoneCopy(identityOf('m1'), { connectorId: 'absence-reconcile' });
+    }
+    // The parent is gone from the stores; the ledger never heard.
+    expect(liveRows(h, archiveId, ['m1'])).toEqual([]);
+
+    const runtime = restart(h);
+    const reopened = runtime.lane(format.family);
+    // Nothing has synced or reconciled since the restart; the children are already not served.
+    for (const id of M1_CHILDREN) expect(liveCopies(reopened.ledger.copies(identityOf(id)))).toEqual([]);
+    expect(reopened.ledger.pendingChildCascades().map((owed) => owed.child.providerItemId).sort()).toEqual([...M1_CHILDREN].sort());
+    // The sibling parent's child is untouched, and the removal still finishes.
+    expect(liveCopies(reopened.ledger.copies(identityOf(M2_CHILD))).length).toBeGreaterThan(0);
+    reopened.set.runChildCascade();
+    expect(reopened.ledger.pendingChildCascades()).toEqual([]);
+    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
+  });
+
+  test('the process dies before the parent store commits: the restart drops the intent and the children stay', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    // The intent was written; the store's transaction never committed.
+    lane.ledger.oweParentDeletion(identityOf('m1'));
+    expect(lane.ledger.pendingParentDeletions()).toHaveLength(1);
+
+    const reopened = restart(h).lane(format.family);
+    expect(reopened.ledger.pendingParentDeletions()).toEqual([]);
+    expect(reopened.ledger.pendingChildCascades()).toEqual([]);
+    for (const id of ['m1', ...M1_CHILDREN]) expect(liveCopies(reopened.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
+    expect(liveRows(h, archiveId, ['m1', ...M1_CHILDREN]).length).toBeGreaterThan(0);
+  });
+
+  test('a deletion the ledger cannot record is not committed by the store', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    lane.ledger.oweParentDeletion = () => { throw new Error('ledger unavailable'); };
+    for (const store of lane.set.openStores()) {
+      try {
+        store.tombstoneCopy(identityOf('m1'), { connectorId: 'absence-reconcile' });
+      } catch {
+        // The store refused to commit the deletion.
+      }
+    }
+    // The parent is still held, its children are served, and nothing is owed or half-recorded.
+    expect(liveRows(h, archiveId, ['m1']).length).toBeGreaterThan(0);
+    expect(liveCopies(lane.ledger.copies(identityOf('m1'))).length).toBeGreaterThan(0);
+    for (const id of M1_CHILDREN) expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
+    expect(lane.ledger.pendingChildCascades()).toEqual([]);
+  });
+
+  test('a deletion made durable first is recorded in one step once the store commits', async () => {
+    const { lane, identityOf } = await importAndRead();
+    const seen: number[] = [];
+    const real = lane.ledger.hideAndQueueChildren.bind(lane.ledger);
+    lane.ledger.hideAndQueueChildren = ((parent, children) => {
+      // At the moment the children are hidden, the intent is still there to be cleared with them.
+      seen.push(lane.ledger.pendingParentDeletions().length);
+      return real(parent, children);
+    }) as typeof lane.ledger.hideAndQueueChildren;
+    for (const store of lane.set.openStores()) store.tombstoneCopy(identityOf('m1'), { connectorId: 'absence-reconcile' });
+    expect(seen).toEqual([1]);
+    expect(lane.ledger.pendingParentDeletions()).toEqual([]);
+    expect(lane.ledger.pendingChildCascades()).toHaveLength(M1_CHILDREN.length);
   });
 });
