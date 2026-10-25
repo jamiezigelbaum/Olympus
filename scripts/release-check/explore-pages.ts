@@ -25,6 +25,7 @@
  * advisory; the rules are blocking.
  */
 import type { PageControlEntry, PageInventory } from './explore-pages-inventory.ts';
+import { ASK_VIEW } from './inbox-page.ts';
 import { BLANK_WINDOW } from './probe.ts';
 import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
@@ -612,7 +613,8 @@ function validateLink(control: PageControl, page: PageDef, steps: StepTrace[], s
 /**
  * The Inbox is empty on a fresh install, so its Read, Delete and Delete all would only ever be listed. This preparation fills it the
  * way the owner would: each question is typed into the Ask page and "Ask the local model" pressed (the local model answers on this
- * machine), until the Inbox holds one answer per question. Answers already there count, so a run that left some asks fewer.
+ * machine), until the Inbox holds one answer per question. Answers already there count, so a run that left some asks fewer. A question
+ * is in the Inbox as soon as it is asked, while the model still answers, so each one waits for the Ask form to show its answer.
  */
 export function inboxAnswers(driver: JourneyDriver, options: { questions: readonly string[]; sleep?: (ms: number) => Promise<void>; now?: () => number }): NonNullable<PagesOptions['prepare']> {
   const sleep = options.sleep ?? sleepFor;
@@ -633,8 +635,12 @@ export function inboxAnswers(driver: JourneyDriver, options: { questions: readon
       if (!(await driver.type('host', { css: 'form[data-pa-ask] textarea[name="question"]' }, question))) return { ok: false, detail: 'the question field on the Ask page could not be typed into' };
       if (!(await driver.click('host', { css: 'form[data-pa-ask] button[data-pa-destination="computer"]' }))) return { ok: false, detail: '"Ask the local model" could not be pressed' };
       const before = rows;
-      while ((rows = await rowCount()) <= before) {
-        if (now() >= until) return { ok: false, detail: `the local model's answer did not reach the Inbox in time (it holds ${rows} of ${wanted} answers)` };
+      for (;;) {
+        const view = JSON.parse(String(await driver.probe('host', ASK_VIEW))) as { found?: boolean; busy?: boolean; answer?: string; error?: boolean; message?: string };
+        if (view.error) return { ok: false, detail: `the local model did not answer: ${String(view.message ?? '').slice(0, 160)}` };
+        rows = await rowCount();
+        if (view.found && !view.busy && view.answer && rows > before) break;
+        if (now() >= until) return { ok: false, detail: `the local model's answer was not finished and in the Inbox in time (${view.answer ? 'answered' : 'no answer yet'}; the Inbox holds ${rows} of ${wanted})` };
         await sleep(2_000);
       }
     }

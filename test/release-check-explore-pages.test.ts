@@ -385,26 +385,40 @@ describe('exploring the other pages', () => {
   });
 });
 
-/** The Ask page and its Inbox, as far as filling the Inbox needs: the question field, the local model's Ask, and the rows. */
+/**
+ * The Ask page and its Inbox, as far as filling the Inbox needs: the question field, the local model's Ask, the answer panel and the
+ * rows. As in the product, a question is a row as soon as it is asked; its answer shows in the panel some reads later.
+ */
 class InboxPage {
   readonly window = new Window({ url: 'http://127.0.0.1:8010/dashboard?private-answers' });
   rows: number;
   asked: string[] = [];
-  constructor(rows = 0, private readonly ready = true, private readonly answers = true) { this.rows = rows; }
+  /** Reads of the answer panel left before the answer shows (Infinity: it never does). */
+  private pending = 0;
+  private answer = '';
+  constructor(rows = 0, private readonly ready = true, private readonly answerAfter = 2) { this.rows = rows; }
   private render(): void {
-    const ask = this.ready ? '<button type="submit" data-pa-destination="computer">Ask the local model</button>' : '<a class="btn" href="/dashboard?models">Set up the local model</a>';
-    this.window.document.body.innerHTML = `<form data-pa-ask><textarea name="question"></textarea>${ask}</form><ul data-pa-list>${Array.from({ length: this.rows }, (_, i) => `<li data-pa-question="q${i}">Question ${i}</li>`).join('')}</ul>`;
+    const ask = this.ready ? `<button type="submit" data-pa-destination="computer"${this.pending > 0 ? ' aria-busy="true" disabled' : ''}>Ask the local model</button>` : '<a class="btn" href="/dashboard?models">Set up the local model</a>';
+    const out = this.pending > 0 ? '<p class="pamsg">Answering…</p>' : this.answer ? `<div class="paanswer">${this.answer}</div>` : '';
+    this.window.document.body.innerHTML = `<form data-pa-ask><textarea name="question"></textarea>${ask}<div data-pa-out>${out}</div></form><ul data-pa-list>${Array.from({ length: this.rows }, (_, i) => `<li data-pa-question="q${i}">Question ${i}</li>`).join('')}</ul>`;
   }
   get driver(): JourneyDriver {
     const field = () => this.window.document.querySelector('textarea[name="question"]') as unknown as { value: string } | null;
     return {
       go: async () => { this.render(); },
-      probe: async (_frame: 'host' | 'panel', call: string) => evalIn(this.window, call),
+      probe: async (_frame: 'host' | 'panel', call: string) => {
+        if (call.includes('data-pa-out') && this.pending > 0 && --this.pending === 0) this.render();
+        return evalIn(this.window, call);
+      },
       type: async (_frame: 'host' | 'panel', target: WireTarget, text: string) => { const el = field(); if (!el || target.css !== 'form[data-pa-ask] textarea[name="question"]') return false; el.value = text; return true; },
       click: async (_frame: 'host' | 'panel', target: WireTarget) => {
-        if (!this.window.document.querySelector(target.css ?? '')) return null;
-        this.asked.push(field()!.value);
-        if (this.answers) { this.rows += 1; this.render(); }
+        if (!this.window.document.querySelector(`${target.css ?? ''}:not([disabled])`)) return null;
+        const question = field()!.value;
+        this.asked.push(question);
+        this.rows += 1;
+        this.pending = this.answerAfter;
+        this.answer = `An answer to ${question}`;
+        this.render();
         return {} as ElementInfo;
       },
     } as unknown as JourneyDriver;
@@ -420,6 +434,10 @@ describe('filling the Inbox before it is crawled', () => {
     const prepare = inboxAnswers(page.driver, { questions: ['One?', 'Two?'], ...clock() });
     expect(await prepare(inbox, 60_000)).toEqual({ ok: true, detail: 'the local model answered; the Inbox holds 2 answer(s)' });
     expect(page.asked).toEqual(['One?', 'Two?']);
+    // The second question waited for the first answer (the button is busy until then), not only for its row.
+    const slow = new InboxPage(0, true, 5);
+    expect((await inboxAnswers(slow.driver, { questions: ['One?', 'Two?'], ...clock() })(inbox, 60_000))?.ok).toBe(true);
+    expect(slow.asked).toEqual(['One?', 'Two?']);
   });
 
   test('answers already there count, and another page is left as it is', async () => {
@@ -433,7 +451,8 @@ describe('filling the Inbox before it is crawled', () => {
   test('a local model that is not ready, or an answer that never reaches the Inbox, fails with why once the time is up', async () => {
     const notReady = inboxAnswers(new InboxPage(0, false).driver, { questions: ['One?'], ...clock() });
     expect(await notReady(inbox, 10_000)).toEqual({ ok: false, detail: '"Ask the local model" was not ready to press (the Inbox holds 0 of 1 answers)' });
-    const silent = inboxAnswers(new InboxPage(0, true, false).driver, { questions: ['One?'], ...clock() });
-    expect(await silent(inbox, 10_000)).toEqual({ ok: false, detail: 'the local model\'s answer did not reach the Inbox in time (it holds 0 of 1 answers)' });
+    // The question is in the Inbox at once; an answer that never comes is not counted as one.
+    const silent = inboxAnswers(new InboxPage(0, true, Infinity).driver, { questions: ['One?'], ...clock() });
+    expect(await silent(inbox, 10_000)).toEqual({ ok: false, detail: 'the local model\'s answer was not finished and in the Inbox in time (no answer yet; the Inbox holds 1 of 1)' });
   });
 });
