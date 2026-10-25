@@ -523,8 +523,10 @@ imports with the private model stopped and checks this.
 For WhatsApp and Telegram, also on the same candidate as a supported live
 connection (`V0_4_RELEASE.md`, "Qualification action"): the dashboard shows
 the connected scope and the history the export covers, tells stale live
-capture apart from a successful empty import, and removing the archive leaves
-live capture running and its items in place.
+capture apart from a successful empty import, and the export and live
+capture make one dataset with nothing stored twice; history merged that way
+is deleted with the account, not on its own (owner, 2026-10-25,
+[one dataset, one pipeline](archive-live-one-dataset.md)).
 
 Status 2026-10-24: the first paragraph is met for all five formats on fresh
 Mac and Linux installs of main `1e043925` (the release check's archive leg,

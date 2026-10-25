@@ -1,8 +1,9 @@
 # Archives and live connectors: one dataset, one pipeline
 
-Status: design, 2026-10-25, after one critical review round. Owner
-requirement; builds on [archive import](archive-import.md) and
-[child items](child-items.md).
+Status: design, 2026-10-25, after two critical review rounds and the owner's
+removal decision. Owner requirement; builds on
+[archive import](archive-import.md), [child items](child-items.md) and
+[source storage](source-storage.md).
 
 ## Owner requirement
 
@@ -16,6 +17,9 @@ requirement; builds on [archive import](archive-import.md) and
   2026-10-25).
 - **Best of both.** Where the two mechanisms built so far differ, keep the
   better one, without adding bugs (owner, 2026-10-25).
+- **Merged history stays.** An import that joins a live source becomes part
+  of that account's history; it is deleted with the account's data, not on
+  its own (owner, 2026-10-25, option A of two).
 
 ## Today (main, 2026-10-25)
 
@@ -47,28 +51,35 @@ input: the archive layer reads the export and emits the live reader's own
 record shape (a Telegram message record, a WhatsApp bridge record, a parsed
 mail), and the source's connector turns every record into an item the same
 way, whichever input it came from. Everything after the record is one code
-path: builder, store set, placement, tier ledger set, judging, extraction,
-children, limits.
+path: builder, store set (the account's own stores, [source
+storage](source-storage.md)), placement, tier ledger set, judging,
+extraction, children, limits.
 
-So the store and the tier ledger see one connector, one owner and one ledger
-set per source, as today. Inputs are the connector's business, below the
-`RawItem`; nothing downstream learns that an archive exists, which keeps the
-rule that only the connector is per-source.
+So the store and the tier ledger see one source and one ledger set per
+account. Inputs are the connector's business, below the `RawItem`; nothing
+downstream learns that an archive exists, which keeps the rule that only the
+connector is per-source.
 
 An input keeps what only it needs: its own cursor (an archive's stays bound
-to its files' identity), its findings, its progress and, for an archive, the
-import record and its Remove control.
+to its files' identity), recorded under its own connector id in the sync
+runs so it never moves the live cursor; its findings; its progress; and, for
+an archive, the import record with a Stop control. Stopping keeps what was
+imported.
 
-A source with no live connector (Reflect, Roam, Evernote, mail of an account
-that is not connected) has its archives as its only inputs, under the
-Archives card as today.
+A source with no live connector (Reflect, Roam, Evernote), mail that matches
+no Gmail account, and an archive of a different account than the connected
+one stay under Archives as today (`archive.imports`, one account scope per
+import), with their Remove.
 
 ### 2. Intake: one version per item, chosen before judging
 
-The connector merges its inputs per item before it builds the `RawItem`, so
-the classifier only ever judges content that will be kept. A shared,
-source-neutral helper keeps an input table per source:
-`(item key, input, record version, supplied content)`.
+The connector decides, per record, whether it applies before it builds the
+`RawItem`, so the classifier only ever judges content that will be kept. It
+compares the record with the stored item through a lookup the store lane
+gives it (stored version and whether the item holds content), as live Gmail
+already does for stored mail. The decision keeps no state of its own: the
+store is the record of what applied, so a crash replays the record and
+decides again.
 
 - A record applies when it is newer than the stored version, in the
   source's own order (Telegram: edit date, then reactions; WhatsApp: the
@@ -79,18 +90,20 @@ source-neutral helper keeps an input table per source:
   stored item lacks: mail outside the Gmail window is names-only, and a live
   WhatsApp photo is metadata only (the bridge downloads voice notes alone).
   Otherwise the stored item stays, and live is kept on a tie.
-- Two archives of the same history: the first applies, and the second is a
-  further input. Re-importing an export is caught by its file identity, as
-  today.
+- A second archive of the same history adds only what is newer or missing.
+  Re-importing an export is caught by its file identity, as today.
 
 ### 3. The hold travels with the item
 
 Today the hold-until-judged rule is a lane option on the archive set. In one
 pipeline the lane is the live one, so the hold moves to the item: an item
-whose kept content came from an archive input carries `holdContentUntilJudged`
-on its `RawItem`, and placement honours it exactly as it honours the lane
-option today, through first classification, replacement and child
-extraction. Live items are unchanged.
+built from an archive record carries `holdContentUntilJudged` on its
+`RawItem`, and placement honours it exactly as it honours the lane option
+today, through first classification and child extraction. As today, the
+persisted hold keeps applying to that item's later versions until the
+private model has judged it; a live replacement of a held item is therefore
+held too, which errs Private. Items built only from live records are
+unchanged.
 
 ### 4. Matching, per source, inside the connector
 
@@ -99,12 +112,14 @@ extraction. Live items are unchanged.
   `-100id`, from the export's chat type) and the message id, so its record
   has the live item's key.
 - **Gmail:** exact where the export carries the Gmail id (Takeout, to
-  verify). Otherwise by `Message-ID`, only when it is unique in the account
-  and its `Date` and `From` agree; anything else is its own item. Live Gmail
-  adds `Message-ID` to the headers it requests; when an mbox of the connected
-  account is imported, a bounded background pass reads it for mail already
-  stored (one metadata read per message, within the provider budget), before
-  matching starts.
+  verify). Otherwise a message is the live item whose `Message-ID`, `Date`,
+  `From` and `Subject` all agree, and its own item when none or several do.
+  Two mails that agree on all four (a list resend) are taken as one, a
+  residual this rule accepts. Live Gmail adds `Message-ID` to the headers it
+  requests; when an mbox of the connected account is imported, a bounded
+  background pass reads it for mail already stored (one metadata read per
+  message, within the provider budget), and matching waits for the pass to
+  finish.
 - **WhatsApp:** an export has no message ids, so nothing can make it
   certain; this is the closest the data allows. A message's key is its chat,
   its minute, its sender and its text (caption included). The sender is
@@ -140,60 +155,64 @@ Each source has one representation of its media, and both inputs use it.
 
 - **WhatsApp** keeps live's form: a media message is one row with the media
   type and its extracted content. The archive input emits the bridge's media
-  record, and the import's media folder is registered as a readable root for
-  that input while the import exists.
+  record, and the import's media folder is registered as a readable root of
+  the account. If those files go, what was extracted stays and unread media
+  is reported as unavailable, as the child-items design reports it.
 - **Telegram and mail** use child items, with keys both inputs can compute:
   Telegram `media` (one per message), mail the MIME part path. A photo the
-  archive brings to a message live also holds is a child only the archive
-  supplied; if live capture later brings media, it is the same child.
+  archive brings to a message live also holds is its child; if live capture
+  later brings the same media, it is the same child.
 
 Each child is still judged on its own.
 
-### 6. Removing an archive
+### 6. Deleting
 
-Removal removes the input, never by account:
-
-- the input is dropped from the input table;
-- an item with no input left is deleted through the child-items cascade:
-  hidden in the ledger in one transaction, then deleted from every tier
-  store, with its children, chunks, embeddings, extraction jobs, questions
-  and Secret locations;
-- an item another input supplied stays as it is: by section 2 its content is
-  that input's;
-- mail whose names-only row the archive had filled returns to names-only:
-  the Gmail connector rebuilds it from its live record.
-
-The account-scoped deletes (`purgeAccountScope`, `withdrawAccountScope` and
-the child-items design's extraction-job forget by account scope) are never
-used for an input; they stay for deleting a whole source. Disconnecting live
-keeps the history the archives supplied.
+- **Merged history** is deleted with the account: deleting the account's
+  data removes live and imported items together, through the existing
+  whole-source delete. There is no per-import removal, so no per-item record
+  of inputs, no single-item delete and no account-scoped purge for an input.
+- **An import under Archives** (section 1) keeps today's Remove by its own
+  account scope, which no other input writes.
+- **Disconnecting live** keeps the history the archives supplied.
 
 ### 7. Same account, or no merge
 
-- **Telegram:** the export's user id, hashed as pairing hashes it, equals
-  the pairing's `account_ref`. Imported before pairing, the import records
-  it; pairing another account later is refused with a plain route ("this
-  Telegram is a different account from the imported history: remove the
-  import first"). No rows are ever re-keyed. A single-chat export carries no
-  profile; it joins the paired account at the owner's confirmation.
-- **Mail:** the export's address, hashed into the opaque account labels the
-  source binding keeps, equals the connected Gmail's. Absent, mixed or
-  conflicting delivery headers mean no merge. Mail of an account that is not
-  connected is archive mail. Connecting that account later offers to join it:
-  the file is read again as a Gmail input, then the separate archive is
-  removed. If the file is gone, it stays separate and the card says so.
-- **WhatsApp:** one WhatsApp is paired per install. The import sheet says
-  the chat joins it, and the owner can keep it apart (its own source, as
-  today).
+Accounts are resolved by the storage service by source and provider account
+hash (a [source storage](source-storage.md) step agreed 2026-10-25, before
+steps 4 and 6 below); live connect and pairing record the hash.
+
+- **Telegram:** the export's user id, hashed as pairing hashes it, is the
+  account's hash. Imported before pairing, the account is created with it;
+  pairing another account later is refused with a plain route ("this
+  Telegram is a different account from the imported history: delete that
+  history first"). A single-chat export carries no profile: it joins the
+  source's only account at the owner's confirmation, or creates the account
+  without a hash, which the first pairing sets.
+- **Mail:** an mbox with Gmail's own markers (`X-Gmail-Labels`,
+  `X-GM-THRID`) and one delivered-to address is a Gmail account, hashed into
+  the opaque address label the source binding keeps; matching a connected
+  account needs that label among the account's labels and the owner's
+  confirmation. With no connected account, the account is created with the
+  label and a later connect of that address joins it. Absent, mixed or
+  conflicting addresses, or no Gmail markers, make it archive mail under
+  Archives.
+- **WhatsApp:** an export never names its account. It joins the source's
+  only account at the owner's confirmation in the import sheet, or creates
+  the account, which pairing then joins; the owner can keep it apart under
+  Archives instead.
+- **Another account's archive** (an old Telegram account, say) stays under
+  Archives, as today, until more than one account per source exists.
+
+No rows are ever re-keyed.
 
 ### 8. Counts and findings
 
 One dataset shows on one card: the source's own (Telegram, WhatsApp,
 Gmail). Its imports are listed inside it, each with its progress, findings
-(their plain sentences and two lists) and Remove. The Archives card keeps the
-sources with no live connector. The source card counts each item once; an
-import counts its own input: "N items from this archive, of which M were
-already there from live capture." The card shows the history each input
+(their plain sentences and two lists) and Stop. The Archives card keeps the
+imports of section 1's last paragraph. The source card counts each item
+once; an import counts its own run as it goes: "N items from this archive,
+of which M were already there". The card shows the history each input
 covers: imported up to the export's date, live since pairing.
 
 ### 9. Connector work this needs
@@ -224,7 +243,7 @@ its own.
 | Media | the extraction factory for every input; WhatsApp voice notes as live reads them | both | only live WhatsApp reads any media today (voice notes); archives count media as not imported |
 | Problems | findings by kind, counted once per position, in plain sentences, in two lists | archive | live reports receipt counters, and a full bridge queue drops a message with only a log line |
 | Freshness | capture freshness, told apart from a quiet account | live, fixed | live judges staleness from the newest message's time, so a quiet account reads as stale |
-| Removal | per input (section 6) | archive's key, the cascade's mechanism | the account-scoped purge would delete live items |
+| Deleting | with the account for merged history, by archive for imports under Archives | both | section 6 |
 | Progress | percent of the input read, items held, attention when held | archive | live shows freshness only |
 | Tests | shared fixtures and the release check's real-machine leg | archive | live is driven in the release check only through stand-ins |
 
@@ -241,28 +260,29 @@ input fills the last two for the history it covers.
 ## Contract
 
 `RawItem.holdContentUntilJudged`, connector inputs with their own cursors,
-and removal by input are a semantic change: contract 2.2.0, after 2.1.0
-(child items), through the versioned gate with an independent critical
-review and the private held-out run. Store and ledger ownership do not
-change.
+and the intake lookup of the stored version are a semantic change: contract
+2.2.0, after 2.1.0 (child items), through the versioned gate with an
+independent critical review and the private held-out run. Store and ledger
+ownership and the delete paths do not change.
 
 ## Order
 
 1. Child items spine (2.1.0, in progress).
-2. One-pipeline spine (2.2.0): the input table and intake rule, the hold on
-   the item, removal by input through the cascade, input cursors, counts;
-   proved with a fixture source that has a live and an archive input.
+2. One-pipeline spine (2.2.0): connector inputs and their cursors, the
+   intake lookup and rule, the hold on the item, the import record inside a
+   source card with its counts; proved with a fixture source that has a live
+   and an archive input.
 3. Live capture fixes from "Best of both", each with its own tests:
    streaming spool reads with bounds, cursor recovery, counted bridge
    drops, WhatsApp captions, freshness told apart from quiet.
 4. Telegram: the export becomes an input of the Telegram connector (exact
-   ids, account check), with folder media as children; reusable builder and
-   new record kinds.
+   ids, account hash), with folder media as children; reusable builder and
+   new record kinds. After storage's account-identity step.
 5. WhatsApp: the export becomes an input (counted keys, zone alignment,
    chat joining); the bridge's records carry the contact's saved name.
 6. Mail: live Gmail requests `Message-ID`, with the background pass, and
-   gains attachments as children; mbox of the connected account becomes a
-   Gmail input.
+   gains attachments as children; mbox of a Gmail account becomes a Gmail
+   input. After storage's account-identity step.
 7. Reflect, Roam, Evernote: their own sources, assets as children.
 8. Live Telegram media and live WhatsApp images and video, so both
    inputs bring the same media.
@@ -277,34 +297,39 @@ apps.
 - Telegram Desktop writes bare chat ids, with the type telling the marked
   form. Check against a real export.
 - Takeout's mbox separator line carries the Gmail message id in decimal (the
-  API id is its hex). If not, mail matches by `Message-ID` only.
+  API id is its hex). If not, mail matches by its headers only.
 - The WhatsApp export's chat names equal the bridge's contact names for
   direct chats. Check with the owner canary.
 
 ## Review
 
-Round 1 (independent critical review, 2026-10-25) found no P0 and nine P1/P2
-issues against the first draft, which had archives write into live stores as
-second connectors. This draft answers them by design rather than patches:
+Independent critical review, two rounds on 2026-10-25, no P0 in either.
 
-- One writer per source (section 1) removes multi-owner precedence, the
-  ledger-owner gap and the separate-ledger refusal.
-- Choosing the version before judging (section 2) makes every judgment
-  concern kept content.
-- The hold travels on the item (section 3).
-- Removal by input through the cascade (section 6) never deletes or
-  withdraws by account.
-- WhatsApp matches by counted keys (section 4), after round 2 showed that
-  capture periods cannot partition history.
-- Gmail ownership no longer depends on live re-reading stored mail, and the
-  `Message-ID` backfill is explicit (sections 2 and 4).
-- No re-keying: a mismatched account is refused or re-read (section 7).
-- WhatsApp media keeps live's form (section 5).
-- Counts are per input and per dataset (section 8).
+- **Round 1** (first draft, archives as second connectors writing into live
+  stores): nine P1/P2 issues. Answered by one writer per source (section
+  1), choosing the version before judging (section 2), the hold on the item
+  (section 3), no re-keying (section 7), WhatsApp media in live's form
+  (section 5) and counts per input and per dataset (section 8).
+- **Round 2** (one writer, inputs, removal by input): five P1s.
+  - No commit protocol for the input table, removal re-selecting a version
+    from a surviving input, and Gmail live ownership of skipped mail: all
+    came from removing one import after it merged. The owner chose to
+    delete merged history only with the account (section 6), so the input
+    table, per-input removal and the cascade dependency are gone, and the
+    intake keeps no state of its own (section 2).
+  - WhatsApp capture periods cannot partition history: replaced by counted
+    keys, with zones by date (section 4).
+  - Intake regression and lost media: a version order across inputs and
+    same-version content fill (section 2).
+  - P2s: the hold's persistence is stated (section 3); the Gmail rule no
+    longer claims uniqueness (section 4); the comparison table's wording
+    was corrected.
+- Review-bot comments on the PR (WhatsApp capture gaps, daylight saving,
+  re-selection on removal) are answered by the same changes.
 
 ## Open questions
 
-None for the owner. Defaults chosen: removing an archive removes only the
-history it alone supplied; a WhatsApp chat export joins the paired WhatsApp
-unless the owner keeps it apart; pairing a different Telegram account than
-the imported history is refused until the import is removed.
+None for the owner. Defaults chosen: a WhatsApp or single-chat Telegram
+export joins the source's account at the owner's confirmation; pairing a
+different Telegram account than the imported history is refused until that
+history is deleted; another account's archive stays under Archives.
