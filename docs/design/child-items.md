@@ -355,7 +355,7 @@ floor from its parent.
     items they gather: keyword and vector search, fetch by id, counts and
     status, the embedding sweep, unreadable-file locators, the parent label,
     the cross-store gate, the Secret location search (a Secret child's
-    location is its name, found by its id since no row need hold it), and the
+    location is its name, found by its id and so needing no row), and the
     release check. A delayed answer that drew on a child whose parent is gone
     is withheld whole, not given back without the citation: what it said of
     the child is in its prose. The parent's names, when the answer carried
@@ -369,18 +369,32 @@ floor from its parent.
     that is too deep hides the child. Hiding is not removal: only a parent
     that is gone (below) costs its children their rows.
   - **A Secret parent is present while the provider lists it, and no longer.**
-    Classifying a parent as a Secret never takes its children: its row is
-    kept as a location only (tombstoned at tier S5), or it was caught on its
-    own words before any store wrote it and only the ledger knows it. Either
-    counts as present without being read; its names and content are never
-    shown through the check, and its children are judged on their own words.
-    Presence ends with the provider's deletion, which retires the location:
-    the deletion feed does it (`retireSecretLocation` in each open store; a
-    Secret no store ever held gets an ordinary tombstone in the Private store
-    so the deletion is a fact somewhere), and so does a full snapshot that no
-    longer lists it (every sync re-observes the locations it still lists, so
-    an absence reconcile retires only those it does not). A retired Secret is
-    an ordinary deleted parent: its children are hidden at once and swept.
+    Classifying a parent as a Secret never takes its children. A Secret has
+    one representation: its row, kept as a location only (tombstoned at tier
+    S5, no names, no text, and for a child its link to its own parent). It is
+    written when the item is first judged Secrets even if no store held it
+    (the Private store takes it, in its own pass, so the row and the fact that
+    the provider lists it land together), and it counts as present without
+    being read. Its children are judged on their own words. Presence ends with
+    the provider's deletion, which retires the location: the deletion feed does
+    it (`retireSecretLocation` in each open store; for a Secret the ledger
+    knows and no store holds a row for, which only a crash between the decision
+    and the row leaves, the Private store gets an ordinary tombstone so the
+    deletion is a fact somewhere), and so does a full snapshot that no longer
+    lists it (every sync re-observes the locations it still lists, so an
+    absence reconcile retires only those it does not). A retired Secret is an
+    ordinary deleted parent: its children are hidden at once and swept. A
+    positive listing restores presence: a retired location whose ledger
+    decision is still Secrets goes back to tier S5 when the provider lists it
+    again (a location only; nothing of its names or content returns), and
+    whether it stays a Secret is the ledger's decision under the usual version
+    rules. The ledger's word that an item is a Secret, with no row anywhere,
+    is not presence: its children are hidden and nothing is removed until the
+    next listing writes the row.
+  - **A Secret that came inside another item is hidden with it.** A Secret is
+    present for itself, but where it is a child its own parent still decides:
+    the chain check goes on above it, so deleting A hides C in A, then a Secret
+    B, then C at once, and the sweep takes B and then C.
   - **A Secret child's name is its location.** The Secret location index is
     read through the same check (by the child's own id, `#child:`), and the
     sweep covers a child kept as a location only: it removes the location, the

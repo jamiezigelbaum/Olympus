@@ -1012,13 +1012,16 @@ export type ConnectorStoreOwnershipKind = 'observed' | 'preservation';
  *   writes nothing, and a copy it already holds (superseded) is kept as-is.
  * - `delete`: the provider deleted a routed item this store holds a copy of
  *   (current, staged or superseded), or the item became Secrets: tombstone it.
- *   Chunks, FTS rows and vectors go, as for every tombstone.
+ *   Chunks, FTS rows and vectors go, as for every tombstone. With `keepLocation`
+ *   (a Secret that no store holds a row for) the store writes the Secret's
+ *   location row when it has none: a tombstone at tier S5 with no names and no
+ *   text, owned by this listing.
  */
 export type ConnectorStoreTierRoute =
   | { kind: 'legacy' }
   | { kind: 'store'; sensitivity: SourceSensitivity; layer: 'both' | 'metadata' | 'content' }
   | { kind: 'elsewhere'; reason: 'routed_to_other_tier' | 'secrets' | 'move_queued' | 'content_unread' }
-  | { kind: 'delete'; reason: 'provider_deleted' | 'secrets' };
+  | { kind: 'delete'; reason: 'provider_deleted' | 'secrets'; keepLocation?: true };
 
 export interface ConnectorStoreTierRouteInput {
   store: LocalConnectorStore;
@@ -3669,7 +3672,8 @@ export class LocalConnectorStore {
    * - `retired`: the row was a Secret's location and is now an ordinary tombstone.
    * - `held`: the store holds a row that is not a Secret's location; nothing changed.
    * - `recorded`: with `record`, the store held no row and now holds an ordinary tombstone, for a
-   *   Secret that no store ever held (only the ledger knew it), so its deletion is a fact somewhere.
+   *   Secret that no store holds a row for (only the ledger knows it: a crash between its decision
+   *   and its location row), so its deletion is a fact somewhere.
    * - `none`: the store holds no row and none was made.
    */
   retireSecretLocation(
@@ -3731,13 +3735,21 @@ export class LocalConnectorStore {
    * sync, to leave the per-item work out of a store that has none.
    */
   private keepsSecretLocations(): boolean {
-    return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 AND trust_tier = 'S5' LIMIT 1`).get() !== null;
+    // Any tombstone may be a Secret's location, or one retired and now listed again.
+    return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 LIMIT 1`).get() !== null;
   }
 
   /**
    * The provider listed an item this store keeps as a Secret's location: say
    * so, so that an absence reconcile can tell it from a Secret the provider no
    * longer lists. Writes only the owner row, like `reobserveRoutedCopy`.
+   *
+   * A Secret whose location was retired (the provider deleted it, or stopped
+   * listing it) and is listed again, with the ledger's decision for it still
+   * Secrets, is present again: the row goes back to a location at tier S5,
+   * with no name and no text (it never had any back). Nothing else of the
+   * item comes back; whether it stays a Secret is the ledger's decision, made
+   * by the listing's own judgment before this runs, under the usual version rules.
    */
   private reobserveSecretLocation(
     item: RawItem,
@@ -3746,16 +3758,25 @@ export class LocalConnectorStore {
     syncRunId: string,
   ): void {
     const row = this.db.query(`
-      SELECT item_pk FROM items
+      SELECT item_pk, trust_tier FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
-        AND tombstoned = 1 AND trust_tier = 'S5'
+        AND tombstoned = 1
     `).get(
       item.identity.provider,
       item.identity.accountScope,
       normalizeConversationId(item.identity.providerConversationId),
       item.identity.providerItemId,
-    ) as { item_pk: number } | null;
+    ) as { item_pk: number; trust_tier: string } | null;
     if (!row) return;
+    if (row.trust_tier !== 'S5') {
+      if (this.tierLedger()?.itemIsSecret(item.identity) !== true) return;
+      this.db.transaction(() => {
+        this.db.query(`UPDATE items SET trust_tier = 'S5' WHERE item_pk = ? AND tombstoned = 1`).run(row.item_pk);
+        this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
+        this.deleteFtsForItem(row.item_pk);
+        this.keepSecretsLocationOnly(row.item_pk);
+      })();
+    }
     this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), 'provider_listing');
   }
 
@@ -8055,7 +8076,7 @@ export class LocalConnectorStore {
           }
           if (route.kind === 'delete') {
             const secrets = route.reason === 'secrets';
-            if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? 'S5' : undefined, true)) {
+            if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? 'S5' : undefined, route.keepLocation !== true)) {
               itemsTombstoned += 1;
               if (secrets) {
                 secretsTierItemsTombstoned += 1;
@@ -8964,13 +8985,15 @@ export class LocalConnectorStore {
       // A tombstone for an item this store never saw still gets a row so a
       // later upsert of the same provider item id does not resurrect deleted
       // content without preserving its ownership history.
+      // A child's row keeps the link to what it came inside (an id, no name): the chain above a
+      // Secret's location is read from it (child-visibility.ts).
       this.db.query(`
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
       `).run(
         identity.provider,
         identity.family,
@@ -8984,6 +9007,7 @@ export class LocalConnectorStore {
         tombstoneTrustTier,
         now,
         syncRunId,
+        identity.parent?.localItemId ?? null,
       );
       const inserted = this.db.query(
         `SELECT item_pk FROM items

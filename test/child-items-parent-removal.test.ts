@@ -341,7 +341,7 @@ describe('what is not a deletion takes nothing with it', () => {
   });
 });
 
-describe('a Secret that no store ever held', () => {
+describe('a Secret that no store held before it was judged', () => {
   // Built at runtime so the repository's credential-pattern check never sees a literal key.
   const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 
@@ -351,8 +351,11 @@ describe('a Secret that no store ever held', () => {
     const secretParent: FixtureParentSpec = { ...parents()[0]!, subject: `Wifi ${FAKE_AWS_KEY}` };
     await h.importAll(archiveId, [secretParent]);
     const lane = h.runtime.lane(format.family);
-    // No store holds the parent at all; the ledger alone knows it is a Secret.
-    expect(h.rows(archiveId).filter((row) => row.providerItemId === 'm1')).toEqual([]);
+    // No store held the parent before it was judged, so the Private store keeps its location: a
+    // tombstone at tier S5 with no chunks, which is what makes it present while the provider lists it.
+    expect(h.rows(archiveId).filter((row) => row.providerItemId === 'm1')).toEqual([
+      expect.objectContaining({ domain: 'secure_local', tombstoned: 1, trustTier: 'S5', chunks: 0 }),
+    ]);
     expect(liveRows(h, archiveId, M1_CHILDREN).length).toBe(M1_CHILDREN.length);
     expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 0, retry: 0 });
     expect(liveRows(h, archiveId, M1_CHILDREN).length).toBe(M1_CHILDREN.length);

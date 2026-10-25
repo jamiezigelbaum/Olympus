@@ -129,6 +129,12 @@ export const TIER_KEY_TRUST_DOMAIN: Readonly<Record<Exclude<TierKey, 'secrets'>,
   secure: 'secure_local',
 };
 
+/**
+ * The store that keeps a Secret's location row when no other store holds one for it. A Secret
+ * classifies at tier S5, whose trust domain is this one (`buildSourceSensitivity`).
+ */
+export const SECRET_LOCATION_DOMAIN: SourceTrustDomain = 'secure_local';
+
 /** Connector id recorded on writes the set makes into a leg outside that leg's own traversal. */
 export const TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = 'tiered_store_set_handoff';
 
@@ -257,8 +263,8 @@ export interface TieredStoreSetRun {
 type Plan =
   | { kind: 'legacy' }
   | { kind: 'routed'; copies: ReadonlyMap<string, TierCopyLayers>; sensitivity: ReadonlyMap<string, SourceSensitivity> }
-  | { kind: 'hold'; reason: 'move_queued' | 'content_unread' | 'secrets' }
-  | { kind: 'delete'; corpora: ReadonlySet<string>; reason: 'provider_deleted' | 'secrets' };
+  | { kind: 'hold'; reason: 'move_queued' | 'content_unread' | 'secrets'; location?: true }
+  | { kind: 'delete'; corpora: ReadonlySet<string>; reason: 'provider_deleted' | 'secrets'; location?: true };
 
 interface PlanEntry {
   plan: Plan;
@@ -512,7 +518,7 @@ export class TieredStoreSet {
     const stores = this.openStores();
     const outcomes = stores.map((store) => store.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID }));
     if (options.record && outcomes.every((outcome) => outcome === 'none')) {
-      this.store('secure_local', { create: true })
+      this.store(SECRET_LOCATION_DOMAIN, { create: true })
         ?.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, record: true });
     }
   }
@@ -1456,8 +1462,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           : { kind: 'elsewhere', reason: 'routed_to_other_tier' };
       }
       case 'hold':
-        return { kind: 'elsewhere', reason: plan.reason };
+        // A Secret no store holds a row for keeps its location in the Private store, held or not.
+        return plan.location === true && domain === SECRET_LOCATION_DOMAIN
+          ? { kind: 'delete', reason: 'secrets', keepLocation: true }
+          : { kind: 'elsewhere', reason: plan.reason };
       case 'delete':
+        if (plan.location === true && domain === SECRET_LOCATION_DOMAIN) {
+          return { kind: 'delete', reason: plan.reason, keepLocation: true };
+        }
         return plan.corpora.has(corpusId)
           ? { kind: 'delete', reason: plan.reason }
           : { kind: 'elsewhere', reason: plan.reason === 'secrets' ? 'secrets' : 'routed_to_other_tier' };
@@ -1557,9 +1569,19 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // kept, hidden, for an owner-approved purge. Either way the side
         // stores forget the item's names and excerpt now.
         forgetSecretInSideStores({ ledger, identity });
-        if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets' };
+        // A Secret is present while its location row is (child-visibility.ts), so it always has
+        // one: an item no store ever held gets it in the Private store, location only (no names,
+        // no text), written by that store's own pass so its owner row says the provider lists it.
+        const location = !hasRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined;
+        if (location) this.routedDomains.add(SECRET_LOCATION_DOMAIN);
+        if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets', ...(location ? { location: true as const } : {}) };
         this.copyRemovals.set(identityKey(identity), identity);
-        return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };
+        return {
+          kind: 'delete',
+          corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)),
+          reason: 'secrets',
+          ...(location ? { location: true as const } : {}),
+        };
       case 'queued_move':
         this.counts.movesQueued += 1;
         if (contentRead && !recorded.raise) {
@@ -1634,6 +1656,19 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           ...(plan.reason === 'secrets' ? { trustTier: 'S5' as const } : {}),
         });
       }
+    }
+    if ((plan.kind === 'delete' || plan.kind === 'hold') && plan.location === true && listingDomain !== SECRET_LOCATION_DOMAIN) {
+      // The Secret's location row is the Private store's to write: its own pass takes the item
+      // as it takes any handed-off item, so the row and its owner land in one transaction.
+      const store = this.set.store(SECRET_LOCATION_DOMAIN, { create: true })!;
+      const listing = this.legOptions.get(input.store.corpusId) ?? {};
+      await store.syncFromConnector(handoffConnector(input.connector, input.item), {
+        ...(listing.fetchContent !== undefined ? { fetchContent: listing.fetchContent } : {}),
+        ...(listing.deferMetadataOnlyContent !== undefined
+          ? { deferMetadataOnlyContent: listing.deferMetadataOnlyContent }
+          : {}),
+        tierRouting: this,
+      });
     }
   }
 

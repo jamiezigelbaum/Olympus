@@ -17,16 +17,22 @@
 // parents too deep): a child is shown only on positive evidence.
 //
 // A Secret parent is not a deletion (the owner's rule: each child is judged on
-// its own), and neither is it a standing presence. While the provider still
-// lists it, its store row is kept as a location only (a tombstoned row at tier
-// S5, no names, no text), or, when no store ever held a row, the ledger alone
-// knows it is a Secret; either counts as present, and neither is read for
-// anything but that. Once the provider deletes it the location row is retired
-// to an ordinary tombstone (the store does it with the deletion, a feed's or
-// an absence reconcile's, `retireSecretLocation`), and from then on a Secret
-// is judged as any other deleted parent: its children go. Secret
-// classification alone never cascades. The parent's names and content are
-// never shown through this module.
+// its own), and neither is it a standing presence. Every Secret has one
+// representation here: its store row, kept as a location only (a tombstoned row
+// at tier S5, no names, no text), written when the item is first judged Secrets
+// even if no store held it before. That row counts as present while the
+// provider lists it, and nothing of the item is read for anything but that.
+// Once the provider deletes it the row is retired to an ordinary tombstone
+// (the store does it with the deletion, a feed's or an absence reconcile's,
+// `retireSecretLocation`), and from then on a Secret is judged as any other
+// deleted parent: its children go. A listing of it again restores the row
+// (`reobserveSecretLocation`). Secret classification alone never cascades. A
+// Secret is present for itself, but it is still a child when it came inside
+// another item, so its own parent decides whether its children may be seen:
+// the chain check goes on above it. The ledger's knowledge that an item is a
+// Secret, with no row for it anywhere (a crash between the decision and the
+// row), hides its children and removes nothing: it is not presence. The
+// parent's names and content are never shown through this module.
 //
 // The sweep that removes the children of a parent that is gone (the tiered
 // store set, `sweepOrphanedChildren`) asks a narrower question than the read
@@ -48,7 +54,7 @@ export interface ParentRef {
    * The parent's identity as the contract derives it from a child's
    * (`parentIdentityOf`), when the caller had a child to derive it from. It
    * is used for one question only: whether the ledger knows the parent as a
-   * Secret that no store ever held a row for.
+   * Secret that no store holds a row for (hidden, never gone).
    */
   identity?: TierLedgerIdentity;
 }
@@ -182,16 +188,24 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
     const list = rows.get(key) ?? [];
     const identity = list[0]?.identity;
     const active = list.filter((row) => row.active);
-    // A Secret's row is a location only: present, though nothing of it may be read.
-    if (list.some((row) => row.secret)) {
+    // A Secret's row is a location only: present for itself, though nothing of it may be read.
+    // Its classification is not a deletion and does not cascade, but where it came inside
+    // another item that item's standing still decides it, so the chain goes on above it.
+    const locations = list.filter((row) => row.secret);
+    if (locations.length > 0) {
+      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above) climbing.set(key, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId! });
       verdicts.set(key, { visible: true, gone: false });
       continue;
     }
     if (!identity) {
-      // No store holds a row for it. A Secret caught on its own words before any store wrote it
-      // is known to the ledger alone, and is present all the same (nothing of it is read).
+      // No store holds a row for it, so it is gone, unless the ledger knows it as a Secret: a
+      // Secret's row is written with the decision, so that is a crash between the two, or a
+      // Secret from before rows were kept. It is not present (nothing says it is listed), and
+      // it is not gone either (a classification alone is no deletion): hidden, nothing removed,
+      // until its next listing writes the row.
       if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
-        verdicts.set(key, { visible: true, gone: false });
+        verdicts.set(key, HIDDEN);
       } else {
         verdicts.set(key, { visible: false, gone: true });
       }
@@ -208,12 +222,10 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
         ? state?.record.routed !== true && active.length > 0
         : copies.some((copy) => copy.state === 'current' && active.some((row) => row.corpusId === copy.corpusId));
       // A Secret whose copies were settled but whose location row is not written yet (the row is
-      // still active) is present. Once every row is a tombstone and none is a location, the
-      // provider deleted it: the ledger's record of what it was says nothing about whether it is there.
-      if (!visible && active.length > 0 && ledger.itemIsSecret(identity)) {
-        verdicts.set(key, { visible: true, gone: false });
-        continue;
-      }
+      // still active) is present, and its own parent still decides its children like any other
+      // item's. Once every row is a tombstone and none is a location, the provider deleted it:
+      // the ledger's record of what it was says nothing about whether it is there.
+      if (!visible && active.length > 0 && ledger.itemIsSecret(identity)) visible = true;
     }
     if (visible) {
       const above = active.find((row) => row.grandparentLocalItemId !== undefined);
@@ -269,7 +281,8 @@ export function goneParents(lane: ChildVisibilityLane, parents: readonly ParentR
 /**
  * The verdict on each item by its own identity (`tierLedgerIdentityKey`), the
  * same one a child's parent gets: an item no store holds a row for is judged
- * on the ledger alone, so it is gone unless the ledger knows it as a Secret.
+ * on the ledger alone, so it is gone unless the ledger knows it as a Secret
+ * (then hidden, not gone).
  * Never throws: whatever cannot be established is hidden and not gone.
  */
 export function itemVerdicts(lane: ChildVisibilityLane, items: readonly ChildProbe[]): Map<string, ParentVerdict> {
