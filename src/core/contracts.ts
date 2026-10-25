@@ -75,19 +75,33 @@ export interface RawItem {
 }
 
 // 2.2.0: what the store holds of one item, as the store lane tells the
-// connector before it builds the item. `version` is the stored
-// `identity.sourceVersion` (opaque to everything but the connector, whose own
-// order compares it); `hasContent` is whether the stored item holds content
-// (chunks), as against its names alone. Absent when the store holds no active
-// copy of the item.
+// connector before it builds the item. `version` is the newest
+// `identity.sourceVersion` any row of the item holds, by the connector's own
+// order (the lookup is given it); `hasContent` is whether the item's rows at
+// that version hold content (chunks), as against its names alone. Absent only
+// when the store holds no row of the item at all: a tombstoned row (deleted,
+// or a Secret kept as a location only) and a row on one leg alone are still
+// the item's, so the version boundary never depends on how completely the
+// item was written or whether its row is visible.
+//
+// `incomplete` says the item is not whole at its newest version: an older or
+// unversioned row is still active beside it, or a leg that should hold it has
+// no active row. A record of that version or a newer one completes it; an
+// older one never applies. `tombstoned` says the rows at the newest version
+// are all tombstones (deleted, or a Secret kept as a location): only a newer
+// record, or live's own word at the same version, brings the item back.
 export interface StoredItemState {
   version?: string;
   hasContent: boolean;
+  incomplete?: true;
+  tombstoned?: true;
 }
 
-// 2.2.0: looks up one item in the store set the listing writes into.
+// 2.2.0: looks up one item in the store set the listing writes into. The
+// connector gives its own order of versions, which only it can say.
 export type StoredItemLookup = (
   identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  compareVersions: (a: string, b: string) => number,
 ) => StoredItemState | undefined;
 
 export interface SourceConnectorListOptions {

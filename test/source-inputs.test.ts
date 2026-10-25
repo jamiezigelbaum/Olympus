@@ -155,6 +155,28 @@ describe('the intake rule', () => {
     expect(decide('live', '2', false, stored('2', true))).toBe('skip_same');
   });
 
+  test('an item cut off between legs is completed by a record of its own version and never by an older one', () => {
+    for (const kind of ['live', 'archive'] as const) {
+      const cutOff: StoredItemState = { version: '5', hasContent: true, incomplete: true };
+      expect(decide(kind, '5', true, cutOff)).toBe('apply');
+      expect(decide(kind, '6', false, cutOff)).toBe('apply');
+      expect(decide(kind, '4', true, cutOff)).toBe('skip_older');
+    }
+  });
+
+  test('an item whose every row is a tombstone comes back only with a newer record (live also at the same version)', () => {
+    const gone: StoredItemState = { version: '5', hasContent: false, tombstoned: true };
+    for (const kind of ['live', 'archive'] as const) {
+      expect(decide(kind, '6', true, gone)).toBe('apply');
+      expect(decide(kind, '4', true, gone)).toBe('skip_older');
+    }
+    expect(decide('archive', '5', true, gone)).toBe('skip_same');
+    expect(decide('live', '5', true, gone)).toBe('apply');
+    // A tombstone with no version to compare is not brought back by an archive record.
+    expect(decide('archive', '5', true, { hasContent: false, tombstoned: true })).toBe('skip_same');
+    expect(decide('live', '5', true, { hasContent: false, tombstoned: true })).toBe('apply');
+  });
+
   test('a record with no version is taken as the stored one\'s', () => {
     expect(decide('archive', undefined, true, stored('2', false))).toBe('apply');
     expect(decide('archive', undefined, true, stored('2', true))).toBe('skip_same');
@@ -199,37 +221,40 @@ describe('inputs through a real store set', () => {
     const archive = (records: Rec[]) => inputConnector(builder, input('archive', 'archive.one', records));
     // Live knows the message by name only (a metadata-only record); the archive brings its text.
     await sync(f.set, live([{ id: 'm', version: 1, name: 'M' }]));
-    expect(f.set.storedItem(f.identity('m'))).toEqual({ version: '1', hasContent: false });
+    expect(f.set.storedItem(f.identity('m'), numeric)).toEqual({ version: '1', hasContent: false });
     await sync(f.set, archive([{ id: 'm', version: 1, name: 'M', text: 'text from the archive' }]));
-    expect(f.set.storedItem(f.identity('m'))).toEqual({ version: '1', hasContent: true });
+    expect(f.set.storedItem(f.identity('m'), numeric)).toEqual({ version: '1', hasContent: true });
     // Live's names-only record at the same version does not take it away.
     await sync(f.set, live([{ id: 'm', version: 1, name: 'M' }]));
-    expect(f.set.storedItem(f.identity('m'))).toEqual({ version: '1', hasContent: true });
+    expect(f.set.storedItem(f.identity('m'), numeric)).toEqual({ version: '1', hasContent: true });
     // An archive record without the content, where live has none either, adds nothing.
     await sync(f.set, live([{ id: 'n', version: 1, name: 'N' }]));
     await sync(f.set, archive([{ id: 'n', version: 1, name: 'N' }]));
-    expect(f.set.storedItem(f.identity('n'))).toEqual({ version: '1', hasContent: false });
+    expect(f.set.storedItem(f.identity('n'), numeric)).toEqual({ version: '1', hasContent: false });
   });
 
   test('the lookup is the set\'s: none for an unknown item, one answer across every leg', async () => {
     const f = lane({});
-    expect(f.set.storedItem(f.identity('nothing'))).toBeUndefined();
+    expect(f.set.storedItem(f.identity('nothing'), numeric)).toBeUndefined();
     await sync(f.set, inputConnector(builder, input('live', 'fixture_live', [{ id: 'a', version: 7, name: 'A', text: 'seven' }])));
-    expect(f.set.storedItem(f.identity('a'))).toEqual({ version: '7', hasContent: true });
+    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '7', hasContent: true });
   });
 
-  test('a record cut off between legs reports no version, so the next record completes it', async () => {
+  test('a record cut off between legs keeps its version: its own version or a newer one completes it, an older one never applies', async () => {
     const f = lane(HOLD_OPTIONS);
     // A held item's names rest in the Personal store and its content in the Private one.
     const held = input('archive', 'archive.held', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }]);
     await sync(f.set, holdingItems(inputConnector(builder, held)));
-    expect(f.set.storedItem(f.identity('a'))).toEqual({ version: '1', hasContent: true });
+    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true });
     // The Personal copy of the item's names is lost, as when a run stops after one leg.
     expect(f.stores.internal.tombstoneCopy({ ...f.identity('a'), family: 'file', localItemId: `${ACCOUNT}:a` }, { connectorId: 'test' })).toBe(true);
-    expect(f.set.storedItem(f.identity('a'))).toEqual({ hasContent: true });
-    // The record that arrives next applies, whatever its version, and the item is whole again.
+    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true });
+    // An older record does not apply to it: the version boundary holds although a leg is missing.
+    await sync(f.set, holdingItems(inputConnector(builder, input('archive', 'archive.older', [{ id: 'a', version: 0, name: 'Old list', text: 'Nothing yet.' }]))));
+    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true });
+    // A record of its own version completes it, and the item is whole again.
     await sync(f.set, holdingItems(inputConnector(builder, input('archive', 'archive.held2', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }]))));
-    expect(f.set.storedItem(f.identity('a'))).toEqual({ version: '1', hasContent: true });
+    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true });
   });
 
   test('each input keeps its own cursor and the lookup reaches the connector', async () => {
@@ -294,7 +319,7 @@ describe('the hold travels with the item', () => {
     const record = f.ledger.getCurrent(f.identity('held'))!;
     expect(record.reasons).toContain(HELD_UNTIL_JUDGED_REASON);
     expect(record).toMatchObject({ contentPending: true });
-    expect(f.set.storedItem(f.identity('held'))?.version).toBe('2');
+    expect(f.set.storedItem(f.identity('held'), numeric)?.version).toBe('2');
     expect(f.stores.internal.localContent(`${ACCOUNT}:held`)?.chunks ?? []).toEqual([]);
   });
 });

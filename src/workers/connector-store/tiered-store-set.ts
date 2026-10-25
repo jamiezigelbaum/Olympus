@@ -782,7 +782,7 @@ export class TieredStoreSet {
     this.assertLedgerGovernsLegs();
     if (options.settle !== false) await this.settleStoredItems();
     const run = new TieredRoutingRun(this, 'shared');
-    const traversal = recordedTraversal(connector, (identity) => this.storedItem(identity));
+    const traversal = recordedTraversal(connector, (identity, compareVersions) => this.storedItem(identity, compareVersions));
     const legRuns: TieredStoreLegRun[] = [];
     const ran = new Set<SourceTrustDomain>();
     const embed = options.embed !== false;
@@ -961,32 +961,56 @@ export class TieredStoreSet {
 
   /**
    * The intake lookup (contracts.ts `StoredItemLookup`): what the set holds
-   * of one item, across every leg that exists. `version` is the stored
-   * `sourceVersion`; `hasContent` is whether any leg holds chunks for it.
+   * of one item, across every leg that exists, rows that are tombstones
+   * included. `version` is the newest `sourceVersion` any row holds, by the
+   * connector's own order; `hasContent` is whether the active rows at that
+   * version hold chunks.
    *
    * A routed item is written leg by leg and the set's resume point is
    * committed only after every leg did, so a crash between legs leaves an item
-   * in some legs and not others. Such an item reports no version, so the next
-   * record for it applies whatever its version and completes it: the legs
-   * disagree on the version, or the ledger names a current copy whose store
-   * has no active row for the item.
+   * in some legs and not others. The version boundary is kept whatever the
+   * copies' completeness: such an item is `incomplete` (an older or
+   * unversioned row is still active, or the ledger names a current copy whose
+   * store has no active row), and a record of its version or a newer one
+   * completes it while an older one never applies. An older tombstone beside
+   * a newer active row (a Secret's location from an earlier version) and the
+   * old leg's tombstone after a move are not the item's state. When the rows
+   * at the newest version are all tombstones (deleted, or a Secret kept as a
+   * location) it is `tombstoned`. It is undefined only when no leg holds a row.
    */
-  storedItem(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): StoredItemState | undefined {
-    const found: Array<{ domain: SourceTrustDomain; version?: string; chunkCount: number }> = [];
+  storedItem(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    compareVersions: (a: string, b: string) => number,
+  ): StoredItemState | undefined {
+    const found: Array<{ domain: SourceTrustDomain; version?: string; chunkCount: number; tombstoned: boolean }> = [];
     for (const domain of TIER_DOMAIN_ORDER) {
       const state = this.store(domain)?.storedItemState(identity);
       if (state) found.push({ domain, ...state });
     }
     if (found.length === 0) return undefined;
-    const hasContent = found.some((leg) => leg.chunkCount > 0);
-    const versions = new Set(found.map((leg) => leg.version));
-    const cutOff = this.ledger.copies(identity).some((copy) => {
+    const newest = found.reduce<string | undefined>(
+      (best, leg) => (leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best),
+      undefined,
+    );
+    // The rows at the newest version; with no versioned row at all, every row.
+    const top = newest === undefined ? found : found.filter((leg) => leg.version !== undefined && compareVersions(leg.version, newest) === 0);
+    const below = found.filter((leg) => !top.includes(leg));
+    const topActive = top.filter((leg) => !leg.tombstoned);
+    const tombstoned = topActive.length === 0;
+    // A copy the ledger names as current must have an active row in its store, unless the item is gone.
+    const cutOff = !tombstoned && this.ledger.copies(identity).some((copy) => {
       if (copy.state === 'superseded') return false;
       const domain = this.domainForCorpus(copy.corpusId);
-      return domain !== undefined && !found.some((leg) => leg.domain === domain);
+      return domain !== undefined && !topActive.some((leg) => leg.domain === domain);
     });
-    const agreed = versions.size === 1 ? [...versions][0] : undefined;
-    return { ...(!cutOff && agreed ? { version: agreed } : {}), hasContent };
+    const staleActive = below.some((leg) => !leg.tombstoned);
+    const incomplete = cutOff || staleActive;
+    return {
+      ...(newest !== undefined ? { version: newest } : {}),
+      hasContent: topActive.some((leg) => leg.chunkCount > 0),
+      ...(tombstoned ? { tombstoned: true as const } : {}),
+      ...(incomplete ? { incomplete: true as const } : {}),
+    };
   }
 
   /** @internal */

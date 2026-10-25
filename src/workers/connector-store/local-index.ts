@@ -4974,11 +4974,13 @@ export class LocalConnectorStore {
   /**
    * What this store holds of one item for the intake lookup (contracts.ts
    * `StoredItemState`): its stored version and how many chunks it has. A
-   * metadata-only row has none. Undefined when absent or tombstoned. A
-   * deferred child (bytes read later) counts as holding no content until its
-   * chunks land.
+   * metadata-only row has none. A tombstoned row (a provider deletion, or a
+   * Secret kept as a location only) is reported too, `tombstoned`, with the
+   * version it kept: the version boundary does not depend on whether the row
+   * is visible. Undefined only when there is no row. A deferred child (bytes
+   * read later) counts as holding no content until its chunks land.
    */
-  storedItemState(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): { version?: string; chunkCount: number } | undefined {
+  storedItemState(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): { version?: string; chunkCount: number; tombstoned: boolean } | undefined {
     const row = this.db.query(`
       SELECT source_version, tombstoned,
              (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = items.item_pk) AS chunk_count
@@ -4992,8 +4994,12 @@ export class LocalConnectorStore {
       normalizeConversationId(identity.providerConversationId),
       identity.providerItemId,
     ) as { source_version: string | null; tombstoned: number; chunk_count: number } | null;
-    if (!row || row.tombstoned === 1) return undefined;
-    return { ...(row.source_version ? { version: row.source_version } : {}), chunkCount: row.chunk_count };
+    if (!row) return undefined;
+    return {
+      ...(row.source_version ? { version: row.source_version } : {}),
+      chunkCount: row.tombstoned === 1 ? 0 : row.chunk_count,
+      tombstoned: row.tombstoned === 1,
+    };
   }
 
   itemPresence(identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>): ConnectorStoreItemPresence {
@@ -8992,9 +8998,13 @@ export class LocalConnectorStore {
       ) as { item_pk: number; tombstoned: number } | null;
 
       if (existing && (!activeOnly || existing.tombstoned === 0)) {
+        // The tombstone carries the version of the item that made it (a Secret in version 9 is version 9 here),
+        // so an older record is judged against it; an identity with no version leaves the stored one.
         this.db.query(`
-          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ? WHERE item_pk = ?
-        `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
+          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ?,
+            source_version = COALESCE(?, source_version)
+          WHERE item_pk = ?
+        `).run(now, now, tombstoneTrustTier, syncRunId, identity.sourceVersion ?? null, existing.item_pk);
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(existing.item_pk);
         this.deleteFtsForItem(existing.item_pk);
         if (tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
@@ -9016,9 +9026,9 @@ export class LocalConnectorStore {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id, parent_local_item_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id, source_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
       `).run(
         identity.provider,
         identity.family,
@@ -9033,6 +9043,7 @@ export class LocalConnectorStore {
         now,
         syncRunId,
         identity.parent?.localItemId ?? null,
+        identity.sourceVersion ?? null,
       );
       const inserted = this.db.query(
         `SELECT item_pk FROM items

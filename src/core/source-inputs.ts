@@ -72,13 +72,18 @@ export type IntakeDecision =
  * which version is newer; nothing downstream compares versions.
  *
  * - Nothing stored, or a stored item with no version to compare: it applies.
- * - Newer than the stored version: it applies, whichever input it came from.
+ * - Newer than the newest version any row of the item holds (a tombstone and a
+ *   lone leg included): it applies, whichever input it came from.
  * - Older: it never applies, so a queued live record cannot undo a later edit
- *   an archive holds.
- * - The same version: it applies only when it brings content the stored item
+ *   an archive holds, and an old export never restores what was deleted or
+ *   made a Secret, nor overwrites an item that is only partly written.
+ * - The same version: it applies when the item is incomplete (a record of its
+ *   own version completes it) and when it brings content the stored item
  *   lacks; and on a tie (both hold content) live's record is the one kept, so
  *   a live record applies and an archive record does not. A live record that
  *   is identical to the stored item is a no-op in the store.
+ * - Every row a tombstone: only a newer record brings the item back (live's
+ *   word wins a tie).
  */
 export function decideIntake(args: {
   input: SourceInputKind;
@@ -89,12 +94,22 @@ export function decideIntake(args: {
 }): IntakeDecision {
   const { stored } = args;
   if (!stored) return 'apply';
-  // A stored item with no version to compare (an old row, or one cut off between legs) is completed by the next record.
-  if (stored.version === undefined) return 'apply';
+  // The stored version is the newest any row holds: the boundary, whatever the rows' completeness or visibility.
   // A record that carries no version is taken as the stored one's.
-  const order = args.version === undefined ? 0 : args.compareVersions(args.version, stored.version);
+  const order = stored.version === undefined ? undefined : args.version === undefined ? 0 : args.compareVersions(args.version, stored.version);
+  if (stored.tombstoned === true) {
+    // Deleted, or a Secret kept as a location only: an older or equal record never brings it back; a newer one does,
+    // and live's own word wins a tie (or an unknown version), as it does for any item.
+    if (order !== undefined && order > 0) return 'apply';
+    if (args.input === 'live' && (order === undefined || order === 0)) return 'apply';
+    return order !== undefined && order < 0 ? 'skip_older' : 'skip_same';
+  }
+  // A stored item with no version to compare (an old row) is completed by the next record.
+  if (order === undefined) return 'apply';
   if (order > 0) return 'apply';
   if (order < 0) return 'skip_older';
+  // An item cut off between legs, or whose rows disagree, is completed by a record of its own version.
+  if (stored.incomplete === true) return 'apply';
   if (!args.bringsContent) return 'skip_same';
   if (!stored.hasContent) return 'apply';
   return args.input === 'live' ? 'apply' : 'skip_same';
@@ -186,7 +201,7 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
         // cannot say what an earlier record of the same pass did.
         const thisPass = new Map<string, StoredItemState>();
         const stateOf = (identity: SourceItemIdentity): StoredItemState | undefined =>
-          thisPass.get(identity.localItemId) ?? lookup?.(identity);
+          thisPass.get(identity.localItemId) ?? lookup?.(identity, builder.compareVersions);
         const resume = decodeResume(options.cursor);
         // The input's stream is read from `base`; `offset` records of it came before the page being read.
         let base = resume.inner;
@@ -233,7 +248,7 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 outcomes.push({
                   localItemId: entry.identity.localItemId,
                   decision,
-                  alreadyThere: stored !== undefined,
+                  alreadyThere: stored !== undefined && stored.tombstoned !== true,
                   ...(entry.authoredAt !== undefined ? { authoredAt: entry.authoredAt } : {}),
                 });
               }

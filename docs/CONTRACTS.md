@@ -141,10 +141,15 @@ Notes:
   Each input keeps its own cursor under its own `inputId`, so an archive never
   moves the live cursor, and a crash replays the input from its last committed
   cursor. Before a record's item is built, the connector asks the store lane
-  what it holds (`SourceConnectorListOptions.storedItem`, answering with the
-  stored version and whether the item holds content) and applies the record
-  only if it is newer in the source's own order, or at the same version brings
-  content the stored item lacks; on a tie the live record is kept. The rule
+  what it holds (`SourceConnectorListOptions.storedItem`, given the source's
+  own order of versions and answering with the newest version any row of the
+  item holds, whether it holds content, and whether it is incomplete or
+  tombstoned) and applies the record only if it is newer in that order, or at
+  the same version brings content the stored item lacks or completes an item
+  cut off between legs; an older record never applies, whatever the
+  completeness or visibility of what is stored (it never restores a deleted
+  item or a Secret, nor overwrites an item written to one leg only); on a tie
+  the live record is kept. The rule
   keeps no state of its own: the store is the record of what applied. An item
   built from an archive record carries `RawItem.holdContentUntilJudged`, which
   placement honours like the lane option of the same name and which keeps
@@ -353,8 +358,10 @@ section consolidates and supersedes all other policy wording.
   (owner direction 2026-10-25; `docs/design/archive-live-one-dataset.md`,
   reviewed in two rounds). Additive and optional, no existing field changes:
   `RawItem.holdContentUntilJudged`, `SourceConnectorListOptions.storedItem`
-  (a `StoredItemLookup` answering with a `StoredItemState`: the stored version
-  and whether the item holds content), and `SourceConnector.forInput` (a
+  (a `StoredItemLookup`, given the connector's own order of versions,
+  answering with a `StoredItemState`: the newest version any row of the item
+  holds, tombstones and a lone leg included, whether the item holds content,
+  and whether it is `incomplete` or `tombstoned`), and `SourceConnector.forInput` (a
   `SourceConnectorInput`: `inputId`, `kind` of `live` or `archive`, and
   `records` as `SourceRecordPage`s, the connector's own record shape). A
   connector that omits them, and a consumer that ignores them, behave as under
@@ -363,9 +370,13 @@ section consolidates and supersedes all other policy wording.
   its own connector id in the set's sync runs, so an archive never moves the
   live cursor. The shared intake rule (`decideIntake`, `inputConnector` in
   `src/core/source-inputs.ts`) decides per record, before the item is built:
-  newer in the source's own order applies; older never does; at the same
-  version a record applies only if it brings content the stored item lacks;
-  on a tie live wins. It keeps no state of its own, so a crash replays a
+  newer in the source's own order applies; older never does, whatever the
+  completeness or visibility of what is stored (an old record never restores a
+  deleted item or a Secret kept as a location, nor overwrites an item that
+  was written to one leg only); at the same version a record applies if it
+  brings content the stored item lacks or completes an incomplete item; on a
+  tie live wins. Each version of an item an input brings is classified and
+  routed on its own. It keeps no state of its own, so a crash replays a
   record and decides again. The hold moves to the item: placement honours
   `holdContentUntilJudged` through first classification and child extraction,
   and a persisted hold keeps applying to later versions, a live replacement
