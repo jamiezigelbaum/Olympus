@@ -12,7 +12,7 @@ interface FakeWindow { id: string; app: string; title: string }
 
 /** A desktop that answers the canary's scripts: what each launch opens is up to the test. */
 function fakeDesktop(os: 'linux' | 'macos', opts: {
-  version?: string; brief?: string; missing?: string[]; launcherOk?: boolean; upgradeFails?: boolean;
+  version?: string; brief?: string; missing?: string[]; launcherOk?: boolean; upgradeFails?: boolean; linkFails?: boolean;
   windows?: FakeWindow[]; onLauncher?: (windows: FakeWindow[]) => void; onLink?: (windows: FakeWindow[]) => void;
 } = {}) {
   const windows: FakeWindow[] = [...(opts.windows ?? [])];
@@ -33,7 +33,7 @@ function fakeDesktop(os: 'linux' | 'macos', opts: {
       if (script === 'hyprctl clients -j') return ok(JSON.stringify(windows.map((w) => ({ address: w.id, class: w.app, title: w.title }))));
       if (script.includes('CGWindowListCopyWindowInfo')) return ok(JSON.stringify(windows));
       if (script.startsWith('gtk-launch') || script.includes(' dashboard >/dev/null')) { opts.onLauncher?.(windows); return ok(''); }
-      if (script.startsWith('xdg-open') || script.startsWith('open \'olympus://')) { opts.onLink?.(windows); return ok(''); }
+      if (script.includes('xdg-open \'olympus://') || script.startsWith('open \'olympus://')) { opts.onLink?.(windows); return opts.linkFails ? { ...ok(''), code: 124, stderr: 'xdg-open: x-www-browser: command not found' } : ok(''); }
       const closed = /closewindow address:'([^']+)'/g;
       for (const match of script.matchAll(closed)) windows.splice(windows.findIndex((w) => w.id === match[1]), 1);
       const tab = /sendshortcut 'CTRL, W, address:([^']+)'/.exec(script);
@@ -156,6 +156,19 @@ describe('release-check canary', () => {
       'sendshortcut', 'hl.dsp.send_shortcut({ mods = "CTRL", key = "W", window = "address:0xc3" })',
     ]);
   }, 30_000);
+
+  test('Linux: a link command that fails still has what it opened closed, and is bounded on the machine', async () => {
+    const desktop = fakeDesktop('linux', {
+      linkFails: true,
+      onLauncher: (w) => w.push({ id: '0xa1', app: 'brave-olympus-Default', title: 'Olympus' }),
+      onLink: (w) => w.push({ id: '0xb2', app: 'chromium', title: 'New Tab - Chromium' }),
+    });
+    const result = await runCanary(desktop.machine, options('linux'));
+    expect(statusOf(result.checks)['canary.window.link']).toBe('fail');
+    expect(result.checks.find((c) => c.id === 'canary.window.link')!.detail).toContain('exit 124');
+    expect(desktop.scripts.find((s) => s.includes('xdg-open'))).toStartWith('timeout -k 5 40 xdg-open ');
+    expect(desktop.windows).toEqual([]);
+  });
 
   test('window lists parse on both platforms; prompts and dashboards are told apart', () => {
     expect(parseWindows('linux', '[{"address":"0x1","class":"chromium","title":"Olympus"},{"address":"","class":"x","title":""}]')).toEqual([{ id: '0x1', app: 'chromium', title: 'Olympus' }]);
