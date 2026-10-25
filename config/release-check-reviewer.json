@@ -1,0 +1,18 @@
+{
+  "status": "advisory",
+  "baseUrl": "https://api.x.ai/v1",
+  "model": "grok-4.7",
+  "keyEnv": "RELEASE_CHECK_REVIEWER_KEY",
+  "concurrency": 6,
+  "timeoutMs": 300000,
+  "picturesPerUnit": 8,
+  "minConfidence": "medium",
+  "qualification": {
+    "trials": 3,
+    "minRecall": 0.8,
+    "minHeldOutRecall": 0.8,
+    "minPrecision": 0.7,
+    "maxCleanFalseAlarm": 0.2,
+    "maxInconclusive": 0.05
+  }
+}

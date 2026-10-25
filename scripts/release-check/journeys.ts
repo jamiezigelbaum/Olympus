@@ -21,11 +21,30 @@ import {
   DASHBOARD_COMPUTER_PANEL_COPY as COMPUTER,
   DASHBOARD_PRIVATE_ANSWERS_COPY as ASK,
 } from '../../src/workers/dashboard/vocabulary.ts';
-import type { Journey } from './journey.ts';
+import type { Journey, StepContext } from './journey.ts';
+import { wireTarget, type Target } from './probe.ts';
 
 /** The words on the page that mean something is stuck or broken for the person reading it. */
 const STUCK = /\b(stuck|stalled|paused while|not working|something went wrong)\b/i;
 const DASHBOARD_PAGES = ['/dashboard', '/dashboard?keys', '/dashboard?agents', '/dashboard?private-answers', '/dashboard?connector'] as const;
+
+/** The privacy settings open from the setup prompt on a fresh install, or from Edit once they are saved. */
+const OPEN_PRIVACY: Target = { role: 'button', name: new RegExp(`^(${PRIVACY_SETUP.label}|${PRIVACY.edit}|${PRIVACY.editLabel})$`) };
+const DESCRIPTION: Target = { role: 'textbox', name: PRIVACY.descriptionLabel };
+// The sender field's label also holds its error once one shows.
+const SENDER: Target = { role: 'textbox', name: PRIVACY.senderLabel, contains: true };
+const MODELS_LINE: Target = { role: 'button', name: new RegExp(`^${PANEL.models}\\s+—`) };
+// What the open section says; a closed section's content counts as hidden here (the probe's rule), whatever the page's text holds.
+const SEARCH_LINE: Target = { text: new RegExp(`^${PANEL.modelSearch}: \\S`) };
+const DISCARDED_NOTE = 'release check: this note is never saved';
+const DISCARDED_SENDER = 'release-check@example.com';
+
+/** The description box does not hold `text` (what a discarded edit typed there). */
+const descriptionLacks = (text: string) => async ({ driver }: StepContext) => {
+  const held = await driver.probe('panel', `__rc.value(${JSON.stringify(wireTarget(DESCRIPTION))})`) as string | null;
+  const ok = typeof held === 'string' && !held.includes(text);
+  return { ok, expected: `the description does not hold "${text}"`, actual: typeof held !== 'string' ? 'the description box is not on the page' : ok ? 'it does not' : 'it does: the discarded edit was kept' };
+};
 
 export const JOURNEYS: readonly Journey[] = [
   {
@@ -91,6 +110,24 @@ export const JOURNEYS: readonly Journey[] = [
         do: { open: 'dashboard' },
         expect: [{ text: new RegExp(`${PANEL.models}\\s+—\\s+${PANEL.modelBuiltIn}\\s+·\\s+${PANEL.modelReady}`), frame: 'panel' }],
       },
+    ],
+  },
+  {
+    id: 'models-section-opens',
+    title: 'The Models line opens to say which model does what, and closes again',
+    source: 'release check coverage: the panel\'s Models section was never opened',
+    steps: [
+      {
+        name: 'Open the dashboard',
+        do: { open: 'dashboard' },
+        expect: [{ present: MODELS_LINE, frame: 'panel' }, { absent: SEARCH_LINE, frame: 'panel' }],
+      },
+      {
+        name: 'Press the Models line',
+        do: { click: MODELS_LINE, frame: 'panel' },
+        expect: [{ present: SEARCH_LINE, frame: 'panel' }, { noText: STUCK, frame: 'panel' }],
+      },
+      { name: 'Press it again', do: { click: MODELS_LINE, frame: 'panel' }, expect: [{ absent: SEARCH_LINE, frame: 'panel' }] },
     ],
   },
   {
@@ -279,6 +316,104 @@ export const JOURNEYS: readonly Journey[] = [
           } },
         ],
       },
+    ],
+  },
+  {
+    id: 'privacy-cancel-asks',
+    title: 'Leaving the privacy settings with unsaved changes asks first, and Discard changes keeps nothing',
+    source: 'owner test plan: what is private; the release check had never pressed Cancel there',
+    steps: [
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
+      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION, frame: 'panel' }] },
+      {
+        name: 'Type a description',
+        do: { type: { into: DESCRIPTION, text: DISCARDED_NOTE }, frame: 'panel' },
+        expect: [{ value: DESCRIPTION, equals: DISCARDED_NOTE, frame: 'panel' }],
+      },
+      {
+        name: 'Press Cancel',
+        do: { click: { role: 'button', name: PRIVACY.cancel }, frame: 'panel' },
+        expect: [
+          { text: PRIVACY.discardPrompt, frame: 'panel' },
+          { present: { role: 'button', name: PRIVACY.discard }, frame: 'panel' },
+          { present: { role: 'button', name: PRIVACY.keep }, frame: 'panel' },
+        ],
+      },
+      {
+        name: 'Press Keep editing',
+        do: { click: { role: 'button', name: PRIVACY.keep }, frame: 'panel' },
+        expect: [{ noText: PRIVACY.discardPrompt, frame: 'panel' }, { value: DESCRIPTION, equals: DISCARDED_NOTE, frame: 'panel' }],
+      },
+      { name: 'Press Cancel again', do: { click: { role: 'button', name: PRIVACY.cancel }, frame: 'panel' }, expect: [{ text: PRIVACY.discardPrompt, frame: 'panel' }] },
+      {
+        name: 'Press Discard changes',
+        do: { click: { role: 'button', name: PRIVACY.discard }, frame: 'panel' },
+        expect: [{ text: PANEL.sources, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
+      },
+      {
+        name: 'Open the privacy settings again',
+        do: { click: OPEN_PRIVACY, frame: 'panel' },
+        expect: [{ text: PRIVACY.title, frame: 'panel' }, { custom: descriptionLacks(DISCARDED_NOTE) }],
+      },
+      {
+        name: 'Press Back with nothing changed',
+        do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' },
+        // Nothing was edited this time, so there is nothing to ask about.
+        expect: [{ text: PANEL.sources, frame: 'panel' }, { noText: PRIVACY.discardPrompt, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
+      },
+    ],
+  },
+  {
+    id: 'privacy-add-sender',
+    title: 'Add a sender refuses what is not an address, adds one that is, and Discard changes drops it',
+    source: 'owner test plan: what is private; the release check had never added a sender',
+    steps: [
+      { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
+      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }] },
+      {
+        name: 'Press Add a sender',
+        do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' },
+        expect: [{ text: PRIVACY.senderIntro, frame: 'panel' }, { present: SENDER, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.senderAdd }, frame: 'panel' }],
+      },
+      { name: 'Type something that is not an address', do: { type: { into: SENDER, text: 'not an address' }, frame: 'panel' }, expect: [{ value: SENDER, equals: 'not an address', frame: 'panel' }] },
+      {
+        name: 'Press Add',
+        do: { click: { role: 'button', name: PRIVACY.senderAdd }, frame: 'panel' },
+        expect: [{ text: PRIVACY.senderInvalid, frame: 'panel' }, { present: SENDER, frame: 'panel' }],
+      },
+      {
+        name: 'Press Back to privacy',
+        do: { click: { role: 'button', name: PRIVACY.backToPrivacy }, frame: 'panel' },
+        expect: [{ present: DESCRIPTION, frame: 'panel' }, { absent: SENDER, frame: 'panel' }, { noText: 'not an address', frame: 'panel' }],
+      },
+      {
+        name: 'Press Add a sender again',
+        do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' },
+        // A fresh start: the refused value and its error are gone.
+        expect: [{ value: SENDER, equals: '', frame: 'panel' }, { noText: PRIVACY.senderInvalid, frame: 'panel' }],
+      },
+      { name: 'Type an address', do: { type: { into: SENDER, text: DISCARDED_SENDER }, frame: 'panel' }, expect: [{ value: SENDER, equals: DISCARDED_SENDER, frame: 'panel' }] },
+      {
+        name: 'Press Add with the address',
+        do: { click: { role: 'button', name: PRIVACY.senderAdd }, frame: 'panel' },
+        expect: [{ absent: SENDER, frame: 'panel' }, { text: DISCARDED_SENDER, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.save }, frame: 'panel' }],
+      },
+      {
+        name: 'Press Back with the sender unsaved',
+        do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' },
+        expect: [{ text: PRIVACY.discardPrompt, frame: 'panel' }, { present: { role: 'button', name: PRIVACY.discard }, frame: 'panel' }],
+      },
+      {
+        name: 'Press Discard changes',
+        do: { click: { role: 'button', name: PRIVACY.discard }, frame: 'panel' },
+        expect: [{ text: PANEL.sources, frame: 'panel' }, { absent: DESCRIPTION, frame: 'panel' }],
+      },
+      {
+        name: 'Open the privacy settings again',
+        do: { click: OPEN_PRIVACY, frame: 'panel' },
+        expect: [{ text: PRIVACY.title, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
+      },
+      { name: 'Leave the privacy settings', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
     ],
   },
   {

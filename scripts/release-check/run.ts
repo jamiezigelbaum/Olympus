@@ -140,6 +140,8 @@ export interface RunOptions {
   baselinesDir?: string;
   /** Write this run's screens into `baselinesDir` as candidate pictures. They are never approved by the run; the owner approves by merging. */
   updateBaselines?: boolean;
+  /** A qualification run for the AI reviewer: also take the screens with planted bugs (reviewer-plants.ts). Never release evidence. */
+  reviewerPlants?: boolean;
   /** Throw after the machine exists, to prove teardown on failure. */
   failAfterProvision?: boolean;
   /** Debugging only: leave the machine running. The run is reported as failed so it can never pass for release evidence. */
@@ -942,7 +944,8 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   const options = run.options;
   if (options.skipJourneys) return;
   const only = options.onlyJourneys?.length ? ` --only ${sh(options.onlyJourneys.join(','))}` : '';
-  const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}`, 2_400_000));
+  const plants = options.reviewerPlants ? ' --plants' : '';
+  const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${plants}`, 2_400_000));
   const result = done.result;
   if (!result || !Array.isArray(result.traces)) {
     run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });
@@ -962,6 +965,16 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
     return;
   }
   if (existsSync(join(scratch, 'traces'))) cpSync(join(scratch, 'traces'), join(outDir, 'traces'), { recursive: true });
+  // The screens as a person saw them, before the mask, for the AI reviewer (reviewer.ts).
+  if (existsSync(join(scratch, 'review'))) cpSync(join(scratch, 'review'), join(outDir, 'review'), { recursive: true });
+  if (options.reviewerPlants) {
+    // The planted pictures and what was planted in each, for reviewer-qualify.ts. Such a run never counts for a release.
+    const planted = Array.isArray(result.planted) ? result.planted : [];
+    if (existsSync(join(scratch, 'plants'))) cpSync(join(scratch, 'plants'), join(outDir, 'plants'), { recursive: true });
+    mkdirSync(join(outDir, 'plants'), { recursive: true });
+    writeFileSync(join(outDir, 'plants', 'index.json'), `${JSON.stringify(planted, null, 2)}\n`);
+    run.add({ id: 'reviewer.plants', title: 'The pictures with planted bugs were taken for the reviewer\'s qualification', status: planted.some((item: { plant?: unknown }) => item.plant) ? 'pass' : 'fail', detail: `${planted.length} picture(s), ${planted.filter((item: { plant?: unknown }) => item.plant).length} with a planted bug` });
+  }
   const traces = result.traces as JourneyTrace[];
   (run.stage.traces ??= []).push(...traces);
   for (const check of journeyChecks(traces)) run.add(check);
@@ -1321,6 +1334,8 @@ export async function runReleaseCheck(options: RunOptions): Promise<ReleaseRepor
       },
     } : {}),
   };
+  // Planted bugs are in its pictures, so such a run can never count for a release, whatever else passed.
+  if (options.reviewerPlants) run.errors.push('a qualification run for the AI reviewer (--reviewer-plants): its pictures carry planted bugs, so it does not qualify a release');
   const selfTest = options.mistier
     ? `the ${options.mistier} marker was deliberately stored in an ordinary Personal item; this run is expected to FAIL on the leak checks`
     : options.upgradeSelftest
@@ -1371,7 +1386,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
   const candidate = get('--candidate');
   const out = get('--out');
   if (!configPath || !candidate || !out) {
-    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]]');
+    throw new Error('usage: bun scripts/release-check/run.ts --config <file> --candidate <dir> --out <dir> [--label <name>] [--sha <sha>] [--harness-commit <sha>] [--run-id <id>] [--agents <id,id>] [--mistier private|secrets] [--upgrade-from <earlier bundle dir> [--upgrade-selftest lose-tier-rules|revert-policy]] [--inbox-selftest plant-private-reply|wrong-link-id] [--fail-after-provision] [--keep-machine] [--skip-relay] [--skip-screenshots] [--skip-inbox] [--skip-journeys] [--skip-explore] [--skip-suite] [--skip-archive] [--only-journeys <id,id>] [--baselines <dir> [--update-baselines]] [--reviewer-plants]');
   }
   const config = JSON.parse(readFileSync(resolve(configPath), 'utf8')) as RunConfigFile;
   if (!Array.isArray(config.driver) || config.driver.length === 0) throw new Error('the config needs a "driver" argv array');
@@ -1396,6 +1411,8 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (baselines !== undefined && baselines.startsWith('--')) throw new Error('--baselines is the folder of approved pictures');
   if (has('--update-baselines') && baselines === undefined) throw new Error('--update-baselines needs --baselines <dir> to write into');
   if (has('--update-baselines') && has('--skip-journeys')) throw new Error('--update-baselines needs the screens; drop --skip-journeys');
+  if (has('--reviewer-plants') && has('--skip-journeys')) throw new Error('--reviewer-plants takes its pictures with the screens; drop --skip-journeys');
+  if (has('--reviewer-plants') && has('--update-baselines')) throw new Error('--reviewer-plants is a qualification run; it never writes baselines');
   const onlyJourneys = get('--only-journeys');
   const runId = get('--run-id') ?? newRunId();
   const harnessCommit = get('--harness-commit');
@@ -1424,6 +1441,7 @@ export function parseCli(argv: readonly string[]): RunOptions {
     ...(onlyJourneys ? { onlyJourneys: onlyJourneys.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     ...(baselines !== undefined ? { baselinesDir: resolve(baselines) } : {}),
     updateBaselines: has('--update-baselines'),
+    reviewerPlants: has('--reviewer-plants'),
     ...(only ? { onlyAgents: only.split(',').map((id) => id.trim()).filter(Boolean) } : {}),
     failAfterProvision: has('--fail-after-provision'),
     keepMachine: has('--keep-machine'),

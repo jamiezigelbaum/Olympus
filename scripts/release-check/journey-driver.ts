@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import type { Cdp } from './browser.ts';
 import type { ElementInfo, JourneyDriver, OpenPlace, PageEvents } from './journey.ts';
 import { PROBE_SOURCE, type WireTarget } from './probe.ts';
+import type { PlantedPicture } from './reviewer-plants.ts';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -286,10 +287,12 @@ export class CdpJourneyDriver implements JourneyDriver {
   }
 
   /** Runs a page script in every frame that has one (the page and the framed panel), for the capture's masks. */
-  async everyFrame(expression: string): Promise<void> {
+  async everyFrame(expression: string): Promise<unknown[]> {
+    const results: unknown[] = [];
     for (const frame of ['host', 'panel'] as const) {
-      try { await this.evalIn(frame, expression); } catch { /* no such frame */ }
+      try { results.push(await this.evalIn(frame, expression)); } catch { /* no such frame */ }
     }
+    return results;
   }
 
   drainEvents(): PageEvents {
@@ -308,8 +311,9 @@ export interface CapturedScreen { name: string; screen: string; width: number; t
 
 /**
  * The visual baselines' screens: every dashboard page at phone and desktop width, light and dark, taken with the run-dependent parts
- * normalised or left out (visual.ts). The dashboard's framed panel is shown whole. Pages are reached the owner's way: the first
- * opening link signs the browser in and Unlock opens the controls, then the others open in that session.
+ * normalised or left out (visual.ts), each first taken as it is for the AI reviewer (review/). The dashboard's framed panel is shown
+ * whole. Pages are reached the owner's way: the first opening link signs the browser in and Unlock opens the controls, then the others
+ * open in that session.
  */
 export async function captureScreens(driver: CdpJourneyDriver, outDir: string): Promise<CapturedScreen[]> {
   const { maskScript, SCREENS, SCREEN_THEMES, SCREEN_WIDTHS, screenName } = await import('./visual-capture.ts');
@@ -323,9 +327,11 @@ export async function captureScreens(driver: CdpJourneyDriver, outDir: string): 
         await driver.go(screen.path);
         // The pages settle (the panel reads the dashboard, the lists fill); then what varies by the clock or by the run is made fixed.
         await sleep(1_500);
+        const name = screenName(screen.id, width, theme);
+        // The AI reviewer's copy (reviewer.ts): the page as a person sees it, before the mask makes it the same from run to run.
+        await driver.capturePng(join(outDir, 'review', `${name}.png`));
         await driver.everyFrame(maskScript());
         await sleep(300);
-        const name = screenName(screen.id, width, theme);
         const file = join(outDir, 'screens', `${name}.png`);
         const size = await driver.capturePng(file);
         out.push({ name, screen: screen.id, width, theme, bytes: statSync(file).size, height: size.height });
@@ -334,3 +340,36 @@ export async function captureScreens(driver: CdpJourneyDriver, outDir: string): 
   }
   return out;
 }
+
+/**
+ * The pictures for qualifying the AI reviewer (reviewer-plants.ts): each planted screen as it is, then once per planted bug, the page
+ * opened afresh between them so each picture holds one bug. A bug the page has nowhere to plant is left out; one the page redrew away
+ * before the picture is planted again, up to three times. Only a qualification run (`--reviewer-plants`) takes them.
+ */
+export async function capturePlants(driver: CdpJourneyDriver, outDir: string): Promise<PlantedPicture[]> {
+  const { PLANTS, PLANT_SCREENS } = await import('./reviewer-plants.ts');
+  const { SCREENS } = await import('./visual-capture.ts');
+  const still = `!!document.querySelector('[data-rc-plant]')`;
+  const out: PlantedPicture[] = [];
+  for (const item of PLANT_SCREENS) {
+    const screen = SCREENS.find((candidate) => candidate.id === item.screen);
+    if (!screen) continue;
+    await driver.setViewport(item.width, item.theme);
+    const folder = `${item.screen}-${item.width}-${item.theme}`;
+    for (const plant of [null, ...PLANTS]) {
+      const picture = `${folder}/${plant ? plant.id : 'clean'}.png`;
+      let taken = false;
+      for (let attempt = 0; attempt < 3 && !taken; attempt += 1) {
+        await driver.go(screen.path);
+        await sleep(1_500);
+        if (plant && !(await driver.everyFrame(plant.script)).includes(true)) break;
+        await sleep(300);
+        await driver.capturePng(join(outDir, 'plants', picture));
+        taken = !plant || (await driver.everyFrame(still)).includes(true);
+      }
+      if (taken) out.push({ screen: item.screen, width: item.width, theme: item.theme, picture, plant: plant?.id ?? null, kind: plant?.kind ?? null, heldOut: plant?.heldOut ?? false });
+    }
+  }
+  return out;
+}
+
