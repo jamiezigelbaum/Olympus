@@ -418,8 +418,12 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
           let unsent = false;
           let emitted = 0;
           // The fields of a part that is one object (the profile, other data) wait here until it ends: it is one item,
-          // so no resume point is placed inside it.
-          let whole: { section: AccountSection; pathIndex: number; start: number; fields: Array<[string, unknown]>; last: JsonResumePoint } | undefined;
+          // so no resume point is placed inside it. Its fields together are held to the bound of one message: a part
+          // larger than that is one gap, read on to its end without keeping its fields.
+          let whole: {
+            section: AccountSection; pathIndex: number; start: number; fields: Array<[string, unknown]>; bytes: number; dropped: boolean;
+            last: JsonResumePoint;
+          } | undefined;
           // An event read while the part before it was being finished, handled on the next turn.
           let held: { event: JsonStreamEvent | undefined } | undefined;
           const report = (kind: string, findingClass: 'gap' | 'skipped', offset: number, count?: number): void => {
@@ -429,7 +433,7 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
           const finishWhole = (): void => {
             const part = whole!;
             whole = undefined;
-            if (part.fields.length > 0) {
+            if (!part.dropped && part.fields.length > 0) {
               const built = accountItem(input, part.section, 0, Object.fromEntries(part.fields), fetchedAt);
               page.push(built.item);
               if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', part.start, built.mediaFiles);
@@ -470,10 +474,20 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
                 // A part of the account export that is not chats.
                 const section = ACCOUNT_SECTIONS[event.pathIndex - MESSAGE_PATHS.length]!;
                 if (section.whole) {
-                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], last: event.resume };
+                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], bytes: 0, dropped: false, last: event.resume };
                   whole.last = event.resume;
-                  if (event.kind === 'oversize') report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
-                  else whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
+                  if (event.kind === 'oversize') {
+                    report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
+                  } else if (!whole.dropped) {
+                    whole.bytes += event.end - event.start;
+                    if (whole.bytes > TELEGRAM_MAX_MESSAGE_BYTES) {
+                      whole.dropped = true;
+                      whole.fields = [];
+                      report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', whole.start);
+                    } else {
+                      whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
+                    }
+                  }
                   continue;
                 }
                 if (event.kind === 'oversize') {

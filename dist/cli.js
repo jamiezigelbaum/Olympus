@@ -160447,7 +160447,7 @@ function createTelegramArchiveConnector(input) {
           const finishWhole = () => {
             const part = whole;
             whole = undefined;
-            if (part.fields.length > 0) {
+            if (!part.dropped && part.fields.length > 0) {
               const built = accountItem(input, part.section, 0, Object.fromEntries(part.fields), fetchedAt);
               page2.push(built.item);
               if (built.mediaFiles > 0)
@@ -160490,12 +160490,20 @@ function createTelegramArchiveConnector(input) {
               if (event.pathIndex >= MESSAGE_PATHS.length) {
                 const section = ACCOUNT_SECTIONS[event.pathIndex - MESSAGE_PATHS.length];
                 if (section.whole) {
-                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], last: event.resume };
+                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], bytes: 0, dropped: false, last: event.resume };
                   whole.last = event.resume;
-                  if (event.kind === "oversize")
+                  if (event.kind === "oversize") {
                     report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
-                  else
-                    whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
+                  } else if (!whole.dropped) {
+                    whole.bytes += event.end - event.start;
+                    if (whole.bytes > TELEGRAM_MAX_MESSAGE_BYTES) {
+                      whole.dropped = true;
+                      whole.fields = [];
+                      report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", whole.start);
+                    } else {
+                      whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
+                    }
+                  }
                   continue;
                 }
                 if (event.kind === "oversize") {
