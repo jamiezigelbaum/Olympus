@@ -1422,7 +1422,7 @@ export function tieredLaneReceiptCounts(input: {
   };
 }
 
-/** The router one run hands every leg. Plans are made once per item per run. */
+/** The router one run hands every leg. Plans are made once per item version per run. */
 // Fields are assigned in the constructor, not as class-field initializers:
 // initializers defeat the bundler's tree-shaking of this module and inflate
 // the committed dist bundles (see the note on LocalConnectorStore's fields).
@@ -1459,7 +1459,10 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   async route(input: ConnectorStoreTierRouteInput): Promise<ConnectorStoreTierRoute> {
     const domain = this.set.domainForCorpus(input.store.corpusId);
     if (!domain) throw new Error('A tier route was asked by a store outside its set.');
-    const key = identityKey(input.item.identity);
+    // A plan is made once per item VERSION per run: a later version of the same item in one listing is
+    // classified and routed on its own verdict (a key added in an edit makes it a Secret), never on the
+    // earlier version's placement.
+    const key = `${identityKey(input.item.identity)}\u0000${input.item.identity.sourceVersion ?? ''}`;
     let entry = this.plans.get(key);
     if (!entry) {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
