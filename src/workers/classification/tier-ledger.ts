@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 11;
+export const TIER_LEDGER_SCHEMA_VERSION = 12;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -135,6 +135,15 @@ export interface TierCopy {
    */
   previousLayers: TierCopyLayers | null;
   updatedAt: string;
+}
+
+/** A parent's deletion that is pending (`TierLedger.holdParentDeletion`), as a pass reads it. */
+export interface PendingParentDeletion {
+  /** The order the deletions were first held in; a pass pages by it. */
+  seq: number;
+  parent: SourceItemIdentity;
+  /** Only a sighting of the parent later than this lifts the deletion. */
+  observedAfter: string;
 }
 
 export interface TierCopyPlan {
@@ -1768,6 +1777,7 @@ export class TierLedger {
     for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
     const list = [...unique.values()];
     this.db.transaction(() => {
+      const holds = this.holdsExist();
       for (let offset = 0; offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const rows = this.db.query(`
@@ -1781,9 +1791,33 @@ export class TierLedger {
           if (existing) existing.push(copyFromRow(row));
           else result.set(key, [copyFromRow(row)]);
         }
+        if (holds) {
+          // A held item is hidden, whatever its copies say (a deletion is pending).
+          for (const key of this.heldKeys(batch)) {
+            const copies = result.get(key) ?? [];
+            result.set(key, copies.length > 0 ? copies.map(hiddenByHold) : [heldPlaceholderCopy()]);
+          }
+        }
       }
     })();
     return result;
+  }
+
+  /** Whether any deletion holds an item. The usual answer is no, and a read then asks nothing more. */
+  private holdsExist(): boolean {
+    return this.db.query('SELECT 1 AS present FROM tier_deletion_hold LIMIT 1').get() !== null;
+  }
+
+  /** The keys (`tierLedgerIdentityKey`) of those of `batch` that a deletion holds. */
+  private heldKeys(batch: readonly TierLedgerIdentity[]): Set<string> {
+    const held = new Set<string>();
+    if (batch.length === 0) return held;
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
+      WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
+    `).all(...batch.flatMap((identity) => [...idParams(identity)])) as Array<Pick<TierItemRow, 'provider' | 'account_scope' | 'conversation_key' | 'provider_item_id'>>;
+    for (const row of rows) held.add(tierLedgerIdentityKey(identityOfRow(row)));
+    return held;
   }
 
   /**
@@ -2114,6 +2148,16 @@ export class TierLedger {
    */
   itemStatesForMany(
     identities: readonly TierLedgerIdentity[],
+    options: {
+      /**
+       * Read the copies as they are, ignoring what a pending deletion holds.
+       * Only for a writer deciding where a copy may be written (the store's
+       * own write gate): a held parent must still be writable, because its
+       * being written again is what lifts the deletion. Every reader leaves
+       * this off and sees a held item as having no current copy.
+       */
+      raw?: boolean;
+    } = {},
   ): Map<string, { record: TierLedgerRecord; copies: TierCopy[] }> {
     const result = new Map<string, { record: TierLedgerRecord; copies: TierCopy[] }>();
     if (identities.length === 0) return result;
@@ -2121,6 +2165,7 @@ export class TierLedger {
     for (const identity of identities) unique.set(tierLedgerIdentityKey(identity), identity);
     const list = [...unique.values()];
     this.db.transaction(() => {
+      const holds = options.raw !== true && this.holdsExist();
       for (let offset = 0; offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const values = batch.map(() => '(?, ?, ?, ?)').join(', ');
@@ -2138,6 +2183,12 @@ export class TierLedger {
           ORDER BY corpus_id
         `).all(...params) as TierCopyRow[];
         for (const row of copies) result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+        if (holds) {
+          for (const key of this.heldKeys(batch)) {
+            const state = result.get(key);
+            if (state) state.copies = state.copies.length > 0 ? state.copies.map(hiddenByHold) : [heldPlaceholderCopy()];
+          }
+        }
       }
     })();
     return result;
@@ -3048,7 +3099,10 @@ export class TierLedger {
    * means every row in the store is legacy, so readers can skip the filter.
    */
   corpusHasCopies(corpusId: string): boolean {
-    return this.db.query('SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1').get(corpusId) !== null;
+    // A held item is refused even in a store whose items are all legacy, so a
+    // pending deletion makes every store take the filter.
+    return this.db.query('SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1').get(corpusId) !== null
+      || this.holdsExist();
   }
 
   /**
@@ -3091,9 +3145,16 @@ export class TierLedger {
                 AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
             )`
           : `copy_state = '${filter === 'superseded' ? 'superseded' : 'staged'}'`;
+    // An item a pending deletion holds is hidden whatever its copies say: it
+    // is listed with the superseded ones, and with no other kind.
+    const hiddenKind = filter === 'superseded' || filter === 'staged';
+    const unheld = hiddenKind ? '' : `AND NOT EXISTS (
+        SELECT 1 FROM tier_deletion_hold hold
+        WHERE hold.provider = tier_copies.provider AND hold.account_scope = tier_copies.account_scope
+          AND hold.conversation_key = tier_copies.conversation_key AND hold.provider_item_id = tier_copies.provider_item_id)`;
     const page = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where}
+      WHERE corpus_id = ? AND ${where} ${unheld}
         AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT 5000
@@ -3106,6 +3167,17 @@ export class TierLedger {
       if (rows.length < 5000) break;
       const last = rows[rows.length - 1]!;
       after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
+    }
+    if (filter === 'superseded') {
+      const seen = new Set(identities.map((identity) => tierLedgerIdentityKey(identity)));
+      const held = this.db.query(`
+        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+      `).all() as TierIdentityRow[];
+      for (const row of held) {
+        const identity = identityFromRow(row);
+        if (!seen.has(tierLedgerIdentityKey(identity))) identities.push(identity);
+      }
     }
     return identities;
   }
@@ -3203,6 +3275,7 @@ export class TierLedger {
         'secret_redaction_retirement',
         'tier_child_cascade',
         'tier_parent_deletion_intent',
+        'tier_deletion_hold',
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
@@ -3210,16 +3283,128 @@ export class TierLedger {
     })();
   }
 
-  // ---- A parent was tombstoned: its children go with it ----------------------
+  // ---- A parent is being deleted: its children go with it --------------------
+  //
+  // The protocol fails closed (docs/design/child-items.md, "Removal"):
+  //
+  // 1. Hold first. Before a store commits a parent's tombstone, ONE ledger
+  //    transaction writes the intent and a hold row for the parent and every
+  //    child (`holdParentDeletion`). A held item is refused by every read of
+  //    the ledger's copy states (`copiesForMany`, `itemStatesForMany`,
+  //    `corpusCopyIdentities`), whatever its copies say and whatever writes
+  //    them, so nothing that moves, re-judges or re-places a copy can make it
+  //    readable again.
+  // 2. Confirm, then cascade. The removals are owed (cascade rows, copies
+  //    superseded) only once the parent's tombstone is seen committed
+  //    (`hideAndQueueChildren`); a deletion a store rolled back owes nothing.
+  // 3. Recovery never infers. No path clears an intent because the parent
+  //    looks active; the set waits and everything stays held.
+  // 4. Only a sighting after the intent lifts it (`liftParentDeletion`, the
+  //    set judges the sighting against `observedAfter`).
 
   /**
-   * A tombstoned parent and its children, hidden together. In ONE transaction
-   * every current or staged copy of the parent and of each child is
-   * superseded (no store serves any of them from here on) and a cascade row
-   * is written per child, so a crash at any later point leaves the children
-   * hidden with their removal still owed (`pendingChildCascades`), never
-   * visible. An item the ledger never routed has no copy to hide; it still
-   * gets its cascade row, so the worker removes whatever a store holds.
+   * Written BEFORE a store commits the tombstone of an item that has children
+   * (one transaction, durable on return): the deletion is pending, and the
+   * parent and each child are held. `observedAfter` is the store clock's
+   * time of the deletion; only a sighting of the parent later than it can lift
+   * the hold. Asking again keeps what is held, adds what is new and moves
+   * `observedAfter` forward, never back.
+   */
+  holdParentDeletion(parent: SourceItemIdentity, children: readonly SourceItemIdentity[], observedAfter: string): void {
+    this.db.transaction(() => {
+      const now = this.now().toISOString();
+      this.db.query(`
+        INSERT INTO tier_parent_deletion_intent (
+          provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at, observed_after
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
+        DO UPDATE SET observed_after = MAX(observed_after, excluded.observed_after)
+      `).run(...idParams(parent), parent.family, parent.localItemId, now, observedAfter);
+      const hold = this.db.query(`
+        INSERT OR IGNORE INTO tier_deletion_hold (
+          provider, account_scope, conversation_key, provider_item_id,
+          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const item of [parent, ...children]) hold.run(...idParams(item), ...idParams(parent), now);
+    })();
+  }
+
+  /**
+   * An item listed while its parent's deletion is pending is held with the
+   * rest of that parent's items. Nothing happens for a parent with no
+   * deletion pending. Returns whether the item was newly held.
+   */
+  holdChildOfPendingDeletion(child: TierLedgerIdentity, parentLocalItemId: string): boolean {
+    return this.db.query(`
+      INSERT OR IGNORE INTO tier_deletion_hold (
+        provider, account_scope, conversation_key, provider_item_id,
+        owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
+      )
+      SELECT ?, ?, ?, ?, provider, account_scope, conversation_key, provider_item_id, ?
+      FROM tier_parent_deletion_intent WHERE local_item_id = ?
+    `).run(...idParams(child), this.now().toISOString(), parentLocalItemId).changes > 0;
+  }
+
+  /** Whether a deletion hides this item right now (the parent's, a child's, or a confirmed child's until it is removed). */
+  heldForDeletion(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`
+      SELECT 1 AS present FROM tier_deletion_hold
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) !== null;
+  }
+
+  /** The deletions pending, oldest first, after the sequence number given (a pass walks them in pages). */
+  pendingParentDeletions(options: { after?: number; limit?: number } = {}): PendingParentDeletion[] {
+    const rows = this.db.query(`
+      SELECT rowid AS seq, provider, account_scope, conversation_key, provider_item_id, family, local_item_id, observed_after
+      FROM tier_parent_deletion_intent WHERE rowid > ? ORDER BY rowid LIMIT ?
+    `).all(Math.max(0, Math.floor(options.after ?? 0)), Math.max(1, Math.floor(options.limit ?? 100))) as Array<{
+      seq: number; provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+      family: string; local_item_id: string; observed_after: string;
+    }>;
+    return rows.map((row) => ({
+      seq: row.seq,
+      observedAfter: row.observed_after,
+      parent: {
+        family: row.family as SourceItemIdentity['family'],
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        localItemId: row.local_item_id,
+        ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+      },
+    }));
+  }
+
+  /**
+   * The deletion is over without removing anything: the parent was seen again
+   * after it, is a Secret (judged on its own words), or has no child left to
+   * protect. The intent and every hold it owns go together, in one
+   * transaction, and the items read as before.
+   */
+  liftParentDeletion(parent: TierLedgerIdentity): void {
+    this.db.transaction(() => {
+      this.db.query(`
+        DELETE FROM tier_deletion_hold
+        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
+      `).run(...idParams(parent));
+      this.db.query(`
+        DELETE FROM tier_parent_deletion_intent
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(parent));
+    })();
+  }
+
+  /**
+   * The parent's tombstone is confirmed committed: its removal is owed. In
+   * ONE transaction every current or staged copy of the parent and of each
+   * child is superseded, a cascade row is written per child, the intent goes
+   * and the parent's own hold with it. The children stay held until each
+   * one's removal is done (`completeChildCascade`), so an item the ledger
+   * never routed (no copy to supersede) is still refused. A crash at any later
+   * point leaves the children hidden with their removal still owed
+   * (`pendingChildCascades`), never visible.
    */
   hideAndQueueChildren(
     parent: TierLedgerIdentity,
@@ -3240,7 +3425,14 @@ export class TierLedger {
         if (changed > 0) hidden += 1;
       };
       hide(parent);
-      // The deletion was owed (`oweParentDeletion`); it is recorded now.
+      // The deletion is recorded: the intent is done, the parent carries no
+      // hold (it is tombstoned for good; a parent that comes back is a new
+      // item), and what this parent held is re-stated below from the
+      // children that are still there.
+      this.db.query(`
+        DELETE FROM tier_deletion_hold
+        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
+      `).run(...idParams(parent));
       this.db.query(`
         DELETE FROM tier_parent_deletion_intent
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
@@ -3251,57 +3443,20 @@ export class TierLedger {
           parent_provider_item_id, queued_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
+      const hold = this.db.query(`
+        INSERT OR IGNORE INTO tier_deletion_hold (
+          provider, account_scope, conversation_key, provider_item_id,
+          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
       let queued = 0;
       for (const child of children) {
         hide(child);
+        hold.run(...idParams(child), ...idParams(parent), now);
         queued += queue.run(...idParams(child), child.family, child.localItemId, parent.providerItemId, now).changes;
       }
       return { hidden, queued };
     })();
-  }
-
-  /**
-   * Written BEFORE a store commits the tombstone of an item that has children
-   * (its own transaction, durable on return): the deletion is owed. A crash
-   * after the store commits leaves this row, so the next start hides the
-   * children (`pendingParentDeletions`, settled by the tiered store set)
-   * instead of leaving them served with no cascade row at all. A row for a
-   * parent that was not in fact deleted (the store's transaction rolled
-   * back) is cleared, never acted on.
-   */
-  oweParentDeletion(parent: SourceItemIdentity): void {
-    this.db.query(`
-      INSERT OR IGNORE INTO tier_parent_deletion_intent (
-        provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(...idParams(parent), parent.family, parent.localItemId, this.now().toISOString());
-  }
-
-  /** The parents whose deletion is owed and not yet recorded, oldest first. */
-  pendingParentDeletions(limit = 100): SourceItemIdentity[] {
-    const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id, family, local_item_id
-      FROM tier_parent_deletion_intent ORDER BY noted_at, rowid LIMIT ?
-    `).all(Math.max(1, Math.floor(limit))) as Array<{
-      provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
-      family: string; local_item_id: string;
-    }>;
-    return rows.map((row) => ({
-      family: row.family as SourceItemIdentity['family'],
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      localItemId: row.local_item_id,
-      ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
-    }));
-  }
-
-  /** The parent was not deleted after all (it is held, moved tiers, or is a Secret), or has no children. */
-  clearParentDeletion(parent: TierLedgerIdentity): void {
-    this.db.query(`
-      DELETE FROM tier_parent_deletion_intent
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...idParams(parent));
   }
 
   /** Whether this item's removal is owed because its parent was tombstoned. */
@@ -3353,6 +3508,11 @@ export class TierLedger {
       this.deleteCopies(identity);
       this.db.query(`
         DELETE FROM tier_child_cascade
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
+      // The removal is done, so the hold that refused the child until now has nothing left to refuse.
+      this.db.query(`
+        DELETE FROM tier_deletion_hold
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity));
     })();
@@ -3635,6 +3795,30 @@ function identityFromRow(row: TierIdentityRow): TierLedgerIdentity {
     accountScope: row.account_scope,
     providerItemId: row.provider_item_id,
     ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+  };
+}
+
+/** A copy as every read sees it while a deletion holds its item: not current anywhere. */
+function hiddenByHold(copy: TierCopy): TierCopy {
+  return { ...copy, state: 'superseded', supersededByGeneration: copy.supersededByGeneration ?? copy.generation + 1 };
+}
+
+/**
+ * What a read sees of a held item that has no copy row (an item the ledger
+ * never routed): a copy in no store that is current nowhere, so the item is
+ * known to the ledger and served by no store.
+ */
+function heldPlaceholderCopy(): TierCopy {
+  return {
+    corpusId: '',
+    trustDomain: 'secure_local',
+    layers: 'both',
+    state: 'superseded',
+    embedHold: false,
+    generation: 0,
+    supersededByGeneration: 1,
+    previousLayers: null,
+    updatedAt: '',
   };
 }
 
@@ -4356,10 +4540,10 @@ function tierLedgerMigrations(): SqliteMigration[] {
     {
       // A deletion owed before the store commits it: one row per parent that
       // has children and is being tombstoned. A crash between the store's
-      // commit and the cascade transaction above leaves this row; the next
-      // start settles it (hides the children if the parent is gone, drops it
-      // if the parent was not deleted after all). docs/design/child-items.md,
-      // "Removal".
+      // commit and the cascade transaction above leaves this row.
+      // docs/design/child-items.md, "Removal". Schema 12 makes the deletion
+      // fail closed (it adds the hold on the items and the time of the
+      // deletion); this migration stays as it was.
       version: 11,
       name: 'tier_parent_deletion_intent',
       up(db) {
@@ -4374,6 +4558,37 @@ function tierLedgerMigrations(): SqliteMigration[] {
             noted_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
+        `);
+      },
+    },
+    {
+      // The deletion protocol fails closed (docs/design/child-items.md,
+      // "Removal"). The intent now says when the parent was last seen
+      // (`observed_after`: only a sighting later than that can lift it), and a
+      // hold row per item the deletion hides (the parent and each child) is
+      // written in the same transaction. A held item is refused by every read
+      // of the ledger's copy states, whatever its copies say, until the
+      // deletion is confirmed (the cascade rows take over) or lifted.
+      version: 12,
+      name: 'tier_deletion_hold',
+      up(db) {
+        db.exec(`
+          ALTER TABLE tier_parent_deletion_intent ADD COLUMN observed_after TEXT NOT NULL DEFAULT '';
+          UPDATE tier_parent_deletion_intent SET observed_after = noted_at WHERE observed_after = '';
+          CREATE TABLE IF NOT EXISTS tier_deletion_hold (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            owner_provider TEXT NOT NULL,
+            owner_account_scope TEXT NOT NULL,
+            owner_conversation_key TEXT NOT NULL DEFAULT '',
+            owner_provider_item_id TEXT NOT NULL,
+            held_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE INDEX IF NOT EXISTS tier_deletion_hold_owner
+            ON tier_deletion_hold (owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id);
         `);
       },
     },

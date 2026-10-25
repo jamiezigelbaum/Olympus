@@ -292,21 +292,45 @@ floor from its parent.
   - Only then does it purge the rows, as today.
 - **Account delete.** It already forgets extraction jobs by corpus through
   the registry. Children's rows go with the account.
-- **A parent tombstoned** (a Gmail message deleted at the provider, or an item
-  absent from a re-sync):
-  - In one ledger transaction, the parent and its children are hidden and a
-    durable cascade row is written per child.
-  - A worker then deletes each child's copies in every tier store that holds
-    one, with retry.
-  - A crash between stores leaves the children hidden, never visible.
-  - The parent's own store commits its tombstone before that ledger
-    transaction, so the deletion is made durable first: a store about to
-    tombstone a parent that has children writes an intent row to the ledger
-    inside its writing transaction (if the row cannot be written, the
-    tombstone does not commit). The next start settles any intent a crash
-    left: the parent is gone, so the children are hidden and owed; the parent
-    is still held, so the intent is dropped and the children stay. The
-    ledger's intent table is `tier_parent_deletion_intent` (schema 11).
+- **A parent deleted** (a Gmail message deleted at the provider, or an item
+  absent from a re-sync). The protocol fails closed: a crash or a failure
+  between the stores, or in the pass that repairs it, leaves the children
+  hidden, never visible.
+  - **Hold first.** Before the parent's store commits its tombstone, one
+    ledger transaction writes the deletion's intent and a hold on the parent
+    and on every child. A held item is refused by every read of the ledger's
+    copy states, whatever its copies say and whatever later writes them (a
+    move that completes, a re-judge, a re-placement), until the deletion is
+    confirmed or lifted. If the hold cannot be written, the tombstone does not
+    commit. When another store still holds the parent (it moved tiers, or the
+    deletion is not whole yet), the store that lets go last holds it.
+  - **Cascade after confirmation.** The removals are owed only once the
+    parent is seen tombstoned in a store and held in none. In one ledger
+    transaction the parent's and the children's copies are superseded, a
+    durable cascade row is written per child and the intent goes; each child
+    stays held until its own removal is done. A worker then deletes each
+    child's copy in every tier store that holds one, with retry. A deletion a
+    store rolled back owes nothing.
+  - **Recovery never infers.** At start, before each sync and after it, each
+    pending deletion is settled from what the stores say: tombstoned and held
+    nowhere, the removals are owed; held somewhere, it waits with everything
+    still held. Nothing is cleared because the parent looks active, and a
+    pass that fails leaves every deletion pending and held.
+  - **Only a sighting lifts it.** A parent a store has written again after the
+    deletion was noted (the row's write time is later than the intent's
+    `observed_after`, a store-clock time) lifts the hold on it and its
+    children and clears the intent; an older write cannot. A Secret parent is
+    not a deletion: its children are judged on their own words and the hold is
+    lifted. An item listed while its parent's deletion is pending is held
+    with the rest.
+  - The ledger tables are `tier_parent_deletion_intent` (schema 11, with
+    `observed_after` from schema 12) and `tier_deletion_hold` (schema 12).
+  - One gap is accepted: "the store that lets go last holds the deletion"
+    assumes one writer per parent. If two processes tombstone the same parent
+    in two different stores in the same instant, each sees the other store
+    still holding it and neither holds first. The pass after their commits
+    then owes the removals, and only a crash in that same instant leaves the
+    children served.
 - **Media.** Prepared photo copies in the media cache are released by the
   chunk triggers that already release them.
 

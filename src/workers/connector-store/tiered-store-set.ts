@@ -301,7 +301,7 @@ export class TieredStoreSet {
         throw new Error('A tiered store leg\'s store must match its declared trust domain and corpus.');
       }
       spec.store?.useTierLedger(this.ledger);
-      spec.store?.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent) => this.oweParentDeletion(parent));
+      spec.store?.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent, tombstonedAt) => this.oweParentDeletion(parent, tombstonedAt));
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     // Private and pending items must always have somewhere to go.
@@ -317,19 +317,30 @@ export class TieredStoreSet {
     void this.repairLowerContent();
   }
 
-  // ---- A parent was tombstoned: its children go with it ----------------------
-  // docs/design/child-items.md, "Removal". The parent and its children are
-  // hidden together in ONE ledger transaction, which also writes a durable
-  // cascade row per child (tier-ledger.ts `hideAndQueueChildren`). The worker
-  // (`runChildCascade`) then deletes each child's copy in every store that
-  // holds one, with retry. The parent's own store commits its tombstone before
-  // that transaction, so the deletion is made durable FIRST: a store about to
-  // tombstone a parent that has children writes an intent row to the ledger
-  // (`oweParentDeletion`, inside the store's writing transaction; if it cannot
-  // be written the tombstone does not commit). A crash at any point leaves
-  // either the intent (settled at the next start, `recoverParentDeletions`:
-  // the parent is gone, so the children are hidden and owed; the parent is
-  // still held, so the intent is dropped) or the hide and cascade rows.
+  // ---- A parent is deleted: its children go with it --------------------------
+  // docs/design/child-items.md, "Removal". The protocol fails closed:
+  //
+  //  1. Hold first. A store about to commit the tombstone of a parent that has
+  //     children writes, in ONE ledger transaction inside its own writing
+  //     transaction, the deletion's intent and a hold on the parent and every
+  //     child (`oweParentDeletion`). A held item is read by nobody. If that
+  //     cannot be written the tombstone does not commit.
+  //  2. Cascade after confirmation. The removals are owed (copies superseded,
+  //     one cascade row per child, tier-ledger.ts `hideAndQueueChildren`) only
+  //     once the parent is seen tombstoned in a store and held in none
+  //     (`cascadeParentDeletion` refuses otherwise), so a deletion a store
+  //     rolled back owes nothing. The worker (`runChildCascade`) then deletes
+  //     each child's copy in every store, with retry.
+  //  3. Recovery never infers. At start and at every later pass
+  //     (`recoverParentDeletions`) each pending deletion is settled from what
+  //     the stores say: tombstoned and held nowhere, the removals are owed;
+  //     held somewhere, it waits with everything still held. Nothing is
+  //     cleared because the parent looks active, and a pass that fails leaves
+  //     every deletion pending, so everything stays held.
+  //  4. A sighting lifts it. A parent a store has written again after the
+  //     deletion was noted (its row's write time is later than the intent's
+  //     `observedAfter`) lifts the hold on it and its children; a write that
+  //     is not later cannot.
 
   /** The parent's children that a store or the ledger still holds, across every store of the set. */
   private childrenStillHeld(parent: SourceItemIdentity): SourceItemIdentity[] {
@@ -347,84 +358,168 @@ export class TieredStoreSet {
     return [...found.values()];
   }
 
+  /** What the stores say of a parent right now: held in a store (and last written when), tombstoned, or neither. */
+  private parentStanding(parent: SourceItemIdentity): { active: boolean; observedAt: string | undefined; tombstoned: boolean } {
+    let active = false;
+    let tombstoned = false;
+    let observedAt: string | undefined;
+    for (const store of this.openStores()) {
+      const row = store.activeLocalItemRow(parent.localItemId);
+      if (row) {
+        active = true;
+        if (row.observedAt !== undefined && (observedAt === undefined || row.observedAt > observedAt)) observedAt = row.observedAt;
+      } else if (store.tombstonedItemByLocalId(parent.localItemId) !== undefined) {
+        tombstoned = true;
+      }
+    }
+    return { active, observedAt, tombstoned };
+  }
+
   /**
-   * The parent is being deleted: hide it and its children together and owe
-   * each child's removal. A parent with no child here changes nothing. Returns
-   * the number of removals newly owed.
+   * Whether a parent's deletion is confirmed, over, or still to be seen. Read
+   * from the stores and the ledger alone; never a guess.
+   *
+   * - 'deleted': tombstoned in a store and held in none (a Secret excepted).
+   * - 'kept': the deletion is over without removing anything: the parent is a
+   *   Secret (judged on its own words, its children on theirs), or a store
+   *   wrote it again after the deletion was noted (`observedAfter`).
+   * - 'wait': anything else. A parent that still looks active, or that no
+   *   store has a row for, proves nothing.
    */
-  cascadeParentDeletion(parent: SourceItemIdentity): number {
+  private parentVerdict(parent: SourceItemIdentity, observedAfter?: string): 'deleted' | 'kept' | 'wait' {
+    if (this.ledger.itemIsSecret(parent)) return 'kept';
+    const standing = this.parentStanding(parent);
+    if (standing.active) {
+      return observedAfter !== undefined && standing.observedAt !== undefined && standing.observedAt > observedAfter
+        ? 'kept'
+        : 'wait';
+    }
+    return standing.tombstoned ? 'deleted' : 'wait';
+  }
+
+  /**
+   * The parent's deletion is confirmed (`parentVerdict`): hide it and its
+   * children together and owe each child's removal. A parent with no child
+   * left changes nothing but lets its hold go. Returns the number of removals
+   * newly owed.
+   */
+  private cascadeConfirmedDeletion(parent: SourceItemIdentity): number {
     const children = this.childrenStillHeld(parent);
     if (children.length === 0) {
-      this.ledger.clearParentDeletion(parent);
+      this.ledger.liftParentDeletion(parent);
       return 0;
     }
-    // Also drops the parent's intent row, in the same transaction.
     return this.ledger.hideAndQueueChildren(parent, children).queued;
   }
 
   /**
-   * A store is about to commit the tombstone of `parent`: when other items
-   * came inside it, make the deletion durable first. Runs inside the store's
-   * writing transaction; a failure fails that transaction.
+   * Owes the removal of a parent's children, if and only if the parent is
+   * tombstoned in a store and held in none: a parent that is still held
+   * anywhere owes nothing, whoever asks. Returns the removals newly owed.
    */
-  private oweParentDeletion(parent: SourceItemIdentity): void {
+  cascadeParentDeletion(parent: SourceItemIdentity): number {
+    return this.parentVerdict(parent) === 'deleted' ? this.cascadeConfirmedDeletion(parent) : 0;
+  }
+
+  /**
+   * A store is about to commit the tombstone of `parent`: when other items came
+   * inside it and no other store still holds it (one that does is only a move,
+   * or the deletion is not whole yet), hold the deletion first. Runs inside
+   * the store's writing transaction; a failure fails that transaction.
+   */
+  private oweParentDeletion(parent: SourceItemIdentity, tombstonedAt: string): void {
     const stores = this.openStores();
     if (!stores.some((store) => store.hasChildItems())) return;
     if (this.ledger.itemIsSecret(parent)) return;
-    if (this.childrenStillHeld(parent).length === 0) return;
-    this.ledger.oweParentDeletion(parent);
+    if (stores.some((store) => store.activeLocalItemRow(parent.localItemId) !== undefined)) return;
+    this.holdParentDeletion(parent, tombstonedAt);
   }
 
   /**
-   * The parent's deletion, once its stores let go: hide and owe its children
-   * unless it is still held in a store (it moved tiers) or is a Secret, in
-   * which case the intent is dropped and the children stay. Returns the
-   * removals newly owed.
+   * The provider reports `parent` deleted: hold it and its children now,
+   * before any store tombstones it. A parent with no child here, or a Secret,
+   * holds nothing.
    */
-  private settleParentDeletion(parent: SourceItemIdentity): number {
-    if (this.openStores().some((store) => store.activeLocalItemRow(parent.localItemId) !== undefined)
-      || this.ledger.itemIsSecret(parent)) {
-      this.ledger.clearParentDeletion(parent);
-      return 0;
-    }
-    return this.cascadeParentDeletion(parent);
+  holdParentDeletion(parent: SourceItemIdentity, deletedAt: string = new Date().toISOString()): void {
+    if (this.ledger.itemIsSecret(parent)) return;
+    const children = this.childrenStillHeld(parent);
+    if (children.length === 0) return;
+    this.ledger.holdParentDeletion(parent, children, deletedAt);
   }
 
   /**
-   * Settles the deletions a crash left owed (the intent rows written before a
-   * parent's store committed): the parent is gone from every store, so its
-   * children are hidden and owed; it is still held, so nothing happened.
-   * Never fails the caller; what it cannot settle stays owed for the next
-   * pass. Returns the removals newly owed.
+   * An item listed while its parent's deletion is pending is held with the
+   * rest, so a child that arrives late is never the one readable.
+   */
+  holdChildOfPendingDeletion(child: SourceItemIdentity): void {
+    const parent = child.parent;
+    if (parent) this.ledger.holdChildOfPendingDeletion(child, parent.localItemId);
+  }
+
+  /**
+   * Settles one parent's deletion from what the stores say: confirmed, the
+   * removals are owed; over, the hold is lifted; anything else changes
+   * nothing. Returns the removals newly owed.
+   */
+  private settleParentDeletion(parent: SourceItemIdentity, observedAfter?: string): number {
+    switch (this.parentVerdict(parent, observedAfter)) {
+      case 'deleted':
+        return this.cascadeConfirmedDeletion(parent);
+      case 'kept':
+        this.ledger.liftParentDeletion(parent);
+        return 0;
+      case 'wait':
+        return 0;
+    }
+  }
+
+  /**
+   * Settles every pending deletion (the intents written before a store
+   * committed): at start, before each sync, and after each. One that cannot be
+   * settled, for any reason, stays pending and stays held; it is tried again
+   * by the next pass. Never fails the caller. Returns the removals newly owed.
    */
   recoverParentDeletions(): number {
     let queued = 0;
     try {
-      for (let pass = 0; pass < 1000; pass += 1) {
-        const owed = this.ledger.pendingParentDeletions(CHILD_CASCADE_BATCH);
-        if (owed.length === 0) break;
-        for (const parent of owed) queued += this.settleParentDeletion(parent);
+      let after = 0;
+      for (let page = 0; page < 1000; page += 1) {
+        const pending = this.ledger.pendingParentDeletions({ after, limit: CHILD_CASCADE_BATCH });
+        if (pending.length === 0) break;
+        after = pending[pending.length - 1]!.seq;
+        for (const entry of pending) {
+          try {
+            queued += this.settleParentDeletion(entry.parent, entry.observedAfter);
+          } catch {
+            // Still pending, still held; the next pass tries again.
+          }
+        }
       }
     } catch {
-      // Still owed; the next start or sync settles it.
+      // Still pending, still held.
     }
     return queued;
   }
 
   /**
-   * A store reports items it tombstoned. One that has children in any store
-   * of the set is a parent that was deleted, unless it is still held in any
-   * store (it moved tiers) or is a Secret (judged on its own words): then its
-   * children stay.
+   * A store reports items it tombstoned, after its transaction committed. One
+   * that has children in any store of the set is settled now: owed if it is
+   * tombstoned in a store and held in none; otherwise it waits (still held in
+   * a store, or moved tiers, or a Secret, judged on its own words).
    */
   private parentsTombstoned(parents: readonly SourceItemIdentity[]): void {
     try {
       const stores = this.openStores();
       if (!stores.some((store) => store.hasChildItems())) return;
-      for (const parent of parents) this.settleParentDeletion(parent);
     } catch {
-      // The parent's intent row is still owed and settled at the next start
-      // or sync; the reconcile also walks the parents of live children.
+      return;
+    }
+    for (const parent of parents) {
+      try {
+        this.settleParentDeletion(parent);
+      } catch {
+        // Its intent, if written, is still pending and settled by the next pass.
+      }
     }
   }
 
@@ -511,7 +606,7 @@ export class TieredStoreSet {
       throw new Error('A lazily opened tiered store does not match its declared leg.');
     }
     store.useTierLedger(this.ledger);
-    store.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent) => this.oweParentDeletion(parent));
+    store.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent, tombstonedAt) => this.oweParentDeletion(parent, tombstonedAt));
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
@@ -1444,10 +1539,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       this.counts.routedDeletions += 1;
       this.copyRemovals.set(identityKey(identity), identity);
       const corpora = new Set(ledger.copies(identity).map((copy) => copy.corpusId));
-      // Items that came inside this one go with it: hidden now, removed by the cascade worker.
-      this.set.cascadeParentDeletion(identity);
+      // Items that came inside this one go with it: held now, before any store
+      // tombstones the parent, and removed by the cascade worker once the
+      // stores have (the removals are owed only when the tombstone is seen).
+      this.set.holdParentDeletion(identity);
       return { kind: 'delete', corpora, reason: 'provider_deleted' };
     }
+    // An item listed while its parent's deletion is pending is held with the rest.
+    this.set.holdChildOfPendingDeletion(identity);
     // A child whose parent was tombstoned is listed again before its removal
     // finished: it is removed, never placed.
     if (routed && ledger.childCascadePending(identity)) {

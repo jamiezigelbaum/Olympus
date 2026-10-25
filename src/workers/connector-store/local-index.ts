@@ -2590,7 +2590,7 @@ export class LocalConnectorStore {
   // tiered store set (if any) once the writing transaction has committed, so it
   // can hide and remove their children (docs/design/child-items.md, "Removal").
   private parentTombstoneObserver: ((parents: SourceItemIdentity[]) => void) | undefined;
-  private parentDeletionOwed: ((parent: SourceItemIdentity) => void) | undefined;
+  private parentDeletionOwed: ((parent: SourceItemIdentity, tombstonedAt: string) => void) | undefined;
   private tombstonedParents: Map<string, SourceItemIdentity> | undefined;
   /**
    * Items a sync handed to this store's embedding sweep instead of embedding
@@ -3065,13 +3065,20 @@ export class LocalConnectorStore {
     trustTier: SourceTrustTier;
     /** The approved-scope stamp the lane put on the row, when it has one. */
     sourceScope?: { accountGeneration: string; scopeRevision: string; folderKeys: string[] };
+    /**
+     * When this store last wrote the row (the store clock). A listing that
+     * sees the item again writes it, so a time later than a deletion's is a
+     * sighting after it.
+     */
+    observedAt?: string;
   } | undefined {
     const row = this.db.query(`
       SELECT provider, account_scope, provider_item_id, provider_conversation_id, locator_uri, trust_tier,
-        source_scope_generation, source_scope_revision, source_scope_folder_keys_json
+        source_scope_generation, source_scope_revision, source_scope_folder_keys_json, indexed_at
       FROM items WHERE local_item_id = ? AND tombstoned = 0
       LIMIT 1
     `).get(localItemId) as {
+      indexed_at: string | null;
       provider: string;
       account_scope: string;
       provider_item_id: string;
@@ -3108,6 +3115,7 @@ export class LocalConnectorStore {
             },
           }
         : {}),
+      ...(row.indexed_at ? { observedAt: row.indexed_at } : {}),
     };
   }
 
@@ -3265,15 +3273,15 @@ export class LocalConnectorStore {
    * judged on their own and are not reported.
    *
    * `owed` is called BEFORE the tombstone can commit (inside the writing
-   * transaction, with the parent's identity): the caller makes the deletion
-   * durable where a crash cannot lose it, so a crash after this store commits
-   * still finds the children's removal owed. A throw from it fails the
-   * writing transaction: a deletion that cannot be made durable is not
-   * committed.
+   * transaction, with the parent's identity and the store clock's time of the
+   * tombstone): the caller makes the deletion durable and hides the children
+   * where a crash cannot lose it, so a crash after this store commits still
+   * finds the children hidden. A throw from it fails the writing
+   * transaction: a deletion that cannot be made durable is not committed.
    */
   observeParentTombstones(
     observer: ((parents: SourceItemIdentity[]) => void) | undefined,
-    owed?: ((parent: SourceItemIdentity) => void) | undefined,
+    owed?: ((parent: SourceItemIdentity, tombstonedAt: string) => void) | undefined,
   ): void {
     this.parentTombstoneObserver = observer;
     this.parentDeletionOwed = owed;
@@ -3288,15 +3296,17 @@ export class LocalConnectorStore {
     if (!this.parentTombstoneObserver || !this.childItemColumnsPresent) return;
     const row = this.db.query(`
       SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
-        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier,
+        indexed_at
       FROM items WHERE item_pk = ? AND tombstoned = 1
     `).get(itemPk) as (Pick<ItemRow,
       'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
       | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'>
-      & { trust_tier: string }) | null;
+      & { trust_tier: string; indexed_at: string }) | null;
     if (!row || row.trust_tier === 'S5') return;
-    const parent = sourceItemFromRow({ ...row, rank: 0 } as ItemRow);
-    this.parentDeletionOwed?.(parent);
+    const { indexed_at: tombstonedAt, ...fields } = row;
+    const parent = sourceItemFromRow({ ...fields, rank: 0 } as ItemRow);
+    this.parentDeletionOwed?.(parent, tombstonedAt);
     (this.tombstonedParents ??= new Map()).set(row.local_item_id, parent);
   }
 
@@ -8307,7 +8317,9 @@ export class LocalConnectorStore {
       const binding = this.tierSetBinding();
       if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId)) return false;
       if (!ledger) return true;
-      const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
+      // The copies as they are: a pending deletion hides an item from readers, but
+      // the item stays writable (its being written again is what lifts the deletion).
+      const state = ledger.itemStatesForMany([identity], { raw: true }).get(tierLedgerIdentityKey(identity));
       if (!state || !state.record.routed) return true;
       const { record, copies } = state;
       if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;

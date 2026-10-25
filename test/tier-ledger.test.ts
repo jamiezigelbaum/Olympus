@@ -2,6 +2,7 @@
 // row, flip generations with compare-and-swap, list pending items, and keep
 // per-item overrides. Custody: identity, tier keys and reason codes only.
 
+import { Database } from 'bun:sqlite';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,8 @@ import { classifyItemTiers, type TierDecision } from '../src/workers/classificat
 import {
   TierLedger,
   TierLedgerGenerationConflictError,
+  TIER_LEDGER_SCHEMA_VERSION,
+  TIER_LEDGER_SQLITE_STORE_ID,
   tierLedgerPathForStore,
 } from '../src/workers/classification/tier-ledger.ts';
 
@@ -131,6 +134,39 @@ describe('tier ledger', () => {
       })();
       expect(bytes).not.toContain('zebracorn');
       expect(bytes).not.toContain('diagnosis');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the deletion hold (schema 12)', () => {
+  test('a ledger left at schema 11 opens at 12 with its pending deletion kept and given a time of its own', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tier-ledger-v11-'));
+    try {
+      const path = join(dir, 'tier-ledger.sqlite');
+      new TierLedger({ dbPath: path }).close();
+      // Put the file back as schema 11 left it: an intent without a time, and no hold table.
+      const raw = new Database(path);
+      raw.exec('DROP INDEX tier_deletion_hold_owner; DROP TABLE tier_deletion_hold; ALTER TABLE tier_parent_deletion_intent DROP COLUMN observed_after;');
+      raw.query(`
+        INSERT INTO tier_parent_deletion_intent (provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at)
+        VALUES ('fixture', 'personal', '', 'parent', 'file', 'local-parent', '2026-10-01T00:00:00.000Z')
+      `).run();
+      raw.query('UPDATE schema_version SET version = 11 WHERE store_id = ?').run(TIER_LEDGER_SQLITE_STORE_ID);
+      raw.close();
+
+      const reopened = new TierLedger({ dbPath: path });
+      expect(TIER_LEDGER_SCHEMA_VERSION).toBe(12);
+      const pending = reopened.pendingParentDeletions();
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({ parent: { providerItemId: 'parent', localItemId: 'local-parent' }, observedAfter: '2026-10-01T00:00:00.000Z' });
+      // The new table works: the child is held, and the deletion lifts.
+      reopened.holdChildOfPendingDeletion({ ...ITEM, providerItemId: 'child' }, 'local-parent');
+      expect(reopened.heldForDeletion({ ...ITEM, providerItemId: 'child' })).toBe(true);
+      reopened.liftParentDeletion({ ...ITEM, providerItemId: 'parent' });
+      expect(reopened.heldForDeletion({ ...ITEM, providerItemId: 'child' })).toBe(false);
+      reopened.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
