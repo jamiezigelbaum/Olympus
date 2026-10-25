@@ -2252,8 +2252,28 @@ describe('a file always has a name that survives a power failure', () => {
       const report = migrateAccountFolders(withoutSwitch(env));
 
       expect(report.moved, variant).toEqual(['dropbox.files']);
-      for (const folder of chainOf(root)) expect(syncedBeforeAnyOldNameWent.has(folder), `${variant}: ${relative(root, folder) || 'the data folder'} was not synced before the first old name went`).toBe(true);
+      // Synced by their real paths (the temporary folder may itself be reached through a link).
+      for (const folder of chainOf(realpathSync(root))) expect(syncedBeforeAnyOldNameWent.has(folder), `${variant}: ${relative(realpathSync(root), folder) || 'the data folder'} was not synced before the first old name went`).toBe(true);
     }
+  });
+
+  test('a data folder that is a link: the real folders it leads to are synced before the first old name goes', () => {
+    const { dir, env, root } = fixture();
+    const real = join(dir, 'elsewhere', 'olympus');
+    mkdirSync(real, { recursive: true });
+    mkdirSync(dirname(root), { recursive: true });
+    symlinkSync(real, root);
+    install(env, 'dropbox.files', { walOn: 'none' });
+    const syncedBeforeAnyOldNameWent = new Set<string>();
+    let moves: SourceRegistryMove[] = [];
+    onCheckpoint((point) => {
+      if (point === 'plan') moves = entryOf(env, 'dropbox.files')?.migration?.moves ?? [];
+    });
+    __accountMigrationTestHooks.syncDirectory = (folder) => {
+      if (moves.length > 0 && moves.every((move) => existsSync(join(root, ...move.from.split('/'))))) syncedBeforeAnyOldNameWent.add(folder);
+    };
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+    for (const folder of chainOf(realpathSync(real))) expect(syncedBeforeAnyOldNameWent.has(folder), `${relative(realpathSync(real), folder) || 'the real data folder'} was not synced before the first old name went`).toBe(true);
   });
 
   test('going back, the folders the files return to are synced before the first file is moved back', () => {
@@ -2270,7 +2290,7 @@ describe('a file always has a name that survives a power failure', () => {
     // Syncs after the put-back began and before any file had its old name again.
     const beforeFirstLink = watch.syncs.filter((sync) => sync.afterRevert && [...sync.states.values()].every((state) => state === 'new'));
     for (const folder of legacyFolders) {
-      expect(beforeFirstLink.some((sync) => sync.folder === folder), `${relative(root, folder) || 'the data folder'} was not synced before the first file went back`).toBe(true);
+      expect(beforeFirstLink.some((sync) => sync.folder === realpathSync(folder)), `${relative(root, folder) || 'the data folder'} was not synced before the first file went back`).toBe(true);
     }
   });
 });

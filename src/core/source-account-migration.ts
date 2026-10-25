@@ -590,12 +590,15 @@ function planIsCanonical(ctx: Context, sourceId: string, slot: string, migration
  * by an earlier run that died before it synced anything is in the chain like one
  * made now: whether a folder is new or already there says nothing about whether
  * its entry is on disk. A folder that is not there is skipped. Each folder is
- * synced once per call, the root first.
+ * synced once per call, the root first, by its real path when the data root
+ * is a link (a link below the root is never followed: it is not a folder).
  */
 function syncFolderChains(ctx: Context, folders: string[]): void {
+  // The data folder may itself be a link: the folders synced are the real ones it leads to.
+  const root = realpathSync(ctx.root);
   const chain = new Set<string>();
   for (const folder of folders) {
-    let current = ctx.root;
+    let current = root;
     chain.add(current);
     for (const part of relative(ctx.root, folder).split(sep).filter(Boolean)) {
       current = join(current, part);
