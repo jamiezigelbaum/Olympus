@@ -27,8 +27,8 @@ interface PanelState {
   deadSync?: boolean;
   /** Disconnect forgets to ask. */
   noQuestion?: boolean;
-  /** A disabled Sync now with or without its reason. */
-  disabledSync?: 'reason' | 'silent';
+  /** A disabled Sync now with or without its reason, or busy ("Checking…", marked aria-busy, as the product draws it while a sync runs). */
+  disabledSync?: 'reason' | 'silent' | 'busy';
   /** Pressing Sync now logs a console error. */
   syncLogs?: boolean;
   /** Connect opens this address in a new window. */
@@ -87,7 +87,7 @@ class PanelDriver implements JourneyDriver {
   }
   private render(): void {
     const s = this.state;
-    const sync = s.disabledSync ? `<button data-key="menu:readwise.library:0" disabled>Sync now</button>${s.disabledSync === 'reason' ? '<span class="reason">Waiting for the first sync</span>' : ''}` : `<button data-key="menu:readwise.library:0">Sync now</button>`;
+    const sync = s.disabledSync === 'busy' ? '<button data-key="menu:readwise.library:0" disabled aria-busy="true">Checking…</button>' : s.disabledSync ? `<button data-key="menu:readwise.library:0" disabled>Sync now</button>${s.disabledSync === 'reason' ? '<span class="reason">Waiting for the first sync</span>' : ''}` : `<button data-key="menu:readwise.library:0">Sync now</button>`;
     const disconnect = s.confirming
       ? `<span class="fix confirm"><span class="reason strong">Disconnect Readwise?</span><button data-key="menu:readwise.library:1:yes">Confirm disconnect</button><button data-key="menu:readwise.library:1:no">Cancel</button></span>`
       : `<span class="fix"><button data-key="menu:readwise.library:1">Disconnect</button></span>`;
@@ -328,6 +328,11 @@ describe('exploring the Sources section', () => {
     const reasonResult = await explore({ driver: reason, seeds: [populated(reason)], inventory: inventory(), ...quick() });
     expect(exploreChecks(reasonResult).find((entry) => entry.id === 'explore.populated')!.status).toBe('pass');
     expect(reasonResult.coverage.find((entry) => entry.id === 'readwise.library:sync')?.detail).toContain('disabled');
+    // A busy control says what it is doing in its own words.
+    const busy = new PanelDriver({ disabledSync: 'busy' });
+    const busyResult = await explore({ driver: busy, seeds: [populated(busy)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(busyResult).find((entry) => entry.id === 'explore.populated')!.status).toBe('pass');
+    expect(busyResult.traces[0]!.steps.find((step) => step.name.startsWith('Checking…'))?.actual).toBe('it is busy and says so: "Checking…"');
   });
 
   test('a problem with no way to fix it fails', async () => {

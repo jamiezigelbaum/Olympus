@@ -218,7 +218,7 @@ export const PROBE_SOURCE = String.raw`(() => {
         const headingText = heading ? Array.from(heading.childNodes).filter((node) => !(node.classList && node.classList.contains('tag'))).map((node) => node.textContent).join(' ') : '';
         out.push({
           key: el.getAttribute('data-key'), tag, role: roleOf(el), name: nameOf(el), text: clean(el.textContent).slice(0, 120),
-          disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+          disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true', busy: el.getAttribute('aria-busy') === 'true',
           visible: isVisible(el), expanded: el.getAttribute('aria-expanded'),
           // The reason shown beside the control, else the one it carries itself (a title or a description a screen reader reads).
           reason: reason && !reason.contains(el) ? clean(reason.textContent).slice(0, 200) : below.length > 0 ? below.join(' ').slice(0, 200) : clean(el.getAttribute('aria-description') || el.getAttribute('title') || '').slice(0, 200),
