@@ -14,6 +14,7 @@
 
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
+import { extractionSpoolFileName, extractionSpoolOwnerDir, pruneExtractionSpoolOwner } from './spool.ts';
 import type { RawItem, SourceConnector } from '../../core/contracts.ts';
 import {
   FileExtractionSourceError,
@@ -119,9 +120,18 @@ export async function readItemToFile(
   if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
     throw new FileExtractionSourceError('source_too_large');
   }
-  mkdirSync(options.spoolDir, { recursive: true, mode: 0o700 });
-  const path = join(options.spoolDir, `spool-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  writeFileSync(path, bytes, { mode: 0o600 });
+  const path = join(options.spoolDir, extractionSpoolFileName());
+  // The folder is the owner's own and is removed when it empties; a removal that
+  // lands between the make and the write is made again.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      mkdirSync(options.spoolDir, { recursive: true, mode: 0o700 });
+      writeFileSync(path, bytes, { mode: 0o600 });
+      break;
+    } catch (error) {
+      if (attempt >= 3 || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
   return { item, path, spooled: true };
 }
 
@@ -285,13 +295,17 @@ export function createConnectorFileExtractionSource(
 
     async fetchFile(ref: ExtractionItemRef, fileOptions: ExtractionFetchFileOptions): Promise<FetchedFile> {
       const { connector, deferred } = resolve_(ref, fileOptions.maxBytes);
+      // The scratch file is written under its owner, so removing the owner's account scope or
+      // source removes it, and a start can tell it is an orphan.
+      const owner = { corpusId, accountScope: ref.accountScope };
+      const spoolDir = extractionSpoolOwnerDir(fileOptions.spoolDir, owner);
       let handed: { item: RawItem; path: string; spooled: boolean };
       try {
         handed = await readItemToFile(connector, ref.localItemId, {
           ...(fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {}),
           ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
           ...(deferred ? { deferredBytes: { locator: deferred.locator } } : {}),
-          spoolDir: fileOptions.spoolDir,
+          spoolDir,
         });
       } catch (error) {
         throw asSourceError(error);
@@ -302,7 +316,7 @@ export function createConnectorFileExtractionSource(
         path: handed.path,
         ...(mimeType ? { mimeType } : {}),
         ...(deferred?.sizeBytes !== undefined ? { sizeBytes: deferred.sizeBytes } : {}),
-        dispose: fileHandOver(handed.path, handed.spooled, fileOptions.spoolDir).dispose,
+        dispose: fileHandOver(handed.path, handed.spooled, spoolDir, () => pruneExtractionSpoolOwner(fileOptions.spoolDir, owner)).dispose,
       };
     },
   };
@@ -351,7 +365,7 @@ function asSourceError(error: unknown): FileExtractionSourceError {
  * Removes a file only when the connector wrote it, and only inside the spool
  * folder: a path to an original under an approved folder is never touched.
  */
-function fileHandOver(path: string, spooled: boolean, spoolDir: string): { dispose(): Promise<void> } {
+function fileHandOver(path: string, spooled: boolean, spoolDir: string, tidy: () => void): { dispose(): Promise<void> } {
   return {
     async dispose() {
       if (!spooled) return;
@@ -359,6 +373,8 @@ function fileHandOver(path: string, spooled: boolean, spoolDir: string): { dispo
       const target = resolve(path);
       if (!target.startsWith(root) || basename(target) === '') return;
       rmSync(target, { force: true });
+      // The owner's folders go when they are empty, so a finished read leaves nothing in the spool.
+      tidy();
     },
   };
 }

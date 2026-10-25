@@ -38,7 +38,7 @@ import {
 import type { RawItem } from '../../core/contracts.ts';
 import { mediaCacheDir, sweepMediaCache } from '../../core/media-cache.ts';
 import { extractionSpoolRoot } from '../../core/olympus-layout.ts';
-import { prepareExtractionSpool } from '../file-extraction/spool.ts';
+import { extractionSpoolOwnerKey, prepareExtractionSpool } from '../file-extraction/spool.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
 import {
@@ -435,7 +435,11 @@ export function createFileExtractionRuntime(
   const reclassificationRules = defaultTerminalReclassificationRules(registry);
   // File readers (transcription) are handed a path: a source that has to write the item
   // does it in this private folder, and the runner removes each file after the read.
-  const spoolDir = prepareExtractionSpool(extractionSpoolRoot(env));
+  // What a crash left in it goes now, not after a day: files of a process that is gone, and the
+  // folders of an account scope or source that has no job left.
+  const spoolDir = prepareExtractionSpool(extractionSpoolRoot(env), {
+    ownersWithJobs: () => new Set(jobs.jobOwners().map(extractionSpoolOwnerKey)),
+  });
   const runner = createFileExtractionRunner({
     jobs,
     registry,

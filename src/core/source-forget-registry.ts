@@ -34,6 +34,8 @@ import {
 } from '../workers/source-dashboard.ts';
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
+import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
+import { extractionSpoolRoot } from './olympus-layout.ts';
 import {
   forgetTierMigrationReports,
   forgetTierMigrationSelectors,
@@ -148,6 +150,23 @@ export class ForgetStepError extends OperationError {
 const line = (path: string, what: string, count: number): string[] =>
   count > 0 ? [`${path} (${what}: ${count})`] : [];
 
+/**
+ * The extraction spool's scratch files of the account's corpora, or of the named account scopes inside them.
+ */
+function spoolLines(
+  account: ForgetAccount,
+  context: Pick<ForgetContext, 'env'>,
+  { dryRun }: ForgetOptions,
+  accountScopes?: readonly string[],
+): string[] {
+  const root = extractionSpoolRoot(context.env);
+  return line(root, 'scratch files', forgetExtractionSpool(
+    root,
+    { corpusIds: account.corpus_ids, ...(accountScopes ? { accountScopes } : {}) },
+    { dryRun },
+  ));
+}
+
 /** The ids a source's rows may be filed under: its own and its aliases'. */
 const sourceIdsOf = (account: ForgetAccount, context: ForgetContext): string[] =>
   [...new Set([account.source_id, ...(context.sourceAliases ?? [])])];
@@ -210,12 +229,16 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     modules: ['src/workers/file-extraction/job-store.ts', 'src/workers/file-extraction/job-names.ts'],
     forgetAccountScopes(account, accountScopes, context, { dryRun }) {
       // The Secrets claims of a tier ledger stay: the ledger is shared by the other accounts of the corpora.
-      return extractionJobsDbPaths(context.env).flatMap((path) =>
-        line(path, 'extraction rows', forgetExtractionJobs(
-          path,
-          { corpusIds: account.corpus_ids, accountScopes },
-          { dryRun },
-        )));
+      return [
+        ...extractionJobsDbPaths(context.env).flatMap((path) =>
+          line(path, 'extraction rows', forgetExtractionJobs(
+            path,
+            { corpusIds: account.corpus_ids, accountScopes },
+            { dryRun },
+          ))),
+        // The raw scratch files a read left in the spool (a recording a crash interrupted) are theirs too.
+        ...spoolLines(account, context, { dryRun }, accountScopes),
+      ];
     },
     forget(account, context, { dryRun }) {
       // Every ledger this process opened, as the Secrets clearing does.
@@ -229,9 +252,10 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
       // A tier ledger whose id could not be read: its Secrets redaction claims
       // stay, because no claim is retired on a guess. Said in the report.
       const unreadable = context.unreadableTierLedgers?.length ?? 0;
+      const withSpool = [...lines, ...spoolLines(account, context, { dryRun })];
       return unreadable > 0 && paths[0] !== undefined
-        ? [...lines, ...line(paths[0], 'redaction claims kept, tier ledger unreadable', unreadable)]
-        : lines;
+        ? [...withSpool, ...line(paths[0], 'redaction claims kept, tier ledger unreadable', unreadable)]
+        : withSpool;
     },
   },
   {

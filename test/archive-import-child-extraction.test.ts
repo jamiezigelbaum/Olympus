@@ -8,10 +8,11 @@
 // being removed is no longer served: nothing is offered, read or landed.
 
 import { Database } from 'bun:sqlite';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { archiveCorpusId, getArchiveFormat, type ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
+import { extractionSpoolRoot } from '../src/core/olympus-layout.ts';
 import type { SourceConnector } from '../src/core/contracts.ts';
 import { ARCHIVE_EXTRACTION_PROVIDER, ARCHIVE_EXTRACTION_SCOPE_KEY, archiveFileExtractionCorpora, archiveFileExtractionSourceFactory } from '../src/workers/archive-import/extraction-source.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
@@ -166,13 +167,18 @@ describe('reading child items later', () => {
 // A runner with a reader of our own, over the same archive source and tier-set
 // sink the runtime builds, to prove the bounds the registry's real readers set
 // too large to exercise with real bytes.
-function runnerWith(h: ReturnType<typeof childItemsArchiveHarness>, extractor: Extractor, parentsOf: (archiveId: string) => FixtureParentSpec[]) {
+function runnerWith(
+  h: ReturnType<typeof childItemsArchiveHarness>,
+  extractor: Extractor,
+  parentsOf: (archiveId: string) => FixtureParentSpec[],
+  options: { spoolDir?: string } = {},
+) {
   const lane = h.runtime.lane(format.family);
   const secure = lane.set.store('secure_local', { create: true })!;
   const corpusId = archiveCorpusId('secure_local', format.family);
   const view = tieredExtractionView(lane.set, { home: 'secure_local' });
   const jobs = new LocalFileExtractionJobStore(':memory:');
-  const spoolDir = join(h.base, 'spool');
+  const spoolDir = options.spoolDir ?? join(h.base, 'spool');
   const connectorFactory = (): ArchiveConnectorFactory => (input): SourceConnector => createFixtureChildConnector({
     accountScope: input.accountScope, provider: format.provider, family: format.family, id: input.connectorId,
     parents: parentsOf(input.archiveId), log: h.log,
@@ -249,6 +255,55 @@ describe('reading within a reader\'s declared input', () => {
     // Nothing is left in the spool, and none of the bytes were read into the connector's answer.
     for (const path of h.log.spooled) expect(existsSync(path)).toBe(false);
     expect(existsSync(spoolDir) ? readdirSync(spoolDir) : []).toEqual([]);
+  });
+});
+
+/** Every file under a folder, as paths relative to it. */
+function filesIn(root: string, prefix = ''): string[] {
+  if (!existsSync(root)) return [];
+  return readdirSync(root).flatMap((name) => {
+    const path = join(root, name);
+    return statSync(path).isDirectory() ? filesIn(path, `${prefix}${name}/`) : [`${prefix}${name}`];
+  });
+}
+
+describe('a scratch file has an owner', () => {
+  test('a read that dies leaves its file under its archive, and removing the archive removes it and no other archive\'s', async () => {
+    const h = childItemsArchiveHarness(cleanups);
+    const first = h.start('First.mbox');
+    const second = h.start('Second.mbox');
+    const parents = lease();
+    await h.importAll(first, parents);
+    await h.importAll(second, parents);
+
+    // A reader that never returns: the process died mid-transcription, with the recording on disk.
+    const started: string[] = [];
+    const extractor: Extractor = {
+      kind: 'dying_file_reader', version: 'test', input: { kind: 'file' }, egress: 'local', accepts: () => true,
+      async extract(input) {
+        started.push(input.localPath!);
+        await new Promise<never>(() => {});
+        throw new Error('unreachable');
+      },
+    };
+    const spoolRoot = extractionSpoolRoot(h.env);
+    const { runner, key } = runnerWith(h, extractor, () => parents, { spoolDir: spoolRoot });
+    for (const archiveId of [first, second]) await runner.plan({ ...key(archiveId), limit: 10 });
+    void runner.run(key(first));
+    void runner.run(key(second));
+    while (started.length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(filesIn(spoolRoot)).toHaveLength(2);
+    expect(readFileSync(started[0]!, 'utf8').length).toBeGreaterThan(0);
+
+    // The first archive is removed: its raw scratch file goes with it; the second archive's stays.
+    requestArchiveRemoval(h.runtime.state, first);
+    const lane = h.runtime.lane(format.family);
+    let outcome = await runArchiveRemoval({ state: h.runtime.state, lane, archiveId: first });
+    while (outcome.kind === 'progress') outcome = await runArchiveRemoval({ state: h.runtime.state, lane, archiveId: first });
+    expect(outcome.kind).toBe('removed');
+    const left = started.filter((path) => existsSync(path));
+    expect(left).toHaveLength(1);
+    expect(filesIn(spoolRoot)).toHaveLength(1);
   });
 });
 

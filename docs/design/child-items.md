@@ -283,6 +283,12 @@ floor from its parent.
   - Removal then retires the archive's extraction jobs. The job store gains a
     forget step by `(corpus, account scope)`, registered in the forget
     registry; archive corpora are shared by every archive of a family.
+  - The same forget step removes the archive's scratch files from the
+    extraction spool. A file reader's input is written under its owner
+    (`<spool>/c-<corpus>/a-<account scope>/`, each a digest) in a file named
+    for the process that wrote it, so removing an account scope or a source
+    removes what a crashed read left, and a start removes at once the files of
+    a process that is gone and the folders of an owner with no job left.
   - Only then does it purge the rows, as today.
 - **Account delete.** It already forgets extraction jobs by corpus through
   the registry. Children's rows go with the account.
