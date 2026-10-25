@@ -315,8 +315,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       }
       const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
       if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
+        // A child's content row names its parent as the names row does, so each
+        // store's row says whose child it is (child-visibility.ts).
+        const parent = parentOf(set, anchorStore, identity);
         await contentStore.syncFromConnector(
-          singleItemConnector(contentStore, { ...plan.item, content: { kind: 'metadata_only' } }),
+          singleItemConnector(contentStore, {
+            ...plan.item,
+            ...(parent ? { identity: { ...plan.item.identity, parent } } : {}),
+            content: { kind: 'metadata_only' },
+          }),
           {
             fetchContent: false,
             // The content row carries the names row's approved-scope stamp, so
@@ -455,3 +462,22 @@ function singleItemConnector(store: LocalConnectorStore, item: RawItem): SourceC
 }
 
 export type { SourceItemIdentity };
+
+/**
+ * The item a child came inside, as the names row of the child names it: its
+ * provider id (from whichever store holds the parent's row) and its local id.
+ * Undefined for an item that is not a child, or whose parent no store holds.
+ */
+function parentOf(
+  set: TieredStoreSet,
+  anchorStore: LocalConnectorStore,
+  child: Parameters<LocalConnectorStore['parentLocalItemIdOf']>[0],
+): { providerItemId: string; localItemId: string } | undefined {
+  const localItemId = anchorStore.parentLocalItemIdOf(child);
+  if (!localItemId) return undefined;
+  for (const domain of TIER_DOMAIN_ORDER) {
+    const row = set.store(domain)?.activeLocalItemRow(localItemId);
+    if (row) return { providerItemId: row.identity.providerItemId, localItemId };
+  }
+  return undefined;
+}

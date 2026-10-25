@@ -315,7 +315,7 @@ import {
 } from '../x-bookmarks/tier-set.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
-import { createReleaseTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
+import { createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   enableSourceRegistryAdoption,
@@ -2579,14 +2579,19 @@ export async function main(): Promise<void> {
       return [];
     }
   });
-  const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
+  // Each lane's ledger, its corpora and its stores that exist now: the stores
+  // let a child item be judged by its parent where the gate and the release
+  // check read (tier-visibility.ts).
+  const tierScopes = (): TierVisibilityScope[] => tierLanes.map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
-  })));
+    stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
+  }));
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
   // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
-    scopes: () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+    scopes: tierScopes,
   });
   const onDemandCorpusAbsent = (corpusId: string): boolean => {
     for (const lane of tierLanes) {
@@ -3893,7 +3898,7 @@ export async function main(): Promise<void> {
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
         releaseCheck: createReleaseTierCheck(
-          () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+          tierScopes,
           () => secureDerivativeDefault ?? 'allow',
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
@@ -5082,7 +5087,7 @@ export async function main(): Promise<void> {
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
     sourceAnswerReleaseCheck: createReleaseTierCheck(
-      () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+      tierScopes,
       () => secureDerivativeDefault ?? 'allow',
     ),
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
@@ -5494,7 +5499,7 @@ export async function main(): Promise<void> {
   // uses, read when a remote agent collects an answer: an item the answer
   // read that was reclassified since it was written is caught there.
   const remoteReleaseCheck = createReleaseTierCheck(
-    () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+    tierScopes,
     () => secureDerivativeDefault ?? 'allow',
   );
   // Private answers on this computer (design background-agents.md, section

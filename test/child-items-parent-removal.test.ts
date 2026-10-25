@@ -1,23 +1,42 @@
-// A parent item that is tombstoned takes its children with it
-// (docs/design/child-items.md, "Removal"), through the real archive import,
-// tier set, ledger and extraction runtime with the fixture connector standing
-// in for every format. In ONE ledger transaction the parent and its children
-// are hidden and a durable cascade row is written per child; a worker then
-// deletes each child's copies in every store, with retry; a crash between
-// stores leaves the children hidden, never visible; a child read after its
-// parent was hidden lands nothing; a parent that only moved tiers or became a
-// Secret takes nothing with it; and removing the archive clears what is owed.
+// A child is shown only while its parent is (docs/design/child-items.md,
+// "Removal"), through the real archive import, tier set, ledger and extraction
+// runtime with the fixture connector standing in for every format.
+//
+// The rule is decided where it is read and nothing is remembered between
+// reads, so there is no state to lose in a crash and none to get out of step
+// with the stores: the moment a parent is tombstoned in every store that held
+// it, its children are hidden on every read path (fetch by id, keyword search,
+// counts, the cross-store gate, the release check and the parent label), with
+// no step in between. A sweep then removes the children as a provider deletion
+// would, and is cleanup only. A parent that is merely moving tiers, or a
+// Secret (judged on its own words, its children on theirs), takes nothing with
+// it.
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'bun:test';
+import type { RawItem, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { getArchiveFormat } from '../src/core/archive-formats.ts';
+import { answerReleaseWithheldReason, type ReleaseInput, type ReleaseManifest } from '../src/core/release-manifest.ts';
+import { REMOTE_ANSWER_UNVERIFIED, remoteOperationOutput } from '../src/core/remote-result.ts';
+import type { SourceIndexRoutedSearchHit } from '../src/core/source-index/router.ts';
+import type { SourceItemIdentity } from '../src/core/source-index/types.ts';
 import { ARCHIVE_STORE_PLACEMENT } from '../src/workers/archive-import/store.ts';
 import { createArchiveImportRuntime } from '../src/workers/archive-import/runtime.ts';
-import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
-import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
+import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { TierLedger, type TierCopy } from '../src/workers/classification/tier-ledger.ts';
-import type { SourceItemIdentity } from '../src/core/source-index/types.ts';
+import { secretLocationsPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
+import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
+import { createParentLabelResolver } from '../src/workers/connector-store/parent-label.ts';
+import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
+import {
+  createReleaseTierCheck,
+  createTierVisibilityGate,
+  type TierVisibilityScope,
+} from '../src/workers/connector-store/tier-visibility.ts';
 import { childProviderItemId, createFixtureChildConnector, fixtureLocalItemId, type FixtureParentSpec } from './helpers/child-items-fixture.ts';
 import { childItemsArchiveHarness, FIXTURE_ARCHIVE_FORMAT, type ChildItemsArchiveHarness } from './support/child-items-archive-harness.ts';
 import { childItemsExtraction } from './support/child-items-extraction-harness.ts';
@@ -44,6 +63,7 @@ function parents(): FixtureParentSpec[] {
 
 const M1_CHILDREN = [childProviderItemId('m1', 'p1'), childProviderItemId('m1', 'p2')];
 const M2_CHILD = childProviderItemId('m2', 'p1');
+const SYNC = { placement: ARCHIVE_STORE_PLACEMENT, fetchContent: true, deferMetadataOnlyContent: true } as const;
 
 async function importAndRead(readChildren = true) {
   const h = childItemsArchiveHarness(cleanups);
@@ -62,6 +82,8 @@ async function importAndRead(readChildren = true) {
   return { h, archiveId, ext, lane, identityOf };
 }
 
+type Lane = ReturnType<ChildItemsArchiveHarness['runtime']['lane']>;
+
 /** Copies of an item that some store would still serve (current), or is staging (staged). */
 function liveCopies(copies: readonly TierCopy[]): TierCopy[] {
   return copies.filter((copy) => copy.state !== 'superseded');
@@ -71,15 +93,13 @@ function liveRows(h: ChildItemsArchiveHarness, archiveId: string, ids: readonly 
   return h.rows(archiveId).filter((row) => ids.includes(row.providerItemId) && row.tombstoned === 0);
 }
 
-type Lane = ReturnType<ChildItemsArchiveHarness['runtime']['lane']>;
-
-/** Whether any store of the lane would serve this child to a reader (its names or its text). */
-function childReadable(lane: Lane, archiveId: string, providerItemId: string): boolean {
+/** Whether any store of the lane would serve this item to a reader (its names or its text). */
+function readable(lane: Lane, archiveId: string, providerItemId: string): boolean {
   const localItemId = fixtureLocalItemId(archiveId, providerItemId);
   return lane.set.openStores().some((store) => store.localContent(localItemId) !== undefined);
 }
 
-/** Whether a keyword search of any store of the lane finds the child's text. */
+/** Whether a keyword search of any store of the lane finds this text. */
 function textSearchable(lane: Lane, words: string): boolean {
   return lane.set.openStores().some((store) => store.searchItems(words, 5).length > 0);
 }
@@ -87,40 +107,6 @@ function textSearchable(lane: Lane, words: string): boolean {
 /** The parent is deleted in every store that holds it, as an absence reconcile does it. */
 function deleteParent(lane: Lane, identity: SourceItemIdentity): void {
   for (const store of lane.set.openStores()) store.tombstoneCopy(identity, { connectorId: 'absence-reconcile' });
-}
-
-type OwedHook = (...args: unknown[]) => void;
-
-/** The store's hook that makes a deletion durable before its tombstone commits (a private seam, replaced in tests). */
-function owedHookOf(store: unknown): { get(): OwedHook; set(hook: OwedHook): void } {
-  const holder = store as { parentDeletionOwed?: OwedHook };
-  return { get: () => holder.parentDeletionOwed!, set: (hook) => { holder.parentDeletionOwed = hook; } };
-}
-
-/**
- * A process that dies after a store's deletion is made durable and before that store's own
- * transaction commits: the last store holding the parent throws after the hook has run, so the
- * store rolls back and the parent is still held there.
- */
-function deleteParentButRollBackLastStore(lane: Lane, identity: SourceItemIdentity): void {
-  const holders = lane.set.openStores().filter((store) => store.activeLocalItemRow(identity.localItemId) !== undefined);
-  const last = holders[holders.length - 1]!;
-  const hook = owedHookOf(last);
-  const real = hook.get();
-  hook.set((...args) => { real(...args); throw new Error('the store rolled the deletion back'); });
-  for (const store of holders) {
-    try {
-      store.tombstoneCopy(identity, { connectorId: 'absence-reconcile' });
-    } catch {
-      // The rolled-back store; the others committed.
-    }
-  }
-  hook.set(real);
-}
-
-/** A process that dies right after the store commits, before anything settles the deletion. */
-function dieBeforeSettling(lane: Lane): void {
-  (lane.set as unknown as { parentsTombstoned: () => void }).parentsTombstoned = () => { throw new Error('process died'); };
 }
 
 /** What a restarted process sees: every handle closed, the same files opened afresh. */
@@ -131,11 +117,6 @@ function restart(h: ChildItemsArchiveHarness) {
     lane.ledger.close();
   }
   h.runtime.media.close();
-  return openRuntime(h);
-}
-
-/** A second, independent handle on the same files: its own ledger and store connections. */
-function openRuntime(h: ChildItemsArchiveHarness) {
   const runtime = createArchiveImportRuntime({
     env: h.env,
     statePath: join(h.base, 'xdg', 'archive-imports.json'),
@@ -144,22 +125,333 @@ function openRuntime(h: ChildItemsArchiveHarness) {
   });
   cleanups.push(() => {
     runtime.media.close();
-    for (const lane of runtime.existingLanes()) {
-      for (const store of lane.set.openStores()) store.close();
-      lane.secretLocations?.close();
-      lane.ledger.close();
+    for (const reopened of runtime.existingLanes()) {
+      for (const store of reopened.set.openStores()) store.close();
+      reopened.secretLocations?.close();
+      reopened.ledger.close();
     }
   });
   return runtime;
 }
 
-describe('a parent is deleted at the provider', () => {
-  test('its children are hidden and removed from every store, and a sibling parent\'s child is untouched', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    // The children's text landed in the store.
-    expect(h.rows(archiveId).filter((row) => M1_CHILDREN.includes(row.providerItemId) && row.chunks > 0).length).toBeGreaterThan(0);
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
+/** The lane as the cross-store gate and the release check see it. */
+function scopeOf(lane: Lane): TierVisibilityScope {
+  return {
+    ledger: lane.ledger,
+    corpusIds: new Set(lane.set.openStores().map((store) => store.corpusId)),
+    stores: () => lane.set.openStores(),
+  };
+}
 
+function hitOf(lane: Lane, identity: SourceItemIdentity): SourceIndexRoutedSearchHit {
+  const store = lane.set.openStores().find((candidate) => candidate.activeLocalItemRow(identity.localItemId) !== undefined)!;
+  return { corpusId: store.corpusId, sourceItem: identity } as unknown as SourceIndexRoutedSearchHit;
+}
+
+/** The feed lists only the items the predicate keeps: a child arriving on its own. */
+function onlyItems(source: SourceConnector, keep: (item: RawItem) => boolean): SourceConnector {
+  return {
+    ...source,
+    async *listItems(options: SourceConnectorListOptions): AsyncGenerator<SourceConnectorListPage> {
+      for await (const page of source.listItems(options)) yield { ...page, items: page.items.filter(keep) };
+    },
+  };
+}
+
+describe('a child is hidden the moment its parent is, on every read path', () => {
+  test('a parent tombstoned in every store hides its children at once, before anything is removed, and a sibling parent\'s child is untouched', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    for (const id of [...M1_CHILDREN, M2_CHILD]) expect(readable(lane, archiveId, id)).toBe(true);
+    expect(textSearchable(lane, 'thirty-seven months')).toBe(true);
+    const countsBefore = lane.set.openStores().map((store) => store.status().counts.items);
+
+    deleteParent(lane, identityOf('m1'));
+
+    // Fetch by id and keyword search: nothing of the children is served by any store.
+    for (const id of M1_CHILDREN) expect(readable(lane, archiveId, id)).toBe(false);
+    expect(textSearchable(lane, 'thirty-seven months')).toBe(false);
+    expect(textSearchable(lane, 'deposit')).toBe(false);
+    // Counts leave them out too: the parent itself and its two children, in the store that holds the names.
+    const countsAfter = lane.set.openStores().map((store) => store.status().counts.items);
+    expect(countsBefore[0]! - countsAfter[0]!).toBe(3);
+    // Nothing was removed: the rows and the ledger's copies are as they were. The rule is read, not stored.
+    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBeGreaterThan(0);
+    for (const id of M1_CHILDREN) expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
+    // The sibling parent's child is as it was.
+    expect(readable(lane, archiveId, M2_CHILD)).toBe(true);
+    expect(textSearchable(lane, 'gate twelve')).toBe(true);
+  });
+
+  test('the cross-store gate drops a hit on a child whose parent is gone, and keeps one whose parent is there', async () => {
+    const { lane, identityOf } = await importAndRead();
+    const gate = createTierVisibilityGate(() => [scopeOf(lane)]);
+    const hits = [...M1_CHILDREN, M2_CHILD].map((id) => hitOf(lane, identityOf(id)));
+    expect(gate(hits)).toHaveLength(3);
+
+    deleteParent(lane, identityOf('m1'));
+    expect(gate(hits).map((hit) => hit.sourceItem.providerItemId)).toEqual([M2_CHILD]);
+  });
+
+  test('the release check marks a child gone once its parent is: a delayed answer loses the citation, or is withheld when it carried the parent\'s names', async () => {
+    const { lane, identityOf, archiveId } = await importAndRead();
+    const check = createReleaseTierCheck(() => [scopeOf(lane)], () => 'allow');
+    const namesCorpus = lane.set.openStores().find((store) => store.trustDomain === 'internal')!.corpusId;
+    const input = (providerItemId: string, extra: Partial<ReleaseInput> = {}): ReleaseInput => ({
+      corpusId: namesCorpus, provider: format.provider, accountScope: archiveId, providerItemId, privateAtAnswer: false, ...extra,
+    });
+    const cites = (providerItemId: string): Record<string, unknown> => ({
+      corpus_id: namesCorpus, trust_domain: 'internal', family: format.family, provider: format.provider,
+      provider_item_id: providerItemId, title: `${providerItemId}.txt`, authored_at: '2026-01-02T03:04:05.000Z',
+    });
+    const answer = (...ids: string[]) => ({ answer: 'The lease is thirty-seven months.', evidence: ids.map(cites), secret_locations: [] }) as never;
+    const written = (...inputs: ReleaseInput[]): ReleaseManifest[] => [{ inputs, constraints: { secureDerivativeDefault: 'allow', includeSecureLocalContent: false } }];
+    const citations = (output: Record<string, unknown>): unknown[] => output.citations as unknown[];
+
+    const child = input(M1_CHILDREN[0]!);
+    const sibling = input(M2_CHILD);
+    const parentNames = input('m1', { layer: 'names' });
+    expect(check.inputs([child, sibling]).map((verdict) => verdict.gone)).toEqual([false, false]);
+    const before = remoteOperationOutput('source_answer_result', answer(M1_CHILDREN[0]!, M2_CHILD), {
+      releaseCheck: check, releaseManifests: written(child, sibling),
+    });
+    expect(before.status).toBe('answered');
+    expect(citations(before)).toHaveLength(2);
+
+    deleteParent(lane, identityOf('m1'));
+
+    // The child is gone to the check although its own copies are untouched; the sibling's child is not.
+    expect(lane.ledger.copies(identityOf(M1_CHILDREN[0]!)).some((copy) => copy.state === 'current')).toBe(true);
+    expect(check.inputs([child, sibling]).map((verdict) => verdict.gone)).toEqual([true, false]);
+    // The citation of the gone child is dropped; the sibling's stays.
+    const after = remoteOperationOutput('source_answer_result', answer(M1_CHILDREN[0]!, M2_CHILD), {
+      releaseCheck: check, releaseManifests: written(child, sibling),
+    });
+    expect(after.status).toBe('answered');
+    expect(citations(after)).toHaveLength(1);
+    // The paths that withhold on any gone input withhold; an answer of the sibling alone does not.
+    expect(answerReleaseWithheldReason(written(child), check)).toBeDefined();
+    expect(answerReleaseWithheldReason(written(sibling), check)).toBeUndefined();
+    // The parent's names were in front of the model that wrote the answer, and the parent is gone: nothing of it leaves.
+    // (The sync that reports the deletion forgets the parent's copy rows right after its stores tombstone it.)
+    lane.ledger.removeCopies(identityOf('m1'));
+    expect(remoteOperationOutput('source_answer_result', answer(M2_CHILD), {
+      releaseCheck: check, releaseManifests: written(sibling, parentNames),
+    })).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
+  });
+
+  test('a deleted parent gives no label to its child\'s citation', async () => {
+    const { lane, identityOf } = await importAndRead();
+    const resolve = createParentLabelResolver({ stores: () => lane.set.openStores(), scopes: () => [scopeOf(lane)] });
+    const namesStore = lane.set.openStores().find((store) => store.trustDomain === 'internal')!;
+    const request = { corpusId: namesStore.corpusId, sourceItem: identityOf(M1_CHILDREN[0]!) };
+    expect(resolve([request])[0]).toBeDefined();
+    deleteParent(lane, identityOf('m1'));
+    expect(resolve([request])[0]).toBeUndefined();
+  });
+
+  test('a store that cannot say what the parent is hides the child: shown only on positive evidence', async () => {
+    const { archiveId, lane } = await importAndRead();
+    expect(readable(lane, archiveId, M1_CHILDREN[0]!)).toBe(true);
+    for (const store of lane.set.openStores()) {
+      store.parentStandings = () => { throw new Error('the store cannot be read'); };
+    }
+    // The children are hidden; an item that is not a child is not affected.
+    for (const id of [...M1_CHILDREN, M2_CHILD]) expect(readable(lane, archiveId, id)).toBe(false);
+    expect(readable(lane, archiveId, 'm1')).toBe(true);
+    expect(textSearchable(lane, 'thirty-seven months')).toBe(false);
+  });
+
+  test('a child held by two stores names its parent in both, so each store\'s row says whose child it is', async () => {
+    const { h, archiveId } = await importAndRead();
+    const rows = h.rows(archiveId).filter((row) => M1_CHILDREN.includes(row.providerItemId));
+    expect(new Set(rows.map((row) => row.domain))).toEqual(new Set(['internal', 'secure_local']));
+    for (const row of rows) expect(row.parent).toBe(fixtureLocalItemId(archiveId, 'm1'));
+  });
+});
+
+describe('what is not a deletion takes nothing with it', () => {
+  test('a parent still held in another store, or moving tiers, keeps its children shown; the sweep removes nothing', async () => {
+    const { archiveId, lane, identityOf } = await importAndRead();
+    const holders = lane.set.openStores().filter((store) => store.activeLocalItemRow(fixtureLocalItemId(archiveId, 'm1')) !== undefined);
+    expect(holders.length).toBeGreaterThan(1);
+
+    // One holder lets go (a purge after a move): the other still serves the parent.
+    holders[0]!.tombstoneCopy(identityOf('m1'), { connectorId: 'tier-purge' });
+    for (const id of M1_CHILDREN) expect(readable(lane, archiveId, id)).toBe(true);
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 0, retry: 0 });
+  });
+
+  test('a real move of the parent: its children are shown whenever it is, through the move and after it, and never once it is deleted', async () => {
+    const { archiveId, lane, identityOf } = await importAndRead();
+    expect(readable(lane, archiveId, 'm1')).toBe(true);
+    const during: Array<{ parent: boolean; children: boolean[] }> = [];
+    await moveTieredItem({
+      set: lane.set,
+      identity: identityOf('m1'),
+      target: { metadataTier: 'secure', contentTier: 'secure' },
+      beforeFlip: () => {
+        during.push({ parent: readable(lane, archiveId, 'm1'), children: M1_CHILDREN.map((id) => readable(lane, archiveId, id)) });
+      },
+    });
+    // A raise hides the parent's source copy while it moves, and its children with it: at no moment is a
+    // child shown that its parent is not.
+    expect(during).toHaveLength(1);
+    expect(during[0]!.children.every((shown) => shown === during[0]!.parent)).toBe(true);
+    // After the flip the parent is shown from its new store, and so are its children.
+    expect(readable(lane, archiveId, 'm1')).toBe(true);
+    for (const id of M1_CHILDREN) expect(readable(lane, archiveId, id)).toBe(true);
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 0, retry: 0 });
+
+    deleteParent(lane, identityOf('m1'));
+    for (const id of M1_CHILDREN) expect(readable(lane, archiveId, id)).toBe(false);
+    expect(readable(lane, archiveId, M2_CHILD)).toBe(true);
+  });
+
+  test('a parent that became a Secret takes nothing with it: its children are judged on their own, and the parent itself is never shown', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    await moveTieredItem({
+      set: lane.set,
+      identity: identityOf('m1'),
+      target: { metadataTier: 'secrets', contentTier: 'secrets' },
+      secretsDisposition: 'tombstone_now',
+    });
+    // The parent is not served by anyone, in any form.
+    expect(readable(lane, archiveId, 'm1')).toBe(false);
+    expect(liveRows(h, archiveId, ['m1'])).toEqual([]);
+    // Its children are not hidden by it, and the sweep does not remove them.
+    for (const id of M1_CHILDREN) expect(readable(lane, archiveId, id)).toBe(true);
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 0, retry: 0 });
+    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBeGreaterThan(0);
+    for (const id of M1_CHILDREN) expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
+    // Its names give no label to a citation.
+    const resolve = createParentLabelResolver({ stores: () => lane.set.openStores(), scopes: () => [scopeOf(lane)] });
+    const namesStore = lane.set.openStores().find((store) => store.trustDomain === 'internal')!;
+    expect(resolve([{ corpusId: namesStore.corpusId, sourceItem: identityOf(M1_CHILDREN[0]!) }])[0]).toBeUndefined();
+  });
+});
+
+describe('a Secret that no store ever held', () => {
+  // Built at runtime so the repository's credential-pattern check never sees a literal key.
+  const FAKE_AWS_KEY = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+
+  test('a parent caught as a Secret on its own words before any store wrote it keeps its children: the sweep removes nothing', async () => {
+    const h = childItemsArchiveHarness(cleanups);
+    const archiveId = h.start();
+    const secretParent: FixtureParentSpec = { ...parents()[0]!, subject: `Wifi ${FAKE_AWS_KEY}` };
+    await h.importAll(archiveId, [secretParent]);
+    const lane = h.runtime.lane(format.family);
+    // No store holds the parent at all; the ledger alone knows it is a Secret.
+    expect(h.rows(archiveId).filter((row) => row.providerItemId === 'm1')).toEqual([]);
+    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBe(M1_CHILDREN.length);
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 0, retry: 0 });
+    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBe(M1_CHILDREN.length);
+    for (const id of M1_CHILDREN) expect(readable(lane, archiveId, id)).toBe(true);
+  });
+});
+
+describe('legacy children: a store on its own, or beside a ledger that never routed them', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+  const ACCOUNT = 'legacy-account';
+  const PROVIDER = 'fixture-archive';
+
+  function feed(deletedParent = false): SourceConnector {
+    return createFixtureChildConnector({
+      accountScope: ACCOUNT,
+      provider: PROVIDER,
+      parents: [{
+        id: 'msg-1', subject: 'Flat', sender: 'Alice', sentAt: '2024-03-03T10:00:00.000Z', body: 'Please find the lease attached.',
+        ...(deletedParent ? { deleted: true } : {}),
+        children: [{ key: 'p1', name: 'lease.pdf', mimeType: 'application/pdf', text: 'The lease term is thirty-seven months.' }],
+      }],
+    });
+  }
+
+  for (const withLedger of [false, true]) {
+    test(`never routed${withLedger ? ', a ledger beside the store' : ', no ledger'}: shown while the parent's row is, hidden once it is tombstoned`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'olympus-child-removal-'));
+      dirs.push(dir);
+      const ledger = withLedger ? new TierLedger({ dbPath: join(dir, 'tier-ledger.sqlite') }) : undefined;
+      const store = new LocalConnectorStore({
+        dbPath: join(dir, 'store.sqlite'), corpusId: 'secure_local.archive.email', family: 'email', trustDomain: 'secure_local',
+        tierLedger: ledger ?? null,
+      });
+      cleanups.push(() => { store.close(); ledger?.close(); });
+      await store.syncFromConnector(feed(), SYNC);
+      const childLocal = fixtureLocalItemId(ACCOUNT, 'msg-1#child:p1');
+      expect(store.searchItems('lease.pdf', 5).length).toBeGreaterThan(0);
+      expect(store.localContent(childLocal)).toBeDefined();
+
+      await store.syncFromConnector(feed(true), SYNC);
+      // The parent is deleted; the child's row is still there and is not served.
+      expect(store.searchItems('lease.pdf', 5)).toEqual([]);
+      expect(store.localContent(childLocal)).toBeUndefined();
+      const db = new Database(join(dir, 'store.sqlite'), { readonly: true });
+      try {
+        expect(db.query("SELECT COUNT(*) AS n FROM items WHERE provider_item_id LIKE '%#child:%' AND tombstoned = 0").get()).toEqual({ n: 1 });
+      } finally {
+        db.close();
+      }
+    });
+  }
+});
+
+describe('a child listed after its parent was deleted', () => {
+  test('is hidden whenever it arrives, even if the sweep cannot remove it yet, and the sweep removes it when it can', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    deleteParent(lane, identityOf('m1'));
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: M1_CHILDREN.length, retry: 0 });
+
+    // A late listing of a new child of the deleted parent (a feed that lags the deletion). The stores
+    // refuse to remove it for now, so what a reader sees is the read-time rule alone.
+    const late = childProviderItemId('m1', 'p3');
+    const withLate = [{ ...parents()[0]!, children: [...parents()[0]!.children, { key: 'p3', name: 'late.txt', mimeType: 'text/plain', text: 'Arrived late.' }] }];
+    const feed = onlyItems(
+      createFixtureChildConnector({ accountScope: archiveId, provider: format.provider, family: format.family, id: 'late-feed', parents: withLate, log: h.log }),
+      (item) => item.identity.providerItemId === late,
+    );
+    const originals = lane.set.openStores().map((store) => [store, store.tombstoneCopy.bind(store)] as const);
+    for (const [store, real] of originals) {
+      store.tombstoneCopy = ((identity, options) => {
+        if (identity.providerItemId === late) throw new Error('synthetic store failure');
+        return real(identity, options);
+      }) as typeof store.tombstoneCopy;
+    }
+    await lane.set.sync(feed, SYNC);
+
+    expect(liveRows(h, archiveId, [late]).length).toBeGreaterThan(0);
+    expect(readable(lane, archiveId, late)).toBe(false);
+    expect(textSearchable(lane, 'arrived late')).toBe(false);
+
+    for (const [store, real] of originals) store.tombstoneCopy = real;
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 1, retry: 0 });
+    expect(liveRows(h, archiveId, [late])).toEqual([]);
+  });
+});
+
+describe('the sweep removes the children of a parent that is gone, and only those', () => {
+  test('every copy of every child goes, from every store, chunks and search rows with it; the other parent\'s child is untouched', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    expect(h.rows(archiveId).filter((row) => M1_CHILDREN.includes(row.providerItemId) && row.chunks > 0).length).toBeGreaterThan(0);
+
+    deleteParent(lane, identityOf('m1'));
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: M1_CHILDREN.length, retry: 0 });
+
+    expect(liveRows(h, archiveId, ['m1', ...M1_CHILDREN])).toEqual([]);
+    for (const id of M1_CHILDREN) {
+      expect(lane.ledger.copies(identityOf(id))).toEqual([]);
+      expect(h.rows(archiveId).filter((row) => row.providerItemId === id && row.chunks > 0)).toEqual([]);
+    }
+    expect(textSearchable(lane, 'thirty-seven months')).toBe(false);
+    expect(liveRows(h, archiveId, [M2_CHILD]).length).toBeGreaterThan(0);
+    expect(liveCopies(lane.ledger.copies(identityOf(M2_CHILD))).length).toBeGreaterThan(0);
+    expect(readable(lane, archiveId, M2_CHILD)).toBe(true);
+    // Idempotent: nothing is left to do.
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 0, retry: 0 });
+  });
+
+  test('a provider deletion through a sync takes the children with it, by the sweep that closes the sync', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
     const deletion = createFixtureChildConnector({
       accountScope: archiveId,
       provider: format.provider,
@@ -168,51 +460,21 @@ describe('a parent is deleted at the provider', () => {
       parents: [{ ...parents()[0]!, deleted: true }],
       log: h.log,
     });
-    await lane.set.sync(deletion, { placement: ARCHIVE_STORE_PLACEMENT, fetchContent: true, deferMetadataOnlyContent: true });
+    await lane.set.sync(deletion, SYNC);
 
-    // Every copy of every child is gone, in every store; so is the parent.
     expect(liveRows(h, archiveId, ['m1', ...M1_CHILDREN])).toEqual([]);
-    for (const id of M1_CHILDREN) {
-      expect(lane.ledger.copies(identityOf(id))).toEqual([]);
-      expect(h.rows(archiveId).filter((row) => row.providerItemId === id && row.chunks > 0)).toEqual([]);
-    }
-    // The work owed is done, and the other parent's child is as it was.
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    expect(liveRows(h, archiveId, [M2_CHILD]).length).toBeGreaterThan(0);
-    expect(liveRows(h, archiveId, ['m2']).length).toBeGreaterThan(0);
-    expect(liveCopies(lane.ledger.copies(identityOf(M2_CHILD))).length).toBeGreaterThan(0);
+    for (const id of M1_CHILDREN) expect(lane.ledger.copies(identityOf(id))).toEqual([]);
+    expect(liveRows(h, archiveId, [M2_CHILD, 'm2']).length).toBeGreaterThan(0);
+    expect(readable(lane, archiveId, M2_CHILD)).toBe(true);
   });
 
-  test('once the parent\'s last store let go, it and its children are hidden together, with one owed removal per child', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    const before = [...M1_CHILDREN, 'm1'].map((id) => liveCopies(lane.ledger.copies(identityOf(id))).length);
-    expect(before.every((count) => count > 0)).toBe(true);
-
-    deleteParent(lane, identityOf('m1'));
-
-    // Hidden: no copy is current or staged for the parent or any child. Still in the stores, not yet removed.
-    for (const id of ['m1', ...M1_CHILDREN]) expect(liveCopies(lane.ledger.copies(identityOf(id)))).toEqual([]);
-    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBeGreaterThan(0);
-    // One durable row per child, and asking again owes nothing twice.
-    expect(lane.ledger.pendingChildCascades().map((owed) => owed.child.providerItemId).sort()).toEqual([...M1_CHILDREN].sort());
-    expect(lane.set.cascadeParentDeletion(identityOf('m1'))).toBe(0);
-    expect(lane.ledger.pendingChildCascades()).toHaveLength(M1_CHILDREN.length);
-  });
-
-  test('a parent still held in a store is never cascaded, whoever asks', async () => {
-    const { lane, identityOf } = await importAndRead();
-    expect(lane.set.cascadeParentDeletion(identityOf('m1'))).toBe(0);
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    for (const id of ['m1', ...M1_CHILDREN]) expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
-  });
-
-  test('a failure between stores leaves the child hidden and owed, and the next pass finishes it', async () => {
+  test('a child whose copy cannot be removed stays hidden and owed, and the next pass finishes it', async () => {
     const { h, archiveId, lane, identityOf } = await importAndRead();
     deleteParent(lane, identityOf('m1'));
 
-    // One store fails to remove one child, once.
-    const stores = lane.set.openStores();
-    const failing = stores.find((store) => store.childItemsOf(fixtureLocalItemId(archiveId, 'm1')).length > 0)!;
+    const failing = lane.set.openStores().find((store) => store.activeChildrenOf({
+      provider: format.provider, accountScope: archiveId, parentLocalItemId: fixtureLocalItemId(archiveId, 'm1'),
+    }).length > 0)!;
     const real = failing.tombstoneCopy.bind(failing);
     let failed = false;
     failing.tombstoneCopy = ((identity, options) => {
@@ -223,340 +485,84 @@ describe('a parent is deleted at the provider', () => {
       return real(identity, options);
     }) as typeof failing.tombstoneCopy;
 
-    const first = lane.set.runChildCascade();
-    expect(first).toEqual({ removed: 1, retry: 1 });
-    // The failed child is owed still, counted, and hidden: no copy anywhere is current or staged.
-    const owed = lane.ledger.pendingChildCascades();
-    expect(owed.map((entry) => entry.child.providerItemId)).toEqual([M1_CHILDREN[0]!]);
-    expect(owed[0]!.attempts).toBe(1);
-    expect(liveCopies(lane.ledger.copies(identityOf(M1_CHILDREN[0]!)))).toEqual([]);
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 1, retry: 1 });
+    // The failed child is hidden all the same: the rule is read, not removed.
+    expect(readable(lane, archiveId, M1_CHILDREN[0]!)).toBe(false);
+    expect(liveRows(h, archiveId, [M1_CHILDREN[0]!]).length).toBeGreaterThan(0);
 
-    const second = lane.set.runChildCascade();
-    expect(second).toEqual({ removed: 1, retry: 0 });
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 1, retry: 0 });
     expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
     for (const id of M1_CHILDREN) expect(lane.ledger.copies(identityOf(id))).toEqual([]);
   });
 
-  test('a child read after its parent was hidden lands nothing', async () => {
-    const { h, archiveId, ext, lane, identityOf } = await importAndRead(false);
-    deleteParent(lane, identityOf('m1'));
-    const driven = await ext.drive(archiveId);
-    // The sibling parent's child was read; the hidden parent's children were not landed.
-    expect(driven.run.counts.indexed).toBe(1);
-    expect(h.rows(archiveId).filter((row) => M1_CHILDREN.includes(row.providerItemId) && row.chunks > 0)).toEqual([]);
-    for (const id of M1_CHILDREN) expect(liveCopies(lane.ledger.copies(identityOf(id)))).toEqual([]);
-  });
-
-  test('a removal owed when the archive is removed goes with it', async () => {
+  test('a sweep asked for during a sync waits for it: nothing is removed while the sync is in flight', async () => {
     const { h, archiveId, lane, identityOf } = await importAndRead();
     deleteParent(lane, identityOf('m1'));
-    expect(lane.ledger.pendingChildCascades()).toHaveLength(M1_CHILDREN.length);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const base = createFixtureChildConnector({
+      accountScope: archiveId, provider: format.provider, family: format.family, id: 'slow-feed', parents: [parents()[1]!], log: h.log,
+    });
+    const slow: SourceConnector = {
+      ...base,
+      async *listItems(options: SourceConnectorListOptions): AsyncGenerator<SourceConnectorListPage> {
+        await gate;
+        yield* base.listItems(options);
+      },
+    };
+    const syncing = lane.set.sync(slow, SYNC);
+    const sweeping = lane.set.sweepOrphanedChildren();
+    await Bun.sleep(100);
+    // The orphans are hidden, and still there: the sweep has not touched the account's stores.
+    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBeGreaterThan(0);
+    for (const id of M1_CHILDREN) expect(readable(lane, archiveId, id)).toBe(false);
+
+    release();
+    await syncing;
+    await sweeping;
+    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
+    expect(liveRows(h, archiveId, [M2_CHILD]).length).toBeGreaterThan(0);
+  });
+
+  test('asked twice at once, it removes each child once', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    deleteParent(lane, identityOf('m1'));
+    const [first, second] = await Promise.all([lane.set.sweepOrphanedChildren(), lane.set.sweepOrphanedChildren()]);
+    expect(first).toEqual(second);
+    expect(first.removed).toBe(M1_CHILDREN.length);
+    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
+  });
+});
+
+describe('a restart changes nothing a reader sees', () => {
+  test('children of a visible parent stay shown and children of a deleted parent stay hidden, with no recovery step in between', async () => {
+    const { h, archiveId, identityOf, lane } = await importAndRead();
+    deleteParent(lane, identityOf('m1'));
+
+    const reopened = restart(h).lane(format.family);
+    // Straight after the reopen, before any sweep or sync has run.
+    for (const id of M1_CHILDREN) expect(readable(reopened, archiveId, id)).toBe(false);
+    expect(readable(reopened, archiveId, M2_CHILD)).toBe(true);
+    expect(textSearchable(reopened, 'thirty-seven months')).toBe(false);
+    expect(textSearchable(reopened, 'gate twelve')).toBe(true);
+
+    // The sweep that start-up runs finishes the cleanup.
+    expect((await reopened.set.sweepOrphanedChildren()).retry).toBe(0);
+    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
+    expect(readable(reopened, archiveId, M2_CHILD)).toBe(true);
+  });
+});
+
+describe('the archive is removed', () => {
+  test('its children go with it whether or not the sweep has run', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    deleteParent(lane, identityOf('m1'));
 
     requestArchiveRemoval(h.runtime.state, archiveId);
     let outcome = await runArchiveRemoval({ state: h.runtime.state, lane, archiveId });
     while (outcome.kind === 'progress') outcome = await runArchiveRemoval({ state: h.runtime.state, lane, archiveId });
     expect(outcome.kind).toBe('removed');
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
     expect(h.rows(archiveId)).toEqual([]);
-  });
-});
-
-describe('a store reports a parent it tombstoned', () => {
-  test('a parent absent from a re-sync takes its children with it', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    // The parent's store tombstones it outside any listing, as an absence reconcile does.
-    for (const store of lane.set.openStores()) {
-      store.tombstoneCopy(identityOf('m1'), { connectorId: 'absence-reconcile' });
-    }
-    // Told once the last store let go of the parent: one owed removal per child.
-    expect(lane.ledger.pendingChildCascades().map((owed) => owed.child.providerItemId).sort()).toEqual([...M1_CHILDREN].sort());
-    lane.set.runChildCascade();
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
-    expect(liveRows(h, archiveId, [M2_CHILD]).length).toBeGreaterThan(0);
-  });
-
-  test('a parent that became a Secret takes nothing with it: its children are judged on their own', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    for (const store of lane.set.openStores()) {
-      store.tombstoneCopy(identityOf('m1'), { connectorId: 'secrets', trustTier: 'S5' });
-    }
-    lane.set.runChildCascade();
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBeGreaterThan(0);
-    for (const id of M1_CHILDREN) expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
-  });
-
-  test('children left behind by a report that was lost are found again', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    // The report is lost: the store tombstones with no observer listening.
-    for (const store of lane.set.openStores()) store.observeParentTombstones(undefined);
-    for (const store of lane.set.openStores()) store.tombstoneCopy(identityOf('m1'), { connectorId: 'absence-reconcile' });
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    expect(liveRows(h, archiveId, M1_CHILDREN).length).toBeGreaterThan(0);
-
-    // The set looks again (rate-limited, so the clock is moved on) and removes them. The children's
-    // names sit in another store than the parent's: the walk follows the parent link across stores.
-    for (const store of lane.set.openStores()) store.observeParentTombstones(() => {});
-    expect(lane.set.reconcileOrphanedChildren(Date.now() + 10 * 60_000)).toBe(M1_CHILDREN.length);
-    lane.set.runChildCascade();
-    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
-  });
-});
-
-describe('a crash between the parent store\'s commit and the ledger', () => {
-  test('the process dies after the parent is tombstoned and before the children are hidden: the restart finds them hidden, not served', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    // The process dies between the parent store's commit and the ledger's transaction.
-    lane.ledger.hideAndQueueChildren = () => { throw new Error('process died'); };
-    deleteParent(lane, identityOf('m1'));
-    // The parent is gone from the stores; the ledger never recorded the cascade.
-    expect(liveRows(h, archiveId, ['m1'])).toEqual([]);
-    // Still, no child is served by anyone: the deletion was made durable first.
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(false);
-
-    const runtime = restart(h);
-    const reopened = runtime.lane(format.family);
-    // Nothing has synced or reconciled since the restart; the children are already not served.
-    for (const id of M1_CHILDREN) expect(childReadable(reopened, archiveId, id)).toBe(false);
-    for (const id of M1_CHILDREN) expect(liveCopies(reopened.ledger.copies(identityOf(id)))).toEqual([]);
-    expect(reopened.ledger.pendingChildCascades().map((owed) => owed.child.providerItemId).sort()).toEqual([...M1_CHILDREN].sort());
-    expect(reopened.ledger.pendingParentDeletions()).toEqual([]);
-    // The sibling parent's child is untouched, and the removal still finishes.
-    expect(liveCopies(reopened.ledger.copies(identityOf(M2_CHILD))).length).toBeGreaterThan(0);
-    expect(childReadable(reopened, archiveId, M2_CHILD)).toBe(true);
-    reopened.set.runChildCascade();
-    expect(reopened.ledger.pendingChildCascades()).toEqual([]);
-    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
-  });
-
-  test('a deletion the ledger cannot record is not committed by the store', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    lane.ledger.holdParentDeletion = () => { throw new Error('ledger unavailable'); };
-    for (const store of lane.set.openStores()) {
-      try {
-        store.tombstoneCopy(identityOf('m1'), { connectorId: 'absence-reconcile' });
-      } catch {
-        // The store refused to commit the deletion.
-      }
-    }
-    // The parent is still held, its children are served, and nothing is owed or half-recorded.
-    expect(liveRows(h, archiveId, ['m1']).length).toBeGreaterThan(0);
-    expect(liveCopies(lane.ledger.copies(identityOf('m1'))).length).toBeGreaterThan(0);
-    for (const id of M1_CHILDREN) expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(true);
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-  });
-
-  test('a deletion made durable first is cleared in the same step that owes the removals', async () => {
-    const { lane, identityOf } = await importAndRead();
-    const seen: number[] = [];
-    const real = lane.ledger.hideAndQueueChildren.bind(lane.ledger);
-    lane.ledger.hideAndQueueChildren = ((parent, children) => {
-      // At the moment the removals are owed, the intent is still there to be cleared with them.
-      seen.push(lane.ledger.pendingParentDeletions().length);
-      return real(parent, children);
-    }) as typeof lane.ledger.hideAndQueueChildren;
-    deleteParent(lane, identityOf('m1'));
-    expect(seen).toEqual([1]);
-    expect(lane.ledger.pendingParentDeletions()).toEqual([]);
-    expect(lane.ledger.pendingChildCascades()).toHaveLength(M1_CHILDREN.length);
-  });
-});
-
-describe('a parent\'s deletion fails closed', () => {
-  /** The same parent listed again, present, as a later run of the import does. */
-  async function listAgain(h: ChildItemsArchiveHarness, lane: Lane, archiveId: string, extraChildren: FixtureParentSpec['children'] = []) {
-    const parent = parents()[0]!;
-    const feed = createFixtureChildConnector({
-      accountScope: archiveId,
-      provider: format.provider,
-      family: format.family,
-      id: 'relist-feed',
-      parents: [{ ...parent, children: [...parent.children, ...extraChildren] }],
-      log: h.log,
-    });
-    await lane.set.sync(feed, { placement: ARCHIVE_STORE_PLACEMENT, fetchContent: true, deferMetadataOnlyContent: true });
-  }
-
-  test('the deletion is made durable and the children are refused before the parent\'s store commits', async () => {
-    const { archiveId, lane, identityOf } = await importAndRead();
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(true);
-    expect(textSearchable(lane, 'thirty-seven months')).toBe(true);
-
-    const seenInsideTheStoreTransaction: boolean[][] = [];
-    for (const store of lane.set.openStores()) {
-      const hook = owedHookOf(store);
-      const real = hook.get();
-      hook.set((...args) => {
-        real(...args);
-        seenInsideTheStoreTransaction.push(M1_CHILDREN.map((id) => childReadable(lane, archiveId, id)));
-      });
-    }
-    deleteParent(lane, identityOf('m1'));
-    // The hook ran with the deletion recorded and no store committed yet: nobody could read a child by then.
-    expect(seenInsideTheStoreTransaction.length).toBeGreaterThan(0);
-    expect(seenInsideTheStoreTransaction[seenInsideTheStoreTransaction.length - 1]!.every((readable) => !readable)).toBe(true);
-    expect(textSearchable(lane, 'thirty-seven months')).toBe(false);
-  });
-
-  test('a recovery that fails at start leaves the child unreadable, and the next pass finishes the job', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    // The process dies after the parent store commits and before anything settles.
-    dieBeforeSettling(lane);
-    deleteParent(lane, identityOf('m1'));
-    expect(lane.ledger.pendingParentDeletions()).toHaveLength(1);
-
-    // The restart cannot write the cascade (its ledger write fails), but it finishes opening.
-    const realHide = TierLedger.prototype.hideAndQueueChildren;
-    TierLedger.prototype.hideAndQueueChildren = () => { throw new Error('ledger write failed'); };
-    cleanups.push(() => { TierLedger.prototype.hideAndQueueChildren = realHide; });
-    const reopened = restart(h).lane(format.family);
-
-    expect(reopened.ledger.pendingParentDeletions()).toHaveLength(1);
-    expect(reopened.ledger.pendingChildCascades()).toEqual([]);
-    for (const id of M1_CHILDREN) expect(childReadable(reopened, archiveId, id)).toBe(false);
-    expect(textSearchable(reopened, 'thirty-seven months')).toBe(false);
-
-    // The write works again: the next pass owes the removals, and nothing was ever readable in between.
-    TierLedger.prototype.hideAndQueueChildren = realHide;
-    expect(reopened.set.recoverParentDeletions()).toBe(M1_CHILDREN.length);
-    expect(reopened.ledger.pendingParentDeletions()).toEqual([]);
-    for (const id of M1_CHILDREN) expect(childReadable(reopened, archiveId, id)).toBe(false);
-    reopened.set.runChildCascade();
-    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
-    void identityOf;
-  });
-
-  test('another process passing by while the parent still looks active clears nothing, and the child is never readable', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    // A second process: its own ledger and store connections on the same files, opened while nothing is pending.
-    const other = openRuntime(h).lane(format.family);
-    other.set.openStores();
-
-    const otherSaw: Array<{ readable: boolean; pending: number }> = [];
-    for (const store of lane.set.openStores()) {
-      const hook = owedHookOf(store);
-      const real = hook.get();
-      hook.set((...args) => {
-        real(...args);
-        // Between the ledger's write and this store's commit, the other process runs its recovery pass.
-        other.set.recoverParentDeletions();
-        otherSaw.push({
-          readable: M1_CHILDREN.some((id) => childReadable(other, archiveId, id)),
-          pending: other.ledger.pendingParentDeletions().length,
-        });
-      });
-    }
-    // The first process commits and dies before it settles anything.
-    dieBeforeSettling(lane);
-    deleteParent(lane, identityOf('m1'));
-
-    expect(otherSaw.length).toBeGreaterThan(0);
-    const during = otherSaw[otherSaw.length - 1]!;
-    expect(during.readable).toBe(false);
-    expect(during.pending).toBe(1);
-    // After the commit, the other process still reads nothing and still sees the deletion owed.
-    for (const id of M1_CHILDREN) expect(childReadable(other, archiveId, id)).toBe(false);
-    expect(other.ledger.pendingParentDeletions()).toHaveLength(1);
-
-    // A start settles it: the parent is tombstoned, so the removals are owed and the children stay unreadable.
-    const reopened = restart(h).lane(format.family);
-    for (const id of M1_CHILDREN) expect(childReadable(reopened, archiveId, id)).toBe(false);
-    expect(reopened.ledger.pendingChildCascades().map((owed) => owed.child.providerItemId).sort()).toEqual([...M1_CHILDREN].sort());
-    expect(reopened.ledger.pendingParentDeletions()).toEqual([]);
-    expect(childReadable(reopened, archiveId, M2_CHILD)).toBe(true);
-  });
-
-  test('a parent still held in another store is a move, not a deletion: nothing is held until the last store lets go', async () => {
-    const { archiveId, lane, identityOf } = await importAndRead();
-    const holders = lane.set.openStores().filter((store) => store.activeLocalItemRow(fixtureLocalItemId(archiveId, 'm1')) !== undefined);
-    expect(holders.length).toBeGreaterThan(1);
-
-    holders[0]!.tombstoneCopy(identityOf('m1'), { connectorId: 'tier-purge' });
-    expect(lane.ledger.pendingParentDeletions()).toEqual([]);
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(true);
-
-    for (const store of holders.slice(1)) store.tombstoneCopy(identityOf('m1'), { connectorId: 'tier-purge' });
-    expect(lane.ledger.pendingChildCascades()).toHaveLength(M1_CHILDREN.length);
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(false);
-  });
-
-  test('a deletion the parent\'s store rolled back keeps the children hidden, with no removal owed, until the parent is seen again', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    deleteParentButRollBackLastStore(lane, identityOf('m1'));
-
-    // The last store still holds the parent; nothing was owed, and the children's copies are kept.
-    expect(lane.set.openStores().some((store) => store.activeLocalItemRow(fixtureLocalItemId(archiveId, 'm1')) !== undefined)).toBe(true);
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    expect(lane.ledger.pendingParentDeletions()).toHaveLength(1);
-    for (const id of M1_CHILDREN) {
-      expect(liveCopies(lane.ledger.copies(identityOf(id))).length).toBeGreaterThan(0);
-      expect(childReadable(lane, archiveId, id)).toBe(false);
-    }
-
-    // A restart and a pass do not lift it: nothing has seen the parent since.
-    const reopened = restart(h).lane(format.family);
-    reopened.set.recoverParentDeletions();
-    reopened.set.runChildCascade();
-    expect(reopened.ledger.pendingParentDeletions()).toHaveLength(1);
-    expect(reopened.ledger.pendingChildCascades()).toEqual([]);
-    for (const id of M1_CHILDREN) expect(childReadable(reopened, archiveId, id)).toBe(false);
-    expect(childReadable(reopened, archiveId, M2_CHILD)).toBe(true);
-  });
-
-  test('a parent seen again after the deletion shows its children again', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    deleteParentButRollBackLastStore(lane, identityOf('m1'));
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(false);
-
-    await Bun.sleep(5);
-    await listAgain(h, lane, archiveId);
-
-    expect(lane.ledger.pendingParentDeletions()).toEqual([]);
-    expect(lane.ledger.pendingChildCascades()).toEqual([]);
-    for (const id of M1_CHILDREN) expect(lane.ledger.heldForDeletion(identityOf(id))).toBe(false);
-    expect(lane.ledger.heldForDeletion(identityOf('m1'))).toBe(false);
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(true);
-    expect(textSearchable(lane, 'thirty-seven months')).toBe(true);
-  });
-
-  test('a sighting older than the deletion cannot lift it, and one after it does', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    const children = M1_CHILDREN.map(identityOf);
-    // The deletion is noted after any write the next listing can make: that listing is stale next to it.
-    lane.ledger.holdParentDeletion(identityOf('m1'), children, new Date(Date.now() + 3_600_000).toISOString());
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(false);
-
-    await Bun.sleep(5);
-    await listAgain(h, lane, archiveId);
-    expect(lane.ledger.pendingParentDeletions()).toHaveLength(1);
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(false);
-
-    // The same deletion noted before the listing's write is lifted by it.
-    lane.ledger.liftParentDeletion(identityOf('m1'));
-    lane.ledger.holdParentDeletion(identityOf('m1'), children, new Date(Date.now() - 3_600_000).toISOString());
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(false);
-    await listAgain(h, lane, archiveId);
-    expect(lane.ledger.pendingParentDeletions()).toEqual([]);
-    for (const id of M1_CHILDREN) expect(childReadable(lane, archiveId, id)).toBe(true);
-  });
-
-  test('a child listed while its parent\'s deletion is pending is held with the rest', async () => {
-    const { h, archiveId, lane, identityOf } = await importAndRead();
-    lane.ledger.holdParentDeletion(
-      identityOf('m1'),
-      M1_CHILDREN.map(identityOf),
-      new Date(Date.now() + 3_600_000).toISOString(),
-    );
-    await Bun.sleep(5);
-    const late = childProviderItemId('m1', 'p3');
-    await listAgain(h, lane, archiveId, [{ key: 'p3', name: 'late.txt', mimeType: 'text/plain', text: 'Arrived late.' }]);
-    expect(lane.ledger.heldForDeletion(identityOf(late))).toBe(true);
-    // When the deletion is confirmed it takes the late child too.
-    deleteParent(lane, identityOf('m1'));
-    expect(lane.ledger.pendingChildCascades().map((owed) => owed.child.providerItemId)).toContain(late);
   });
 });

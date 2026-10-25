@@ -293,44 +293,55 @@ floor from its parent.
 - **Account delete.** It already forgets extraction jobs by corpus through
   the registry. Children's rows go with the account.
 - **A parent deleted** (a Gmail message deleted at the provider, or an item
-  absent from a re-sync). The protocol fails closed: a crash or a failure
-  between the stores, or in the pass that repairs it, leaves the children
-  hidden, never visible.
-  - **Hold first.** Before the parent's store commits its tombstone, one
-    ledger transaction writes the deletion's intent and a hold on the parent
-    and on every child. A held item is refused by every read of the ledger's
-    copy states, whatever its copies say and whatever later writes them (a
-    move that completes, a re-judge, a re-placement), until the deletion is
-    confirmed or lifted. If the hold cannot be written, the tombstone does not
-    commit. When another store still holds the parent (it moved tiers, or the
-    deletion is not whole yet), the store that lets go last holds it.
-  - **Cascade after confirmation.** The removals are owed only once the
-    parent is seen tombstoned in a store and held in none. In one ledger
-    transaction the parent's and the children's copies are superseded, a
-    durable cascade row is written per child and the intent goes; each child
-    stays held until its own removal is done. A worker then deletes each
-    child's copy in every tier store that holds one, with retry. A deletion a
-    store rolled back owes nothing.
-  - **Recovery never infers.** At start, before each sync and after it, each
-    pending deletion is settled from what the stores say: tombstoned and held
-    nowhere, the removals are owed; held somewhere, it waits with everything
-    still held. Nothing is cleared because the parent looks active, and a
-    pass that fails leaves every deletion pending and held.
-  - **Only a sighting lifts it.** A parent a store has written again after the
-    deletion was noted (the row's write time is later than the intent's
-    `observed_after`, a store-clock time) lifts the hold on it and its
-    children and clears the intent; an older write cannot. A Secret parent is
-    not a deletion: its children are judged on their own words and the hold is
-    lifted. An item listed while its parent's deletion is pending is held
-    with the rest.
-  - The ledger tables are `tier_parent_deletion_intent` (schema 11, with
-    `observed_after` from schema 12) and `tier_deletion_hold` (schema 12).
-  - One gap is accepted: "the store that lets go last holds the deletion"
-    assumes one writer per parent. If two processes tombstone the same parent
-    in two different stores in the same instant, each sees the other store
-    still holding it and neither holds first. The pass after their commits
-    then owes the removals, and only a crash in that same instant leaves the
-    children served.
+  absent from a re-sync). A child is shown only while its parent is, and that
+  is decided where the child is read. Nothing is recorded when a parent goes,
+  so there is no deletion state to lose in a crash and none to get out of step
+  with the stores: the moment the parent is gone, its children are hidden on
+  the next read.
+  - **One rule.** The parent's standing is the rule that already decides any
+    item: it has a current copy in the tier ledger at a store whose row for it
+    is present and not tombstoned. An item the ledger never routed has no copy
+    to look for; it stands while a store holds its row. A store with no ledger
+    judges by its own row. A parent that is itself a child stands only while
+    its own parent does (up to eight levels).
+  - **One function.** `connector-store/child-visibility.ts` holds the check;
+    nothing copies it. Each store applies it in the one place every read of
+    its rows passes through, and the cross-store consumers apply it to the
+    items they gather: keyword and vector search, fetch by id, counts and
+    status, the embedding sweep, unreadable-file locators, the parent label,
+    the cross-store gate, and the release check (a child whose parent is gone
+    is `gone`, so an answer that cited it loses the citation, or is withheld
+    when it carried the parent's names).
+  - **Looked up in the child's own tier set.** The ledger that governs the
+    child's stores and those stores, and nowhere else. A second install of the
+    same source, or another source, can never make a parent stand.
+  - **Fail closed.** A child is shown only on positive evidence. A ledger or a
+    store that cannot be read, a parent no store has a row for, or a chain
+    that is too deep hides the child. Hiding is not removal: only a parent
+    that is gone (below) costs its children their rows.
+  - **A Secret parent is not a deletion.** Its row is kept as a location only,
+    or it was caught on its own words before any store wrote it and only the
+    ledger knows it. Either counts as present without being read; its names
+    and content are never shown through the check, and its children are
+    judged on their own words.
+  - **A parent moving tiers** is hidden for a moment with its row still
+    active. That is not gone, and its children stay hidden with it and return
+    with it.
+  - **The orphan sweep** is cleanup only: the check already hid the children.
+    It runs when the worker starts and after each account sync, and removes
+    the children of a parent that is gone (no store holds an active row for it
+    and it is not a Secret) through the normal path: every open store
+    tombstones the child's copy (its chunks, search rows, vectors and media
+    holds go with it), then the Secrets index entry, then the ledger's copy
+    rows, stores first so a half-done removal never reads as a visible child.
+    It is idempotent and works in batches. It never touches the children of a
+    parent that stands. It does not run while a sync is in flight (each batch
+    is judged and removed in one synchronous step, and a pass ends when a sync
+    starts), so it cannot meet a parent a sync is about to write. A child it
+    cannot remove stays hidden and is tried again at the next pass.
+  - **Legacy children** (rows written before the ledger routed them, or in a
+    store with no ledger) are judged by the same rule from their own parent
+    link.
 - **Media.** Prepared photo copies in the media cache are released by the
   chunk triggers that already release them.
 
@@ -415,7 +426,6 @@ floor from its parent.
   - The archive record gains the append-only media-binding table (a SQLite
     file beside the record, forgotten with each archive on removal and taken
     with the source on Delete).
-  - The tier ledger gains the parent key and the cascade queue.
 
 ## Later: identical files read once
 
@@ -463,8 +473,7 @@ This follows the versioned change gate in `docs/ENGINEERING_PROCESS.md`:
   - architecture guard;
   - classifier-neutrality suite;
   - `test/tier-hold-until-judged-guard.test.ts`;
-  - store-open guard (forget steps for the new queues and the job store's new
-    step);
+  - store-open guard (the job store's new forget step);
   - public-surface guard, with the allowlist not growing.
 
 ## Order
@@ -474,7 +483,7 @@ This follows the versioned change gate in `docs/ENGINEERING_PROCESS.md`:
      - the contract fields;
      - the store and ledger columns;
      - the judge's parent-names context;
-     - the cascade and its queue;
+     - the read-time parent check and the orphan sweep;
      - the generation check;
      - the extraction-jobs forget by account scope;
      - sync deferral;
@@ -542,8 +551,10 @@ Round 1, twelve findings, and how each is settled:
   decision removes: no child waits on, or moves with, its parent.
 - **The parent label** needs a destination-scoped authorization and travels
   as a dependency through dispatch and release.
-- **Cascade** is a ledger hide plus durable per-store deletes, behind an
-  archive generation.
+- **Parent removal** is a read-time rule, a child shown only while its parent
+  is, with an orphan sweep for cleanup, behind an archive generation. (The
+  first design wrote a ledger hold and a durable cascade queue; the owner
+  replaced it because the rule needs no recorded state.)
 - **Children cross pages**, with positions taken from their references.
 - **Media beside a chat export** joins the manifest only under a chosen folder.
 - **Reading later** has durable locators, availability, sync deferral,

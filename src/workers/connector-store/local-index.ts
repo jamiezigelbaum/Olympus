@@ -93,6 +93,16 @@ import {
 } from './tier-placement.ts';
 import { forgetSecretInSideStores, retireSecretRedactions } from './secrets-disposition.ts';
 import {
+  hiddenChildKeys,
+  parentIdentityField,
+  parentKey,
+  parentVerdicts,
+  type ChildProbe,
+  type ChildVisibilityLane,
+  type ParentRef,
+  type ParentStandingRow,
+} from './child-visibility.ts';
+import {
   createSourceExclusionMatcherFromPrefixes,
   sourceExclusionOutcomeIsUnevaluable,
   type SourceExclusionDecision,
@@ -2569,6 +2579,8 @@ export class LocalConnectorStore {
   private reactionsColumnPresent = false;
   /** Whether the v15 child-item columns are here (a read-only open of an older store has none). */
   private childItemColumnsPresent = false;
+  /** The tier set this store belongs to, for judging a child by its parent (`useChildVisibility`). */
+  private childLane: ChildVisibilityLane | undefined;
   /** Whether `chunks` carries the v13 media columns (a read-only open of an older store does not). */
   private chunkMediaColumnsPresent = false;
   /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
@@ -2586,12 +2598,6 @@ export class LocalConnectorStore {
   private tierLedgerOwned: boolean | undefined;
   private tierLedgerDisabled: boolean | undefined;
   private boundLedgerHandle: TierLedger | undefined;
-  // Parents this store tombstoned that other items came inside, told to the
-  // tiered store set (if any) once the writing transaction has committed, so it
-  // can hide and remove their children (docs/design/child-items.md, "Removal").
-  private parentTombstoneObserver: ((parents: SourceItemIdentity[]) => void) | undefined;
-  private parentDeletionOwed: ((parent: SourceItemIdentity, tombstonedAt: string) => void) | undefined;
-  private tombstonedParents: Map<string, SourceItemIdentity> | undefined;
   /**
    * Items a sync handed to this store's embedding sweep instead of embedding
    * them itself, each with the exact provider (and so the scope binding) the
@@ -2947,20 +2953,39 @@ export class LocalConnectorStore {
     throwOnUnavailable = false,
   ): T[] {
     if (rows.length === 0) return [];
-    let copies: Map<string, TierCopy[]>;
+    let copies: Map<string, TierCopy[]> | undefined;
     try {
       const ledger = this.visibilityLedger();
-      if (!ledger || !ledger.corpusHasCopies(this.corpusId)) return [...rows];
-      copies = ledger.copiesForMany(rows.map(identityOf));
+      if (ledger && ledger.corpusHasCopies(this.corpusId)) copies = ledger.copiesForMany(rows.map(identityOf));
     } catch (error) {
       if (throwOnUnavailable) throw error;
       return [];
     }
-    return rows.filter((row) => tierRowVisible(
-      copies.get(tierLedgerIdentityKey(identityOf(row))),
-      this.corpusId,
-      layerOf(row),
-    ));
+    const served = copies
+      ? rows.filter((row) => tierRowVisible(
+        copies.get(tierLedgerIdentityKey(identityOf(row))),
+        this.corpusId,
+        layerOf(row),
+      ))
+      : [...rows];
+    return this.withoutChildrenOfHiddenParents(served, identityOf);
+  }
+
+  /**
+   * A child is served only while its parent is (child-visibility.ts): the same
+   * rule at the same place as the copy filter above, so every read that honors
+   * a hidden copy honors this. The parent is looked for in the tier set this
+   * store belongs to; whatever cannot be established hides the child.
+   */
+  private withoutChildrenOfHiddenParents<T>(
+    rows: T[],
+    identityOf: (row: T) => { provider: string; accountScope: string; providerItemId: string; providerConversationId?: string },
+  ): T[] {
+    if (rows.length === 0) return rows;
+    // The link is looked for in every store of the set, not this one alone: a
+    // copy written for its text may be a row that does not say whose child it is.
+    const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
+    return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
   }
 
   /**
@@ -2973,6 +2998,19 @@ export class LocalConnectorStore {
     held: number[];
     metadataLayer: number[];
     /** The subset of `metadataLayer` whose text no current copy holds yet: still to be read. */
+    metadataLayerContentUnread: number[];
+    moving: number;
+  } {
+    const base = this.tierLedgerHiddenItemPks();
+    // A child whose parent is not served is hidden with the copies the ledger hides.
+    const children = this.hiddenChildItemPks();
+    return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+  }
+
+  private tierLedgerHiddenItemPks(): {
+    hidden: number[];
+    held: number[];
+    metadataLayer: number[];
     metadataLayerContentUnread: number[];
     moving: number;
   } {
@@ -3065,20 +3103,13 @@ export class LocalConnectorStore {
     trustTier: SourceTrustTier;
     /** The approved-scope stamp the lane put on the row, when it has one. */
     sourceScope?: { accountGeneration: string; scopeRevision: string; folderKeys: string[] };
-    /**
-     * When this store last wrote the row (the store clock). A listing that
-     * sees the item again writes it, so a time later than a deletion's is a
-     * sighting after it.
-     */
-    observedAt?: string;
   } | undefined {
     const row = this.db.query(`
       SELECT provider, account_scope, provider_item_id, provider_conversation_id, locator_uri, trust_tier,
-        source_scope_generation, source_scope_revision, source_scope_folder_keys_json, indexed_at
+        source_scope_generation, source_scope_revision, source_scope_folder_keys_json
       FROM items WHERE local_item_id = ? AND tombstoned = 0
       LIMIT 1
     `).get(localItemId) as {
-      indexed_at: string | null;
       provider: string;
       account_scope: string;
       provider_item_id: string;
@@ -3115,7 +3146,6 @@ export class LocalConnectorStore {
             },
           }
         : {}),
-      ...(row.indexed_at ? { observedAt: row.indexed_at } : {}),
     };
   }
 
@@ -3266,76 +3296,24 @@ export class LocalConnectorStore {
     };
   }
 
-  /**
-   * Be told, after the writing transaction commits, of each parent this store
-   * tombstoned (a provider deletion, or absence from a full snapshot) that
-   * other items came inside. A Secret is not a deletion: its children are
-   * judged on their own and are not reported.
-   *
-   * `owed` is called BEFORE the tombstone can commit (inside the writing
-   * transaction, with the parent's identity and the store clock's time of the
-   * tombstone): the caller makes the deletion durable and hides the children
-   * where a crash cannot lose it, so a crash after this store commits still
-   * finds the children hidden. A throw from it fails the writing
-   * transaction: a deletion that cannot be made durable is not committed.
-   */
-  observeParentTombstones(
-    observer: ((parents: SourceItemIdentity[]) => void) | undefined,
-    owed?: ((parent: SourceItemIdentity, tombstonedAt: string) => void) | undefined,
-  ): void {
-    this.parentTombstoneObserver = observer;
-    this.parentDeletionOwed = owed;
-  }
+  // ---- Child items: who may be seen ------------------------------------------
+  // A child is visible only while its parent is (child-visibility.ts; the rule
+  // is decided where it is read, so nothing is recorded when a parent goes).
 
   /**
-   * Remembers a just-tombstoned row (a Secret excepted) for `flushTombstonedParents`.
-   * Whether other items came inside it is the set's question: its children's
-   * names may sit in another tier's store than the parent's.
+   * Hands this store the tier set it belongs to, so that a child is judged by
+   * its parent wherever the parent sits. A store without one is its own set.
    */
-  private noteTombstonedParent(itemPk: number): void {
-    if (!this.parentTombstoneObserver || !this.childItemColumnsPresent) return;
-    const row = this.db.query(`
-      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
-        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier,
-        indexed_at
-      FROM items WHERE item_pk = ? AND tombstoned = 1
-    `).get(itemPk) as (Pick<ItemRow,
-      'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
-      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'>
-      & { trust_tier: string; indexed_at: string }) | null;
-    if (!row || row.trust_tier === 'S5') return;
-    const { indexed_at: tombstonedAt, ...fields } = row;
-    const parent = sourceItemFromRow({ ...fields, rank: 0 } as ItemRow);
-    this.parentDeletionOwed?.(parent, tombstonedAt);
-    (this.tombstonedParents ??= new Map()).set(row.local_item_id, parent);
+  useChildVisibility(lane: ChildVisibilityLane | undefined): void {
+    this.childLane = lane;
   }
 
-  /**
-   * Reports the parents tombstoned since the last report, each re-read first
-   * (a rolled-back tombstone is not one). A failing observer never fails the
-   * write: the set walks the parents of active children and finds them again.
-   */
-  private flushTombstonedParents(): void {
-    const noted = this.tombstonedParents;
-    if (!noted || noted.size === 0) return;
-    const parents = [...noted.values()];
-    noted.clear();
-    const observer = this.parentTombstoneObserver;
-    if (!observer) return;
-    try {
-      const confirmed = parents.filter((parent) => this.db.query(`
-        SELECT 1 AS tombstoned FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 1
-      `).get(
-        parent.provider,
-        parent.accountScope,
-        normalizeConversationId(parent.providerConversationId),
-        parent.providerItemId,
-      ) !== null);
-      if (confirmed.length > 0) observer(confirmed);
-    } catch {
-      // Found again by the set's next reconcile.
-    }
+  /** The lane a child's parent is looked for in: the set's, else this store alone. */
+  private childVisibilityLane(): ChildVisibilityLane {
+    return this.childLane ?? {
+      ledger: () => this.visibilityLedger(),
+      stores: () => [this],
+    };
   }
 
   /** Whether any item here came inside another. */
@@ -3345,30 +3323,197 @@ export class LocalConnectorStore {
   }
 
   /**
-   * The local ids of the parents of active children here, in id order after
-   * `after`: what a set walks, a page at a time, to find a parent that was
-   * tombstoned without the set being told.
+   * The parent link of each of `identities` that is a child here, by
+   * `tierLedgerIdentityKey`; a row that is not a child is left out. Active or
+   * tombstoned: the question is whose child it is, not whether it is served.
    */
-  activeChildParentLocalIds(after: string | undefined, limit: number): string[] {
-    if (!this.childItemColumnsPresent) return [];
-    const rows = this.db.query(`
-      SELECT DISTINCT parent_local_item_id AS id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0 AND parent_local_item_id > ?
-      ORDER BY parent_local_item_id LIMIT ?
-    `).all(after ?? '', Math.max(1, Math.floor(limit))) as Array<{ id: string }>;
-    return rows.map((row) => row.id);
+  parentLinksOf(identities: readonly ChildProbe[]): Map<string, ParentRef> {
+    const links = new Map<string, ParentRef>();
+    if (identities.length === 0 || !this.hasChildItems()) return links;
+    for (let offset = 0; offset < identities.length; offset += 200) {
+      const batch = identities.slice(offset, offset + 200);
+      const rows = this.db.query(`
+        SELECT provider, account_scope, provider_conversation_id, provider_item_id, parent_local_item_id FROM items
+        WHERE parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
+      `).all(...batch.flatMap((identity) => [
+        identity.provider,
+        identity.accountScope,
+        normalizeConversationId(identity.providerConversationId),
+        identity.providerItemId,
+      ])) as Array<{
+        provider: string;
+        account_scope: string;
+        provider_conversation_id: string | null;
+        provider_item_id: string;
+        parent_local_item_id: string;
+      }>;
+      for (const row of rows) {
+        links.set(tierLedgerIdentityKey({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.provider_item_id,
+          ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+        }), {
+          provider: row.provider,
+          accountScope: row.account_scope,
+          parentLocalItemId: row.parent_local_item_id,
+          ...parentIdentityField({
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+          }),
+        });
+      }
+    }
+    return links;
   }
 
-  /** This store's tombstoned row for an item (not a Secret's), if it holds one. */
-  tombstonedItemByLocalId(localItemId: string): SourceItemIdentity | undefined {
-    const row = this.db.query(`
+  /**
+   * What this store's rows say of each parent: present and not tombstoned
+   * (`active`), or kept as a Secret's location only (`secret`). Identity,
+   * state and link only; never a name or a word of text. A parent this store
+   * has no row for is absent from the result.
+   */
+  parentStandings(parents: readonly ParentRef[]): ParentStandingRow[] {
+    if (parents.length === 0) return [];
+    const wanted = new Set(parents.map((parent) => parentKey(parent)));
+    const ids = [...new Set(parents.map((parent) => parent.parentLocalItemId))];
+    const out: ParentStandingRow[] = [];
+    for (let offset = 0; offset < ids.length; offset += 20_000) {
+      const rows = this.db.query(`
+        SELECT provider, account_scope, provider_item_id, provider_conversation_id, local_item_id, tombstoned, trust_tier,
+          ${this.childItemColumnsPresent ? 'parent_local_item_id' : 'NULL AS parent_local_item_id'}
+        FROM items WHERE local_item_id IN (SELECT value FROM json_each(?))
+      `).all(JSON.stringify(ids.slice(offset, offset + 20_000))) as Array<{
+        provider: string;
+        account_scope: string;
+        provider_item_id: string;
+        provider_conversation_id: string | null;
+        local_item_id: string;
+        tombstoned: number;
+        trust_tier: string;
+        parent_local_item_id: string | null;
+      }>;
+      for (const row of rows) {
+        const ref: ParentRef = { provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.local_item_id };
+        if (!wanted.has(parentKey(ref))) continue;
+        out.push({
+          ...ref,
+          identity: {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+          },
+          active: row.tombstoned === 0,
+          secret: row.trust_tier === 'S5',
+          ...(row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}),
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The item pks here of children that are not served because their parent is
+   * not (child-visibility.ts), for the counts, the aggregates and the
+   * embedding sweep that leave out what a reader cannot see. Empty for a store
+   * with no child.
+   */
+  private hiddenChildItemPks(): number[] {
+    if (!this.hasChildItems()) return [];
+    const groups = this.db.query(`
+      SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+      GROUP BY provider, account_scope, parent_local_item_id
+    `).all() as Array<{
+      provider: string;
+      account_scope: string;
+      parent_local_item_id: string;
+      child_item_id: string;
+      provider_conversation_id: string | null;
+    }>;
+    const parents: ParentRef[] = groups.map((group) => ({
+      provider: group.provider,
+      accountScope: group.account_scope,
+      parentLocalItemId: group.parent_local_item_id,
+      ...parentIdentityField({
+        provider: group.provider,
+        accountScope: group.account_scope,
+        providerItemId: group.child_item_id,
+        ...(group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}),
+      }),
+    }));
+    const verdicts = parentVerdicts(this.childVisibilityLane(), parents);
+    const hiddenParents = parents.filter((parent) => verdicts.get(parentKey(parent))?.visible !== true);
+    const pks: number[] = [];
+    for (let offset = 0; offset < hiddenParents.length; offset += 20_000) {
+      const rows = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, parent_local_item_id) IN (
+            SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)
+          )
+      `).all(JSON.stringify(hiddenParents.slice(offset, offset + 20_000)
+        .map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId]))) as Array<{ item_pk: number }>;
+      for (const row of rows) pks.push(row.item_pk);
+    }
+    return pks;
+  }
+
+  /**
+   * The parents of the active children here, `limit` of them in
+   * (parent id, provider, account) order after `after`: what the set's sweep
+   * pages through to find a parent that is gone.
+   */
+  activeChildParents(after: ParentRef | undefined, limit: number): ParentRef[] {
+    if (!this.childItemColumnsPresent) return [];
+    const rows = this.db.query(`
+      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+      GROUP BY parent_local_item_id, provider, account_scope
+      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+    `).all(
+      after?.parentLocalItemId ?? '',
+      after?.provider ?? '',
+      after?.accountScope ?? '',
+      Math.max(1, Math.floor(limit)),
+    ) as Array<{
+      parent_local_item_id: string;
+      provider: string;
+      account_scope: string;
+      child_item_id: string;
+      provider_conversation_id: string | null;
+    }>;
+    return rows.map((row) => ({
+      provider: row.provider,
+      accountScope: row.account_scope,
+      parentLocalItemId: row.parent_local_item_id,
+      ...parentIdentityField({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.child_item_id,
+        ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+      }),
+    }));
+  }
+
+  /** The active children of a parent here, by their stored parent link. */
+  activeChildrenOf(parent: ParentRef): SourceItemIdentity[] {
+    if (!this.childItemColumnsPresent) return [];
+    const rows = this.db.query(`
       SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
         provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
-      FROM items WHERE local_item_id = ? AND tombstoned = 1 AND trust_tier <> 'S5' ORDER BY item_pk LIMIT 1
-    `).get(localItemId) as Pick<ItemRow,
+      FROM items
+      WHERE parent_local_item_id = ? AND provider = ? AND account_scope = ? AND tombstoned = 0
+      ORDER BY item_pk
+    `).all(parent.parentLocalItemId, parent.provider, parent.accountScope) as Array<Pick<ItemRow,
       'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
-      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'> | null;
-    return row ? sourceItemFromRow({ ...row, rank: 0 } as ItemRow) : undefined;
+      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'>>;
+    return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 } as ItemRow));
   }
 
   /** Confirm an immutable stored item's current provider scope without rewriting its body or vectors. */
@@ -3444,10 +3589,7 @@ export class LocalConnectorStore {
     } finally {
       // The pictures its chunks carried (and their judgments) go when no
       // other chunk here carries them; inside a caller's transaction, after it.
-      if (!this.db.inTransaction) {
-        this.releaseUnreferencedChunkMedia();
-        this.flushTombstonedParents();
-      }
+      if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
     }
   }
 
@@ -7530,7 +7672,6 @@ export class LocalConnectorStore {
       return await this.syncFromConnectorHeld(connector, options);
     } finally {
       this.releaseUnreferencedChunkMedia();
-      this.flushTombstonedParents();
     }
   }
 
@@ -8317,9 +8458,7 @@ export class LocalConnectorStore {
       const binding = this.tierSetBinding();
       if (binding && (!ledger || ledger.ledgerId() !== binding.ledgerId)) return false;
       if (!ledger) return true;
-      // The copies as they are: a pending deletion hides an item from readers, but
-      // the item stays writable (its being written again is what lifts the deletion).
-      const state = ledger.itemStatesForMany([identity], { raw: true }).get(tierLedgerIdentityKey(identity));
+      const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
       if (!state || !state.record.routed) return true;
       const { record, copies } = state;
       if (record.contentTier === 'secrets' || record.metadataTier === 'secrets') return false;
@@ -8472,7 +8611,6 @@ export class LocalConnectorStore {
           `).run(now, now, syncRunId, row.item_pk);
           this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
           this.deleteFtsForItem(row.item_pk);
-          this.noteTombstonedParent(row.item_pk);
           this.rememberItemOwner(
             row.item_pk,
             connectorId,
@@ -8556,7 +8694,6 @@ export class LocalConnectorStore {
           `).run(now, now, syncRunId, row.item_pk);
           this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
           this.deleteFtsForItem(row.item_pk);
-          this.noteTombstonedParent(row.item_pk);
         }
         count += rows.length;
       }
@@ -8617,7 +8754,6 @@ export class LocalConnectorStore {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(existing.item_pk);
         this.deleteFtsForItem(existing.item_pk);
         if (tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
-        else this.noteTombstonedParent(existing.item_pk);
         this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, 'local_write');
         return true;
       }
