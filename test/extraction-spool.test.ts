@@ -10,8 +10,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
-import { extractionSpoolRoot } from '../src/core/olympus-layout.ts';
+import { accountExtractionSpoolRoot, accountFolder, extractionSpoolRoot } from '../src/core/olympus-layout.ts';
 import { FORGET_STEPS } from '../src/core/source-forget-registry.ts';
+import { placedAccount } from '../src/core/source-placement.ts';
+import { updateSourceRegistry } from '../src/core/source-registry.ts';
 import {
   EXTRACTION_SPOOL_STALE_MS,
   extractionSpoolOwnerDir,
@@ -124,28 +126,58 @@ describe('forgetting an owner\'s files', () => {
 });
 
 describe('deleting a source forgets its scratch files', () => {
-  test('the forget step of the extraction jobs takes the source\'s corpora, and an account-scope forget takes only its scopes', () => {
+  /** An env whose archive imports account is recorded with this layout. */
+  function envWithArchiveAccount(layout: 'legacy' | 'folder') {
     const base = mkdtempSync(join(tmpdir(), 'extraction-spool-forget-'));
     cleanups.push(() => rmSync(base, { recursive: true, force: true }));
     const env = { HOME: base, XDG_DATA_HOME: join(base, 'xdg'), OPENCLAW_STATE_DIR: join(base, 'openclaw') };
-    const spool = extractionSpoolRoot(env);
-    const corpusId = 'secure_local.archive.mail';
+    updateSourceRegistry(env, (registry) => {
+      registry.accounts.push({ source_id: 'archive.imports', slot: '1', state: 'active', layout, corpus_ids: [], created_at: '2026-10-25T00:00:00.000Z' });
+    });
+    return env;
+  }
+  const step = () => FORGET_STEPS.find((candidate) => candidate.id === 'file-extraction-jobs')!;
+  const corpusId = 'secure_local.archive.mail';
+  const account = { source_id: 'archive.imports', slot: '1', corpus_ids: [corpusId] } as never;
+
+  test('a legacy account\'s scratch files sit in the shared spool: the forget step takes the source\'s corpora, and an account-scope forget takes only its scopes', () => {
+    const env = envWithArchiveAccount('legacy');
+    const spool = accountExtractionSpoolRoot(placedAccount('archive.imports', env), env);
+    expect(spool).toBe(extractionSpoolRoot(env));
     const a = put(extractionSpoolOwnerDir(spool, { corpusId, accountScope: 'archive-a' }), 'spool-1-1-a');
     const b = put(extractionSpoolOwnerDir(spool, { corpusId, accountScope: 'archive-b' }), 'spool-1-1-b');
     const other = put(extractionSpoolOwnerDir(spool, { corpusId: 'internal.other', accountScope: 'x' }), 'spool-1-1-o');
-    const step = FORGET_STEPS.find((candidate) => candidate.id === 'file-extraction-jobs')!;
-    const account = { source_id: 'archive.imports', slot: '1', corpus_ids: [corpusId] } as never;
 
     // A scoped forget (one archive removed from a family's shared corpus) takes that archive's files only.
-    const scoped = step.forgetAccountScopes!(account, ['archive-a'], { env } as never, { dryRun: false });
+    const scoped = step().forgetAccountScopes!(account, ['archive-a'], { env } as never, { dryRun: false });
     expect(scoped.join('\n')).toContain('scratch files: 1');
     expect(existsSync(a)).toBe(false);
     expect(existsSync(b)).toBe(true);
 
     // A source delete takes every account scope of its corpora, and nothing of another source's.
-    const whole = step.forget(account, { env } as never, { dryRun: false });
+    const whole = step().forget(account, { env } as never, { dryRun: false });
     expect(whole.join('\n')).toContain('scratch files: 1');
     expect(existsSync(b)).toBe(false);
     expect(existsSync(other)).toBe(true);
+  });
+
+  test('an account in its folder keeps them in its raw/ folder: an account-scope forget takes only that scope\'s, and the whole-account forget leaves the rest to the folder\'s Delete', () => {
+    const env = envWithArchiveAccount('folder');
+    const spool = accountExtractionSpoolRoot(placedAccount('archive.imports', env), env);
+    expect(spool).toBe(join(accountFolder({ source_id: 'archive.imports', slot: '1' }, env), 'raw', 'extraction-spool'));
+    const a = put(extractionSpoolOwnerDir(spool, { corpusId, accountScope: 'archive-a' }), 'spool-1-1-a');
+    const b = put(extractionSpoolOwnerDir(spool, { corpusId, accountScope: 'archive-b' }), 'spool-1-1-b');
+    const shared = put(extractionSpoolOwnerDir(extractionSpoolRoot(env), { corpusId, accountScope: 'archive-a' }), 'spool-1-1-s');
+
+    const scoped = step().forgetAccountScopes!(account, ['archive-a'], { env } as never, { dryRun: false });
+    expect(scoped.join('\n')).toContain('scratch files: 1');
+    expect(existsSync(a)).toBe(false);
+    expect(existsSync(b)).toBe(true);
+    // The shared spool is a legacy account's: nothing of a folder account's is looked for there.
+    expect(existsSync(shared)).toBe(true);
+
+    // The folder goes whole at Delete, so the forget step has nothing of its own to do.
+    expect(step().forget(account, { env } as never, { dryRun: false }).join('\n')).not.toContain('scratch files');
+    expect(existsSync(b)).toBe(true);
   });
 });

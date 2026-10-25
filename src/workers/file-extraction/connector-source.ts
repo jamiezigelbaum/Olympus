@@ -12,7 +12,7 @@
  * Nothing here names a source family.
  */
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
 import { extractionSpoolFileName, extractionSpoolOwnerDir, pruneExtractionSpoolOwner } from './spool.ts';
 import type { RawItem, SourceConnector } from '../../core/contracts.ts';
@@ -72,6 +72,7 @@ export interface FileFetchConnector extends SourceConnector {
       expectedVersion?: string;
       deferredBytes?: { locator: string };
       spoolDir: string;
+      spoolRoot?: string;
     },
   ): Promise<{ item: RawItem; path: string; spooled: boolean }>;
 }
@@ -110,7 +111,19 @@ export async function readItemWithin(
 export async function readItemToFile(
   connector: SourceConnector,
   localItemId: string,
-  options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string }; spoolDir: string },
+  options: {
+    maxBytes?: number;
+    expectedVersion?: string;
+    deferredBytes?: { locator: string };
+    spoolDir: string;
+    /**
+     * The spool root `spoolDir` is inside. It is made once, at start; this read
+     * makes the owner's folder in it and no more, so a root that is gone (the
+     * account's folder was deleted under a running worker) is not made again,
+     * which would bring the deleted folder back.
+     */
+    spoolRoot?: string;
+  },
 ): Promise<{ item: RawItem; path: string; spooled: boolean }> {
   if (isFileFetchConnector(connector)) return connector.fetchItemToFile(localItemId, options);
   const item = await readItemWithin(connector, localItemId, options);
@@ -125,6 +138,9 @@ export async function readItemToFile(
   // lands between the make and the write is made again.
   for (let attempt = 0; ; attempt += 1) {
     try {
+      if (options.spoolRoot !== undefined && !existsSync(options.spoolRoot)) {
+        throw new Error('The extraction spool folder is gone.');
+      }
       mkdirSync(options.spoolDir, { recursive: true, mode: 0o700 });
       writeFileSync(path, bytes, { mode: 0o600 });
       break;
@@ -306,6 +322,7 @@ export function createConnectorFileExtractionSource(
           ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
           ...(deferred ? { deferredBytes: { locator: deferred.locator } } : {}),
           spoolDir,
+          spoolRoot: fileOptions.spoolDir,
         });
       } catch (error) {
         throw asSourceError(error);

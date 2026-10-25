@@ -35,7 +35,8 @@ import {
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
-import { extractionSpoolRoot } from './olympus-layout.ts';
+import { accountExtractionSpoolRoot } from './olympus-layout.ts';
+import { placedAccount } from './source-placement.ts';
 import {
   forgetTierMigrationReports,
   forgetTierMigrationSelectors,
@@ -151,7 +152,12 @@ const line = (path: string, what: string, count: number): string[] =>
   count > 0 ? [`${path} (${what}: ${count})`] : [];
 
 /**
- * The extraction spool's scratch files of the account's corpora, or of the named account scopes inside them.
+ * The extraction spool's scratch files of the account's corpora, or of the
+ * named account scopes inside them. An account in its folder keeps its spool
+ * in the folder (`raw/extraction-spool`), which a Delete removes whole, so the
+ * whole-account forget has nothing to do there; an account scope forgotten out
+ * of a corpus its siblings share (an archive removed) is still named, in that
+ * folder's spool. A `legacy` account's scratch files sit in the shared spool.
  */
 function spoolLines(
   account: ForgetAccount,
@@ -159,7 +165,9 @@ function spoolLines(
   { dryRun }: ForgetOptions,
   accountScopes?: readonly string[],
 ): string[] {
-  const root = extractionSpoolRoot(context.env);
+  const placed = placedAccount(account.source_id, context.env, account.slot);
+  if (placed.layout === 'folder' && accountScopes === undefined) return [];
+  const root = accountExtractionSpoolRoot(placed, context.env);
   return line(root, 'scratch files', forgetExtractionSpool(
     root,
     { corpusIds: account.corpus_ids, ...(accountScopes ? { accountScopes } : {}) },
@@ -236,7 +244,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
             { corpusIds: account.corpus_ids, accountScopes },
             { dryRun },
           ))),
-        // The raw scratch files a read left in the spool (a recording a crash interrupted) are theirs too.
+        // The raw scratch files a read left in the account's spool (a recording a crash interrupted) are theirs too.
         ...spoolLines(account, context, { dryRun }, accountScopes),
       ];
     },

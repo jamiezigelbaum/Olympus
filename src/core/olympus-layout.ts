@@ -788,13 +788,31 @@ export function mediaCacheRoot(env: LayoutEnv = process.env): string {
 }
 
 /**
- * Where a file reader's input is written when the source has to write it
- * (a member of an archive, a part of a message): `<data root>/extraction-spool`.
- * Private to the extraction runner, which removes each file after reading and
- * sweeps leftovers of a crash at start.
+ * Where a `legacy` account's file readers' input is written when the source
+ * has to write it (a member of an archive, a part of a message):
+ * `<data root>/extraction-spool`, shared by every legacy account and keyed
+ * inside by corpus and account scope. A `folder` account keeps its own in its
+ * folder (`accountExtractionSpoolRoot`). Private to the extraction runner,
+ * which removes each file after reading and sweeps leftovers of a crash at
+ * start.
  */
 export function extractionSpoolRoot(env: LayoutEnv = process.env): string {
   return olympusDataPath(env, 'extraction-spool');
+}
+
+/**
+ * Where an account's file readers' input is written: `raw/extraction-spool` in
+ * its folder, so the raw bytes of a recording or an attachment sit with the
+ * account that owns them and a Delete of the account takes them with the
+ * folder. A `legacy` account has no folder, so it uses the shared
+ * `extractionSpoolRoot`. Inside, scratch files are keyed by corpus and account
+ * scope (file-extraction/spool.ts), because one account holds several corpora
+ * and, for imported archives, many account scopes.
+ */
+export function accountExtractionSpoolRoot(account: LayoutAccount, env: LayoutEnv = process.env): string {
+  return account.layout === 'folder'
+    ? join(accountFolder(account, env), 'raw', 'extraction-spool')
+    : extractionSpoolRoot(env);
 }
 
 /** A WhatsApp state location as a folder: the value names the folder, or the `session.db` inside it. */

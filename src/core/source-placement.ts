@@ -38,11 +38,13 @@ import {
 import { archiveImportFamilies, isArchiveCorpusId } from './archive-formats.ts';
 import {
   FOLDER_LAYOUT_SOURCES,
+  accountExtractionSpoolRoot,
   accountFolder,
   accountRawPath,
   accountStorePath,
   legacyAccountPaths,
   legacyOverrideEnvNames,
+  extractionSpoolRoot,
   nativeCaptureOwnerPin,
   olympusDataRoot,
   TELEGRAM_SOURCE_ID,
@@ -112,6 +114,26 @@ export function placedAccount(
     return { source_id: sourceId, slot, layout: 'legacy' };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
+}
+
+/**
+ * Where the scratch files of a file reader's input for this corpus go: the
+ * extraction spool of the account that owns the corpus (the corpus registry's
+ * source for it, any imported archive's corpus being `archive.imports`), in
+ * its folder when it lives in one. The folder is used only when the corpus's
+ * store is in it too, which is the evidence that the folder is the account's
+ * (a store held elsewhere, or in memory, keeps the scratch files in the
+ * shared spool a `legacy` account uses).
+ */
+export function extractionSpoolRootForCorpus(
+  corpus: { corpusId: string; trustDomain: string; storePath?: string },
+  env: LayoutEnv = process.env,
+  registered: ReadonlyArray<{ corpusId: string; sourceId: string }> = [],
+): string {
+  const account = placedAccount(storageAccountForCorpus(corpus, registered).sourceId, env);
+  const inFolder = account.layout === 'folder'
+    && (corpus.storePath === undefined || isInsideAccountFolder(corpus.storePath, account, env));
+  return inFolder ? accountExtractionSpoolRoot(account, env) : extractionSpoolRoot(env);
 }
 
 /** One of an account's stores, by the registry (or, with no entry, by what a new account would get). */

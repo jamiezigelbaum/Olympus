@@ -274,6 +274,12 @@ export interface ExtractionRunnerCorpus {
    * the reading first. The sink still refuses it either way.
    */
   refusesImageContent?: (ref: ExtractionItemRef) => boolean;
+  /**
+   * This corpus's own spool root, where its account keeps the scratch files a
+   * source writes for a file reader. It wins over the runner's `spoolDir`,
+   * which is for a corpus that names none.
+   */
+  spoolDir?: string;
 }
 
 export interface FileExtractionRunnerOptions {
@@ -295,7 +301,9 @@ export interface FileExtractionRunnerOptions {
   maxConsecutiveRetryableFailures?: number;
   /**
    * A private folder in the data folder where a source writes an item it must
-   * hand a file reader as a file. Without it a file reader gets bytes.
+   * hand a file reader as a file, for a corpus that names no spool of its own
+   * (`ExtractionRunnerCorpus.spoolDir`). Without either a file reader gets
+   * bytes.
    */
   spoolDir?: string;
   now?: () => Date;
@@ -850,6 +858,7 @@ export function createFileExtractionRunner(
         ...(request.providerItemIds !== undefined ? { providerItemIds: request.providerItemIds } : {}),
       });
 
+      const spoolDir = corpus.spoolDir ?? options.spoolDir;
       const records: ExtractionRunRecord[] = [];
       let consecutiveRetryableFailures = 0;
       let paused = false;
@@ -879,7 +888,7 @@ export function createFileExtractionRunner(
             source ??= await resolveSource(corpus);
             return source;
           },
-          ...(options.spoolDir !== undefined ? { spoolDir: options.spoolDir } : {}),
+          ...(spoolDir !== undefined ? { spoolDir } : {}),
           now,
         });
 

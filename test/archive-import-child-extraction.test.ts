@@ -8,11 +8,12 @@
 // being removed is no longer served: nothing is offered, read or landed.
 
 import { Database } from 'bun:sqlite';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { archiveCorpusId, getArchiveFormat, type ArchiveConnectorFactory } from '../src/core/archive-formats.ts';
-import { extractionSpoolRoot } from '../src/core/olympus-layout.ts';
+import { accountFolder, extractionSpoolRoot } from '../src/core/olympus-layout.ts';
+import { extractionSpoolRootForCorpus } from '../src/core/source-placement.ts';
 import type { SourceConnector } from '../src/core/contracts.ts';
 import { ARCHIVE_EXTRACTION_PROVIDER, ARCHIVE_EXTRACTION_SCOPE_KEY, archiveFileExtractionCorpora, archiveFileExtractionSourceFactory } from '../src/workers/archive-import/extraction-source.ts';
 import { requestArchiveRemoval, runArchiveRemoval } from '../src/workers/archive-import/removal.ts';
@@ -167,6 +168,20 @@ describe('reading child items later', () => {
 // A runner with a reader of our own, over the same archive source and tier-set
 // sink the runtime builds, to prove the bounds the registry's real readers set
 // too large to exercise with real bytes.
+/** Where the production runtime puts the scratch files of the archive family's Private corpus. */
+function archiveSpoolRoot(h: ReturnType<typeof childItemsArchiveHarness>): string {
+  return extractionSpoolRootForCorpus({
+    corpusId: archiveCorpusId('secure_local', format.family),
+    trustDomain: 'secure_local',
+    storePath: archiveConnectorStoreDbPath('secure_local', format.family, h.env),
+  }, h.env);
+}
+
+/** A process id that has ended: a child that ran and exited. */
+function deadPid(): number {
+  return Bun.spawnSync(['true']).pid;
+}
+
 function runnerWith(
   h: ReturnType<typeof childItemsArchiveHarness>,
   extractor: Extractor,
@@ -286,7 +301,9 @@ describe('a scratch file has an owner', () => {
         throw new Error('unreachable');
       },
     };
-    const spoolRoot = extractionSpoolRoot(h.env);
+    // Where the production runtime puts a corpus's scratch files: the archive account's own folder.
+    const spoolRoot = archiveSpoolRoot(h);
+    expect(spoolRoot).toBe(join(accountFolder({ source_id: 'archive.imports', slot: '1' }, h.env), 'raw', 'extraction-spool'));
     const { runner, key } = runnerWith(h, extractor, () => parents, { spoolDir: spoolRoot });
     for (const archiveId of [first, second]) await runner.plan({ ...key(archiveId), limit: 10 });
     void runner.run(key(first));
@@ -304,7 +321,26 @@ describe('a scratch file has an owner', () => {
     const left = started.filter((path) => existsSync(path));
     expect(left).toHaveLength(1);
     expect(filesIn(spoolRoot)).toHaveLength(1);
-  });
+    // Nothing of an account in its folder is written to the folder legacy accounts share.
+    expect(existsSync(extractionSpoolRoot(h.env))).toBe(false);
+  }, 30_000);
+
+  test('the production runtime keeps the archive account\'s scratch files in its folder, and sweeps what a dead process left there at start', async () => {
+    const h = childItemsArchiveHarness(cleanups);
+    await h.importAll(h.start(), lease());
+    const root = archiveSpoolRoot(h);
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const orphan = join(root, `spool-${deadPid()}-${Date.now()}-abc`);
+    const running = join(root, `spool-${process.pid}-${Date.now()}-def`);
+    writeFileSync(orphan, 'raw bytes');
+    writeFileSync(running, 'raw bytes');
+
+    childItemsExtraction(h, cleanups, { parents: lease() });
+
+    expect(existsSync(orphan)).toBe(false);
+    expect(existsSync(running)).toBe(true);
+    expect(existsSync(extractionSpoolRoot(h.env))).toBe(false);
+  }, 30_000);
 });
 
 describe('an archive being removed is no longer served', () => {

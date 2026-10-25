@@ -23,6 +23,7 @@
  * gate, not by leaving a kind out of a registry.
  */
 
+import { existsSync } from 'node:fs';
 import {
   createEnvCredentialBroker,
   type CredentialBroker,
@@ -38,6 +39,7 @@ import {
 import type { RawItem } from '../../core/contracts.ts';
 import { mediaCacheDir, sweepMediaCache } from '../../core/media-cache.ts';
 import { extractionSpoolRoot } from '../../core/olympus-layout.ts';
+import { extractionSpoolRootForCorpus } from '../../core/source-placement.ts';
 import { extractionSpoolOwnerKey, prepareExtractionSpool } from '../file-extraction/spool.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
@@ -273,6 +275,21 @@ export function createFileExtractionRuntime(
     options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env),
   );
 
+  // Each account keeps the scratch files a file reader's input is written to in its own folder
+  // (core/source-placement.ts, `extractionSpoolRootForCorpus`), so deleting the account takes them
+  // with it. A root is prepared once, when the first corpus that uses it is served: what a crash
+  // left in it goes now, not after a day (files of a process that is gone, and the folders of an
+  // account scope or source that has no job left).
+  const preparedSpools = new Map<string, string | undefined>();
+  const prepareSpool = (root: string): string | undefined => {
+    if (!preparedSpools.has(root)) {
+      preparedSpools.set(root, prepareExtractionSpool(root, {
+        ownersWithJobs: () => new Set(jobs.jobOwners().map(extractionSpoolOwnerKey)),
+      }));
+    }
+    return preparedSpools.get(root);
+  };
+
   const corpora: ExtractionRunnerCorpus[] = [];
   // Where each served corpus's items live: its store, or every store of its tier set.
   const itemStores = new Map<string, () => LocalConnectorStore[]>();
@@ -322,9 +339,16 @@ export function createFileExtractionRuntime(
         throw new FileExtractionSourceError('source_item_not_found');
       }
     };
+    // A spool that cannot be prepared only means this corpus's file readers get bytes instead.
+    const spoolDir = prepareSpool(extractionSpoolRootForCorpus({
+      corpusId: config.corpusId,
+      trustDomain: store.trustDomain,
+      storePath: store.dbPath,
+    }, env));
     corpora.push({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
+      ...(spoolDir ? { spoolDir } : {}),
       source: async () => {
         options.scopeGuard?.assertAuthorized({ config, store });
         const source = await buildSource({ config, store, ...(view ? { view } : {}) });
@@ -434,17 +458,15 @@ export function createFileExtractionRuntime(
 
   const reclassificationRules = defaultTerminalReclassificationRules(registry);
   // File readers (transcription) are handed a path: a source that has to write the item
-  // does it in this private folder, and the runner removes each file after the read.
-  // What a crash left in it goes now, not after a day: files of a process that is gone, and the
-  // folders of an account scope or source that has no job left.
-  const spoolDir = prepareExtractionSpool(extractionSpoolRoot(env), {
-    ownersWithJobs: () => new Set(jobs.jobOwners().map(extractionSpoolOwnerKey)),
-  });
+  // does it in the account's private spool folder (`ExtractionRunnerCorpus.spoolDir`), and the
+  // runner removes each file after the read. Files an earlier layout (or an account that has
+  // since moved into its folder) left in the shared spool go at the next start, as above.
+  const sharedSpool = extractionSpoolRoot(env);
+  if (existsSync(sharedSpool)) prepareSpool(sharedSpool);
   const runner = createFileExtractionRunner({
     jobs,
     registry,
     corpora,
-    ...(spoolDir ? { spoolDir } : {}),
     healthProbes: extractorHealthProbes(extractorConfig),
     reclassificationRules,
     ...(workerId ? { workerId } : {}),

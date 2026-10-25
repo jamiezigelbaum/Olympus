@@ -127,7 +127,8 @@ export interface ExtractionFetchOptions {
 export interface ExtractionFetchFileOptions {
   maxBytes?: number;
   /**
-   * A private folder the runner owns, in the data folder. A source that has
+   * The root of a private folder the runner owns, in the account's folder (or
+   * the data folder, for a legacy account). A source that has
    * to write the item's bytes somewhere (a member of an archive, a part of a
    * message) streams them to a file here, in bounded chunks, and removes it
    * in `dispose`. A source whose item is already a file under an approved

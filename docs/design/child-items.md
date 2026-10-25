@@ -284,14 +284,19 @@ floor from its parent.
     forget step by `(corpus, account scope)`, registered in the forget
     registry; archive corpora are shared by every archive of a family.
   - The same forget step removes the archive's scratch files from the
-    extraction spool. A file reader's input is written under its owner
-    (`<spool>/c-<corpus>/a-<account scope>/`, each a digest) in a file named
-    for the process that wrote it, so removing an account scope or a source
-    removes what a crashed read left, and a start removes at once the files of
-    a process that is gone and the folders of an owner with no job left.
+    archive account's extraction spool. A file reader's input is raw bytes
+    (a recording, a part of a message), so it is written in the account's own
+    folder, `raw/extraction-spool/c-<corpus>/a-<account scope>/` (each a
+    digest), in a file named for the process that wrote it. Removing an
+    account scope removes what a crashed read left. A start removes at once the
+    files of a process that is gone and the folders of an owner with no job
+    left, in the spool of each account it serves.
   - Only then does it purge the rows, as today.
 - **Account delete.** It already forgets extraction jobs by corpus through
-  the registry. Children's rows go with the account.
+  the registry. Children's rows go with the account, and so do its scratch
+  files, which sit in its folder. An account still in the legacy layout keeps
+  them in the shared spool of the data root, and the same forget step removes
+  them there.
 - **A parent deleted** (a Gmail message deleted at the provider, or an item
   absent from a re-sync). A child is shown only while its parent is, and that
   is decided where the child is read. Nothing is recorded when a parent goes,
