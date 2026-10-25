@@ -10569,6 +10569,16 @@ var init_connect = __esm(() => {
   ]);
 });
 
+// src/core/sqlite-store.ts
+function closeSqliteStore(db, options = {}) {
+  if (options.checkpoint !== false) {
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch {}
+  }
+  db.close();
+}
+
 // src/workers/classification/tier-ledger-path.ts
 function tierLedgerPathForStore(storeDbPath) {
   if (storeDbPath === ":memory:")
@@ -16315,16 +16325,6 @@ var init_cli_via_worker = __esm(() => {
     }
   };
 });
-
-// src/core/sqlite-store.ts
-function closeSqliteStore(db, options = {}) {
-  if (options.checkpoint !== false) {
-    try {
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-    } catch {}
-  }
-  db.close();
-}
 
 // src/core/sqlite-migrations.ts
 function currentStoreMigrations() {
@@ -37448,7 +37448,8 @@ function copyLogin(from, to) {
   } catch {
     rmSync8(to, { force: true });
   } finally {
-    db?.close();
+    if (db)
+      closeSqliteStore(db);
   }
 }
 function keepLoginAside(aside, base) {
@@ -37517,7 +37518,7 @@ function writeLoginInto(from, to) {
     }
     return true;
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 function loginIdentity(path) {

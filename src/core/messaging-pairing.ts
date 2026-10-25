@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
 import { FileLeaseBusyError, withFileLease } from './file-lease.ts';
+import { closeSqliteStore } from './sqlite-store.ts';
 import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
@@ -578,7 +579,7 @@ function copyLogin(from: string, to: string): void {
   } catch {
     rmSync(to, { force: true });
   } finally {
-    db?.close();
+    if (db) closeSqliteStore(db);
   }
 }
 
@@ -659,7 +660,7 @@ function writeLoginInto(from: string, to: string): boolean {
     }
     return true;
   } finally {
-    db.close();
+    closeSqliteStore(db);
   }
 }
 
