@@ -137,8 +137,12 @@ export function extractionSpoolFileName(): string {
 }
 
 function writerOf(name: string): number | undefined {
-  const match = /^spool-(\d+)-/.exec(name);
-  return match ? Number(match[1]) : undefined;
+  const prefix = 'spool-';
+  if (!name.startsWith(prefix)) return undefined;
+  const end = name.indexOf('-', prefix.length);
+  if (end < 0) return undefined;
+  const digits = name.slice(prefix.length, end);
+  return digits.length > 0 && [...digits].every((char) => char >= '0' && char <= '9') ? Number(digits) : undefined;
 }
 
 export interface PrepareExtractionSpoolOptions {
