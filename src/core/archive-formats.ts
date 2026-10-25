@@ -122,6 +122,15 @@ export interface ArchiveFormatDefinition {
   /** How an answer's citation names this format's items ("Imported mail"); absent: the family's word. */
   citationLabel?: string;
   /**
+   * The import-only source this format's exports belong to, for a format no
+   * live connector reads (docs/design/archive-live-one-dataset.md, step 7): its
+   * card in Sources lists the format's imports and imports its exports. The
+   * imports stay stored under Archives (`archive.imports`, one account scope
+   * each, with their Remove), as source-storage.md keeps archive-only formats.
+   * Formats that name the same id share one card. Absent: Other archives.
+   */
+  sourceCard?: { id: string; label: string };
+  /**
    * File and zip-member names (`*` and `?` wildcards, case-insensitive) this
    * format recognises itself by. A folder of thousands of files, or a zip of
    * thousands of members, hides the one file that says what it is; the
@@ -585,6 +594,7 @@ export const REFLECT_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freez
   provider: 'reflect',
   chooseHint: 'a Reflect export in JSON (the .json file, or the .zip that holds it)',
   citationLabel: 'Reflect',
+  sourceCard: Object.freeze({ id: 'reflect.archive', label: 'Reflect' }),
   probeNames: Object.freeze(['*.json']),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'reflect')),
 });
@@ -602,6 +612,7 @@ export const REFLECT_MARKDOWN_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.f
   provider: 'reflect',
   chooseHint: 'a Reflect export as Markdown (the .zip file)',
   citationLabel: 'Reflect',
+  sourceCard: Object.freeze({ id: 'reflect.archive', label: 'Reflect' }),
   probeNames: Object.freeze(['*, *, ????.md']),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => {
     if (!entry.members || /^roam/i.test(entry.name)) return false;
@@ -623,6 +634,7 @@ export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   provider: 'roam',
   chooseHint: 'a Roam export in JSON (the .json file from Export All, or the .zip that holds it)',
   citationLabel: 'Roam',
+  sourceCard: Object.freeze({ id: 'roam.archive', label: 'Roam' }),
   probeNames: Object.freeze(['*.json']),
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'roam')),
 });
@@ -699,6 +711,31 @@ export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {
   return ARCHIVE_FORMATS.find((format) => format.id === formatId);
+}
+
+/** One import-only source card (`ArchiveFormatDefinition.sourceCard`) and the formats it imports, in registry order. */
+export interface ArchiveSourceCard {
+  id: string;
+  label: string;
+  formats: readonly ArchiveFormatDefinition[];
+}
+
+/** The import-only source cards the registered formats name, in the order their first format is registered. */
+export function archiveSourceCards(formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): ArchiveSourceCard[] {
+  const cards = new Map<string, { id: string; label: string; formats: ArchiveFormatDefinition[] }>();
+  for (const format of formats) {
+    if (!format.sourceCard) continue;
+    const card = cards.get(format.sourceCard.id) ?? { id: format.sourceCard.id, label: format.sourceCard.label, formats: [] };
+    card.formats.push(format);
+    cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+
+/** The import-only source card a format's exports belong to, if any. */
+export function archiveSourceCardOf(formatId: string, formats: readonly ArchiveFormatDefinition[] = ARCHIVE_FORMATS): ArchiveSourceCard | undefined {
+  const card = formats.find((format) => format.id === formatId)?.sourceCard;
+  return card ? archiveSourceCards(formats).find((entry) => entry.id === card.id) : undefined;
 }
 
 /** The format whose items carry this provider name, if any. */

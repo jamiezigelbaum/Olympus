@@ -5,7 +5,7 @@ import type { ModelSetupView } from '../core/model-setup.ts';
 import type { AccountBoundSourceId, SourceAccountBindings } from '../core/source-account-binding.ts';
 import type { SourceStorageNoticeKind } from '../core/source-registry.ts';
 import { SENSITIVITY_TIER_LABELS } from '../core/privacy-language.ts';
-import { ARCHIVE_NEUTRAL_PROVIDER, isArchiveProvider } from '../core/archive-formats.ts';
+import { ARCHIVE_NEUTRAL_PROVIDER, archiveCorpusId, archiveSourceCards, isArchiveProvider } from '../core/archive-formats.ts';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -1489,6 +1489,11 @@ export interface SourceDashboardBuildOptions {
    * (archive-import/dashboard.ts). Absent: none.
    */
   importedArchives?: DashboardImportedArchives;
+  /**
+   * The same for each import-only source's card (`ArchiveFormatDefinition.sourceCard`),
+   * by card id: the imports of its formats. Absent for a card: none.
+   */
+  importedArchivesByCard?: Readonly<Record<string, DashboardImportedArchives>>;
 }
 
 /** The Archives card's whole connection: there is no account, only imports. */
@@ -1836,6 +1841,9 @@ export function dashboardSensitivityTiers(sovereigntyEngine: SovereigntyEngine):
   };
 }
 
+/** The Archives card (Other archives): imports no source card claims. */
+const ARCHIVE_IMPORTS_CARD_ID = 'archive.imports';
+
 export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] = [
   {
     source_id: 'gmail.email',
@@ -1977,6 +1985,23 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     content_arrives_extracted: true,
     connect_action: { kind: 'api_key', source: 'readwise' },
   },
+  // Import-only sources (archive-live-one-dataset.md, step 7): a format no live
+  // connector reads names its card in the format registry. Its imports are
+  // stored under Archives, one account scope each, so the card owns no corpus
+  // of its own; its connection is its imports (importedArchivesByCard).
+  ...archiveSourceCards().map((card): DashboardSupportedSourceDefinition => ({
+    source_id: card.id,
+    primary_corpus_id: archiveCorpusId('secure_local', card.formats[0]!.family),
+    corpus_source_ids: [],
+    owns_corpus: () => false,
+    ingestion_ledger_source_id: card.id,
+    label: card.label,
+    provider: card.formats[0]!.provider,
+    family: card.formats[0]!.family,
+    trust_domain: 'secure_local',
+    connect_kind: 'local',
+    connect_action: { kind: 'archive_import' },
+  })),
 ];
 
 const VENICE_ANSWER_LANE: DashboardSupportedSourceDefinition = {
@@ -2450,7 +2475,7 @@ export function buildSourceDashboardViewModel(options: SourceDashboardBuildOptio
       unpairedSources.get(definition.source_id),
       options.fileSourceScopeStatus?.[definition.source_id],
       options.fileSourceScopeIngestionEnabled?.[definition.source_id] ?? false,
-      options.importedArchives,
+      definition.source_id === ARCHIVE_IMPORTS_CARD_ID ? options.importedArchives : options.importedArchivesByCard?.[definition.source_id],
       captureRuntime?.paired_at,
     );
     // Four-tier facts, stamped like sync_now below: counts from the card's own
