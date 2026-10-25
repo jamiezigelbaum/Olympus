@@ -14312,7 +14312,8 @@ class TierLedger {
         "secret_side_store_debt",
         "secret_side_store_scrubs",
         "secret_redaction_retirement",
-        "tier_child_cascade"
+        "tier_child_cascade",
+        "tier_parent_deletion_intent"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
@@ -14337,6 +14338,10 @@ class TierLedger {
           hidden += 1;
       };
       hide(parent);
+      this.db.query(`
+        DELETE FROM tier_parent_deletion_intent
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(parent));
       const queue = this.db.query(`
         INSERT OR IGNORE INTO tier_child_cascade (
           provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
@@ -14350,6 +14355,33 @@ class TierLedger {
       }
       return { hidden, queued };
     })();
+  }
+  oweParentDeletion(parent) {
+    this.db.query(`
+      INSERT OR IGNORE INTO tier_parent_deletion_intent (
+        provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(...idParams(parent), parent.family, parent.localItemId, this.now().toISOString());
+  }
+  pendingParentDeletions(limit = 100) {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, family, local_item_id
+      FROM tier_parent_deletion_intent ORDER BY noted_at, rowid LIMIT ?
+    `).all(Math.max(1, Math.floor(limit)));
+    return rows.map((row) => ({
+      family: row.family,
+      provider: row.provider,
+      accountScope: row.account_scope,
+      providerItemId: row.provider_item_id,
+      localItemId: row.local_item_id,
+      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+    }));
+  }
+  clearParentDeletion(parent) {
+    this.db.query(`
+      DELETE FROM tier_parent_deletion_intent
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(...idParams(parent));
   }
   childCascadePending(identity) {
     return this.db.query(`
@@ -15050,7 +15082,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 10,
       name: "tier_child_cascade",
       up(db) {
         db.exec(`
@@ -15069,10 +15101,28 @@ function tierLedgerMigrations() {
           );
         `);
       }
+    },
+    {
+      version: 11,
+      name: "tier_parent_deletion_intent",
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_parent_deletion_intent (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            family TEXT NOT NULL DEFAULT '',
+            local_item_id TEXT NOT NULL DEFAULT '',
+            noted_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+        `);
+      }
     }
   ];
 }
-var TIER_LEDGER_SCHEMA_VERSION = 10, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -21420,6 +21470,7 @@ var init_local_index = __esm(() => {
     tierLedgerDisabled;
     boundLedgerHandle;
     parentTombstoneObserver;
+    parentDeletionOwed;
     tombstonedParents;
     embeddingQueueState;
     embeddingFailureState;
@@ -21841,8 +21892,9 @@ var init_local_index = __esm(() => {
         ...row.authored_at ? { authoredAt: row.authored_at } : {}
       };
     }
-    observeParentTombstones(observer) {
+    observeParentTombstones(observer, owed) {
       this.parentTombstoneObserver = observer;
+      this.parentDeletionOwed = owed;
     }
     noteTombstonedParent(itemPk) {
       if (!this.parentTombstoneObserver || !this.childItemColumnsPresent)
@@ -21854,7 +21906,9 @@ var init_local_index = __esm(() => {
     `).get(itemPk);
       if (!row || row.trust_tier === "S5")
         return;
-      (this.tombstonedParents ??= new Map).set(row.local_item_id, sourceItemFromRow({ ...row, rank: 0 }));
+      const parent = sourceItemFromRow({ ...row, rank: 0 });
+      this.parentDeletionOwed?.(parent);
+      (this.tombstonedParents ??= new Map).set(row.local_item_id, parent);
     }
     flushTombstonedParents() {
       const noted = this.tombstonedParents;
@@ -35605,6 +35659,12 @@ var init_file_extraction_source = __esm(() => {
   };
 });
 
+// src/workers/file-extraction/spool.ts
+var EXTRACTION_SPOOL_STALE_MS;
+var init_spool = __esm(() => {
+  EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
+});
+
 // src/workers/whatsapp/extraction-source.ts
 var init_extraction_source = __esm(() => {
   init_file_extraction_source();
@@ -41150,6 +41210,8 @@ var init_source_forget_registry = __esm(() => {
   init_source_dashboard();
   init_source_scheduler_state();
   init_job_names();
+  init_spool();
+  init_olympus_layout();
   init_tier_migration_reports();
 });
 
@@ -43795,11 +43857,7 @@ init_types();
 init_file_extraction_source();
 init_media_cache();
 init_olympus_layout();
-
-// src/workers/file-extraction/spool.ts
-var EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
-
-// src/workers/email-source/file-extraction-runtime.ts
+init_spool();
 init_connector_store();
 
 // src/workers/dropbox-files/extraction-source.ts
@@ -47730,6 +47788,7 @@ init_file_extraction_source();
 init_scope_safe_fs();
 
 // src/workers/file-extraction/connector-source.ts
+init_spool();
 init_file_extraction_source();
 
 // src/workers/archive-import/extraction-source.ts

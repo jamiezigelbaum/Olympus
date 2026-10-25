@@ -19767,6 +19767,12 @@ var init_source_scheduler_state = __esm(() => {
   init_sqlite_migrations();
 });
 
+// src/workers/file-extraction/spool.ts
+var EXTRACTION_SPOOL_STALE_MS;
+var init_spool = __esm(() => {
+  EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
+});
+
 // src/workers/classification/tier-migration-reports.ts
 var init_tier_migration_reports = __esm(() => {
   init_atomic_file();
@@ -19787,6 +19793,8 @@ var init_source_forget_registry = __esm(() => {
   init_source_dashboard();
   init_source_scheduler_state();
   init_job_names();
+  init_spool();
+  init_olympus_layout();
   init_tier_migration_reports();
 });
 
