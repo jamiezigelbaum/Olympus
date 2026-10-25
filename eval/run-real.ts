@@ -9,9 +9,11 @@
 // git in eval/private/ (gitignored). See eval/README.md "Running for real".
 //
 // Usage (on a machine with a hydrated connector store and a reachable Argus profile):
-//   OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH=~/.olympus/indexes/dropbox-files-connector-store.sqlite \
 //   OLYMPUS_SOURCE_INDEX_ACCOUNT=personal \
 //   bun run eval:real [path/to/held-out.real.json]
+//
+// The store is the Dropbox account's Private store where this install keeps it;
+// OLYMPUS_EVAL_DROPBOX_STORE names another file (a copy, say).
 //
 // Set OLYMPUS_EVAL_DROPBOX_APPROVED_SCOPE_KEY only when every instantiated
 // expected evidence item is inside that approved Dropbox scope.
@@ -22,6 +24,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAnalyst, type AnalystModel } from '../src/core/analyst.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { createDelphiAnalystModel } from '../src/core/analyst-delphi.ts';
 import {
   DEFAULT_VENICE_ANALYST_MODEL,
@@ -82,9 +85,9 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
-  const dbPath = process.env.OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH?.trim();
-  if (!dbPath) {
-    console.error('Set OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH to the local Dropbox connector store.');
+  const dbPath = process.env.OLYMPUS_EVAL_DROPBOX_STORE?.trim() || resolvedStorePath('dropbox.files', 'secure_local');
+  if (!existsSync(dbPath)) {
+    console.error(`No Dropbox connector store at ${dbPath}. Set OLYMPUS_EVAL_DROPBOX_STORE to the store to evaluate.`);
     process.exit(2);
   }
 

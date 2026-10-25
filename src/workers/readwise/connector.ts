@@ -479,7 +479,7 @@ export const READWISE_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.free
 });
 
 export function createReadwiseConnectorStore(
-  dbPath = resolvedStorePath('readwise.library', 'internal'),
+  dbPath = resolvedStorePath(READWISE_SOURCE_ID, 'internal'),
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
   return openConnectorStore({ sourceId: READWISE_SOURCE_ID }, {

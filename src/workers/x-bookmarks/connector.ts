@@ -94,7 +94,7 @@ export const X_BOOKMARKS_STORE_PLACEMENT: ConnectorStorePlacementRule = Object.f
 });
 
 export function createXBookmarksConnectorStore(
-  dbPath = resolvedStorePath('x.bookmarks', 'internal'),
+  dbPath = resolvedStorePath(X_BOOKMARKS_SOURCE_ID, 'internal'),
   env: Record<string, string | undefined> = process.env,
 ): LocalConnectorStore {
   return openConnectorStore({ sourceId: X_BOOKMARKS_SOURCE_ID }, {

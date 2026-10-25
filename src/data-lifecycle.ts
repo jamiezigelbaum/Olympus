@@ -960,7 +960,7 @@ function deleteUnderCustody(options: Parameters<typeof deleteOlympusDataWithCust
       custody.requirement === 'source_disconnected'
         // Unpair or Disconnect by what the SOURCE is (a paired session), never
         // by what custody happened to observe: an unreadable registry on a
-        // Dropbox delete is still a Disconnect source.
+        // delete of a broker-connected source is still a Disconnect source.
         ? requireAccount(options.sourceId, options).files.pairing
           ? `Unpair ${options.sourceId} cleanly before deleting its local data (${custody.observed.replace(/_/g, ' ')}).`
           : `Disconnect ${options.sourceId} before deleting its local data.`
@@ -1048,7 +1048,7 @@ export function dataDeleteCustody(options: {
         next_action: held.nextAction,
       };
     }
-    // A paired-session source (Telegram, WhatsApp) has no handle to disconnect
+    // A paired-session source (a messaging account) has no handle to disconnect
     // and its card infers a live session from sync evidence, so "no handle" is
     // not "disconnected". Only a CLEAN Unpair is: the unpaired record says
     // `unpaired` and no pairing artifact is left on disk. Anything else is a
@@ -1152,9 +1152,8 @@ function allDeleteTargets(context: LifecyclePathContext): DeleteTarget[] {
     // The registry: every account it lists is being deleted.
     ...registryDeleteTargets(context),
     // Approved remote-agent connections. Removing the database revokes every
-    // connection token at once. Named on its own because an explicit
-    // OLYMPUS_REMOTE_CONNECTIONS_DB_PATH or XDG_DATA_HOME can put it outside
-    // the known roots below.
+    // connection token at once. Named on its own because XDG_DATA_HOME can put
+    // it outside the known roots below.
     ...remoteConnectionsDeleteTargets(context),
     // Prepared photo copies (docs/design/photo-embeddings.md). Named on its
     // own because OLYMPUS_MEDIA_CACHE_DIR or XDG_DATA_HOME can put it outside
@@ -1338,8 +1337,8 @@ function sourceDeleteTargets(source: LifecycleAccount, context: LifecyclePathCon
     ...files.stores.flatMap((storePath) => [
       ...sqliteTargets(storePath, CONNECTOR_STORE_SQLITE_STORE_ID),
       // Each store's four-tier ledger is co-located with it (tier-ledger-path.ts),
-      // so it is found wherever the store is — a *_DB_PATH override, XDG, the
-      // WhatsApp state directory — and deleting a source takes its ledger rows.
+      // so it is found wherever the store is — an account folder, XDG, a capture
+      // state directory — and deleting a source takes its ledger rows.
       ...(storePath === ':memory:'
         ? []
         : sqliteTargets(tierLedgerPathForStore(storePath), TIER_LEDGER_SQLITE_STORE_ID)),
@@ -1949,7 +1948,7 @@ function assertVerifiedExternalSqliteStore(path: string, storeId: string | undef
     throw new OperationError(
       'invalid_params',
       `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`,
-      'Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.',
+      'Check the store paths a connector-store mount or a capture setting names before retrying data deletion.',
     );
   }
   try {
@@ -1960,7 +1959,7 @@ function assertVerifiedExternalSqliteStore(path: string, storeId: string | undef
       throw new OperationError(
         'invalid_params',
         `Refusing to delete external source path that is not a readable Olympus SQLite store: ${path}`,
-        'Check the configured OLYMPUS_*_DB_PATH value before retrying data deletion.',
+        'Check the store paths a connector-store mount or a capture setting names before retrying data deletion.',
       );
     }
     if (schemaVersion <= 0) {
@@ -2001,7 +2000,7 @@ function isStrictlyInside(path: string, root: string): boolean {
  * gateway state: whatever an env override or a default names).
  *
  * 1. Strictly inside an Olympus root, never equal to one and never above one: an
- *    override such as OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR=~/.local/share/olympus
+ *    override such as a capture state folder set to ~/.local/share/olympus
  *    would otherwise turn one source's delete into every source's.
  * 2. No symlink anywhere between the root and the target, the target itself
  *    included: the real path must equal the lexical path under the root's real
@@ -2076,8 +2075,8 @@ function assertRawStateTargetsContained(
       );
     }
   }
-  // A store the connector-store mount list places by path (Reflect, Roam, an
-  // operator's own) may sit anywhere, an account folder included: another
+  // A store the connector-store mount list places by path (a source with no
+  // folder layout, or an operator's own) may sit anywhere, an account folder included: another
   // source's mounted store and its sidecars are protected where they really are.
   const mounts = declaredConnectorStoreMounts(envForContext(context));
   if (mounts === 'unreadable' && overlapTargets.some((target) => target.kind === 'account_folder')) {
@@ -2113,8 +2112,8 @@ function assertRawStateTargetsContained(
           // A target legitimately inside its OWN source's other path is not
           // reachable here: own paths are not in the protected set.
           if (target.kind === 'account_folder') {
-            // Typically another source's retained path override (a legacy
-            // account pinned by OLYMPUS_*_DB_PATH) pointing into this folder.
+            // Typically another source's capture path or a mounted store
+            // pointing into this folder.
             throw new OperationError(
               'invalid_params',
               `Refusing to delete the account folder because it overlaps another source's or shared Olympus data (${protectedPath}): ${target.path}`,
