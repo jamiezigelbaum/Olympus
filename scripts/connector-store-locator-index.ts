@@ -12,7 +12,7 @@ import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-
 import { resolveConnectorStoreOptions } from './connector-store-embed.ts';
 
 const STORE_ID = 'connector-store';
-const CURRENT_SCHEMA_VERSION = 14;
+const CURRENT_SCHEMA_VERSION = 15;
 const DEFAULT_BATCH_ITEMS = 1_000;
 const USAGE = 'Usage: bun run connector-store:locator-index --db <path> '
   + '[--max-items N] [--corpus-id <id> --family <family> --trust-domain <domain>] [--execute]';

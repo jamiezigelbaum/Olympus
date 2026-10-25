@@ -143,7 +143,7 @@ describe('vlm pdf extractor: registry surface', () => {
     expect(extractor.kind).toBe('local_vlm_pdf');
     expect(extractor.version).toBe(VLM_PDF_EXTRACTOR_VERSION);
     expect(extractor.version).toBe('2026-08-17-delphi-vision-deep-v1');
-    expect(extractor.needsBytes).toBe(true);
+    expect(extractor.input.kind).toBe('bytes');
     expect(extractor.egress).toBe('local');
     expect(extractor.accepts(PDF_MIME)).toBe(true);
     expect(extractor.accepts('image/png')).toBe(false);
@@ -446,7 +446,7 @@ describe('vlm layout extractor', () => {
     expect(extractor.kind).toBe('local_vlm_layout');
     expect(extractor.version).toBe(VLM_LAYOUT_EXTRACTOR_VERSION);
     expect(extractor.version).toBe('vlm-v1');
-    expect(extractor.needsBytes).toBe(true);
+    expect(extractor.input.kind).toBe('bytes');
     expect(extractor.egress).toBe('local');
     expect(extractor.accepts('image/png')).toBe(true);
     expect(extractor.accepts('application/pdf')).toBe(false);

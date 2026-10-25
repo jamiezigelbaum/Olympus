@@ -13,6 +13,7 @@
 // keyword retry only for Private stores. Neither mode changes a model or epoch.
 
 import type { ClassificationCoverageNote, SecretLocationNote } from '../../core/evidence-pack.ts';
+import type { ParentLabelResolver } from '../../core/parent-label.ts';
 import type { SourceIndexAnswerRequest } from '../source-index/answer-types.ts';
 import type { SourceIndexCorpusRegistry } from '../../core/source-index/corpus.ts';
 import type { SourceIndexCorpusSearchAdapter, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
@@ -74,6 +75,8 @@ export interface SourceAnswerLaneDependencies {
   ) => readonly SecretLocationNote[];
   /** Items still waiting for their tier in a corpus (0 when none or unknown). */
   heldItems?: (corpusId: string) => number;
+  /** A child item's parent, for the label its citation carries (names only, authorized per candidate). */
+  parentLabels?: ParentLabelResolver;
 }
 
 /** Trusted modes: local answers narrow embeddings; private search enables the keyword retry. */
@@ -144,6 +147,7 @@ export function createSourceAnswerLanes(
     return {
       registry: deps.registry(),
       ...(deps.visibilityGate ? { visibilityGate: deps.visibilityGate } : {}),
+      ...(deps.parentLabels ? { parentLabels: deps.parentLabels } : {}),
       ...(deps.secretLocations
         ? {
           secretLocations: (query: string, searchedCorpora: readonly string[]) => deps.secretLocations!(

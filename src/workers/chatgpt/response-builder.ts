@@ -26,6 +26,7 @@ import { isValidPort, isValidSshTarget, isSshWorkerSocketPath } from '../../core
 import { OperationError, type OperationErrorCode } from '../../core/operation-error.ts';
 import { boundedLogErrorMessage } from '../../core/log-redaction.ts';
 import { namesOnlyCoverageNote } from '../../core/names-only-coverage.ts';
+import { citationTitleWithParent } from '../../core/parent-label.ts';
 import { DASHBOARD_SUPPORTED_SOURCES } from '../source-dashboard.ts';
 import { archiveFormatForProvider } from '../../core/archive-formats.ts';
 import type {
@@ -928,7 +929,11 @@ function citationFrom(evidence: Record<string, unknown>): ChatGptCitation | unde
   const source = sourceLabel(evidence.provider, evidence.family);
   if (!source) return undefined;
   const citation: ChatGptCitation = { source };
-  if (typeof evidence.title === 'string' && evidence.title.trim()) citation.title = text(evidence.title);
+  // A child's parent rides in the title text ("lease.pdf, in 'Flat' from Alice"): the citation
+  // shape, the tool lists and the listed output schemas are unchanged.
+  const parent = typeof evidence.parent_label === 'string' ? text(evidence.parent_label) : '';
+  const composed = citationTitleWithParent(typeof evidence.title === 'string' ? text(evidence.title) : undefined, parent);
+  if (composed) citation.title = text(composed);
   const url = httpsUrl(evidence.uri);
   if (url) citation.url = url;
   const date = dateOnly(evidence.authored_at) ?? dateOnly(evidence.updated_at);

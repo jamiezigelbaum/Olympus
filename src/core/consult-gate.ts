@@ -590,7 +590,8 @@ function classifyPath(path: string, isNumber: boolean): PathClass {
 
 function isKnownProvenancePath(relative: string): boolean {
   return /^(?:chunk\.)?sourceItem\.(?:provider|providerItemId|providerThreadId|providerConversationId|providerFileId|providerEventId|localItemId|sourceVersion)$/u.test(relative)
-    || /^(?:chunk\.(?:chunkId|contentHash)|providerIds\.\*|localIds\.\*|syncRunId|syncCheckpoint|citation\.(?:title|sourceLabel|uri|authoredAt|updatedAt))$/u.test(relative);
+    || /^(?:chunk\.)?sourceItem\.parent\.(?:providerItemId|localItemId)$/u.test(relative)
+    || /^(?:chunk\.(?:chunkId|contentHash)|providerIds\.\*|localIds\.\*|syncRunId|syncCheckpoint|citation\.(?:title|sourceLabel|uri|authoredAt|updatedAt|parentLabel))$/u.test(relative);
 }
 
 // A key that could be mistaken for path syntax is quoted, so it can never match a schema path.
@@ -704,7 +705,7 @@ const SCHEMA_FIELD_NAMES: ReadonlySet<string> = new Set([
   'providerItemId', 'providerThreadId', 'providerConversationId', 'providerFileId', 'providerEventId', 'localItemId',
   'sourceVersion', 'chunkId', 'chunkIndex', 'contentHash', 'span', 'charStart', 'charEnd', 'itemCharStart',
   'itemCharEnd', 'chunkChars', 'lane', 'title', 'sourceLabel', 'conversationLabel', 'authorLabel', 'uri',
-  'authoredAt', 'updatedAt', 'searchedCorpora', 'skippedCorpora', 'corpusId', 'reason', 'extractionGaps',
+  'parent', 'parentLabel', 'authoredAt', 'updatedAt', 'searchedCorpora', 'skippedCorpora', 'corpusId', 'reason', 'extractionGaps',
   'matchCounts', 'matchedItems', 'contentMatchedItems', 'atLeast', 'inEvidence',
 ]);
 

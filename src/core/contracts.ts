@@ -33,12 +33,31 @@ export type RawItemContent =
   | { kind: 'bytes'; mimeType: string; bytes: Uint8Array }
   | { kind: 'metadata_only' };
 
+// How to read a child item's bytes later (2.1.0, docs/design/child-items.md).
+// `locator` is opaque outside the connector that wrote it and is bound to the
+// version it was written for: it holds whatever that connector needs to read
+// the bytes again after a restart. `sizeBytes` is the size the SOURCE states,
+// checked again while reading. `available: false` means the source says the
+// bytes are not there, so the child is listed by name and never read.
+export interface RawItemDeferredBytes {
+  locator: string;
+  available: boolean;
+  sizeBytes?: number;
+}
+
+// What `fetchItem` gets besides the item id (2.1.0): the persisted locator of
+// a child whose bytes were deferred, read fresh from the store at fetch time.
+export interface SourceConnectorFetchOptions {
+  deferredBytes?: { locator: string };
+}
+
 export interface RawItem {
   identity: SourceItemIdentity;
   mimeType: string;
   content: RawItemContent;
   metadata: Readonly<Record<string, unknown>>;
   fetchedAt: string;
+  deferredBytes?: RawItemDeferredBytes;
 }
 
 export interface SourceConnectorListOptions {
@@ -114,7 +133,7 @@ export interface SourceConnector {
   readonly family: SourceFamily;
   authenticate(): Promise<void>;
   listItems(options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage>;
-  fetchItem(localItemId: string): Promise<RawItem>;
+  fetchItem(localItemId: string, options?: SourceConnectorFetchOptions): Promise<RawItem>;
   classificationSignals(item: RawItem): SourceClassificationSignals;
 }
 

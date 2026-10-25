@@ -2184,7 +2184,7 @@ function accountRawPath(account, name, env = process.env, options = {}) {
     if (name === "watch")
       return olympusDataPath(env, "local-files-watch");
     const state = legacyArchiveStatePath(env);
-    return name === "archive-imports.json" ? state : join6(dirname5(state), "archive-import-requests.json");
+    return name === "archive-imports.json" ? state : join6(dirname5(state), name);
   }
   return join6(accountFolder(account, env), "raw", name);
 }
@@ -2202,8 +2202,9 @@ function legacyAccountPaths(sourceId, env = process.env, archiveFamilies = []) {
     raw.push(olympusDataPath(env, "local-files-watch"));
   if (sourceId === "x.bookmarks")
     raw.push(`${olympusDataPath(env, "x-bookmarks-api-usage.sqlite")}.reconcile`);
-  if (sourceId === ARCHIVE_IMPORTS)
-    raw.push(olympusDataPath(env, "archive-imports.json"), olympusDataPath(env, "archive-import-requests.json"));
+  if (sourceId === ARCHIVE_IMPORTS) {
+    raw.push(olympusDataPath(env, "archive-imports.json"), olympusDataPath(env, "archive-import-requests.json"), olympusDataPath(env, "archive-media-bindings.sqlite"));
+  }
   const messaging = legacyMessagingPaths(sourceId, env);
   return { stores: [...stores, ...messaging.stores], raw: [...raw, ...messaging.raw] };
 }
@@ -2526,6 +2527,7 @@ var init_olympus_layout = __esm(() => {
     "x-reconcile.sqlite": "x.bookmarks",
     "archive-imports.json": ARCHIVE_IMPORTS,
     "archive-import-requests.json": ARCHIVE_IMPORTS,
+    "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
     ...messagingRawOwners()
   };
   LEGACY_RAW_OVERRIDES = {
@@ -11658,12 +11660,36 @@ function heldUntilJudged(reasons) {
 function contentDigestReason(text2) {
   return `content:sha256:${createHash6("sha256").update(text2.trim()).digest("hex")}`;
 }
-function snifferContentMaterial(names, excerpt) {
+function snifferContentMaterial(names, excerpt, parentContext) {
   const trimmed = names.trim();
-  return trimmed ? `Names: ${trimmed}
-Excerpt: ${excerpt}` : excerpt;
+  const context = parentContextLine(parentContext);
+  if (!trimmed && !context)
+    return withoutParentContextMarker(excerpt);
+  return `${trimmed ? `Names: ${withoutParentContextMarker(trimmed)}` : "Names:"}${context}
+Excerpt: ${withoutParentContextMarker(excerpt)}`;
 }
-function tierSnifferInputHash(pass, signals, text2) {
+function parentContextLine(parentContext) {
+  const flat = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
+  return flat ? `${PARENT_CONTEXT_MARKER}${flat}` : "";
+}
+function withoutParentContextMarker(text2) {
+  return text2.split(PARENT_CONTEXT_MARKER.trim()).join(" ");
+}
+function namesWithParentContext(names, parentContext) {
+  return `${withoutParentContextMarker(names)}${parentContextLine(parentContext)}`;
+}
+function splitParentContext(material) {
+  const at = material.indexOf(PARENT_CONTEXT_MARKER);
+  if (at < 0)
+    return { own: material, context: undefined };
+  const from = at + PARENT_CONTEXT_MARKER.length;
+  const lineEnd = material.indexOf(`
+`, from);
+  const end = lineEnd < 0 ? material.length : lineEnd;
+  return { own: material.slice(0, at) + material.slice(end), context: material.slice(from, end) };
+}
+function tierSnifferInputHash(pass, signals, text2, parentContext) {
+  const context = parentContext?.replace(/\s+/g, " ").trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
   return createHash6("sha256").update(JSON.stringify([
     pass,
     signals.title ?? null,
@@ -11671,7 +11697,8 @@ function tierSnifferInputHash(pass, signals, text2) {
     signals.folderKeys ?? [],
     signals.labels ?? [],
     signals.sender ?? null,
-    text2 ?? null
+    text2 ?? null,
+    ...context ? [context] : []
   ])).digest("hex");
 }
 function isImageMediaType(mimeType) {
@@ -11732,6 +11759,7 @@ function classifyItemTiersWithPublic(input, options) {
     sniffer,
     mapRevision: base.mapRevision,
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
+    ...input.parentContext ? { parentContext: input.parentContext } : {},
     ...input.subject ? { subject: input.subject } : {}
   });
   const content = contentPass({
@@ -11748,6 +11776,7 @@ function classifyItemTiersWithPublic(input, options) {
     secretsCleared,
     sniffer,
     mapRevision: base.mapRevision,
+    ...input.parentContext ? { parentContext: input.parentContext } : {},
     ...input.subject ? { subject: input.subject } : {}
   });
   const contentRead = text2 !== undefined || metadata.tier === "secrets";
@@ -11825,6 +11854,7 @@ function classifyContentTier(input, options = {}) {
     secretsCleared: options.override?.kind === "not_secret",
     sniffer,
     mapRevision: base.mapRevision,
+    ...input.parentContext ? { parentContext: input.parentContext } : {},
     ...input.subject ? { subject: input.subject } : {}
   });
   const lifted = options.retirePublic === true && content.tier === "public";
@@ -11912,8 +11942,8 @@ function metadataPass(args) {
       pass: "metadata",
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY,
       flags,
-      material: snifferNames(signals),
-      materialHash: tierSnifferInputHash("metadata", signals),
+      material: namesWithParentContext(snifferNames(signals), args.parentContext),
+      materialHash: tierSnifferInputHash("metadata", signals, undefined, args.parentContext),
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
@@ -12013,8 +12043,8 @@ function contentPass(args) {
       pass: "content",
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
-      material: snifferContentMaterial(args.names, snifferExcerpt(text2, vocabularyTerms(detection.vocabulary))),
-      materialHash: tierSnifferInputHash("content", args.signals, text2),
+      material: snifferContentMaterial(args.names, snifferExcerpt(text2, vocabularyTerms(detection.vocabulary)), args.parentContext),
+      materialHash: tierSnifferInputHash("content", args.signals, text2, args.parentContext),
       mapRevision: args.mapRevision,
       ...args.subject ? { subject: args.subject } : {}
     });
@@ -12187,7 +12217,8 @@ function namesOf(signals) {
 function slug(value) {
   return SLUG.test(value) ? value : "invalid";
 }
-var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
+var TIER_CLASSIFIER_VERSION = "2026-10-13.p6", TIER_MAP_REVISION = "none", TIER_KEYS, TIER_RANK, HELD_RECORD_PRIORITY = 10, HELD_UNTIL_JUDGED_PRIORITY = -1, UNDECIDED_TIER_SNIFFER, SNIFFER_NAMES_MAX_CHARS = 400, SNIFFER_EXCERPT_MAX_CHARS = 1200, CONTENT_READ_SNIFFER_FLAG = "content:read", PERSONAL_FIRST_REASON = "content:personal_first", HELD_UNTIL_JUDGED_REASON = "content:held_until_judged", PARENT_CONTEXT_MARKER = `
+Parent names (context only): `, PARENT_CONTEXT_MAX_CHARS = 200, IMAGE_PRIVATE_DEFAULT_REASON = "content:image_private_default", IMAGE_SENSITIVE_REASON_PREFIX = "content:image_sensitive:", IMAGE_ORDINARY_REASON = "content:image_ordinary", PUBLIC_RETIRED_REASON = "tier:public_retired", SNIFFER_EXCERPT_HEAD_CHARS = 600, SNIFFER_EXCERPT_MAX_FOCUS = 2, SNIFFER_EXCERPT_GAP = " … ", SLUG;
 var init_tier_classifier = __esm(() => {
   init_secret_patterns();
   init_secret_patterns();
@@ -17335,7 +17366,21 @@ class SecretLocationsIndex {
       if (score > 0)
         scored.push({ location, score });
     }
-    return scored.sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
+    const identities = scored.map(({ location }) => ({
+      provider: location.source,
+      accountScope: location.accountScope,
+      providerItemId: location.providerItemId,
+      ...location.conversationKey ? { providerConversationId: location.conversationKey } : {}
+    }));
+    let hidden = new Set;
+    if (options.hide && scored.length > 0) {
+      try {
+        hidden = options.hide(identities);
+      } catch {
+        return [];
+      }
+    }
+    return scored.filter((_, index) => !hidden.has(identities[index])).sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt)).slice(0, limit).map(({ location }) => ({
       source: location.source,
       ref: secretLocationRef(location),
       locator: location.namesReleasable ? location.locator : null,
@@ -17566,6 +17611,7 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
   const fresh = text2?.trim() ? extra.contentFetchFailed !== true : false;
   const sniffer = options?.sniffer && ledger && read ? secretFencedSniffer(options.sniffer, ledger, item.identity, read, { mayAskSecret: fresh }) : options?.sniffer;
   const holdUntilJudged = options?.holdContentUntilJudged === true || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
+  const parentContext = item.identity.parent ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId) : undefined;
   return classifyItemTiers({
     signals: connector.classificationSignals(item),
     locators: ["locatorUri", "url", "pathDisplay"].map((key2) => item.metadata[key2]).filter((value) => typeof value === "string"),
@@ -17573,6 +17619,7 @@ function decideItemTiers(connector, item, text2, options, ledger, extra = {}) {
     ...text2 !== undefined ? { text: text2 } : {},
     ...extra.namesOnly ? { namesOnly: true } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
+    ...parentContext ? { parentContext } : {},
     mimeType: item.mimeType,
     subject: item.identity
   }, {
@@ -18141,6 +18188,22 @@ function snifferCategoryOf(raw, tier) {
 function snifferMaterialCarriesSecret(material) {
   return hasCredentialUrl(material) || detectSecretFindingKinds(material).length > 0;
 }
+function snifferParentContextAllowed(context2) {
+  return !snifferMaterialCarriesSecret(context2) && snifferInjectionRule(context2) === undefined;
+}
+function snifferOwnMaterial(material) {
+  return splitParentContext(material).own;
+}
+function snifferMaterialForModel(material) {
+  const { context: context2 } = splitParentContext(material);
+  if (context2 === undefined || snifferParentContextAllowed(context2))
+    return material;
+  const at = material.indexOf(PARENT_CONTEXT_MARKER);
+  const from = at + PARENT_CONTEXT_MARKER.length;
+  const lineEnd = material.indexOf(`
+`, from);
+  return material.slice(0, at) + (lineEnd < 0 ? "" : material.slice(lineEnd));
+}
 
 class CachedTierSniffer {
   id;
@@ -18154,12 +18217,14 @@ class CachedTierSniffer {
     this.id = snifferId(lane, promptVersion);
   }
   judge(request) {
-    const material = request.material?.trim();
-    if (!material)
+    const asked = request.material?.trim();
+    if (!asked)
       return { verdict: "undecided" };
-    if (snifferMaterialCarriesSecret(material))
+    const material = snifferMaterialForModel(asked);
+    const own3 = snifferOwnMaterial(material);
+    if (snifferMaterialCarriesSecret(own3))
       return { verdict: "decided", tier: "secrets", code: "secret_refused" };
-    const injectionRule = snifferInjectionRule(material);
+    const injectionRule = snifferInjectionRule(own3);
     if (injectionRule) {
       return { verdict: "decided", tier: "secure", code: `injection:${injectionRule}:0.00` };
     }
@@ -18548,7 +18613,7 @@ function snifferRetriesSettlement(ledger, identity) {
       };
       return ["content", "metadata"].some((pass) => {
         const question = sniffer.questionFor(subject, pass);
-        return question !== undefined && snifferMaterialCarriesSecret(question.material);
+        return question !== undefined && snifferMaterialCarriesSecret(snifferOwnMaterial(question.material));
       });
     } finally {
       sniffer.close();
@@ -18610,6 +18675,150 @@ var init_secrets_disposition = __esm(() => {
   init_sniffer();
   init_sniffer_store();
   init_job_names();
+});
+
+// src/workers/connector-store/child-visibility.ts
+function parentIdentityOf(child) {
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
+  if (cut <= 0)
+    return;
+  return {
+    provider: child.provider,
+    accountScope: child.accountScope,
+    providerItemId: child.providerItemId.slice(0, cut),
+    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
+  };
+}
+function parentIdentityField(child) {
+  const identity = parentIdentityOf(child);
+  return identity ? { identity } : {};
+}
+function parentKey(parent) {
+  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
+}
+function parentVerdicts(lane, parents) {
+  const unique = new Map;
+  for (const parent of parents)
+    unique.set(parentKey(parent), parent);
+  try {
+    return judge(lane, [...unique.values()], 0);
+  } catch {
+    return new Map([...unique.keys()].map((key2) => [key2, HIDDEN]));
+  }
+}
+function judge(lane, parents, depth) {
+  const verdicts = new Map;
+  if (parents.length === 0)
+    return verdicts;
+  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
+    for (const parent of parents)
+      verdicts.set(parentKey(parent), HIDDEN);
+    return verdicts;
+  }
+  const rows = new Map;
+  for (const store of lane.stores()) {
+    for (const row of store.parentStandings(parents)) {
+      const key2 = parentKey(row);
+      const list = rows.get(key2) ?? [];
+      list.push({ ...row, corpusId: store.corpusId });
+      rows.set(key2, list);
+    }
+  }
+  const ledger = lane.ledger();
+  const identities = new Map;
+  for (const list of rows.values()) {
+    for (const row of list)
+      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
+  }
+  const states = ledger && identities.size > 0 ? ledger.itemStatesForMany([...identities.values()]) : undefined;
+  const climbing = new Map;
+  for (const parent of parents) {
+    const key2 = parentKey(parent);
+    const list = rows.get(key2) ?? [];
+    const identity = list[0]?.identity;
+    const active = list.filter((row) => row.active);
+    const locations = list.filter((row) => row.secret);
+    if (locations.length > 0) {
+      const above = locations.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key2, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key2, { visible: true, gone: false });
+      continue;
+    }
+    if (!identity) {
+      if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
+        verdicts.set(key2, HIDDEN);
+      } else {
+        verdicts.set(key2, { visible: false, gone: true });
+      }
+      continue;
+    }
+    let visible;
+    if (!ledger) {
+      visible = active.length > 0;
+    } else {
+      const state = states?.get(tierLedgerIdentityKey(identity));
+      const copies = state?.copies ?? [];
+      visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      if (!visible && active.length > 0 && ledger.itemIsSecret(identity))
+        visible = true;
+    }
+    if (visible) {
+      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key2, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key2, { visible: true, gone: false });
+    } else {
+      verdicts.set(key2, { visible: false, gone: active.length === 0 });
+    }
+  }
+  if (climbing.size > 0) {
+    const above = judge(lane, [...climbing.values()], depth + 1);
+    for (const [key2, grandparent] of climbing) {
+      if (above.get(parentKey(grandparent))?.visible !== true)
+        verdicts.set(key2, HIDDEN);
+    }
+  }
+  return verdicts;
+}
+function childrenWithHiddenParents(lane, children) {
+  const hidden = new Set;
+  if (children.length === 0)
+    return hidden;
+  const verdicts = parentVerdicts(lane, children.map((child) => child.parent));
+  for (const child of children) {
+    if (verdicts.get(parentKey(child.parent))?.visible !== true)
+      hidden.add(child.key);
+  }
+  return hidden;
+}
+function childLinks(lane, probes) {
+  const found = new Map;
+  let remaining = probes;
+  for (const store of lane.stores()) {
+    if (remaining.length === 0)
+      break;
+    for (const [key2, parent] of store.parentLinksOf(remaining))
+      found.set(key2, parent);
+    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
+  }
+  return [...found].map(([key2, parent]) => ({ key: key2, parent }));
+}
+function hiddenChildKeys(lane, probes) {
+  if (probes.length === 0)
+    return new Set;
+  let links;
+  try {
+    links = childLinks(lane, probes);
+  } catch {
+    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
+  }
+  return childrenWithHiddenParents(lane, links);
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var init_child_visibility = __esm(() => {
+  init_tier_ledger();
+  HIDDEN = { visible: false, gone: false };
 });
 
 // src/core/source-index/chunk-selection.ts
@@ -19132,13 +19341,30 @@ function connectorStoreMigrations() {
       }
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 14,
       name: "connector_store_media_judgments",
       up(db) {
         createConnectorStoreMediaJudgments(db);
       }
+    },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: "connector_store_child_items",
+      up(db) {
+        addConnectorStoreChildItemColumns(db);
+      }
     }
   ];
+}
+function addConnectorStoreChildItemColumns(db) {
+  addColumnIfMissing(db, "items", "parent_local_item_id", "TEXT");
+  addColumnIfMissing(db, "items", "deferred_locator", "TEXT");
+  addColumnIfMissing(db, "items", "bytes_available", "INTEGER");
+  addColumnIfMissing(db, "items", "size_bytes", "INTEGER");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_parent
+      ON items(parent_local_item_id) WHERE parent_local_item_id IS NOT NULL;
+  `);
 }
 function createConnectorStoreMediaJudgments(db) {
   db.exec(`
@@ -20617,8 +20843,12 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db) {
   if (version === 13) {
     validateConnectorStoreV12Schema(db, "v13", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version === 14) {
     validateConnectorStoreV12Schema(db, "v14", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+    assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   }
 }
 function validateConnectorStoreV6Schema(db) {
@@ -20626,7 +20856,8 @@ function validateConnectorStoreV6Schema(db) {
   validateConnectorStoreFtsOwnership(db, "v6");
 }
 function validateConnectorStoreSchema(db) {
-  validateConnectorStoreV12Schema(db, "v14", CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  validateConnectorStoreV12Schema(db, "v15", CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  assertIndexColumns(db, "idx_connector_store_items_parent", ["parent_local_item_id"], "v15");
   assertExactTableColumns(db, "chunk_media_releases", ["media_sha256", "media_path"], false, "v13");
   assertExactTableColumns(db, "chunk_media_failures", ["media_sha256", "reason", "failed_at", "attempts"], false, "v13");
   assertExactTableColumns(db, "image_media_reads", ["item_pk", "read_at"], false, "v13");
@@ -20637,8 +20868,8 @@ function validateConnectorStoreSchema(db) {
   assertExactTableColumns(db, "item_text_versions", ["item_pk", "source_version", "recorded_at"], false, "v14");
   assertTriggerExists(db, "connector_store_item_text_version_capture", "v14");
 }
-function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks) {
-  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
+function validateConnectorStoreV12Schema(db, versionLabel = "v12", chunkColumns = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks, itemColumns = CONNECTOR_STORE_V12_ITEM_COLUMNS) {
+  validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkColumns);
   assertExactTableColumns(db, "embedding_models", CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, false, versionLabel);
   assertExactTableColumns(db, "item_write_claims", CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, false, versionLabel);
   validateConnectorStoreLocatorIdentitySchema(db, versionLabel);
@@ -21011,7 +21242,11 @@ function extractionCandidateFromRow(row) {
     ...row.mime_type ? { mimeType: row.mime_type } : {},
     ...row.title ? { name: row.title } : {},
     ...row.locator_uri ? { locatorUri: row.locator_uri } : {},
-    ...row.content_hash ? { contentHash: row.content_hash } : {}
+    ...row.content_hash ? { contentHash: row.content_hash } : {},
+    ...row.parent_local_item_id ? { parentLocalItemId: row.parent_local_item_id } : {},
+    ...row.deferred_locator ? { deferredLocator: row.deferred_locator } : {},
+    ...row.bytes_available === 1 ? { bytesAvailable: true } : {},
+    ...row.size_bytes !== null && row.size_bytes !== undefined ? { sizeBytes: row.size_bytes } : {}
   };
 }
 function normalizeExtractionCandidateLimit(value) {
@@ -21117,13 +21352,13 @@ function fileIdentity(path) {
     return;
   }
 }
-var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
+var DEFAULT_MAX_CHUNK_CHARS = 4000, MAX_MAX_CHUNK_CHARS = 32000, MAX_SEARCH_RESULTS = 50, CONNECTOR_STORE_FTS_TITLE_WEIGHT = 1.5, EMBEDDING_BATCH_SIZE = 32, MAX_SELECTED_EMBED_ITEM_IDS = 25000, MAX_CONVERSATION_TITLE_LOOKUP_ROWS = 100, MIN_VECTOR_SCORE = 0.18, MAX_REQUIRED_CONCEPTS = 3, RARE_CONCEPT_WEIGHT_SHARE = 0.6, READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, SQLITE_STORE_ID = "connector-store", CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15, IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = "olympus_image_content_private_only", CHUNK_MEDIA_RETRY_BASE_MS, CHUNK_MEDIA_MAX_ATTEMPTS = 3, MEDIA_JUDGE_MAX_PER_PASS = 200, MEDIA_JUDGE_RETRY_BASE_MS, MEDIA_JUDGE_MAX_ATTEMPTS = 3, MAX_CONSECUTIVE_CONTENT_FETCH_FAILURES = 3, CONNECTOR_SYNC_COOPERATIVE_YIELD_ITEMS = 32, CONNECTOR_STORE_FTS_MIGRATION, ConnectorStoreExclusionViolationError, ConnectorStoreMetadataOnlyViolationError, ConnectorStoreTierWriteRefusedError, TierLedgerUnavailableError, TIER_SET_BINDING_RUN_ID = "tiered-store-set-binding", TIER_SET_BINDING_CONNECTOR_ID = "tiered_store_set_binding", ConnectorStoreLocatorIdentityIndexNotReadyError, CONNECTOR_STORE_EMBEDDING_LEASE_SUFFIX = ".embedding", CONNECTOR_STORE_EMBEDDING_LEASE_WAIT_MS = 120000, CONNECTOR_STORE_VECTOR_SCAN_PAGE_SIZE = 256, CONNECTOR_STORE_CURRENT_EMBEDDING_JOINS_AND_FILTER = `
   FROM chunk_embeddings emb
   JOIN chunks c ON c.chunk_pk = emb.chunk_pk
   JOIN items i ON i.item_pk = emb.item_pk
   WHERE i.tombstoned = 0
     AND emb.content_hash = c.embedding_input_hash
-`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
+`, LocalConnectorStore, lexicalContentPreference, CONNECTOR_STORE_COPY_ITEM_COLUMNS, CONNECTOR_STORE_CHILD_ITEM_COLUMNS, MAX_PASSAGES_PER_CANDIDATE = 3, PASSAGE_TIE_MARGIN = 0.03, CONNECTOR_STORE_PRIVATE_TIER_EMBEDDING_WITHHELD_REASON = "private_tier_requires_private_embedder", lastMediaCacheSweepMs = 0, reassertedMediaHolders, CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS, CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_REQUIRED_COLUMNS, CONNECTOR_STORE_EMBEDDING_MODEL_COLUMNS, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS, CONNECTOR_STORE_MEDIA_JUDGMENT_COLUMNS, LOCATOR_FOLD_SCAN_MAX_CANDIDATES = 50000, LOCAL_RELAXED_STOPWORDS, TRUST_RECONCILIATION_CURSOR_PATTERN;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -21141,6 +21376,7 @@ var init_local_index = __esm(() => {
   init_tier_set_binding();
   init_tier_placement();
   init_secrets_disposition();
+  init_child_visibility();
   init_source_ingestion_exclusions();
   init_fts();
   init_chunk_selection();
@@ -21239,6 +21475,8 @@ var init_local_index = __esm(() => {
     trustReconciliationReadyCursors;
     exclusions;
     reactionsColumnPresent = false;
+    childItemColumnsPresent = false;
+    childLane;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
     itemTextVersionsPresent = false;
@@ -21302,6 +21540,7 @@ var init_local_index = __esm(() => {
           validateConnectorStoreSchema(this.db);
         }
         this.reactionsColumnPresent = tableColumns(this.db, "items", false).includes("reactions_json");
+        this.childItemColumnsPresent = tableColumns(this.db, "items", false).includes("parent_local_item_id");
         this.chunkMediaColumnsPresent = tableColumns(this.db, "chunks", false).includes("media_sha256");
         this.imageMediaReadsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'").get() !== null;
         this.itemTextVersionsPresent = this.db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'item_text_versions'").get() !== null;
@@ -21486,17 +21725,28 @@ var init_local_index = __esm(() => {
       let copies;
       try {
         const ledger = this.visibilityLedger();
-        if (!ledger || !ledger.corpusHasCopies(this.corpusId))
-          return [...rows];
-        copies = ledger.copiesForMany(rows.map(identityOf));
+        if (ledger && ledger.corpusHasCopies(this.corpusId))
+          copies = ledger.copiesForMany(rows.map(identityOf));
       } catch (error) {
         if (throwOnUnavailable)
           throw error;
         return [];
       }
-      return rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row)));
+      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row))) : [...rows];
+      return this.withoutChildrenOfHiddenParents(served, identityOf);
+    }
+    withoutChildrenOfHiddenParents(rows, identityOf) {
+      if (rows.length === 0)
+        return rows;
+      const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
+      return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
     }
     tierHiddenItemPks() {
+      const base = this.tierLedgerHiddenItemPks();
+      const children = this.hiddenChildItemPks();
+      return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    }
+    tierLedgerHiddenItemPks() {
       const ledger = this.visibilityLedger();
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
@@ -21602,6 +21852,267 @@ var init_local_index = __esm(() => {
       LIMIT 1
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId) !== null;
     }
+    deferredBytesOf(identity, expectedVersion) {
+      const state = this.deferredBytesStateWhere("provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?", [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId], expectedVersion);
+      return state.state === "ready" ? { locator: state.locator, ...state.sizeBytes !== undefined ? { sizeBytes: state.sizeBytes } : {} } : undefined;
+    }
+    deferredBytesStateOfLocalItem(localItemId, expectedVersion) {
+      return this.deferredBytesStateWhere("local_item_id = ?", [localItemId], expectedVersion);
+    }
+    deferredBytesStateWhere(where, params, expectedVersion) {
+      if (!this.childItemColumnsPresent)
+        return { state: "none" };
+      const row = this.db.query(`
+      SELECT deferred_locator, bytes_available, size_bytes, source_version, tombstoned FROM items
+      WHERE ${where} ORDER BY tombstoned, item_pk LIMIT 1
+    `).get(...params);
+      if (!row)
+        return { state: "gone" };
+      if (row.tombstoned === 1)
+        return { state: "gone" };
+      if (!row.deferred_locator)
+        return { state: "none" };
+      if (row.bytes_available === 0)
+        return { state: "unavailable" };
+      if (expectedVersion !== undefined && row.source_version !== expectedVersion)
+        return { state: "version_changed" };
+      return {
+        state: "ready",
+        locator: row.deferred_locator,
+        ...row.size_bytes !== null ? { sizeBytes: row.size_bytes } : {}
+      };
+    }
+    childItemsOf(parentLocalItemId) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+      FROM items
+      WHERE parent_local_item_id = ?
+      ORDER BY item_pk
+    `).all(parentLocalItemId);
+      return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 }));
+    }
+    parentLocalItemIdOf(identity) {
+      if (!this.childItemColumnsPresent)
+        return;
+      const row = this.db.query(`
+      SELECT parent_local_item_id FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      return row?.parent_local_item_id ?? undefined;
+    }
+    itemNames(identity) {
+      const row = this.db.query(`
+      SELECT title, sender_label, sender_id, authored_at FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+      if (!row)
+        return;
+      const sender = row.sender_label?.trim() || row.sender_id?.trim();
+      return {
+        ...row.title?.trim() ? { title: row.title.trim() } : {},
+        ...sender ? { sender } : {},
+        ...row.authored_at ? { authoredAt: row.authored_at } : {}
+      };
+    }
+    useChildVisibility(lane) {
+      this.childLane = lane;
+    }
+    childVisibilityLane() {
+      return this.childLane ?? {
+        ledger: () => this.visibilityLedger(),
+        stores: () => [this]
+      };
+    }
+    hasChildItems() {
+      if (!this.childItemColumnsPresent)
+        return false;
+      return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1").get() !== null;
+    }
+    parentLinksOf(identities) {
+      const links = new Map;
+      if (identities.length === 0 || !this.hasChildItems())
+        return links;
+      for (let offset = 0;offset < identities.length; offset += 200) {
+        const batch = identities.slice(offset, offset + 200);
+        const rows = this.db.query(`
+        SELECT provider, account_scope, provider_conversation_id, provider_item_id, parent_local_item_id FROM items
+        WHERE parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+      `).all(...batch.flatMap((identity) => [
+          identity.provider,
+          identity.accountScope,
+          normalizeConversationId(identity.providerConversationId),
+          identity.providerItemId
+        ]));
+        for (const row of rows) {
+          links.set(tierLedgerIdentityKey({
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          }), {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            parentLocalItemId: row.parent_local_item_id,
+            ...parentIdentityField({
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            })
+          });
+        }
+      }
+      return links;
+    }
+    parentStandings(parents) {
+      if (parents.length === 0)
+        return [];
+      const wanted = new Set(parents.map((parent) => parentKey(parent)));
+      const ids = [...new Set(parents.map((parent) => parent.parentLocalItemId))];
+      const out = [];
+      for (let offset = 0;offset < ids.length; offset += 20000) {
+        const rows = this.db.query(`
+        SELECT provider, account_scope, provider_item_id, provider_conversation_id, local_item_id, tombstoned, trust_tier,
+          ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
+        FROM items WHERE local_item_id IN (SELECT value FROM json_each(?))
+      `).all(JSON.stringify(ids.slice(offset, offset + 20000)));
+        for (const row of rows) {
+          const ref = { provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.local_item_id };
+          if (!wanted.has(parentKey(ref)))
+            continue;
+          out.push({
+            ...ref,
+            identity: {
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            },
+            active: row.tombstoned === 0,
+            secret: row.trust_tier === "S5",
+            ...row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}
+          });
+        }
+      }
+      return out;
+    }
+    itemStandings(identities) {
+      const out = new Map;
+      if (identities.length === 0)
+        return out;
+      for (let offset = 0;offset < identities.length; offset += 200) {
+        const batch = identities.slice(offset, offset + 200);
+        const rows = this.db.query(`
+        SELECT provider, account_scope, provider_item_id, provider_conversation_id, normalized_conversation, local_item_id, tombstoned, trust_tier,
+          ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
+        FROM items
+        WHERE (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+      `).all(...batch.flatMap((identity) => [
+          identity.provider,
+          identity.accountScope,
+          normalizeConversationId(identity.providerConversationId),
+          identity.providerItemId
+        ]));
+        const asked = new Map(batch.map((identity) => [
+          [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId].join("\x00"),
+          identity
+        ]));
+        for (const row of rows) {
+          const probe = asked.get([row.provider, row.account_scope, row.normalized_conversation, row.provider_item_id].join("\x00"));
+          if (!probe)
+            continue;
+          out.set(tierLedgerIdentityKey(probe), {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            parentLocalItemId: row.local_item_id,
+            identity: {
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            },
+            active: row.tombstoned === 0,
+            secret: row.trust_tier === "S5",
+            ...row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}
+          });
+        }
+      }
+      return out;
+    }
+    hiddenChildItemPks() {
+      if (!this.hasChildItems())
+        return [];
+      const groups = this.db.query(`
+      SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+      GROUP BY provider, account_scope, parent_local_item_id
+    `).all();
+      const parents = groups.map((group) => ({
+        provider: group.provider,
+        accountScope: group.account_scope,
+        parentLocalItemId: group.parent_local_item_id,
+        ...parentIdentityField({
+          provider: group.provider,
+          accountScope: group.account_scope,
+          providerItemId: group.child_item_id,
+          ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
+        })
+      }));
+      const verdicts = parentVerdicts(this.childVisibilityLane(), parents);
+      const hiddenParents = parents.filter((parent) => verdicts.get(parentKey(parent))?.visible !== true);
+      const pks = [];
+      for (let offset = 0;offset < hiddenParents.length; offset += 20000) {
+        const rows = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, parent_local_item_id) IN (
+            SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)
+          )
+      `).all(JSON.stringify(hiddenParents.slice(offset, offset + 20000).map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId])));
+        for (const row of rows)
+          pks.push(row.item_pk);
+      }
+      return pks;
+    }
+    activeChildParents(after, limit) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
+      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND (tombstoned = 0 OR trust_tier = 'S5')
+        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+      GROUP BY parent_local_item_id, provider, account_scope
+      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+    `).all(after?.parentLocalItemId ?? "", after?.provider ?? "", after?.accountScope ?? "", Math.max(1, Math.floor(limit)));
+      return rows.map((row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        parentLocalItemId: row.parent_local_item_id,
+        ...parentIdentityField({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.child_item_id,
+          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+        })
+      }));
+    }
+    activeChildrenOf(parent) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+      FROM items
+      WHERE parent_local_item_id = ? AND provider = ? AND account_scope = ? AND (tombstoned = 0 OR trust_tier = 'S5')
+      ORDER BY item_pk
+    `).all(parent.parentLocalItemId, parent.provider, parent.accountScope);
+      return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 }));
+    }
     observeStoredItemOwner(identity, connectorId) {
       this.db.transaction(() => {
         const row = this.db.query(`
@@ -21645,6 +22156,67 @@ var init_local_index = __esm(() => {
         if (!this.db.inTransaction)
           this.releaseUnreferencedChunkMedia();
       }
+    }
+    retireSecretLocation(identity, options) {
+      return this.db.transaction(() => {
+        const row = this.db.query(`
+        SELECT item_pk, tombstoned, trust_tier FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+      `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
+        if (row && !(row.tombstoned === 1 && row.trust_tier === "S5"))
+          return "held";
+        if (!row && options.record !== true)
+          return "none";
+        const syncRunId = `connector-secret-retired-${randomUUID5()}`;
+        const now = nowIso();
+        this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, completed_at
+        ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
+      `).run(syncRunId, this.corpusId, options.connectorId, now, now);
+        if (row) {
+          this.retireSecretRow(row.item_pk, syncRunId, now);
+          return "retired";
+        }
+        this.tombstoneItem({
+          identity,
+          mimeType: "application/octet-stream",
+          content: { kind: "metadata_only" },
+          metadata: {},
+          fetchedAt: now
+        }, options.connectorId, "observed", syncRunId, undefined, false);
+        return "recorded";
+      })();
+    }
+    retireSecretRow(itemPk, syncRunId, now) {
+      this.db.query(`
+      UPDATE items SET trust_tier = ?, deleted_at = ?, indexed_at = ?, sync_run_id = ?
+      WHERE item_pk = ? AND tombstoned = 1 AND trust_tier = 'S5'
+    `).run(conservativeTierForDomain(this.trustDomain), now, now, syncRunId, itemPk);
+    }
+    keepsSecretLocations() {
+      return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 LIMIT 1`).get() !== null;
+    }
+    reobserveSecretLocation(item, connectorId, ownershipKind, syncRunId) {
+      const row = this.db.query(`
+      SELECT item_pk, trust_tier FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 1
+    `).get(item.identity.provider, item.identity.accountScope, normalizeConversationId(item.identity.providerConversationId), item.identity.providerItemId);
+      if (!row)
+        return;
+      if (row.trust_tier !== "S5") {
+        if (this.tierLedger()?.itemIsSecret(item.identity) !== true)
+          return;
+        this.db.transaction(() => {
+          this.db.query(`UPDATE items SET trust_tier = 'S5' WHERE item_pk = ? AND tombstoned = 1`).run(row.item_pk);
+          this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
+          this.deleteFtsForItem(row.item_pk);
+          this.keepSecretsLocationOnly(row.item_pk);
+        })();
+      }
+      this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), "provider_listing");
     }
     tombstoneSecretsExtraction(identity, options) {
       const writeClaim = options.writeClaim ? normalizeConnectorStoreItemWriteClaim(options.writeClaim) : undefined;
@@ -21706,7 +22278,7 @@ var init_local_index = __esm(() => {
     }
     exportItemCopy(identity) {
       const row = this.db.query(`
-      SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.join(", ")}
+      SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.map((column) => this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column) ? column : `NULL AS ${column}`).join(", ")}
       FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
         AND tombstoned = 0
@@ -22867,10 +23439,12 @@ var init_local_index = __esm(() => {
         i.provider_thread_id, i.provider_conversation_id, i.provider_file_id,
         i.provider_event_id, i.local_item_id, i.source_version, i.title,
         i.mime_type, i.locator_uri, i.content_hash, i.trust_tier,
+        ${this.childItemColumnsPresent ? "i.parent_local_item_id, i.deferred_locator, i.bytes_available, i.size_bytes," : "NULL AS parent_local_item_id, NULL AS deferred_locator, NULL AS bytes_available, NULL AS size_bytes,"}
         (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS stored_chunks
       FROM items i
       WHERE i.tombstoned = 0
         AND LOWER(i.mime_type) <> 'inode/directory'
+        ${this.childItemColumnsPresent ? "AND (i.bytes_available IS NULL OR i.bytes_available <> 0)" : ""}
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
@@ -24343,7 +24917,9 @@ var init_local_index = __esm(() => {
       let itemsIndexed = 0;
       let itemsChanged = 0;
       let itemsTombstoned = 0;
+      const keepsSecretLocations = this.keepsSecretLocations();
       let absenceItemsTombstoned = 0;
+      let retiredSecretLocations = [];
       let windowRemovedItemsTombstoned = 0;
       let windowRemovalsDeferredLocalItemIds = [];
       let deletedEventItemsTombstoned = 0;
@@ -24418,6 +24994,9 @@ var init_local_index = __esm(() => {
               contentFetchFailed,
               ...options?.sourceScopeObservation ? { sourceScope: normalizeSourceScopeObservation(options.sourceScopeObservation(itemForStorage)) } : {}
             }) : { kind: "legacy" };
+            if (keepsSecretLocations && itemForStorage.metadata["deleted"] !== true) {
+              this.reobserveSecretLocation(itemForStorage, connector.id, ownershipKind, syncRunId);
+            }
             if (route.kind === "elsewhere") {
               this.reobserveRoutedCopy(itemForStorage, connector.id, ownershipKind, syncRunId);
               itemsRoutedElsewhere += 1;
@@ -24425,7 +25004,7 @@ var init_local_index = __esm(() => {
             }
             if (route.kind === "delete") {
               const secrets = route.reason === "secrets";
-              if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? "S5" : undefined, true)) {
+              if (this.tombstoneItem(itemForStorage, connector.id, ownershipKind, syncRunId, secrets ? "S5" : undefined, route.keepLocation !== true)) {
                 itemsTombstoned += 1;
                 if (secrets) {
                   secretsTierItemsTombstoned += 1;
@@ -24564,8 +25143,10 @@ var init_local_index = __esm(() => {
               }
               checkpoint = undefined;
             } else {
-              absenceItemsTombstoned = this.tombstoneItemsMissingFromFullSnapshot(connector.id, syncRunId, scopes, reconcileCurrentMembershipAuthority, reconcileSnapshotObservedAt);
+              const absent = this.tombstoneItemsMissingFromFullSnapshot(connector.id, syncRunId, scopes, reconcileCurrentMembershipAuthority, reconcileSnapshotObservedAt);
+              absenceItemsTombstoned = absent.count;
               itemsTombstoned += absenceItemsTombstoned;
+              retiredSecretLocations = absent.retiredSecrets;
               checkpoint = undefined;
             }
           } else {
@@ -24585,6 +25166,11 @@ var init_local_index = __esm(() => {
       SET status = 'completed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?
       WHERE sync_run_id = ?
     `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), syncRunId);
+      if (retiredSecretLocations.length > 0) {
+        try {
+          tierRouting?.retiredSecrets?.(retiredSecretLocations);
+        } catch {}
+      }
       for (const row of metadataOnlyTally.byPrefix.values()) {
         if (row.items === 0)
           continue;
@@ -24661,11 +25247,12 @@ var init_local_index = __esm(() => {
         provider, family, account_scope, provider_item_id, provider_thread_id, provider_conversation_id,
         provider_file_id, provider_event_id, local_item_id, source_version, title, search_text,
         reactions_json, source_scope_generation, source_scope_revision, source_scope_folder_keys_json,
+        parent_local_item_id, deferred_locator, bytes_available, size_bytes,
         sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
         authored_at, updated_at,
         fetched_at, indexed_at, content_hash, trust_tier, tombstoned, deleted_at, sync_run_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
         provider_thread_id = excluded.provider_thread_id,
         provider_conversation_id = excluded.provider_conversation_id,
@@ -24679,6 +25266,16 @@ var init_local_index = __esm(() => {
         source_scope_generation = COALESCE(excluded.source_scope_generation, items.source_scope_generation),
         source_scope_revision = COALESCE(excluded.source_scope_revision, items.source_scope_revision),
         source_scope_folder_keys_json = COALESCE(excluded.source_scope_folder_keys_json, items.source_scope_folder_keys_json),
+        parent_local_item_id = COALESCE(excluded.parent_local_item_id, items.parent_local_item_id),
+        -- A locator is bound to the version it was written for: a listing of a new
+        -- version without one clears it, while a fetch of the same version (which
+        -- carries none) leaves it alone.
+        deferred_locator = CASE WHEN excluded.deferred_locator IS NULL AND excluded.source_version IS NOT items.source_version
+          THEN NULL ELSE COALESCE(excluded.deferred_locator, items.deferred_locator) END,
+        bytes_available = CASE WHEN excluded.deferred_locator IS NULL AND excluded.source_version IS NOT items.source_version
+          THEN NULL ELSE COALESCE(excluded.bytes_available, items.bytes_available) END,
+        size_bytes = CASE WHEN excluded.size_bytes IS NULL AND excluded.source_version IS NOT items.source_version
+          THEN NULL ELSE COALESCE(excluded.size_bytes, items.size_bytes) END,
         sender_id = excluded.sender_id,
         sender_label = excluded.sender_label,
         sender_is_owner = excluded.sender_is_owner,
@@ -24693,7 +25290,7 @@ var init_local_index = __esm(() => {
         tombstoned = 0,
         deleted_at = NULL,
         sync_run_id = excluded.sync_run_id
-    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sourceScopeGeneration ?? null, sourceScopeRevision ?? null, sourceScopeFolderKeysJson ?? null, sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
+    `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerThreadId ?? null, identity.providerConversationId ?? null, identity.providerFileId ?? null, identity.providerEventId ?? null, identity.localItemId, identity.sourceVersion ?? null, title ?? null, searchText ?? null, reactionsJson, sourceScopeGeneration ?? null, sourceScopeRevision ?? null, sourceScopeFolderKeysJson ?? null, identity.parent?.localItemId ?? null, item.deferredBytes?.locator ?? null, item.deferredBytes === undefined ? null : Number(item.deferredBytes.available), item.deferredBytes?.sizeBytes ?? null, sender.senderId ?? null, sender.senderLabel ?? null, sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner), locatorUri ?? null, item.mimeType, authoredAt ?? null, updatedAt ?? null, item.fetchedAt, now, contentHash ?? null, sensitivity.trustTier, syncRunId);
       const itemPk = existing?.item_pk ?? Number(applied.lastInsertRowid);
       const ftsMetadataChanged = existing === null || existing.tombstoned === 1 || existing.title !== (title ?? null) || existing.search_text !== (searchText ?? null);
       return {
@@ -24803,11 +25400,12 @@ var init_local_index = __esm(() => {
       return this.db.transaction(() => {
         const now = nowIso();
         let count = 0;
+        const retiredSecrets = [];
         for (const scope of scopes) {
           const rows = currentMembershipAuthority === "provider_account_snapshot" ? this.db.query(`
-            SELECT DISTINCT i.item_pk
+            SELECT DISTINCT i.item_pk, i.tombstoned
             FROM items i
-            WHERE i.tombstoned = 0
+            WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND i.provider = ?
               AND i.account_scope = ?
               AND NOT EXISTS (
@@ -24826,12 +25424,12 @@ var init_local_index = __esm(() => {
                   AND preservation.ownership_kind = 'preservation'
               )
           `).all(scope.provider, scope.accountScope, syncRunId, snapshotObservedAt ?? "") : this.db.query(`
-            SELECT DISTINCT i.item_pk
+            SELECT DISTINCT i.item_pk, i.tombstoned
             FROM items i
             JOIN item_owners owner
               ON owner.item_pk = i.item_pk
               AND owner.connector_id = ?
-            WHERE i.tombstoned = 0
+            WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND owner.last_seen_sync_run_id <> ?
               AND i.provider = ?
               AND i.account_scope = ?
@@ -24842,15 +25440,26 @@ var init_local_index = __esm(() => {
               )
           `).all(connectorId, syncRunId, scope.provider, scope.accountScope);
           for (const row of rows) {
+            if (row.tombstoned === 1) {
+              const located = this.db.query(`
+              SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+                provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+              FROM items WHERE item_pk = ?
+            `).get(row.item_pk);
+              this.retireSecretRow(row.item_pk, syncRunId, now);
+              if (located)
+                retiredSecrets.push(sourceItemFromRow({ ...located, rank: 0 }));
+              continue;
+            }
             this.db.query(`
             UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, sync_run_id = ? WHERE item_pk = ?
           `).run(now, now, syncRunId, row.item_pk);
             this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
             this.deleteFtsForItem(row.item_pk);
+            count += 1;
           }
-          count += rows.length;
         }
-        return count;
+        return { count, retiredSecrets };
       })();
     }
     activeStoredCopy(item) {
@@ -24890,10 +25499,10 @@ var init_local_index = __esm(() => {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity.parent?.localItemId ?? null);
         const inserted = this.db.query(`SELECT item_pk FROM items
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
@@ -26654,7 +27263,17 @@ var init_local_index = __esm(() => {
     "authored_at",
     "updated_at",
     "fetched_at",
-    "content_hash"
+    "content_hash",
+    "parent_local_item_id",
+    "deferred_locator",
+    "bytes_available",
+    "size_bytes"
+  ];
+  CONNECTOR_STORE_CHILD_ITEM_COLUMNS = [
+    "parent_local_item_id",
+    "deferred_locator",
+    "bytes_available",
+    "size_bytes"
   ];
   CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
     "sync_runs",
@@ -26686,7 +27305,8 @@ var init_local_index = __esm(() => {
     "media_judgments",
     "idx_connector_store_media_judgments_unapplied",
     "item_text_versions",
-    "connector_store_item_text_version_capture"
+    "connector_store_item_text_version_capture",
+    "idx_connector_store_items_parent"
   ];
   CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
     "chunk_pk",
@@ -26798,6 +27418,13 @@ var init_local_index = __esm(() => {
     "source_scope_revision",
     "source_scope_folder_keys_json"
   ];
+  CONNECTOR_STORE_V15_ITEM_COLUMNS = [
+    ...CONNECTOR_STORE_V12_ITEM_COLUMNS,
+    "parent_local_item_id",
+    "deferred_locator",
+    "bytes_available",
+    "size_bytes"
+  ];
   CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS = [
     "item_pk",
     "claim_scope",
@@ -26871,6 +27498,91 @@ function tierSetForLedger(ledgerPath) {
   return tierSets?.get(ledgerPath);
 }
 var tierSets;
+
+// src/workers/connector-store/stored-names.ts
+function storedCopyOf(set, identity, copies) {
+  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
+  const ordered = [
+    ...names ? [names] : [],
+    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
+  ];
+  for (const copy of ordered) {
+    const domain = set.domainForCorpus(copy.corpusId);
+    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
+    if (exported)
+      return exported;
+  }
+  return;
+}
+function storedSignals(copy) {
+  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+  const title = text2(copy.columns["title"]);
+  const locator = text2(copy.columns["locator_uri"]);
+  const path = locator?.startsWith("/") ? locator : undefined;
+  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
+  let folderKeys = [];
+  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
+  if (keysJson) {
+    try {
+      const parsed = JSON.parse(keysJson);
+      if (Array.isArray(parsed))
+        folderKeys = parsed.filter((key2) => typeof key2 === "string");
+    } catch {
+      folderKeys = [];
+    }
+  }
+  if (copy.identity.providerConversationId)
+    folderKeys.push(copy.identity.providerConversationId);
+  return {
+    ...title ? { title } : {},
+    ...path ? { path } : {},
+    ...folderKeys.length > 0 ? { folderKeys } : {},
+    ...sender ? { sender } : {}
+  };
+}
+var init_stored_names = __esm(() => {
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/parent-context.ts
+function parentNamesContext(set, child, parentLink) {
+  const stores = set.openStores();
+  let parentLocalItemId = parentLink;
+  for (const store of stores) {
+    if (parentLocalItemId)
+      break;
+    parentLocalItemId = store.parentLocalItemIdOf(child);
+  }
+  if (!parentLocalItemId)
+    return;
+  let parent;
+  for (const store of stores) {
+    const row = store.activeLocalItemRow(parentLocalItemId);
+    if (row) {
+      parent = row.identity;
+      break;
+    }
+  }
+  if (!parent)
+    return;
+  const ledger = set.ledger;
+  const record = ledger.getCurrent(parent);
+  if (!record || record.metadataTier === "secrets" || record.contentTier === "secrets" || ledger.itemIsSecret(parent))
+    return;
+  const exported = storedCopyOf(set, parent, ledger.copies(parent));
+  if (!exported)
+    return;
+  const signals = storedSignals(exported);
+  const text2 = [signals.title, signals.sender].filter((part) => typeof part === "string" && part.trim().length > 0).map((part) => part.replace(/\s+/g, " ").trim()).join(" | ").slice(0, PARENT_CONTEXT_MAX_CHARS);
+  if (!text2)
+    return;
+  return snifferParentContextAllowed(text2) ? text2 : undefined;
+}
+var init_parent_context = __esm(() => {
+  init_sniffer();
+  init_tier_classifier();
+  init_stored_names();
+});
 
 // src/workers/connector-store/tier-names-only-settle.ts
 function settleNamesOnlyItems(options) {
@@ -28753,7 +29465,8 @@ function rejudgeStoredContent(set, record, options) {
   };
   const sniffer = counting && secretFencedSniffer(counting, ledger, identity, read);
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged);
+  const parentContext = sniffer ? parentNamesContext(set, identity) : undefined;
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext);
   const content = classifyContentTier({
     text: text2,
     metadataTier: metadata.metadataTier,
@@ -28766,6 +29479,7 @@ function rejudgeStoredContent(set, record, options) {
     ...mimeType ? { mimeType } : {},
     ...holdUntilJudged ? { holdUntilJudged: true } : {},
     ...imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...imageJudgment.category ? { category: imageJudgment.category } : {} } } : {},
+    ...parentContext ? { parentContext } : {},
     subject: identity
   }, {
     ...sniffer ? { sniffer } : {},
@@ -28833,7 +29547,7 @@ function rejudgeStoredContent(set, record, options) {
   else
     report.updated += 1;
 }
-function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false) {
+function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = false, parentContext) {
   const previous = { ...record, reasons: record.reasons.filter((reason) => !reason.startsWith("content:")) };
   if (!sniffer || record.state !== "current" || record.metadataForced || namesDecidedByOwner(record.reasons) || !record.reasons.some((reason) => reason.startsWith("metadata:sniffer:") && !reason.startsWith(`metadata:sniffer:${sniffer.id}:`)))
     return previous;
@@ -28851,10 +29565,10 @@ function rejudgeMetadata(record, sniffer, names, subject, holdUntilJudged = fals
   const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(" | ").slice(0, SNIFFER_NAMES_MAX_CHARS);
   const verdict = sniffer.judge({
     pass: "metadata",
-    material,
+    material: namesWithParentContext(material, parentContext),
     flags: ["names:rejudge"],
     subject,
-    materialHash: tierSnifferInputHash("metadata", signals),
+    materialHash: tierSnifferInputHash("metadata", signals, undefined, parentContext),
     mapRevision: fresh.mapRevision,
     priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY
   });
@@ -28949,6 +29663,7 @@ function storedFolderKeys(value) {
 }
 var DEFAULT_TIER_REJUDGE_PER_PASS = 100, TIER_REJUDGE_CONNECTOR_ID = "olympus_tier_rejudge";
 var init_tier_rejudge = __esm(() => {
+  init_parent_context();
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
@@ -29211,20 +29926,6 @@ function raiseRoutedItem(set, record, rules, inputs, extraSignals = {}) {
   set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
   return "raised";
 }
-function storedCopyOf(set, identity, copies) {
-  const names = copyServingLayer(copies.filter((copy) => copy.state === "current"), "metadata");
-  const ordered = [
-    ...names ? [names] : [],
-    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === "current") - Number(left.state === "current"))
-  ];
-  for (const copy of ordered) {
-    const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-    if (exported)
-      return exported;
-  }
-  return;
-}
 function isLabelRule(rule) {
   return rule.match.kind === "label";
 }
@@ -29233,32 +29934,6 @@ function isRaisingRule(rule) {
 }
 function ruleKey(rule) {
   return createHash14("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
-}
-function storedSignals(copy) {
-  const text2 = (value) => typeof value === "string" && value.trim() ? value.trim() : undefined;
-  const title = text2(copy.columns["title"]);
-  const locator = text2(copy.columns["locator_uri"]);
-  const path = locator?.startsWith("/") ? locator : undefined;
-  const sender = text2(copy.columns["sender_label"]) ?? text2(copy.columns["sender_id"]);
-  let folderKeys = [];
-  const keysJson = text2(copy.columns["source_scope_folder_keys_json"]);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson);
-      if (Array.isArray(parsed))
-        folderKeys = parsed.filter((key2) => typeof key2 === "string");
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId)
-    folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...title ? { title } : {},
-    ...path ? { path } : {},
-    ...folderKeys.length > 0 ? { folderKeys } : {},
-    ...sender ? { sender } : {}
-  };
 }
 function readState(raw) {
   if (!raw)
@@ -29319,7 +29994,7 @@ function identityOf4(record) {
 var DEFAULT_RULES_SWEEP_ROWS = 1000, SWEEP_META_KEY = "owner_rules_sweep", MAX_HELD_ITEMS = 200;
 var init_tier_rules_sweep = __esm(() => {
   init_tier_classifier();
-  init_tier_ledger();
+  init_stored_names();
   init_tier_override_settle();
   init_tier_rejudge();
 });
@@ -29486,6 +30161,8 @@ var init_tiered_store_set = __esm(() => {
   init_local_index();
   init_tier_placement();
   init_secrets_disposition();
+  init_parent_context();
+  init_child_visibility();
   init_tier_names_only_settle();
   init_tier_content_purge();
   init_tier_move();
@@ -30490,6 +31167,11 @@ var init_analyst_openclaw_infer = __esm(() => {
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
 
+// src/core/parent-label.ts
+var init_parent_label = __esm(() => {
+  init_types();
+});
+
 // src/workers/source-index/answer-latency-trace.ts
 import { AsyncLocalStorage as AsyncLocalStorage3 } from "node:async_hooks";
 var storage, CONTENT_FREE_ERROR_CLASSES;
@@ -30560,6 +31242,7 @@ var init_router = __esm(() => {
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_parent_label();
   init_source_model_policy();
   init_router();
   init_types();
@@ -30678,6 +31361,7 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_parent_label();
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
@@ -35224,6 +35908,12 @@ var init_file_extraction_source = __esm(() => {
   };
 });
 
+// src/workers/file-extraction/spool.ts
+var EXTRACTION_SPOOL_STALE_MS;
+var init_spool = __esm(() => {
+  EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
+});
+
 // src/workers/whatsapp/extraction-source.ts
 var init_extraction_source = __esm(() => {
   init_file_extraction_source();
@@ -35393,6 +36083,7 @@ var LOG_ERROR_MESSAGE_MAX_CHARS = 200;
 // src/workers/file-extraction/unreadable-files.ts
 var TOKEN_ALPHABET, DEFAULT_TOKEN_TTL_MS, CURSOR_TIME_ALPHABET;
 var init_unreadable_files = __esm(() => {
+  init_archive_formats();
   TOKEN_ALPHABET = new Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
   DEFAULT_TOKEN_TTL_MS = 30 * 60000;
   CURSOR_TIME_ALPHABET = new Set("0123456789TZ:.+-");
@@ -38335,19 +39026,19 @@ function chatgptPickerProgram(kit) {
     p.retry = retry;
     kit.render(focus);
   }
-  function list(parentKey, append, after) {
-    const cursor = append ? parentKey ? p.cursors.get(parentKey) : p.rootCursor : "";
+  function list(parentKey2, append, after) {
+    const cursor = append ? parentKey2 ? p.cursors.get(parentKey2) : p.rootCursor : "";
     const archive = archiveMode();
     const args = archive ? {} : { source_id: p.id };
-    if (parentKey)
-      args.parent_key = parentKey;
-    if (!archive && parentKey && (p.ancestors.get(parentKey) || []).length)
-      args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
+    if (parentKey2)
+      args.parent_key = parentKey2;
+    if (!archive && parentKey2 && (p.ancestors.get(parentKey2) || []).length)
+      args.ancestor_keys = p.ancestors.get(parentKey2).slice(0, 64);
     if (cursor)
       args.cursor = cursor;
-    p.loading = parentKey || "root";
+    p.loading = parentKey2 || "root";
     p.error = "";
-    const focus = append ? "picker:more:" + parentKey : p.loaded ? "" : "picker:back";
+    const focus = append ? "picker:more:" + parentKey2 : p.loaded ? "" : "picker:back";
     kit.render(focus);
     const mine = session;
     kit.call(archive ? T.archiveBrowse : T.scopeList, args).then((result) => {
@@ -38355,21 +39046,21 @@ function chatgptPickerProgram(kit) {
         return;
       const page2 = scopeData(result);
       if (!(archive ? validArchiveBrowse(page2) : validBrowse(page2))) {
-        failLoad(() => list(parentKey, append, after), "picker:retry");
+        failLoad(() => list(parentKey2, append, after), "picker:retry");
         return;
       }
       if (p.loaded && !p.pick && (page2.account_generation !== p.generation || page2.scope_revision !== p.revision)) {
-        reload(Q.conflict, parentKey || append ? null : page2);
+        reload(Q.conflict, parentKey2 || append ? null : page2);
         return;
       }
-      takeFolders(page2, parentKey, append, focus, after);
+      takeFolders(page2, parentKey2, append, focus, after);
     }, () => {
       if (mine !== session || !p)
         return;
-      failLoad(() => list(parentKey, append, after), "picker:retry");
+      failLoad(() => list(parentKey2, append, after), "picker:retry");
     });
   }
-  function takeFolders(page2, parentKey, append, focus, after) {
+  function takeFolders(page2, parentKey2, append, focus, after) {
     if (!p.loaded) {
       p.generation = page2.account_generation;
       p.revision = page2.scope_revision;
@@ -38385,8 +39076,8 @@ function chatgptPickerProgram(kit) {
       }
       p.loaded = true;
     }
-    const trail = parentKey ? trailOf(parentKey) : [];
-    const previous = append ? parentKey ? p.branches.get(parentKey) || [] : p.roots : [];
+    const trail = parentKey2 ? trailOf(parentKey2) : [];
+    const previous = append ? parentKey2 ? p.branches.get(parentKey2) || [] : p.roots : [];
     const seen = {};
     for (const node of previous)
       seen[node.key] = true;
@@ -38398,25 +39089,25 @@ function chatgptPickerProgram(kit) {
     const nodes = previous.concat(fresh).sort((a, b) => (a.is_disk === true ? 1 : 0) - (b.is_disk === true ? 1 : 0) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const levelAccess = page2.access && typeof page2.access.message === "string" && page2.access.message ? page2.access : null;
     if (levelAccess)
-      p.access.set(parentKey, levelAccess);
+      p.access.set(parentKey2, levelAccess);
     else
-      p.access.delete(parentKey);
+      p.access.delete(parentKey2);
     const next = typeof page2.next_cursor === "string" && page2.next_cursor ? page2.next_cursor : "";
     const more = typeof page2.remaining === "number" && isFinite(page2.remaining) && page2.remaining > 0 ? Math.round(page2.remaining) : 0;
     if (next && more)
-      p.remaining.set(parentKey, more);
+      p.remaining.set(parentKey2, more);
     else
-      p.remaining.delete(parentKey);
+      p.remaining.delete(parentKey2);
     if (page2.truncated === true)
-      p.truncated.add(parentKey);
-    if (parentKey && blockedByComputer(levelAccess)) {
-      p.branches.delete(parentKey);
-    } else if (parentKey) {
-      p.branches.set(parentKey, nodes);
+      p.truncated.add(parentKey2);
+    if (parentKey2 && blockedByComputer(levelAccess)) {
+      p.branches.delete(parentKey2);
+    } else if (parentKey2) {
+      p.branches.set(parentKey2, nodes);
       if (next)
-        p.cursors.set(parentKey, next);
+        p.cursors.set(parentKey2, next);
       else
-        p.cursors.delete(parentKey);
+        p.cursors.delete(parentKey2);
     } else {
       p.roots = nodes;
       p.rootCursor = next;
@@ -38965,21 +39656,21 @@ function chatgptPickerProgram(kit) {
     add(li, label, folderControl(key2, node.name, node));
     return li;
   }
-  function loadMore(parentKey) {
-    const busy = p.loading === (parentKey || "root");
-    const more = p.remaining.get(parentKey) || 0;
+  function loadMore(parentKey2) {
+    const busy = p.loading === (parentKey2 || "root");
+    const more = p.remaining.get(parentKey2) || 0;
     const label = more ? fill2(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
-    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
+    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey2, busy || p.loading ? null : () => list(parentKey2, true), "plain");
   }
-  function levelList(parentKey, nodes, hasMore) {
+  function levelList(parentKey2, nodes, hasMore) {
     const listNode = el("ul", "flist");
     for (const node of nodes)
       add(listNode, folderRow(node));
     if (!nodes.length)
       add(listNode, el("li", "muted fempty", Q.noFolders));
     if (hasMore)
-      add(listNode, add(el("li", "fmore"), loadMore(parentKey)));
-    if (p.truncated.has(parentKey))
+      add(listNode, add(el("li", "fmore"), loadMore(parentKey2)));
+    if (p.truncated.has(parentKey2))
       add(listNode, el("li", "muted fmore", Q.truncated));
     return listNode;
   }
@@ -40768,10 +41459,14 @@ var init_source_forget_registry = __esm(() => {
   init_source_dashboard();
   init_source_scheduler_state();
   init_job_names();
+  init_spool();
+  init_olympus_layout();
+  init_source_placement();
   init_tier_migration_reports();
 });
 
 // src/workers/archive-import/state.ts
+var ARCHIVE_IMPORTS_SOURCE_ID2 = "archive.imports";
 var init_state = __esm(() => {
   init_source_placement();
   init_source_storage();
@@ -40801,6 +41496,15 @@ var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
 var init_scope_safe_fs = __esm(() => {
   runtimeRequire3 = createRequire5(import.meta.url);
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/media-bindings.ts
+var init_media_bindings = __esm(() => {
+  init_sqlite_migrations();
+  init_scope_safe_fs();
+  init_source_placement();
+  init_source_storage();
+  init_state();
 });
 
 // src/workers/archive-import/byte-source.ts
@@ -41758,6 +42462,7 @@ var init_data_lifecycle = __esm(() => {
   init_archive_formats();
   init_store2();
   init_state();
+  init_media_bindings();
   init_requests();
   init_google_connectors();
   init_telegram_messages();
@@ -43405,6 +44110,9 @@ init_credential_broker();
 init_types();
 init_file_extraction_source();
 init_media_cache();
+init_olympus_layout();
+init_source_placement();
+init_spool();
 init_connector_store();
 
 // src/workers/dropbox-files/extraction-source.ts
@@ -43833,7 +44541,10 @@ init_media_cache();
 init_still_image_formats();
 init_command_runner();
 init_image_preparers();
-var DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+
+// src/workers/file-extraction/extractors/input-limits.ts
+var DOCUMENT_READER_MAX_INPUT_BYTES = 256 * 1024 * 1024;
+var IMAGE_READER_MAX_INPUT_BYTES = 64 * 1024 * 1024;
 
 // src/workers/file-extraction/extractors/text.ts
 init_media_cache();
@@ -43968,6 +44679,7 @@ init_types();
 init_engine();
 init_tier_classifier();
 init_tier_ledger();
+init_parent_context();
 init_tier_placement();
 init_secrets_disposition();
 init_tiered_store_set();
@@ -47250,6 +47962,7 @@ var LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.
 
 // src/workers/archive-import/runtime.ts
 init_lane();
+init_media_bindings();
 
 // src/workers/archive-import/start.ts
 init_archive_formats();
@@ -47305,6 +48018,7 @@ var ARCHIVE_AGENT_COPY = {
 init_manifest3();
 
 // src/workers/archive-import/removal.ts
+init_source_forget_registry();
 init_source_storage();
 init_lane();
 init_state();
@@ -47320,6 +48034,28 @@ init_lane();
 init_store2();
 init_state();
 
+// src/workers/archive-import/extraction-runtime.ts
+init_store2();
+
+// src/workers/archive-import/extraction-source.ts
+init_archive_formats();
+init_file_extraction_source();
+init_scope_safe_fs();
+
+// src/workers/file-extraction/connector-source.ts
+init_spool();
+init_file_extraction_source();
+
+// src/workers/archive-import/extraction-source.ts
+init_spool();
+init_manifest3();
+init_media_bindings();
+init_state();
+var ARCHIVE_EXTRACTION_SCOPE_KEY = `${ARCHIVE_IMPORTS_SOURCE_ID2}:extraction`;
+
+// src/workers/archive-import/extraction-runtime.ts
+init_lane();
+
 // src/workers/archive-import/scheduler-source.ts
 init_embeddings();
 
@@ -47327,6 +48063,7 @@ init_embeddings();
 init_archive_formats();
 init_scope_safe_fs();
 init_tiered_store_set();
+init_media_bindings();
 init_manifest3();
 init_state();
 init_store2();
@@ -47629,9 +48366,6 @@ function plistString(plist, key2) {
 // src/workers/email-source/server.ts
 init_local_open();
 
-// src/workers/file-extraction/connector-source.ts
-init_file_extraction_source();
-
 // src/workers/local-files/scope-browser.ts
 init_remote_access();
 import { lstatSync as lstatSync13, readdirSync as readdirSync4, realpathSync as realpathSync8 } from "node:fs";
@@ -47924,12 +48658,12 @@ function localFilesListing(options, mode) {
     home,
     memoryPath: join34(olympusDataDir(), "local-files", "folder-access.json")
   });
-  const node = (scopePath, name, parentKey, access) => {
+  const node = (scopePath, name, parentKey2, access) => {
     const own3 = mode === "folders" && isInsideOwnRoot(scopePath, context2);
     const reason = own3 ? "olympus_data" : mode === "folders" ? defaultExclusionForFolder(scopePath, context2) : undefined;
     return {
       key: scopePath,
-      ...parentKey !== undefined ? { parent_key: parentKey } : {},
+      ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
       name: name.normalize("NFC"),
       kind: "folder",
       has_children: !own3,
@@ -47938,15 +48672,15 @@ function localFilesListing(options, mode) {
       ...access ? { access } : {}
     };
   };
-  const fileNode = (scopePath, name, parentKey) => ({
+  const fileNode = (scopePath, name, parentKey2) => ({
     key: scopePath,
-    ...parentKey !== undefined ? { parent_key: parentKey } : {},
+    ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
     name: name.normalize("NFC"),
     kind: "file",
     has_children: false,
     selectable: true
   });
-  const childFolders = (realPath, parentKey) => {
+  const childFolders = (realPath, parentKey2) => {
     let entries;
     try {
       entries = readDirectory(realPath);
@@ -47969,10 +48703,10 @@ function localFilesListing(options, mode) {
     return entries.filter(offered).map((entry) => {
       const childReal = join34(realPath, entry.name);
       if (!entry.isDirectory())
-        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey);
+        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
-      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
+      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
     }).sort((a, b) => {
       const aHidden = a.name.startsWith(".");
       const bHidden = b.name.startsWith(".");
@@ -48125,8 +48859,16 @@ init_tiered_store_set();
 init_tier_set2();
 init_tier_set3();
 
+// src/workers/connector-store/parent-label.ts
+init_parent_label();
+init_tier_ledger();
+
+// src/workers/email-source/server.ts
+init_child_visibility();
+
 // src/workers/connector-store/tier-visibility.ts
 init_tier_ledger();
+init_child_visibility();
 
 // src/workers/email-source/server.ts
 init_secret_locations();
@@ -48449,7 +49191,7 @@ async function runSnifferPass(options) {
     const row = target.ledger.getCurrent(question);
     if (row === undefined || row.decidedBy === "override")
       return false;
-    if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused") && snifferMaterialCarriesSecret(question.material))
+    if (row.contentTier === "secrets" && row.reasons.includes("metadata:secret:sniffer_refused") && snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)))
       return true;
     let expectedMap = row.mapRevision;
     let open4 = row.state === "pending" && openPasses(row).includes(question.pass);
@@ -48471,7 +49213,7 @@ async function runSnifferPass(options) {
     return open4;
   };
   const screenQuestion = (target, question) => {
-    const screen = snifferMaterialCarriesSecret(question.material) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
+    const screen = snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)) ? "secrets" : target.screenStoredQuestion?.(question) ?? "clean";
     if (screen === "unreadable") {
       report.awaitingPlacement += 1;
       return false;
@@ -48517,7 +49259,7 @@ async function runSnifferPass(options) {
         report.staleDropped += 1;
         continue;
       }
-      if (snifferMaterialLooksLikeInjection(question.material)) {
+      if (snifferMaterialLooksLikeInjection(snifferOwnMaterial(question.material))) {
         const failSafe = { tier: "private", category: SNIFFER_INJECTION_CATEGORY, confidence: 0, failSafe: true };
         target.sniffer.putVerdict(keyOf(question), failSafe);
         apply({ target, question }, failSafe);
@@ -48571,7 +49313,7 @@ async function runSnifferPass(options) {
       return finish(report);
     }
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
-    const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: group2[0].question.material })), options.ownerContext);
+    const prompt = buildSnifferBatchPrompt(pass, batch.map((group2, index) => ({ i: index + 1, material: snifferMaterialForModel(group2[0].question.material) })), options.ownerContext);
     next.target.sniffer.recordDispatch();
     dispatches += 1;
     for (const item of group)

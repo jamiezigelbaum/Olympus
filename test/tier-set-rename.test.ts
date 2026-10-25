@@ -262,20 +262,26 @@ describe('a set written the old way (recorded ledger path), before and after a r
     const w = world();
     renameIntoAccountFolder(w);
     const dir = dirname(folderPath(w, 'internal'));
+    const openAndRead = (): void => {
+      const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(folderPath(w, 'secure_local')) });
+      const stores = TIERS.map((tier) => openConnectorStore(
+        SOURCE,
+        { dbPath: folderPath(w, tier), corpusId: CORPORA[tier]!, family: 'file', trustDomain: tier, ...(tier === 'secure_local' ? { tierLedger: ledger } : {}) },
+        w.env,
+      ));
+      try {
+        for (const store of stores) expect(store.searchItems('harbour', 5).length).toBeGreaterThan(0);
+        expect(stores[0]!.searchItems('compost', 5)).toEqual([]);
+      } finally {
+        for (const store of stores) store.close();
+        ledger.close();
+      }
+    };
+    // The fixture was written at an older store schema, so the first open for
+    // writing brings it up to date; a later open that only reads writes nothing.
+    openAndRead();
     const before = storeFiles(fileStates(dir));
-    const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(folderPath(w, 'secure_local')) });
-    const stores = TIERS.map((tier) => openConnectorStore(
-      SOURCE,
-      { dbPath: folderPath(w, tier), corpusId: CORPORA[tier]!, family: 'file', trustDomain: tier, ...(tier === 'secure_local' ? { tierLedger: ledger } : {}) },
-      w.env,
-    ));
-    try {
-      for (const store of stores) expect(store.searchItems('harbour', 5).length).toBeGreaterThan(0);
-      expect(stores[0]!.searchItems('compost', 5)).toEqual([]);
-    } finally {
-      for (const store of stores) store.close();
-      ledger.close();
-    }
+    openAndRead();
     const after = fileStates(dir);
     expect(storeFiles(after)).toEqual(before);
     expect(walSizes(after).every((size) => size === 0)).toBe(true);

@@ -113,7 +113,45 @@ export interface ExtractionCandidatePage {
 }
 
 export interface ExtractionFetchOptions {
+  /**
+   * The most bytes a read may take. A source enforces it while reading
+   * (at most this many plus one), never by trusting a size the item states.
+   */
   maxBytes?: number;
+}
+
+/**
+ * Where a file reader's input is, for a source that can hand over a path
+ * instead of bytes.
+ */
+export interface ExtractionFetchFileOptions {
+  maxBytes?: number;
+  /**
+   * The root of a private folder the runner owns, in the account's folder (or
+   * the data folder, for a legacy account). A source that has
+   * to write the item's bytes somewhere (a member of an archive, a part of a
+   * message) streams them to a file here, in bounded chunks, and removes it
+   * in `dispose`. A source whose item is already a file under an approved
+   * folder returns that file's path (no copy) and leaves `dispose` empty.
+   */
+  spoolDir: string;
+  /**
+   * The existing folder `spoolDir` is under when it is an account's own (see
+   * `readItemToFile`): the spool is made below it on the first write, and a
+   * write is refused once it is gone.
+   */
+  spoolAnchor?: string;
+}
+
+/**
+ * A file the reader opens by path. The runner calls `dispose` once the read is
+ * over, on every path including a throw.
+ */
+export interface FetchedFile {
+  path: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  dispose(): Promise<void>;
 }
 
 /**
@@ -136,6 +174,12 @@ export interface FileExtractionSource {
    * Bytes for one item: provider download, local mount, or both.
    */
   fetch(ref: ExtractionItemRef, options: ExtractionFetchOptions): Promise<FetchedBytes>;
+  /**
+   * Optional: the item as a file, for a reader that declares a file input
+   * (`Extractor.input`) so a long recording is never held in memory. Absent,
+   * the runner falls back to `fetch` and the reader makes its own file.
+   */
+  fetchFile?(ref: ExtractionItemRef, options: ExtractionFetchFileOptions): Promise<FetchedFile>;
   /**
    * Optional: verify fetched bytes against the ref's `contentHash`.
    */
@@ -246,10 +290,10 @@ export interface ExtractorJobContext {
 /**
  * Input to one extraction attempt.
  *
- * `bytes` is present whenever the selected extractor declares `needsBytes`.
- * `localPath` is the temp file those bytes were spilled to; extractors that
- * shell out to a local command consume the path rather than the buffer, so
- * both may be present for the same attempt.
+ * `bytes` is present whenever the selected extractor declares a bytes input
+ * (or a file input and its source could not hand over a path). `localPath` is
+ * present when it declares a file input and the source did: the reader opens
+ * it and never deletes it (the runner's cleanup owns it).
  */
 export interface ExtractorInput {
   ref: ExtractionItemRef;
@@ -358,13 +402,29 @@ export type ExtractorOutput =
   | ExtractorNonTextOutput
   | ExtractorFailureOutput;
 
+/**
+ * What an extractor reads, declared so a reader's memory is bounded by
+ * construction (docs/design/child-items.md, "Size"):
+ *
+ *   - `none`: the reader reads no bytes of the item (a reader of names only).
+ *   - `bytes`: the reader takes the bytes in memory, up to `maxInputBytes`.
+ *     A source enforces the bound while reading, and an item whose stated
+ *     size is over it is listed as too large and never read.
+ *   - `file`: the reader takes a path (it shells out, or streams). Nothing
+ *     is held in memory by the runner.
+ */
+export type ExtractorInputDeclaration =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'bytes'; readonly maxInputBytes: number }
+  | { readonly kind: 'file' };
+
 export interface Extractor {
   /**
    * Stable dispatch id. Matches the kind strings already enqueued today.
    */
   readonly kind: string;
   readonly version: string;
-  readonly needsBytes: boolean;
+  readonly input: ExtractorInputDeclaration;
   /**
    * The version a job for this media type is queued under, when it differs
    * from `version`: a capability added for one media type (pictures read for

@@ -973,6 +973,7 @@ describe('a store migrates to the judgments schema with its photos intact', () =
       try {
         if (shape === 'v13') {
           db.exec('DROP INDEX idx_connector_store_media_judgments_unapplied; DROP TABLE media_judgments;');
+          db.exec('DROP INDEX IF EXISTS idx_connector_store_items_parent; ALTER TABLE items DROP COLUMN parent_local_item_id; ALTER TABLE items DROP COLUMN deferred_locator; ALTER TABLE items DROP COLUMN bytes_available; ALTER TABLE items DROP COLUMN size_bytes;');
           db.query("UPDATE schema_version SET version = 13 WHERE store_id = 'connector-store'").run();
         } else {
           db.exec('DELETE FROM media_judgments; ALTER TABLE media_judgments DROP COLUMN attempts; ALTER TABLE media_judgments DROP COLUMN tier_checked_at;');
@@ -994,7 +995,7 @@ describe('a store migrates to the judgments schema with its photos intact', () =
         expect(columns(dbPath)).toEqual(expectedColumns);
         const check = new Database(dbPath, { readonly: true });
         try {
-          expect(readSqliteSchemaVersion(check, 'connector-store')).toBe(14);
+          expect(readSqliteSchemaVersion(check, 'connector-store')).toBe(15);
         } finally {
           check.close();
         }

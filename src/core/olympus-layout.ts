@@ -350,6 +350,7 @@ export type AccountRawName =
   | 'x-reconcile.sqlite'
   | 'archive-imports.json'
   | 'archive-import-requests.json'
+  | 'archive-media-bindings.sqlite'
   | MessagingRawName;
 
 const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
@@ -357,6 +358,7 @@ const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
   'x-reconcile.sqlite': 'x.bookmarks',
   'archive-imports.json': ARCHIVE_IMPORTS,
   'archive-import-requests.json': ARCHIVE_IMPORTS,
+  'archive-media-bindings.sqlite': ARCHIVE_IMPORTS,
   ...messagingRawOwners(),
 };
 
@@ -414,8 +416,8 @@ export function accountRawPath(
   } else if (account.layout === 'legacy') {
     if (name === 'watch') return olympusDataPath(env, 'local-files-watch');
     const state = legacyArchiveStatePath(env);
-    // The requests sit beside the state, wherever it is.
-    return name === 'archive-imports.json' ? state : join(dirname(state), 'archive-import-requests.json');
+    // The requests and the media bindings sit beside the state, wherever it is.
+    return name === 'archive-imports.json' ? state : join(dirname(state), name);
   }
   return join(accountFolder(account, env), 'raw', name);
 }
@@ -450,7 +452,13 @@ export function legacyAccountPaths(
   const raw: string[] = [];
   if (sourceId === 'local.files') raw.push(olympusDataPath(env, 'local-files-watch'));
   if (sourceId === 'x.bookmarks') raw.push(`${olympusDataPath(env, 'x-bookmarks-api-usage.sqlite')}.reconcile`);
-  if (sourceId === ARCHIVE_IMPORTS) raw.push(olympusDataPath(env, 'archive-imports.json'), olympusDataPath(env, 'archive-import-requests.json'));
+  if (sourceId === ARCHIVE_IMPORTS) {
+    raw.push(
+      olympusDataPath(env, 'archive-imports.json'),
+      olympusDataPath(env, 'archive-import-requests.json'),
+      olympusDataPath(env, 'archive-media-bindings.sqlite'),
+    );
+  }
   const messaging = legacyMessagingPaths(sourceId, env);
   return { stores: [...stores, ...messaging.stores], raw: [...raw, ...messaging.raw] };
 }
@@ -777,6 +785,34 @@ export const MEDIA_CACHE_DIR_ENV = 'OLYMPUS_MEDIA_CACHE_DIR';
 export function mediaCacheRoot(env: LayoutEnv = process.env): string {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
   return configured ? join(configured, 'olympus-media') : olympusDataPath(env, 'media-cache');
+}
+
+/**
+ * Where a `legacy` account's file readers' input is written when the source
+ * has to write it (a member of an archive, a part of a message):
+ * `<data root>/extraction-spool`, shared by every legacy account and keyed
+ * inside by corpus and account scope. A `folder` account keeps its own in its
+ * folder (`accountExtractionSpoolRoot`). Private to the extraction runner,
+ * which removes each file after reading and sweeps leftovers of a crash at
+ * start.
+ */
+export function extractionSpoolRoot(env: LayoutEnv = process.env): string {
+  return olympusDataPath(env, 'extraction-spool');
+}
+
+/**
+ * Where an account's file readers' input is written: `raw/extraction-spool` in
+ * its folder, so the raw bytes of a recording or an attachment sit with the
+ * account that owns them and a Delete of the account takes them with the
+ * folder. A `legacy` account has no folder, so it uses the shared
+ * `extractionSpoolRoot`. Inside, scratch files are keyed by corpus and account
+ * scope (file-extraction/spool.ts), because one account holds several corpora
+ * and, for imported archives, many account scopes.
+ */
+export function accountExtractionSpoolRoot(account: LayoutAccount, env: LayoutEnv = process.env): string {
+  return account.layout === 'folder'
+    ? join(accountFolder(account, env), 'raw', 'extraction-spool')
+    : extractionSpoolRoot(env);
 }
 
 /** A WhatsApp state location as a folder: the value names the folder, or the `session.db` inside it. */

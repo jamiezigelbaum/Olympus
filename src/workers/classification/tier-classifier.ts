@@ -233,17 +233,68 @@ export function contentDigestReason(text: string): string {
  * sender), when known, then the excerpt. The names are a signal of their own
  * (a records folder, a dated test title) that the text alone may not carry.
  */
-export function snifferContentMaterial(names: string, excerpt: string): string {
+export function snifferContentMaterial(names: string, excerpt: string, parentContext?: string): string {
   const trimmed = names.trim();
-  return trimmed ? `Names: ${trimmed}\nExcerpt: ${excerpt}` : excerpt;
+  const context = parentContextLine(parentContext);
+  if (!trimmed && !context) return withoutParentContextMarker(excerpt);
+  return `${trimmed ? `Names: ${withoutParentContextMarker(trimmed)}` : 'Names:'}${context}\nExcerpt: ${withoutParentContextMarker(excerpt)}`;
+}
+
+/**
+ * The line that carries a child item's parent's names (a message's subject
+ * and sender) to the sniffer as CONTEXT for judging the child. It is its own
+ * line in the material, so every screen can take it apart from the child's
+ * own words (`splitParentContext`): a detector's result on the context never
+ * applies to the child. The parent's content is never carried.
+ */
+export const PARENT_CONTEXT_MARKER = '\nParent names (context only): ';
+/** The longest parent-names context handed to the sniffer. */
+export const PARENT_CONTEXT_MAX_CHARS = 200;
+
+function parentContextLine(parentContext: string | undefined): string {
+  const flat = parentContext?.replace(/\s+/g, ' ').trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
+  return flat ? `${PARENT_CONTEXT_MARKER}${flat}` : '';
+}
+
+/** A child's own words never open the context line: only the classifier writes the marker. */
+function withoutParentContextMarker(text: string): string {
+  return text.split(PARENT_CONTEXT_MARKER.trim()).join(' ');
+}
+
+/** The names with the parent-names context line appended, for the names pass. */
+export function namesWithParentContext(names: string, parentContext: string | undefined): string {
+  return `${withoutParentContextMarker(names)}${parentContextLine(parentContext)}`;
+}
+
+/**
+ * Material taken apart into the item's own words and the parent-names context
+ * line, if it carries one. A detector, an injection screen or a Secrets
+ * decision about the item reads `own` only.
+ */
+export function splitParentContext(material: string): { own: string; context: string | undefined } {
+  const at = material.indexOf(PARENT_CONTEXT_MARKER);
+  if (at < 0) return { own: material, context: undefined };
+  const from = at + PARENT_CONTEXT_MARKER.length;
+  const lineEnd = material.indexOf('\n', from);
+  const end = lineEnd < 0 ? material.length : lineEnd;
+  return { own: material.slice(0, at) + material.slice(end), context: material.slice(from, end) };
 }
 
 /** Cache/queue identity covers the complete input, not the bounded prompt.
- * Shared by listing, extraction and stored-item rejudges. */
-export function tierSnifferInputHash(pass: 'metadata' | 'content', signals: SourceClassificationSignals, text?: string): string {
+ * Shared by listing, extraction and stored-item rejudges. The permitted parent
+ * context is part of it: a different context is a different judgment. */
+export function tierSnifferInputHash(
+  pass: 'metadata' | 'content',
+  signals: SourceClassificationSignals,
+  text?: string,
+  parentContext?: string,
+): string {
+  const context = parentContext?.replace(/\s+/g, ' ').trim().slice(0, PARENT_CONTEXT_MAX_CHARS);
   return createHash('sha256').update(JSON.stringify([
     pass, signals.title ?? null, signals.path ?? null, signals.folderKeys ?? [],
     signals.labels ?? [], signals.sender ?? null, text ?? null,
+    // Appended only when present, so every item without a parent hashes as it always did.
+    ...(context ? [context] : []),
   ])).digest('hex');
 }
 
@@ -288,6 +339,16 @@ export interface TierClassificationInput {
    * HELD_UNTIL_JUDGED_PRIORITY.
    */
   holdUntilJudged?: boolean;
+  /**
+   * The names of the item's parent (a child item: an attachment, a photo), as
+   * context for the sniffer. The caller has already authorized and screened
+   * them on their own (connector-store/parent-context.ts); this module only
+   * carries them to the sniffer as a separate line and into the question's
+   * identity. They are never read by a detector, a rule or a flag here, so
+   * nothing about them can decide the child's tier, and no parent content is
+   * ever passed.
+   */
+  parentContext?: string;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -470,6 +531,7 @@ function classifyItemTiersWithPublic(
     sniffer,
     mapRevision: base.mapRevision,
     ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
+    ...(input.parentContext ? { parentContext: input.parentContext } : {}),
     ...(input.subject ? { subject: input.subject } : {}),
   });
 
@@ -488,6 +550,7 @@ function classifyItemTiersWithPublic(
     secretsCleared,
     sniffer,
     mapRevision: base.mapRevision,
+    ...(input.parentContext ? { parentContext: input.parentContext } : {}),
     ...(input.subject ? { subject: input.subject } : {}),
   });
 
@@ -546,6 +609,8 @@ export interface ContentTierInput {
    * A caller with only the stored decision reads it back with `heldUntilJudged`.
    */
   holdUntilJudged?: boolean;
+  /** The parent's names as sniffer context; see `TierClassificationInput.parentContext`. */
+  parentContext?: string;
   /** Passed through to the sniffer only; never read here. */
   subject?: TierSnifferSubject;
 }
@@ -616,6 +681,7 @@ export function classifyContentTier(
     secretsCleared: options.override?.kind === 'not_secret',
     sniffer,
     mapRevision: base.mapRevision,
+    ...(input.parentContext ? { parentContext: input.parentContext } : {}),
     ...(input.subject ? { subject: input.subject } : {}),
   });
   const lifted = options.retirePublic === true && content.tier === 'public';
@@ -665,6 +731,8 @@ function metadataPass(args: {
   mapRevision: string;
   /** The lane holds content until judged: its names question queues behind live ones. */
   holdUntilJudged?: boolean;
+  /** Screened parent names, sniffer context only (`TierClassificationInput.parentContext`). */
+  parentContext?: string;
   subject?: TierSnifferSubject;
 }): PassResult {
   const { signals, names, options } = args;
@@ -770,8 +838,8 @@ function metadataPass(args: {
       pass: 'metadata',
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY,
       flags,
-      material: snifferNames(signals),
-      materialHash: tierSnifferInputHash('metadata', signals),
+      material: namesWithParentContext(snifferNames(signals), args.parentContext),
+      materialHash: tierSnifferInputHash('metadata', signals, undefined, args.parentContext),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });
@@ -819,6 +887,8 @@ function contentPass(args: {
   mapRevision: string;
   /** The lane holds content until judged (TierClassificationInput.holdUntilJudged). */
   holdUntilJudged?: boolean;
+  /** Screened parent names, sniffer context only (`TierClassificationInput.parentContext`). */
+  parentContext?: string;
   subject?: TierSnifferSubject;
 }): { tier: TierKey; decidedBy: TierDecidedBy; reasons: string[]; pending: boolean } {
   const { metadata, text } = args;
@@ -922,8 +992,8 @@ function contentPass(args: {
       priority: args.holdUntilJudged === true ? HELD_UNTIL_JUDGED_PRIORITY
         : recordFlags.length > 0 || metadata.pending ? HELD_RECORD_PRIORITY : 0,
       flags,
-      material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary))),
-      materialHash: tierSnifferInputHash('content', args.signals, text),
+      material: snifferContentMaterial(args.names, snifferExcerpt(text, vocabularyTerms(detection.vocabulary)), args.parentContext),
+      materialHash: tierSnifferInputHash('content', args.signals, text, args.parentContext),
       mapRevision: args.mapRevision,
       ...(args.subject ? { subject: args.subject } : {}),
     });

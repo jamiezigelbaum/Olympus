@@ -47,6 +47,7 @@ import {
   type StillImagePreparer,
 } from './image-preparers.ts';
 import { imageExtensionForMimeType } from './ocr.ts';
+import { IMAGE_READER_MAX_INPUT_BYTES } from './input-limits.ts';
 
 export { IMAGE_PREPARE_MAX_PIXEL_EDGE, jpegPixelSize };
 
@@ -55,7 +56,7 @@ export const DEFAULT_IMAGE_PREPARE_TIMEOUT_MS = 60_000;
  * Larger originals are skipped (`skipped_too_large`): a phone photo is a few
  * megabytes, and a scan or panorama past this is not worth a decode.
  */
-export const DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_IMAGE_PREPARE_MAX_INPUT_BYTES = IMAGE_READER_MAX_INPUT_BYTES;
 const TEMP_DIR_PREFIX = 'olympus-image-prepare-';
 /**
  * Pictures smaller than this on either side (a logo, a tracking pixel, an

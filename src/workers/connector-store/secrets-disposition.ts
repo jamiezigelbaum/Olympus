@@ -33,7 +33,7 @@
 
 import { existsSync } from 'node:fs';
 import type { SourceItemIdentity, SourceTrustTier } from '../../core/source-index/types.ts';
-import { snifferMaterialCarriesSecret } from '../classification/sniffer.ts';
+import { snifferMaterialCarriesSecret, snifferOwnMaterial } from '../classification/sniffer.ts';
 import { TierSnifferStore } from '../classification/sniffer-store.ts';
 import type { SecretScrubMark, TierCopy, TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
@@ -285,7 +285,7 @@ function snifferRetriesSettlement(ledger: TierLedger, identity: TierLedgerIdenti
       };
       return (['content', 'metadata'] as const).some((pass) => {
         const question = sniffer.questionFor(subject, pass);
-        return question !== undefined && snifferMaterialCarriesSecret(question.material);
+        return question !== undefined && snifferMaterialCarriesSecret(snifferOwnMaterial(question.material));
       });
     } finally {
       sniffer.close();

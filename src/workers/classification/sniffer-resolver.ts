@@ -37,6 +37,8 @@ import {
   snifferCacheModelId,
   snifferMaterialCarriesSecret,
   snifferMaterialLooksLikeInjection,
+  snifferMaterialForModel,
+  snifferOwnMaterial,
   cachedSnifferVerdictHolds,
   snifferReasonCode,
   snifferTierKey,
@@ -304,7 +306,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     // The queued secret is the durable retry marker if copy cleanup failed
     // after the ledger hid the item. Do not discard it as a stale verdict.
     if (row.contentTier === 'secrets' && row.reasons.includes('metadata:secret:sniffer_refused')
-      && snifferMaterialCarriesSecret(question.material)) return true;
+      && snifferMaterialCarriesSecret(snifferOwnMaterial(question.material))) return true;
     let expectedMap = row.mapRevision;
     let open = row.state === 'pending' && openPasses(row).includes(question.pass);
     if (row.state === 'current') {
@@ -327,7 +329,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
   const screenQuestion = (target: SnifferTarget, question: SnifferQuestion): boolean => {
     // Check inside listQuestions' eligibility callback so unreadable copies
     // remain queued while its durable bounded cursor advances past them.
-    const screen = snifferMaterialCarriesSecret(question.material) ? 'secrets'
+    const screen = snifferMaterialCarriesSecret(snifferOwnMaterial(question.material)) ? 'secrets'
       : target.screenStoredQuestion?.(question) ?? 'clean';
     if (screen === 'unreadable') { report.awaitingPlacement += 1; return false; }
     if (screen === 'clean') return true;
@@ -369,7 +371,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
       }
       // Material shaped like an instruction to the model is never sent: the
       // item is Private at once (fail safe), and that verdict is cached.
-      if (snifferMaterialLooksLikeInjection(question.material)) {
+      if (snifferMaterialLooksLikeInjection(snifferOwnMaterial(question.material))) {
         const failSafe = { tier: 'private' as const, category: SNIFFER_INJECTION_CATEGORY, confidence: 0, failSafe: true };
         target.sniffer.putVerdict(keyOf(question), failSafe);
         apply({ target, question }, failSafe);
@@ -435,7 +437,7 @@ export async function runSnifferPass(options: SnifferPassOptions): Promise<Sniff
     assertSnifferProfileAllowed(options.lane.profileId, options.lane.profile);
     const prompt = buildSnifferBatchPrompt(
       pass,
-      batch.map((group, index) => ({ i: index + 1, material: group[0]!.question.material })),
+      batch.map((group, index) => ({ i: index + 1, material: snifferMaterialForModel(group[0]!.question.material) })),
       options.ownerContext,
     );
     next.target.sniffer.recordDispatch();

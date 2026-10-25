@@ -1511,6 +1511,17 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
+   * Every (corpus, account scope) that holds a job, whatever its status: who a
+   * scratch file in the extraction spool can still belong to. An owner with no
+   * job here is gone (its account scope or source was removed).
+   */
+  jobOwners(): Array<{ corpusId: string; accountScope: string }> {
+    const rows = this.db.query('SELECT DISTINCT corpus_id, account_scope FROM extraction_jobs')
+      .all() as Array<{ corpus_id: string; account_scope: string }>;
+    return rows.map((row) => ({ corpusId: row.corpus_id, accountScope: row.account_scope }));
+  }
+
+  /**
    * When the lane's earliest backed-off retry comes due, if it has one still
    * in the future. A due retry is leased by the next run like any queued job;
    * this answers when that next run should be, so a short backoff is not

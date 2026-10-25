@@ -97,6 +97,7 @@ import type {
   ExtractorOutput,
   ExtractorRegistry,
   FetchedBytes,
+  FetchedFile,
   FileExtractionSource,
 } from './types.ts';
 
@@ -273,6 +274,17 @@ export interface ExtractionRunnerCorpus {
    * the reading first. The sink still refuses it either way.
    */
   refusesImageContent?: (ref: ExtractionItemRef) => boolean;
+  /**
+   * This corpus's own spool root, where its account keeps the scratch files a
+   * source writes for a file reader. It wins over the runner's `spoolDir`,
+   * which is for a corpus that names none.
+   */
+  spoolDir?: string;
+  /**
+   * The existing folder `spoolDir` is under, for an account that keeps its
+   * files in a folder (`ExtractionFetchFileOptions.spoolAnchor`).
+   */
+  spoolAnchor?: string;
 }
 
 export interface FileExtractionRunnerOptions {
@@ -292,6 +304,13 @@ export interface FileExtractionRunnerOptions {
   probeFailurePolicy?: 'pause_lane' | 'ignore';
   reclassificationRules?: readonly ExtractionReclassificationRule[];
   maxConsecutiveRetryableFailures?: number;
+  /**
+   * A private folder in the data folder where a source writes an item it must
+   * hand a file reader as a file, for a corpus that names no spool of its own
+   * (`ExtractionRunnerCorpus.spoolDir`). Without either a file reader gets
+   * bytes.
+   */
+  spoolDir?: string;
   now?: () => Date;
 }
 
@@ -707,6 +726,9 @@ export function createFileExtractionRunner(
       let jobsForced = 0;
       let jobsSkippedTooLarge = 0;
       for (const { kind: extractorKind, version: extractorVersion, refs } of byKind.values()) {
+        // A bytes reader's own bound applies to every source: an item whose stated size is over it
+        // is queued as too large and never read, whatever the lane asked for.
+        const maxBytesPerFile = boundedByReader(request.maxBytesPerFile, registry.get(extractorKind));
         const enqueue = (bucketRefs: readonly ExtractionItemRef[]): ReturnType<typeof jobs.enqueue> => jobs.enqueue({
           refs: bucketRefs,
           extractorKind,
@@ -716,7 +738,7 @@ export function createFileExtractionRunner(
           // that names no decision must not rewrite a stored needs_review.
           ...(request.policyDecision !== undefined ? { policyDecision: request.policyDecision } : {}),
           ...(request.priority !== undefined ? { priority: request.priority } : {}),
-          ...(request.maxBytesPerFile !== undefined ? { maxBytesPerFile: request.maxBytesPerFile } : {}),
+          ...(maxBytesPerFile !== undefined ? { maxBytesPerFile } : {}),
           ...(request.force !== undefined ? { force: request.force } : {}),
         });
         const results: Array<ReturnType<typeof jobs.enqueue>> = [];
@@ -841,6 +863,8 @@ export function createFileExtractionRunner(
         ...(request.providerItemIds !== undefined ? { providerItemIds: request.providerItemIds } : {}),
       });
 
+      const spoolDir = corpus.spoolDir ?? options.spoolDir;
+      const spoolAnchor = corpus.spoolDir !== undefined ? corpus.spoolAnchor : undefined;
       const records: ExtractionRunRecord[] = [];
       let consecutiveRetryableFailures = 0;
       let paused = false;
@@ -870,6 +894,8 @@ export function createFileExtractionRunner(
             source ??= await resolveSource(corpus);
             return source;
           },
+          ...(spoolDir !== undefined ? { spoolDir } : {}),
+          ...(spoolAnchor !== undefined ? { spoolAnchor } : {}),
           now,
         });
 
@@ -956,12 +982,25 @@ interface JobOutcome {
   leaseExpired?: boolean;
 }
 
+/**
+ * The most bytes a read of this item may take: the job's own limit and the
+ * reader's declared bound, whichever is smaller. Undefined when neither
+ * applies (a reader of files declares no bound).
+ */
+function boundedByReader(requested: number | undefined, extractor: Extractor | undefined): number | undefined {
+  const declared = extractor?.input.kind === 'bytes' ? extractor.input.maxInputBytes : undefined;
+  if (declared === undefined) return requested;
+  return requested === undefined ? declared : Math.min(requested, declared);
+}
+
 interface SettleOneJobInput {
   jobs: LocalFileExtractionJobStore;
   job: LeasedExtractionJob;
   extractor: Extractor | undefined;
   corpus: ExtractionRunnerCorpus;
   resolveSource: () => Promise<FileExtractionSource>;
+  spoolDir?: string;
+  spoolAnchor?: string;
   now: () => Date;
 }
 
@@ -971,7 +1010,7 @@ interface SettleOneJobInput {
  * its own reference by now, and a file nothing took is removed with the hold.
  */
 async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
-  const staged: { media?: ExtractedMedia } = {};
+  const staged: { media?: ExtractedMedia; file?: FetchedFile } = {};
   let outcome: JobOutcome;
   try {
     outcome = await settleOneJobHeld(input, staged);
@@ -986,6 +1025,14 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
     outcome = retryable(EXTRACTION_ERROR_KIND_INTERNAL_ERROR, error);
   }
   try {
+    // A file the source wrote for a reader (a spooled member of an archive) is removed on every path.
+    await staged.file?.dispose();
+  } catch (error) {
+    console.error(
+      `[olympus:file-extraction] spool_release_failed job_id=${input.job.jobId} reason=${boundedLogErrorMessage(error)}`,
+    );
+  }
+  try {
     const media = staged.media;
     if (media?.stagingHolder) releaseMediaCacheFile(media.path, media.sha256, media.stagingHolder, dirname(media.path));
   } catch (error) {
@@ -998,7 +1045,7 @@ async function settleOneJob(input: SettleOneJobInput): Promise<JobOutcome> {
   return outcome;
 }
 
-async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: ExtractedMedia }): Promise<JobOutcome> {
+async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: ExtractedMedia; file?: FetchedFile }): Promise<JobOutcome> {
   const { job, extractor, corpus } = input;
   if (!extractor) {
     return { status: 'failed_terminal', errorKind: EXTRACTION_ERROR_KIND_UNKNOWN_EXTRACTOR };
@@ -1038,17 +1085,31 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
   }
 
   let fetched: FetchedBytes | undefined;
-  if (extractor.needsBytes) {
+  let fetchedFile: FetchedFile | undefined;
+  if (extractor.input.kind !== 'none') {
     let source: FileExtractionSource;
     try {
       source = await input.resolveSource();
     } catch (error) {
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
+    // The reader's own bound and the job's, whichever is smaller; a source enforces it while reading.
+    const maxBytes = boundedByReader(job.maxBytesPerFile, extractor);
     try {
-      fetched = await source.fetch(job.ref, {
-        ...(job.maxBytesPerFile !== undefined ? { maxBytes: job.maxBytesPerFile } : {}),
-      });
+      if (extractor.input.kind === 'file' && source.fetchFile && input.spoolDir !== undefined) {
+        fetchedFile = await source.fetchFile(job.ref, {
+          ...(maxBytes !== undefined ? { maxBytes } : {}),
+          spoolDir: input.spoolDir,
+          ...(input.spoolAnchor !== undefined ? { spoolAnchor: input.spoolAnchor } : {}),
+        });
+        staged.file = fetchedFile;
+      } else {
+        fetched = await source.fetch(job.ref, { ...(maxBytes !== undefined ? { maxBytes } : {}) });
+        // Defence in depth: a source that ignored the bound still cannot hand a reader more than it allows.
+        if (maxBytes !== undefined && fetched.bytes.byteLength > maxBytes) {
+          return { status: 'skipped_too_large', errorKind: 'source_too_large' };
+        }
+      }
     } catch (error) {
       // The settlement is the SOURCE'S, read off the typed rejection, never
       // re-derived here from a status code this module never saw. That is the
@@ -1062,7 +1123,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       }
       return retryable(EXTRACTION_ERROR_KIND_SOURCE_FETCH_FAILED, error);
     }
-    if (job.ref.contentHash !== undefined && source.verifyBytes) {
+    if (fetched && job.ref.contentHash !== undefined && source.verifyBytes) {
       let verified = true;
       try {
         verified = source.verifyBytes(job.ref, fetched.bytes);
@@ -1075,8 +1136,8 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
     }
   }
 
-  const resolvedMimeType = resolveExtractionMimeType(job.ref.mimeType, fetched?.mimeType);
-  const resolvedSizeBytes = fetched?.sizeBytes ?? job.ref.sizeBytes;
+  const resolvedMimeType = resolveExtractionMimeType(job.ref.mimeType, fetched?.mimeType ?? fetchedFile?.mimeType);
+  const resolvedSizeBytes = fetched?.sizeBytes ?? fetchedFile?.sizeBytes ?? job.ref.sizeBytes;
   const extractorInput: ExtractorInput = {
     ref: job.ref,
     ...(extractor.egress === 'approved_remote' ? {
@@ -1098,6 +1159,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
       leaseExpiresAt: job.leaseExpiresAt,
     },
     ...(fetched ? { bytes: fetched.bytes } : {}),
+    ...(fetchedFile ? { localPath: fetchedFile.path } : {}),
     ...(resolvedMimeType !== undefined ? { mimeType: resolvedMimeType } : {}),
     ...(resolvedSizeBytes !== undefined ? { sizeBytes: resolvedSizeBytes } : {}),
   };
@@ -1366,12 +1428,15 @@ function hashError(error: unknown): string {
 /**
  * The store signals both halves of a lost lease with plain Errors. Matching the
  * message is not lovely; the alternative is treating every write failure as a
- * lost lease, which would hide a real defect behind an orderly retry.
+ * lost lease, which would hide a real defect behind an orderly retry. A job
+ * whose row is gone (its source or archive was removed while a worker held
+ * it) is a lost lease too: nobody holds a job that no longer exists.
  */
 export function isLostLeaseRecordError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : '';
   return message.includes('does not hold the job lease')
-    || message.includes('requires a leased job');
+    || message.includes('requires a leased job')
+    || message.includes('references an unknown job');
 }
 
 function leaseHasExpired(leaseExpiresAt: string, at: Date): boolean {

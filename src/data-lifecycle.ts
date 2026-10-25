@@ -61,6 +61,7 @@ import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './worke
 import { archiveImportFamilies } from './core/archive-formats.ts';
 import { archiveConnectorStoreDbPaths, archiveImportCorpora } from './workers/archive-import/store.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './workers/archive-import/state.ts';
+import { ARCHIVE_MEDIA_BINDINGS_STORE_ID, archiveMediaBindingsPath } from './workers/archive-import/media-bindings.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath, withArchiveImportApprovals } from './workers/archive-import/requests.ts';
 import {
   defaultGmailConnectorStoreDbPath,
@@ -360,6 +361,13 @@ export function lifecycleSourceSpecs(): LifecycleSourceSpec[] {
         const statePath = defaultArchiveImportStatePath(envForContext(context));
         return [statePath, archiveImportRequestsPath(statePath)];
       },
+      // The media files each import bound (their paths under the chosen
+      // folder, with versions): names of the person's files, so deleted with
+      // the source and never exported. The files themselves are never touched.
+      accountStateSqlite: (context) => [{
+        path: archiveMediaBindingsPath(defaultArchiveImportStatePath(envForContext(context))),
+        sqliteStoreId: ARCHIVE_MEDIA_BINDINGS_STORE_ID,
+      }],
       approvals: {
         // An approval still being checked for copies counts too: the check
         // records the import when it finishes, so deleting under it would let

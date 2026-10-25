@@ -2,7 +2,7 @@
 
 Status: stable, versioned architecture canon
 Owner: CTO
-Updated: 2026-08-29
+Updated: 2026-10-25
 
 ## Display terminology
 
@@ -77,7 +77,7 @@ interface SourceConnector {
   readonly family: SourceFamily;
   authenticate(): Promise<void>;  // via the existing credential broker
   listItems(options?): AsyncIterable<SourceConnectorListPage>;  // live sync OR archive import
-  fetchItem(localItemId: string): Promise<RawItem>;
+  fetchItem(localItemId: string, options?: { deferredBytes?: { locator: string } }): Promise<RawItem>;  // 2.1.0: the locator of a child's deferred bytes
   classificationSignals(item: RawItem): SourceClassificationSignals;  // source facts, never a tier
 }
 
@@ -120,6 +120,13 @@ Notes:
   ledger. It reads signal kinds only and never branches on a source name.
 - Only `public_link` and `published` are positive evidence for Public. A
   connector that cannot read sharing state publishes none.
+- **Children (2.1.0).** An attachment or a piece of media is an item of its
+  own: its identity names its `parent`, it is listed `metadata_only` with
+  `deferredBytes` (a connector-owned `locator`, whether the source says the
+  bytes `available`, and the `sizeBytes` it states), and the shared extraction
+  factory reads it later through `fetchItem(localItemId, { deferredBytes })`.
+  The connector publishes no tier for it; the classifier judges the child on
+  its own. See [child items](design/child-items.md).
 - Storage placement is the store lane's declaration
   (`ConnectorStoreSyncOptions.placement`), not the connector's. In 2.0.0 each
   lane declares exactly what its connector's `classify()` used to return, so
@@ -318,6 +325,54 @@ section consolidates and supersedes all other policy wording.
 
 ### Change log
 
+- 2026-10-25 (v2.1.0, additive): **child items** (owner direction
+  2026-10-25; `docs/design/child-items.md`, reviewed by Astra in two rounds).
+  An attachment or a piece of media that came inside another item is an item of
+  its own, read by the shared extraction factory and judged on its own. Four
+  optional additions, no existing field changes:
+  `SourceItemIdentity.parent` (`providerItemId`, `localItemId` of the item it
+  came inside), `RawItem.deferredBytes` (`locator`, `available`, `sizeBytes`),
+  a second optional argument to `SourceConnector.fetchItem`
+  (`{ deferredBytes: { locator } }`, the locator the store persisted), and
+  `SourceCitationMetadata.parentLabel`. A producer that omits them behaves as
+  under 2.0.0, and a one-argument `fetchItem` still satisfies the interface.
+  A child has the same family, provider, account scope and conversation as its
+  parent and the provider item id `<parent>#child:<key>`, so archive removal,
+  account delete, ledger withdrawal and conversation grouping already reach it.
+  No tier is inherited: a child is Personal, Private or Secrets by its own
+  names and content, and never raises its parent. The judge may see the
+  parent's names as screened, separately authorized context that is part of
+  the judgment's cache identity; a detector result on that context never
+  applies to the child. The connector store gains four nullable columns
+  (`parent_local_item_id`, `deferred_locator`, `bytes_available`,
+  `size_bytes`) and a parent index as an additive migration; existing rows
+  have no parent and do not move. `Extractor` gains a required input
+  declaration (bytes with `maxInputBytes`, or a file path), enforced while
+  reading. A citation's `parentLabel` is built at pack time only when the
+  parent's names may go where the candidate goes, and the parent's names are a
+  release dependency of the answer, so a revoked label withholds or
+  regenerates it. The Analyst's generic prompt is unchanged; no question logic
+  is added. Beside the contracts, the archive import layer (not a versioned
+  contract) gives a folder-chosen archive's connector `ArchiveConnectorInput.media`
+  to bind and read the media files beside its export: an append-only SQLite
+  table next to the archive record (`raw/archive-media-bindings.sqlite`),
+  written before the child row and the checkpoint, checked with the manifest
+  when the import is called complete, and never hashed into a resume point.
+  Version: 2.1.0. Fingerprint: `config/source-pipeline-contract-version.json`
+  (`bun run contracts:check`).
+  Migration/compatibility: see the version entry. Storage invariance:
+  `test/child-items-storage-unchanged.test.ts` (existing items, chunks and
+  vectors are byte-identical before and after the migration). No embedding
+  model or epoch changes.
+  Eval: the fixture held-out harness gains cases whose answer exists only
+  inside a child, with the cited child naming its parent
+  (`test/eval-child-items.test.ts`). The instantiated private run
+  (`bun run eval:real`) needs the owner-private dataset; the owner waived it
+  for merge by an exception on 2026-10-25, and it runs once a real install
+  with data exists. The fixture held-out cases are the receipt.
+  Critical-review gate: a source-contract change; it needs fresh independent
+  review of its head before merge, alongside required CI under
+  `docs/ENGINEERING_PROCESS.md`.
 - 2026-10-23 (no contract type version change; tier classifier stays
   `2026-10-13.p6`): **imported content is held until judged** (owner
   direction 2026-10-23; `docs/design/archive-import.md`, "Privacy while an
@@ -654,7 +709,9 @@ The initial versioned baseline is `1.0.0` (2026-08-29). It preserves the
 previously frozen shapes without a runtime or data migration. `1.1.0`
 (2026-09-23) adds the optional EvidencePack `coverage.matchCounts`. `2.0.0`
 (2026-09-23) replaces `SourceConnector.classify` with `classificationSignals`;
-see both change logs.
+see both change logs. `2.1.0` (2026-10-25) adds the optional child-item
+fields (`parent`, `deferredBytes`, `fetchItem`'s locator argument,
+`parentLabel`); see the change log.
 
 ## Change log
 

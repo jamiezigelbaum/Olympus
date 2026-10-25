@@ -12,7 +12,13 @@
  * 1. The record is marked `removing`: no pass imports it any more (a pass
  *    already running sees it and stops at the next message). The removal
  *    runs as the archive's own scheduler task, so never beside its import.
- * 2. In the set ledger, every copy of its items is superseded, so no store
+ * 2. The extraction job rows of its items (they carry the names of the files
+ *    read), with their artifacts, go through the forget registry's
+ *    extraction step, scoped to the archive. Extraction already treats the
+ *    archive as gone (see 1), so nothing lands after this. Its media
+ *    bindings (the paths of the media files it bound) go with them: only a
+ *    read of its items used them.
+ *    In the set ledger, every copy of its items is superseded, so no store
  *    serves them from that moment, and every decision, override, history and
  *    proposal row is deleted, so no move, re-judge or migration acts on them.
  *    Its questions to the private model go too.
@@ -25,10 +31,12 @@
  */
 import { existsSync } from 'node:fs';
 import type { WaitingQuestionStore } from '../../core/waiting-private-questions.ts';
+import { runForgetAccountScopeSteps } from '../../core/source-forget-registry.ts';
 import { openTierSniffer } from '../../core/source-storage.ts';
 import { tierSnifferPathForLedger } from '../classification/tier-ledger-path.ts';
 import { archiveContinuations } from './continuation-cache.ts';
 import { archiveLaneLegs, archiveLaneStores, type ArchiveTierLane } from './lane.ts';
+import type { ArchiveMediaBindings } from './media-bindings.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID, archiveConnectorId, type ArchiveImportRecord, type ArchiveImportStateStore } from './state.ts';
 import { archiveTierSetId } from './store.ts';
 
@@ -54,6 +62,14 @@ export interface ArchiveRemovalCounts {
   questions_removed: number;
   answers_removed: number;
   secret_locations_removed: number;
+  /**
+   * Extraction ledger files that held rows of the archive and now hold none.
+   */
+  extraction_ledgers_cleared: number;
+  /**
+   * Media bindings of the archive forgotten (media-bindings.ts).
+   */
+  media_bindings_removed: number;
 }
 
 export interface ArchiveRemovalOptions {
@@ -64,6 +80,10 @@ export interface ArchiveRemovalOptions {
    * Opens the private inbox for this removal; undefined when there is none.
    */
   openWaitingQuestions?: () => WaitingQuestionStore | undefined;
+  /**
+   * The media bindings of the archives; the archive's rows in them go.
+   */
+  media?: ArchiveMediaBindings;
   stepItems?: number;
   stepsPerRun?: number;
   now?: () => Date;
@@ -94,6 +114,8 @@ function emptyCounts(): ArchiveRemovalCounts {
     questions_removed: 0,
     answers_removed: 0,
     secret_locations_removed: 0,
+    extraction_ledgers_cleared: 0,
+    media_bindings_removed: 0,
   };
 }
 
@@ -137,7 +159,18 @@ export async function runArchiveRemoval(options: ArchiveRemovalOptions): Promise
   // An inflater parked for a member of this archive has nothing left to serve.
   archiveContinuations.dropArchive(record.archive_id);
 
-  // 2: hidden everywhere, and out of every later pass's reach.
+  // 2: the archive no longer exists to extraction (its record is `removing`,
+  // checked before every listing, fetch, egress and landing), so its job rows
+  // and artifacts go now: a worker holding a lease finds nothing to settle.
+  counts.extraction_ledgers_cleared += runForgetAccountScopeSteps(
+    { source_id: ARCHIVE_IMPORTS_SOURCE_ID, slot: '1', corpus_ids: corpusIds },
+    [accountScope],
+    { env: lane.env },
+    { dryRun: false },
+  ).length;
+  counts.media_bindings_removed += options.media?.forgetArchive(accountScope) ?? 0;
+
+  // Hidden everywhere, and out of every later pass's reach.
   const withdrawn = lane.ledger.withdrawAccountScope(provider, accountScope);
   counts.decisions_removed += withdrawn.items;
   counts.copies_hidden += withdrawn.copies;

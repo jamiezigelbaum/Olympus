@@ -105,7 +105,7 @@ describe('local files from Connect to an answer', () => {
       locate: (localItemId) => store.localContent(localItemId)?.locatorUri,
     });
     const extractor: Extractor = {
-      kind: 'plain_text_fixture', version: 'test', needsBytes: true, egress: 'local', accepts: () => true,
+      kind: 'plain_text_fixture', version: 'test', input: { kind: 'bytes', maxInputBytes: Number.MAX_SAFE_INTEGER }, egress: 'local', accepts: () => true,
       async extract(input) {
         const text = new TextDecoder().decode(input.bytes);
         return { status: 'indexed', text, derivations: [{ artifactKind: 'document', chars: text.length }] };

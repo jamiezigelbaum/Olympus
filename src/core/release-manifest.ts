@@ -33,6 +33,13 @@ export interface ReleaseInput {
   providerConversationId?: string;
   /** Private (secure_local, or an S4 item) when the answer was written. */
   privateAtAnswer: boolean;
+  /**
+   * Absent: the item itself was read. `names`: only the item's NAMES were in
+   * front of a model, as a child citation's parent label (core/parent-label.ts).
+   * Such an input is judged on the item's names tier alone, its content never
+   * limits the answer, and it never stands for a cited item.
+   */
+  layer?: 'names';
 }
 
 /** The release rules in force when the answer was written. */
@@ -57,10 +64,15 @@ export interface ReleaseManifest {
  * - `secret`: classified Secret, or moving to Secret.
  * - `unknown`: cannot be proven (no account scope in a tiered corpus).
  * `gone`: routed, with no current copy left anywhere.
+ * `hiddenByParent`: a child item whose parent may not be seen any more (it is
+ * also `gone`). Unlike an item that moved or left, what an answer said about
+ * such a child may sit in its prose and not in a citation, so a collector
+ * withholds the whole answer rather than dropping the citation.
  */
 export interface ReleaseInputVerdict {
   tier: 'legacy' | 'public_or_personal' | 'private' | 'secret' | 'unknown';
   gone: boolean;
+  hiddenByParent?: boolean;
 }
 
 /** The worker's current tiers and release rules, read when an answer is collected. */
@@ -115,7 +127,13 @@ export function privateInputReleaseAllowed(
   postureNow: 'allow' | 'approval',
 ): boolean {
   const privateNow = verdict.tier === 'private' || (verdict.tier === 'legacy' && input.privateAtAnswer);
-  return !privateNow || constraints.includeSecureLocalContent || postureNow === 'allow';
+  const authorized = constraints.includeSecureLocalContent || postureNow === 'allow';
+  // A parent label was cleared for the names tier of its time. Names that became Private since
+  // are covered by neither the posture nor a request for Private content: the answer carried
+  // them at a tier they no longer have. Names that were Private then still need today's
+  // authorization, exactly as any Private text does: the posture may have tightened since.
+  if (input.layer === 'names') return !privateNow || (input.privateAtAnswer && authorized);
+  return !privateNow || authorized;
 }
 
 export function answerReleaseWithheldReason(

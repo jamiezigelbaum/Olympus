@@ -638,7 +638,12 @@ export interface ComputerUnpairEntry {
 
 export interface ComputerUnreadableEntry {
   sourceId: string;
-  files: Array<{ name: string; token?: string }>;
+  files: Array<{
+    name: string;
+    token?: string;
+    /** A file that came inside another item: the parent's label and the route to its archive or source. */
+    parent?: { label?: string; route: { kind: 'archive'; archiveId: string } | { kind: 'source' } };
+  }>;
   more: number;
   /** Present when `more` is: the cursor UNREADABLE_FILES_PAGE_TOOL_NAME reads the next page from. */
   after?: string;

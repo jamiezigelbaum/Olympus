@@ -84,7 +84,7 @@ describe('SQLite schema migration runner', () => {
       }).close();
 
       let db = openDatabase(path);
-      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(14);
+      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(15);
       expect(tableColumns(db, 'items')).toEqual(expect.arrayContaining([
         'search_text',
         'sender_id',
@@ -94,6 +94,10 @@ describe('SQLite schema migration runner', () => {
         'source_scope_generation',
         'source_scope_revision',
         'source_scope_folder_keys_json',
+        'parent_local_item_id',
+        'deferred_locator',
+        'bytes_available',
+        'size_bytes',
       ]));
       expect(tableNames(db)).toEqual(expect.arrayContaining([
         'item_owners',
@@ -115,7 +119,7 @@ describe('SQLite schema migration runner', () => {
       }).close();
 
       db = openDatabase(path);
-      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(14);
+      expect(readSqliteSchemaVersion(db, 'connector-store')).toBe(15);
       expect(schemaVersionRows(db, 'connector-store')).toBe(1);
       db.close();
     } finally {

@@ -12,6 +12,7 @@
  *
  * Every leg, the Private one included, is created on first need.
  */
+import type { RawItem } from '../../core/contracts.ts';
 import type { SourceFamily, SourceTrustDomain } from '../../core/source-index/types.ts';
 import type { SecretLocationsIndex } from '../classification/secret-locations.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
@@ -39,8 +40,20 @@ export const ARCHIVE_TIER_CLASSIFICATION: ConnectorStoreTierClassification = Obj
   holdContentUntilJudged: true,
 });
 
+/**
+ * A child's bytes are read after listing, by the extraction factory (docs/design/child-items.md):
+ * its names go to their tier's store at listing and its content lands later, exactly as for any
+ * item whose text arrives after listing. It names no source and no format: the connector says
+ * so on the item (`deferredBytes`).
+ */
+export const archiveContentArrivesLaterFor = (item: RawItem): boolean => item.deferredBytes !== undefined;
+
 export interface ArchiveTierLane {
   family: SourceFamily;
+  /**
+   * The environment the lane's files were resolved under.
+   */
+  env: Record<string, string | undefined>;
   set: TieredStoreSet;
   ledger: TierLedger;
   secure: OnDemandTierStore;
@@ -90,6 +103,7 @@ export function createArchiveTierLane(options: {
     setId: archiveTierSetId(family),
     ledger,
     tierClassification: ARCHIVE_TIER_CLASSIFICATION,
+    contentArrivesLaterFor: archiveContentArrivesLaterFor,
     ...(secretLocations ? { secretLocations } : {}),
     legs: {
       public_safe: { onDemand: publicStore },
@@ -99,6 +113,7 @@ export function createArchiveTierLane(options: {
   });
   return {
     family,
+    env,
     set,
     ledger,
     secure,
@@ -128,6 +143,7 @@ export function archiveTierMigrationLaneSpecs(
       sourceId: ARCHIVE_IMPORTS_SOURCE_ID,
       setId: archiveTierSetId(family),
       tierClassification: ARCHIVE_TIER_CLASSIFICATION,
+      contentArrivesLaterFor: archiveContentArrivesLaterFor,
       legs: {
         public_safe: leg('public_safe', false),
         internal: leg('internal', false),

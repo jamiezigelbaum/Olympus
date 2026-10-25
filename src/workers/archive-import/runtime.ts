@@ -20,12 +20,23 @@ import type { SecretLocationsIndex } from '../classification/secret-locations.ts
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { registerArchiveFormatConnectors } from './format-connectors.ts';
 import { createArchiveTierLane, type ArchiveTierLane } from './lane.ts';
+import {
+  archiveMediaBindingsPath,
+  createArchiveMediaBindings,
+  defaultArchiveMediaBindingsPath,
+  type ArchiveMediaBindings,
+} from './media-bindings.ts';
 import { startArchiveImport, type ArchiveImportStart } from './start.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './state.ts';
 import { archiveConnectorStoreDbPaths } from './store.ts';
 
 export interface ArchiveImportRuntime {
   readonly state: ArchiveImportStateStore;
+  /**
+   * The media bindings of the archives (media-bindings.ts), opened when the
+   * first one is needed; the file sits beside the record.
+   */
+  readonly media: ArchiveMediaBindings;
   /**
    * Every family archives are imported into.
    */
@@ -85,6 +96,11 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
   const state = new ArchiveImportStateStore({ path: options.statePath ?? defaultArchiveImportStatePath(env), env });
+  const media = createArchiveMediaBindings({
+    // Beside the record, wherever the layout resolvers (or a test) put it.
+    path: options.statePath ? archiveMediaBindingsPath(options.statePath) : defaultArchiveMediaBindingsPath(env),
+    env,
+  });
   const families = archiveImportFamilies();
   const lanes = new Map<string, ArchiveTierLane>();
 
@@ -131,6 +147,7 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
 
   return {
     state,
+    media,
     families: () => [...families],
     lane,
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),

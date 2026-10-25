@@ -404,7 +404,14 @@ async function unreadableFilesPage(
 function entriesOf(files: ReturnType<UnreadableFiles['computerList']>['files']): ComputerUnreadableEntry['files'] {
   return files.flatMap((file) => {
     const [name] = unreadableNames([file.name]);
-    return name ? [{ name, ...(file.token ? { token: file.token } : {}) }] : [];
+    const [label] = unreadableNames([file.parent?.label]);
+    return name
+      ? [{
+          name,
+          ...(file.token ? { token: file.token } : {}),
+          ...(file.parent ? { parent: { ...(label ? { label } : {}), route: file.parent.route } } : {}),
+        }]
+      : [];
   });
 }
 

@@ -58,7 +58,7 @@ describe('transcription extractor: registry surface', () => {
     expect(extractor.kind).toBe('whisper_transcription');
     expect(extractor.version).toBe(TRANSCRIPTION_EXTRACTOR_VERSION);
     expect(extractor.version).toBe('2026-06-12');
-    expect(extractor.needsBytes).toBe(true);
+    expect(extractor.input).toEqual({ kind: 'file' });
     expect(extractor.egress).toBe('local');
   });
 

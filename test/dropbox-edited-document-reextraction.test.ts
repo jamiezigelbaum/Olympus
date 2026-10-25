@@ -327,7 +327,7 @@ describe('the Dropbox extraction lane reads an edited file again', () => {
     const extractor: Extractor = {
       kind: EXTRACTOR_KIND,
       version: 'test',
-      needsBytes: true,
+      input: { kind: 'bytes', maxInputBytes: Number.MAX_SAFE_INTEGER },
       egress: 'local',
       accepts: () => true,
       async extract(input) {

@@ -488,9 +488,17 @@ export type ArchiveManifestCheck =
 /**
  * Whether every file is still exactly the version the import started with.
  * Reads no content; for a zip it reads the directory of its members, which
- * must still be the table recorded.
+ * must still be the table recorded. A caller that checks before every single
+ * read (a child item's bytes, fetched on their own) passes
+ * `memberTables: false`: the version check alone is a stat, where a member
+ * table of a large zip is megabytes, and the connector that reads the member
+ * holds the table it was given.
  */
-export function verifyArchiveManifest(root: ScopeRoot, files: readonly ArchiveManifestFile[]): ArchiveManifestCheck {
+export function verifyArchiveManifest(
+  root: ScopeRoot,
+  files: readonly ArchiveManifestFile[],
+  options: { memberTables?: boolean } = {},
+): ArchiveManifestCheck {
   for (const file of files) {
     let reader;
     try {
@@ -508,7 +516,7 @@ export function verifyArchiveManifest(root: ScopeRoot, files: readonly ArchiveMa
       if (!sameScopeFileVersion(reader.version, manifestFileVersion(file))) {
         return { ok: false, code: 'file_changed', relPath: file.rel_path, message: 'A file of this archive changed since the import started.' };
       }
-      if (file.members) {
+      if (file.members && options.memberTables !== false) {
         const now = zipMemberTable(reader, reader.readAt(0, 4));
         if (!now || now.count !== file.members.count || now.sha256 !== file.members.sha256) {
           return { ok: false, code: 'file_changed', relPath: file.rel_path, message: 'A file of this archive changed since the import started.' };

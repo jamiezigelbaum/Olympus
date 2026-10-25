@@ -10,7 +10,9 @@
  *
  * The listing completes only once every file, read again whole, is still the
  * version the import started with; its SHA-256 is then kept on the record,
- * which is how a copy of the same export is known later.
+ * which is how a copy of the same export is known later. The media files the
+ * connector bound along the way (media-bindings.ts) are checked with them,
+ * by version: the import is whole when the manifest and the bindings both are.
  *
  * Findings the connector reports (a message too large, a part it could not
  * read) are counted on the record as the pages they belong to are listed.
@@ -34,6 +36,7 @@ import {
   type TieredLaneReceiptCounts,
 } from '../connector-store/tiered-store-set.ts';
 import type { ArchiveTierLane } from './lane.ts';
+import { archiveMediaAccess, verifyArchiveMediaBindings, type ArchiveMediaBindings } from './media-bindings.ts';
 
 // Where an item is in the archive: the coordinates findings use.
 type ItemPosition = { fileIndex: number; offset: number };
@@ -96,6 +99,11 @@ export interface ArchiveImportPullOptions {
   maxBytesPerListing?: number;
   shouldContinue?: () => boolean;
   connectorFactory?: (formatId: string) => ArchiveConnectorFactory | undefined;
+  /**
+   * The media bindings of the archives. Without them a connector is given no
+   * means to bind media and lists the media it cannot read as left out.
+   */
+  media?: ArchiveMediaBindings;
   now?: () => Date;
 }
 
@@ -366,14 +374,23 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       reportPosition: (next) => { position = next; },
       reportItemPositions: (positions) => { itemPositions = positions; },
       shouldContinue,
+      ...(options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {}),
       ...(options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {}),
       ...(options.pageSize !== undefined ? { pageSize: options.pageSize } : {}),
     });
     const completion: { digests?: string[] } = {};
     const observed = observeListing(connector, pending, flush, async () => {
       const digests = await digestArchiveFiles(root, record.files, shouldContinue);
-      if (digests) completion.digests = digests;
-      return digests !== undefined;
+      if (!digests) return false;
+      // Every media file bound so far (the last page's included: bound before it was listed) must be
+      // the version it was bound at, or the import is not whole.
+      if (options.media) {
+        const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
+        if (!media) return false;
+        if (!media.ok) throw new ArchiveImportStoppedError(media.code, media.message, media.relPath);
+      }
+      completion.digests = digests;
+      return true;
     }, {
       holds: (identity) => options.lane.set.anyLegHasRow(identity),
       positions: () => {
@@ -400,6 +417,9 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       run = await set.sync(observed.connector, {
         placement: ARCHIVE_STORE_PLACEMENT,
         fetchContent: true,
+        // A child (an attachment, a piece of media) is listed by name with the means to read its bytes
+        // later; reading them is the extraction factory's work, never the listing's.
+        deferMetadataOnlyContent: true,
         maxItems: Math.max(1, options.maxItems ?? ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS),
         ...(cursor ? { cursor } : {}),
       });
@@ -415,6 +435,15 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
     const complete = observed.completed();
     const dates = observed.dates();
     const final: { stop?: ArchiveImportStop } = {};
+    // Indexing the last page yielded after the bindings were checked: they are checked again as the
+    // import is called complete, together with the manifest's files below.
+    let mediaChange: ArchiveImportStop | undefined;
+    let mediaChecked = true;
+    if (complete && completion.digests && options.media) {
+      const media = await verifyArchiveMediaBindings({ bindings: options.media, archiveId: record.archive_id, root, shouldContinue });
+      if (!media) mediaChecked = false;
+      else if (!media.ok) mediaChange = stopFrom(media, now().toISOString());
+    }
     const updated = options.state.update(record.archive_id, (entry) => {
       if (dates.earliest && dates.latest) {
         entry.date_range = {
@@ -423,11 +452,11 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
         };
       }
       const digests = completion.digests;
-      if (complete && digests && entry.status === 'importing' && entry.manifest_sha256 === record.manifest_sha256) {
+      if (complete && digests && mediaChecked && entry.status === 'importing' && entry.manifest_sha256 === record.manifest_sha256) {
         // Indexing the last page yielded to other work after the files were
         // read whole: the folder and every file must still be those versions
         // (metadata only) at the moment the import is called complete.
-        const changed = changeSinceApproval(root, record, now().toISOString());
+        const changed = changeSinceApproval(root, record, now().toISOString()) ?? mediaChange;
         if (changed) {
           final.stop = changed;
           entry.status = 'stopped';

@@ -21,6 +21,12 @@ export interface EvalExpectedEvidence {
   providerItemId?: string; // fill for precise grading; omit to require >=1 citation
   /** Exact Castor-visible locator required for citation canonicality checks. */
   uri?: string;
+  /**
+   * For an item that came inside another (an attachment, a photo): text the
+   * cited item's parent label must contain, so the citation names where the
+   * item came from (docs/design/child-items.md). Case-insensitive.
+   */
+  parentLabel?: string;
   hint: string; // human description of the file/message that should be cited
 }
 

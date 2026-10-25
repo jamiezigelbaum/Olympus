@@ -249,7 +249,9 @@ import {
 import { archiveLaneLegs } from '../archive-import/lane.ts';
 import { withArchiveImportCorpora } from '../archive-import/store.ts';
 import { ARCHIVE_IMPORTS_SOURCE_ID } from '../archive-import/state.ts';
+import { createArchiveExtractionRuntime } from '../archive-import/extraction-runtime.ts';
 import { createArchiveImportsSchedulerSource } from '../archive-import/scheduler-source.ts';
+import type { ExtractorRegistryConfig } from '../file-extraction/types.ts';
 import { createLocalFilesSourceConnector } from '../local-files/connector.ts';
 import { LOCAL_FILES_APPROVED_SCOPE_FILTER_CODEC } from '../local-files/approved-scope-filter.ts';
 import { LOCAL_FILES_LOCATOR_RESULT_PROJECTOR_CODEC } from '../local-files/locator-result-projector.ts';
@@ -311,7 +313,10 @@ import {
   createXBookmarksTierLane,
   defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
-import { createReleaseTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
+import { createParentLabelResolver } from '../connector-store/parent-label.ts';
+import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
+import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
+import { createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
   enableSourceRegistryAdoption,
@@ -2572,15 +2577,32 @@ export async function main(): Promise<void> {
       return lane.secrets.search(query, {
         ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
         ...(scope.filters ? { filters: scope.filters } : {}),
-      }, { limit: 5 });
+      }, {
+        limit: 5,
+        // A Secret child's location is its name: it is shown only while its parent is.
+        hide: (identities) => hiddenProbesByParentIdentity({
+          ledger: () => lane.ledger,
+          stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
+        }, identities),
+      });
     } catch {
       return [];
     }
   });
-  const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
+  // Each lane's ledger, its corpora and its stores that exist now: the stores
+  // let a child item be judged by its parent where the gate and the release
+  // check read (tier-visibility.ts).
+  const tierScopes = (): TierVisibilityScope[] => tierLanes.map((lane) => ({
     ledger: lane.ledger,
     corpusIds: lane.corpusIds,
-  })));
+    stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
+  }));
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
+  // A child item's parent: its names, judged against the ledger that governs its lane (answers and the unreadable list).
+  const parentLabelResolver = createParentLabelResolver({
+    stores: () => connectorStores,
+    scopes: tierScopes,
+  });
   const onDemandCorpusAbsent = (corpusId: string): boolean => {
     for (const lane of tierLanes) {
       const store = lane.onDemand.find((candidate) => candidate.corpusId === corpusId);
@@ -3254,6 +3276,94 @@ export async function main(): Promise<void> {
         ]
       : []),
   ]);
+  // The extractor configuration the main runtime and the imported archives' runtime share.
+  const fileExtractionExtractors: ExtractorRegistryConfig = {
+    // An owner-configured command wins; otherwise audio is read by the
+    // built-in on-device transcriber where it runs (Mac and Linux by default).
+    ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
+      ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
+      : sharedBuiltInTranscriber(process.env)
+        ? { transcription: { builtIn: sharedBuiltInTranscriber(process.env)! } }
+        : {}),
+    ...(fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined
+      || fileExtractionMaxBoundedTextChars !== undefined
+      ? {
+          text: {
+            ...(fileExtractionPdfTextCommand ? { pdfTextCommand: fileExtractionPdfTextCommand } : {}),
+            ...(fileExtractionPdfTextTimeoutMs !== undefined
+              ? { pdfTextTimeoutMs: fileExtractionPdfTextTimeoutMs }
+              : {}),
+            ...(fileExtractionMaxBoundedTextChars !== undefined
+              ? { maxBoundedTextChars: fileExtractionMaxBoundedTextChars }
+              : {}),
+          },
+        }
+      : {}),
+    ...(fileExtractionOcrTimeoutMs !== undefined || fileExtractionPdfRenderTimeoutMs !== undefined
+      || fileExtractionOcrEngine !== undefined || fileExtractionOcrMaxPages !== undefined
+      ? {
+          ocr: {
+            ...(fileExtractionOcrTimeoutMs !== undefined ? { ocrTimeoutMs: fileExtractionOcrTimeoutMs } : {}),
+            ...(fileExtractionOcrEngine !== undefined ? { engine: fileExtractionOcrEngine } : {}),
+            ...(fileExtractionOcrMaxPages !== undefined ? { maxPages: fileExtractionOcrMaxPages } : {}),
+            ...(fileExtractionPdfRenderTimeoutMs !== undefined
+              ? { pdfRenderTimeoutMs: fileExtractionPdfRenderTimeoutMs }
+              : {}),
+          },
+        }
+      : {}),
+    ...(fileExtractionRemoteClient
+      ? {
+          remote: {
+            client: fileExtractionRemoteClient,
+            ...(process.env.OLYMPUS_FILE_EXTRACTION_REMOTE_MODEL?.trim()
+              ? { model: process.env.OLYMPUS_FILE_EXTRACTION_REMOTE_MODEL.trim() }
+              : {}),
+          },
+        }
+      : {}),
+    ...(fileExtractionLocalVlmClient
+      ? {
+          vlm: { client: fileExtractionLocalVlmClient },
+          vlmPdf: {
+            client: fileExtractionLocalVlmClient,
+            ...(parseOptionalPositiveInteger(
+              process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES,
+              'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES',
+            ) !== undefined
+              ? {
+                  maxPages: parseOptionalPositiveInteger(
+                    process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES,
+                    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES',
+                  )!,
+                }
+              : {}),
+            ...(parseOptionalNonNegativeInteger(
+              process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES,
+              'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES',
+            ) !== undefined
+              ? {
+                  pageRetries: parseOptionalNonNegativeInteger(
+                    process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES,
+                    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES',
+                  )!,
+                }
+              : {}),
+            ...(parseOptionalNonNegativeInteger(
+              process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS,
+              'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS',
+            ) !== undefined
+              ? {
+                  pageRetryDelayMs: parseOptionalNonNegativeInteger(
+                    process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS,
+                    'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS',
+                  )!,
+                }
+              : {}),
+          },
+        }
+      : {}),
+  };
   const fileExtractionRuntime = createFileExtractionRuntime({
     env: process.env,
     enabled: fileExtractionCorpora.length > 0,
@@ -3300,93 +3410,7 @@ export async function main(): Promise<void> {
         return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
       },
     },
-    extractors: {
-      // An owner-configured command wins; otherwise audio is read by the
-      // built-in on-device transcriber where it runs (Mac and Linux by default).
-      ...(process.env.OLYMPUS_TRANSCRIBE_COMMAND?.trim()
-        ? { transcription: { command: process.env.OLYMPUS_TRANSCRIBE_COMMAND.trim() } }
-        : sharedBuiltInTranscriber(process.env)
-          ? { transcription: { builtIn: sharedBuiltInTranscriber(process.env)! } }
-          : {}),
-      ...(fileExtractionPdfTextCommand !== undefined || fileExtractionPdfTextTimeoutMs !== undefined
-        || fileExtractionMaxBoundedTextChars !== undefined
-        ? {
-            text: {
-              ...(fileExtractionPdfTextCommand ? { pdfTextCommand: fileExtractionPdfTextCommand } : {}),
-              ...(fileExtractionPdfTextTimeoutMs !== undefined
-                ? { pdfTextTimeoutMs: fileExtractionPdfTextTimeoutMs }
-                : {}),
-              ...(fileExtractionMaxBoundedTextChars !== undefined
-                ? { maxBoundedTextChars: fileExtractionMaxBoundedTextChars }
-                : {}),
-            },
-          }
-        : {}),
-      ...(fileExtractionOcrTimeoutMs !== undefined || fileExtractionPdfRenderTimeoutMs !== undefined
-        || fileExtractionOcrEngine !== undefined || fileExtractionOcrMaxPages !== undefined
-        ? {
-            ocr: {
-              ...(fileExtractionOcrTimeoutMs !== undefined ? { ocrTimeoutMs: fileExtractionOcrTimeoutMs } : {}),
-              ...(fileExtractionOcrEngine !== undefined ? { engine: fileExtractionOcrEngine } : {}),
-              ...(fileExtractionOcrMaxPages !== undefined ? { maxPages: fileExtractionOcrMaxPages } : {}),
-              ...(fileExtractionPdfRenderTimeoutMs !== undefined
-                ? { pdfRenderTimeoutMs: fileExtractionPdfRenderTimeoutMs }
-                : {}),
-            },
-          }
-        : {}),
-      ...(fileExtractionRemoteClient
-        ? {
-            remote: {
-              client: fileExtractionRemoteClient,
-              ...(process.env.OLYMPUS_FILE_EXTRACTION_REMOTE_MODEL?.trim()
-                ? { model: process.env.OLYMPUS_FILE_EXTRACTION_REMOTE_MODEL.trim() }
-                : {}),
-            },
-          }
-        : {}),
-      ...(fileExtractionLocalVlmClient
-        ? {
-            vlm: { client: fileExtractionLocalVlmClient },
-            vlmPdf: {
-              client: fileExtractionLocalVlmClient,
-              ...(parseOptionalPositiveInteger(
-                process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES,
-                'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES',
-              ) !== undefined
-                ? {
-                    maxPages: parseOptionalPositiveInteger(
-                      process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES,
-                      'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_MAX_PAGES',
-                    )!,
-                  }
-                : {}),
-              ...(parseOptionalNonNegativeInteger(
-                process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES,
-                'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES',
-              ) !== undefined
-                ? {
-                    pageRetries: parseOptionalNonNegativeInteger(
-                      process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES,
-                      'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRIES',
-                    )!,
-                  }
-                : {}),
-              ...(parseOptionalNonNegativeInteger(
-                process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS,
-                'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS',
-              ) !== undefined
-                ? {
-                    pageRetryDelayMs: parseOptionalNonNegativeInteger(
-                      process.env.OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS,
-                      'OLYMPUS_FILE_EXTRACTION_LOCAL_VLM_PDF_PAGE_RETRY_DELAY_MS',
-                    )!,
-                  }
-                : {}),
-            },
-          }
-        : {}),
-    },
+    extractors: fileExtractionExtractors,
   });
   const connectorStoreEmbeddingProviders = new Map<string, SourceEmbeddingProvider>();
   const connectorStoreAccountScopes = new Map<string, string>();
@@ -3582,6 +3606,14 @@ export async function main(): Promise<void> {
   } catch (error) {
     console.warn(`[archive-import] imported archives are not served this run: ${error instanceof Error ? error.name : 'error'}`);
   }
+  // Reading the child items an import listed by name (an attachment, a photo): the shared
+  // extraction factory over the archive lanes' stores, built on first use and again when a
+  // lane's stores change, with the same extractor configuration as the main runtime.
+  const archiveExtraction = createArchiveExtractionRuntime({
+    runtime: archiveImports,
+    env: process.env,
+    extractors: fileExtractionExtractors,
+  });
   // Every constructed canonical store gets its embedding and retrieval lane.
   if (xBookmarksConnectorStore && xBookmarksEmbeddingProvider) {
     registerConnectorStoreEmbeddingLane({
@@ -3876,7 +3908,7 @@ export async function main(): Promise<void> {
         inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes!, pack, request, corpusIds }),
         analyst: defaultLocalAnalyst,
         releaseCheck: createReleaseTierCheck(
-          () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+          tierScopes,
           () => secureDerivativeDefault ?? 'allow',
         ),
         queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
@@ -3947,6 +3979,8 @@ export async function main(): Promise<void> {
           accountScope: (store) => connectorStoreAccountScopes.get(store.corpusId),
           semanticRelevanceBar: (store) => (store.corpusId === X_BOOKMARKS_CORPUS_ID ? xBookmarksSemanticRelevanceBar : undefined),
           visibilityGate: tierVisibilityGate,
+          // A child item's citation names its parent when the parent's names may go where the child goes.
+          parentLabels: parentLabelResolver,
           secretLocations: tierSecretLocations,
           heldItems: (corpusId) => tierLanes.find((candidate) => candidate.corpusIds.has(corpusId))?.ledger.corpusCopyCounts(corpusId).held ?? 0,
         }),
@@ -3988,15 +4022,14 @@ export async function main(): Promise<void> {
   // unreadable, on any host; an item no store serves any more is left out of
   // both the count and the list. Source-neutral: every lane's ledger and
   // secret index, by corpus.
-  const locateUnreadableItem = (ref: { corpusId: string; localItemId: string }) => {
-    for (const store of connectorStores) {
-      if (store.corpusId !== ref.corpusId) continue;
-      const found = store.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
-      if (found) return { ...(found.locatorUri ? { locatorUri: found.locatorUri } : {}),
-        ...(found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}) };
-    }
-    return undefined;
-  };
+  const unreadableLocators = createUnreadableLocators({
+    stores: () => connectorStores,
+    lanes: () => tierLanes,
+    parentLabels: parentLabelResolver,
+  });
+  const locateUnreadableItem = unreadableLocators.locate;
+  // A file that came inside another item names it (label and route) in the computer's own list.
+  const unreadableParentOfItem = unreadableLocators.parentOf;
   const unreadableVerdict = createUnreadableVerdict({
     locate: locateUnreadableItem,
     lanes: () => tierLanes,
@@ -4074,6 +4107,7 @@ export async function main(): Promise<void> {
         },
         verdict: unreadableVerdict,
         locate: locateUnreadableItem,
+        parentOf: unreadableParentOfItem,
         // The provider's own resolver, else a Drive file's own Google page.
         // Nothing else opens: a locator is provider data, not a link to trust.
         openTarget: (provider, locator) => (Object.hasOwn(unreadableOpenTargets, provider)
@@ -4620,6 +4654,7 @@ export async function main(): Promise<void> {
           return createArchiveImportsSchedulerSource({
             runtime: archiveImports,
             config: olympusConfig,
+            extraction: archiveExtraction,
             tierEmbeddings: lanes.flatMap((lane) => [
               { leg: lane.secure, provider: tierSecureEmbeddingProvider },
               { leg: lane.internal, provider: sourceIndexEmbeddingProvider },
@@ -5068,7 +5103,7 @@ export async function main(): Promise<void> {
     ...(connector ? { connector } : {}),
     ...(sourceAnswer ? { sourceAnswer } : {}),
     sourceAnswerReleaseCheck: createReleaseTierCheck(
-      () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+      tierScopes,
       () => secureDerivativeDefault ?? 'allow',
     ),
     // Asking for an import or a removal, and reading the list: nothing else (archive-import/agent.ts).
@@ -5480,7 +5515,7 @@ export async function main(): Promise<void> {
   // uses, read when a remote agent collects an answer: an item the answer
   // read that was reclassified since it was written is caught there.
   const remoteReleaseCheck = createReleaseTierCheck(
-    () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })),
+    tierScopes,
     () => secureDerivativeDefault ?? 'allow',
   );
   // Private answers on this computer (design background-agents.md, section

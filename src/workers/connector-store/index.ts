@@ -50,6 +50,7 @@ export {
   type ConnectorStoreLocatorIdentityBackfillSummary,
   type ConnectorStoreLocatorIdentityIndexStatus,
   type ConnectorStoreExtractionCandidate,
+  type StoredDeferredBytes,
   type ConnectorStoreExtractionCandidateOptions,
   type ConnectorStoreExtractionCandidatePage,
   type ConnectorStoreCurrentItemRepresentationCoverage,

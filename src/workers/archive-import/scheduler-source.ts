@@ -13,6 +13,11 @@
  * with a removal waiting. The scheduler then runs the removal within seconds;
  * the import cadence is untouched.
  *
+ * Reading later: an archive that is importing or finished has one more task,
+ * which reads the child items the import listed by name (an attachment, a
+ * photo) through the shared extraction factory, in the same serialization as
+ * the import and the removal, so a child never lands beside a removal.
+ *
  * Embedding: one task per tier store that exists, each with the identity its
  * trust domain allows (the Private store only with a local or approved
  * private embedder).
@@ -25,11 +30,14 @@ import {
   DROPBOX_EMBED_MAX_CHUNKS_PER_PASS,
   SCHEDULER_SOURCE_IDS,
   embedPassResult,
+  fileExtractionSchedulerTask,
   progressFromCounts,
   schedulerScopeHash,
   type SourceSchedulerSource,
   type SourceSchedulerTask,
 } from '../source-scheduler.ts';
+import type { ArchiveExtractionRuntime } from './extraction-runtime.ts';
+import { ARCHIVE_EXTRACTION_SCOPE_KEY } from './extraction-source.ts';
 import { runArchiveRemoval } from './removal.ts';
 import type { ArchiveImportRuntime } from './runtime.ts';
 import { pullArchiveImport } from './sync.ts';
@@ -43,6 +51,20 @@ export const ARCHIVE_IMPORTS_CONCURRENCY_KEY = 'archive.imports';
 export function archiveImportTaskId(archiveId: string): string {
   return `${SCHEDULER_SOURCE_IDS.archiveImports}_pull.${schedulerScopeHash(archiveId)}`;
 }
+
+/**
+ * The task id of one archive's reading of its child items.
+ */
+export function archiveExtractionTaskId(archiveId: string): string {
+  return `${SCHEDULER_SOURCE_IDS.archiveImports}_extract.${schedulerScopeHash(archiveId)}`;
+}
+
+/**
+ * How many candidates a reading pass plans, and how many it reads: a backlog
+ * of attachments drains pass after pass, each asking to continue within seconds.
+ */
+export const ARCHIVE_EXTRACTION_PLAN_LIMIT = 200;
+export const ARCHIVE_EXTRACTION_BATCH_SIZE = 10;
 
 /**
  * How often a running pass re-reads the record to learn the archive is being removed.
@@ -76,6 +98,11 @@ export interface ArchiveImportsSchedulerSourceInput {
    * Opens the private inbox for a removal (default: the runtime's).
    */
   openWaitingQuestions?: () => WaitingQuestionStore | undefined;
+  /**
+   * The archive lanes' extraction runtime, for reading child items. Without
+   * it nothing reads them (a test seam; the product always supplies it).
+   */
+  extraction?: Pick<ArchiveExtractionRuntime, 'runner'>;
   /**
    * One embed task per tier store, with the identity its domain allows.
    */
@@ -119,6 +146,7 @@ export function createArchiveImportsSchedulerSource(
             lane,
             archiveId,
             openWaitingQuestions: input.openWaitingQuestions ?? (() => input.runtime.openWaitingQuestions()),
+            media: input.runtime.media,
           });
           const counts = 'counts' in outcome ? { ...outcome.counts } : {};
           return {
@@ -132,6 +160,7 @@ export function createArchiveImportsSchedulerSource(
           lane,
           archiveId,
           shouldContinue: stillImporting(input.runtime, archiveId),
+          media: input.runtime.media,
           ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
         });
         return {
@@ -142,6 +171,46 @@ export function createArchiveImportsSchedulerSource(
         };
       },
     });
+  }
+
+  if (input.extraction) {
+    const extraction = input.extraction;
+    const known = input.runtime.families();
+    for (const record of records) {
+      if (record.status !== 'importing' && record.status !== 'imported') continue;
+      // A record naming a family no format imports into has nothing to read with.
+      const family = known.find((candidate) => candidate === record.family);
+      if (!family) continue;
+      const archiveId = record.archive_id;
+      const lane = {
+        corpusId: archiveCorpusId('secure_local', family),
+        // The jobs carry the items' own provider (their format's), the archive's id as the account.
+        provider: record.provider,
+        accountScope: archiveId,
+        approvedScopeKey: ARCHIVE_EXTRACTION_SCOPE_KEY,
+      };
+      // The runner is asked for at each use: the runtime is rebuilt when a lane's stores change.
+      const taskFor = (runner: NonNullable<ReturnType<typeof extraction.runner>>) => fileExtractionSchedulerTask({
+        id: archiveExtractionTaskId(archiveId),
+        runner,
+        lane,
+        planLimit: ARCHIVE_EXTRACTION_PLAN_LIMIT,
+        batchSize: ARCHIVE_EXTRACTION_BATCH_SIZE,
+      });
+      tasks.push({
+        id: archiveExtractionTaskId(archiveId),
+        kind: 'extract',
+        writer: true,
+        concurrencyKey: ARCHIVE_IMPORTS_CONCURRENCY_KEY,
+        atStart: () => { extraction.runner()?.prepareReadersWithWaitingWork?.([lane]); },
+        run: async (context) => {
+          const runner = extraction.runner();
+          // Nothing to read from yet (the family's first store is not there): the next pass asks again.
+          if (!runner) return progressFromCounts({ candidates_seen: 0, jobs_queued: 0, jobs_run: 0 });
+          return taskFor(runner).run(context);
+        },
+      });
+    }
   }
 
   for (const tier of input.tierEmbeddings ?? []) {

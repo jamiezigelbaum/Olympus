@@ -31,6 +31,7 @@ import type {
   ConnectorStoreExtractionCandidatePage,
   ConnectorStoreSearchFilters,
   LocalConnectorStore,
+  StoredDeferredBytes,
 } from './local-index.ts';
 import { TIER_DOMAIN_ORDER, type TieredStoreSet } from './tiered-store-set.ts';
 
@@ -64,6 +65,11 @@ export interface TieredExtractionView {
   ): boolean;
   /** The tier egress decisions read: never below Private for a routed item. */
   itemTrustTier(localItemId: string): SourceTrustTier | undefined;
+  /**
+   * What a child's row kept for reading its bytes later, from whichever store
+   * holds it: read fresh at every fetch (see `LocalConnectorStore.deferredBytesStateOfLocalItem`).
+   */
+  deferredBytesStateOfLocalItem(localItemId: string, expectedVersion?: string): StoredDeferredBytes;
   /**
    * Whether the item's picture content has nowhere to land: an item the set
    * never routed lands in the legacy store holding it, which keeps a picture
@@ -226,6 +232,17 @@ export function tieredExtractionView(
       }
       if (!routed) return tier;
       return tier === undefined || TRUST_TIER_RANK[tier] < TRUST_TIER_RANK.S4 ? 'S4' : tier;
+    },
+
+    deferredBytesStateOfLocalItem(localItemId, expectedVersion) {
+      // A usable locator in any store wins; otherwise the first thing a store has to say.
+      let found: StoredDeferredBytes = { state: 'gone' };
+      for (const store of storesHoldingRow(localItemId)) {
+        const state = store.deferredBytesStateOfLocalItem(localItemId, expectedVersion);
+        if (state.state === 'ready') return state;
+        if (found.state === 'gone' || (found.state === 'none' && state.state !== 'gone')) found = state;
+      }
+      return found;
     },
 
     refusesImageContent(localItemId) {

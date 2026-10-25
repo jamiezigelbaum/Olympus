@@ -606,7 +606,7 @@ describe('reading unread audio again once a reader is ready', () => {
     const extractor: Extractor = {
       kind: TRANSCRIPTION_EXTRACTOR_KIND,
       version: 'v1',
-      needsBytes: false,
+      input: { kind: 'none' },
       egress: 'local',
       accepts: () => true,
       reread: {
@@ -733,7 +733,7 @@ describe('download only when the chosen sources contain audio', () => {
     let prepares = 0;
     const builtIn = engineStub({ prepare: () => { prepares += 1; return 'pending'; } });
     const text: Extractor = {
-      kind: 'fake_text', version: 'v1', needsBytes: false, egress: 'local',
+      kind: 'fake_text', version: 'v1', input: { kind: 'none' }, egress: 'local',
       accepts: () => true,
       async extract() { return { status: 'indexed', text: 'words' }; },
     };

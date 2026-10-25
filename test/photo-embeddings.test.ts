@@ -622,7 +622,7 @@ describe('a prepared picture through runner, sink and store', () => {
         const written = writeMediaCacheFile(cache(), jpegBytes(1 + (accept ? 0 : 1)), 'image/jpeg');
         const media = { path: written.path, sha256: written.sha256, mimeType: 'image/jpeg' as const, stagingHolder: written.stagingHolder };
         const extractor: Extractor = {
-          kind: 'fake_text', version: '1', needsBytes: true, egress: 'local', accepts: () => true,
+          kind: 'fake_text', version: '1', input: { kind: 'bytes', maxInputBytes: Number.MAX_SAFE_INTEGER }, egress: 'local', accepts: () => true,
           async extract() { return { status: 'indexed', text: IMAGE_MEDIA_DESCRIPTOR, media }; },
         };
         const accepted: ExtractionSinkRequest[] = [];
@@ -1064,6 +1064,11 @@ describe('a prepared picture through runner, sink and store', () => {
     seeded.close();
     const db = new Database(dbPath);
     db.exec(`
+      DROP INDEX IF EXISTS idx_connector_store_items_parent;
+      ALTER TABLE items DROP COLUMN parent_local_item_id;
+      ALTER TABLE items DROP COLUMN deferred_locator;
+      ALTER TABLE items DROP COLUMN bytes_available;
+      ALTER TABLE items DROP COLUMN size_bytes;
       DROP TRIGGER connector_store_chunk_media_release;
       DROP TABLE chunk_media_releases;
       DROP TABLE chunk_media_failures;
@@ -1080,7 +1085,7 @@ describe('a prepared picture through runner, sink and store', () => {
     const check = new Database(dbPath, { readonly: true });
     try {
       const version = check.query("SELECT version FROM schema_version WHERE store_id = 'connector-store'").get() as { version: number };
-      expect(version.version).toBe(14);
+      expect(version.version).toBe(15);
       const columns = (check.query('PRAGMA table_info(chunks)').all() as Array<{ name: string }>).map((column) => column.name);
       expect(columns).toContain('media_path');
       expect(columns).toContain('media_sha256');

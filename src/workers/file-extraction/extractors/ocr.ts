@@ -84,6 +84,7 @@ import { rasterPdfOcr } from './pdf-raster-ocr.ts';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DOCUMENT_READER_MAX_INPUT_BYTES } from './input-limits.ts';
 
 export const OCR_EXTRACTOR_KIND = 'local_ocr_tesseract';
 export const OCR_EXTRACTOR_VERSION = 'ocr-v1';
@@ -323,7 +324,7 @@ export function createOcrExtractor(options: OcrExtractorOptions = {}): Extractor
   return {
     kind,
     version,
-    needsBytes: true,
+    input: { kind: 'bytes', maxInputBytes: DOCUMENT_READER_MAX_INPUT_BYTES },
     egress: 'local',
     accepts(mimeType) {
       const normalized = normalizeMimeType(mimeType);

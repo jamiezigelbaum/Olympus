@@ -34,6 +34,9 @@ import {
 } from '../workers/source-dashboard.ts';
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
+import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
+import { accountExtractionSpoolRoot } from './olympus-layout.ts';
+import { placedAccount } from './source-placement.ts';
 import {
   forgetTierMigrationReports,
   forgetTierMigrationSelectors,
@@ -75,6 +78,9 @@ export interface ForgetContext {
   unreadableTierLedgers?: readonly string[] | undefined;
 }
 
+/** What an account-scope forget needs: where the data root is. */
+export type AccountScopeForgetContext = Pick<ForgetContext, 'env'>;
+
 export interface ForgetOptions {
   dryRun: boolean;
   /**
@@ -103,6 +109,18 @@ export interface ForgetStep {
   repeatBeforeRestart?: true;
   /** Report lines in the style `<path> (private answers: N)`, one per file with something to forget. */
   forget(account: ForgetAccount, context: ForgetContext, options: ForgetOptions): string[];
+  /**
+   * The same step for the rows of named account scopes only, inside corpora
+   * that other accounts share (an archive family's stores hold every archive
+   * of the family). Only a file keyed by account scope has one; a step
+   * without it is not part of an account-scope forget.
+   */
+  forgetAccountScopes?(
+    account: ForgetAccount,
+    accountScopes: readonly string[],
+    context: AccountScopeForgetContext,
+    options: ForgetOptions,
+  ): string[];
 }
 
 export interface KeptSharedFile {
@@ -132,6 +150,30 @@ export class ForgetStepError extends OperationError {
 
 const line = (path: string, what: string, count: number): string[] =>
   count > 0 ? [`${path} (${what}: ${count})`] : [];
+
+/**
+ * The extraction spool's scratch files of the account's corpora, or of the
+ * named account scopes inside them. An account in its folder keeps its spool
+ * in the folder (`raw/extraction-spool`), which a Delete removes whole, so the
+ * whole-account forget has nothing to do there; an account scope forgotten out
+ * of a corpus its siblings share (an archive removed) is still named, in that
+ * folder's spool. A `legacy` account's scratch files sit in the shared spool.
+ */
+function spoolLines(
+  account: ForgetAccount,
+  context: Pick<ForgetContext, 'env'>,
+  { dryRun }: ForgetOptions,
+  accountScopes?: readonly string[],
+): string[] {
+  const placed = placedAccount(account.source_id, context.env, account.slot);
+  if (placed.layout === 'folder' && accountScopes === undefined) return [];
+  const root = accountExtractionSpoolRoot(placed, context.env);
+  return line(root, 'scratch files', forgetExtractionSpool(
+    root,
+    { corpusIds: account.corpus_ids, ...(accountScopes ? { accountScopes } : {}) },
+    { dryRun },
+  ));
+}
 
 /** The ids a source's rows may be filed under: its own and its aliases'. */
 const sourceIdsOf = (account: ForgetAccount, context: ForgetContext): string[] =>
@@ -193,6 +235,19 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     id: 'file-extraction-jobs',
     file: 'file-extraction-jobs.sqlite',
     modules: ['src/workers/file-extraction/job-store.ts', 'src/workers/file-extraction/job-names.ts'],
+    forgetAccountScopes(account, accountScopes, context, { dryRun }) {
+      // The Secrets claims of a tier ledger stay: the ledger is shared by the other accounts of the corpora.
+      return [
+        ...extractionJobsDbPaths(context.env).flatMap((path) =>
+          line(path, 'extraction rows', forgetExtractionJobs(
+            path,
+            { corpusIds: account.corpus_ids, accountScopes },
+            { dryRun },
+          ))),
+        // The raw scratch files a read left in the account's spool (a recording a crash interrupted) are theirs too.
+        ...spoolLines(account, context, { dryRun }, accountScopes),
+      ];
+    },
     forget(account, context, { dryRun }) {
       // Every ledger this process opened, as the Secrets clearing does.
       const paths = extractionJobsDbPaths(context.env);
@@ -205,9 +260,10 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
       // A tier ledger whose id could not be read: its Secrets redaction claims
       // stay, because no claim is retired on a guess. Said in the report.
       const unreadable = context.unreadableTierLedgers?.length ?? 0;
+      const withSpool = [...lines, ...spoolLines(account, context, { dryRun })];
       return unreadable > 0 && paths[0] !== undefined
-        ? [...lines, ...line(paths[0], 'redaction claims kept, tier ledger unreadable', unreadable)]
-        : lines;
+        ? [...withSpool, ...line(paths[0], 'redaction claims kept, tier ledger unreadable', unreadable)]
+        : withSpool;
     },
   },
   {
@@ -374,6 +430,29 @@ export function runForgetSteps(account: ForgetAccount, context: ForgetContext, o
     if (options.repeatableOnly === true && step.repeatBeforeRestart !== true) continue;
     try {
       lines.push(...step.forget(account, context, options));
+    } catch (error) {
+      throw new ForgetStepError(step, account, error);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Runs the steps that key their rows by account scope, for the named account
+ * scopes only, inside the account's corpora. Same order, failure and retry
+ * behavior as `runForgetSteps`.
+ */
+export function runForgetAccountScopeSteps(
+  account: ForgetAccount,
+  accountScopes: readonly string[],
+  context: AccountScopeForgetContext,
+  options: ForgetOptions,
+): string[] {
+  const lines: string[] = [];
+  for (const step of FORGET_STEPS) {
+    if (step.forgetAccountScopes === undefined) continue;
+    try {
+      lines.push(...step.forgetAccountScopes(account, accountScopes, context, options));
     } catch (error) {
       throw new ForgetStepError(step, account, error);
     }

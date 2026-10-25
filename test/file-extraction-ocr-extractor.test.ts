@@ -57,7 +57,7 @@ describe('ocr extractor: registry surface', () => {
     expect(extractor.kind).toBe('local_ocr_tesseract');
     expect(extractor.version).toBe(OCR_EXTRACTOR_VERSION);
     expect(extractor.version).toBe('ocr-v1');
-    expect(extractor.needsBytes).toBe(true);
+    expect(extractor.input.kind).toBe('bytes');
     expect(extractor.egress).toBe('local');
   });
 

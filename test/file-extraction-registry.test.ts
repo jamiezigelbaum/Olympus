@@ -48,7 +48,7 @@ function stubExtractor(kind: string, accepts: boolean): Extractor {
   return {
     kind,
     version: 'stub-v1',
-    needsBytes: false,
+    input: { kind: 'none' },
     egress: 'local',
     accepts: () => accepts,
     async extract(): Promise<ExtractorOutput> {

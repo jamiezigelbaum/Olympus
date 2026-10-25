@@ -32,6 +32,7 @@ import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
+import { parentNamesContext } from '../connector-store/parent-context.ts';
 import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
@@ -179,6 +180,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // The lane's hold, or the one the listing-time decision recorded.
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
         || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
+      const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const content = classifyContentTier(
         {
           text: request.text,
@@ -191,6 +193,8 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           mimeType: plan.item.mimeType,
           ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
           ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
+          // A child is judged on its own text, with its parent's names as context for the model.
+          ...(parentContext ? { parentContext } : {}),
           subject: identity,
         },
         {
@@ -311,8 +315,15 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       }
       const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
       if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
+        // A child's content row names its parent as the names row does, so each
+        // store's row says whose child it is (child-visibility.ts).
+        const parent = parentOf(set, anchorStore, identity);
         await contentStore.syncFromConnector(
-          singleItemConnector(contentStore, { ...plan.item, content: { kind: 'metadata_only' } }),
+          singleItemConnector(contentStore, {
+            ...plan.item,
+            ...(parent ? { identity: { ...plan.item.identity, parent } } : {}),
+            content: { kind: 'metadata_only' },
+          }),
           {
             fetchContent: false,
             // The content row carries the names row's approved-scope stamp, so
@@ -451,3 +462,22 @@ function singleItemConnector(store: LocalConnectorStore, item: RawItem): SourceC
 }
 
 export type { SourceItemIdentity };
+
+/**
+ * The item a child came inside, as the names row of the child names it: its
+ * provider id (from whichever store holds the parent's row) and its local id.
+ * Undefined for an item that is not a child, or whose parent no store holds.
+ */
+function parentOf(
+  set: TieredStoreSet,
+  anchorStore: LocalConnectorStore,
+  child: Parameters<LocalConnectorStore['parentLocalItemIdOf']>[0],
+): { providerItemId: string; localItemId: string } | undefined {
+  const localItemId = anchorStore.parentLocalItemIdOf(child);
+  if (!localItemId) return undefined;
+  for (const domain of TIER_DOMAIN_ORDER) {
+    const row = set.store(domain)?.activeLocalItemRow(localItemId);
+    if (row) return { providerItemId: row.identity.providerItemId, localItemId };
+  }
+  return undefined;
+}

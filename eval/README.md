@@ -46,7 +46,10 @@ generalization trap the per-question approach failed:
    file/message that must be cited — set `providerItemId` for precise grading,
    or omit it to require at least one citation). Leave them empty to skip that
    dimension. Set `mustReportGap: true` where the honest answer is a reported
-   coverage gap.
+   coverage gap. For a question whose answer exists only inside an attachment
+   or a piece of media, cite the child and set `parentLabel` on the expected
+   evidence: the citation must name the item it came inside (the fixture proof
+   is `test/eval-child-items.test.ts`).
    `runEval` rejects datasets that still contain `{placeholders}` or questions
    with no expected answer, expected evidence, or required gap, so an unfilled
    template cannot produce a green score.

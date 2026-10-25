@@ -265,10 +265,12 @@ export function retireExtractionJobRedaction(
  */
 export function forgetExtractionJobs(
   dbPath: string,
-  scope: { corpusIds: readonly string[]; tierLedgerIds?: readonly string[] },
+  scope: { corpusIds: readonly string[]; accountScopes?: readonly string[]; tierLedgerIds?: readonly string[] },
   options: { dryRun?: boolean } = {},
 ): number {
   if (dbPath === ':memory:' || !existsSync(dbPath)) return 0;
+  // One account scope's jobs inside shared corpora (an archive family's stores hold every archive).
+  if (scope.accountScopes !== undefined) return forgetExtractionJobsOfAccountScopes(dbPath, scope.corpusIds, scope.accountScopes, options);
   const dryRun = options.dryRun === true;
   const jobs = rowsKeyedBy([['corpus_id', scope.corpusIds]]);
   const claimants = [...new Set(scope.tierLedgerIds ?? [])];
@@ -298,6 +300,46 @@ export function forgetExtractionJobs(
         where: `claimant IN (${marks})`,
         params: claimants,
       }] : []),
+    ], dryRun).reduce((sum, count) => sum + count, 0);
+  } finally {
+    closeSqliteStore(db);
+  }
+}
+
+/**
+ * The forget step for the jobs of named account scopes inside shared corpora
+ * (an archive family's stores hold every archive's items, one account scope
+ * each): their job rows, extraction artifacts and owed re-reads, and the
+ * Secrets markers and claims of those accounts' items. Another account scope's
+ * rows in the same corpus are not touched. The account scopes are the removed
+ * account's own keys, which no other account shares; an empty list deletes
+ * nothing, never the whole corpus.
+ */
+function forgetExtractionJobsOfAccountScopes(
+  dbPath: string,
+  corpusIds: readonly string[],
+  accountScopes: readonly string[],
+  options: { dryRun?: boolean },
+): number {
+  const dryRun = options.dryRun === true;
+  if (corpusIds.length === 0 || accountScopes.length === 0) return 0;
+  const marks = (values: readonly string[]): string => values.map(() => '?').join(', ');
+  const ofScopes = `corpus_id IN (${marks(corpusIds)}) AND account_scope IN (${marks(accountScopes)})`;
+  const params = [...corpusIds, ...accountScopes];
+  const db = new Database(dbPath, dryRun ? { readonly: true } : { readwrite: true, create: false });
+  try {
+    db.exec(`PRAGMA busy_timeout = ${CLEAR_NAMES_BUSY_TIMEOUT_MS};`);
+    // The names are the point: overwrite what is deleted.
+    if (!dryRun) db.exec('PRAGMA secure_delete = ON;');
+    const jobIds = `job_id IN (SELECT job_id FROM extraction_jobs WHERE ${ofScopes})`;
+    const byAccount = `account_scope IN (${marks(accountScopes)})`;
+    return forgetSqliteRows(db, [
+      // Before the jobs they are selected by.
+      { table: SECRET_RESTORED_REREADS_TABLE, where: jobIds, params },
+      { table: 'extraction_artifacts', where: jobIds, params },
+      { table: SECRET_ITEM_REDACTION_CLAIMS_TABLE, where: byAccount, params: accountScopes },
+      { table: SECRET_ITEM_REDACTIONS_TABLE, where: byAccount, params: accountScopes },
+      { table: 'extraction_jobs', where: ofScopes, params },
     ], dryRun).reduce((sum, count) => sum + count, 0);
   } finally {
     closeSqliteStore(db);

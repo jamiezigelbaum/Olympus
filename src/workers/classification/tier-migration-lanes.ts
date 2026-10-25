@@ -105,6 +105,8 @@ export interface TierMigrationLaneSpec {
   splitLayers?: boolean;
   laneFloor?: TieredLaneFloor;
   contentArrivesLater?: boolean;
+  /** The lane's per-item form of `contentArrivesLater`, as its runtime sets it. */
+  contentArrivesLaterFor?: TieredLaneSetOptions['contentArrivesLaterFor'];
   storedPlacementIsPrior?: boolean;
 }
 
@@ -302,6 +304,7 @@ export function openTierMigrationLanes(
         ...(spec.splitLayers === false ? { splitLayers: false } : {}),
         ...(spec.laneFloor ? { laneFloor: spec.laneFloor } : {}),
         ...(spec.contentArrivesLater ? { contentArrivesLater: true } : {}),
+        ...(spec.contentArrivesLaterFor ? { contentArrivesLaterFor: spec.contentArrivesLaterFor } : {}),
         ...(tierClassification ? { tierClassification } : {}),
         ...(secretLocations ? { secretLocations } : {}),
       });

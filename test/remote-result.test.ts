@@ -270,6 +270,30 @@ describe('remote output allowlists, per operation and result family', () => {
     expect(titled.citations).toEqual([{ label: 'Files', date: '2026-01-02' }]);
   });
 
+  test('a child\'s citation names its parent in the title text, and the output shape is unchanged', () => {
+    const label = "'Flat' from Alice, 3 March 2024";
+    const output = remoteOperationOutput('source_answer', leakyAnswer([{ ...leakyEvidence(), title: 'lease.pdf', parent_label: label }], 'ok'));
+    expect(output.citations).toEqual([{ label: 'Files', title: `lease.pdf, in ${label}`, date: '2026-01-02' }]);
+    expect(uniqueKeyPaths(output)).toEqual(['answer', 'citations', 'citations[].date', 'citations[].label', 'citations[].title', 'kind', 'status']);
+    expectSchemaValid('source_answer', output);
+    expectNoLeak(JSON.stringify(output));
+    // A child with no title still says where it came from; an item with no parent is as it was.
+    expect(remoteOperationOutput('source_answer', leakyAnswer([{ ...leakyEvidence(), title: undefined, parent_label: label }], 'ok')).citations)
+      .toEqual([{ label: 'Files', title: `In ${label}`, date: '2026-01-02' }]);
+    expect(remoteOperationOutput('source_answer', leakyAnswer([{ ...leakyEvidence(), title: 'lease.pdf' }], 'ok')).citations)
+      .toEqual([{ label: 'Files', title: 'lease.pdf', date: '2026-01-02' }]);
+  });
+
+  test('a parent label is scanned and bounded like the title: a secret in it is left out, a long one is cut', () => {
+    const dropped = remoteOperationOutput('source_answer', leakyAnswer([{ ...leakyEvidence(), title: 'lease.pdf', parent_label: 'password: hunter2hunter2' }], 'ok'));
+    expect(dropped.citations).toEqual([{ label: 'Files', title: 'lease.pdf', date: '2026-01-02' }]);
+    expect(JSON.stringify(dropped)).not.toContain('hunter2');
+    const cut = remoteOperationOutput('source_answer', leakyAnswer([{ ...leakyEvidence(), title: 'lease.pdf', parent_label: 'long label '.repeat(200) }], 'ok'));
+    const [citation] = cut.citations as Array<{ title?: string }>;
+    expect(citation!.title!.length).toBeLessThanOrEqual(400);
+    expect(citation!.title!.startsWith('lease.pdf, in ')).toBe(true);
+  });
+
   test('working survives with its job id on source_answer, source_answer_result and ask_anonymously', () => {
     const pending: SourceAnswerPending = { status: 'working', job_id: JOB_ID, elapsed_ms: 1234, next_tool: 'source_answer_result', message: 'internal text' };
     for (const operation of ['source_answer', 'source_answer_result', 'ask_anonymously'] as const) {
@@ -540,12 +564,70 @@ describe('the release manifest, revalidated against current tiers and rules', ()
       .toBe('answered');
   });
 
+  test('a parent label\'s names input is a dependency of the answer, never a cited item', async () => {
+    const { fixture, check } = await routed();
+    // The label names `orchard`'s names; the answer cites `garden`, which is what its text came from.
+    const labelled = [manifest([input('garden'), input('orchard', { layer: 'names' })])];
+    const answer = leakyAnswer([leakyEvidence('garden')], 'ok');
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }).status).toBe('answered');
+    // A citation of the parent itself does not make the names-layer input a cited one: it stays a dependency.
+    const citesParent = leakyAnswer([leakyEvidence('garden'), leakyEvidence('orchard')], 'ok');
+    expect(remoteOperationOutput('source_answer_result', citesParent, { releaseCheck: check, releaseManifests: labelled }))
+      .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
+
+    // The parent's names are raised to Private under the answer: the whole answer is withheld, label or not.
+    await moveTieredItem({ set: fixture.set, identity: identityOf('orchard'), target: { metadataTier: 'secure', contentTier: 'secure' } });
+    expect(check.inputs([input('orchard', { layer: 'names' })])).toEqual([{ tier: 'private', gone: false }]);
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }))
+      .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_CHANGED, citations: [] });
+
+    // And when the parent becomes a Secret, too.
+    await moveTieredItem({ set: fixture.set, identity: identityOf('orchard'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }))
+      .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_CHANGED, citations: [] });
+  });
+
   test('a cited input gone drops its citation only', async () => {
     const { fixture, check } = await routed();
     fixture.ledger.removeCopies(identityOf('orchard'));
     const output = remoteOperationOutput('source_answer_result', both(), { releaseCheck: check, releaseManifests: bothRead() });
     expect(output.status).toBe('answered');
     expect(output.citations).toEqual([{ label: 'Files', title: 'garden-plan.txt', date: '2026-01-02' }]);
+  });
+
+  test('a parent label\'s names input that is gone withholds the whole answer: prose can still carry the parent\'s subject and sender', async () => {
+    const { fixture, check } = await routed();
+    // The answer was written with the parent's names in front of the model; it cites the child only.
+    const labelled = [manifest([input('garden'), input('orchard', { layer: 'names' })])];
+    const answer = leakyAnswer([leakyEvidence('garden')], 'ok');
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }).status).toBe('answered');
+
+    // The parent and the child are both removed after synthesis: the child's citation drops, and the parent's names
+    // are still in the prose, so nothing of the answer may leave.
+    fixture.ledger.removeCopies(identityOf('orchard'));
+    fixture.ledger.removeCopies(identityOf('garden'));
+    expect(check.inputs([input('orchard', { layer: 'names' })])).toEqual([{ tier: 'public_or_personal', gone: true }]);
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }))
+      .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
+  });
+
+  test('a parent\'s names that were Private when the answer was written need today\'s Private authorization too', async () => {
+    const { fixture, check } = await routed();
+    // The parent's names are Private now, as they were when the answer was written.
+    await moveTieredItem({ set: fixture.set, identity: identityOf('orchard'), target: { metadataTier: 'secure', contentTier: 'secure' } });
+    const wrote = (constraints: Partial<ReleaseConstraints> = {}) =>
+      [manifest([input('garden'), input('orchard', { layer: 'names', privateAtAnswer: true })], constraints)];
+    const answer = leakyAnswer([leakyEvidence('garden')], 'ok');
+    const withPosture = (posture: 'allow' | 'approval'): ReleaseCheck => ({ inputs: check.inputs, secureDerivativeDefault: () => posture });
+
+    // Under `allow` the Private names may still be shared; once the posture is `approval` they may not, unless the request asked.
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: withPosture('allow'), releaseManifests: wrote() }).status).toBe('answered');
+    expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: withPosture('approval'), releaseManifests: wrote() }))
+      .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_WITHHELD, citations: [] });
+    expect(remoteOperationOutput('source_answer_result', answer, {
+      releaseCheck: withPosture('approval'),
+      releaseManifests: wrote({ includeSecureLocalContent: true }),
+    }).status).toBe('answered');
   });
 
   test('missing proof withholds: no manifest, an unprovable input, a cited item the manifest lacks, or a check that fails', () => {

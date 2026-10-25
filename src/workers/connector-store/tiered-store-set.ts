@@ -99,6 +99,14 @@ import {
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
+import { parentNamesContext } from './parent-context.ts';
+import {
+  CHILD_PARENT_CHAIN_LIMIT,
+  goneParents,
+  parentKey,
+  type ChildVisibilityLane,
+  type ParentRef,
+} from './child-visibility.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { flushTierMoveNotes, type TierMoveOptions } from './tier-move.ts';
@@ -120,6 +128,12 @@ export const TIER_KEY_TRUST_DOMAIN: Readonly<Record<Exclude<TierKey, 'secrets'>,
   private: 'internal',
   secure: 'secure_local',
 };
+
+/**
+ * The store that keeps a Secret's location row when no other store holds one for it. A Secret
+ * classifies at tier S5, whose trust domain is this one (`buildSourceSensitivity`).
+ */
+export const SECRET_LOCATION_DOMAIN: SourceTrustDomain = 'secure_local';
 
 /** Connector id recorded on writes the set makes into a leg outside that leg's own traversal. */
 export const TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = 'tiered_store_set_handoff';
@@ -232,6 +246,12 @@ export interface TieredStoreRoutingCounts {
   contentUnreadHeld: number;
 }
 
+/** What one sweep of children whose parent is gone did: removed, and left for the next pass. */
+export interface ChildSweepResult {
+  removed: number;
+  retry: number;
+}
+
 export interface TieredStoreSetRun {
   legs: TieredStoreLegRun[];
   byDomain: Partial<Record<SourceTrustDomain, TieredStoreLegRun>>;
@@ -243,8 +263,8 @@ export interface TieredStoreSetRun {
 type Plan =
   | { kind: 'legacy' }
   | { kind: 'routed'; copies: ReadonlyMap<string, TierCopyLayers>; sensitivity: ReadonlyMap<string, SourceSensitivity> }
-  | { kind: 'hold'; reason: 'move_queued' | 'content_unread' | 'secrets' }
-  | { kind: 'delete'; corpora: ReadonlySet<string>; reason: 'provider_deleted' | 'secrets' };
+  | { kind: 'hold'; reason: 'move_queued' | 'content_unread' | 'secrets'; location?: true }
+  | { kind: 'delete'; corpora: ReadonlySet<string>; reason: 'provider_deleted' | 'secrets'; location?: true };
 
 interface PlanEntry {
   plan: Plan;
@@ -290,6 +310,7 @@ export class TieredStoreSet {
         throw new Error('A tiered store leg\'s store must match its declared trust domain and corpus.');
       }
       spec.store?.useTierLedger(this.ledger);
+      spec.store?.useChildVisibility(this.childLane);
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     // Private and pending items must always have somewhere to go.
@@ -301,6 +322,205 @@ export class TieredStoreSet {
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
     void this.repairLowerContent();
+    // Orphans left by a parent that went while the worker was down.
+    void this.sweepOrphanedChildren();
+  }
+
+  // ---- Child items whose parent is gone ---------------------------------------
+  // docs/design/child-items.md, "Removal". A child is hidden the moment its
+  // parent is (child-visibility.ts, decided where it is read); nothing here
+  // decides visibility. This only cleans up: it finds children whose parent is
+  // gone (no store holds an active row for it, and it is not a Secret) and
+  // removes them as a provider deletion would be removed: every store's copy
+  // (chunks, search rows and vectors with it), then the ledger's copy rows and
+  // the Secret location it may have kept.
+
+  /** How many parents one batch of the sweep looks at. */
+  private static readonly CHILD_SWEEP_PAGE = 200;
+
+  /** The part of the lane the child check and the sweep read: this set's ledger and stores. */
+  private readonly childLane: ChildVisibilityLane = {
+    ledger: () => this.ledger,
+    stores: () => this.openStores(),
+  };
+
+  /** Syncs in flight: the sweep never works while one is. */
+  private syncsRunning = 0;
+  private syncsIdle: Array<() => void> = [];
+  private childSweep: Promise<ChildSweepResult> | undefined;
+  private childSweepAgain = false;
+
+  private async whileSyncing<T>(task: () => Promise<T>): Promise<T> {
+    this.syncsRunning += 1;
+    try {
+      return await task();
+    } finally {
+      this.syncsRunning -= 1;
+      if (this.syncsRunning === 0) for (const wake of this.syncsIdle.splice(0)) wake();
+    }
+  }
+
+  private whenNoSyncRuns(): Promise<void> {
+    return this.syncsRunning === 0 ? Promise.resolve() : new Promise<void>((resolve) => { this.syncsIdle.push(resolve); });
+  }
+
+  /**
+   * The sweep after a sync, inside the sync's own turn (the scheduler's
+   * per-source slot) unless another sync of this set is still running, which
+   * the sweep then waits for in the background. Never fails the caller.
+   */
+  private async sweepAfterSync(): Promise<void> {
+    if (this.syncsRunning > 0) void this.sweepOrphanedChildren();
+    else await this.sweepOrphanedChildren();
+  }
+
+  /**
+   * Removes the children of a parent that is gone, a batch of parents at a
+   * time, until none is left or a sync starts. Cleanup, not visibility: a
+   * child is hidden by the read-time rule whether or not this has run.
+   *
+   * - Serialized with the account's sync writes: a batch runs only while no
+   *   sync of this set is in flight, and runs without a pause (each parent is
+   *   judged and its children removed in the same synchronous step), so a
+   *   parent cannot come back between the check and the removal. A sync that
+   *   starts between batches ends the sweep; its own end-of-sync sweep
+   *   continues.
+   * - Never removes a child of a parent that is visible, hidden for a moment
+   *   (a tier move) or a Secret: only a parent no store holds an active row
+   *   for, confirmed afresh by `goneParents` in the batch that removes.
+   * - Idempotent and retried: a child any of whose store copies could not be
+   *   removed keeps its active row there, stays hidden, and is found again by
+   *   the next pass. A pass that cannot run at all removes nothing.
+   * - Concurrent requests share one run (a request made while it works asks
+   *   for one more pass). Never throws.
+   */
+  sweepOrphanedChildren(): Promise<ChildSweepResult> {
+    if (this.childSweep) {
+      this.childSweepAgain = true;
+      return this.childSweep;
+    }
+    const run = (async (): Promise<ChildSweepResult> => {
+      const total: ChildSweepResult = { removed: 0, retry: 0 };
+      do {
+        this.childSweepAgain = false;
+        const pass = await this.sweepPass();
+        total.removed += pass.removed;
+        total.retry += pass.retry;
+      } while (this.childSweepAgain);
+      return total;
+    })().finally(() => { this.childSweep = undefined; });
+    this.childSweep = run;
+    return run;
+  }
+
+  private async sweepPass(): Promise<ChildSweepResult> {
+    const result: ChildSweepResult = { removed: 0, retry: 0 };
+    // A child that failed is left for the next pass, not tried again at once.
+    const failed = new Set<string>();
+    try {
+      await this.whenNoSyncRuns();
+      // A child can be a parent too: each round reaches one level further down.
+      for (let round = 0; round < CHILD_PARENT_CHAIN_LIMIT; round += 1) {
+        const before = result.removed;
+        let after: ParentRef | undefined;
+        for (;;) {
+          if (this.syncsRunning > 0) return result;
+          const stores = this.openStores().filter((store) => store.hasChildItems());
+          if (stores.length === 0) return result;
+          const page = this.sweepPage(stores, after);
+          if (page.length === 0) break;
+          after = page[page.length - 1]!;
+          this.removeChildrenOfGoneParents(stores, page, result, failed);
+          // Let the event loop breathe between batches.
+          await new Promise<void>((resolve) => { setImmediate(resolve); });
+        }
+        if (result.removed === before) break;
+      }
+    } catch {
+      result.retry += 1;
+    }
+    return result;
+  }
+
+  /** The next parents of active children, in one order across every store. */
+  private sweepPage(stores: readonly LocalConnectorStore[], after: ParentRef | undefined): ParentRef[] {
+    const merged = new Map<string, ParentRef>();
+    for (const store of stores) {
+      for (const parent of store.activeChildParents(after, TieredStoreSet.CHILD_SWEEP_PAGE)) merged.set(parentKey(parent), parent);
+    }
+    return [...merged.values()]
+      .sort((a, b) => (a.parentLocalItemId < b.parentLocalItemId ? -1 : a.parentLocalItemId > b.parentLocalItemId ? 1
+        : a.provider < b.provider ? -1 : a.provider > b.provider ? 1
+        : a.accountScope < b.accountScope ? -1 : a.accountScope > b.accountScope ? 1 : 0))
+      .slice(0, TieredStoreSet.CHILD_SWEEP_PAGE);
+  }
+
+  /** Judges these parents and removes the children of those that are gone, in one synchronous step. */
+  private removeChildrenOfGoneParents(
+    stores: readonly LocalConnectorStore[],
+    parents: readonly ParentRef[],
+    result: ChildSweepResult,
+    failed: Set<string>,
+  ): void {
+    const gone = goneParents(this.childLane, parents);
+    if (gone.size === 0) return;
+    const removing = new Map<string, SourceItemIdentity>();
+    for (const parent of parents) {
+      if (!gone.has(parentKey(parent))) continue;
+      for (const store of stores) {
+        for (const child of store.activeChildrenOf(parent)) {
+          const key = tierLedgerIdentityKey(child);
+          if (!failed.has(key)) removing.set(key, child);
+        }
+      }
+    }
+    for (const [key, child] of removing) {
+      if (this.removeChild(child)) {
+        result.removed += 1;
+      } else {
+        failed.add(key);
+        result.retry += 1;
+      }
+    }
+  }
+
+  /**
+   * The removal of one child: the ledger's copy rows and the Secret location
+   * it may have kept, then its row in every store of the set (tombstoned, or,
+   * for a Secret kept as a location only, retired to an ordinary tombstone).
+   * The stores go last because they are what the sweep finds a child by: a step
+   * that fails leaves the child's row there, so the next pass finds it again and
+   * finishes whatever is left. Every step is safe to repeat.
+   */
+  private removeChild(child: SourceItemIdentity): boolean {
+    try {
+      this.ledger.removeCopies(child);
+      this.secrets()?.remove(child);
+      for (const store of this.openStores()) {
+        store.tombstoneCopy(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        store.retireSecretLocation(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The provider deleted an item that may be a Secret: a store that keeps it
+   * as a location only turns that row into an ordinary tombstone, and, when
+   * `record` is set (the ledger knows it as a Secret) and no store holds any
+   * row for it, the Private store records the deletion. A Secret is present
+   * while its location is (child-visibility.ts), so this is what lets its
+   * children go with it; the Secret classification alone never does.
+   */
+  retireSecretPresence(identity: SourceItemIdentity, options: { record: boolean }): void {
+    const stores = this.openStores();
+    const outcomes = stores.map((store) => store.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID }));
+    if (options.record && outcomes.every((outcome) => outcome === 'none')) {
+      this.store(SECRET_LOCATION_DOMAIN, { create: true })
+        ?.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, record: true });
+    }
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -315,6 +535,7 @@ export class TieredStoreSet {
       throw new Error('A lazily opened tiered store does not match its declared leg.');
     }
     store.useTierLedger(this.ledger);
+    store.useChildVisibility(this.childLane);
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
@@ -520,6 +741,16 @@ export class TieredStoreSet {
    * every leg committed.
    */
   async sync(
+    ...args: Parameters<TieredStoreSet['runSync']>
+  ): Promise<TieredStoreSetRun> {
+    try {
+      return await this.whileSyncing(() => this.runSync(...args));
+    } finally {
+      await this.sweepAfterSync();
+    }
+  }
+
+  private async runSync(
     connector: SourceConnector,
     sync: ConnectorStoreSyncOptions = {},
     options: {
@@ -574,6 +805,16 @@ export class TieredStoreSet {
    * leg's cursor ever passes an item that has not landed.
    */
   async syncLegs(
+    ...args: Parameters<TieredStoreSet['runSyncLegs']>
+  ): Promise<TieredStoreSetRun> {
+    try {
+      return await this.whileSyncing(() => this.runSyncLegs(...args));
+    } finally {
+      await this.sweepAfterSync();
+    }
+  }
+
+  private async runSyncLegs(
     entries: ReadonlyArray<{ trustDomain: SourceTrustDomain; connector: SourceConnector; sync?: ConnectorStoreSyncOptions }>,
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
@@ -717,7 +958,12 @@ export class TieredStoreSet {
     // and rules file re-read when edited, the sniffer), keyed by the set
     // ledger the sniffer's queue sits beside. Resolved per call, so an edited
     // map or rules file applies at the next pass.
-    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+    const resolved = resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+    // A child item is judged with its parent's names as context: only this
+    // set can see the parent's stored names (parent-context.ts).
+    return resolved
+      ? { ...resolved, parentNamesContext: (child, parentLink) => parentNamesContext(this, child, parentLink) }
+      : resolved;
   }
 
   /**
@@ -850,6 +1096,8 @@ export interface TieredLaneSetOptions {
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
   laneFloor?: TieredLaneFloor;
   contentArrivesLater?: boolean;
+  /** See TieredStoreSetOptions.contentArrivesLaterFor. */
+  contentArrivesLaterFor?: (item: RawItem) => boolean;
 }
 
 /**
@@ -892,6 +1140,7 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
     ...(options.laneFloor ? { laneFloor: options.laneFloor } : {}),
     ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
+    ...(options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}),
   });
 }
 
@@ -1186,6 +1435,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     return this.routeFor(entry.plan, input.store.corpusId, domain);
   }
 
+  /** Secrets the provider no longer lists, found by a store's absence reconcile: their locations go. */
+  retiredSecrets(identities: readonly SourceItemIdentity[]): void {
+    const secrets = this.set.secrets();
+    if (!secrets) return;
+    for (const identity of identities) secrets.remove(identity);
+  }
+
   /** Forget the copy rows of routed items this run deleted or found to be Secrets, now that every leg tombstoned them. */
   finalize(): void {
     for (const identity of this.copyRemovals.values()) this.set.ledger.removeCopies(identity);
@@ -1206,8 +1462,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           : { kind: 'elsewhere', reason: 'routed_to_other_tier' };
       }
       case 'hold':
-        return { kind: 'elsewhere', reason: plan.reason };
+        // A Secret no store holds a row for keeps its location in the Private store, held or not.
+        return plan.location === true && domain === SECRET_LOCATION_DOMAIN
+          ? { kind: 'delete', reason: 'secrets', keepLocation: true }
+          : { kind: 'elsewhere', reason: plan.reason };
       case 'delete':
+        if (plan.location === true && domain === SECRET_LOCATION_DOMAIN) {
+          return { kind: 'delete', reason: plan.reason, keepLocation: true };
+        }
         return plan.corpora.has(corpusId)
           ? { kind: 'delete', reason: plan.reason }
           : { kind: 'elsewhere', reason: plan.reason === 'secrets' ? 'secrets' : 'routed_to_other_tier' };
@@ -1225,6 +1487,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const routed = ledger.isRouted(identity);
     if (item.metadata['deleted'] === true) {
       this.set.secrets()?.remove(identity);
+      if (item.metadata['deletedIdentityResolved'] !== false) {
+        this.set.retireSecretPresence(identity, { record: ledger.itemIsSecret(identity) });
+      }
       if (!routed) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
@@ -1304,9 +1569,19 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         // kept, hidden, for an owner-approved purge. Either way the side
         // stores forget the item's names and excerpt now.
         forgetSecretInSideStores({ ledger, identity });
-        if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets' };
+        // A Secret is present while its location row is (child-visibility.ts), so it always has
+        // one: an item no store ever held gets it in the Private store, location only (no names,
+        // no text), written by that store's own pass so its owner row says the provider lists it.
+        const location = !hasRow && this.set.legSpec(SECRET_LOCATION_DOMAIN) !== undefined;
+        if (location) this.routedDomains.add(SECRET_LOCATION_DOMAIN);
+        if (secretsDisposition() === 'hide_until_purge') return { kind: 'hold', reason: 'secrets', ...(location ? { location: true as const } : {}) };
         this.copyRemovals.set(identityKey(identity), identity);
-        return { kind: 'delete', corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)), reason: 'secrets' };
+        return {
+          kind: 'delete',
+          corpora: new Set(recorded.previousCopies.map((copy) => copy.corpusId)),
+          reason: 'secrets',
+          ...(location ? { location: true as const } : {}),
+        };
       case 'queued_move':
         this.counts.movesQueued += 1;
         if (contentRead && !recorded.raise) {
@@ -1381,6 +1656,19 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
           ...(plan.reason === 'secrets' ? { trustTier: 'S5' as const } : {}),
         });
       }
+    }
+    if ((plan.kind === 'delete' || plan.kind === 'hold') && plan.location === true && listingDomain !== SECRET_LOCATION_DOMAIN) {
+      // The Secret's location row is the Private store's to write: its own pass takes the item
+      // as it takes any handed-off item, so the row and its owner land in one transaction.
+      const store = this.set.store(SECRET_LOCATION_DOMAIN, { create: true })!;
+      const listing = this.legOptions.get(input.store.corpusId) ?? {};
+      await store.syncFromConnector(handoffConnector(input.connector, input.item), {
+        ...(listing.fetchContent !== undefined ? { fetchContent: listing.fetchContent } : {}),
+        ...(listing.deferMetadataOnlyContent !== undefined
+          ? { deferMetadataOnlyContent: listing.deferMetadataOnlyContent }
+          : {}),
+        tierRouting: this,
+      });
     }
   }
 

@@ -98,7 +98,13 @@ Inside the data root:
     stores/<tier>.sqlite         one per trust tier, sidecars beside it
                                  (archive imports: stores/<family>.<tier>.sqlite)
     raw/                         spools, watch snapshots, capture cursors,
-                                 X's reconcile state (raw/x-reconcile.sqlite)
+                                 X's reconcile state (raw/x-reconcile.sqlite),
+                                 imported archives' media bindings
+                                 (raw/archive-media-bindings.sqlite),
+                                 the extraction spool (raw/extraction-spool/):
+                                 the raw bytes a file reader is handed while it
+                                 reads, under c-<corpus>/a-<account scope>/
+                                 (made by the first file written, never at start)
     session/                     Telegram's pairing session (telegram.session and its -journal,
                                  and the pairing lock telegram.pairing.lock.db);
                                  WhatsApp's session.db lives with its bridge state in raw/whatsapp/
@@ -404,7 +410,7 @@ kept entry names a module that no longer opens one
 | `waiting-private-questions.sqlite` | results' `corpusId`, provenance | `waiting-private-questions`, first: answers go before anything they depend on |
 | `source-dashboard.sqlite` (with the ingestion ledger's tables) | `source_id`, ledger id, `corpus_id` | `source-dashboard` |
 | `source-scheduler.sqlite` | `(source_id, corpus_id, task_id)` | `source-scheduler` |
-| `file-extraction-jobs.sqlite` | `corpus_id`; holds file **names**; Secrets redaction claims keyed by the source's tier-ledger id | `file-extraction-jobs` (names are item data, principle 3): jobs, artifacts, re-reads, and the claims of the source's tier ledgers with each redaction no other ledger claims (the ids are read from the ledger files before they go; an unreadable ledger keeps its claims and is reported); later candidate to move into the account folder |
+| `file-extraction-jobs.sqlite` | `corpus_id`; holds file **names**; Secrets redaction claims keyed by the source's tier-ledger id | `file-extraction-jobs` (names are item data, principle 3): jobs, artifacts, re-reads, and the claims of the source's tier ledgers with each redaction no other ledger claims (the ids are read from the ledger files before they go; an unreadable ledger keeps its claims and is reported); later candidate to move into the account folder. The scratch files the extraction runner writes for a file reader are not shared: each account keeps them in its own `raw/extraction-spool/` (an imported archive's in the archive account's, under its family's corpus), so a Delete takes them with the folder. A `legacy` account's sit in the shared `extraction-spool/` of the data root, and this step removes them there; an archive removed from a corpus its family shares has its account scope's removed from the archive account's spool |
 | `source-watches.sqlite` | `corpus_id` | `source-watches` |
 | `source-ingestion-doctor-state.json` | `sources[ledger id]` | `ingestion-doctor-state` |
 | `tier-migration/reports/*.json` | `topPatterns[].source`; hold the owner's folder paths, senders, chat keys | `tier-migration-reports` (found by the sweep) |

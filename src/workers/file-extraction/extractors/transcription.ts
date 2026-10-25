@@ -15,8 +15,10 @@
  *   - When it is absent, the bytes are spilled to a private temp directory
  *     which IS deleted, on every path including the throw path.
  *
- * `needsBytes` is true: the runner has to fetch bytes for a path to exist at
- * all, and the landed `Extractor` has no separate local-path flag.
+ * The input declaration is a file: a source that can hand over a path (an
+ * item already on disk, or a member streamed to a private file) does, so a long
+ * recording is never held in memory; one that cannot gives bytes, and the
+ * bytes are spilled as above.
  *
  * Doc comments here are always multi-line blocks, and every regex lives inside
  * a named function enrolled in the architecture guard's allowlist — which is
@@ -336,7 +338,7 @@ export function createTranscriptionExtractor(
   return {
     kind,
     version,
-    needsBytes: true,
+    input: { kind: 'file' },
     egress: 'local',
     ...(reread ? { reread } : {}),
     accepts(mimeType, name) {

@@ -63,6 +63,7 @@ import {
   type RenderedPdfPage,
 } from './pdf-render.ts';
 import { missingBytesFailure } from './text.ts';
+import { DOCUMENT_READER_MAX_INPUT_BYTES, IMAGE_READER_MAX_INPUT_BYTES } from './input-limits.ts';
 import { isModelEndpointRedirectError } from '../../../core/model-transport.ts';
 
 export const VLM_PDF_EXTRACTOR_KIND = 'local_vlm_pdf';
@@ -285,7 +286,7 @@ export function createVlmPdfExtractor(options: VlmPdfExtractorOptions = {}): Ext
   return {
     kind,
     version,
-    needsBytes: true,
+    input: { kind: 'bytes', maxInputBytes: DOCUMENT_READER_MAX_INPUT_BYTES },
     egress: 'local',
     accepts(mimeType) {
       return normalizeMimeType(mimeType) === PDF_MIME_TYPE;
@@ -452,7 +453,7 @@ export function createVlmLayoutExtractor(options: VlmLayoutExtractorOptions = {}
   return {
     kind,
     version,
-    needsBytes: true,
+    input: { kind: 'bytes', maxInputBytes: IMAGE_READER_MAX_INPUT_BYTES },
     egress: 'local',
     accepts(mimeType) {
       const normalized = normalizeMimeType(mimeType);

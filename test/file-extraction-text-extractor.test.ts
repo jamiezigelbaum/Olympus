@@ -51,7 +51,7 @@ describe('text extractor: registry surface', () => {
     expect(extractor.kind).toBe('local_text');
     expect(extractor.version).toBe(TEXT_EXTRACTOR_VERSION);
     expect(extractor.version).toBe('2026-05-22');
-    expect(extractor.needsBytes).toBe(true);
+    expect(extractor.input.kind).toBe('bytes');
     expect(extractor.egress).toBe('local');
   });
 

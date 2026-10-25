@@ -11,7 +11,7 @@
  * (`registerArchiveFormatConnector`), so this module imports no worker code.
  */
 import type { SourceConnector } from './contracts.ts';
-import type { ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
+import type { ScopeFileReader, ScopeFileVersion, ScopeRoot } from './scope-safe-fs.ts';
 import type { SourceFamily, SourceTrustDomain } from './source-index/types.ts';
 
 /** How many first bytes the probe reads from a file. */
@@ -1011,6 +1011,47 @@ export const ARCHIVE_COMMON_FINDINGS = {
   filesUnconfirmed: 'files_unconfirmed',
 } as const;
 
+/**
+ * What binding a media file can answer. A media file beside a chat export is
+ * bound only under a chosen FOLDER: choosing a single file approves that file,
+ * never the folder it sits in (docs/design/child-items.md, "Manifest").
+ */
+export type ArchiveMediaBindResult =
+  | { ok: true; bindingId: string; sizeBytes: number }
+  | { ok: false; reason: 'chosen_file' | 'missing' | 'not_regular' | 'unreadable' };
+
+/**
+ * A connector's way to media files the import's manifest does not hold (the
+ * files a folder-chosen chat export refers to). The import records each one
+ * it binds in an append-only table before the listing goes on, so the
+ * child's locator can name the binding and a later read finds the same file
+ * at the same version or settles as gone.
+ */
+export interface ArchiveMediaAccess {
+  /**
+   * Binds the file at `relPath` (relative to the chosen folder) and returns
+   * the binding the child's locator names. Written durably before this
+   * returns, so before the child row and the checkpoint that follow it.
+   * Binding the same path again returns the same binding, never a new
+   * version of it.
+   */
+  bind(relPath: string): ArchiveMediaBindResult;
+  /**
+   * Opens a bound file for bounded range reads, descriptor-relative, at the
+   * version the binding recorded. A replaced, changed or missing file throws
+   * a `ScopeSafeError` (`changed`, `not_found`); the caller closes the reader
+   * and calls `assertCurrent()` after reading what it needs.
+   */
+  open(bindingId: string): ScopeFileReader;
+  /**
+   * The bytes of a bound file, up to `maxBytes` (a larger file throws
+   * `too_large`; 64 MiB when no limit is named), checked to still be the
+   * bound version after they were read. A file that can be larger is read in
+   * ranges through `open`.
+   */
+  read(bindingId: string, options?: { maxBytes?: number }): Uint8Array;
+}
+
 export interface ArchiveConnectorInput {
   archiveId: string;
   connectorId: string;
@@ -1042,6 +1083,12 @@ export interface ArchiveConnectorInput {
   /** Bytes read per listing before it pauses with a resume point. */
   maxBytesPerListing?: number;
   pageSize?: number;
+  /**
+   * The means to bind and read media files under the chosen folder. Absent
+   * where the archive keeps no binding table (a connector then lists media
+   * it cannot read as left out).
+   */
+  media?: ArchiveMediaAccess;
 }
 
 export type ArchiveConnectorFactory = (input: ArchiveConnectorInput) => SourceConnector;

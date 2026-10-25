@@ -598,6 +598,7 @@ describe('every process reaches the same answer', () => {
       import { archiveConnectorStoreDbPath } from '${here}/workers/archive-import/store.ts';
       import { defaultArchiveImportStatePath } from '${here}/workers/archive-import/state.ts';
       import { archiveImportRequestsPath } from '${here}/workers/archive-import/requests.ts';
+      import { defaultArchiveMediaBindingsPath } from '${here}/workers/archive-import/media-bindings.ts';
       import { defaultGmailConnectorStoreDbPath, defaultGmailSecureConnectorStoreDbPath } from '${here}/workers/google-connectors/gmail.ts';
       import { defaultGoogleDriveConnectorStoreDbPath } from '${here}/workers/google-connectors/drive.ts';
       import { dropboxTierConnectorStoreDbPaths } from '${here}/workers/dropbox-files/connector-store.ts';
@@ -619,6 +620,7 @@ describe('every process reaches the same answer', () => {
         defaultXBookmarksApiUsageDbPath(env), defaultXBookmarksReconcileStateDbPath(env),
         archiveImportFamilies().map((family) => ['secure_local', 'internal', 'public_safe'].map((tier) => archiveConnectorStoreDbPath(tier, family, env))),
         defaultArchiveImportStatePath(env), archiveImportRequestsPath(defaultArchiveImportStatePath(env)),
+        defaultArchiveMediaBindingsPath(env),
         // What the CLI pairs and the scripts read, and what the worker and the capture children are given.
         defaultInternalTelegramConnectorStoreDbPath(env), defaultProtectedTelegramConnectorStoreDbPath(env),
         defaultTelegramCaptureSpoolDir(env), telegramSessionBasePath({ env }), telegramPairingSessionPaths({ env }),
@@ -655,6 +657,7 @@ describe('every process reaches the same answer', () => {
       join(olympusDataRoot(env), 'x-bookmarks-api-usage.sqlite'), resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env),
       families.map((family) => tiers.map((tier) => archiveConnectorStoreDbPath(tier, family, env))),
       resolvedRawPath('archive.imports', 'archive-imports.json', env), resolvedRawPath('archive.imports', 'archive-import-requests.json', env),
+      resolvedRawPath('archive.imports', 'archive-media-bindings.sqlite', env),
       resolvedStorePath('telegram.messages', 'internal', env), resolvedStorePath('telegram.messages', 'secure_local', env),
       resolvedRawPath('telegram.messages', 'telegram-spool', env), accountSessionPath(placedAccount('telegram.messages', env), env),
       [`${accountSessionPath(placedAccount('telegram.messages', env), env)}.session`, `${accountSessionPath(placedAccount('telegram.messages', env), env)}.session-journal`],

@@ -1,7 +1,9 @@
 # Child items: attachments and media
 
 Status: owner direction 2026-10-25 ("we also need child handling … should
-that be designed before we finish this"). Design only; nothing built.
+that be designed before we finish this"). The spine (step 1 of "Order") is
+built and tested with a fixture connector; no format connector reads a child
+yet.
 Reviewed by Astra (Codex, high) in two rounds on 2026-10-25. Every finding
 is folded in or settled by the owner's tier decision (see "Review"). Where
 this page and the code differ, the code is current.
@@ -182,11 +184,17 @@ account scope. Repeated items between archives are counted as they are today.
     **media binding**: its path under the chosen folder, its file identity,
     size and modification time. Choosing the folder approved them.
     - Bindings live in an append-only table beside the manifest, in the
-      archive's record.
+      archive's record. As built: the record is one JSON file rewritten whole
+      on every update, so the table is a SQLite file beside it
+      (`raw/archive-media-bindings.sqlite`, reached through the layout
+      resolvers), keyed by archive. A resume point does not hash it.
     - A binding is written before the child row and the checkpoint that
       follows it. The child's locator names the binding.
     - Checking that an import is whole covers the manifest and the bindings
-      together.
+      together. The bindings are checked by version (identity, size and
+      modification time, from metadata alone) when the listing reaches its
+      end and again as the import is marked complete. A pass does not check
+      them at its start, which would cost every pass the whole table.
   - For a chosen single file (a lone `result.json` or `_chat.txt`), media
     beside it is not read. It is listed under "Not imported" as "choose the
     export folder to include its media". The choice of one file is never
@@ -301,20 +309,117 @@ floor from its parent.
   - Removal first marks the archive's generation retired in the archive
     registry. Extraction enumeration, fetch, egress and landing all check the
     generation, so work already in flight cannot enqueue or land children of
-    a removed archive.
+    a removed archive. A scratch file counts as landing: the archive is asked
+    again right before its folder is made and again once the file is written,
+    and a file written after the mark is removed and the read refused as not
+    found, so a fetch that was paused across a removal leaves no raw bytes
+    behind, even if the worker then dies.
   - Removal then retires the archive's extraction jobs. The job store gains a
     forget step by `(corpus, account scope)`, registered in the forget
     registry; archive corpora are shared by every archive of a family.
+  - The same forget step removes the archive's scratch files from the
+    archive account's extraction spool. A file reader's input is raw bytes
+    (a recording, a part of a message), so it is written in the account's own
+    folder, `raw/extraction-spool/c-<corpus>/a-<account scope>/` (each a
+    digest), in a file named for the process that wrote it. Nothing is made at
+    start: the first scratch file made `raw/`, `extraction-spool/` and the
+    owner's folder below the account folder, one level at a time, and only
+    while the account folder is there, so an account that never needs one has
+    none and a Delete that lands under a running worker is never undone.
+    (The spool of accounts that keep no folder is made whole on first write.)
+    Removing an
+    account scope removes what a crashed read left. A start removes at once the
+    files of a process that is gone and the folders of an owner with no job
+    left, in the spool of each account it serves.
   - Only then does it purge the rows, as today.
 - **Account delete.** It already forgets extraction jobs by corpus through
-  the registry. Children's rows go with the account.
-- **A parent tombstoned** (a Gmail message deleted at the provider, or an item
-  absent from a re-sync):
-  - In one ledger transaction, the parent and its children are hidden and a
-    durable cascade row is written per child.
-  - A worker then deletes each child's copies in every tier store that holds
-    one, with retry.
-  - A crash between stores leaves the children hidden, never visible.
+  the registry. Children's rows go with the account, and so do its scratch
+  files, which sit in its folder. An account still in the legacy layout keeps
+  them in the shared spool of the data root, and the same forget step removes
+  them there.
+- **A parent deleted** (a Gmail message deleted at the provider, or an item
+  absent from a re-sync). A child is shown only while its parent is, and that
+  is decided where the child is read. Nothing is recorded when a parent goes,
+  so there is no deletion state to lose in a crash and none to get out of step
+  with the stores: the moment the parent is gone, its children are hidden on
+  the next read.
+  - **One rule.** The parent's standing is the rule that already decides any
+    item: it has a current copy in the tier ledger at a store whose row for it
+    is present and not tombstoned. An item the ledger never routed has no copy
+    to look for; it stands while a store holds its row. A store with no ledger
+    judges by its own row. A parent that is itself a child stands only while
+    its own parent does (up to eight levels).
+  - **One function.** `connector-store/child-visibility.ts` holds the check;
+    nothing copies it. Each store applies it in the one place every read of
+    its rows passes through, and the cross-store consumers apply it to the
+    items they gather: keyword and vector search, fetch by id, counts and
+    status, the embedding sweep, unreadable-file locators, the parent label,
+    the cross-store gate, the Secret location search (a Secret child's
+    location is its name, found by its id and so needing no row), and the
+    release check. A delayed answer that drew on a child whose parent is gone
+    is withheld whole, not given back without the citation: what it said of
+    the child is in its prose. The parent's names, when the answer carried
+    them, are judged by the same live-row standing, not by the parent's ledger
+    copies, which outlive a tombstone until the sync that made it ends.
+  - **Looked up in the child's own tier set.** The ledger that governs the
+    child's stores and those stores, and nowhere else. A second install of the
+    same source, or another source, can never make a parent stand.
+  - **Fail closed.** A child is shown only on positive evidence. A ledger or a
+    store that cannot be read, a parent no store has a row for, or a chain
+    that is too deep hides the child. Hiding is not removal: only a parent
+    that is gone (below) costs its children their rows.
+  - **A Secret parent is present while the provider lists it, and no longer.**
+    Classifying a parent as a Secret never takes its children. A Secret has
+    one representation: its row, kept as a location only (tombstoned at tier
+    S5, no names, no text, and for a child its link to its own parent). It is
+    written when the item is first judged Secrets even if no store held it
+    (the Private store takes it, in its own pass, so the row and the fact that
+    the provider lists it land together), and it counts as present without
+    being read. Its children are judged on their own words. Presence ends with
+    the provider's deletion, which retires the location: the deletion feed does
+    it (`retireSecretLocation` in each open store; for a Secret the ledger
+    knows and no store holds a row for, which only a crash between the decision
+    and the row leaves, the Private store gets an ordinary tombstone so the
+    deletion is a fact somewhere), and so does a full snapshot that no longer
+    lists it (every sync re-observes the locations it still lists, so an
+    absence reconcile retires only those it does not). A retired Secret is an
+    ordinary deleted parent: its children are hidden at once and swept. A
+    positive listing restores presence: a retired location whose ledger
+    decision is still Secrets goes back to tier S5 when the provider lists it
+    again (a location only; nothing of its names or content returns), and
+    whether it stays a Secret is the ledger's decision under the usual version
+    rules. The ledger's word that an item is a Secret, with no row anywhere,
+    is not presence: its children are hidden and nothing is removed until the
+    next listing writes the row.
+  - **A Secret that came inside another item is hidden with it.** A Secret is
+    present for itself, but where it is a child its own parent still decides:
+    the chain check goes on above it, so deleting A hides C in A, then a Secret
+    B, then C at once, and the sweep takes B and then C.
+  - **A Secret child's name is its location.** The Secret location index is
+    read through the same check (by the child's own id, `#child:`), and the
+    sweep covers a child kept as a location only: it removes the location, the
+    ledger's copy rows and the store's S5 row (retired to an ordinary
+    tombstone, which is what stops the sweep finding it again).
+  - **A parent moving tiers** is hidden for a moment with its row still
+    active. That is not gone, and its children stay hidden with it and return
+    with it.
+  - **The orphan sweep** is cleanup only: the check already hid the children.
+    It runs when the worker starts and after each account sync, and removes
+    the children of a parent that is gone (no store holds an active row for it
+    and it is not a Secret that is still present) through the normal path:
+    the ledger's copy rows, the Secrets index entry, and then every open
+    store's row (tombstoned, with its chunks, search rows, vectors and media
+    holds; a Secret's location retired). The stores go last because the sweep
+    finds a child by its store row: a step that fails leaves the child
+    findable, so the debt is discoverable until it is settled, and the child
+    is already hidden meanwhile. It is idempotent and works in batches. It never touches the children of a
+    parent that stands. It does not run while a sync is in flight (each batch
+    is judged and removed in one synchronous step, and a pass ends when a sync
+    starts), so it cannot meet a parent a sync is about to write. A child it
+    cannot remove stays hidden and is tried again at the next pass.
+  - **Legacy children** (rows written before the ledger routed them, or in a
+    store with no ledger) are judged by the same rule from their own parent
+    link.
 - **Media.** Prepared photo copies in the media cache are released by the
   chunk triggers that already release them.
 
@@ -396,8 +501,9 @@ floor from its parent.
   - The store's `items` table gains four nullable columns and an index on
     the parent: `parent_local_item_id`, `deferred_locator`,
     `bytes_available` and `size_bytes`.
-  - The archive record gains the append-only media-binding table.
-  - The tier ledger gains the parent key and the cascade queue.
+  - The archive record gains the append-only media-binding table (a SQLite
+    file beside the record, forgotten with each archive on removal and taken
+    with the source on Delete).
 
 ## Later: identical files read once
 
@@ -433,10 +539,11 @@ This follows the versioned change gate in `docs/ENGINEERING_PROCESS.md`:
     a child, and the cited child must name its parent. Examples:
     - a lease term in a PDF attached to an email;
     - a word spoken in a voice note.
-  - The instantiated private held-out run (`bun run eval:real`) is a **merge
-    precondition** of the spine pull request. If the owner-private dataset
-    cannot be reached, merging needs the owner's explicit exception, recorded
-    on the pull request.
+  - The instantiated private held-out run (`bun run eval:real`) was a merge
+    precondition of the spine pull request. The owner waived it for merge by
+    an exception on 2026-10-25 (recorded on the pull request): the fixture
+    held-out cases are the receipt, and the private run happens once a real
+    install with data exists.
 - **Review.** Astra on this design (done, below), then the critical-review
   receipt on the implementing pull request's head.
 - **Checks named for the spine:**
@@ -444,8 +551,7 @@ This follows the versioned change gate in `docs/ENGINEERING_PROCESS.md`:
   - architecture guard;
   - classifier-neutrality suite;
   - `test/tier-hold-until-judged-guard.test.ts`;
-  - store-open guard (forget steps for the new queues and the job store's new
-    step);
+  - store-open guard (the job store's new forget step);
   - public-surface guard, with the allowlist not growing.
 
 ## Order
@@ -455,7 +561,7 @@ This follows the versioned change gate in `docs/ENGINEERING_PROCESS.md`:
      - the contract fields;
      - the store and ledger columns;
      - the judge's parent-names context;
-     - the cascade and its queue;
+     - the read-time parent check and the orphan sweep;
      - the generation check;
      - the extraction-jobs forget by account scope;
      - sync deferral;
@@ -524,8 +630,10 @@ Round 1, twelve findings, and how each is settled:
   decision removes: no child waits on, or moves with, its parent.
 - **The parent label** needs a destination-scoped authorization and travels
   as a dependency through dispatch and release.
-- **Cascade** is a ledger hide plus durable per-store deletes, behind an
-  archive generation.
+- **Parent removal** is a read-time rule, a child shown only while its parent
+  is, with an orphan sweep for cleanup, behind an archive generation. (The
+  first design wrote a ledger hold and a durable cascade queue; the owner
+  replaced it because the rule needs no recorded state.)
 - **Children cross pages**, with positions taken from their references.
 - **Media beside a chat export** joins the manifest only under a chosen folder.
 - **Reading later** has durable locators, availability, sync deferral,
