@@ -7,15 +7,16 @@ import { closeSync, existsSync, lstatSync, openSync, readSync, readdirSync } fro
 import { join } from 'node:path';
 import { TELEGRAM_SOURCE_ID } from '../../core/olympus-layout.ts';
 import { resolvedRawPath } from '../../core/source-placement.ts';
-import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
   RawItem,
-  SourceClassificationSignals,
   SourceConnector,
+  SourceConnectorInput,
   SourceConnectorListOptions,
-  SourceConnectorListPage,
   SourceConversationKind,
+  SourceRecordPage,
+  StoredItemLookup,
 } from '../../core/contracts.ts';
+import { inputConnector } from '../../core/source-inputs.ts';
 import {
   buildSourceSensitivity,
   type SourceItemIdentity,
@@ -34,6 +35,7 @@ import {
 } from './corpus-adapter.ts';
 import { rememberSpoolOffset, spoolFileLines, spoolLineOffset } from './spool-lines.ts';
 import { telegramServiceContent } from '../archive-import/telegram/message.ts';
+import { telegramRecordBuilder, type TelegramRecordItems } from './record-builder.ts';
 
 // Product capture and migration replay are independent writers with
 // independent cursors. Reusing the historical `telegram_spool_replay_*`
@@ -119,6 +121,12 @@ export function createTelegramCaptureSpoolConnector(options: {
    * record that no resolution ever saw. `null` bounds the lane to nothing.
    */
   admitThroughCursor?: string | null;
+  /**
+   * What the source's stores hold of an item (`TieredStoreSet.storedItem`):
+   * with it, a record older than what is stored is not applied, whichever
+   * input stored it (core/source-inputs.ts). Without it, every record applies.
+   */
+  storedItem?: StoredItemLookup;
 }): SourceConnector {
   const spoolDir = requiredString(options.spoolDir, 'spool directory');
   const trustDomain = options.trustDomain;
@@ -128,57 +136,9 @@ export function createTelegramCaptureSpoolConnector(options: {
   const bound = options.admitThroughCursor === undefined
     ? {}
     : { admitThroughCursor: options.admitThroughCursor };
-  return {
-    id: TELEGRAM_CAPTURE_CONNECTOR_IDS[trustDomain],
-    family: 'chat',
-
-    async authenticate(): Promise<void> {
-      assertTelegramCaptureSpoolDirectory(spoolDir);
-    },
-
-    // The spool is a durable backlog, not a live tail: a migration replay or a
-    // reconnected gateway can leave hundreds of thousands of unread records.
-    // Yielding a single page per run capped every sync at one page — a 200k
-    // backlog then needed weeks of scheduler intervals, and a max-items budget
-    // larger than one page silently delivered one page. Keep paging until the
-    // spool is exhausted or the run's budget is spent.
-    listItems(listOptions: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
-      const budget = normalizeBudget(listOptions.limit);
-      return (async function* (): AsyncGenerator<SourceConnectorListPage> {
-        let cursor = listOptions.cursor;
-        let remaining = budget;
-        for (;;) {
-          // Every page reads on from its cursor (the byte offset of a cursor
-          // already met is remembered, so a page does not re-scan the file
-          // before it). The page limit bounds one read's records and the read
-          // itself is bounded in bytes; a run with a budget spends it in whole
-          // pages so the spine never has to abandon one mid-page.
-          const result = readTelegramCaptureSpool({
-            spoolDir,
-            trustDomain,
-            limit: remaining === undefined ? DEFAULT_PAGE_LIMIT : Math.min(remaining, MAX_PAGE_LIMIT),
-            malformedPolicy: 'skip',
-            ...(cursor ? { cursor } : {}),
-            ...resolved,
-            ...bound,
-          });
-          if (remaining !== undefined) remaining -= result.records.length;
-          yield {
-            items: result.records.map((record) => record.capturedItem.item),
-            ...(result.resumeCursor ? { nextCursor: result.resumeCursor } : {}),
-            done: result.exhausted,
-          };
-          if (result.exhausted) return;
-          if (remaining !== undefined && remaining <= 0) return;
-          // A page that stopped short of the spool always carries the resume
-          // point that produced it. Refusing to loop without a NEW one keeps a
-          // future reader from spinning on the same window forever.
-          if (!result.resumeCursor || result.resumeCursor === cursor) return;
-          cursor = result.resumeCursor;
-        }
-      })();
-    },
-
+  const builder = telegramRecordBuilder({
+    trustDomain,
+    authenticate: async () => { assertTelegramCaptureSpoolDirectory(spoolDir); },
     async fetchItem(localItemId: string): Promise<RawItem> {
       // The newest record of the item wins, so the whole spool is read, a
       // bounded read at a time.
@@ -204,27 +164,59 @@ export function createTelegramCaptureSpoolConnector(options: {
       if (!found) throw new Error('Telegram capture spool cannot fetch an unknown item.');
       return found;
     },
-
-    classificationSignals(item: RawItem): SourceClassificationSignals {
-      // The chat's configured trust domain is a chat-level rule: a prior that
-      // messages rest at and are never lowered below. A Secret Chat is a
-      // provider fact and floors the item at Private.
-      const conversationKind = telegramConversationKind(signalText(item.metadata, 'chatType'));
-      const redacted = item.metadata['secretRedacted'] === true;
-      return compactClassificationSignals({
-        prior: trustDomainPrior(trustDomain, 'source_config'),
-        ...(redacted
-          ? { floor: { tier: 'secrets' as const, basis: TELEGRAM_SECRET_REDACTED_FLOOR_BASIS } }
-          : conversationKind === 'secret_chat'
-            ? { floor: { tier: 'secure' as const, basis: 'provider:secret_chat' } }
-            : {}),
-        conversationKind,
-        title: signalText(item.metadata, 'title'),
-        sender: signalText(item.metadata, 'senderDisplayName', 'senderId'),
-        folderKeys: item.identity.providerConversationId ? [item.identity.providerConversationId] : [],
-      });
+  });
+  // The spool is the connector's live input: its records in their own shape,
+  // turned into items by the connector's one builder, as an export's are.
+  const input: SourceConnectorInput<TelegramRecordItems> = {
+    inputId: TELEGRAM_CAPTURE_CONNECTOR_IDS[trustDomain],
+    kind: 'live',
+    // The spool is a durable backlog, not a live tail: a migration replay or a
+    // reconnected gateway can leave hundreds of thousands of unread records.
+    // Yielding a single page per run capped every sync at one page — a 200k
+    // backlog then needed weeks of scheduler intervals, and a max-items budget
+    // larger than one page silently delivered one page. Keep paging until the
+    // spool is exhausted or the run's budget is spent.
+    records(listOptions = {}): AsyncIterable<SourceRecordPage<TelegramRecordItems>> {
+      const budget = normalizeBudget(listOptions.limit);
+      return (async function* (): AsyncGenerator<SourceRecordPage<TelegramRecordItems>> {
+        let cursor = listOptions.cursor;
+        let remaining = budget;
+        for (;;) {
+          // Every page reads on from its cursor (the byte offset of a cursor
+          // already met is remembered, so a page does not re-scan the file
+          // before it). The page limit bounds one read's records and the read
+          // itself is bounded in bytes; a run with a budget spends it in whole
+          // pages so the spine never has to abandon one mid-page.
+          const result = readTelegramCaptureSpool({
+            spoolDir,
+            trustDomain,
+            limit: remaining === undefined ? DEFAULT_PAGE_LIMIT : Math.min(remaining, MAX_PAGE_LIMIT),
+            malformedPolicy: 'skip',
+            ...(cursor ? { cursor } : {}),
+            ...resolved,
+            ...bound,
+          });
+          if (remaining !== undefined) remaining -= result.records.length;
+          const records = result.records.map((record) => ({ record }));
+          const next = result.resumeCursor ? { nextCursor: result.resumeCursor } : {};
+          yield result.exhausted ? { records, ...next, done: true } : { records, ...next, done: false };
+          if (result.exhausted) return;
+          if (remaining !== undefined && remaining <= 0) return;
+          // A page that stopped short of the spool always carries the resume
+          // point that produced it. Refusing to loop without a NEW one keeps a
+          // future reader from spinning on the same window forever.
+          if (!result.resumeCursor || result.resumeCursor === cursor) return;
+          cursor = result.resumeCursor;
+        }
+      })();
     },
   };
+  const connector = inputConnector(builder, input);
+  if (!options.storedItem) return connector;
+  const lookup = options.storedItem;
+  const withLookup = Object.create(connector) as SourceConnector;
+  withLookup.listItems = (listOptions: SourceConnectorListOptions = {}) => connector.listItems({ storedItem: lookup, ...listOptions });
+  return withLookup;
 }
 
 export function readTelegramCaptureSpool(options: {
@@ -736,6 +728,7 @@ export function telegramMessageItem(input: {
     title: chatTitle ?? `Telegram conversation ${sha256(input.conversationId).slice(0, 12)}`,
     ...(searchText ? { searchText } : {}),
     sentAt: optionalTimestamp(input.message.sentAt, 'sent timestamp'),
+    authoredAt: optionalTimestamp(input.message.sentAt, 'sent timestamp'),
     editedAt: optionalTimestamp(input.message.editedAt, 'edited timestamp'),
     senderId: optionalString(input.message.senderId),
     senderDisplayName: senderName,
@@ -744,7 +737,9 @@ export function telegramMessageItem(input: {
     replyToMessageId: replyTo,
     forwardSource: optionalString(input.message.forwardSource),
     ...(forwardedFrom ? { forwardedFrom } : {}),
+    ...(attachmentNames.length > 0 ? { attachmentNames } : {}),
     ...(service ? { serviceMessage: true, serviceAction: service.action } : {}),
+    ...(optionalString(input.message.recordKind) ? { recordKind: optionalString(input.message.recordKind)! } : {}),
     chatType: optionalString(input.message.chatType),
     attachments: Array.isArray(input.message.attachments) ? input.message.attachments : [],
     reactions: input.message.reactions,
@@ -917,7 +912,7 @@ function sha256(value: string): string {
  * The capture's chat-type vocabulary mapped to the contract's conversation
  * kinds. An unknown or missing value claims nothing.
  */
-function telegramConversationKind(chatType: string | undefined): SourceConversationKind | undefined {
+export function telegramConversationKind(chatType: string | undefined): SourceConversationKind | undefined {
   switch (chatType?.toLowerCase()) {
     case 'dm':
     case 'private':

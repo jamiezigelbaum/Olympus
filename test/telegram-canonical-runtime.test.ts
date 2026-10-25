@@ -50,9 +50,11 @@ describe('Telegram canonical product runtime', () => {
       });
 
       const first = await source!.tasks[0]!.run();
+      // Two versions of message 1 in one window: the connector's intake passes on only the newer one
+      // (core/source-inputs.ts), so the store sees two items, and message 1 lands with its reactions.
       expect(first).toMatchObject({
         status: 'progress',
-        counts: { items_seen: 3, items_indexed: 3, items_changed: 3 },
+        counts: { items_seen: 2, items_indexed: 2, items_changed: 2 },
       });
       expect(JSON.stringify(first)).not.toContain('project note');
       expect(fixture.stores.internal.status().counts.items).toBe(1);

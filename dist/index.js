@@ -19370,10 +19370,16 @@ var init_corpus_adapter4 = __esm(() => {
   init_source_corpus_registry();
   init_corpus();
 });
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
 // src/workers/connector-store/capture-spool-secrets.ts
+var SPOOL_SCAN_CHUNK_BYTES, SPOOL_MAX_LINE_BYTES;
 var init_capture_spool_secrets = __esm(() => {
   init_engine();
   init_secrets_disposition();
+  SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
+  SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
 });
 
 // src/workers/telegram-messages/spool-lines.ts
@@ -19409,15 +19415,22 @@ var init_message = __esm(() => {
   ]);
 });
 
+// src/workers/telegram-messages/record-builder.ts
+var init_record_builder = __esm(() => {
+  init_capture_spool_connector();
+});
+
 // src/workers/telegram-messages/capture-spool-connector.ts
 var TELEGRAM_CAPTURE_CONNECTOR_ID = "telegram_capture_spool", TELEGRAM_CAPTURE_CONNECTOR_IDS, TELEGRAM_TRUST_EVICTION_CONNECTOR_ID, TELEGRAM_TRUST_RECONCILIATION_CONNECTOR_ID, MAX_READ_BYTES, MAX_RECORD_BYTES, MAX_TAIL_SCAN_BYTES, SERVICE_FIELDS;
 var init_capture_spool_connector = __esm(() => {
   init_olympus_layout();
   init_source_placement();
+  init_source_inputs();
   init_capture_spool_secrets();
   init_corpus_adapter4();
   init_spool_lines();
   init_message();
+  init_record_builder();
   TELEGRAM_CAPTURE_CONNECTOR_IDS = {
     internal: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_internal`,
     secure_local: `${TELEGRAM_CAPTURE_CONNECTOR_ID}_secure_local`

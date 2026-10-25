@@ -385,7 +385,11 @@ message beyond its search context (`src/workers/telegram-messages/`,
   remain, or whose file holds fewer lines than it says, no longer stops the
   lane for good: that lane reads the spool again from its start (writes are
   idempotent; skipping could lose history), and the receipt says so
-  (`telegram_spool_cursor_reset`, `spool_cursor_resets`).
+  (`telegram_spool_cursor_reset`, `spool_cursor_resets`). Reading again never
+  puts back an older version: both lanes now read the spool as the live
+  input of the Telegram connector, through the one record builder
+  (`record-builder.ts`) and the intake rule, so a record older than what the
+  stores hold (by its edit time) is not applied (review, #545).
 - **Quiet is not stale.** After every finished cycle (it read every approved
   chat) the helper writes `.capture-heartbeat.json` beside the spool. The
   receipt's age is from the newer of the newest record and the heartbeat,
@@ -402,7 +406,12 @@ message beyond its search context (`src/workers/telegram-messages/`,
   search context adds the chat, the sender and the forward's origin to the
   words and attachment names. A Secrets rewrite of a spool record now also
   takes the forward's origin and the per-sender names with the names, and a
-  service event's words (a title, an amount) with the text.
+  service event's words (a title, an amount) with the text. Every name the
+  search context adds beyond the chat and the sender (the forward's origin,
+  attachment names) is passed to the classifier as the item's names, so a
+  Secret in one of them makes the names Secrets (review, #545). The Secrets
+  rewrite itself reads a spool file in 1 MB chunks, holding one record at a
+  time, instead of the whole file.
 - **Cost.** An existing item is rewritten only when it is read again, and
   its new search context then re-embeds it once.
 

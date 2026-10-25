@@ -213,6 +213,10 @@ export function createTelegramConnectorStoreSyncHandler(options: {
     splitLayers: false,
     ...(options.secretLocations ? { secretLocations: options.secretLocations } : {}),
   });
+  // What the stores hold of an item, for the connector's intake: a record older than the stored version
+  // (a cursor read again from the start, a queued record behind a later edit) is never applied.
+  const storedItem = (identity: Parameters<TieredStoreSet['storedItem']>[0], compareVersions: (a: string, b: string) => number) =>
+    tierSet.storedItem(identity, compareVersions);
   if (options.privateEmbedder) tierSet.declarePrivateEmbedder(options.privateEmbedder);
 
   return {
@@ -227,8 +231,9 @@ export function createTelegramConnectorStoreSyncHandler(options: {
       );
 
       // A cursor that names no place in the spool any more is dropped here,
-      // so both the preflight and its lane read from the start (idempotent)
-      // instead of every later pull failing on it.
+      // so both the preflight and its lane read from the start instead of
+      // every later pull failing on it. Reading again is safe: the lanes'
+      // intake never applies a record older than the version stored.
       let cursorResets = 0;
       const placed = (cursor: string | undefined): string | undefined => {
         if (!cursor || telegramCaptureSpoolCursorState(spoolDir, cursor) === 'ok') return cursor;
@@ -319,6 +324,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
             spoolDir,
             trustDomain: 'internal',
             admitThroughCursor,
+            storedItem,
             ...resolved,
           }),
           sync: {
@@ -335,6 +341,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
             spoolDir,
             trustDomain: 'secure_local',
             admitThroughCursor,
+            storedItem,
             ...resolved,
           }),
           sync: {
