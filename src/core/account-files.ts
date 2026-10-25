@@ -166,24 +166,24 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
   const pairingContext = { env, layout: account.layout };
   if (sourceId === TELEGRAM_SOURCE_ID) files.pairing = telegramPairingSessionPaths(pairingContext);
   if (sourceId === WHATSAPP_SOURCE_ID) files.pairing = whatsappPairingSessionPaths(pairingContext);
-  const raw = (name: AccountRawName, options: { usageDbPath?: string } = {}): string => accountRawPath(account, name, env, options);
+  const rawPath = (name: AccountRawName, options: { usageDbPath?: string } = {}): string => accountRawPath(account, name, env, options);
   switch (sourceId) {
     case 'local.files':
       // The change snapshots that let a restart catch up without a rescan.
-      files.raw.push(raw('watch'));
+      files.raw.push(rawPath('watch'));
       break;
     case 'archive.imports':
       // The record of each import and the imports asked for but not yet
       // recorded; and the media files each import bound, by name. The
       // person's own export files are never touched.
-      files.raw.push(raw('archive-imports.json'), raw('archive-import-requests.json'));
-      files.rawDatabases.push({ path: raw('archive-media-bindings.sqlite'), storeId: ARCHIVE_MEDIA_BINDINGS_STORE_ID });
+      files.raw.push(rawPath('archive-imports.json'), rawPath('archive-import-requests.json'));
+      files.rawDatabases.push({ path: rawPath('archive-media-bindings.sqlite'), storeId: ARCHIVE_MEDIA_BINDINGS_STORE_ID });
       break;
     case 'x.bookmarks':
       // X's reconcile snapshots per X user id. The usage ledger beside them is
       // the quota ledger and stays; its sync checkpoints are a forget step.
       files.rawDatabases.push({
-        path: raw('x-reconcile.sqlite', { usageDbPath: xBookmarksApiUsageDbPath(env) }),
+        path: rawPath('x-reconcile.sqlite', { usageDbPath: xBookmarksApiUsageDbPath(env) }),
         storeId: X_BOOKMARKS_RECONCILE_STATE_STORE_ID,
       });
       break;
@@ -193,7 +193,7 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
       // has written into it. A legacy account's login is Unpair's, kept back
       // here; a folder account's is in its folder and goes with it.
       if (account.layout === 'folder') {
-        files.raw.push(raw('telegram-spool'), raw('telegram-gateway'));
+        files.raw.push(rawPath('telegram-spool'), rawPath('telegram-gateway'));
       } else {
         files.raw.push(...legacyTelegramCaptureState(account, env));
         files.preserved.push(...files.pairing!);
@@ -203,7 +203,7 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
       // The spool carries every message's full text, the session the
       // linked-device keys, and media the captured audio: a folder account
       // keeps all of it in its one state folder.
-      files.raw.push(...(account.layout === 'folder' ? [raw('whatsapp')] : legacyWhatsAppCaptureState(account, env, files.pairing!)));
+      files.raw.push(...(account.layout === 'folder' ? [rawPath('whatsapp')] : legacyWhatsAppCaptureState(account, env, files.pairing!)));
       break;
   }
   files.raw = [...new Set(files.raw)];

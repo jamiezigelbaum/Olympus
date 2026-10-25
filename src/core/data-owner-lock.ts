@@ -27,12 +27,12 @@ import { closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { constants as osConstants } from 'node:os';
 import { dirname } from 'node:path';
-import { olympusDataRoot, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { olympusDataRoot, SHARED_DATA_FILES, sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 const runtimeRequire = createRequire(import.meta.url);
 
 /** The lock file, in the data root. */
-const OWNER_LOCK_NAME = 'data-owner.lock';
+const OWNER_LOCK_NAME = SHARED_DATA_FILES['data-owner-lock'];
 
 // <sys/file.h>: the same values on Linux and macOS.
 const LOCK_EX = 2;

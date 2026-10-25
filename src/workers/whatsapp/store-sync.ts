@@ -3,9 +3,11 @@
 // records to the shared SourceConnector -> LocalConnectorStore spine.
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
-import { WHATSAPP_SOURCE_ID, legacyWhatsAppLiveSyncStateDir } from '../../core/olympus-layout.ts';
+import {
+  legacyWhatsAppLiveSyncPaths,
+  WHATSAPP_SOURCE_ID,
+} from '../../core/olympus-layout.ts';
 import { placedAccount, resolvedRawPath, resolvedStorePath, whatsappMovedPathMapper } from '../../core/source-placement.ts';
 import type {
   LocalConnectorStore,
@@ -150,8 +152,7 @@ export function whatsAppLiveSyncScriptPaths(
   if (placedAccount(WHATSAPP_SOURCE_ID, env).layout === 'folder') {
     return { spoolDir: defaultWhatsAppSpoolDir(env), dbPath: resolvedStorePath(WHATSAPP_SOURCE_ID, 'secure_local', env) };
   }
-  const stateDir = legacyWhatsAppLiveSyncStateDir(env, homeDir ?? homedir());
-  return { spoolDir: join(stateDir, 'spool'), dbPath: join(stateDir, 'connector-store.db') };
+  return legacyWhatsAppLiveSyncPaths(env, homeDir ?? homedir());
 }
 
 // The store may also contain archive-import runs. Only a cursor shaped like the

@@ -72,6 +72,8 @@ export const SHARED_DATA_FILES = {
   'gmail-request-budget': 'gmail-daily-request-budget.json',
   'google-drive-request-budget': 'google-drive-daily-request-budget.json',
   'credential-broker-state': 'credential-broker-state.json',
+  // Beside the remote connections, where the relay's private questions wait.
+  'waiting-private-questions': 'waiting-private-questions.sqlite',
   'tier-migration': 'tier-migration',
   models: 'models',
   'built-in-embedding': 'models/built-in-embedding',
@@ -133,6 +135,15 @@ export function legacyWhatsAppServiceStateDir(env: LayoutEnv = process.env): str
 export function legacyWhatsAppLiveSyncStateDir(env: LayoutEnv = process.env, homeDir: string = homedir()): string {
   return env.OLYMPUS_WHATSAPP_STATE_DIR?.trim() || join(homeDir, '.local', 'share', 'olympus', 'whatsapp-live');
 }
+
+/** Where scripts/whatsapp-live-sync.ts has always kept a `legacy` account's spool and store: inside its own state folder. */
+export function legacyWhatsAppLiveSyncPaths(env: LayoutEnv = process.env, homeDir: string = homedir()): { spoolDir: string; dbPath: string } {
+  const stateDir = legacyWhatsAppLiveSyncStateDir(env, homeDir);
+  return { spoolDir: join(stateDir, 'spool'), dbPath: join(stateDir, 'connector-store.db') };
+}
+
+/** The WhatsApp bridge's linked-device session, in its state folder. */
+export const WHATSAPP_SESSION_FILE = 'session.db';
 
 /**
  * Legacy: where Telegram's connector stores live today. It ignores
@@ -209,6 +220,21 @@ export const ACCOUNT_TRASH_DIR = '.trash';
 /** `<data>/.trash`: a per-source Delete renames the account's folder here, then empties it. */
 export function accountTrashRoot(env: LayoutEnv = process.env): string {
   return olympusDataPath(env, ACCOUNT_TRASH_DIR);
+}
+
+/** One entry of `<data>/.trash`: a renamed-away folder, by the plain name it was given or found under. */
+export function accountTrashEntry(name: string, env: LayoutEnv = process.env): string {
+  return join(accountTrashRoot(env), folderSegment(name, 'trash entry'));
+}
+
+/**
+ * A path inside an account's folder, `/`-separated and relative to it, as
+ * `legacyAccountFiles` names where a moved file goes (`folderPath`).
+ */
+export function accountFolderEntry(account: Pick<LayoutAccount, 'source_id' | 'slot'>, folderPath: string, env: LayoutEnv = process.env): string {
+  const segments = folderPath.split('/');
+  for (const segment of segments) folderSegment(segment, 'path segment');
+  return join(accountFolder(account, env), ...segments);
 }
 
 const TIERS = ['secure_local', 'internal', 'public_safe'] as const;
@@ -378,6 +404,15 @@ const RAW_OWNER: Readonly<Record<AccountRawName, string>> = {
   'archive-media-bindings.sqlite': ARCHIVE_IMPORTS,
   ...messagingRawOwners(),
 };
+
+/**
+ * A file the archive record keeps beside it, wherever the record is (its
+ * account folder's `raw/`, or the data folder for a `legacy` account): the
+ * import requests and the media bindings.
+ */
+export function archiveStateSiblingPath(statePath: string, name: 'archive-import-requests.json' | 'archive-media-bindings.sqlite'): string {
+  return join(dirname(statePath), name);
+}
 
 /** X's API usage ledger. It is the quota ledger, kept when a source is deleted, so it is shared and has no account folder. */
 export function xBookmarksApiUsageDbPath(env: LayoutEnv = process.env): string {
@@ -945,7 +980,7 @@ export function accountExtractionSpoolRoot(account: LayoutAccount, env: LayoutEn
 /** A WhatsApp state location as a folder: the value names the folder, or the `session.db` inside it. */
 export function whatsappStateDirFromValue(value: string): string {
   const trimmed = value.trim();
-  return basename(trimmed) === 'session.db' ? dirname(trimmed) : trimmed;
+  return basename(trimmed) === WHATSAPP_SESSION_FILE ? dirname(trimmed) : trimmed;
 }
 
 /**

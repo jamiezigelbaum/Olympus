@@ -2,8 +2,6 @@ import { lstatSync, readdirSync, realpathSync, rmSync, type Stats } from 'node:f
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
-  TELEGRAM_SOURCE_ID,
-  WHATSAPP_SOURCE_ID,
   accountRawPath,
   accountSessionPath,
   legacyCaptureDataRoot,
@@ -12,6 +10,9 @@ import {
   olympusDataRoot,
   olympusHomeRoots,
   olympusStateRoot,
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SESSION_FILE,
+  WHATSAPP_SOURCE_ID,
   whatsappStateDirFromValue,
   type LayoutAccount,
   type LayoutAccountLayout,
@@ -126,7 +127,7 @@ export function whatsappStateDir(context: OlympusPathContext = {}): string {
  */
 export function whatsappPairingSessionPaths(context: OlympusPathContext = {}): string[] {
   const stateDir = whatsappStateDir(context);
-  const sessionDb = join(stateDir, 'session.db');
+  const sessionDb = join(stateDir, WHATSAPP_SESSION_FILE);
   return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt'), join(stateDir, 'qr.png')];
 }
 
@@ -224,7 +225,7 @@ export function pairingSessionPathsFromStoredValue(
     return [`${base}.session`, `${base}.session-journal`];
   }
   const stateDir = whatsappStateDirFromValue(value);
-  const sessionDb = join(stateDir, 'session.db');
+  const sessionDb = join(stateDir, WHATSAPP_SESSION_FILE);
   return [sessionDb, `${sessionDb}-wal`, `${sessionDb}-shm`, join(stateDir, 'qr.txt'), join(stateDir, 'qr.png')];
 }
 

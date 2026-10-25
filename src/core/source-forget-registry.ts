@@ -35,7 +35,7 @@ import {
 import { defaultSourceSchedulerStateDbPath, forgetSourceSchedulerState } from '../workers/source-scheduler-state.ts';
 import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-extraction/job-names.ts';
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
-import { accountExtractionSpoolRoot } from './olympus-layout.ts';
+import { accountExtractionSpoolRoot, SHARED_DATA_FILES } from './olympus-layout.ts';
 import { placedAccount } from './source-placement.ts';
 import { xBookmarksApiUsageDbPath } from './olympus-layout.ts';
 import { forgetXBookmarksSyncState } from '../workers/x-bookmarks/live-control.ts';
@@ -188,7 +188,7 @@ const sourceIdsOf = (account: ForgetAccount, context: ForgetContext): string[] =
 export const FORGET_STEPS: readonly ForgetStep[] = [
   {
     id: 'waiting-private-questions',
-    file: 'waiting-private-questions.sqlite',
+    file: SHARED_DATA_FILES['waiting-private-questions'],
     modules: ['src/core/waiting-private-questions.ts'],
     // A question asked before the restart is answered from the deleted
     // stores' handles, still open; an answer derived from them must not stay.
@@ -206,7 +206,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
   },
   {
     id: 'source-dashboard',
-    file: 'source-dashboard.sqlite',
+    file: SHARED_DATA_FILES['source-dashboard'],
     // The ingestion ledger shares the file; forgetSourceDashboardRows covers both writers' tables.
     modules: ['src/workers/source-dashboard.ts', 'src/workers/source-ingestion-ledger.ts'],
     // The dashboard's history poll records a source's counts from stale handles.
@@ -222,7 +222,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
   },
   {
     id: 'source-scheduler',
-    file: 'source-scheduler.sqlite',
+    file: SHARED_DATA_FILES['source-scheduler'],
     modules: ['src/workers/source-scheduler-state.ts'],
     forget(account, context, { dryRun }) {
       const path = defaultSourceSchedulerStateDbPath(context.env);
@@ -235,7 +235,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
   },
   {
     id: 'file-extraction-jobs',
-    file: 'file-extraction-jobs.sqlite',
+    file: SHARED_DATA_FILES['file-extraction-jobs'],
     modules: ['src/workers/file-extraction/job-store.ts', 'src/workers/file-extraction/job-names.ts'],
     forgetAccountScopes(account, accountScopes, context, { dryRun }) {
       // The Secrets claims of a tier ledger stay: the ledger is shared by the other accounts of the corpora.
@@ -270,7 +270,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
   },
   {
     id: 'source-watches',
-    file: 'source-watches.sqlite',
+    file: SHARED_DATA_FILES['source-watches'],
     modules: ['src/core/source-watch.ts'],
     // The watch pass can queue matches from stores that are being deleted.
     repeatBeforeRestart: true,
@@ -281,7 +281,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
   },
   {
     id: 'ingestion-doctor-state',
-    file: 'source-ingestion-doctor-state.json',
+    file: SHARED_DATA_FILES['ingestion-doctor-state'],
     modules: [],
     forget(account, context, { dryRun }) {
       const path = defaultIngestionHealthStatePath(context.env);
@@ -315,7 +315,7 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
   {
     // The X usage ledger is the quota ledger and stays; only the deleted account's sync positions go.
     id: 'x-bookmarks-sync-state',
-    file: 'x-bookmarks-api-usage.sqlite',
+    file: SHARED_DATA_FILES['x-usage'],
     modules: ['src/workers/x-bookmarks/live-control.ts'],
     forget(account, context, { dryRun }) {
       const path = xBookmarksApiUsageDbPath(context.env);
@@ -369,17 +369,17 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
  */
 export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
   {
-    file: 'embedding-ledger.jsonl',
+    file: SHARED_DATA_FILES['embedding-ledger'],
     modules: [],
     reason: 'An append-only record of embedding decisions: corpus ids, counts and one-sentence notes, no item content or names. The owner\'s ruling is that it is never rewritten.',
   },
   {
-    file: 'source-answer-latency.jsonl',
+    file: SHARED_DATA_FILES['answer-latency'],
     modules: [],
     reason: 'A content-free latency log: timings, the corpus ids searched, the calling agent. Never a question, answer, path or citation.',
   },
   {
-    file: 'classification-ledger.jsonl',
+    file: SHARED_DATA_FILES['classification-ledger'],
     modules: [],
     reason: 'The owner-approved classifier model and prompt decisions. It names no source, corpus or item.',
   },
@@ -394,12 +394,12 @@ export const KEPT_SHARED_FILES: readonly KeptSharedFile[] = [
     reason: 'One global counter of the day\'s sniffer calls ({ day, used }).',
   },
   {
-    file: 'remote-connections.sqlite',
+    file: SHARED_DATA_FILES['remote-connections'],
     modules: ['src/core/remote-connections.ts'],
     reason: 'The agents connected to Olympus: display name, token digest, and the host the agent runs on. It references no source or corpus.',
   },
   {
-    file: 'credential-broker-state.json',
+    file: SHARED_DATA_FILES['credential-broker-state'],
     modules: [],
     reason: 'The OAuth2 state of each connected handle (refresh token, account id, scopes, status), keyed by handle, not by source or corpus; no item data. Disconnect, which a Delete requires first, deletes the handle\'s entry.',
   },
