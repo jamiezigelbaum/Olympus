@@ -9,11 +9,12 @@
  * not read back from the implementation, so a fixture "written the old way" is
  * what the build before this change left on disk.
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import * as atomicFile from '../src/core/atomic-file.ts';
 import type { RawItem, SourceConnector, SourceConnectorListPage } from '../src/core/contracts.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import {
@@ -38,6 +39,7 @@ type Env = Record<string, string | undefined>;
 type StoreOf = 'local.files' | 'dropbox.files' | 'telegram.messages';
 
 const THREE_DAYS = 3 * 24 * 60 * 60_000;
+const CREATED = '2026-10-25T00:00:00.000Z';
 
 let base: string;
 let env: Env;
@@ -74,8 +76,20 @@ afterEach(() => {
 // --- Fixtures ----------------------------------------------------------------
 
 function account(sourceId: StoreOf, layout: SourceRegistryAccountLayout, state: SourceRegistryAccountState = 'active'): void {
-  updateSourceRegistry(env, (registry) => {
-    registry.accounts.push({ source_id: sourceId, slot: '1', state, layout, corpus_ids: [], created_at: '2026-10-25T00:00:00.000Z' });
+  entry(sourceId, '1', layout, state);
+}
+
+/** One registry entry, in this test's data folder or another. */
+function entry(
+  sourceId: StoreOf,
+  slot: string,
+  layout: SourceRegistryAccountLayout,
+  state: SourceRegistryAccountState = 'active',
+  createdAt: string = CREATED,
+  registryEnv: Env = env,
+): void {
+  updateSourceRegistry(registryEnv, (registry) => {
+    registry.accounts.push({ source_id: sourceId, slot, state, layout, corpus_ids: [], created_at: createdAt });
   });
 }
 
@@ -235,7 +249,7 @@ describe('a store the registry places is held by who it is', () => {
     expect(names).toHaveLength(1);
     expect(names[0]).toMatch(/^store-[0-9a-f]{32}$/);
     const marker = JSON.parse(held[names[0]!]!);
-    expect(marker).toMatchObject({ sourceId: 'local.files', slot: '1', store: 'secure_local' });
+    expect(marker).toMatchObject({ sourceId: 'local.files', slot: '1', store: 'secure_local', incarnation: CREATED });
     // The path is only a hint of where the file was seen.
     expect(marker.seen).toBe(realpathSync(dbPath));
     expect(marker.registry).toBe(sourceRegistryPath(env));
@@ -270,7 +284,7 @@ describe('a store the registry places is held by who it is', () => {
     });
     const dbPath = accountStorePath({ source_id: 'archive.imports', slot: '1', layout: 'folder' }, 'chat.secure_local', env);
     const holder = placedStoreHolder({ sourceId: 'archive.imports' }, { dbPath, family: 'chat', trustDomain: 'secure_local' }, env);
-    expect(holder?.identity).toEqual({ sourceId: 'archive.imports', slot: '1', store: 'chat.secure_local' });
+    expect(holder?.identity).toEqual({ sourceId: 'archive.imports', slot: '1', store: 'chat.secure_local', incarnation: CREATED });
   });
 });
 
@@ -674,5 +688,266 @@ describe('replacing a path marker', () => {
     expect(existsSync(media.path)).toBe(false);
     expect(releaseMediaCacheFile(other.path, other.sha256, holder)).toBe(true);
     expect(existsSync(other.path)).toBe(false);
+  });
+});
+
+// --- Review findings on the first version (PR #509) --------------------------
+
+const LATER = '2026-10-26T00:00:00.000Z';
+
+/** Where a store sits for any slot in a layout, in this test's data folder or another. */
+function storeFileOf(sourceId: StoreOf, slot: string, layout: SourceRegistryAccountLayout, tier = 'secure_local', pathEnv: Env = env): string {
+  return accountStorePath({ source_id: sourceId, slot, layout }, tier, pathEnv);
+}
+
+/** The holder a store opened at `dbPath` takes, as the storage service builds it. */
+function holderOf(sourceId: StoreOf, slot: string, dbPath: string, holderEnv: Env = env) {
+  const holder = placedStoreHolder({ sourceId, slot }, { dbPath, family: 'file', trustDomain: 'secure_local' }, holderEnv);
+  expect(holder).toBeDefined();
+  return holder!;
+}
+
+describe('a registry that is not there', () => {
+  test('keeps the picture an old path marker holds for a store that moved into its account folder', async () => {
+    account('dropbox.files', 'legacy');
+    const legacy = storeFile('dropbox.files', 'legacy');
+    const store = pathHeldStore('dropbox.files', legacy);
+    const media = await landPicture(store, 70);
+    closeStore(store);
+    const expected = oldMarker(legacy);
+    renameStore(legacy, storeFile('dropbox.files', 'folder'));
+    rmSync(sourceRegistryPath(env));
+    // The legacy folder is there, and the registry that could say the store moved is not.
+    expect(existsSync(dirname(legacy))).toBe(true);
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+    expect(pathMarkers(media)).toEqual([expected.name]);
+  });
+
+  test('keeps the picture an old path marker holds for a store in an account folder, until the registry can judge it', async () => {
+    account('local.files', 'folder');
+    const dbPath = storeFile('local.files', 'folder');
+    const store = pathHeldStore('local.files', dbPath);
+    const media = await landPicture(store, 71);
+    closeStore(store);
+    rmSync(dbPath);
+    rmSync(sourceRegistryPath(env));
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+    // Once the registry is back and the account is active with no store, the hold is judged as any other.
+    account('local.files', 'folder');
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
+  });
+
+  test('judges a path no account could have, as it always did', async () => {
+    account('local.files', 'legacy');
+    const mounted = join(base, 'mounts', 'reflect.sqlite');
+    const store = pathHeldStore('local.files', mounted);
+    const media = await landPicture(store, 72);
+    closeStore(store);
+    rmSync(mounted);
+    rmSync(sourceRegistryPath(env));
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
+  });
+});
+
+describe('two data folders that share one media cache', () => {
+  test('hold the same picture separately, and one releasing it leaves the other\'s hold', () => {
+    const other: Env = { HOME: base, XDG_DATA_HOME: join(base, 'data-b') };
+    entry('local.files', '1', 'folder');
+    entry('local.files', '1', 'folder', 'active', CREATED, other);
+    const mine = holderOf('local.files', '1', storeFileOf('local.files', '1', 'folder'));
+    const theirs = holderOf('local.files', '1', storeFileOf('local.files', '1', 'folder', 'secure_local', other), other);
+    expect(theirs.registry).not.toBe(mine.registry);
+
+    const picture = writeMediaCacheFile(cache, jpeg(80), 'image/jpeg');
+    expect(retainMediaCacheFile(picture.path, picture.sha256, mine)).toBe(true);
+    expect(retainMediaCacheFile(picture.path, picture.sha256, theirs)).toBe(true);
+    releaseMediaCacheFile(picture.path, picture.sha256, picture.stagingHolder);
+    expect(identityMarkers(picture)).toHaveLength(2);
+
+    expect(releaseMediaCacheFile(picture.path, picture.sha256, mine)).toBe(false);
+    expect(existsSync(picture.path)).toBe(true);
+    expect(identityMarkers(picture)).toHaveLength(1);
+    // Neither data folder's sweep judges the other's hold.
+    expect(sweep()).toBe(0);
+    expect(existsSync(picture.path)).toBe(true);
+    expect(releaseMediaCacheFile(picture.path, picture.sha256, theirs)).toBe(true);
+    expect(existsSync(picture.path)).toBe(false);
+  });
+});
+
+describe('the legacy paths belong to the first slot', () => {
+  test('a hold by another slot leaves the first slot\'s path marker and picture alone', async () => {
+    entry('local.files', '1', 'legacy');
+    entry('local.files', '2', 'folder');
+    const legacy = storeFile('local.files', 'legacy');
+    const first = pathHeldStore('local.files', legacy);
+    const media = await landPicture(first, 90);
+    closeStore(first);
+    const expected = oldMarker(legacy);
+    const second = holderOf('local.files', '2', storeFileOf('local.files', '2', 'folder'));
+
+    expect(retainMediaCacheFile(media.path, media.sha256, second)).toBe(true);
+    expect(markers(media)[expected.name]).toBe(expected.text);
+    expect(identityMarkers(media)).toHaveLength(1);
+    // Releasing the second slot's hold leaves the first slot's.
+    expect(releaseMediaCacheFile(media.path, media.sha256, second)).toBe(false);
+    expect(existsSync(media.path)).toBe(true);
+    expect(markers(media)).toEqual({ [expected.name]: expected.text });
+  });
+
+  test('a deleted second slot listed first does not judge the first slot\'s store', async () => {
+    entry('local.files', '2', 'folder', 'deleted');
+    entry('local.files', '1', 'legacy');
+    const legacy = storeFile('local.files', 'legacy');
+    const store = pathHeldStore('local.files', legacy);
+    const media = await landPicture(store, 91);
+    closeStore(store);
+    // The first slot's store was renamed into its folder before its layout was flipped.
+    renameStore(legacy, storeFileOf('local.files', '1', 'folder'));
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+  });
+});
+
+describe('a path marker in an account folder that went with its account', () => {
+  async function heldInFolder(seed: number) {
+    entry('dropbox.files', '1', 'legacy');
+    account('local.files', 'folder');
+    const dbPath = storeFile('local.files', 'folder');
+    const store = pathHeldStore('local.files', dbPath);
+    const media = await landPicture(store, seed);
+    closeStore(store);
+    expect(pathMarkers(media)).toEqual([oldMarker(dbPath).name]);
+    return { media, accountFolder: dirname(dirname(dbPath)) };
+  }
+
+  test('is released when the entry says deleted, though the whole folder is gone', async () => {
+    const { media, accountFolder } = await heldInFolder(95);
+    rmSync(accountFolder, { recursive: true });
+    setAccount('local.files', { state: 'deleted' });
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
+  });
+
+  test('is released when the readable registry no longer lists the account', async () => {
+    const { media, accountFolder } = await heldInFolder(96);
+    rmSync(accountFolder, { recursive: true });
+    dropAccount('local.files');
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
+  });
+
+  test('is kept while the account is live and being deleted, and a volume that is not mounted keeps its hold', async () => {
+    const { media, accountFolder } = await heldInFolder(97);
+    rmSync(accountFolder, { recursive: true });
+    setAccount('local.files', { state: 'deleting' });
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+
+    const mounted = join(base, 'volume', 'notes.sqlite');
+    const store = pathHeldStore('local.files', mounted);
+    const mountedMedia = await landPicture(store, 98);
+    closeStore(store);
+    rmSync(dirname(mounted), { recursive: true });
+    expect(sweep()).toBe(0);
+    expect(existsSync(mountedMedia.path)).toBe(true);
+  });
+});
+
+describe('an account that was deleted and connected again', () => {
+  test('does not inherit the pictures the deleted account held', async () => {
+    account('local.files', 'folder');
+    const dbPath = storeFile('local.files', 'folder');
+    const store = serviceStore('local.files', dbPath);
+    const media = await landPicture(store, 110);
+    closeStore(store);
+    expect(JSON.parse(markers(media)[identityMarkers(media)[0]!]!).incarnation).toBe(CREATED);
+    expect(sweep()).toBe(0);
+    // The entry is gone and made again (a later `created_at`); a store file sits at the same path.
+    dropAccount('local.files');
+    entry('local.files', '1', 'folder', 'active', LATER);
+    expect(existsSync(dbPath)).toBe(true);
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
+  });
+
+  test('keeps a picture the new account holds itself, which takes the hold over', async () => {
+    account('local.files', 'folder');
+    const dbPath = storeFile('local.files', 'folder');
+    const store = serviceStore('local.files', dbPath);
+    const media = await landPicture(store, 111);
+    await reassert(store);
+    closeStore(store);
+    dropAccount('local.files');
+    entry('local.files', '1', 'folder', 'active', LATER);
+    // The new account opens the same file and holds its pictures again: this process has already re-asserted this store once.
+    const again = serviceStore('local.files', dbPath);
+    await reassert(again);
+    expect(JSON.parse(markers(media)[identityMarkers(media)[0]!]!).incarnation).toBe(LATER);
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+  });
+
+  test('holds written before the field existed, and holds from a later registry, keep their pictures while the store is there', async () => {
+    account('local.files', 'folder');
+    const dbPath = storeFile('local.files', 'folder');
+    const store = serviceStore('local.files', dbPath);
+    const media = await landPicture(store, 112);
+    closeStore(store);
+    const marker = join(`${media.path}.refs`, identityMarkers(media)[0]!);
+    const written = JSON.parse(readFileSync(marker, 'utf8'));
+    // A hold from before the field existed: no incarnation, so the store alone decides.
+    delete written.incarnation;
+    writeFileSync(marker, JSON.stringify(written));
+    dropAccount('local.files');
+    entry('local.files', '1', 'folder', 'active', LATER);
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+    // One from a registry that has since been restored to an earlier state is not older than the entry.
+    writeFileSync(marker, JSON.stringify({ ...written, incarnation: '2026-12-01T00:00:00.000Z' }));
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+    // And both are released with the store as before.
+    rmSync(dbPath);
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
+  });
+});
+
+describe('retaking a hold after an interrupted one', () => {
+  test('flushes the marker that is already there before the old marker goes', async () => {
+    account('local.files', 'legacy');
+    const legacy = storeFile('local.files', 'legacy');
+    const old = pathHeldStore('local.files', legacy);
+    const media = await landPicture(old, 100);
+    closeStore(old);
+    const expected = oldMarker(legacy);
+    const holder = holderOf('local.files', '1', legacy);
+    // An earlier attempt renamed the identity marker into place, then stopped before the folder was flushed.
+    const sibling = writeMediaCacheFile(cache, jpeg(101), 'image/jpeg');
+    expect(retainMediaCacheFile(sibling.path, sibling.sha256, holder)).toBe(true);
+    const [name] = identityMarkers(sibling);
+    writeFileSync(join(`${media.path}.refs`, name!), markers(sibling)[name!]!);
+    expect(markers(media)[expected.name]).toBe(expected.text);
+
+    const flush = spyOn(atomicFile, 'syncDirectorySync').mockImplementation(() => {
+      throw new Error('the folder cannot be flushed');
+    });
+    try {
+      expect(retainMediaCacheFile(media.path, media.sha256, holder)).toBe(false);
+      expect(flush).toHaveBeenCalledWith(`${media.path}.refs`);
+    } finally {
+      flush.mockRestore();
+    }
+    // The old marker is still the hold the picture has on disk.
+    expect(pathMarkers(media)).toEqual([expected.name]);
+    // Once the flush works, it goes.
+    expect(retainMediaCacheFile(media.path, media.sha256, holder)).toBe(true);
+    expect(pathMarkers(media)).toEqual([]);
+    expect(identityMarkers(media)).toEqual([name!]);
   });
 });

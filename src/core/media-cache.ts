@@ -14,8 +14,9 @@
 //
 // A store the account registry places (core/store-identity.ts) is held by its
 // identity, the account and the store's name inside it, not by the path of its
-// file: its marker is named by a digest of the identity and records the
-// identity (plus where the file was last seen, as a hint). The sweep asks the
+// file: its marker is named by a digest of the registry and the identity (two
+// data folders can share one cache) and records the identity, the account's
+// incarnation and where the file was last seen (as a hint). The sweep asks the
 // registry and the layout whether that store still exists, so a store renamed
 // into its account folder keeps every picture with no call into this module.
 // Every other store (a mount, an operator's `--db`, an in-memory store) is
@@ -41,9 +42,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -54,7 +58,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import { syncDirectorySync, writePrivateFileAtomicSync } from './atomic-file.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { olympusDataDir } from './remote-access.ts';
 import { storePathKey, storePlacementView, type StoreHolder, type StoreIdentity, type StorePlacementView } from './store-identity.ts';
@@ -176,11 +180,12 @@ export function writeMediaCacheFile(dir: string, bytes: Uint8Array, mimeType: st
 
 /**
  * What tells one holder from another within a process: the string as given, or
- * a store's marker name and the path it was opened at (a store opened at a new
- * path holds again, which refreshes where its marker says it was seen).
+ * a store's marker name, the path it was opened at and the incarnation of its
+ * account (a store opened at a new path, or for a re-created account, holds
+ * again, which refreshes what its marker says).
  */
 export function mediaHolderKey(holder: MediaHolder): string {
-  return typeof holder === 'string' ? holder : `${storeMarkerName(holder.identity)}@${holder.path}`;
+  return typeof holder === 'string' ? holder : `${storeMarkerName(holder)}@${holder.path}@${holder.identity.incarnation ?? ''}`;
 }
 
 /** Records that `holder` (one store) references the cache file for `sha256`. */
@@ -302,11 +307,25 @@ function addMarker(path: string, holder: MediaHolder): void {
  * neither is on disk.
  */
 function addStoreMarker(refs: string, holder: StoreHolder): void {
-  const marker = join(refs, storeMarkerName(holder.identity));
+  const marker = join(refs, storeMarkerName(holder));
   const text = storeMarkerText(holder);
   if (readMarker(marker) !== text) writePrivateFileAtomicSync(marker, text);
+  // The same marker is already there, but an earlier attempt may have stopped
+  // between renaming it and flushing its folder: the old marker goes only once
+  // this one is known to be durable, so flush what is there.
+  else flushMarker(marker, refs);
   // The path markers an earlier build left for this store, wherever it sat then.
   for (const name of pathMarkerNames(holder)) rmSync(join(refs, name), { force: true });
+}
+
+function flushMarker(marker: string, refs: string): void {
+  const descriptor = openSync(marker, 'r');
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  syncDirectorySync(refs);
 }
 
 function readMarker(marker: string): string | undefined {
@@ -330,8 +349,13 @@ function readMarker(marker: string): string | undefined {
 function holderGone(marker: string, markerName: string, placement: StorePlacementView): boolean {
   const name = readMarker(marker);
   if (!name || !isAbsolute(name) || holderDigest(name) !== markerName) return false;
-  if (existsSync(name) || !existsSync(dirname(name))) return false;
-  return placement.pathMarkerGone(name);
+  if (existsSync(name)) return false;
+  // A path in an account folder is the account's, and is judged by it even when
+  // the folder went with the account. Any other path with its folder missing is
+  // a volume not mounted now.
+  const verdict = placement.pathMarker(name);
+  if (verdict !== 'unplaced') return verdict === 'gone';
+  return existsSync(dirname(name));
 }
 
 const STORE_MARKER_PREFIX = 'store-';
@@ -343,8 +367,13 @@ function storeHolderGone(marker: string, placement: StorePlacementView): boolean
   return placement.storeGone(recorded.identity, [recorded.seen]);
 }
 
-function storeMarkerName(identity: StoreIdentity): string {
-  return `${STORE_MARKER_PREFIX}${holderDigest(JSON.stringify([identity.sourceId, identity.slot, identity.store]))}`;
+/**
+ * Named for the registry as well as the store: two data folders can share one
+ * media cache, and their accounts and stores can carry the same names.
+ */
+function storeMarkerName(holder: Pick<StoreHolder, 'identity' | 'registry'>): string {
+  const { sourceId, slot, store } = holder.identity;
+  return `${STORE_MARKER_PREFIX}${holderDigest(JSON.stringify([holder.registry, sourceId, slot, store]))}`;
 }
 
 function storeMarkerText(holder: StoreHolder): string {
@@ -353,6 +382,7 @@ function storeMarkerText(holder: StoreHolder): string {
     sourceId: holder.identity.sourceId,
     slot: holder.identity.slot,
     store: holder.identity.store,
+    ...(holder.identity.incarnation === undefined ? {} : { incarnation: holder.identity.incarnation }),
     seen: mediaHolderName(holder.path),
     registry: holder.registry,
   });
@@ -362,10 +392,12 @@ function parseStoreMarker(text: string | undefined): { identity: StoreIdentity; 
   if (!text) return undefined;
   try {
     const parsed = JSON.parse(text) as Record<string, unknown>;
-    const { version, sourceId, slot, store, seen, registry } = parsed;
+    const { version, sourceId, slot, store, incarnation, seen, registry } = parsed;
     if (version !== 1 || typeof sourceId !== 'string' || typeof slot !== 'string' || typeof store !== 'string') return undefined;
     if (typeof seen !== 'string' || typeof registry !== 'string' || !sourceId || !slot || !store) return undefined;
-    return { identity: { sourceId, slot, store }, seen, registry };
+    // A hold written before the field existed has none, and is judged by the store alone.
+    if (incarnation !== undefined && typeof incarnation !== 'string') return undefined;
+    return { identity: { sourceId, slot, store, ...(incarnation === undefined ? {} : { incarnation }) }, seen, registry };
   } catch {
     return undefined;
   }
@@ -386,7 +418,7 @@ function holderName(holder: string): string {
 
 /** Every marker a holder may have left: under its identity, under its real path, and as an earlier build named it. */
 function markerNames(holder: MediaHolder): string[] {
-  if (typeof holder !== 'string') return [storeMarkerName(holder.identity), ...pathMarkerNames(holder)];
+  if (typeof holder !== 'string') return [storeMarkerName(holder), ...pathMarkerNames(holder)];
   const legacy = legacyHolderName(holder);
   return legacy ? [holderName(holder), legacy] : [holderName(holder)];
 }
