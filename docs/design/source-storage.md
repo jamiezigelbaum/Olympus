@@ -829,9 +829,9 @@ the same look, fold, plan, rename, verify and flip, with these additions
   so its child starts once more.
 - *A pairing the move overtakes.* A pairing settles the account's layout, then
   takes its session's lock (the Telegram lease, the bridge's lock); a boot can
-  move the account in between. So, holding the lock, and again before it
-  registers anything, the pairing checks that the account is still where it
-  settled it, with no plan pending, and otherwise stops with nothing paired (a
+  move the account in between. So, holding the lock, and again once its helper
+  is done and before it records anything, the pairing checks that the account is still where it
+  settled it, with no plan pending, and otherwise stops with nothing paired and the login it made removed (a
   WhatsApp pairing gives back the state folder it had just made).
 - *Paths in data.* The bridge writes each saved file's absolute path into its
   spool lines (`media_path`) and the store keeps it as the item's locator. They

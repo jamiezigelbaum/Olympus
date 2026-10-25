@@ -38075,6 +38075,13 @@ async function pairMessagingSource(options) {
     const chats = options.source === "telegram" ? parseTelegramDialogs(receipt.dialogs) : [];
     const accountProof = proofForReceipt(options.source, receipt);
     const madeSession = sessionExisted ? undefined : sessionPath;
+    try {
+      assertPairingPlacement(options.source, layout, registryEnv);
+    } catch (error) {
+      if (madeSession && options.source === "telegram")
+        removeTelegramLogin(madeSession);
+      throw error;
+    }
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
@@ -38105,7 +38112,6 @@ async function pairMessagingSource(options) {
     }
     const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
     const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
-    assertPairingPlacement(options.source, layout, registryEnv);
     const register = options.registerSession ?? connectGuidedSession;
     let connected;
     try {

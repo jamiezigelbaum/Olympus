@@ -263,6 +263,14 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     const accountProof = proofForReceipt(options.source, receipt);
     // What a later refusal removes: a login this pairing made, never one that was there before it.
     const madeSession = sessionExisted ? undefined : sessionPath;
+    // Still where it was settled, now that the helper is done and before anything is recorded: a boot
+    // that moved the account meanwhile would leave this login behind, at a place nothing names.
+    try {
+      assertPairingPlacement(options.source, layout, registryEnv);
+    } catch (error) {
+      if (madeSession && options.source === 'telegram') removeTelegramLogin(madeSession);
+      throw error;
+    }
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
@@ -298,8 +306,6 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     const rollbackCredentials = options.source === 'telegram'
       ? await persistTelegramCredentials(secretStore, result.privatePayload)
       : async () => {};
-    // Still where it was settled, now that the login is made: a boot that moved the account meanwhile would leave this one behind.
-    assertPairingPlacement(options.source, layout, registryEnv);
     const register = options.registerSession ?? connectGuidedSession;
     let connected: ConnectResult;
     try {
