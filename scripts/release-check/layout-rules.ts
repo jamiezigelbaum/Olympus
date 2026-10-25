@@ -42,7 +42,16 @@ export function layoutRulesScript(): string {
   return String.raw`(() => {
   const out = [];
   if (!document.body) return out;
-  const hidden = (el) => { const s = getComputedStyle(el); return s.visibility === 'hidden' || s.display === 'none' || !!el.closest('details:not([open]) > :not(summary), [hidden], [aria-hidden="true"]'); };
+  // Text kept for screen readers only (a 1 px clipped box) is hidden on purpose, not clipped by mistake.
+  const forReaders = (el) => {
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const s = getComputedStyle(node);
+      const r = node.getBoundingClientRect();
+      if (/^rect\(0(px)?,? 0/.test(s.clip || '') || /^inset\(50%/.test(s.clipPath || '') || (r.width <= 1 && r.height <= 1 && /hidden|clip/.test(s.overflow))) return true;
+    }
+    return false;
+  };
+  const hidden = (el) => { const s = getComputedStyle(el); return s.visibility === 'hidden' || s.display === 'none' || !!el.closest('details:not([open]) > :not(summary), [hidden], [aria-hidden="true"]') || forReaders(el); };
   const shown = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !hidden(el); };
   const own = (el) => Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join('').replace(/\s+/g, ' ').trim();
   const words = (el) => (own(el) || el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60);
