@@ -42,7 +42,7 @@ import {
   WHATSAPP_FINDINGS,
   createWhatsAppArchiveConnector,
 } from '../src/workers/archive-import/whatsapp/connector.ts';
-import { WHATSAPP_MAX_ITEM_TEXT_CHARS } from '../src/workers/archive-import/whatsapp/messages.ts';
+import { WHATSAPP_MAX_MESSAGE_BYTES } from '../src/workers/archive-import/whatsapp/messages.ts';
 import { ZIP_INFLATE_PUSH_BYTES, ZipMemberReader } from '../src/workers/archive-import/zip-reader.ts';
 import { referenceCrc32 } from './helpers/zip-fixture.ts';
 import {
@@ -476,7 +476,7 @@ describe('whatsapp connector over text files', () => {
     expect(items.map((item) => item.metadata.chat)).toEqual(['a', 'b']);
   });
 
-  test('notices, empty messages and the status updates chat are skipped and counted, never items', async () => {
+  test('notices and empty messages are skipped and counted, never items; the status updates chat is read like any chat', async () => {
     const dir = workDir();
     const messages: SyntheticMessage[] = [
       notice('2026-05-14T10:00:00'),
@@ -490,15 +490,22 @@ describe('whatsapp connector over text files', () => {
     put(dir, 'WhatsApp Chat with status@broadcast.txt', chatText(syntheticChat(4, { label: 'status' }), { style: 'android-24-dmy' }));
     const { connector, findings } = connectorFor(dir, ['WhatsApp Chat with Harbour crew.txt', 'WhatsApp Chat with status@broadcast.txt']);
     const { items } = await listAll(connector);
-    expect(items.map(textOf)).toEqual(['a real message', 'another']);
+    // The status chat's four messages are items in a chat of their own, after the first chat's two.
+    expect(items.map(textOf)).toEqual([
+      'a real message', 'another',
+      'The synthetic status log, entry 0.', 'The synthetic status log, entry 1.', 'The synthetic status log, entry 2.', 'The synthetic status log, entry 3.',
+    ]);
+    expect(items.map((item) => item.metadata.chat)).toEqual(['Harbour crew', 'Harbour crew', 'status@broadcast', 'status@broadcast', 'status@broadcast', 'status@broadcast']);
+    expect(new Set(items.slice(2).map((item) => item.identity.providerThreadId)).size).toBe(1);
+    expect(items[2]!.identity.providerThreadId).not.toBe(items[0]!.identity.providerThreadId);
     expect(kinds(findings, 'skipped')).toEqual({
       [WHATSAPP_FINDINGS.systemMessage]: 3,
       [WHATSAPP_FINDINGS.messageEmpty]: 1,
-      [WHATSAPP_FINDINGS.statusUpdates]: 4,
     });
+    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1 });
     // Each skip says where, in the file it is in.
-    const status = findings.filter((finding) => finding.kind === WHATSAPP_FINDINGS.statusUpdates);
-    expect(status.every((finding) => finding.fileIndex === 1 && finding.class === 'skipped')).toBe(true);
+    const system = findings.filter((finding) => finding.kind === WHATSAPP_FINDINGS.systemMessage);
+    expect(system.every((finding) => finding.fileIndex === 0 && finding.class === 'skipped')).toBe(true);
   });
 
   test('media stays in the text as the marker and is counted as not imported, once per file named', async () => {
@@ -524,21 +531,54 @@ describe('whatsapp connector over text files', () => {
     expect(new Set(media.map((finding) => finding.offset)).size).toBe(4);
   });
 
-  test('a message over the bound is kept to the bound and reported with its place', async () => {
+  test('a long message is kept whole, past the million characters it used to be cut at, and nothing is said', async () => {
     const dir = workDir();
+    const long = `${'z'.repeat(1_048_566)}\n${'y'.repeat(100)}\n${'x'.repeat(400_000)} end`;
+    expect(long.length).toBeGreaterThan(1_048_576 + 400_000);
     const messages: SyntheticMessage[] = [
       { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: 'short' },
-      { at: '2026-05-14T10:01:00', sender: 'Alex Example', text: `${'z'.repeat(WHATSAPP_MAX_ITEM_TEXT_CHARS - 10)}\n${'z'.repeat(100)}\n${'z'.repeat(100)}` },
+      { at: '2026-05-14T10:01:00', sender: 'Alex Example', text: long },
+      { at: '2026-05-14T10:02:00', sender: 'Sam Example', text: 'after' },
+    ];
+    put(dir, '_chat.txt', chatText(messages, { style: 'android-24-dmy' }));
+    const { connector, findings } = connectorFor(dir, ['_chat.txt']);
+    const { items } = await listAll(connector);
+    expect(items.map(textOf)).toEqual(['short', long, 'after']);
+    expect(kinds(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.timeZoneAssumed]: 1 });
+    expect(kinds(findings, 'skipped')).toEqual({});
+  });
+
+  test('a message past the memory bound, far longer than WhatsApp allows, is not kept and is reported with its place; the next one is', async () => {
+    const dir = workDir();
+    const line = 'z'.repeat(100_000);
+    const huge = Array.from({ length: Math.ceil(WHATSAPP_MAX_MESSAGE_BYTES / line.length) + 2 }, () => line).join('\n');
+    const messages: SyntheticMessage[] = [
+      { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: 'short' },
+      { at: '2026-05-14T10:01:00', sender: 'Alex Example', text: huge },
       { at: '2026-05-14T10:02:00', sender: 'Sam Example', text: 'after' },
     ];
     const text = chatText(messages, { style: 'android-24-dmy' });
     put(dir, '_chat.txt', text);
     const { connector, findings } = connectorFor(dir, ['_chat.txt']);
     const { items } = await listAll(connector);
-    expect(items.map((item) => textOf(item).length)).toEqual([5, WHATSAPP_MAX_ITEM_TEXT_CHARS, 5]);
-    const cut = findings.filter((finding) => finding.kind === ARCHIVE_COMMON_FINDINGS.itemTruncated);
-    expect(cut).toHaveLength(1);
-    expect(cut[0]).toMatchObject({ class: 'gap', fileIndex: 0, offset: Buffer.byteLength(text.slice(0, text.indexOf('14/05/2026, 10:01')), 'utf8') });
+    expect(items.map(textOf)).toEqual(['short', 'after']);
+    const large = findings.filter((finding) => finding.kind === WHATSAPP_FINDINGS.tooLarge);
+    expect(large).toHaveLength(1);
+    expect(large[0]).toMatchObject({ class: 'gap', fileIndex: 0, offset: Buffer.byteLength(text.slice(0, text.indexOf('14/05/2026, 10:01')), 'utf8') });
+    // Nothing is made of a cut message: no item, and nothing about being cut.
+    expect(findings.filter((finding) => finding.kind === ARCHIVE_COMMON_FINDINGS.itemTruncated)).toEqual([]);
+  });
+
+  test('one line of megabytes is past the memory bound too: not kept, reported, and the message after it is', async () => {
+    const dir = workDir();
+    const text = `${chatText([{ at: '2026-05-14T10:00:00', sender: 'Sam Example', text: 'short' }], { style: 'android-24-dmy' })}`
+      + `14/05/2026, 10:01 - Alex Example: ${'y'.repeat(5 * 1024 * 1024)}\n`
+      + `14/05/2026, 10:02 - Sam Example: after\n`;
+    put(dir, '_chat.txt', text);
+    const { connector, findings } = connectorFor(dir, ['_chat.txt']);
+    const { items } = await listAll(connector);
+    expect(items.map(textOf)).toEqual(['short', 'after']);
+    expect(kinds(findings, 'gap')[WHATSAPP_FINDINGS.tooLarge]).toBe(1);
   });
 
   test('two messages alike in everything, in the same minute, are two items', async () => {
@@ -750,14 +790,13 @@ describe('whatsapp connector resumes', () => {
       last = state.o;
     }
     expect(passes).toBeLessThan(60);
-    expect(items.map((item) => textOf(item).slice(0, 8))).toEqual(['before', '0 zzzzzz', 'after', 'and last']);
-    // The long message is kept to the text bound and said to be cut, once however many passes drop the rest of it.
-    expect(textOf(items[1]!).length).toBe(WHATSAPP_MAX_ITEM_TEXT_CHARS);
-    expect(findings.filter((finding) => finding.kind === ARCHIVE_COMMON_FINDINGS.itemTruncated)).toHaveLength(1);
+    // The long message (22 MB) is past the memory bound: it is not kept, and said so once however many passes drop the rest of it.
+    expect(items.map((item) => textOf(item).slice(0, 8))).toEqual(['before', 'after', 'and last']);
+    expect(findings.filter((finding) => finding.kind === WHATSAPP_FINDINGS.tooLarge)).toHaveLength(1);
     // No pass read much more than its budget, whatever the size of the message it was inside: a pass is
     // the budget, plus one message at most (kept to its bounds), plus the read it stopped in.
     const chunk = 1024 * 1024;
-    expect(Math.max(...advances)).toBeLessThanOrEqual(budget + WHATSAPP_MAX_ITEM_TEXT_CHARS + 2 * chunk);
+    expect(Math.max(...advances)).toBeLessThanOrEqual(budget + WHATSAPP_MAX_MESSAGE_BYTES + 2 * chunk);
     // The dropped part was read in budget-sized passes.
     expect(advances.filter((advance) => advance >= budget).length).toBeGreaterThanOrEqual(5);
     expect(passes).toBeGreaterThanOrEqual(6);
@@ -767,7 +806,7 @@ describe('whatsapp connector resumes', () => {
     const dir = workDir();
     const line = 'z'.repeat(1000);
     put(dir, '_chat.txt', chatText([
-      { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: Array.from({ length: 4000 }, (_, index) => `${index} ${line}`).join('\n') },
+      { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: Array.from({ length: 9000 }, (_, index) => `${index} ${line}`).join('\n') },
       { at: '2026-05-14T10:01:00', sender: 'Alex Example', text: 'after' },
     ], { style: 'android-24-dmy' }));
     const states: Array<ReturnType<typeof cursorState>> = [];
@@ -783,9 +822,9 @@ describe('whatsapp connector resumes', () => {
       cursor = listed.cursors.at(-1)!;
       states.push(cursorState(cursor));
     }
-    expect(items.map((item) => textOf(item).slice(0, 3))).toEqual(['0 z', 'aft']);
-    // At least one stop was inside the dropped lines, past the text that was kept.
-    const inside = states.filter((state) => (state.k === 'skip' || state.k === 'mid') && state.o > WHATSAPP_MAX_ITEM_TEXT_CHARS);
+    expect(items.map((item) => textOf(item).slice(0, 3))).toEqual(['aft']);
+    // At least one stop was inside the dropped lines, past the bytes read of the message before it was given up on.
+    const inside = states.filter((state) => (state.k === 'skip' || state.k === 'mid') && state.o > WHATSAPP_MAX_MESSAGE_BYTES);
     expect(inside.length).toBeGreaterThan(0);
     // Every place names the date order the first pass read, so it is not read again.
     expect(states.every((state) => state.d !== '?')).toBe(true);

@@ -982,7 +982,7 @@ export interface ArchiveImportFinding {
 export const ARCHIVE_COMMON_FINDINGS = {
   /** Pictures, audio, video or other files named in the archive that were not read. */
   mediaNotImported: 'media_not_imported',
-  /** An item longer than the import keeps: the start of it is kept. */
+  /** Old records only: an item used to be cut at a length. Nothing reports it now; an item is kept whole. */
   itemTruncated: 'item_truncated',
   // What the import took as given because the archive does not say, one kind for each thing taken, so the dashboard
   // says exactly what: no kind stands for "something was assumed".

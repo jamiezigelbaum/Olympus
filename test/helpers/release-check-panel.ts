@@ -114,12 +114,13 @@ export function panelIdFor(fx: LegFixture): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/** The engine's entry for a fixture. The page and the agent sort a finding into a list by its kind, not by the engine's gap or skipped class, so the two lists are passed as those two arrays. */
 export function entryFor(fx: LegFixture, over: Partial<ComputerArchiveEntry> = {}): ComputerArchiveEntry {
   const expect = fx.expect;
   return {
     id: panelIdFor(fx), name: fx.fileName, format: expect.label, family: expect.family, where: `~/${FIXTURE_FOLDER}`, status: 'imported',
     items: expect.messages, judged: expect.messages, held: 0, earliest: expect.earliest, latest: expect.latest,
-    startedAt: '2026-10-22T08:00:00.000Z', importedAt: '2026-10-22T09:00:00.000Z', gaps: expect.gaps.map((g) => ({ ...g })), skipped: expect.leftOut.map((g) => ({ ...g })), ...over,
+    startedAt: '2026-10-22T08:00:00.000Z', importedAt: '2026-10-22T09:00:00.000Z', gaps: expect.notImported.map((g) => ({ ...g })), skipped: expect.howRead.map((g) => ({ ...g })), ...over,
   };
 }
 

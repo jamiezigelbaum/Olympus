@@ -73,14 +73,12 @@ interface ReadOptions {
   chunkBytes?: number;
   start?: number;
   entry?: WhatsAppEntry;
-  maxTextChars?: number;
   maxMessageBytes?: number;
 }
 
 function readAll(text: string, options: ReadOptions = {}): WhatsAppRawMessage[] {
   const source = fileByteSource(memory(text), { chunkBytes: options.chunkBytes ?? 1024 * 1024, start: options.start ?? 0 });
   const reader = new WhatsAppMessageReader(source, options.entry ?? { kind: 'start' }, {
-    ...(options.maxTextChars !== undefined ? { maxTextChars: options.maxTextChars } : {}),
     ...(options.maxMessageBytes !== undefined ? { maxMessageBytes: options.maxMessageBytes } : {}),
   });
   const messages: WhatsAppRawMessage[] = [];
@@ -298,18 +296,21 @@ describe('whatsapp message reader', () => {
     expect(readAll('')).toEqual([]);
   });
 
-  test('a message over the text bound is cut and says so; the next message is not affected', () => {
-    const long = 'x'.repeat(5000);
+  test('a long message keeps all its text, however many lines; the next message is not affected', () => {
+    // Past the million characters the reader used to keep, across lines of different lengths.
+    const long = 'x'.repeat(300_000);
+    const lines = Array.from({ length: 5 }, (_, index) => `${index}${long}`);
     const text = chatText([
-      { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: `${long}\n${long}` },
+      { at: '2026-05-14T10:00:00', sender: 'Sam Example', text: lines.join('\n') },
       { at: '2026-05-14T10:01:00', sender: 'Alex Example', text: 'short' },
     ], { style: 'android-24-dmy' });
-    const messages = readAll(text, { maxTextChars: 1000 });
+    const messages = readAll(text);
     expect(messages).toHaveLength(2);
-    expect(messages[0]!.cut).toBe(true);
-    expect(messages[0]!.text.length).toBe(1000);
+    expect(messages[0]!.cut).toBe(false);
+    expect(messages[0]!.text).toBe(lines.join('\n'));
+    expect(messages[0]!.text.length).toBeGreaterThan(1_500_000);
     expect(messages[1]).toMatchObject({ cut: false, text: 'short', sender: 'Alex Example' });
-    expect(readAll(text, { maxTextChars: 1000, chunkBytes: 13 })).toEqual(messages);
+    expect(readAll(text, { chunkBytes: 4093 })).toEqual(messages);
   });
 
   test('a header at the very end of the file, with no line break, is a message', () => {
@@ -324,7 +325,8 @@ describe('whatsapp message reader', () => {
     const messages = readAll(big, { chunkBytes: 1024 * 1024 });
     expect(messages).toHaveLength(2);
     expect(messages[0]!.cut).toBe(true);
-    expect(messages[0]!.text.length).toBeLessThanOrEqual(1024 * 1024);
+    // The reader keeps no more of a line than its memory bound.
+    expect(messages[0]!.text.length).toBeLessThanOrEqual(4 * 1024 * 1024);
     expect(messages[1]!.text).toBe('after');
   });
 

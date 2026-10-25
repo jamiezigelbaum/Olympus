@@ -14594,7 +14594,44 @@ var init_vocabulary = __esm(() => {
       files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
-    seeWhy: "See what was not read",
+    lists: { notImported: "Not imported", howRead: "How it was read" },
+    seeWhy: {
+      notImported: "See what was not imported",
+      howRead: "See how it was read",
+      both: "See what was not imported and how it was read"
+    },
+    listOf: {
+      media_not_imported: "not_imported",
+      item_truncated: "not_imported",
+      section_not_imported: "not_imported",
+      file_damaged: "not_imported",
+      files_not_looked_at: "not_imported",
+      files_unconfirmed: "not_imported",
+      time_zone_assumed: "how_read",
+      date_order_assumed: "how_read",
+      item_start_assumed: "how_read",
+      zip_overlap_unchecked: "how_read",
+      assumption: "how_read",
+      item_repeated: "how_read",
+      message_too_large: "not_imported",
+      message_unreadable: "not_imported",
+      charset_not_decoded: "not_imported",
+      attachments_not_read: "not_imported",
+      text_cut: "not_imported",
+      spam_or_trash: "not_imported",
+      message_content_unsupported: "not_imported",
+      system_message: "how_read",
+      message_empty: "how_read",
+      message_without_text: "how_read",
+      status_updates: "not_imported",
+      service_message: "not_imported",
+      note_unreadable: "not_imported",
+      note_too_large: "not_imported",
+      note_content_unsupported: "not_imported",
+      note_empty: "how_read",
+      note_date_assumed: "how_read",
+      other: "not_imported"
+    },
     gapInFile: "{file}: {gap}",
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
@@ -19378,12 +19415,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",

@@ -3,7 +3,7 @@
 // folders), Import approves the choice and the row says what came of it, a
 // refusal stays in the picker with the engine's reason; each archive's state
 // renders with its way forward (Set up the private model, See what was not
-// read, Remove with confirmation); an agent's request waits for Import or
+// imported and how it was read, Remove with confirmation); an agent's request waits for Import or
 // Decline. What needs the person (a stopped import, an agent's request,
 // held messages no private model can judge, a list that cannot be read) is
 // a Needs you line on both surfaces: on the computer its button goes to that
@@ -180,6 +180,23 @@ function archiveItem(page: Page, status: string): Element {
   return found;
 }
 
+/** The two lists under an archive's See button: the button, and each list's heading with its lines (empty when the list is not there). */
+function archiveLists(item: Element): { button: string | undefined; notImported: string[]; howRead: string[]; heads: string[] } {
+  const why = item.querySelector('details.why');
+  const heads = Array.from(why?.querySelectorAll('.why-head') ?? []).map((node) => node.textContent ?? '');
+  const under = (head: string): string[] => {
+    const node = Array.from(why?.querySelectorAll('.why-head') ?? []).find((candidate) => candidate.textContent === head);
+    const list = node?.nextElementSibling;
+    return list && list.matches('ul.plain') ? Array.from(list.querySelectorAll('li')).map((line) => line.textContent ?? '') : [];
+  };
+  return {
+    button: why?.querySelector('summary')?.textContent ?? undefined,
+    notImported: under(A.lists.notImported),
+    howRead: under(A.lists.howRead),
+    heads,
+  };
+}
+
 describe('Import an archive on the computer', () => {
   test('opens the picker in place over files and folders; Import approves the file and the row says it started', async () => {
     let answer = dashboard('archives-none', meta([]));
@@ -305,43 +322,83 @@ describe('each archive under the Archives row', () => {
     expect(item.textContent).toContain(A.setUpPrivateModel);
   });
 
-  test('what was not read, per kind in plain words, behind See what was not read; never a byte offset', async () => {
+  test('what was not imported and how it was read are two lists in plain words, behind one button; never a byte offset', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([{
         ...ARCHIVE,
-        gaps: [{ kind: 'message_too_large', count: 2 }, { kind: 'attachments_not_read', count: 1 }, { kind: 'something_new', count: 4 }],
-        skipped: [{ kind: 'spam_or_trash', count: 30 }],
+        gaps: [{ kind: 'message_too_large', count: 2 }, { kind: 'time_zone_assumed', count: 1 }, { kind: 'attachments_not_read', count: 1 }, { kind: 'something_new', count: 4 }],
+        skipped: [{ kind: 'spam_or_trash', count: 30 }, { kind: 'message_empty', count: 6 }],
       }])),
     });
     const item = archiveItem(page, 'imported');
     const why = item.querySelector('details.why')!;
     expect(why).not.toBeNull();
-    expect(why.querySelector('summary')!.textContent).toBe(A.seeWhy);
-    const lines = Array.from(why.querySelectorAll('ul.plain li')).map((node) => node.textContent);
-    expect(lines).toEqual([
+    const lists = archiveLists(item);
+    expect(lists.button).toBe(A.seeWhy.both);
+    expect(lists.heads).toEqual([A.lists.notImported, A.lists.howRead]);
+    // A kind the page has never heard of is under Not imported, never hidden.
+    expect(lists.notImported).toEqual([
       fill(A.gaps.message_too_large.many, { n: '2' }),
       A.gaps.attachments_not_read.one,
       fill(A.gaps.other.many, { n: '4' }),
       fill(A.gaps.spam_or_trash.many, { n: '30' }),
     ]);
+    expect(lists.howRead).toEqual([
+      A.gaps.time_zone_assumed.one,
+      fill(A.gaps.message_empty.many, { n: '6' }),
+    ]);
     expect(why.textContent).not.toContain('byte');
   });
 
-  test('an archive of several files says which file each gap is in', async () => {
+  test('an archive with lines in only one list shows only that list, and the button says which', async () => {
+    const only = async (gaps: ComputerArchiveEntry['gaps'], skipped: ComputerArchiveEntry['skipped']) => {
+      const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([{ ...ARCHIVE, gaps, skipped }])) });
+      return archiveLists(archiveItem(page, 'imported'));
+    };
+    const lost = await only([{ kind: 'file_damaged', count: 1 }], []);
+    expect(lost.button).toBe(A.seeWhy.notImported);
+    expect(lost.heads).toEqual([A.lists.notImported]);
+    expect(lost.notImported).toEqual([A.gaps.file_damaged.one]);
+    const read = await only([{ kind: 'date_order_assumed', count: 1 }], [{ kind: 'item_repeated', count: 112 }]);
+    expect(read.button).toBe(A.seeWhy.howRead);
+    expect(read.heads).toEqual([A.lists.howRead]);
+    expect(read.howRead).toEqual([A.gaps.date_order_assumed.one, fill(A.gaps.item_repeated.many, { n: '112' })]);
+    // Nothing to say is no button at all.
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([ARCHIVE])) });
+    expect(archiveItem(page, 'imported').querySelector('details.why')).toBeNull();
+  });
+
+  test('a kind sits in the list the table gives it whichever way the engine classed it, and a name that is not a kind is shown under Not imported', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([{
+        ...ARCHIVE,
+        // The engine's own class (gap or skipped) does not decide the list: the kind does.
+        gaps: [{ kind: 'message_empty', count: 2 }, { kind: 'constructor', count: 1 }],
+        skipped: [{ kind: 'file_damaged', count: 1 }],
+      }])),
+    });
+    const lists = archiveLists(archiveItem(page, 'imported'));
+    expect(lists.howRead).toEqual([fill(A.gaps.message_empty.many, { n: '2' })]);
+    expect(lists.notImported).toEqual([A.gaps.other.one, A.gaps.file_damaged.one]);
+  });
+
+  test('an archive of several files says which file each line is in', async () => {
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([{
         ...ARCHIVE,
         gaps: [
           { kind: 'message_too_large', count: 2, file: 'Inbox' },
           { kind: 'message_unreadable', count: 1, file: 'Sent' },
+          { kind: 'time_zone_assumed', count: 1, file: 'Sent' },
         ],
       }])),
     });
-    const lines = Array.from(archiveItem(page, 'imported').querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
-    expect(lines).toEqual([
+    const lists = archiveLists(archiveItem(page, 'imported'));
+    expect(lists.notImported).toEqual([
       fill(A.gapInFile, { file: 'Inbox', gap: fill(A.gaps.message_too_large.many, { n: '2' }) }),
       fill(A.gapInFile, { file: 'Sent', gap: A.gaps.message_unreadable.one }),
     ]);
+    expect(lists.howRead).toEqual([fill(A.gapInFile, { file: 'Sent', gap: A.gaps.time_zone_assumed.one })]);
   });
 
   test('a notes archive counts notes, and every kind of gap any format reports has its own plain sentence', async () => {
@@ -350,15 +407,16 @@ describe('each archive under the Archives row', () => {
     expect(item.textContent).toContain(fill(A.nouns.note.many, { n: '3,412' }));
     expect(item.textContent).not.toContain('messages');
     expect(item.textContent).not.toContain(fill(A.nouns.other.many, { n: '3,412' }));
-    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
-    expect(lines).toEqual([
+    const lists = archiveLists(item);
+    expect(lists.notImported).toEqual([
       fill(A.gaps.media_not_imported.many, { n: '287' }),
-      fill(A.gaps.item_truncated.many, { n: '4' }),
-      fill(A.gaps.note_date_assumed.many, { n: '12' }),
       A.gaps.note_too_large.one,
       fill(A.gaps.section_not_imported.many, { n: '2' }),
       A.gaps.file_damaged.one,
-      // What was left out on purpose comes after what could not be read.
+    ]);
+    // A date taken from the file and a note with nothing in it lose nothing: they are how the notes were read.
+    expect(lists.howRead).toEqual([
+      fill(A.gaps.note_date_assumed.many, { n: '12' }),
       fill(A.gaps.note_empty.many, { n: '38' }),
     ]);
     // Every kind has both a one and a many sentence, none of them the catch-all.
@@ -368,7 +426,7 @@ describe('each archive under the Archives row', () => {
     }
   });
 
-  test('a chat archive counts messages, says Snapshot, not updated beside its dates, and names what it left out in plain words', async () => {
+  test('a chat archive counts messages, says Snapshot, not updated beside its dates, and names what it did not import and how it read the rest in plain words', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat-whatsapp') });
     const item = archiveItem(page, 'imported');
     expect(item.textContent).toContain(fill(A.nouns.chat.many, { n: '12,644' }));
@@ -376,19 +434,20 @@ describe('each archive under the Archives row', () => {
     expect(facts.textContent).toContain('WhatsApp chat export');
     expect(facts.textContent).toContain(fill(A.dates, { earliest: '2019-06-08', latest: '2026-09-30' }));
     expect(facts.querySelector('.archive-snapshot')!.textContent).toBe('Snapshot, not updated');
-    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
-    expect(lines).toEqual([
+    const lists = archiveLists(item);
+    expect(lists.notImported).toEqual([
       fill(A.gaps.media_not_imported.many, { n: '1,870' }),
-      fill(A.gaps.item_truncated.many, { n: '2' }),
+      A.gaps.file_damaged.one,
+      A.gaps.files_unconfirmed.one,
+    ]);
+    // WhatsApp's own notices, empty messages and a message in two files are how the chat was read, not losses.
+    expect(lists.howRead).toEqual([
       A.gaps.time_zone_assumed.one,
       A.gaps.date_order_assumed.one,
       fill(A.gaps.item_start_assumed.many, { n: '3' }),
-      A.gaps.file_damaged.one,
       fill(A.gaps.system_message.many, { n: '318' }),
       fill(A.gaps.message_empty.many, { n: '6' }),
-      fill(A.gaps.status_updates.many, { n: '41' }),
       fill(A.gaps.item_repeated.many, { n: '112' }),
-      A.gaps.files_unconfirmed.one,
     ]);
     // A mail archive is not a snapshot.
     const mail = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-imported') });
@@ -396,20 +455,20 @@ describe('each archive under the Archives row', () => {
     expect(archiveItem(mail, 'imported').querySelector('.archive-snapshot')).toBeNull();
   });
 
-  test('a Telegram archive counts messages, and what it leaves out or cannot carry has its own plain sentence', async () => {
+  test('a Telegram archive counts messages, and what it does not import or only reads a certain way has its own plain sentence', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => previewState('archives-chat') });
     const item = archiveItem(page, 'imported');
     expect(item.textContent).toContain(fill(A.nouns.chat.many, { n: '18,460' }));
     expect(item.textContent).not.toContain(fill(A.nouns.other.many, { n: '18,460' }));
-    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
-    expect(lines).toEqual([
+    const lists = archiveLists(item);
+    expect(lists.notImported).toEqual([
       fill(A.gaps.media_not_imported.many, { n: '2,318' }),
-      fill(A.gaps.section_not_imported.many, { n: '6' }),
+      A.gaps.section_not_imported.one,
       fill(A.gaps.message_content_unsupported.many, { n: '12' }),
-      A.gaps.item_truncated.one,
-      A.gaps.time_zone_assumed.one,
       A.gaps.file_damaged.one,
-      fill(A.gaps.service_message.many, { n: '3,071' }),
+    ]);
+    expect(lists.howRead).toEqual([
+      A.gaps.time_zone_assumed.one,
       fill(A.gaps.message_without_text.many, { n: '54' }),
     ]);
     for (const kind of ['service_message', 'message_without_text', 'message_content_unsupported'] as const) {
@@ -423,12 +482,13 @@ describe('each archive under the Archives row', () => {
     const item = archiveItem(page, 'imported');
     expect(item.textContent).toContain(fill(A.nouns.note.many, { n: '1,208' }));
     expect(item.textContent).not.toContain('messages');
-    const lines = Array.from(item.querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
-    expect(lines).toEqual([
+    const lists = archiveLists(item);
+    expect(lists.notImported).toEqual([
       fill(A.gaps.media_not_imported.many, { n: '94' }),
-      A.gaps.item_truncated.one,
-      fill(A.gaps.note_date_assumed.many, { n: '3' }),
       fill(A.gaps.note_unreadable.many, { n: '2' }),
+    ]);
+    expect(lists.howRead).toEqual([
+      fill(A.gaps.note_date_assumed.many, { n: '3' }),
       fill(A.gaps.note_empty.many, { n: '17' }),
     ]);
   });
@@ -464,9 +524,10 @@ describe('each archive under the Archives row', () => {
   test('an archive recorded before the specific kinds still reads: its one assumption has a plain sentence, not the catch-all', async () => {
     const old = { ...ARCHIVE, family: 'chat', gaps: [{ kind: ARCHIVE_COMMON_FINDINGS.assumption, count: 2 }], skipped: [] };
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => dashboard('archives-imported', meta([old])) });
-    const lines = Array.from(archiveItem(page, 'imported').querySelectorAll('details.why ul.plain li')).map((node) => node.textContent);
-    expect(lines).toEqual([fill(A.gaps.assumption.many, { n: '2' })]);
-    expect(lines[0]).not.toBe(fill(A.gaps.other.many, { n: '2' }));
+    const lists = archiveLists(archiveItem(page, 'imported'));
+    expect(lists.howRead).toEqual([fill(A.gaps.assumption.many, { n: '2' })]);
+    expect(lists.notImported).toEqual([]);
+    expect(lists.howRead[0]).not.toBe(fill(A.gaps.other.many, { n: '2' }));
     // It says why it cannot say which, and what to do.
     expect(A.gaps.assumption.one).toContain('import it again');
   });
@@ -500,7 +561,7 @@ describe('each archive under the Archives row', () => {
     expect(item.textContent).not.toContain(A.countsUnavailable.why);
     expect(item.textContent).not.toContain(fill(A.judgedLine, { judged: '0', held: '0' }));
     // The reasons stay one press away, in plain words.
-    expect(item.textContent).toContain(A.seeWhy);
+    expect(item.textContent).toContain(A.seeWhy.notImported);
     expect(item.textContent).toContain(fill(A.gaps.spam_or_trash.many, { n: '1,204' }));
     expect(item.textContent).toContain(fill(A.gaps.message_too_large.many, { n: '2' }));
     // The same for notes, and without a time to say.

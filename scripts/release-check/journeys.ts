@@ -369,7 +369,8 @@ export const JOURNEYS: readonly Journey[] = [
     source: 'owner test plan: what is private; the release check had never added a sender',
     steps: [
       { name: 'Open the dashboard', do: { open: 'dashboard' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
-      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }] },
+      // The title shows while the settings still load; the description box only once they have.
+      { name: 'Open the privacy settings', do: { click: OPEN_PRIVACY, frame: 'panel' }, expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION, frame: 'panel' }] },
       {
         name: 'Press Add a sender',
         do: { click: { role: 'button', name: PRIVACY.addSender }, frame: 'panel' },
@@ -411,7 +412,8 @@ export const JOURNEYS: readonly Journey[] = [
       {
         name: 'Open the privacy settings again',
         do: { click: OPEN_PRIVACY, frame: 'panel' },
-        expect: [{ text: PRIVACY.title, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
+        // Loaded first, so the saved senders are on the page when their absence is read.
+        expect: [{ text: PRIVACY.title, frame: 'panel' }, { present: DESCRIPTION, frame: 'panel' }, { noText: DISCARDED_SENDER, frame: 'panel' }],
       },
       { name: 'Leave the privacy settings', do: { click: { role: 'button', name: PRIVACY.back }, frame: 'panel' }, expect: [{ text: PANEL.sources, frame: 'panel' }] },
     ],

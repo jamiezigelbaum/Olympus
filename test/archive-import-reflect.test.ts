@@ -27,7 +27,7 @@ import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
 import { archiveContinuations } from '../src/workers/archive-import/continuation-cache.ts';
 import { registerArchiveFormatConnectors } from '../src/workers/archive-import/format-connectors.ts';
 import { probeArchivePath } from '../src/workers/archive-import/manifest.ts';
-import { NOTE_FINDINGS, NOTE_MAX_RECORD_BYTES, NOTE_MAX_TEXT_CHARS } from '../src/workers/archive-import/notes/note.ts';
+import { NOTE_FINDINGS, NOTE_MAX_RECORD_BYTES } from '../src/workers/archive-import/notes/note.ts';
 import {
   REFLECT_JSON_CURSOR_PREFIX,
   createReflectJsonArchiveConnector,
@@ -419,13 +419,20 @@ describe('the Reflect JSON connector', () => {
     expect(text.slice(findings[0]!.offset, findings[0]!.offset + 20)).toBe('{"id":"big","subject');
   });
 
-  test('a note longer than the import keeps is cut to its start and says so', async () => {
-    const body = `start ${'y'.repeat(NOTE_MAX_TEXT_CHARS + 500)} end`;
+  test('a long note is kept whole, past the million characters it used to be cut at, and nothing is said', async () => {
+    const body = `start ${'y'.repeat(1_500_000)} end`;
     const { connector, findings } = jsonConnector('long.json', reflectJson([{ id: 'l', title: 'Long', body, created: '2023-01-01T00:00:00Z' }]));
     const { items } = await listAll(connector);
-    expect(textOf(items[0]!)).toHaveLength(NOTE_MAX_TEXT_CHARS);
-    expect(textOf(items[0]!)).toContain('start yyy');
-    expect(kinds(findings)).toEqual([`gap:${ARCHIVE_COMMON_FINDINGS.itemTruncated}`]);
+    expect(textOf(items[0]!)).toBe(`Long\nCreated: 2023-01-01\n\n${body}`);
+    expect(findings).toEqual([]);
+  });
+
+  test('a title longer than the display title is kept whole in the text', async () => {
+    const title = `${'Harbour notes '.repeat(60)}end`;
+    const { connector } = jsonConnector('title.json', reflectJson([{ id: 't', title, body: 'Words.', created: '2023-01-01T00:00:00Z' }]));
+    const { items } = await listAll(connector);
+    expect(textOf(items[0]!).startsWith(`${title}\nCreated: 2023-01-01`)).toBe(true);
+    expect(String(items[0]!.metadata.title).length).toBeLessThan(title.length);
   });
 
   test('authoredAt is the note\'s own created time, else its edited time, else the day the file was saved', async () => {
@@ -665,14 +672,32 @@ describe('the Reflect Markdown connector', () => {
     ]);
   });
 
-  test('a Markdown file longer than the import keeps is cut to its start and says so', async () => {
-    const huge = `start ${'z'.repeat(NOTE_MAX_TEXT_CHARS * 4 + 100)} end`;
+  test('a long Markdown file is kept whole, past the 4 MB it used to be cut at', async () => {
+    const huge = `start ${'z'.repeat(5_000_000)} end`;
     const zip = reflectMarkdownZip([{ name: 'Huge.md', text: huge }, { name: 'After.md', text: 'Still read.' }]);
     const { connector, findings } = markdownConnector('Reflect Export.zip', zip);
     const { items } = await listAll(connector);
     expect(items.map((item) => item.metadata.title)).toEqual(['Huge', 'After']);
-    expect(textOf(items[0]!).length).toBeLessThanOrEqual(NOTE_MAX_TEXT_CHARS);
-    expect(kinds(findings)).toContain(`gap:${ARCHIVE_COMMON_FINDINGS.itemTruncated}`);
+    expect(textOf(items[0]!).endsWith(' end')).toBe(true);
+    expect(textOf(items[0]!).length).toBeGreaterThan(5_000_000);
+    expect(kinds(findings)).not.toContain(`gap:${ARCHIVE_COMMON_FINDINGS.itemTruncated}`);
+    expect(kinds(findings)).not.toContain(`gap:${NOTE_FINDINGS.tooLarge}`);
+  });
+
+  test('a Markdown file past the memory bound is not kept and is reported with its place; the files after it are read', async () => {
+    const huge = `start ${'z'.repeat(NOTE_MAX_RECORD_BYTES + 100)} end`;
+    const zip = reflectMarkdownZip([{ name: 'Before.md', text: 'Read first.' }, { name: 'Huge.md', text: huge }, { name: 'After.md', text: 'Still read.' }]);
+    const { connector, findings } = markdownConnector('Reflect Export.zip', zip);
+    const { items } = await listAll(connector);
+    expect(items.map((item) => item.metadata.title)).toEqual(['Before', 'After']);
+    expect(kinds(findings).filter((kind) => kind === `gap:${NOTE_FINDINGS.tooLarge}`)).toEqual([`gap:${NOTE_FINDINGS.tooLarge}`]);
+    expect(kinds(findings)).not.toContain(`gap:${ARCHIVE_COMMON_FINDINGS.itemTruncated}`);
+    // The finding is at the file that was left out, between the two that were read.
+    const large = findings.find((finding) => finding.kind === NOTE_FINDINGS.tooLarge)!;
+    const others = findings.filter((finding) => finding.kind === NOTE_FINDINGS.dateAssumed).map((finding) => finding.offset);
+    expect(others).toHaveLength(2);
+    expect(large.offset).toBeGreaterThan(Math.min(...others));
+    expect(large.offset).toBeLessThan(Math.max(...others));
   });
 
   test('a file that is not a zip holds no Markdown notes, and a broken zip is said to be damaged', async () => {

@@ -2079,7 +2079,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
   /**
    * A finished import that stored nothing although the archive held things it
    * left out or could not read: never said as an empty archive, and the
-   * reasons stay under See what was not read. {None} is "No notes".
+   * reasons stay under the See button. {None} is "No notes".
    */
   nothingImported: '{None} imported.',
   nothingImportedWhen: '{None} imported {when}.',
@@ -2130,17 +2130,22 @@ export const DASHBOARD_ARCHIVE_COPY = {
   },
   /** A file of the archive, when the stop names none. */
   thisFile: 'A file of this archive',
-  /** What could not be read fully, per kind; and what was left out on purpose. */
+  /**
+   * One sentence for each kind of finding an archive reports. Which of the two
+   * lists a kind is shown in (`lists`) is `listOf`, directly below.
+   */
   gaps: {
     message_too_large: { one: '1 message too large to read', many: '{n} messages too large to read' },
     message_unreadable: { one: '1 message could not be read', many: '{n} messages could not be read' },
     message_content_unsupported: { one: '1 message with a kind of content Olympus cannot read yet', many: '{n} messages with a kind of content Olympus cannot read yet' },
     charset_not_decoded: { one: '1 message in a character set Olympus could not read', many: '{n} messages in a character set Olympus could not read' },
     attachments_not_read: { one: '1 attachment not read (its name is kept)', many: '{n} attachments not read (their names are kept)' },
+    // Old records only (a message used to be cut at a million characters; nothing is cut now).
     text_cut: { one: '1 message too long: the start of it is kept', many: '{n} messages too long: the start of each is kept' },
     spam_or_trash: { one: '1 message in Spam or Trash left out', many: '{n} messages in Spam or Trash left out' },
     system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
     message_empty: { one: '1 message with no text left out', many: '{n} messages with no text left out' },
+    // Old records only (the status updates chat used to be left out; it is read like any chat now).
     status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
     // Notes exports (Reflect, Roam): archive-import/notes/note.ts NOTE_FINDINGS.
     note_empty: { one: '1 note with nothing written in it left out', many: '{n} notes with nothing written in them left out' },
@@ -2148,10 +2153,12 @@ export const DASHBOARD_ARCHIVE_COPY = {
     note_too_large: { one: '1 note too large to read', many: '{n} notes too large to read' },
     note_content_unsupported: { one: '1 note with a kind of content Olympus cannot read yet', many: '{n} notes with a kind of content Olympus cannot read yet' },
     note_date_assumed: { one: '1 note has no date in the archive: Olympus used the day the file was saved', many: '{n} notes have no date in the archive: Olympus used the day the file was saved' },
+    // Old records only (joins, calls and pins used to be left out; they are messages now).
     service_message: { one: '1 service message (a join, a call or a pin) left out', many: '{n} service messages (joins, calls or pins) left out' },
     message_without_text: { one: '1 message with nothing to read (no text, picture or file) left out', many: '{n} messages with nothing to read (no text, picture or file) left out' },
     // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
     media_not_imported: { one: '1 picture, recording or other file the archive refers to was not imported', many: '{n} pictures, recordings or other files the archive refers to were not imported' },
+    // Old records only (nothing is cut now).
     item_truncated: { one: '1 item too long: the start of it is kept', many: '{n} items too long: the start of each is kept' },
     // What was taken as given, one sentence for each thing and, where it is known, the value taken.
     time_zone_assumed: { one: "The times have no time zone, so Olympus read them in this computer's time zone", many: "The times in {n} files have no time zone, so Olympus read them in this computer's time zone" },
@@ -2167,7 +2174,63 @@ export const DASHBOARD_ARCHIVE_COPY = {
     files_unconfirmed: { one: '1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)', many: '{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)' },
     other: { one: '1 item not read fully', many: '{n} items not read fully' },
   },
-  seeWhy: 'See what was not read',
+  /**
+   * The two lists under an archive's row. Not imported: what Olympus does not
+   * have (damaged, unread, unsupported, pictures and files not read, files
+   * not looked at). How it was read: what Olympus took as given or left out
+   * on purpose, with nothing lost by it (a time zone, a date order, items
+   * repeated and imported once, notices and empty messages).
+   */
+  lists: { notImported: 'Not imported', howRead: 'How it was read' },
+  /** The button that opens them, by which of the two there are. */
+  seeWhy: {
+    notImported: 'See what was not imported',
+    howRead: 'See how it was read',
+    both: 'See what was not imported and how it was read',
+  },
+  /**
+   * The list every kind of finding is shown in: one line each, beside the
+   * sentences above. A kind missing here is shown under Not imported, so a
+   * problem never disappears; test/archive-import-finding-lists.test.ts
+   * fails when a kind any format reports has no entry.
+   */
+  listOf: {
+    // Kinds any format can report (ARCHIVE_COMMON_FINDINGS).
+    media_not_imported: 'not_imported',
+    item_truncated: 'not_imported',
+    section_not_imported: 'not_imported',
+    file_damaged: 'not_imported',
+    files_not_looked_at: 'not_imported',
+    files_unconfirmed: 'not_imported',
+    time_zone_assumed: 'how_read',
+    date_order_assumed: 'how_read',
+    item_start_assumed: 'how_read',
+    zip_overlap_unchecked: 'how_read',
+    assumption: 'how_read',
+    item_repeated: 'how_read',
+    // Mail (mbox).
+    message_too_large: 'not_imported',
+    message_unreadable: 'not_imported',
+    charset_not_decoded: 'not_imported',
+    attachments_not_read: 'not_imported',
+    text_cut: 'not_imported',
+    spam_or_trash: 'not_imported',
+    // Chats (WhatsApp, Telegram).
+    message_content_unsupported: 'not_imported',
+    system_message: 'how_read',
+    message_empty: 'how_read',
+    message_without_text: 'how_read',
+    status_updates: 'not_imported',
+    service_message: 'not_imported',
+    // Notes (Reflect, Roam).
+    note_unreadable: 'not_imported',
+    note_too_large: 'not_imported',
+    note_content_unsupported: 'not_imported',
+    note_empty: 'how_read',
+    note_date_assumed: 'how_read',
+    // Any kind this version does not know (an older or newer record).
+    other: 'not_imported',
+  },
   /** A gap line for an archive of several files: which file it is in. */
   gapInFile: '{file}: {gap}',
   remove: 'Remove',
@@ -3285,3 +3348,9 @@ export const DASHBOARD_OUTSIDE_HELP_COPY = {
   native: 'Anonymous answers are set up on this computer\'s own dashboard only, never from an agent or ChatGPT.',
   unavailable: 'Anonymous answers are not available from this worker.',
 } as const;
+
+/** Which of an archive's two lists a kind of finding is shown in; a kind nobody has heard of is Not imported, so it is never hidden. */
+export function archiveFindingList(kind: string): 'not_imported' | 'how_read' {
+  const lists: Readonly<Record<string, 'not_imported' | 'how_read'>> = DASHBOARD_ARCHIVE_COPY.listOf;
+  return Object.prototype.hasOwnProperty.call(lists, kind) ? lists[kind]! : 'not_imported';
+}

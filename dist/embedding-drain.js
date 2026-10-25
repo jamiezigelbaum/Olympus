@@ -32882,12 +32882,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -33426,7 +33426,44 @@ var init_vocabulary = __esm(() => {
       files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
-    seeWhy: "See what was not read",
+    lists: { notImported: "Not imported", howRead: "How it was read" },
+    seeWhy: {
+      notImported: "See what was not imported",
+      howRead: "See how it was read",
+      both: "See what was not imported and how it was read"
+    },
+    listOf: {
+      media_not_imported: "not_imported",
+      item_truncated: "not_imported",
+      section_not_imported: "not_imported",
+      file_damaged: "not_imported",
+      files_not_looked_at: "not_imported",
+      files_unconfirmed: "not_imported",
+      time_zone_assumed: "how_read",
+      date_order_assumed: "how_read",
+      item_start_assumed: "how_read",
+      zip_overlap_unchecked: "how_read",
+      assumption: "how_read",
+      item_repeated: "how_read",
+      message_too_large: "not_imported",
+      message_unreadable: "not_imported",
+      charset_not_decoded: "not_imported",
+      attachments_not_read: "not_imported",
+      text_cut: "not_imported",
+      spam_or_trash: "not_imported",
+      message_content_unsupported: "not_imported",
+      system_message: "how_read",
+      message_empty: "how_read",
+      message_without_text: "how_read",
+      status_updates: "not_imported",
+      service_message: "not_imported",
+      note_unreadable: "not_imported",
+      note_too_large: "not_imported",
+      note_content_unsupported: "not_imported",
+      note_empty: "how_read",
+      note_date_assumed: "how_read",
+      other: "not_imported"
+    },
     gapInFile: "{file}: {gap}",
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
@@ -36690,22 +36727,38 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
     }
     return block;
   }
+  function archiveFindings(archive) {
+    const lists = H.copy.archives.listOf;
+    return archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => ({
+      list: Object.prototype.hasOwnProperty.call(lists, entry.kind) && lists[entry.kind] === "how_read" ? "how_read" : "not_imported",
+      entry
+    }));
+  }
   function archiveHasReasons(archive) {
-    return archive.gaps.concat(archive.skipped).some((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0);
+    return archiveFindings(archive).length > 0;
   }
   function archiveWhy(archive) {
     const A = H.copy.archives;
     const kinds = A.gaps;
-    const lines = archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => {
-      const words2 = kinds[entry.kind] || kinds.other;
+    const found = archiveFindings(archive);
+    const listed = (list) => found.filter((item) => item.list === list).map((item) => {
+      const entry = item.entry;
+      const words2 = Object.prototype.hasOwnProperty.call(kinds, entry.kind) ? kinds[entry.kind] : kinds.other;
       const n = wholeCount(entry.count);
       const gap = fill2(n === 1 ? words2.one : words2.many, { n: count(n) });
       return el("li", "", typeof entry.file === "string" && entry.file ? fill2(A.gapInFile, { file: entry.file, gap }) : gap);
     });
-    if (!lines.length)
+    const notImported = listed("not_imported");
+    const howRead = listed("how_read");
+    if (!notImported.length && !howRead.length)
       return null;
-    const box = details("archive-why:" + archive.id, doc.createTextNode(A.seeWhy), "why");
-    return add(box, add(el("ul", "plain"), ...lines));
+    const label = notImported.length && howRead.length ? A.seeWhy.both : howRead.length ? A.seeWhy.howRead : A.seeWhy.notImported;
+    const box = details("archive-why:" + archive.id, doc.createTextNode(label), "why");
+    if (notImported.length)
+      add(box, el("p", "why-head", A.lists.notImported), add(el("ul", "plain"), ...notImported));
+    if (howRead.length)
+      add(box, el("p", "why-head", A.lists.howRead), add(el("ul", "plain"), ...howRead));
+    return box;
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
@@ -47062,12 +47115,10 @@ init_zip_reader();
 init_zip_reader();
 
 // src/workers/archive-import/notes/note.ts
-var NOTE_MAX_TEXT_CHARS = 1e6;
 var NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
 
 // src/workers/archive-import/notes/archive.ts
 var NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-var MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
 var LIST_PEEK_BYTES = 64 * 1024;
 var MEMBER_NOT_CHECKED = Object.freeze({ bytes: 0, sizeOk: false, crcOk: undefined });
 
@@ -47135,6 +47186,16 @@ init_byte_source();
 init_json_stream();
 
 // src/workers/archive-import/telegram/message.ts
+var TELEGRAM_MEDIA_KEYS = new Set([
+  "photo",
+  "file",
+  "media_type",
+  "file_name",
+  "sticker_emoji",
+  "performer",
+  "title",
+  "duration_seconds"
+]);
 var READ_OBJECTS = new Set([
   "contact_information",
   "location_information",
@@ -47147,6 +47208,19 @@ var READ_OBJECTS = new Set([
   "inline_bot_buttons"
 ]);
 
+// src/workers/archive-import/telegram/account.ts
+var ACCOUNT_SECTIONS = [
+  { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
+  { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
+  { name: "stories", path: ["stories"], label: "stories", whole: false },
+  { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
+  { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
+  { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
+  { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
+  { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
+  { name: "other_data", path: ["other_data"], label: "other data", whole: true }
+];
+
 // src/workers/archive-import/telegram/connector.ts
 var TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 var TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
@@ -47155,20 +47229,9 @@ var MESSAGE_PATHS = [
   ["left_chats", "list", "*", "messages"],
   ["messages"]
 ];
-var SECTION_PATHS = [
-  { path: ["personal_information"], name: "personal_information" },
-  { path: ["profile_pictures"], name: "profile_pictures" },
-  { path: ["stories"], name: "stories" },
-  { path: ["profile_music"], name: "profile_music" },
-  { path: ["contacts", "list"], name: "contacts" },
-  { path: ["frequent_contacts", "list"], name: "frequent_contacts" },
-  { path: ["sessions", "list"], name: "sessions" },
-  { path: ["web_sessions", "list"], name: "web_sessions" },
-  { path: ["other_data"], name: "other_data" }
-];
-var ITEM_PATHS = [...MESSAGE_PATHS, ...SECTION_PATHS.map((section) => section.path)];
-var SECTION_ROOTS = new Set(SECTION_PATHS.map((section) => section.path[0]));
-var LISTED_SECTIONS = new Set(SECTION_PATHS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+var ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
+var SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
+var LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 
 // src/workers/archive-import/runtime.ts
 init_lane();
@@ -47382,8 +47445,8 @@ class VolumeResolver {
   scan() {
     let raw = [];
     try {
-      const text2 = this.deps.readMounts ? this.deps.readMounts() : defaultReadMounts(this.deps.platform);
-      raw = this.deps.platform === "darwin" ? parseDarwinMounts(text2) : parseLinuxMountinfo(text2);
+      const text3 = this.deps.readMounts ? this.deps.readMounts() : defaultReadMounts(this.deps.platform);
+      raw = this.deps.platform === "darwin" ? parseDarwinMounts(text3) : parseLinuxMountinfo(text3);
     } catch {
       raw = [];
     }
@@ -47510,9 +47573,9 @@ function defaultUuidsByDevice() {
   } catch {}
   return result;
 }
-function parseDarwinMounts(text2) {
+function parseDarwinMounts(text3) {
   const mounts = [];
-  for (const line of text2.split(`
+  for (const line of text3.split(`
 `)) {
     const match = /^(.+?) on (\/.*?) \(([^,)]+)/.exec(line);
     if (!match)
@@ -47521,9 +47584,9 @@ function parseDarwinMounts(text2) {
   }
   return mounts;
 }
-function parseLinuxMountinfo(text2) {
+function parseLinuxMountinfo(text3) {
   const mounts = [];
-  for (const line of text2.split(`
+  for (const line of text3.split(`
 `)) {
     const separator = line.indexOf(" - ");
     if (separator < 0)
@@ -48500,7 +48563,7 @@ async function runSnifferPass(options) {
     report.calls += 1;
     report.itemsAsked += batch.length;
     report.promptChars += SNIFFER_SYSTEM_PROMPT.length + prompt.length;
-    let text2;
+    let text3;
     try {
       const completion = await options.model.complete({
         system: SNIFFER_SYSTEM_PROMPT,
@@ -48509,7 +48572,7 @@ async function runSnifferPass(options) {
         maxOutputChars: batch.length * OUTPUT_CHARS_PER_ITEM + 200,
         ...options.signal ? { signal: options.signal } : {}
       });
-      text2 = completion.text;
+      text3 = completion.text;
     } catch {
       if (options.signal?.aborted) {
         report.stoppedBy = "preempted";
@@ -48530,8 +48593,8 @@ async function runSnifferPass(options) {
       return finish(report);
     }
     consecutiveTransportFailures = 0;
-    report.responseChars += text2.length;
-    const verdicts = parseSnifferBatchResponse(text2, new Set(batch.map((_, index) => index + 1)));
+    report.responseChars += text3.length;
+    const verdicts = parseSnifferBatchResponse(text3, new Set(batch.map((_, index) => index + 1)));
     for (const [index, group2] of batch.entries()) {
       const verdict = verdicts.get(index + 1);
       const key2 = keyOf(group2[0].question);
@@ -49637,11 +49700,11 @@ class HttpSourceEmbeddingDrainClient {
         ...controller ? { signal: controller.signal } : {}
       }, this.authToken);
       const response = await this.fetchImpl(`${this.baseUrl}/source/index/embed`, init);
-      const text2 = await response.text();
+      const text3 = await response.text();
       if (!response.ok) {
-        throw new Error(`/source/index/embed returned HTTP ${response.status}: ${text2.slice(0, 300)}`);
+        throw new Error(`/source/index/embed returned HTTP ${response.status}: ${text3.slice(0, 300)}`);
       }
-      return text2 ? JSON.parse(text2) : {};
+      return text3 ? JSON.parse(text3) : {};
     } finally {
       if (timeout)
         clearTimeout(timeout);

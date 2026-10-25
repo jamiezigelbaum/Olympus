@@ -9,8 +9,10 @@
  * - Reading: through the shared readers only (`json-stream.ts`, `zip-reader.ts`)
  *   over the scope-safe range reader. A JSON record is read whole up to
  *   NOTE_MAX_RECORD_BYTES; a bigger one is reported (`note_too_large`) with its
- *   place and passed over. A Markdown member is streamed, the first 4 MB of it
- *   kept. Nothing reads a whole file or a whole member.
+ *   place and passed over. A Markdown member is read up to the same size, kept
+ *   whole, and one bigger is reported the same way. A note is never cut:
+ *   either all of it is kept or none of it is, and what is not kept is
+ *   reported. Nothing reads a whole file.
  * - Findings: an empty note is skipped, a record that is no note, a record
  *   too big and a note (or part of one) of a kind Olympus has no rule for are
  *   gaps, a zip member whose checksum or size is wrong (or whose checksum was
@@ -89,7 +91,6 @@ import {
 import {
   NOTE_FINDINGS,
   NOTE_MAX_RECORD_BYTES,
-  NOTE_MAX_TEXT_CHARS,
   buildNoteItem,
   noteClassificationSignals,
   type NoteOutcome,
@@ -100,8 +101,8 @@ export const NOTES_DEFAULT_PAGE_SIZE = 100;
 export const NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
 /** Records and findings read before a page goes out even when it holds few items, so findings never pile up unbounded. */
 export const NOTES_MAX_UNITS_PER_PAGE = 5_000;
-/** Bytes of a Markdown member kept: enough for NOTE_MAX_TEXT_CHARS characters of any text. */
-const MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
+/** A Markdown member is read whole up to the size a JSON record is; a bigger one is reported and passed over. */
+const MARKDOWN_MAX_BYTES = NOTE_MAX_RECORD_BYTES;
 const ROOT_PEEK_BYTES = 1024;
 /** The biggest value looked at when asking whether a document's list of notes is there; an empty list is far smaller. */
 const LIST_PEEK_BYTES = 64 * 1024;
@@ -270,7 +271,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     input.report({ kind, class: findingClass, fileIndex, offset, ...(count !== undefined ? { count } : {}) });
   };
 
-  const takeNote = (segment: Segment, outcome: NoteOutcome, place: NotePlace, offset: number, savedAt: string, cut = false): void => {
+  const takeNote = (segment: Segment, outcome: NoteOutcome, place: NotePlace, offset: number, savedAt: string): void => {
     segment.consumed += 1;
     if (outcome.kind === 'empty') {
       report(NOTE_FINDINGS.empty, 'skipped', place.fileIndex, offset);
@@ -287,7 +288,6 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     const built = buildNoteItem(input, outcome.note, place, savedAt);
     segment.items.push(built.item);
     if (outcome.note.unsupported) report(NOTE_FINDINGS.unsupported, 'gap', place.fileIndex, offset);
-    if (built.truncated || cut) report(ARCHIVE_COMMON_FINDINGS.itemTruncated, 'gap', place.fileIndex, offset);
     if (built.dateAssumed) report(NOTE_FINDINGS.dateAssumed, 'gap', place.fileIndex, offset);
   };
 
@@ -623,14 +623,15 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
   };
 
   /**
-   * The text of a Markdown member (the first MARKDOWN_MAX_BYTES of it), why it
-   * has none (undefined), or that the import was told to stop while it was
-   * being read ('stopped'). The whole member is read, so its checksum is checked.
+   * The text of a Markdown member, whole; why it has none (undefined); that it
+   * is bigger than MARKDOWN_MAX_BYTES (`tooLarge`, nothing of it kept); or that
+   * the import was told to stop while it was being read ('stopped'). The whole
+   * member is read, so its checksum is checked.
    */
   const readMarkdownMember = (
     archive: ZipArchive,
     entry: ZipEntry,
-  ): { text: string; cut: boolean; end: ZipMemberEnd | undefined } | undefined | 'stopped' => {
+  ): { text: string; end: ZipMemberEnd | undefined } | { tooLarge: true } | undefined | 'stopped' => {
     let member: ZipMemberReader;
     try {
       member = ZipMemberReader.open(archive, entry);
@@ -640,20 +641,14 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
     }
     const parts: Uint8Array[] = [];
     let kept = 0;
-    let cut = false;
     try {
       for (;;) {
         if (!input.shouldContinue()) return 'stopped';
         const chunk = member.next();
         if (!chunk) break;
-        if (kept < MARKDOWN_MAX_BYTES) {
-          const take = chunk.subarray(0, MARKDOWN_MAX_BYTES - kept);
-          parts.push(take);
-          kept += take.length;
-          if (take.length < chunk.length) cut = true;
-        } else {
-          cut = true;
-        }
+        kept += chunk.length;
+        if (kept > MARKDOWN_MAX_BYTES) return { tooLarge: true };
+        parts.push(chunk);
       }
     } catch (error) {
       if (error instanceof ZipMemberError) return undefined;
@@ -667,7 +662,7 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
       joined.set(part, at);
       at += part.length;
     }
-    return { text: new TextDecoder('utf-8').decode(joined), cut, end: member.end };
+    return { text: new TextDecoder('utf-8').decode(joined), end: member.end };
   };
 
   const readMarkdownZip = (
@@ -714,9 +709,12 @@ export function createNoteArchiveConnector(input: ArchiveConnectorInput, spec: N
       if (!read) {
         segment.consumed += 1;
         report(NOTE_FINDINGS.unreadable, 'gap', fileIndex, offset);
+      } else if ('tooLarge' in read) {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.tooLarge, 'gap', fileIndex, offset);
       } else {
         const place: NotePlace = { fileIndex, member: entry.index, ordinal: entry.index };
-        takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt, read.cut);
+        takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt);
         if (!read.end || read.end.crcOk !== true || !read.end.sizeOk) {
           report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', fileIndex, zipFindingOffset(entry.index, entry.uncompressedSize));
         }

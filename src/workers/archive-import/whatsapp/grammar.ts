@@ -274,11 +274,6 @@ export function whatsAppStem(name: string): string {
   return last.replace(/\.(?:txt|zip)$/i, '');
 }
 
-/** The chat a status-update export stands for: its updates are not a conversation. */
-export function isWhatsAppStatusChat(chat: string): boolean {
-  return chat.trim().toLowerCase() === 'status@broadcast';
-}
-
 /** Names inside a zip that are not files of the export: macOS folders and resource forks. */
 export function isWhatsAppZipNoise(name: string): boolean {
   if (name.endsWith('/') || name.startsWith('__MACOSX/') || name.includes('/__MACOSX/')) return true;

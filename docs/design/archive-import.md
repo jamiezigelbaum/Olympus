@@ -35,6 +35,11 @@ same way, with the same privacy and the same status.
   agent-started imports.
 - **WhatsApp and Telegram exports are in scope** (owner, 2026-10-23), after
   mail.
+- **Everything that can be read is ingested; no length cut and no size
+  refusal** (owner, 2026-10-25). The one-million-character cuts are gone
+  (see "No length cut"); Telegram's service messages, its account parts
+  (profile, contacts, sessions...) and WhatsApp's status updates chat are
+  items. Attachment and media bytes are a separate design (child items).
 - **Imported archives stay Private until the private model judges them**
   (owner, 2026-10-23): the local model, or Venice Private where there is no
   local model, as for every source. Personal-first does not apply to them: it assumed a
@@ -45,8 +50,8 @@ same way, with the same privacy and the same status.
 | Format | Today |
 |---|---|
 | Mail (mbox) | Built in step 1 (2026-10-23): the shared spine in `workers/archive-import/`, and a thin mbox connector (`workers/archive-import/mbox/`) that splits the file itself and parses each message with `postal-mime`. Gmail items come from the Gmail API's JSON, so Gmail shares none of it. |
-| WhatsApp chat export | Built in step 3 (2026-10-24): one format (`whatsapp_chat`, family `chat`, provider `whatsapp_export`) over `_chat.txt`, `WhatsApp Chat with <name>.txt` and the zip WhatsApp shares, in `workers/archive-import/whatsapp/`, with the line grammar in `workers/archive-import/whatsapp/grammar.ts` (core keeps only the small detection signature). The old export connector (`workers/whatsapp/connector.ts`) is deleted. Live WhatsApp capture is wired separately and untouched. |
-| Telegram Desktop export | Built in step 4 (2026-10-24): a thin connector (`workers/archive-import/telegram/`) that streams a JSON `result.json`, whole-account or single-chat, as family `chat`, provider `telegram_export`. Live Telegram capture (`telegram-messages/`) is a different provider in different stores, and the import never opens it. |
+| WhatsApp chat export | Built in step 3 (2026-10-24): one format (`whatsapp_chat`, family `chat`, provider `whatsapp_export`) over `_chat.txt`, `WhatsApp Chat with <name>.txt` and the zip WhatsApp shares, in `workers/archive-import/whatsapp/`, with the line grammar in `workers/archive-import/whatsapp/grammar.ts` (core keeps only the small detection signature). The old export connector (`workers/whatsapp/connector.ts`) is deleted. Live WhatsApp capture is wired separately and untouched. Since 2026-10-25 the status updates chat is read like any chat, notices and empty messages are listed as how it was read rather than as a loss, and a message is never cut by length. |
+| Telegram Desktop export | Built in step 4 (2026-10-24): a thin connector (`workers/archive-import/telegram/`) that streams a JSON `result.json`, whole-account or single-chat, as family `chat`, provider `telegram_export`. Live Telegram capture (`telegram-messages/`) is a different provider in different stores, and the import never opens it. Since 2026-10-25 service messages (joins, calls, pins) and the account's own parts (profile, contacts, sessions...) are items, and a message is never cut by length. |
 | Reflect export | Built in step 2 (2026-10-24): JSON (a list of notes, or `{"notes": [...]}`, either key style, in a `.json` file or a zip) and Markdown (a zip of `.md` files), as formats `reflect-json` and `reflect-markdown` with thin connectors in `workers/archive-import/reflect/` over the shared notes engine in `workers/archive-import/notes/`. The old connector is deleted. CSV and HTML exports are not read; choosing one gets the supported-formats answer. |
 | Roam export | Built in step 2 (2026-10-24): "Export All" as JSON (a list of pages with nested blocks, in a `.json` file or a zip), format `roam-json`, `workers/archive-import/roam/`, same engine. The old connector is deleted. Roam's Markdown and EDN exports are not read. |
 
@@ -72,12 +77,12 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
 | Archive identity | Each import gets a persistent archive id at start, used as the connector instance id and `accountScope`. Checkpoints key on it, so two imports of the same format never share a resume position. The old Reflect connector used one constant connector id and the store keyed resume on it; moving Reflect onto the registry (step 2) retired that. |
 | Cursor | Position in the archive, bound to the identity (device, inode, size, mtime) of every file the import reads, not only the chosen path. For a folder (Apple Mail's `.mbox`, a folder of WhatsApp exports) that means a manifest of its files, and for a zip its members. A large import resumes after a restart; if any file in an unfinished archive changed or went missing, the import stops and says so instead of resuming against different bytes. |
 | Picker | The local-files picker (`workers/local-files/scope-browser.ts`), extended to offer files as well as folders in a "choose one file or folder" mode (today it lists folders only, `scope-browser.ts:121`). |
-| Reading | Only the chosen path, through the scope-safe reader (`core/scope-safe-fs.ts`), so no symlink escape. `ScopeRoot.readFile` loads a whole file, so archive reading adds a bounded streaming read on `openRelative`, with a per-message size cap. |
+| Reading | Only the chosen path, through the scope-safe reader (`core/scope-safe-fs.ts`), so no symlink escape. `ScopeRoot.readFile` loads a whole file, so archive reading adds a bounded streaming read on `openRelative`. A message or record over a memory bound is not read and is reported (`message_too_large`, `note_too_large`); the text of one that is read is never cut (see "No length cut"). |
 | Storage | Items go into the shared connector store and pipeline unchanged: extraction, per-item tiers from privacy settings plus the judge, index, search, Analyst. No archive-specific code after the connector. Importers set no source-level floor; each item gets its own tier. Until the private model judges an item, its content is held Private (below). |
 | Removal | Per archive, not per source. Lifecycle delete today removes a whole source's store (`data-lifecycle.ts:657`) and Reflect has one store for the whole family (`data-lifecycle.ts:404`), so removing one import that way would erase the others. Remove cancels and fences that archive's running work, deletes its items, chunks, vectors and derived data (including private answers built from it, `data-lifecycle.ts:691`), and never touches the user's file. |
 | Operation | One operation, `archive_import` (start, status, remove), on the public tool lists, CLI, and MCP. The dashboard calls the same core functions as the operation. An agent cannot import a path just by naming it: start needs a path the user approved, through the dashboard picker or a confirmation the user answers, the same approval the scope picker gives other sources. A prompt-injected or accidental tool call can at most ask. |
-| Dashboard | An "Archives" source showing each import: format, file name, item count, date range, progress, gaps (unreadable messages, skipped attachments), and Remove. Every problem has a route to exactly what failed. |
-| Findings | What a connector did not read, left out or took as given is reported as findings, each of a kind with one plain sentence in the dashboard's words (a one and a many form), and each counted once by its position however a restart cuts its pages. An assumption is never one generic finding: each thing taken as given is its own kind, so the sentence says exactly what and, where it is known, the value taken. The kinds every format can use (`ARCHIVE_COMMON_FINDINGS`): `time_zone_assumed` (times carry no zone: read in this computer's), `date_order_assumed` (dates do not say which part is the day: read day first), `item_start_assumed` (a line shaped like the start of an item was taken as one), `zip_overlap_unchecked` (a zip too large to check its members for shared bytes: taken not to share; every engine that opens a zip reports it through one helper, `reportZipOverlap`, once per zip). A format's own kinds live with its connector. `assumption` is kept only as the fallback sentence for an archive recorded before the split; nothing reports it now. |
+| Dashboard | An "Archives" source showing each import: format, file name, item count, date range, progress, two lists behind one button ("Not imported": what Olympus does not have, such as unreadable or too-large messages and pictures and files not imported; "How it was read": what it took as given or left out on purpose, with nothing lost by it, such as a time zone or date order, items repeated and imported once, WhatsApp notices and empty messages), and Remove. Every problem has a route to exactly what failed. |
+| Findings | What a connector did not read, left out or took as given is reported as findings, each of a kind with one plain sentence in the dashboard's words (a one and a many form), and each counted once by its position however a restart cuts its pages. An assumption is never one generic finding: each thing taken as given is its own kind, so the sentence says exactly what and, where it is known, the value taken. The kinds every format can use (`ARCHIVE_COMMON_FINDINGS`): `time_zone_assumed` (times carry no zone: read in this computer's), `date_order_assumed` (dates do not say which part is the day: read day first), `item_start_assumed` (a line shaped like the start of an item was taken as one), `zip_overlap_unchecked` (a zip too large to check its members for shared bytes: taken not to share; every engine that opens a zip reports it through one helper, `reportZipOverlap`, once per zip). A format's own kinds live with its connector. `assumption` is kept only as the fallback sentence for an archive recorded before the split; nothing reports it now. Which of the two dashboard lists a kind is shown in is one table beside the sentences (`listOf` in `DASHBOARD_ARCHIVE_COPY`, `workers/dashboard/vocabulary.ts`); `test/archive-import-finding-lists.test.ts` fails when any kind a format reports has no entry, and a kind the table does not know is shown under Not imported, so nothing is hidden. The agent view of `status` has the same two lists (`not_imported`, `how_read`). `item_truncated`, `text_cut`, `service_message` and `status_updates` are reported by nothing now and stay only so an archive imported before reads in plain words. |
 
 ### Mail (mbox), first
 
@@ -103,6 +108,45 @@ archive is a snapshot: "Imported 23 Oct 2026, mail from 2004 to 2019".
   through the shared extraction machinery is a follow-up.
 - **Size:** exports can be tens of GB. Streaming with a byte-offset cursor;
   never load the file.
+
+### No length cut
+
+No format cuts an item's text (2026-10-25). The cuts were each one million
+characters (mail body, note, Telegram message, WhatsApp message) and reported
+as `item_truncated`; they are removed. Before removing them, each step an
+item passes through was checked for a very long item:
+
+- **Chunking and the full-text index.** `chunkText` splits any text into
+  4,000-character chunks with no total cap; the full-text index holds one row
+  per chunk. A word at the start, the middle and the end of one item is found.
+- **The private judge and the classifier.** The classifier's detectors scan
+  the whole text; the judge reads a bounded excerpt of any item (the sniffer
+  excerpt is 1,200 characters, the model scorer's bound 2,000), so its work
+  does not grow with the item.
+- **Embedding.** The embed lane takes a bounded number of chunks per pass, so
+  a long item is several passes, not one large one.
+- **The per-listing byte budget.** The first record of a listing is always
+  read, so a record larger than the budget still moves the import on.
+
+What stays is a memory bound on the one record a reader holds whole. A record
+over it is not imported, and is reported in plain words (`message_too_large`,
+`note_too_large`, or `section_not_imported` for an account entry), never cut
+and never silent:
+
+| Format | Bound | Why it stays |
+|---|---|---|
+| Mail (mbox) | 32 MiB per message | A 30 MB message peaked at 1.18 GB of memory on this Mac (2026-10-25) |
+| Reflect, Roam | 16 MiB per record or Markdown file | A 15 MB Roam page peaked at 730 MB |
+| Telegram | 16 MiB of JSON per message or account entry | A message at the bound (8 M characters) peaked at 494 MB |
+| WhatsApp | 8 MiB per message (4 MiB per line) | A message at the bound peaked at 450 MB |
+
+Those were measured end to end through the real import (a synthetic export of
+one very long item between two short ones, one pass, the secure store, search
+on the first, middle and last word of the long item): a 1 M-character item
+takes about 2 seconds and 180 MB, 5 M about 10 seconds, 8 M about 16 seconds,
+30 M about 63 seconds; the time grows in step with the length, not faster.
+The bounds are the ones the formats already had. They stay because one record
+at its bound already takes up to 1.2 GB; past it nothing is attempted.
 
 ### Reflect and Roam, promoted
 
@@ -146,14 +190,13 @@ make its reason true.
   list item or comment and a key is one Reflect writes (title, dates, tags,
   id); any other text between two rules stays in the note.
 - **Findings.** `note_empty` (left out: the body is there and empty, or there
-  is none), `note_unreadable` (not a note), `note_too_large` (a record over
-  16 MiB is not read; its place is named), `note_content_unsupported` (a body,
+  is none), `note_unreadable` (not a note), `note_too_large` (a record, or a Markdown file, over
+  16 MiB is not read and nothing of it is kept; its place is named), `note_content_unsupported` (a body,
   editor node or block of a kind Olympus has no rule for: the rest of the note
   is imported, and a note with nothing else is left out; this is never
   reported as `note_empty`; the same idea as Telegram's
-  `message_content_unsupported`), `note_date_assumed`, and the common kinds: `item_truncated` (text over one
-  million characters keeps its start), `media_not_imported` (other files in a
-  zip), `file_damaged` (bad checksum, cut-short JSON), `section_not_imported`
+  `message_content_unsupported`), `note_date_assumed`, and the common kinds: `media_not_imported` (other
+  files in a zip), `file_damaged` (bad checksum, cut-short JSON), `section_not_imported`
   (a JSON document without the list its notes would be in, or with another
   kind of value there; a Roam document that is not a list of pages; a JSON
   file in a zip that is not this format's). A file whose list is there and
@@ -345,12 +388,15 @@ Both are in scope. They come after mail because they reuse the same spine
   overlapping copies. `item_repeated` is counted by each message's position in
   the files beyond the position already counted, not by the page it is in, so
   a restart that cuts its pages differently counts each repeat once.
-- **Left out, and counted.** Notices from WhatsApp itself (`system_message`),
-  messages with no text (`message_empty`) and the status updates chat
-  (`status_updates`) are skipped and counted. Media stays in the message text
-  as the phone's marker and is counted as `media_not_imported` ("the archive
-  refers to" it); a message over 1,048,576 characters (or 8 MiB) is cut and
-  reported as `item_truncated`. The notices, empty messages and assumptions
+- **Left out, and counted.** Notices from WhatsApp itself (`system_message`)
+  and messages with no text (`message_empty`) are skipped and counted; they
+  are not losses, so the dashboard lists them under "How it was read". The
+  status updates chat is read like any chat (it was left out before
+  2026-10-25; `status_updates` stays only for an old record). Media stays in
+  the message text as the phone's marker and is counted as
+  `media_not_imported` ("the archive refers to" it). A message over 8 MiB is
+  not imported and is counted as `message_too_large` (no length cut; see "No
+  length cut"). The notices, empty messages and assumptions
   of a page are told as one finding per kind, and each carries the place of
   every occurrence (`ArchiveImportFinding.at`); the state store counts only
   the occurrences past the position it counted before, so a restart whose
@@ -381,7 +427,7 @@ Both are in scope. They come after mail because they reuse the same spine
     past any probe. A single-chat export is the chat object itself. Detection
     reads the first keys (`about` and a known section, or `name`/`type`/`id`
     then `messages`); the folder form is found by the name `result.json`.
-  - *Items.* One per message. The thread is the chat, keyed by its position
+  - *Items.* One per message, service messages included. The thread is the chat, keyed by its position
     in the file (`chats:3`), because a chat's own `id` repeats across users,
     groups and channels. The text is the words with links kept (`label
     (address)` when they differ), then a line per picture, file, contact,
@@ -393,31 +439,46 @@ Both are in scope. They come after mail because they reuse the same spine
     and stops a strict reader at the first one. A byte filter
     (`telegram/json-repair.ts`) turns each into four spaces of the same
     length, so byte offsets in resume points stay file offsets.
-  - *Left out, counted.* Service messages (joins, calls, pins) and messages
-    with nothing to read are `skipped`; media files are named in the text
-    and counted as `media_not_imported` (never opened), and so is a file
-    the export itself left out, marked "not in the export" and keeping the
-    name the export gave it, so a search for the name finds the message. A
-    message that carries what the reader does not know (a giveaway, a rich
-    message, paid media, a message the writer marks `unsupported`, any object
-    the reader has no rule for) is `message_content_unsupported`, a gap and
-    not "nothing to read"; its words, if it has any, are kept. Each part of the
-    account export that is not messages (personal information, contacts,
-    sessions, other data and so on) is one `section_not_imported`, said once
-    and never stored. A message over 1,000,000 characters keeps its start
-    (`item_truncated`); one over 16 MiB is `message_too_large`; a file cut
-    short imports what came before and counts `file_damaged`.
+  - *Service messages.* A join, a call, a pin, a new title, a group made and
+    the other actions are items in their chat: a plain sentence from the
+    action's own fields (who called and for how long, who pinned which
+    message, who joined), with the sender and the time. They are not left out.
+  - *Account items.* Each part of a whole-account export that is not a chat
+    (personal information, contacts, frequent contacts, sessions, web
+    sessions, profile pictures, stories, profile music, other data) is items
+    too: one per entry a person would cite (a contact, a session), the
+    profile and the other data one each, in a thread of their own per part
+    titled "Telegram account: contacts" and so on. The text is a headline and
+    a line for each field the entry carries (`telegram/account.ts`). They
+    carry no `authoredAt`: a contact's or session's dates are in the text, and
+    the chats' date range stays the messages'. They go through the same lane
+    as the messages (held Private until the private model judges each one;
+    nothing is tiered by the connector). A profile picture is media: named,
+    never opened.
+  - *Left out, counted.* Messages with nothing to read are `skipped`
+    (`message_without_text`, listed under "How it was read"); media files are
+    named in the text and counted as `media_not_imported` (never opened), and
+    so is a file the export itself left out, marked "not in the export" and
+    keeping the name the export gave it, so a search for the name finds the
+    message. A message that carries what the reader does not know (a
+    giveaway, a rich message, paid media, a message the writer marks
+    `unsupported`, any object the reader has no rule for) is
+    `message_content_unsupported`, a gap and not "nothing to read"; its
+    words, if it has any, are kept. A message, or an entry of the account
+    export, over 16 MiB of JSON is not built: a message is `message_too_large`
+    and an entry is `section_not_imported`; no text is cut. A file cut short
+    imports what came before and counts `file_damaged`.
   - *Resume.* The cursor is the JSON reader's point after a message or after
     an entry of a part that is not messages, bound to the manifest; any other
-    cursor stops the import. A pass counts the bytes of those parts against
-    its budget too, and a pass that starts inside a part does not say the
-    part again. The reader returns every message it finished before a
+    cursor stops the import. The profile and the other data are one item
+    each, so a point is placed after the whole of one, never inside it. A
+    pass counts the bytes of those parts against its budget too. The reader returns every message it finished before a
     mid-file JSON error, so damage costs only the messages from the damage on.
   - *HTML form.* `messages.html` is recognised and turned away with plain
     advice to export again as JSON (`unsupportedVariants` on the format).
   - *Limits of the finding shape.* A finding has no name or path field, so
-    the dashboard says "6 parts of the archive are not imported" without
-    naming them, and a media gap cannot name the file (the item text does).
+    a media gap cannot name the file (the item text does), and the one
+    account entry that can be too large to build is counted, not named.
 - Both import as snapshots alongside any live capture of the same account.
   The dashboard keeps "imported archive" and "live capture" apart, as the
   release plan requires. Overlap between an export and live capture is the
