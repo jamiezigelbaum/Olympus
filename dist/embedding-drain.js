@@ -21867,12 +21867,13 @@ var init_local_index = __esm(() => {
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ? AND provider_conversation_id IS NOT NULL
     `).all(identity.provider, identity.accountScope, identity.providerItemId).map((row) => row.provider_conversation_id);
     }
-    advanceItemVersion(identity) {
+    advanceItemVersion(identity, options = {}) {
       if (identity.sourceVersion === undefined)
         return;
       this.db.query(`
       UPDATE items SET source_version = ?
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        ${options.onlyTombstoned === true ? "AND tombstoned = 1" : ""}
     `).run(identity.sourceVersion, identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
     }
     hasItemRow(identity) {
