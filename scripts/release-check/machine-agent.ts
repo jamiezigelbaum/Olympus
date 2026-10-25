@@ -37,7 +37,8 @@ import {
   anchorPresent, ASK_VIEW, centerOf, factsIn, FOCUS_QUESTION, PAGE_STATE, PAGE_UNLOCK_OFFERED, PAGE_UNLOCKED, pageApi, rowView, sourceNames,
 } from './inbox-page.ts';
 import { findBrowser, openBrowser, type Cdp, type OpenedBrowser } from './browser.ts';
-import { captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey-driver.ts';
+import { capturePlants, captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey-driver.ts';
+import type { PlantedPicture } from './reviewer-plants.ts';
 import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
 import { explore, pagesAccessibilityAudit, withPageAudits, type Seed } from './explore.ts';
@@ -1138,7 +1139,7 @@ const JOURNEY_DEBUG_PORT = 9335;
  * a screenshot after each step. The screens are taken first, while the install is as the run left it; the journeys that change the
  * install run last.
  */
-async function journeysCommand(outDir: string, only: string[], skipScreens: boolean): Promise<never> {
+async function journeysCommand(outDir: string, only: string[], skipScreens: boolean, plants: boolean): Promise<never> {
   const browser = findBrowser();
   if (!browser) emit({ ok: false, detail: 'no headless browser on the machine' });
   rmSync(outDir, { recursive: true, force: true });
@@ -1148,6 +1149,7 @@ async function journeysCommand(outDir: string, only: string[], skipScreens: bool
   let opened: OpenedBrowser | undefined;
   const traces: JourneyTrace[] = [];
   let screens: CapturedScreen[] = [];
+  let planted: PlantedPicture[] = [];
   let failure: string | undefined;
   try {
     opened = await openBrowser(browser!, 'chrome-profile-journeys', JOURNEY_DEBUG_PORT, true);
@@ -1169,6 +1171,10 @@ async function journeysCommand(outDir: string, only: string[], skipScreens: bool
     if (!skipScreens) {
       try { screens = await captureScreens(driver, outDir); } catch (error) { failure = `the screens could not be captured: ${error instanceof Error ? error.message : String(error)}`; }
     }
+    // A qualification run for the AI reviewer: the same screens with planted bugs (reviewer-plants.ts), before any journey changes the install.
+    if (plants) {
+      try { planted = await capturePlants(driver, outDir); } catch (error) { failure = `the planted pictures could not be captured: ${error instanceof Error ? error.message : String(error)}`; }
+    }
     for (const journey of selectJourneys(only)) {
       try {
         traces.push(await runJourney(driver, journey));
@@ -1187,7 +1193,7 @@ async function journeysCommand(outDir: string, only: string[], skipScreens: bool
   const archive = join(WORKDIR, 'journeys.tgz');
   const packed = spawnSync('tar', ['-czf', archive, '-C', outDir, '.'], { encoding: 'utf8' });
   if (packed.status !== 0) emit({ ok: false, detail: `the journey files could not be archived: ${packed.stderr.slice(0, 160)}` });
-  emit({ ok: failure === undefined, ...(failure === undefined ? {} : { detail: failure }), traces, screens, archive });
+  emit({ ok: failure === undefined, ...(failure === undefined ? {} : { detail: failure }), traces, screens, ...(plants ? { planted } : {}), archive });
 }
 
 
@@ -1843,7 +1849,7 @@ async function main(): Promise<void> {
     }
     case 'screenshots': return await screenshots(flag('--out'));
     case 'inbox-check': return await inboxCheck(flag('--primary', ''), flag('--ids', '').split(',').map((id) => id.trim()).filter(Boolean), Number(flag('--wait-s', '600')), flag('--out'), process.argv.includes('--fault-entry-id'));
-    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'));
+    case 'journeys': return await journeysCommand(flag('--out'), flag('--only', '').split(',').map((id) => id.trim()).filter(Boolean), process.argv.includes('--skip-screens'), process.argv.includes('--plants'));
     case 'explore': return await exploreCommand(flag('--out'), flag('--inventory'), process.argv.includes('--pages-inventory') ? flag('--pages-inventory') : undefined);
     case 'archive-import': return await archiveImportCommand({
       role: flag('--role'), format: flag('--format', STRESS_FORMAT), via: flag('--via'), seed: flag('--seed'),
