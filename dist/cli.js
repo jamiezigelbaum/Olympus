@@ -20297,6 +20297,7 @@ class TierLedger {
       unique.set(tierLedgerIdentityKey(identity2), identity2);
     const list = [...unique.values()];
     this.db.transaction(() => {
+      const holds = this.holdsExist();
       for (let offset = 0;offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const rows = this.db.query(`
@@ -20312,9 +20313,30 @@ class TierLedger {
           else
             result.set(key, [copyFromRow(row)]);
         }
+        if (holds) {
+          for (const key of this.heldKeys(batch)) {
+            const copies = result.get(key) ?? [];
+            result.set(key, copies.length > 0 ? copies.map(hiddenByHold) : [heldPlaceholderCopy()]);
+          }
+        }
       }
     })();
     return result;
+  }
+  holdsExist() {
+    return this.db.query("SELECT 1 AS present FROM tier_deletion_hold LIMIT 1").get() !== null;
+  }
+  heldKeys(batch) {
+    const held = new Set;
+    if (batch.length === 0)
+      return held;
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
+      WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+    `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
+    for (const row of rows)
+      held.add(tierLedgerIdentityKey(identityOfRow(row)));
+    return held;
   }
   recordRoutedPlacement(identity2, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
@@ -20510,7 +20532,7 @@ class TierLedger {
     })();
     return result;
   }
-  itemStatesForMany(identities) {
+  itemStatesForMany(identities, options = {}) {
     const result = new Map;
     if (identities.length === 0)
       return result;
@@ -20519,6 +20541,7 @@ class TierLedger {
       unique.set(tierLedgerIdentityKey(identity2), identity2);
     const list = [...unique.values()];
     this.db.transaction(() => {
+      const holds = options.raw !== true && this.holdsExist();
       for (let offset = 0;offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
@@ -20537,6 +20560,13 @@ class TierLedger {
         `).all(...params);
         for (const row of copies)
           result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
+        if (holds) {
+          for (const key of this.heldKeys(batch)) {
+            const state = result.get(key);
+            if (state)
+              state.copies = state.copies.length > 0 ? state.copies.map(hiddenByHold) : [heldPlaceholderCopy()];
+          }
+        }
       }
     })();
     return result;
@@ -21114,7 +21144,7 @@ class TierLedger {
     `).run(update.status, update.batchId ?? null, update.movedGeneration ?? null, update.outcome ? JSON.stringify(update.outcome) : null, this.now().toISOString(), planId, ...idParams(identity2));
   }
   corpusHasCopies(corpusId) {
-    return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
+    return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null || this.holdsExist();
   }
   corpusCopyIdentities(corpusId, filter) {
     const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" ? `copy_state = 'current' AND layers = 'metadata'
@@ -21137,9 +21167,14 @@ class TierLedger {
                 AND other.corpus_id <> tier_copies.corpus_id
                 AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
             )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
+    const hiddenKind = filter === "superseded" || filter === "staged";
+    const unheld = hiddenKind ? "" : `AND NOT EXISTS (
+        SELECT 1 FROM tier_deletion_hold hold
+        WHERE hold.provider = tier_copies.provider AND hold.account_scope = tier_copies.account_scope
+          AND hold.conversation_key = tier_copies.conversation_key AND hold.provider_item_id = tier_copies.provider_item_id)`;
     const page2 = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where}
+      WHERE corpus_id = ? AND ${where} ${unheld}
         AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT 5000
@@ -21154,6 +21189,18 @@ class TierLedger {
         break;
       const last = rows[rows.length - 1];
       after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
+    }
+    if (filter === "superseded") {
+      const seen = new Set(identities.map((identity2) => tierLedgerIdentityKey(identity2)));
+      const held = this.db.query(`
+        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
+        ORDER BY provider, account_scope, conversation_key, provider_item_id
+      `).all();
+      for (const row of held) {
+        const identity2 = identityFromRow(row);
+        if (!seen.has(tierLedgerIdentityKey(identity2)))
+          identities.push(identity2);
+      }
     }
     return identities;
   }
@@ -21223,11 +21270,78 @@ class TierLedger {
         "secret_side_store_scrubs",
         "secret_redaction_retirement",
         "tier_child_cascade",
-        "tier_parent_deletion_intent"
+        "tier_parent_deletion_intent",
+        "tier_deletion_hold"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
       return { items, copies };
+    })();
+  }
+  holdParentDeletion(parent, children, observedAfter) {
+    this.db.transaction(() => {
+      const now = this.now().toISOString();
+      this.db.query(`
+        INSERT INTO tier_parent_deletion_intent (
+          provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at, observed_after
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
+        DO UPDATE SET observed_after = MAX(observed_after, excluded.observed_after)
+      `).run(...idParams(parent), parent.family, parent.localItemId, now, observedAfter);
+      const hold = this.db.query(`
+        INSERT OR IGNORE INTO tier_deletion_hold (
+          provider, account_scope, conversation_key, provider_item_id,
+          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const item of [parent, ...children])
+        hold.run(...idParams(item), ...idParams(parent), now);
+    })();
+  }
+  holdChildOfPendingDeletion(child, parentLocalItemId) {
+    return this.db.query(`
+      INSERT OR IGNORE INTO tier_deletion_hold (
+        provider, account_scope, conversation_key, provider_item_id,
+        owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
+      )
+      SELECT ?, ?, ?, ?, provider, account_scope, conversation_key, provider_item_id, ?
+      FROM tier_parent_deletion_intent WHERE local_item_id = ?
+    `).run(...idParams(child), this.now().toISOString(), parentLocalItemId).changes > 0;
+  }
+  heldForDeletion(identity2) {
+    return this.db.query(`
+      SELECT 1 AS present FROM tier_deletion_hold
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity2)) !== null;
+  }
+  pendingParentDeletions(options = {}) {
+    const rows = this.db.query(`
+      SELECT rowid AS seq, provider, account_scope, conversation_key, provider_item_id, family, local_item_id, observed_after
+      FROM tier_parent_deletion_intent WHERE rowid > ? ORDER BY rowid LIMIT ?
+    `).all(Math.max(0, Math.floor(options.after ?? 0)), Math.max(1, Math.floor(options.limit ?? 100)));
+    return rows.map((row) => ({
+      seq: row.seq,
+      observedAfter: row.observed_after,
+      parent: {
+        family: row.family,
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        localItemId: row.local_item_id,
+        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+      }
+    }));
+  }
+  liftParentDeletion(parent) {
+    this.db.transaction(() => {
+      this.db.query(`
+        DELETE FROM tier_deletion_hold
+        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
+      `).run(...idParams(parent));
+      this.db.query(`
+        DELETE FROM tier_parent_deletion_intent
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(parent));
     })();
   }
   hideAndQueueChildren(parent, children) {
@@ -21249,6 +21363,10 @@ class TierLedger {
       };
       hide(parent);
       this.db.query(`
+        DELETE FROM tier_deletion_hold
+        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
+      `).run(...idParams(parent));
+      this.db.query(`
         DELETE FROM tier_parent_deletion_intent
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(parent));
@@ -21258,40 +21376,20 @@ class TierLedger {
           parent_provider_item_id, queued_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
+      const hold = this.db.query(`
+        INSERT OR IGNORE INTO tier_deletion_hold (
+          provider, account_scope, conversation_key, provider_item_id,
+          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
       let queued = 0;
       for (const child of children) {
         hide(child);
+        hold.run(...idParams(child), ...idParams(parent), now);
         queued += queue.run(...idParams(child), child.family, child.localItemId, parent.providerItemId, now).changes;
       }
       return { hidden, queued };
     })();
-  }
-  oweParentDeletion(parent) {
-    this.db.query(`
-      INSERT OR IGNORE INTO tier_parent_deletion_intent (
-        provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(...idParams(parent), parent.family, parent.localItemId, this.now().toISOString());
-  }
-  pendingParentDeletions(limit = 100) {
-    const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id, family, local_item_id
-      FROM tier_parent_deletion_intent ORDER BY noted_at, rowid LIMIT ?
-    `).all(Math.max(1, Math.floor(limit)));
-    return rows.map((row) => ({
-      family: row.family,
-      provider: row.provider,
-      accountScope: row.account_scope,
-      providerItemId: row.provider_item_id,
-      localItemId: row.local_item_id,
-      ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-    }));
-  }
-  clearParentDeletion(parent) {
-    this.db.query(`
-      DELETE FROM tier_parent_deletion_intent
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(...idParams(parent));
   }
   childCascadePending(identity2) {
     return this.db.query(`
@@ -21329,6 +21427,10 @@ class TierLedger {
       this.deleteCopies(identity2);
       this.db.query(`
         DELETE FROM tier_child_cascade
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity2));
+      this.db.query(`
+        DELETE FROM tier_deletion_hold
         WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
       `).run(...idParams(identity2));
     })();
@@ -21426,6 +21528,22 @@ function identityFromRow(row) {
     accountScope: row.account_scope,
     providerItemId: row.provider_item_id,
     ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
+  };
+}
+function hiddenByHold(copy) {
+  return { ...copy, state: "superseded", supersededByGeneration: copy.supersededByGeneration ?? copy.generation + 1 };
+}
+function heldPlaceholderCopy() {
+  return {
+    corpusId: "",
+    trustDomain: "secure_local",
+    layers: "both",
+    state: "superseded",
+    embedHold: false,
+    generation: 0,
+    supersededByGeneration: 1,
+    previousLayers: null,
+    updatedAt: ""
   };
 }
 function copyFromRow(row) {
@@ -22027,6 +22145,33 @@ function tierLedgerMigrations() {
             noted_at TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
+        `);
+      }
+    },
+    {
+      version: 12,
+      name: "tier_deletion_hold",
+      up(db) {
+        const columns = db.query("PRAGMA table_info(tier_parent_deletion_intent)").all();
+        if (!columns.some((column) => column.name === "observed_after")) {
+          db.exec("ALTER TABLE tier_parent_deletion_intent ADD COLUMN observed_after TEXT NOT NULL DEFAULT ''");
+        }
+        db.exec(`
+          UPDATE tier_parent_deletion_intent SET observed_after = noted_at WHERE observed_after = '';
+          CREATE TABLE IF NOT EXISTS tier_deletion_hold (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            owner_provider TEXT NOT NULL,
+            owner_account_scope TEXT NOT NULL,
+            owner_conversation_key TEXT NOT NULL DEFAULT '',
+            owner_provider_item_id TEXT NOT NULL,
+            held_at TEXT NOT NULL,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE INDEX IF NOT EXISTS tier_deletion_hold_owner
+            ON tier_deletion_hold (owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id);
         `);
       }
     }
@@ -31549,7 +31694,7 @@ var init_local_index = __esm(() => {
     activeLocalItemRow(localItemId) {
       const row = this.db.query(`
       SELECT provider, account_scope, provider_item_id, provider_conversation_id, locator_uri, trust_tier,
-        source_scope_generation, source_scope_revision, source_scope_folder_keys_json
+        source_scope_generation, source_scope_revision, source_scope_folder_keys_json, indexed_at
       FROM items WHERE local_item_id = ? AND tombstoned = 0
       LIMIT 1
     `).get(localItemId);
@@ -31578,7 +31723,8 @@ var init_local_index = __esm(() => {
             scopeRevision: row.source_scope_revision,
             folderKeys
           }
-        } : {}
+        } : {},
+        ...row.indexed_at ? { observedAt: row.indexed_at } : {}
       };
     }
     conversationIdsForProviderItem(identity2) {
@@ -31669,13 +31815,15 @@ var init_local_index = __esm(() => {
         return;
       const row = this.db.query(`
       SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
-        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier,
+        indexed_at
       FROM items WHERE item_pk = ? AND tombstoned = 1
     `).get(itemPk);
       if (!row || row.trust_tier === "S5")
         return;
-      const parent = sourceItemFromRow({ ...row, rank: 0 });
-      this.parentDeletionOwed?.(parent);
+      const { indexed_at: tombstonedAt, ...fields } = row;
+      const parent = sourceItemFromRow({ ...fields, rank: 0 });
+      this.parentDeletionOwed?.(parent, tombstonedAt);
       (this.tombstonedParents ??= new Map).set(row.local_item_id, parent);
     }
     flushTombstonedParents() {
@@ -34842,7 +34990,7 @@ var init_local_index = __esm(() => {
           return false;
         if (!ledger)
           return true;
-        const state = ledger.itemStatesForMany([identity2]).get(tierLedgerIdentityKey(identity2));
+        const state = ledger.itemStatesForMany([identity2], { raw: true }).get(tierLedgerIdentityKey(identity2));
         if (!state || !state.record.routed)
           return true;
         const { record, copies } = state;
@@ -51172,7 +51320,7 @@ class TieredStoreSet {
         throw new Error("A tiered store leg's store must match its declared trust domain and corpus.");
       }
       spec.store?.useTierLedger(this.ledger);
-      spec.store?.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent) => this.oweParentDeletion(parent));
+      spec.store?.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent, tombstonedAt) => this.oweParentDeletion(parent, tombstonedAt));
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     if (!this.legs.has("secure_local"))
@@ -51199,40 +51347,90 @@ class TieredStoreSet {
     }
     return [...found.values()];
   }
-  cascadeParentDeletion(parent) {
+  parentStanding(parent) {
+    let active = false;
+    let tombstoned = false;
+    let observedAt;
+    for (const store of this.openStores()) {
+      const row = store.activeLocalItemRow(parent.localItemId);
+      if (row) {
+        active = true;
+        if (row.observedAt !== undefined && (observedAt === undefined || row.observedAt > observedAt))
+          observedAt = row.observedAt;
+      } else if (store.tombstonedItemByLocalId(parent.localItemId) !== undefined) {
+        tombstoned = true;
+      }
+    }
+    return { active, observedAt, tombstoned };
+  }
+  parentVerdict(parent, observedAfter) {
+    if (this.ledger.itemIsSecret(parent))
+      return "kept";
+    const standing = this.parentStanding(parent);
+    if (standing.active) {
+      return observedAfter !== undefined && standing.observedAt !== undefined && standing.observedAt > observedAfter ? "kept" : "wait";
+    }
+    return standing.tombstoned ? "deleted" : "wait";
+  }
+  cascadeConfirmedDeletion(parent) {
     const children = this.childrenStillHeld(parent);
     if (children.length === 0) {
-      this.ledger.clearParentDeletion(parent);
+      this.ledger.liftParentDeletion(parent);
       return 0;
     }
     return this.ledger.hideAndQueueChildren(parent, children).queued;
   }
-  oweParentDeletion(parent) {
+  cascadeParentDeletion(parent) {
+    return this.parentVerdict(parent) === "deleted" ? this.cascadeConfirmedDeletion(parent) : 0;
+  }
+  oweParentDeletion(parent, tombstonedAt) {
     const stores = this.openStores();
     if (!stores.some((store) => store.hasChildItems()))
       return;
     if (this.ledger.itemIsSecret(parent))
       return;
-    if (this.childrenStillHeld(parent).length === 0)
+    if (stores.some((store) => store.activeLocalItemRow(parent.localItemId) !== undefined))
       return;
-    this.ledger.oweParentDeletion(parent);
+    this.holdParentDeletion(parent, tombstonedAt);
   }
-  settleParentDeletion(parent) {
-    if (this.openStores().some((store) => store.activeLocalItemRow(parent.localItemId) !== undefined) || this.ledger.itemIsSecret(parent)) {
-      this.ledger.clearParentDeletion(parent);
-      return 0;
+  holdParentDeletion(parent, deletedAt = new Date().toISOString()) {
+    if (this.ledger.itemIsSecret(parent))
+      return;
+    const children = this.childrenStillHeld(parent);
+    if (children.length === 0)
+      return;
+    this.ledger.holdParentDeletion(parent, children, deletedAt);
+  }
+  holdChildOfPendingDeletion(child) {
+    const parent = child.parent;
+    if (parent)
+      this.ledger.holdChildOfPendingDeletion(child, parent.localItemId);
+  }
+  settleParentDeletion(parent, observedAfter) {
+    switch (this.parentVerdict(parent, observedAfter)) {
+      case "deleted":
+        return this.cascadeConfirmedDeletion(parent);
+      case "kept":
+        this.ledger.liftParentDeletion(parent);
+        return 0;
+      case "wait":
+        return 0;
     }
-    return this.cascadeParentDeletion(parent);
   }
   recoverParentDeletions() {
     let queued = 0;
     try {
-      for (let pass = 0;pass < 1000; pass += 1) {
-        const owed = this.ledger.pendingParentDeletions(CHILD_CASCADE_BATCH);
-        if (owed.length === 0)
+      let after = 0;
+      for (let page2 = 0;page2 < 1000; page2 += 1) {
+        const pending = this.ledger.pendingParentDeletions({ after, limit: CHILD_CASCADE_BATCH });
+        if (pending.length === 0)
           break;
-        for (const parent of owed)
-          queued += this.settleParentDeletion(parent);
+        after = pending[pending.length - 1].seq;
+        for (const entry of pending) {
+          try {
+            queued += this.settleParentDeletion(entry.parent, entry.observedAfter);
+          } catch {}
+        }
       }
     } catch {}
     return queued;
@@ -51242,9 +51440,14 @@ class TieredStoreSet {
       const stores = this.openStores();
       if (!stores.some((store) => store.hasChildItems()))
         return;
-      for (const parent of parents)
+    } catch {
+      return;
+    }
+    for (const parent of parents) {
+      try {
         this.settleParentDeletion(parent);
-    } catch {}
+      } catch {}
+    }
   }
   reconcileOrphanedChildren(nowMs = Date.now()) {
     if (nowMs - this.lastChildReconcileAt < CHILD_CASCADE_RECONCILE_INTERVAL_MS)
@@ -51313,7 +51516,7 @@ class TieredStoreSet {
       throw new Error("A lazily opened tiered store does not match its declared leg.");
     }
     store.useTierLedger(this.ledger);
-    store.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent) => this.oweParentDeletion(parent));
+    store.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent, tombstonedAt) => this.oweParentDeletion(parent, tombstonedAt));
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
@@ -51868,9 +52071,10 @@ class TieredRoutingRun {
       this.counts.routedDeletions += 1;
       this.copyRemovals.set(identityKey(identity2), identity2);
       const corpora = new Set(ledger.copies(identity2).map((copy) => copy.corpusId));
-      this.set.cascadeParentDeletion(identity2);
+      this.set.holdParentDeletion(identity2);
       return { kind: "delete", corpora, reason: "provider_deleted" };
     }
+    this.set.holdChildOfPendingDeletion(identity2);
     if (routed && ledger.childCascadePending(identity2)) {
       this.copyRemovals.set(identityKey(identity2), identity2);
       return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted" };
