@@ -223,10 +223,40 @@ account scope. Repeated items between archives are counted as they are today.
     temporary file in the data folder, which is removed after reading. So an
     hour of video is transcribed without being held in memory.
   - These limits are shared by every source.
-- **Evernote recognition.** Evernote's own `<recognition>` OCR index is not
-  used in the first version. There is one reading path, and the quality of
-  text a source supplies is unverified. Revisit with an eval if handwriting
-  matters.
+- **Text the provider supplies** (decided 2026-10-25, after a proposal from
+  the Evernote contributor). Some sources ship their own reading of a file.
+  Evernote's `<recognition>` is one: its OCR of each resource, handwriting
+  included. This is a generic input to the shared extractor, not an Evernote
+  branch. Any connector may supply it; whether other providers offer such
+  text is unverified.
+  - **Contract.** An optional `RawItem.providerText` with the text, its form
+    (`prose`, or `recognized_words`, meaning word candidates and not ordered
+    prose) and a label to show (`Evernote`). The connector turns
+    recognition into the best candidate for each word, in reading order.
+    Alternatives become search terms only. The exact shape is fixed at the
+    contract gate of the step that first supplies it.
+  - **Our reader stays primary.** When the factory's reader reads the bytes,
+    its text is the item's content. The provider's words are still added to
+    the item's search terms, so handwriting our OCR misses can still find the
+    item.
+  - **Provider text fills in.** When no reader produces text (handwriting it
+    cannot read, a type with no reader, a file over a reader's limit), the
+    provider text becomes the item's content. It is marked provider-derived
+    in the extraction record and in the citation, for example "text
+    recognized by Evernote". The Analyst's one generic prompt treats text
+    marked `recognized_words` as approximate wording: it is good for finding
+    and describing the item, not for quoting it exactly. This carries no
+    source or question logic.
+  - **Same judgment.** Provider text is the item's content for its tier: the
+    same per-item judge, the same archive hold until judged, and a Secret
+    recorded as a location only. It is never shown before it is judged.
+  - **Bounds and coverage.** It is held to the text reader's input limit. An
+    item whose only text came from the provider counts as read (by the
+    provider) and is not in "files we couldn't read". An item with neither
+    kind of text is listed as today.
+  - **When.** It lands with the Evernote step, the first connector that
+    supplies it. It is done when the held-out eval finds a handwritten note
+    by its words and the answer marks that text as recognized.
 
 ## Tiers
 
@@ -445,7 +475,8 @@ This follows the versioned change gate in `docs/ENGINEERING_PROCESS.md`:
      archive leg (below).
 3. **Gmail attachments.**
 4. **Evernote.** The Evernote connector emits resources as children from its
-   first version.
+   first version, with their `<recognition>` as provider text (see "Text the
+   provider supplies").
 
 ## Done when
 
