@@ -30,7 +30,7 @@
  * No instance cache: callers share the objects they open, as before.
  */
 import { Database } from 'bun:sqlite';
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { closeSqliteStore } from './sqlite-store.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
@@ -347,16 +347,32 @@ function adoptedLayout(env: LayoutEnv, sourceId: string, slot: string, dbPath: s
 // a store file is opened (test/store-open-guard.test.ts).
 
 /**
- * Opens a store file to look at it, and proves its schema reads. The connection
- * is writable but query-only: a read-only connection cannot open a WAL database
- * that has no `-wal` beside it (macOS's SQLite refuses), which is how a store
- * looks after a clean close, and a refusal would read as a damaged store. A file
- * that cannot be opened for writing is opened read-only. Throws when neither way
- * reads it. Nothing is written to the database: the connection can only query.
+ * Whether committed writes sit outside the main file: a `-wal` that holds
+ * frames, or a `-journal` waiting to be rolled back. Opening such a file
+ * read-write and closing it would merge them into the main file.
+ */
+function hasUnmergedWrites(path: string): boolean {
+  try {
+    if (statSync(`${path}-wal`).size > 0) return true;
+  } catch {
+    // No -wal.
+  }
+  return existsSync(`${path}-journal`);
+}
+
+/**
+ * Opens a store file to look at it, and proves its schema reads. It is opened
+ * read-only first. A read-only connection cannot open a WAL database that has
+ * no `-wal` beside it (macOS's SQLite refuses), which is how a store looks
+ * after a clean close and would read as damaged, so then, and only when no
+ * write waits outside the main file (closing a writable connection merges
+ * it), the file is opened writable but query-only. Throws when neither way
+ * reads it. Nothing is written to the database.
  */
 function openToLookAt(path: string): Database {
   let failure: unknown;
-  for (const mode of [{ readwrite: true, create: false }, { readonly: true, create: false }] as const) {
+  for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
+    if ('readwrite' in mode && hasUnmergedWrites(path)) break;
     let db: Database | undefined;
     try {
       db = new Database(path, mode);
@@ -368,7 +384,7 @@ function openToLookAt(path: string): Database {
       if (db) closeSqliteStore(db, { checkpoint: false });
     }
   }
-  throw failure;
+  throw failure ?? new Error('The store has writes outside its file.');
 }
 
 /** Whether a store file opens and its schema reads. Writes nothing to it (SQLite's own `-wal` and `-shm` aside). */

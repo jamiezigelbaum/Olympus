@@ -38,8 +38,8 @@
  *    sidecars): a hard link to the new name, then the old name removed, so a
  *    file another process put at the destination is never replaced. Nothing is
  *    copied. A file system that makes no hard links keeps the account where it is.
- * 6. Verify: the same identity at every destination, then an open (query-only)
- *    of each database that opened before. A failure undoes the move.
+ * 6. Verify: the same identity at every destination, then an open of each
+ *    database that opened before (it writes nothing). A failure undoes the move.
  * 7. In one registry write: `layout: 'folder'` and the plan marked done.
  *
  * A crash anywhere resumes from the plan at the next boot. A failed check

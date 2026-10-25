@@ -531,8 +531,10 @@ order:
    the last rename the folders each file left and went to are fsynced, before the
    registry records anything that depends on the renames.
 5. **Verify.** Each destination has the planned `(dev, ino, size)`, then each
-   database that opened before opens (query-only, so a database whose `-wal` is
-   missing still opens on macOS) and its schema reads. A failure undoes the
+   database that opened before opens and its schema reads (read-only; a database
+   with no `-wal` beside it, which macOS's SQLite will not open read-only, is
+   opened writable but query-only, and only when no write waits outside its file,
+   because closing a writable connection merges one). A failure undoes the
    move. A file that is in neither place is a failure, and so is a `-wal` or
    `-journal` that held bytes when the plan was made: that is committed data not
    yet in its database file, so only a `-shm` (rebuilt from the log on the next

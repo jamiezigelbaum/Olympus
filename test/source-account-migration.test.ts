@@ -1311,6 +1311,28 @@ describe('the logs are folded in first, or the account waits', () => {
     expect(rowsOf(moved), 'the row written late is in the database file that moved').toBe(4);
   });
 
+  test('looking at a store never merges a log that someone left in it: the database file is what it was when the account is put off', () => {
+    const { env } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'none' });
+    let mainFile = '';
+    onCheckpoint((at) => {
+      if (at !== 'folded') return;
+      // A writer that crashed after the fold leaves rows in a log beside the store (the checks that follow open the store).
+      sqliteFile(store!, { rows: 5, pendingWal: true });
+      mainFile = digest(store!);
+    });
+
+    skippedAsUnfolded(migrateAccountFolders(env));
+    __accountMigrationTestHooks.reset();
+
+    expect(statSync(`${store}-wal`).size, 'the log was not merged by a look').toBeGreaterThan(0);
+    expect(digest(store!)).toBe(mainFile);
+
+    // The next boot folds those rows in, as the fold is for, and moves.
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+    expect(rowsOf(resolvedStorePath('dropbox.files', 'secure_local', env))).toBe(5);
+  });
+
   test('a file that is not a database but has a log with bytes in it is not moved away from that log', () => {
     const { env, root } = fixture();
     const [store] = install(env, 'dropbox.files', { walOn: 'none' });
