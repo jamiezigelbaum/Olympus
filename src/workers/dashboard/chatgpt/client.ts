@@ -1544,29 +1544,47 @@ export function chatgptDashboardClient(
   }
 
   /**
-   * What could not be read fully, per kind (for an archive of several files,
-   * which file each is in), then what was left out on purpose.
+   * An archive's findings in two lists (what each kind is, and which list it
+   * is in, are the vocabulary's: copy.archives.gaps and .listOf). Not
+   * imported is what Olympus does not have; How it was read is what it took as
+   * given or left out on purpose. For an archive of several files, each line
+   * says which file it is in. A kind the table does not name is shown under
+   * Not imported, so nothing is hidden.
    */
-  /** Whether the import has anything left out or not read to say (the lines under See what was not read). */
-  function archiveHasReasons(archive: Any): boolean {
+  function archiveFindings(archive: Any): Array<{ list: string; entry: Any }> {
+    const lists = H.copy.archives.listOf as Any;
     return archive.gaps.concat(archive.skipped)
-      .some((entry: Any) => entry && typeof entry.kind === 'string' && wholeCount(entry.count) > 0);
+      .filter((entry: Any) => entry && typeof entry.kind === 'string' && wholeCount(entry.count) > 0)
+      .map((entry: Any) => ({
+        list: Object.prototype.hasOwnProperty.call(lists, entry.kind) && lists[entry.kind] === 'how_read' ? 'how_read' : 'not_imported',
+        entry,
+      }));
+  }
+
+  /** Whether the import has anything not imported or to say about how it was read (the lines under its See button). */
+  function archiveHasReasons(archive: Any): boolean {
+    return archiveFindings(archive).length > 0;
   }
 
   function archiveWhy(archive: Any): HTMLElement | null {
     const A = H.copy.archives;
     const kinds = A.gaps as Any;
-    const lines = archive.gaps.concat(archive.skipped)
-      .filter((entry: Any) => entry && typeof entry.kind === 'string' && wholeCount(entry.count) > 0)
-      .map((entry: Any) => {
-        const words = kinds[entry.kind] || kinds.other;
-        const n = wholeCount(entry.count);
-        const gap = fill(n === 1 ? words.one : words.many, { n: count(n) });
-        return el('li', '', typeof entry.file === 'string' && entry.file ? fill(A.gapInFile, { file: entry.file, gap }) : gap);
-      });
-    if (!lines.length) return null;
-    const box = details('archive-why:' + archive.id, doc.createTextNode(A.seeWhy), 'why');
-    return add(box, add(el('ul', 'plain'), ...lines));
+    const found = archiveFindings(archive);
+    const listed = (list: string) => found.filter((item) => item.list === list).map((item) => {
+      const entry = item.entry;
+      const words = Object.prototype.hasOwnProperty.call(kinds, entry.kind) ? kinds[entry.kind] : kinds.other;
+      const n = wholeCount(entry.count);
+      const gap = fill(n === 1 ? words.one : words.many, { n: count(n) });
+      return el('li', '', typeof entry.file === 'string' && entry.file ? fill(A.gapInFile, { file: entry.file, gap }) : gap);
+    });
+    const notImported = listed('not_imported');
+    const howRead = listed('how_read');
+    if (!notImported.length && !howRead.length) return null;
+    const label = notImported.length && howRead.length ? A.seeWhy.both : howRead.length ? A.seeWhy.howRead : A.seeWhy.notImported;
+    const box = details('archive-why:' + archive.id, doc.createTextNode(label), 'why');
+    if (notImported.length) add(box, el('p', 'why-head', A.lists.notImported), add(el('ul', 'plain'), ...notImported));
+    if (howRead.length) add(box, el('p', 'why-head', A.lists.howRead), add(el('ul', 'plain'), ...howRead));
+    return box;
   }
 
   /**

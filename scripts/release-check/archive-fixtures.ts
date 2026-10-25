@@ -10,8 +10,8 @@
  * never has to answer a permission prompt it cannot see. The picker lists the home directory first, so the folder is one press from it.
  *
  * Adding a format. One entry in `ARCHIVE_FORMATS`: a builder for a small archive that has the same shape of life as the mbox one (a few
- * readable items on known days, something that cannot be read in full, something left out on purpose), and the expectation row that
- * goes with it (the format's label as the dashboard shows it, its citation label, the counts, the dates, the gaps). The leg then
+ * readable items on known days, something that is not imported, something taken as given or left out with nothing lost), and the expectation row that
+ * goes with it (the format's label as the dashboard shows it, its citation label, the counts, the dates, the two lists). The leg then
  * imports that archive by the agent path (every format but the stress one: `EXTRA_FORMATS`), checks the dashboard against the row,
  * searches for its token, and removes it. Nothing else in the leg names a format. The model-off and changed-file stages use `STRESS_FORMAT`, which also needs a plain archive, a large
  * one, and the bytes that change a file (`ArchiveStressSpec`); a later format only has to supply them to be used there too.
@@ -42,10 +42,17 @@ export interface ArchiveExpectation {
   /** The first and last day (UTC) of the stored items. */
   earliest: string;
   latest: string;
-  /** What could not be read in full, by the product's kind code, with how many. */
-  gaps: ReadonlyArray<{ kind: string; count: number }>;
-  /** What was left out on purpose. */
-  leftOut: ReadonlyArray<{ kind: string; count: number }>;
+  /**
+   * What Olympus does not have, by the product's kind code, with how many: what the dashboard lists under "Not imported" (something
+   * that could not be read in full, a file or picture not imported, a message left out that a person could still want).
+   */
+  notImported: ReadonlyArray<{ kind: string; count: number }>;
+  /**
+   * What was taken as given or left out on purpose with nothing lost by it, in the same form: what the dashboard lists under "How it
+   * was read" (a time zone assumed, a notice from the chat app itself, a message or note with nothing in it).
+   * The fixtures say which list each is in; the product's own table is not asked.
+   */
+  howRead: ReadonlyArray<{ kind: string; count: number }>;
 }
 
 export interface BuiltArchive {
@@ -64,13 +71,13 @@ export interface ArchiveFixtureSpec {
   /** The family and provider its items carry in the stores. */
   family: string;
   provider: string;
-  /** A small Takeout-style archive: readable items, one thing not read in full, one thing left out. */
+  /** A small Takeout-style archive: readable items, something not imported, something taken as given or left out with nothing lost. */
   small(token: string): BuiltArchive;
 }
 
 /** What the model-off and changed-file stages need besides `small`. */
 export interface ArchiveStressSpec extends ArchiveFixtureSpec {
-  /** A small archive with nothing unreadable or left out. */
+  /** A small archive with nothing not imported and nothing to say about how it was read. */
   plain(token: string): BuiltArchive;
   /** `count` distinct readable items, enough to need several passes. */
   bulk(token: string, count: number): Uint8Array;
@@ -175,8 +182,8 @@ function mboxSmall(token: string): BuiltArchive {
       messages: 4,
       earliest: '2024-03-04',
       latest: '2024-03-09',
-      gaps: [{ kind: 'attachments_not_read', count: 1 }],
-      leftOut: [{ kind: 'spam_or_trash', count: 1 }],
+      notImported: [{ kind: 'attachments_not_read', count: 1 }, { kind: 'spam_or_trash', count: 1 }],
+      howRead: [],
     },
   };
 }
@@ -193,7 +200,7 @@ function mboxPlain(token: string): BuiltArchive {
   ].join('');
   return {
     bytes: bytesOf(text),
-    expect: { label: MBOX_LABEL, citationLabel: MBOX_CITATION, family: 'email', messages: 3, earliest: '2024-04-02', latest: '2024-04-05', gaps: [], leftOut: [] },
+    expect: { label: MBOX_LABEL, citationLabel: MBOX_CITATION, family: 'email', messages: 3, earliest: '2024-04-02', latest: '2024-04-05', notImported: [], howRead: [] },
   };
 }
 
@@ -243,14 +250,15 @@ const TELEGRAM_CITATION = 'Telegram';
 /** A message's time, as the writer gives it: the exact Unix time at midday UTC, and the zone-less date beside it. */
 const telegramAt = (day: string) => ({ extra: { date: `${day}T12:00:00`, date_unixtime: String(Date.parse(`${day}T12:00:00Z`) / 1000) } });
 
-/** The parts of a whole-account export but `personal_information`, left out of the file so exactly one part is there to not import. */
+/** The parts of a whole-account export but `personal_information`, left out of the file so exactly one part is there to become an item. */
 const TELEGRAM_OTHER_PARTS = ['profile_pictures', 'contacts', 'frequent_contacts', 'sessions', 'web_sessions', 'other_data'] as const;
 
 /**
- * A whole-account export of one chat: five readable messages (one a picture, named and not imported), one join the dashboard counts as a
- * service message and leaves out, and one part of the account (`personal_information`) that is not messages and is not imported. The
- * join is the earliest by date, so a date range that counts it is wrong. Names and numbers are made up; the word is in message
- * bodies only, never in the chat's name.
+ * A whole-account export of one chat: five readable messages (one a picture, named and not imported), one join (a service message,
+ * which is an item like the others), one message with nothing in it that is left out, and one part of the account
+ * (`personal_information`, the profile) that is an item of its own. The empty message is the earliest by date, so a date range that
+ * counts it is wrong; the profile has no date of a message, so a range that counts it is wrong too. Names and numbers are made up; the
+ * word is in message bodies only, never in the chat's name.
  */
 function telegramSmall(token: string): BuiltArchive {
   const chat = telegramChat({
@@ -258,12 +266,13 @@ function telegramSmall(token: string): BuiltArchive {
     type: 'private_group',
     id: 1_000_001,
     messages: [
-      telegramService(0, 'join_group_by_link', telegramAt('2023-12-30')),
-      telegramText(1, `Packing for the lake trip: tent, stove, two jackets. The reference word for this trip is ${token}.`, telegramAt('2024-03-04')),
-      telegramText(2, 'The route is the north shore road, then the ferry at noon.', telegramAt('2024-03-05')),
-      telegramPhoto(3, 'The light on the water at the quay was good.', telegramAt('2024-03-06')),
-      telegramText(4, `Lentil soup: onion, carrot, lentils, stock, forty minutes. Same reference word as before: ${token}.`, telegramAt('2024-03-07')),
-      telegramText(5, 'The photos are in the shared album.', telegramAt('2024-03-09')),
+      telegramText(0, '', telegramAt('2023-12-30')),
+      telegramService(1, 'join_group_by_link', telegramAt('2024-03-04')),
+      telegramText(2, `Packing for the lake trip: tent, stove, two jackets. The reference word for this trip is ${token}.`, telegramAt('2024-03-04')),
+      telegramText(3, 'The route is the north shore road, then the ferry at noon.', telegramAt('2024-03-05')),
+      telegramPhoto(4, 'The light on the water at the quay was good.', telegramAt('2024-03-06')),
+      telegramText(5, `Lentil soup: onion, carrot, lentils, stock, forty minutes. Same reference word as before: ${token}.`, telegramAt('2024-03-07')),
+      telegramText(6, 'The photos are in the shared album.', telegramAt('2024-03-09')),
     ],
   });
   const text = telegramJson(telegramFullExport({ chats: [chat], omit: TELEGRAM_OTHER_PARTS }));
@@ -273,11 +282,12 @@ function telegramSmall(token: string): BuiltArchive {
       label: TELEGRAM_LABEL,
       citationLabel: TELEGRAM_CITATION,
       family: 'chat',
-      messages: 5,
+      // The five messages, the join, and the profile.
+      messages: 7,
       earliest: '2024-03-04',
       latest: '2024-03-09',
-      gaps: [{ kind: 'media_not_imported', count: 1 }, { kind: 'section_not_imported', count: 1 }],
-      leftOut: [{ kind: 'service_message', count: 1 }],
+      notImported: [{ kind: 'media_not_imported', count: 1 }],
+      howRead: [{ kind: 'message_without_text', count: 1 }],
     },
   };
 }
@@ -327,8 +337,8 @@ function whatsappSmall(token: string): BuiltArchive {
       messages: 5,
       earliest: '2024-03-14',
       latest: '2024-03-19',
-      gaps: [{ kind: 'media_not_imported', count: 1 }, { kind: 'time_zone_assumed', count: 1 }],
-      leftOut: [{ kind: 'system_message', count: 1 }],
+      notImported: [{ kind: 'media_not_imported', count: 1 }],
+      howRead: [{ kind: 'time_zone_assumed', count: 1 }, { kind: 'system_message', count: 1 }],
     },
   };
 }
@@ -380,8 +390,8 @@ function reflectSmall(token: string): BuiltArchive {
       messages: 4,
       earliest: '2024-03-04',
       latest: '2024-03-09',
-      gaps: [{ kind: 'note_unreadable', count: 1 }],
-      leftOut: [{ kind: 'note_empty', count: 1 }],
+      notImported: [{ kind: 'note_unreadable', count: 1 }],
+      howRead: [{ kind: 'note_empty', count: 1 }],
     },
   };
 }
@@ -434,8 +444,8 @@ function roamSmall(token: string): BuiltArchive {
       messages: 4,
       earliest: '2024-05-06',
       latest: '2024-05-12',
-      gaps: [{ kind: 'note_content_unsupported', count: 1 }],
-      leftOut: [{ kind: 'note_empty', count: 1 }],
+      notImported: [{ kind: 'note_content_unsupported', count: 1 }],
+      howRead: [{ kind: 'note_empty', count: 1 }],
     },
   };
 }
@@ -509,7 +519,7 @@ export function legFixture(role: FixtureRole, seed: string, format: string = STR
   const fileName = role === 'bulk' ? `rc-${role}-${count}${spec.extension}` : `rc-${role}-${format}${spec.extension}`;
   let built: BuiltArchive;
   if (role === 'held') built = stressSpec().plain(token);
-  else if (role === 'bulk') built = { bytes: stressSpec().bulk(token, count), expect: { label: spec.label, citationLabel: spec.citationLabel, family: spec.family, messages: count, earliest: '', latest: '', gaps: [], leftOut: [] } };
+  else if (role === 'bulk') built = { bytes: stressSpec().bulk(token, count), expect: { label: spec.label, citationLabel: spec.citationLabel, family: spec.family, messages: count, earliest: '', latest: '', notImported: [], howRead: [] } };
   else built = spec.small(token);
   return { role, format, fileName, token, relPath: `${FIXTURE_FOLDER}/${fileName}`, expect: built.expect, bytes: built.bytes };
 }

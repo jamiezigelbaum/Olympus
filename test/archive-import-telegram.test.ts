@@ -5,6 +5,7 @@
 // archive-import-telegram-lifecycle.test.ts.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { appendFileSync, mkdtempSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,15 +29,15 @@ import { parseJsonResume, serializeJsonResume } from '../src/workers/archive-imp
 import { archiveFileEntries, archiveManifestSha256, buildArchiveManifest } from '../src/workers/archive-import/manifest.ts';
 import {
   TELEGRAM_FINDINGS,
-  TELEGRAM_MAX_ITEM_TEXT_CHARS,
   TELEGRAM_MAX_MESSAGE_BYTES,
   createTelegramArchiveConnector,
 } from '../src/workers/archive-import/telegram/connector.ts';
 import { telegramJsonSource } from '../src/workers/archive-import/telegram/json-repair.ts';
+import { ACCOUNT_SECTIONS, accountEntryContent, type AccountSection } from '../src/workers/archive-import/telegram/account.ts';
 import {
-  cutText,
   flattenTelegramText,
   telegramMessageContent,
+  telegramServiceContent,
   telegramTime,
 } from '../src/workers/archive-import/telegram/message.ts';
 import { DASHBOARD_ARCHIVE_COPY } from '../src/workers/dashboard/vocabulary.ts';
@@ -452,11 +453,158 @@ describe('telegram message text', () => {
     expect(telegramTime({ edited_unixtime: '1420455600' }, 'edited').iso).toBe('2015-01-05T11:00:00.000Z');
   });
 
-  test('cutting text never splits a surrogate pair', () => {
-    const text = `ab${'\u{1F600}'}cd`;
-    expect(cutText(text, 3)).toBe('ab');
-    expect(cutText(text, 4)).toBe(`ab${'\u{1F600}'}`);
-    expect(cutText(text, 10)).toBe(text);
+  test('no line of a message is cut: a long name, question or answer is kept to its last word', () => {
+    const long = `${'north quay '.repeat(120)}end`;
+    expect(long.length).toBeGreaterThan(1000);
+    expect(telegramMessageContent({ file: 'files/x.pdf', file_name: long }).text).toContain(`${long}, files/x.pdf`);
+    const poll = telegramMessageContent({ poll: { question: long, answers: Array.from({ length: 60 }, (_, index) => ({ text: `Answer ${index}`, voters: 0 })) } });
+    expect(poll.text.split('\n')[0]).toBe(`Poll: ${long}`);
+    // Every answer, not the first fifty.
+    expect(poll.text.split('\n')).toHaveLength(61);
+    expect(poll.text).toContain('- Answer 59 (0 votes)');
+    const todo = telegramMessageContent(telegramTodo(1, long, Array.from({ length: 60 }, (_, index) => `Task ${index}`)));
+    expect(todo.text.split('\n')).toHaveLength(61);
+    expect(todo.text).toContain('- Task 59');
+  });
+});
+
+describe('telegram service messages', () => {
+  const say = (action: string, extra: Record<string, unknown> = {}, from = 'Alex Example') =>
+    telegramServiceContent(telegramService(1, action, { from, extra })).text;
+
+  test('a join, a call, a pin and the like are one plain sentence that names who did it', () => {
+    expect(say('create_group', { title: 'Harbour Crew', members: ['Sam Example', 'Robin Placeholder'] }))
+      .toBe('Alex Example created the group "Harbour Crew" with Sam Example and Robin Placeholder.');
+    expect(say('edit_group_title', { title: 'Dawn Patrol' })).toBe('Alex Example changed the group name to "Dawn Patrol".');
+    expect(say('invite_members', { members: ['Sam Example', 'Robin Placeholder', 'Kit Sample'] }))
+      .toBe('Alex Example added Sam Example, Robin Placeholder and Kit Sample.');
+    expect(say('remove_members', { members: ['Sam Example'] })).toBe('Alex Example removed Sam Example.');
+    expect(say('join_group_by_link')).toBe('Alex Example joined the group by invite link.');
+    expect(say('join_group_by_link', { inviter: 'Robin Placeholder' })).toBe('Alex Example joined the group by invite link from Robin Placeholder.');
+    expect(say('pin_message', { message_id: 1042, reply_to_peer_id: 'user1001' })).toBe('Alex Example pinned message 1042.');
+    expect(say('pin_message')).toBe('Alex Example pinned a message.');
+    expect(say('clear_history')).toBe('Alex Example cleared the chat history.');
+    expect(say('joined_telegram')).toBe('Alex Example joined Telegram.');
+    expect(say('delete_group_photo')).toBe('Alex Example removed the group photo.');
+    expect(say('set_messages_ttl', { period: 86400 })).toBe('Alex Example set messages to disappear after 24 hours.');
+    expect(say('topic_created', { title: 'Tides' })).toBe('Alex Example created the topic "Tides".');
+  });
+
+  test('a call says who called and for how long', () => {
+    expect(say('phone_call', { duration_seconds: 205, discard_reason: 'hangup' })).toBe('Alex Example made a phone call that lasted 3 minutes 25 seconds.');
+    expect(say('phone_call', { duration_seconds: 3725 })).toBe('Alex Example made a phone call that lasted 1 hour 2 minutes 5 seconds.');
+    expect(say('phone_call', { duration_seconds: 1 })).toBe('Alex Example made a phone call that lasted 1 second.');
+    expect(say('phone_call', { duration_seconds: 0, discard_reason: 'missed' })).toBe('Missed phone call from Alex Example.');
+    expect(say('phone_call', { discard_reason: 'busy' })).toBe('Alex Example called; the line was busy.');
+    expect(say('group_call', { duration: 600 })).toBe('Alex Example started a voice chat that lasted 10 minutes.');
+  });
+
+  test('an action this does not know still reads as a sentence, and keeps every field it carries', () => {
+    expect(say('some_new_action', { thing_count: 3, note: 'hello', flag: true, who: ['Sam Example', 'Kit Sample'] }))
+      .toBe('Alex Example: some new action.\nthing count: 3\nnote: hello\nflag: true\nwho: Sam Example and Kit Sample');
+    expect(telegramServiceContent({ type: 'service', id: 1, action: 'take_screenshot' }).text).toBe('Someone took a screenshot.');
+    expect(telegramServiceContent({ type: 'service', id: 2 }).text).toBe('Someone: a service event.');
+    expect(telegramServiceContent(telegramService(1, 'some_new_action')).hasContent).toBe(true);
+  });
+
+  test('a picture a service message names is counted and not imported', () => {
+    const content = telegramServiceContent(telegramService(1, 'edit_group_photo', { extra: { photo: 'photos/group_1.jpg', photo_file_size: 1000, width: 10, height: 10 } }));
+    expect(content.text).toBe('Sam Example changed the group photo.\n[Photo: photos/group_1.jpg (not imported)]');
+    expect(content).toMatchObject({ mediaFiles: 1, attachments: ['Photo: photos/group_1.jpg'], unsupported: false });
+  });
+});
+
+describe('telegram account entries', () => {
+  const section = (name: string): AccountSection => ACCOUNT_SECTIONS.find((candidate) => candidate.name === name)!;
+
+  test('every part of the account export the reader knows is named once, with the entries it holds', () => {
+    expect(ACCOUNT_SECTIONS.map((part) => part.name)).toEqual([
+      'personal_information', 'profile_pictures', 'stories', 'profile_music', 'contacts', 'frequent_contacts', 'sessions', 'web_sessions', 'other_data',
+    ]);
+    // The profile and the other data are one object each; every other part is a list of entries.
+    expect(ACCOUNT_SECTIONS.filter((part) => part.whole).map((part) => part.name)).toEqual(['personal_information', 'other_data']);
+  });
+
+  test('a contact is a headline and a line for each field, the time as the export wrote it', () => {
+    const content = accountEntryContent(section('contacts'), {
+      user_id: 2002, first_name: 'Robin', last_name: 'Placeholder', phone_number: '+1 555 0102', date: '2015-01-04T09:00:00', date_unixtime: '1420362000',
+    });
+    expect(content.text).toBe([
+      'Contact: Robin Placeholder',
+      'User id: 2002',
+      'First name: Robin',
+      'Last name: Placeholder',
+      'Phone number: +1 555 0102',
+      'Date: 2015-01-04T09:00:00',
+    ].join('\n'));
+    expect(content.mediaFiles).toBe(0);
+    // A contact the export gives no name or number for still says so and keeps its time (from the Unix time alone).
+    expect(accountEntryContent(section('contacts'), { date: '', date_unixtime: '1420362000' }).text)
+      .toBe('Contact: no name or number in the export\nDate: 2015-01-04T09:00:00.000Z');
+  });
+
+  test('a session and a web session say what and where, and a frequent contact its kind', () => {
+    expect(accountEntryContent(section('sessions'), {
+      last_active: '2015-01-04T09:00:00', last_active_unixtime: '1420362000', last_ip: '203.0.113.7', last_country: 'Synthetic Land',
+      application_name: 'Telegram Android', application_version: '10.0', device_model: 'Synthetic Phone', platform: 'Android', system_version: '14',
+    }).text).toBe([
+      'Telegram session: Telegram Android 10.0 on Synthetic Phone',
+      'Last active: 2015-01-04T09:00:00',
+      'Last ip: 203.0.113.7',
+      'Last country: Synthetic Land',
+      'Application name: Telegram Android',
+      'Application version: 10.0',
+      'Device model: Synthetic Phone',
+      'Platform: Android',
+      'System version: 14',
+    ].join('\n'));
+    expect(accountEntryContent(section('web_sessions'), { domain_name: 'harbour.example.invalid', browser: 'Synthetic Browser', bot_username: 'harbour_bot' }).text.split('\n')[0])
+      .toBe('Web session: harbour.example.invalid, Synthetic Browser');
+    expect(accountEntryContent(section('frequent_contacts'), { id: 2002, category: 'inline_bots', type: 'bot_chat', name: 'Harbour Bot', rating: 0.5 }).text)
+      .toBe('Frequent contact: Harbour Bot (inline bots)\nId: 2002\nCategory: inline_bots\nType: bot_chat\nName: Harbour Bot\nRating: 0.5');
+  });
+
+  test('the profile is one entry built from all its fields; other data keeps its nesting', () => {
+    expect(accountEntryContent(section('personal_information'), {
+      user_id: 1001, first_name: 'Sam', last_name: 'Example', phone_number: '+1 555 0101', username: '@synthetic_sam', bio: 'Synthetic account for tests.',
+    }).text).toBe([
+      'Telegram profile: Sam Example (@synthetic_sam)',
+      'User id: 1001',
+      'First name: Sam',
+      'Last name: Example',
+      'Phone number: +1 555 0101',
+      'Username: @synthetic_sam',
+      'Bio: Synthetic account for tests.',
+    ].join('\n'));
+    expect(accountEntryContent(section('other_data'), {
+      notes: 'Synthetic other data.', settings: { theme: 'dark', nested: { depth: 2, tags: ['a', 'b'] } }, items: [{ name: 'one' }, 'two'], empty: {}, nothing: null, blank: '  ',
+    }).text).toBe([
+      'Other Telegram account data',
+      'Notes: Synthetic other data.',
+      'Settings:',
+      '  Theme: dark',
+      '  Nested:',
+      '    Depth: 2',
+      '    Tags: a, b',
+      'Items:',
+      '  -',
+      '    Name: one',
+      '  - two',
+    ].join('\n'));
+  });
+
+  test('a picture is named and counted, never opened; the time stays', () => {
+    const content = accountEntryContent(section('profile_pictures'), { date: '2015-01-04T09:00:00', date_unixtime: '1420362000', photo: 'profile_pictures/photo_1.jpg' });
+    expect(content.text).toBe('Profile picture\n[Photo: profile_pictures/photo_1.jpg (not imported)]\nDate: 2015-01-04T09:00:00');
+    expect(content).toMatchObject({ mediaFiles: 1, attachments: ['Photo: profile_pictures/photo_1.jpg'] });
+    const story = accountEntryContent(section('stories'), { date: '2015-01-04T09:00:00', pinned: true, media: { photo: 'stories/story_1.jpg' } });
+    expect(story.text).toBe('Story\n[Photo: stories/story_1.jpg (not imported)]\nDate: 2015-01-04T09:00:00\nPinned: yes');
+    expect(story.mediaFiles).toBe(1);
+  });
+
+  test('a value that is not an object is still kept', () => {
+    expect(accountEntryContent(section('contacts'), 'a stray string').text).toBe('Contact: no name or number in the export\na stray string');
+    expect(accountEntryContent(section('contacts'), 7).text).toBe('Contact: no name or number in the export\n7');
   });
 });
 
@@ -530,6 +678,7 @@ function cursorOffset(cursor: string): number {
 
 describe('telegram connector: items', () => {
   const TEXT = telegramJson(telegramFullExport({
+    withoutPersonalSections: true,
     chats: [
       telegramChat({ name: 'Alex Example', type: 'personal_chat', id: 5001, messages: [
         telegramText(0, 'Good morning from the harbour.', { from: 'Alex Example', fromId: 'user5001' }),
@@ -595,10 +744,10 @@ describe('telegram connector: items', () => {
     }))));
     const { connector, findings } = connectorFor(file.dir, file.name);
     const { items } = await listAll(connector);
-    expect(items.map(textOf)).toEqual(['One.', 'Two.']);
-    expect(items.map((item) => item.identity.providerThreadId)).toEqual(['chat', 'chat']);
+    expect(items.map(textOf)).toEqual(['One.', 'Sam Example joined the group by invite link.', 'Two.']);
+    expect(items.map((item) => item.identity.providerThreadId)).toEqual(['chat', 'chat', 'chat']);
     expect(items[0]!.metadata).toMatchObject({ title: 'Solo Chat', chatType: 'personal_chat', chatId: '9' });
-    expect(counts(findings, 'skipped')).toEqual({ service_message: 1 });
+    expect(counts(findings, 'skipped')).toEqual({});
     expect(counts(findings, 'gap')).toEqual({});
   });
 
@@ -670,11 +819,11 @@ describe('telegram connector: time', () => {
 });
 
 describe('telegram connector: what is left out', () => {
-  test('service messages and messages with nothing to read are skipped and counted, never items', async () => {
+  test('messages with nothing to read are skipped and counted, never items; service messages are items in their chat', async () => {
     const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: [
       telegramText(0, 'First.'),
-      telegramService(1, 'join_group_by_link'),
-      telegramService(2, 'pin_message'),
+      telegramService(1, 'join_group_by_link', { from: 'Alex Example', fromId: 'user77' }),
+      telegramService(2, 'pin_message', { extra: { message_id: 1000 } }),
       telegramText(3, ''),
       { ...telegramText(4, ''), text: [], text_entities: [] },
       telegramText(5, 'Last.'),
@@ -682,9 +831,32 @@ describe('telegram connector: what is left out', () => {
     const { connector, findings } = connectorFor(file.dir, file.name);
     const { items, done } = await listAll(connector);
     expect(done).toBe(true);
-    expect(items.map(textOf)).toEqual(['First.', 'Last.']);
-    expect(counts(findings, 'skipped')).toEqual({ [TELEGRAM_FINDINGS.serviceMessage]: 2, [TELEGRAM_FINDINGS.withoutText]: 2 });
+    expect(items.map(textOf)).toEqual([
+      'First.', 'Alex Example joined the group by invite link.', 'Sam Example pinned message 1000.', 'Last.',
+    ]);
+    // A service message has its time, its actor as the sender, and says it is one.
+    expect(items[1]!.metadata).toMatchObject({
+      authoredAt: telegramFixtureIso(1), sender: 'Alex Example', senderId: 'user77', serviceMessage: true, serviceAction: 'join_group_by_link', title: 'Synthetic Harbour Group',
+    });
+    expect(items[1]!.identity.providerThreadId).toBe('chat');
+    expect(items[0]!.metadata.serviceMessage).toBeUndefined();
+    expect(counts(findings, 'skipped')).toEqual({ [TELEGRAM_FINDINGS.withoutText]: 2 });
     expect(counts(findings, 'gap')).toEqual({});
+  });
+
+  test('a service message is never counted as left out, and one with a picture counts the picture', async () => {
+    const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: [
+      telegramService(0, 'edit_group_photo', { extra: { photo: 'photos/group_0.jpg' } }),
+      telegramService(1, 'phone_call', { extra: { duration_seconds: 65, discard_reason: 'hangup' } }),
+    ] }))));
+    const { connector, findings } = connectorFor(file.dir, file.name);
+    const { items } = await listAll(connector);
+    expect(items.map(textOf)).toEqual([
+      'Sam Example changed the group photo.\n[Photo: photos/group_0.jpg (not imported)]',
+      'Sam Example made a phone call that lasted 1 minute 5 seconds.',
+    ]);
+    expect(counts(findings, 'skipped')).toEqual({});
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 });
   });
 
   test('a kind of content that is not read is a gap, never "nothing to read"; the words beside it are still kept', async () => {
@@ -750,23 +922,113 @@ describe('telegram connector: what is left out', () => {
     expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 + 1 + 1 + 1 + 2 });
   });
 
-  test('each part of an account export that is not messages is one gap, said once, however long it is', async () => {
+  test('each part of an account export that is not chats becomes items: one per entry, the profile and other data one each', async () => {
     const file = exportFile(telegramJson(telegramFullExport({
-      contacts: 300,
-      chats: [telegramChat({ messages: telegramTexts(3) })],
+      contacts: 3,
+      chats: [telegramChat({ messages: telegramTexts(2) })],
     })));
     const { connector, findings } = connectorFor(file.dir, file.name, { pageSize: 1 });
+    const { items, done } = await listAll(connector);
+    expect(done).toBe(true);
+    // The profile, a profile picture, three contacts, a frequent contact, a session, the other data (web_sessions is written empty), then the messages.
+    expect(items).toHaveLength(8 + 2);
+    expect(items.map((item) => item.identity.providerThreadId)).toEqual([
+      'account:personal_information', 'account:profile_pictures', 'account:contacts', 'account:contacts', 'account:contacts',
+      'account:frequent_contacts', 'account:sessions', 'account:other_data', 'chats:0', 'chats:0',
+    ]);
+    expect(items.map((item) => item.metadata.title)).toEqual([
+      'Telegram account: profile', 'Telegram account: profile pictures', 'Telegram account: contacts', 'Telegram account: contacts', 'Telegram account: contacts',
+      'Telegram account: frequent contacts', 'Telegram account: sessions', 'Telegram account: other data', 'Synthetic Harbour Group', 'Synthetic Harbour Group',
+    ]);
+    expect(new Set(items.map((item) => item.identity.providerItemId)).size).toBe(10);
+    expect(textOf(items[0]!)).toBe([
+      'Telegram profile: Sam Example (@synthetic_sam)',
+      'User id: 1001',
+      'First name: Sam',
+      'Last name: Example',
+      'Phone number: +1 555 0101',
+      'Username: @synthetic_sam',
+      'Bio: Synthetic account for tests.',
+    ].join('\n'));
+    expect(textOf(items[1]!)).toBe('Profile picture\n[Photo: profile_pictures/photo_1.jpg (not imported)]\nDate: 2015-01-04T09:00:00');
+    expect(textOf(items[2]!)).toBe('Contact: Contact0 Placeholder\nFirst name: Contact0\nLast name: Placeholder\nPhone number: +1 555 0200\nDate: 2015-01-04T09:00:00');
+    expect(textOf(items[4]!)).toContain('Contact: Contact2 Placeholder');
+    expect(textOf(items[5]!)).toBe('Frequent contact: Synthetic Frequent (people)\nId: 2002\nCategory: people\nType: personal_chat\nName: Synthetic Frequent\nRating: 0.5');
+    expect(textOf(items[6]!)).toBe([
+      'Telegram session: on Synthetic Phone',
+      'Last active: 2015-01-04T09:00:00',
+      'Device model: Synthetic Phone',
+      'Platform: Android',
+    ].join('\n'));
+    expect(textOf(items[7]!)).toBe('Other Telegram account data\nAbout: Synthetic placeholder text for a part of the export.\nNotes: Synthetic other data.');
+    // The picture is named, not read: one finding, the way a message's picture is. Nothing else of the account is a loss.
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 });
+    expect(counts(findings, 'skipped')).toEqual({});
+    expect(items[1]!.metadata).toMatchObject({ attachmentsNotIngested: 1, attachments: ['Photo: profile_pictures/photo_1.jpg'] });
+    expect(items[2]!.metadata).toMatchObject({ attachmentsNotIngested: 0, accountSection: 'contacts' });
+  });
+
+  test('an account entry has no date of its own: the chats\' dates and recency stay the messages\'', async () => {
+    const file = exportFile(telegramJson(telegramFullExport({ contacts: 2, chats: [telegramChat({ messages: telegramTexts(2) })] })));
+    const { connector } = connectorFor(file.dir, file.name);
     const { items } = await listAll(connector);
-    expect(items).toHaveLength(3);
-    // personal_information, profile_pictures, contacts, frequent_contacts, sessions, other_data.
-    // web_sessions is written empty: there is nothing in it to leave out.
-    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.sectionNotImported]: 6 });
-    expect(findings.every((finding) => finding.class === 'gap')).toBe(true);
-    // No contact, phone number or session detail reaches an item.
-    for (const item of items) {
-      expect(textOf(item)).not.toContain('555');
-      expect(JSON.stringify(item.metadata)).not.toContain('Contact');
+    const account = items.filter((item) => String(item.identity.providerThreadId).startsWith('account:'));
+    expect(account).toHaveLength(7);
+    for (const item of account) {
+      expect(item.metadata.authoredAt).toBeUndefined();
+      expect(item.metadata.sentAt).toBeUndefined();
+      expect(item.metadata.sender).toBeUndefined();
     }
+    expect(items.filter((item) => !String(item.identity.providerThreadId).startsWith('account:')).map((item) => item.metadata.authoredAt))
+      .toEqual([0, 1].map(telegramFixtureIso));
+  });
+
+  test('the classifier is given the part\'s title and thread, never a prior', async () => {
+    const file = exportFile(telegramJson(telegramFullExport({ contacts: 1, chats: [] })));
+    const { connector } = connectorFor(file.dir, file.name);
+    const { items } = await listAll(connector);
+    const contact = items.find((item) => item.identity.providerThreadId === 'account:contacts')!;
+    expect(connector.classificationSignals!(contact)).toEqual({ title: 'Telegram account: contacts', folderKeys: ['account:contacts'] });
+  });
+
+  test('a profile is one item however small the pages are, and a part with nothing in it makes none', async () => {
+    const text = telegramJson(telegramFullExport({ omit: ['profile_pictures', 'contacts', 'frequent_contacts', 'sessions', 'other_data'], chats: [] }));
+    const file = exportFile(text);
+    const { connector, findings } = connectorFor(file.dir, file.name, { pageSize: 1, maxBytesPerListing: 1 });
+    const out = await listAll(connector);
+    // A budget of one byte ends the pass after the first thing it can hand over: the whole profile, never half of it.
+    expect(out.items).toHaveLength(1);
+    expect(textOf(out.items[0]!)).toContain('Bio: Synthetic account for tests.');
+    expect(out.done).toBe(false);
+    const rest = await listAll(connectorFor(file.dir, file.name, { maxBytesPerListing: 1 }).connector, out.cursors.at(-1));
+    expect(rest.items).toEqual([]);
+    expect(rest.done).toBe(true);
+    expect(findings).toEqual([]);
+  });
+
+  test('an entry of the account export too large to build is one gap with its place; the entries around it are kept', async () => {
+    const huge = 'x'.repeat(TELEGRAM_MAX_MESSAGE_BYTES + 1024);
+    const full = telegramFullExport({ contacts: 2, chats: [] }) as Record<string, any>;
+    full.contacts.list.splice(1, 0, { first_name: huge, phone_number: '+1 555 0999' });
+    const file = exportFile(telegramJson(full));
+    const { connector, findings } = connectorFor(file.dir, file.name);
+    const { items } = await listAll(connector);
+    expect(items.filter((item) => item.identity.providerThreadId === 'account:contacts').map((item) => textOf(item).split('\n')[0]))
+      .toEqual(['Contact: Contact0 Placeholder', 'Contact: Contact1 Placeholder']);
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.sectionNotImported]: 1, [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 });
+  });
+
+  test('a file cut inside the other data keeps what was read of it, and the file is counted as damaged', async () => {
+    const text = telegramJson(telegramFullExport({ omit: ['profile_pictures', 'contacts', 'frequent_contacts', 'sessions'], chats: [] }));
+    // After the first field of the other data, before the second.
+    const cutAt = text.indexOf('"notes"');
+    const file = exportFile(text.slice(0, cutAt));
+    const { connector, findings } = connectorFor(file.dir, file.name);
+    const { items, done } = await listAll(connector);
+    expect(done).toBe(true);
+    expect(items.map((item) => item.identity.providerThreadId)).toEqual(['account:personal_information', 'account:other_data']);
+    expect(textOf(items[1]!)).toBe('Other Telegram account data\nAbout: Synthetic placeholder text for a part of the export.');
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.fileDamaged]: 1 });
   });
 
   test('an export that excluded its personal sections has no such gaps', async () => {
@@ -776,22 +1038,20 @@ describe('telegram connector: what is left out', () => {
     expect(findings).toEqual([]);
   });
 
-  test('a very long message keeps its start and says so; the next message is unaffected', async () => {
+  test('a very long message is kept whole and nothing is said; the next message is unaffected', async () => {
+    // Past the one-million-character cut the reader used to make.
     const long = `${'The synthetic harbour log runs on. '.repeat(40_000)}END`;
-    expect(long.length).toBeGreaterThan(TELEGRAM_MAX_ITEM_TEXT_CHARS);
+    expect(long.length).toBeGreaterThan(1_000_000);
     const file = exportFile(telegramJson(telegramSingleChatExport(telegramChat({ messages: [
       telegramText(0, long), telegramText(1, 'Short.'),
     ] }))));
     const { connector, findings } = connectorFor(file.dir, file.name);
     const { items } = await listAll(connector);
     expect(items).toHaveLength(2);
-    expect(textOf(items[0]!).length).toBeLessThanOrEqual(TELEGRAM_MAX_ITEM_TEXT_CHARS);
-    expect(textOf(items[0]!).startsWith('The synthetic harbour log runs on.')).toBe(true);
-    expect(textOf(items[0]!)).not.toContain('END');
+    expect(textOf(items[0]!)).toBe(long);
+    expect(items[0]!.identity.sourceVersion).toBe(createHash('sha256').update(long).digest('hex').slice(0, 32));
     expect(textOf(items[1]!)).toBe('Short.');
-    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.itemTruncated]: 1 });
-    // The gap is where the message is.
-    expect(findings[0]!.fileIndex).toBe(0);
+    expect(findings).toEqual([]);
   });
 
   test('a message too large to build is a gap with its place, and reading goes on after it', async () => {
@@ -827,10 +1087,12 @@ describe('telegram connector: what is left out', () => {
     await listAll(connector);
     const offsets = findings.map((finding) => finding.offset);
     expect(offsets).toEqual([...offsets].sort((a, b) => a - b));
-    // Two findings of one message share its place; different messages do not.
-    const byKind = Object.fromEntries(findings.filter((finding) => finding.kind !== ARCHIVE_COMMON_FINDINGS.sectionNotImported).map((finding) => [finding.kind, finding.offset]));
-    expect(byKind[TELEGRAM_FINDINGS.serviceMessage]).toBeLessThan(byKind[ARCHIVE_COMMON_FINDINGS.mediaNotImported]!);
-    expect(byKind[ARCHIVE_COMMON_FINDINGS.mediaNotImported]).toBeLessThan(byKind[TELEGRAM_FINDINGS.withoutText]!);
+    // The profile picture is the first thing found; then each message's own, in the order they are in the file.
+    const byKind = Object.fromEntries(findings.map((finding) => [finding.kind, finding.offset]));
+    expect(findings.map((finding) => finding.kind)).toEqual([
+      ARCHIVE_COMMON_FINDINGS.mediaNotImported, ARCHIVE_COMMON_FINDINGS.mediaNotImported, TELEGRAM_FINDINGS.withoutText,
+    ]);
+    expect(byKind[TELEGRAM_FINDINGS.withoutText]).toBeGreaterThan(findings[1]!.offset);
   });
 });
 
@@ -857,7 +1119,7 @@ describe('telegram connector: Telegram escapes and damaged files', () => {
   test('a file larger than a read, with escapes everywhere, imports every message once across pages', async () => {
     const messages = Array.from({ length: 1500 }, (_, index) =>
       telegramText(index, index % 7 === 0 ? `Entry \u000B ${index} with a code \u001B[0m inside.` : `Entry ${index} is plain.`));
-    const text = telegramJson(telegramFullExport({ chats: [telegramChat({ messages })] }));
+    const text = telegramJson(telegramFullExport({ withoutPersonalSections: true, chats: [telegramChat({ messages })] }));
     expect(Buffer.byteLength(text)).toBeGreaterThan(3 * 128 * 1024);
     const file = exportFile(text);
     const { connector, findings } = connectorFor(file.dir, file.name, { pageSize: 100 });
@@ -931,7 +1193,12 @@ describe('telegram connector: resume', () => {
     ],
     leftChats: [telegramChat({ name: 'Gone', id: 5, messages: [telegramText(7, 'd7'), telegramText(8, '')] })],
   }));
-  const WORDS = ['a0', 'a2', 'a3', 'b4', 'c5', 'c6', 'd7'];
+  // The account's own items come first (the profile, a picture, a contact, a frequent contact, a session, other data), then the chats'.
+  const ACCOUNT_WORDS = [
+    'Telegram profile: Sam Example (@synthetic_sam)', 'Profile picture', 'Contact: Contact0 Placeholder', 'Frequent contact: Synthetic Frequent (people)',
+    'Telegram session: on Synthetic Phone', 'Other Telegram account data',
+  ];
+  const WORDS = [...ACCOUNT_WORDS, 'a0', 'Sam Example joined the group by invite link.', 'a2', 'a3', 'b4', 'c5', 'c6', 'd7'];
 
   test('a resume point from any page lists exactly the rest, across chats and sections', async () => {
     const file = exportFile(TEXT);
@@ -959,8 +1226,6 @@ describe('telegram connector: resume', () => {
       // Findings of the part already read are not reported again.
       const through = cursorOffset(cursor);
       for (const finding of resumed.findings) expect(finding.offset).toBeGreaterThan(through);
-      // A part of the account export is not said again either.
-      expect(resumed.findings.some((finding) => finding.kind === ARCHIVE_COMMON_FINDINGS.sectionNotImported)).toBe(false);
     }
   });
 
@@ -969,8 +1234,8 @@ describe('telegram connector: resume', () => {
     const { connector, positions } = connectorFor(file.dir, file.name, { pageSize: 3 });
     const pages: Array<{ n: number; done: boolean; cursor?: string }> = [];
     for await (const page of connector.listItems({})) pages.push({ n: page.items.length, done: page.done, ...(page.nextCursor ? { cursor: page.nextCursor } : {}) });
-    expect(pages.map((page) => page.n)).toEqual([3, 3, 1]);
-    expect(pages.map((page) => page.done)).toEqual([false, false, true]);
+    expect(pages.map((page) => page.n)).toEqual([3, 3, 3, 3, 2]);
+    expect(pages.map((page) => page.done)).toEqual([false, false, false, false, true]);
     expect(pages.at(-1)!.cursor).toEndWith(':done');
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
     expect(positions.length).toBeGreaterThan(0);
@@ -981,13 +1246,14 @@ describe('telegram connector: resume', () => {
     const { connector } = connectorFor(file.dir, file.name, { pageSize: 10 });
     const first: RawItem[] = [];
     let cursor: string | undefined;
-    for await (const page of connector.listItems({ limit: 4 })) {
+    // Eight items: past the account's six, so the limit falls among the chats' messages.
+    for await (const page of connector.listItems({ limit: 8 })) {
       first.push(...page.items);
       cursor = page.nextCursor;
     }
-    expect(first).toHaveLength(4);
+    expect(first).toHaveLength(8);
     const rest = await listAll(connectorFor(file.dir, file.name).connector, cursor);
-    expect(rest.items.map((item) => textOf(item).split('\n')[0])).toEqual(WORDS.slice(4));
+    expect(rest.items.map((item) => textOf(item).split('\n')[0])).toEqual(WORDS.slice(8));
   });
 
   test('stopping between messages leaves a resume point at the next one', async () => {
@@ -1018,18 +1284,19 @@ describe('telegram connector: resume', () => {
     expect(words).toEqual(WORDS);
   });
 
-  test('a pass can end inside the parts of an account export that are not messages, and each part is still said once', async () => {
+  test('a pass can end inside the parts of an account export that are not chats; no entry is made twice or lost, and each finding is said once', async () => {
     const file = exportFile(TEXT);
     const whole = connectorFor(file.dir, file.name, { pageSize: 1 });
     const all = await listAll(whole.connector);
-    const sectionsOf = (list: readonly ArchiveImportFinding[]) =>
-      list.filter((finding) => finding.kind === ARCHIVE_COMMON_FINDINGS.sectionNotImported).map((finding) => finding.offset);
-    expect(sectionsOf(whole.findings).length).toBeGreaterThan(3);
+    const mediaOf = (list: readonly ArchiveImportFinding[]) =>
+      list.filter((finding) => finding.kind === ARCHIVE_COMMON_FINDINGS.mediaNotImported).map((finding) => finding.offset);
+    // The profile picture's, then the message a3's.
+    expect(mediaOf(whole.findings)).toHaveLength(2);
     const chatsStart = Buffer.byteLength(TEXT.slice(0, TEXT.indexOf('"chats"')));
 
-    // A budget of one byte ends each pass after the first thing it reads, wherever that is.
+    // A budget of one byte ends each pass after the first thing it can hand over, wherever that is.
     const items: RawItem[] = [];
-    const sections: number[] = [];
+    const media: number[] = [];
     let cursor: string | undefined;
     let done = false;
     let passes = 0;
@@ -1041,21 +1308,21 @@ describe('telegram connector: resume', () => {
       const out = await listAll(pass.connector, cursor);
       if (cursor) for (const finding of pass.findings) expect(finding.offset).toBeGreaterThan(cursorOffset(cursor));
       items.push(...out.items);
-      sections.push(...sectionsOf(pass.findings));
+      media.push(...mediaOf(pass.findings));
       done = out.done;
       cursor = out.cursors.at(-1);
       if (!done && cursor && cursorOffset(cursor) < chatsStart) cursorsInSections.push(cursorOffset(cursor));
       if (passes === 1) {
-        // The first pass stops among the parts, with no message read and a point to go on from.
-        expect(out.items).toEqual([]);
+        // The first pass stops among the parts: with the profile (all of it, never half), and a point to go on from.
+        expect(out.items.map((item) => item.identity.providerThreadId)).toEqual(['account:personal_information']);
         expect(done).toBe(false);
         expect(cursorOffset(cursor!)).toBeLessThan(chatsStart);
       }
     }
     expect(cursorsInSections.length).toBeGreaterThan(3);
     expect(items.map((item) => item.identity.providerItemId)).toEqual(all.items.map((item) => item.identity.providerItemId));
-    // The same parts at the same places as a pass that never stopped: none twice, none lost.
-    expect(sections).toEqual(sectionsOf(whole.findings));
+    // The same findings at the same places as a pass that never stopped: none twice, none lost.
+    expect(media).toEqual(mediaOf(whole.findings));
   });
 
   test('a long part of an account export is read in more than one pass when it is longer than the budget', async () => {
@@ -1079,7 +1346,10 @@ describe('telegram connector: resume', () => {
       if (!done && cursor && cursorOffset(cursor) < chatsStart) passesEndingInTheParts += 1;
     }
     expect(passesEndingInTheParts).toBeGreaterThanOrEqual(2);
-    expect(items).toHaveLength(3);
+    // Every contact once, and the rest of the account, and the three messages.
+    expect(items.filter((item) => item.identity.providerThreadId === 'account:contacts')).toHaveLength(16_000);
+    expect(new Set(items.map((item) => item.identity.providerItemId)).size).toBe(items.length);
+    expect(items).toHaveLength(16_000 + 5 + 3);
   });
 
   test('a finished import resumes to nothing', async () => {

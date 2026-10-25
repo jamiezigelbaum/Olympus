@@ -3,6 +3,7 @@
 // built here, never a real export.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { appendFileSync, mkdtempSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -225,6 +226,22 @@ describe('mbox connector', () => {
     ]);
     expect(findings[0]!.offset).toBe(0);
     expect(new Set(findings.map((finding) => finding.offset)).size).toBe(4);
+  });
+
+  test('a very long message body is kept whole, past the million characters it used to be cut at, and nothing is said', async () => {
+    const body = `start ${'The synthetic harbour log runs on.\n'.repeat(45_000)}end of the log`;
+    expect(body.length).toBeGreaterThan(1_500_000);
+    const file = mailFile('Inbox.mbox', mbox([
+      mail({ subject: 'Long', body }),
+      mail({ subject: 'Short', body: 'short body' }),
+    ]));
+    const { connector, findings } = connectorFor(file.dir, 'Inbox.mbox');
+    const { items } = await listAll(connector);
+    expect(items.map((item) => item.metadata.subject)).toEqual(['Long', 'Short']);
+    expect(textOf(items[0]!).endsWith('end of the log')).toBe(true);
+    expect(textOf(items[0]!).length).toBeGreaterThan(body.length);
+    expect(items[0]!.metadata.contentHash).toBe(createHash('sha256').update(textOf(items[0]!)).digest('hex'));
+    expect(findings).toEqual([]);
   });
 
   test('>From lines read as From in the item text', async () => {

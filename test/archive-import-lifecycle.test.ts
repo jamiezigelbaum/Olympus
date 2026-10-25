@@ -67,6 +67,35 @@ function mbox(messages: readonly string[]): string {
   return messages.map((message) => `From sender@example.invalid Mon Jan  5 10:00:00 2015\n${message}\n\n`).join('');
 }
 
+/**
+ * A file over 3 MiB that costs almost nothing to import: one short message and a large attachment, which is named and never read.
+ * (A message's text is never cut by length, so a big file made of text would be imported in full, and slowly.)
+ */
+function bigMbox(): string {
+  const filler = `${'A'.repeat(76)}\n`.repeat(Math.ceil((3 * 1024 * 1024) / 77));
+  return mbox([[
+    'From: Sam Example <sam@example.invalid>',
+    'To: Alex Example <alex@example.invalid>',
+    'Subject: Synthetic big note 0',
+    'Date: Mon, 05 Jan 2015 10:00:00 +0000',
+    'Message-ID: <big-0@example.invalid>',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/mixed; boundary="b1"',
+    '',
+    '--b1',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'The synthetic big harbour log, entry 0.',
+    '--b1',
+    'Content-Type: application/octet-stream; name="big.bin"',
+    'Content-Disposition: attachment; filename="big.bin"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    filler,
+    '--b1--',
+  ].join('\n')]);
+}
+
 function fixture() {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'archive-lifecycle-')));
   cleanups.push(() => rmSync(base, { recursive: true, force: true }));
@@ -322,7 +351,7 @@ describe('archive import passes', () => {
 
   test('a completed import keeps each file SHA-256: a copy is already imported, an export sharing only its ends is not', async () => {
     const f = fixture();
-    const text = mbox([mail(0, { tag: 'big', body: 'x'.repeat(3 * 1024 * 1024) })]);
+    const text = bigMbox();
     const archiveId = f.start('Big.mbox', text);
     await importAll(f.runtime, archiveId);
     const record = f.runtime.state.get(archiveId)!;

@@ -14,15 +14,13 @@
  *   date its title carries (a daily note), else the day the archive file was
  *   saved, which is reported (`note_date_assumed`).
  * - Text: the title, tags and dates in plain lines above what was written,
- *   cut at NOTE_MAX_TEXT_CHARS (reported, the start is kept).
+ *   kept whole: a long note is never cut.
  */
 import { createHash } from 'node:crypto';
 import type { RawItem, SourceClassificationSignals } from '../../../core/contracts.ts';
 import type { ArchiveConnectorInput } from '../../../core/archive-formats.ts';
 import { compactClassificationSignals, signalText, signalTexts } from '../../../core/classification-signals.ts';
 
-/** Text kept per note; longer notes are cut and reported. */
-export const NOTE_MAX_TEXT_CHARS = 1_000_000;
 /** One record of a JSON export is read whole up to this size; a bigger one is reported and passed over. */
 export const NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
 const MAX_TAGS = 100;
@@ -153,8 +151,6 @@ function sha256(value: string): string {
 
 export interface NoteItemResult {
   item: RawItem;
-  /** The text was longer than NOTE_MAX_TEXT_CHARS and the start of it is kept. */
-  truncated: boolean;
   /** The date is the day the archive file was saved, not one the export gives. */
   dateAssumed: boolean;
 }
@@ -173,17 +169,12 @@ export function buildNoteItem(
   const given = draft.createdAt ?? draft.updatedAt ?? draft.titleDate;
   const authoredAt = given ?? savedAt;
   const lines = [
-    title,
+    draft.title.trim(),
     draft.tags.length > 0 ? `Tags: ${draft.tags.join(', ')}` : undefined,
     draft.createdAt ? `Created: ${draft.createdAt.slice(0, 10)}` : given ? `Date: ${given.slice(0, 10)}` : undefined,
     draft.updatedAt && draft.updatedAt !== draft.createdAt ? `Updated: ${draft.updatedAt.slice(0, 10)}` : undefined,
   ].filter((line): line is string => line !== undefined && line !== '');
-  let text = [lines.join('\n'), draft.body].filter((part) => part !== '').join('\n\n');
-  let truncated = false;
-  if (text.length > NOTE_MAX_TEXT_CHARS) {
-    text = text.slice(0, NOTE_MAX_TEXT_CHARS);
-    truncated = true;
-  }
+  const text = [lines.join('\n'), draft.body].filter((part) => part !== '').join('\n\n');
   const providerItemId = sha256(`${place.fileIndex}\u0000${place.member}\u0000${place.ordinal}\u0000${draft.key ?? ''}`).slice(0, 32);
   const contentHash = sha256(text);
   const item: RawItem = {
@@ -208,7 +199,7 @@ export function buildNoteItem(
     }),
     fetchedAt: new Date().toISOString(),
   };
-  return { item, truncated, dateAssumed: given === undefined };
+  return { item, dateAssumed: given === undefined };
 }
 
 /** What the classifier is told about a note: its title and tags, and no prior. */

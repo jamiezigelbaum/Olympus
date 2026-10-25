@@ -42370,6 +42370,10 @@ function dashboardImportAttentionSentence(entry) {
       return words2.unreadable;
   }
 }
+function archiveFindingList(kind) {
+  const lists = DASHBOARD_ARCHIVE_COPY.listOf;
+  return Object.prototype.hasOwnProperty.call(lists, kind) ? lists[kind] : "not_imported";
+}
 var DASHBOARD_UPDATE_COPY, DASHBOARD_MISSING_FOLDER = "A folder you chose is missing", DASHBOARD_FOLDER_NEEDS_PERMISSION = "Your Mac will not let Olympus open a folder you chose. In System Settings, choose Privacy & Security, then Files & Folders, and switch on Olympus Engine (or the app your Mac named when it asked).", DASHBOARD_FOLDER_NEEDS_HELPER = 'A folder you chose needs the Olympus helper app before your Mac can ask about it. On this Mac, run "olympus engine install-helper". If Olympus runs as an OpenClaw worker, run Olympus Engine instead, or choose a folder outside Desktop, Documents and Downloads.', DASHBOARD_FOLDER_UNREADABLE = "Your user account is not allowed to open a folder you chose. Change who may open that folder, or choose another one.", DASHBOARD_STATUS_PRESENTATION, DASHBOARD_CONNECTION_STATE_STATUS, DASHBOARD_ANSWER_READINESS_STATUS, DASHBOARD_QUEUE_HEALTH_STATUS, DASHBOARD_UNKNOWN_STATUS = "Waiting", DASHBOARD_UNCONNECTED_STATES, DASHBOARD_SIGNED_OUT = "signed out", DASHBOARD_DISCONNECTED_DATA_KEPT = "Disconnected · indexed data kept", DASHBOARD_RECONNECT_LABEL = "Reconnect", DASHBOARD_MANY_UNREADABLE_LABEL = "Many files cannot be read", READINESS_REASONS, GENERIC_READINESS_ATTENTION_LABEL = "Needs attention before answers", DASHBOARD_CAPTURE_STALE_LABEL = "Live capture is stale", DASHBOARD_CAPTURE_BLOCKED_LABEL = "Live capture cannot start", DASHBOARD_CAPTURE_COPY, CAPTURE_JUDGED_CONNECTION_STATES, CAPTURE_UNEXPECTED_STOP_REASONS, REDIRECT_REFUSAL_CODES, DASHBOARD_MODELS_BLOCKED_REASON = "Locked until models are ready", SETUP_LEADS, DASHBOARD_INDEX_FASTER, DASHBOARD_NONE_READ_BY_POLICY = "none of these files are read by policy", DASHBOARD_NONE_READ_OLD_MAIL = "older mail is kept as names only", DASHBOARD_UNREADABLE_NOTE = "Olympus does not retry these, and nothing is waiting on you.", DASHBOARD_UNREADABLE_MORE = "and {count} more", DASHBOARD_UNREADABLE_NOTE_MANY, DASHBOARD_UNREADABLE_REASON_CODES, DASHBOARD_UNREADABLE_REASON_WORDS, DASHBOARD_SOURCE_FAILURE_WORDS, DASHBOARD_FAILURE_REF = "Olympus's log on the computer has the details under reference {ref}.", DASHBOARD_FAILURE_LOG = "Olympus's log on the computer has the details.", DASHBOARD_CHATGPT_VOCABULARY, DASHBOARD_CHATGPT_REFUSAL_COPY, DASHBOARD_CHATGPT_CONNECTION_COPY, DASHBOARD_CHATGPT_PAGE_COPY, DASHBOARD_WORKER_TOKEN_AGENT_PROMPT, DASHBOARD_HOST_GATE_COPY, ARCHIVE_PICK_INTRO, DASHBOARD_ARCHIVE_NOUNS, DASHBOARD_ARCHIVE_COPY, DASHBOARD_COMPUTER_PANEL_COPY, DASHBOARD_CHATGPT_SETUP_LABELS, DASHBOARD_CHATGPT_PICKER_COPY, DASHBOARD_PRIVACY_QUESTIONS_COPY, DASHBOARD_CHATGPT_PRIVACY_COPY, DASHBOARD_CHATGPT_PRIVACY_SETUP_COPY, DASHBOARD_CHATGPT_PRIVATE_ANSWER_COPY, DASHBOARD_CHATGPT_PRIVATE_QUESTION_COPY, DASHBOARD_LOCAL_COPY, DASHBOARD_PRIVATE_ANSWERS_COPY, OUTSIDE_HELP_CONFINEMENT_UNAVAILABLE = "Anonymous answers aren't available on this computer because its network isolation check hasn't passed. Nothing is sent without it.", DASHBOARD_OUTSIDE_HELP_COPY;
 var init_vocabulary = __esm(() => {
   init_source_dashboard();
@@ -42856,7 +42860,44 @@ var init_vocabulary = __esm(() => {
       files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
     },
-    seeWhy: "See what was not read",
+    lists: { notImported: "Not imported", howRead: "How it was read" },
+    seeWhy: {
+      notImported: "See what was not imported",
+      howRead: "See how it was read",
+      both: "See what was not imported and how it was read"
+    },
+    listOf: {
+      media_not_imported: "not_imported",
+      item_truncated: "not_imported",
+      section_not_imported: "not_imported",
+      file_damaged: "not_imported",
+      files_not_looked_at: "not_imported",
+      files_unconfirmed: "not_imported",
+      time_zone_assumed: "how_read",
+      date_order_assumed: "how_read",
+      item_start_assumed: "how_read",
+      zip_overlap_unchecked: "how_read",
+      assumption: "how_read",
+      item_repeated: "how_read",
+      message_too_large: "not_imported",
+      message_unreadable: "not_imported",
+      charset_not_decoded: "not_imported",
+      attachments_not_read: "not_imported",
+      text_cut: "not_imported",
+      spam_or_trash: "not_imported",
+      message_content_unsupported: "not_imported",
+      system_message: "how_read",
+      message_empty: "how_read",
+      message_without_text: "how_read",
+      status_updates: "not_imported",
+      service_message: "not_imported",
+      note_unreadable: "not_imported",
+      note_too_large: "not_imported",
+      note_content_unsupported: "not_imported",
+      note_empty: "how_read",
+      note_date_assumed: "how_read",
+      other: "not_imported"
+    },
     gapInFile: "{file}: {gap}",
     remove: "Remove",
     removeConfirm: "Remove {name}? Everything Olympus made from it is deleted. The file itself stays where it is.",
@@ -69507,12 +69548,12 @@ var init_public_source_capabilities = __esm(() => {
       source_id: "archive.imports",
       label: "Archives",
       authentication: { type: "none", ownership: "no account: the export files you choose on this computer" },
-      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices and the status updates chat left out", "a chat export is a snapshot: it is not updated after the export"],
+      contextual_scopes: ["one export file or folder per import, chosen in the dashboard", "read where it is, never copied, moved or changed", "content stays Private until the private model judges each item", "Spam and Trash left out", "WhatsApp notices left out", "a chat export is a snapshot: it is not updated after the export"],
       dependencies: [
         { id: "private_model", label: "Private model (on this computer, or Venice Private)", required_for: "judging each imported item before its content may leave Private" }
       ],
       provider_ceiling: "An import reads the export as it was when chosen: if a file changes or goes missing the import stops and says so; messages too large or unreadable, and attachments, are counted and listed rather than read.",
-      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "picture and file names"]
+      supported_formats: ["mail exports in mbox form (Google Takeout, Apple Mail, Thunderbird)", "headers", "text/plain", "text/html (stripped)", "attachment names", "WhatsApp chat exports (a chat .txt or .zip, or a folder of them)", "message text", "media file names", "Reflect exports (JSON, or a zip of Markdown files)", "Roam exports (JSON from Export All)", "note titles, text, tags and dates", "Telegram Desktop exports (result.json, Machine-readable JSON)", "chat messages with their links", "Telegram service messages (joins, calls, pins) and the account's profile, contacts, sessions and other data", "picture and file names"]
     },
     {
       source_id: "x.bookmarks",
@@ -135473,22 +135514,38 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
     }
     return block;
   }
+  function archiveFindings(archive) {
+    const lists = H.copy.archives.listOf;
+    return archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => ({
+      list: Object.prototype.hasOwnProperty.call(lists, entry.kind) && lists[entry.kind] === "how_read" ? "how_read" : "not_imported",
+      entry
+    }));
+  }
   function archiveHasReasons(archive) {
-    return archive.gaps.concat(archive.skipped).some((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0);
+    return archiveFindings(archive).length > 0;
   }
   function archiveWhy(archive) {
     const A = H.copy.archives;
     const kinds = A.gaps;
-    const lines = archive.gaps.concat(archive.skipped).filter((entry) => entry && typeof entry.kind === "string" && wholeCount(entry.count) > 0).map((entry) => {
-      const words2 = kinds[entry.kind] || kinds.other;
+    const found = archiveFindings(archive);
+    const listed = (list) => found.filter((item) => item.list === list).map((item) => {
+      const entry = item.entry;
+      const words2 = Object.prototype.hasOwnProperty.call(kinds, entry.kind) ? kinds[entry.kind] : kinds.other;
       const n = wholeCount(entry.count);
       const gap = fill2(n === 1 ? words2.one : words2.many, { n: count(n) });
       return el("li", "", typeof entry.file === "string" && entry.file ? fill2(A.gapInFile, { file: entry.file, gap }) : gap);
     });
-    if (!lines.length)
+    const notImported = listed("not_imported");
+    const howRead = listed("how_read");
+    if (!notImported.length && !howRead.length)
       return null;
-    const box = details("archive-why:" + archive.id, doc2.createTextNode(A.seeWhy), "why");
-    return add(box, add(el("ul", "plain"), ...lines));
+    const label = notImported.length && howRead.length ? A.seeWhy.both : howRead.length ? A.seeWhy.howRead : A.seeWhy.notImported;
+    const box = details("archive-why:" + archive.id, doc2.createTextNode(label), "why");
+    if (notImported.length)
+      add(box, el("p", "why-head", A.lists.notImported), add(el("ul", "plain"), ...notImported));
+    if (howRead.length)
+      add(box, el("p", "why-head", A.lists.howRead), add(el("ul", "plain"), ...howRead));
+    return box;
   }
   function seeWhy(source, id, stalled) {
     const stall = stalled && source.progress ? stallLines(source.progress.stall, source) : [];
@@ -156566,14 +156623,10 @@ async function messageOutcome(input, span) {
   ].filter(Boolean).join(`
 `);
   const body = email2.text?.trim() || (email2.html ? stripHtml2(email2.html) : "");
-  let text3 = [summary, body, attachments.lines.join(`
+  const text3 = [summary, body, attachments.lines.join(`
 `)].filter((part) => part !== "").join(`
 
 `) || `Subject: ${subject}`;
-  if (text3.length > MBOX_MAX_ITEM_TEXT_CHARS) {
-    text3 = text3.slice(0, MBOX_MAX_ITEM_TEXT_CHARS);
-    findings.push({ kind: MBOX_FINDINGS.textCut });
-  }
   const messageId = bareMessageId(email2.messageId ?? headerValue(email2, "message-id"));
   const messageHash = sha2567(raw);
   const providerItemId = sha2567(`${messageId ?? ""}\x00${messageHash}`).slice(0, 32);
@@ -156738,7 +156791,7 @@ function createMboxArchiveConnector(input) {
 function registerMboxArchiveConnector() {
   registerArchiveFormatConnector("mbox", createMboxArchiveConnector);
 }
-var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MBOX_MAX_ITEM_TEXT_CHARS = 1e6, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS, SKIPPED_LABELS, decodableCharsets;
+var MBOX_CURSOR_PREFIX = "mbox1:", MBOX_DEFAULT_PAGE_SIZE = 100, MBOX_DEFAULT_MAX_BYTES_PER_LISTING, MAX_ATTACHMENT_NAME_CHARS2 = 256, MBOX_FINDINGS, SKIPPED_LABELS, decodableCharsets;
 var init_connector5 = __esm(() => {
   init_postal_mime();
   init_archive_formats();
@@ -156971,9 +157024,6 @@ function whatsAppStem(name) {
   const last = parts[parts.length - 1] ?? name;
   return last.replace(/\.(?:txt|zip)$/i, "");
 }
-function isWhatsAppStatusChat(chat) {
-  return chat.trim().toLowerCase() === "status@broadcast";
-}
 function isWhatsAppZipNoise(name) {
   if (name.endsWith("/") || name.startsWith("__MACOSX/") || name.includes("/__MACOSX/"))
     return true;
@@ -157182,7 +157232,6 @@ function whatsAppLineText(line2) {
 class WhatsAppMessageReader {
   source;
   lines;
-  maxTextChars;
   maxMessageBytes;
   building;
   dropping;
@@ -157193,7 +157242,6 @@ class WhatsAppMessageReader {
     this.lines = new WhatsAppLineReader(source, { midLine: entry.kind === "skip" && entry.midLine });
     this.dropping = entry.kind !== "message";
     this.expectHeader = entry.kind === "message";
-    this.maxTextChars = options.maxTextChars ?? WHATSAPP_MAX_ITEM_TEXT_CHARS;
     this.maxMessageBytes = options.maxMessageBytes ?? WHATSAPP_MAX_MESSAGE_BYTES;
   }
   get position() {
@@ -157257,7 +157305,6 @@ class WhatsAppMessageReader {
           header,
           sender: first.sender,
           parts: [],
-          chars: 0,
           bytes: line2.bytes.length + 1,
           cut: line2.cut
         };
@@ -157287,21 +157334,7 @@ class WhatsAppMessageReader {
     return this.finish(message2);
   }
   append(message2, text3) {
-    if (message2.chars >= this.maxTextChars) {
-      if (text3.length > 0)
-        message2.cut = true;
-      return;
-    }
-    const separator = message2.parts.length > 0 ? 1 : 0;
-    const room = this.maxTextChars - message2.chars - separator;
-    if (text3.length > room) {
-      message2.parts.push(text3.slice(0, Math.max(0, room)));
-      message2.chars = this.maxTextChars;
-      message2.cut = true;
-      return;
-    }
     message2.parts.push(text3);
-    message2.chars += separator + text3.length;
   }
   finish(message2) {
     return {
@@ -157363,7 +157396,7 @@ function scanWhatsAppDateOrder(source, options = {}) {
     return { order: "dmy", assumed: true, style, bytesRead };
   return { order: top[0], assumed: false, style, bytesRead };
 }
-var WHATSAPP_MAX_ITEM_TEXT_CHARS = 1048576, WHATSAPP_LINE_BYTES_KEPT, WHATSAPP_MAX_MESSAGE_BYTES, WHATSAPP_ORDER_SCAN_MAX_BYTES, WHATSAPP_ORDER_VOTES_ENOUGH = 25, WHATSAPP_ORDER_BACKWARDS_LEFT_OUT = 2, utf83, WhatsAppFormatError;
+var WHATSAPP_LINE_BYTES_KEPT, WHATSAPP_MAX_MESSAGE_BYTES, WHATSAPP_ORDER_SCAN_MAX_BYTES, WHATSAPP_ORDER_VOTES_ENOUGH = 25, WHATSAPP_ORDER_BACKWARDS_LEFT_OUT = 2, utf83, WhatsAppFormatError;
 var init_messages = __esm(() => {
   init_byte_source();
   init_grammar();
@@ -157579,7 +157612,6 @@ function createWhatsAppArchiveConnector(input) {
       chat,
       conversationId: `chat:${sha2568(chat).slice(0, 24)}`,
       sourceKey: sha2568(`${file.relPath}\x00${entry ? entry.name : ""}`).slice(0, 16),
-      statusUpdates: isWhatsAppStatusChat(chat),
       base
     };
   };
@@ -157914,10 +157946,10 @@ function createWhatsAppArchiveConnector(input) {
               }
               if (header && !otherStyle)
                 prev = header.sentAt;
-              if (unit.statusUpdates) {
-                note(WHATSAPP_FINDINGS.statusUpdates, "skipped", raw.offset);
-              } else if (raw.sender === undefined) {
+              if (raw.sender === undefined) {
                 note(WHATSAPP_FINDINGS.systemMessage, "skipped", raw.offset);
+              } else if (raw.cut) {
+                note(WHATSAPP_FINDINGS.tooLarge, "gap", raw.offset);
               } else if (raw.text.trim() === "" || !header) {
                 note(WHATSAPP_FINDINGS.messageEmpty, "skipped", raw.offset);
               } else {
@@ -157928,8 +157960,6 @@ function createWhatsAppArchiveConnector(input) {
                 const media = whatsAppMediaMarkerCount(raw.text);
                 if (media > 0)
                   report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", raw.offset, media);
-                if (raw.cut)
-                  report(ARCHIVE_COMMON_FINDINGS.itemTruncated, "gap", raw.offset);
               }
               const at = reader.resume();
               if (!at)
@@ -158082,6 +158112,7 @@ var init_connector6 = __esm(() => {
   WHATSAPP_FINDINGS = {
     systemMessage: "system_message",
     messageEmpty: "message_empty",
+    tooLarge: "message_too_large",
     statusUpdates: "status_updates"
   };
 });
@@ -158231,20 +158262,15 @@ function buildNoteItem(input, draft, place, savedAt) {
   const given = draft.createdAt ?? draft.updatedAt ?? draft.titleDate;
   const authoredAt = given ?? savedAt;
   const lines = [
-    title,
+    draft.title.trim(),
     draft.tags.length > 0 ? `Tags: ${draft.tags.join(", ")}` : undefined,
     draft.createdAt ? `Created: ${draft.createdAt.slice(0, 10)}` : given ? `Date: ${given.slice(0, 10)}` : undefined,
     draft.updatedAt && draft.updatedAt !== draft.createdAt ? `Updated: ${draft.updatedAt.slice(0, 10)}` : undefined
   ].filter((line2) => line2 !== undefined && line2 !== "");
-  let text3 = [lines.join(`
+  const text3 = [lines.join(`
 `), draft.body].filter((part) => part !== "").join(`
 
 `);
-  let truncated = false;
-  if (text3.length > NOTE_MAX_TEXT_CHARS) {
-    text3 = text3.slice(0, NOTE_MAX_TEXT_CHARS);
-    truncated = true;
-  }
   const providerItemId = sha2569(`${place.fileIndex}\x00${place.member}\x00${place.ordinal}\x00${draft.key ?? ""}`).slice(0, 32);
   const contentHash = sha2569(text3);
   const item = {
@@ -158269,7 +158295,7 @@ function buildNoteItem(input, draft, place, savedAt) {
     }),
     fetchedAt: new Date().toISOString()
   };
-  return { item, truncated, dateAssumed: given === undefined };
+  return { item, dateAssumed: given === undefined };
 }
 function noteClassificationSignals(item) {
   return compactClassificationSignals({
@@ -158277,7 +158303,7 @@ function noteClassificationSignals(item) {
     labels: signalTexts(item.metadata, "tags")
   });
 }
-var NOTE_MAX_TEXT_CHARS = 1e6, NOTE_MAX_RECORD_BYTES, MAX_TAGS = 100, MAX_TAG_CHARS = 200, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
+var NOTE_MAX_RECORD_BYTES, MAX_TAGS = 100, MAX_TAG_CHARS = 200, MAX_TITLE_CHARS = 500, NOTE_FINDINGS;
 var init_note = __esm(() => {
   NOTE_MAX_RECORD_BYTES = 16 * 1024 * 1024;
   NOTE_FINDINGS = {
@@ -158350,7 +158376,7 @@ function createNoteArchiveConnector(input, spec) {
   const report = (kind, findingClass, fileIndex, offset, count) => {
     input.report({ kind, class: findingClass, fileIndex, offset, ...count !== undefined ? { count } : {} });
   };
-  const takeNote = (segment, outcome, place, offset, savedAt, cut = false) => {
+  const takeNote = (segment, outcome, place, offset, savedAt) => {
     segment.consumed += 1;
     if (outcome.kind === "empty") {
       report(NOTE_FINDINGS.empty, "skipped", place.fileIndex, offset);
@@ -158368,8 +158394,6 @@ function createNoteArchiveConnector(input, spec) {
     segment.items.push(built.item);
     if (outcome.note.unsupported)
       report(NOTE_FINDINGS.unsupported, "gap", place.fileIndex, offset);
-    if (built.truncated || cut)
-      report(ARCHIVE_COMMON_FINDINGS.itemTruncated, "gap", place.fileIndex, offset);
     if (built.dateAssumed)
       report(NOTE_FINDINGS.dateAssumed, "gap", place.fileIndex, offset);
   };
@@ -158700,7 +158724,6 @@ function createNoteArchiveConnector(input, spec) {
     }
     const parts = [];
     let kept = 0;
-    let cut = false;
     try {
       for (;; ) {
         if (!input.shouldContinue())
@@ -158708,15 +158731,10 @@ function createNoteArchiveConnector(input, spec) {
         const chunk = member.next();
         if (!chunk)
           break;
-        if (kept < MARKDOWN_MAX_BYTES) {
-          const take = chunk.subarray(0, MARKDOWN_MAX_BYTES - kept);
-          parts.push(take);
-          kept += take.length;
-          if (take.length < chunk.length)
-            cut = true;
-        } else {
-          cut = true;
-        }
+        kept += chunk.length;
+        if (kept > MARKDOWN_MAX_BYTES)
+          return { tooLarge: true };
+        parts.push(chunk);
       }
     } catch (error2) {
       if (error2 instanceof ZipMemberError)
@@ -158731,7 +158749,7 @@ function createNoteArchiveConnector(input, spec) {
       joined.set(part, at);
       at += part.length;
     }
-    return { text: new TextDecoder("utf-8").decode(joined), cut, end: member.end };
+    return { text: new TextDecoder("utf-8").decode(joined), end: member.end };
   };
   const readMarkdownZip = (archive, fileIndex, cursor, limits, segment, savedAt) => {
     if (source.kind !== "markdown")
@@ -158770,9 +158788,12 @@ function createNoteArchiveConnector(input, spec) {
       if (!read) {
         segment.consumed += 1;
         report(NOTE_FINDINGS.unreadable, "gap", fileIndex, offset);
+      } else if ("tooLarge" in read) {
+        segment.consumed += 1;
+        report(NOTE_FINDINGS.tooLarge, "gap", fileIndex, offset);
       } else {
         const place = { fileIndex, member: entry.index, ordinal: entry.index };
-        takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt, read.cut);
+        takeNote(segment, source.parse(read.text, fileName), place, offset, savedAt);
         if (!read.end || read.end.crcOk !== true || !read.end.sizeOk) {
           report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", fileIndex, zipFindingOffset(entry.index, entry.uncompressedSize));
         }
@@ -159029,7 +159050,7 @@ var init_archive = __esm(() => {
   init_zip_reader();
   init_note();
   NOTES_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-  MARKDOWN_MAX_BYTES = NOTE_MAX_TEXT_CHARS * 4;
+  MARKDOWN_MAX_BYTES = NOTE_MAX_RECORD_BYTES;
   LIST_PEEK_BYTES = 64 * 1024;
   ReadInterrupted = class ReadInterrupted extends Error {
   };
@@ -159608,9 +159629,6 @@ function telegramScalar(value2) {
     return String(value2);
   return;
 }
-function cut(value2) {
-  return value2.length > MAX_LINE_CHARS ? `${value2.slice(0, MAX_LINE_CHARS)}…` : value2;
-}
 function flattenTelegramText(value2) {
   if (typeof value2 === "string")
     return value2;
@@ -159637,6 +159655,12 @@ function seconds(value2) {
     return;
   return n >= 60 ? `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, "0")}` : `${Math.floor(n)} s`;
 }
+function telegramMediaLines(record5) {
+  const content = { text: "", mediaFiles: 0, attachments: [], hasContent: false, unsupported: false };
+  const lines = [];
+  mediaLine(record5, content, lines);
+  return { lines, mediaFiles: content.mediaFiles, attachments: content.attachments };
+}
 function mediaLine(message2, content, lines) {
   const photo = text3(message2.photo);
   if (photo) {
@@ -159644,9 +159668,9 @@ function mediaLine(message2, content, lines) {
       lines.push("[Photo (not in the export)]");
       content.mediaFiles += 1;
     } else {
-      lines.push(`[Photo: ${cut(photo)} (not imported)]`);
+      lines.push(`[Photo: ${photo} (not imported)]`);
       content.mediaFiles += 1;
-      content.attachments.push(`Photo: ${cut(photo)}`);
+      content.attachments.push(`Photo: ${photo}`);
     }
   }
   const file = text3(message2.file);
@@ -159656,17 +159680,17 @@ function mediaLine(message2, content, lines) {
     const label = emoji2 ? `${kind} ${emoji2}` : kind ?? "File";
     const name = text3(message2.file_name);
     if (fileLeftOut(file)) {
-      lines.push(name ? `[${label}: ${cut(name)} (not in the export)]` : `[${label} (not in the export)]`);
+      lines.push(name ? `[${label}: ${name} (not in the export)]` : `[${label} (not in the export)]`);
       content.mediaFiles += 1;
       if (name)
-        content.attachments.push(`${label}: ${cut(name)}`);
+        content.attachments.push(`${label}: ${name}`);
     } else {
       const track = [text3(message2.performer), text3(message2.title)].filter(Boolean).join(" - ");
       const duration3 = seconds(message2.duration_seconds);
-      const detail = [name && name !== file ? name : undefined, track || undefined, cut(file), duration3].filter(Boolean).join(", ");
+      const detail = [name && name !== file ? name : undefined, track || undefined, file, duration3].filter(Boolean).join(", ");
       lines.push(`[${label}: ${detail} (not imported)]`);
       content.mediaFiles += 1;
-      content.attachments.push(`${label}: ${name ?? cut(file)}`);
+      content.attachments.push(`${label}: ${name ?? file}`);
     }
   }
 }
@@ -159676,11 +159700,11 @@ function factLines(message2, lines) {
     const name = [text3(contact.first_name), text3(contact.last_name)].filter(Boolean).join(" ");
     const detail = [name || undefined, text3(contact.phone_number)].filter(Boolean).join(", ");
     if (detail)
-      lines.push(`Contact: ${cut(detail)}`);
+      lines.push(`Contact: ${detail}`);
   }
   const place = [text3(message2.place_name), text3(message2.address)].filter(Boolean).join(", ");
   if (place)
-    lines.push(`Place: ${cut(place)}`);
+    lines.push(`Place: ${place}`);
   const location = message2.location_information;
   if (isRecord12(location) && typeof location.latitude === "number" && typeof location.longitude === "number") {
     lines.push(`Location: ${location.latitude}, ${location.longitude}`);
@@ -159689,16 +159713,16 @@ function factLines(message2, lines) {
   if (isRecord12(poll)) {
     const question = flattenTelegramText(poll.question).trim();
     if (question)
-      lines.push(`Poll: ${cut(question)}`);
+      lines.push(`Poll: ${question}`);
     if (Array.isArray(poll.answers)) {
-      for (const answer of poll.answers.slice(0, MAX_LIST_ENTRIES)) {
+      for (const answer of poll.answers) {
         if (!isRecord12(answer))
           continue;
         const label = flattenTelegramText(answer.text).trim();
         if (!label)
           continue;
         const voters = typeof answer.voters === "number" ? ` (${answer.voters} ${answer.voters === 1 ? "vote" : "votes"})` : "";
-        lines.push(`- ${cut(label)}${voters}`);
+        lines.push(`- ${label}${voters}`);
       }
     }
   }
@@ -159707,22 +159731,22 @@ function factLines(message2, lines) {
     const title = flattenTelegramText(todo.title).trim();
     const tasks = [];
     if (Array.isArray(todo.answers)) {
-      for (const task of todo.answers.slice(0, MAX_LIST_ENTRIES)) {
+      for (const task of todo.answers) {
         const label = isRecord12(task) ? flattenTelegramText(task.text).trim() : "";
         if (label)
-          tasks.push(`- ${cut(label)}`);
+          tasks.push(`- ${label}`);
       }
     }
     if (title || tasks.length > 0)
-      lines.push(title ? `To-do list: ${cut(title)}` : "To-do list:", ...tasks);
+      lines.push(title ? `To-do list: ${title}` : "To-do list:", ...tasks);
   }
   const invoice = message2.invoice_information;
   if (isRecord12(invoice)) {
-    const detail = [text3(invoice.title), text3(invoice.description)].filter(Boolean).map((part) => cut(part)).join(", ");
+    const detail = [text3(invoice.title), text3(invoice.description)].filter(Boolean).join(", ");
     if (detail)
       lines.push(`Invoice: ${detail}`);
   }
-  const game = [text3(message2.game_title), text3(message2.game_description)].filter(Boolean).map((part) => cut(part)).join(", ");
+  const game = [text3(message2.game_title), text3(message2.game_description)].filter(Boolean).join(", ");
   if (game)
     lines.push(`Game: ${game}`);
 }
@@ -159766,13 +159790,223 @@ function telegramTime(message2, field) {
   const parsed = Date.parse(date4);
   return Number.isFinite(parsed) ? { iso: new Date(parsed).toISOString(), assumedZone: false } : { assumedZone: false };
 }
-function cutText(value2, limit) {
-  if (value2.length <= limit)
-    return value2;
-  const end = value2.charCodeAt(limit - 1);
-  return value2.slice(0, end >= 55296 && end <= 56319 ? limit - 1 : limit);
+function durationWords(value2) {
+  const total = typeof value2 === "number" ? value2 : typeof value2 === "string" && /^\d+$/.test(value2.trim()) ? Number(value2) : NaN;
+  if (!Number.isFinite(total) || total < 0)
+    return;
+  const whole = Math.floor(total);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor(whole % 3600 / 60);
+  const secs = whole % 60;
+  const parts = [];
+  if (hours > 0)
+    parts.push(`${hours} ${hours === 1 ? "hour" : "hours"}`);
+  if (minutes > 0)
+    parts.push(`${minutes} ${minutes === 1 ? "minute" : "minutes"}`);
+  if (secs > 0 || parts.length === 0)
+    parts.push(`${secs} ${secs === 1 ? "second" : "seconds"}`);
+  return parts.join(" ");
 }
-var MAX_LINE_CHARS = 500, MAX_LIST_ENTRIES = 50, MEDIA_LABELS, READ_OBJECTS, LATEST_PLAUSIBLE_SECONDS = 4102444800, ZONELESS_DATE;
+function peopleOf(value2) {
+  const names = [];
+  if (typeof value2 === "string" && value2.trim() !== "")
+    names.push(value2.trim());
+  if (Array.isArray(value2)) {
+    for (const member of value2) {
+      if (typeof member === "string" && member.trim() !== "")
+        names.push(member.trim());
+      else if (isRecord12(member)) {
+        const name = text3(member.name) ?? text3(member.first_name);
+        if (name)
+          names.push(name);
+      }
+    }
+  }
+  if (names.length === 0)
+    return;
+  return names.length <= 2 ? names.join(" and ") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+function quoted(value2) {
+  const words2 = text3(value2);
+  return words2 ? `"${words2.trim()}"` : undefined;
+}
+function plural(count, one) {
+  return `${count} ${count === 1 ? one : `${one}s`}`;
+}
+function amountOf(message2) {
+  const amount = telegramScalar(message2.amount) ?? telegramScalar(message2.cost);
+  const currency = text3(message2.currency);
+  return amount ? currency ? `${amount} ${currency}` : amount : undefined;
+}
+function remainingFacts(message2, used) {
+  const facts = [];
+  for (const [key2, value2] of Object.entries(message2)) {
+    if (used.has(key2) || key2 === "id" || key2 === "type" || key2 === "date" || key2 === "date_unixtime" || key2 === "edited" || key2 === "edited_unixtime")
+      continue;
+    if (key2 === "photo" || key2 === "file")
+      continue;
+    const label = key2.replace(/_/g, " ");
+    if (typeof value2 === "string" && value2.trim() !== "")
+      facts.push(`${label}: ${value2}`);
+    else if (typeof value2 === "number" || typeof value2 === "boolean")
+      facts.push(`${label}: ${value2}`);
+    else if (Array.isArray(value2) || isRecord12(value2)) {
+      const named = peopleOf(value2);
+      facts.push(`${label}: ${named ?? JSON.stringify(value2)}`);
+    }
+  }
+  return facts;
+}
+function telegramServiceContent(message2) {
+  const action = text3(message2.action)?.trim() ?? "";
+  const actor = text3(message2.actor)?.trim();
+  const who = actor ?? "Someone";
+  const members = peopleOf(message2.members);
+  const title = quoted(message2.title);
+  const used = new Set(["action", "actor", "actor_id"]);
+  const use = (...keys) => {
+    for (const key2 of keys)
+      used.add(key2);
+  };
+  let sentence;
+  switch (action) {
+    case "create_group":
+      use("title", "members");
+      sentence = `${who} created the group${title ? ` ${title}` : ""}${members ? ` with ${members}` : ""}.`;
+      break;
+    case "create_channel":
+      use("title");
+      sentence = `${actor ? `${actor} created` : "Created"} the channel${title ? ` ${title}` : ""}.`;
+      break;
+    case "edit_group_title":
+      use("title");
+      sentence = `${who} changed the group name${title ? ` to ${title}` : ""}.`;
+      break;
+    case "edit_group_photo":
+      use("photo_file_size", "width", "height", "media_spoiler");
+      sentence = `${who} changed the group photo.`;
+      break;
+    case "delete_group_photo":
+      sentence = `${who} removed the group photo.`;
+      break;
+    case "invite_members":
+      use("members");
+      sentence = members ? `${who} added ${members}.` : `${who} added members.`;
+      break;
+    case "remove_members":
+      use("members");
+      sentence = members ? `${who} removed ${members}.` : `${who} removed members.`;
+      break;
+    case "join_group_by_link": {
+      const inviter = text3(message2.inviter);
+      use("inviter");
+      sentence = `${who} joined the group by invite link${inviter ? ` from ${inviter}` : ""}.`;
+      break;
+    }
+    case "join_group_by_request":
+      sentence = `${who} joined the group by request.`;
+      break;
+    case "migrate_to_supergroup":
+      sentence = "This group was upgraded to a supergroup.";
+      break;
+    case "migrate_from_group":
+      use("title");
+      sentence = `This supergroup was upgraded from the group${title ? ` ${title}` : ""}.`;
+      break;
+    case "pin_message": {
+      const pinned = telegramScalar(message2.message_id);
+      use("message_id", "reply_to_peer_id");
+      sentence = `${who} pinned ${pinned ? `message ${pinned}` : "a message"}.`;
+      break;
+    }
+    case "clear_history":
+      sentence = `${who} cleared the chat history.`;
+      break;
+    case "phone_call": {
+      const reason = text3(message2.discard_reason)?.trim();
+      const length = durationWords(message2.duration_seconds);
+      use("duration_seconds", "discard_reason");
+      if (reason === "missed")
+        sentence = `Missed phone call from ${who}.`;
+      else if (reason === "busy")
+        sentence = `${who} called; the line was busy.`;
+      else
+        sentence = `${who} made a phone call${length ? ` that lasted ${length}` : ""}.`;
+      break;
+    }
+    case "conference_call": {
+      const length = durationWords(message2.duration_seconds);
+      use("duration_seconds", "is_active", "is_missed");
+      sentence = message2.is_missed === true ? `Missed group call from ${who}.` : `${who} started a group call${length ? ` that lasted ${length}` : ""}${message2.is_active === true ? " and it is still going" : ""}.`;
+      break;
+    }
+    case "group_call": {
+      const length = durationWords(message2.duration);
+      use("duration");
+      sentence = `${who} started a voice chat${length ? ` that lasted ${length}` : ""}.`;
+      break;
+    }
+    case "invite_to_group_call":
+      use("members");
+      sentence = members ? `${who} invited ${members} to the voice chat.` : `${who} invited members to the voice chat.`;
+      break;
+    case "joined_telegram":
+      sentence = `${who} joined Telegram.`;
+      break;
+    case "set_messages_ttl": {
+      const period = durationWords(message2.period);
+      use("period");
+      sentence = period ? `${who} set messages to disappear after ${period}.` : `${who} changed when messages disappear.`;
+      break;
+    }
+    case "topic_created":
+      use("title");
+      sentence = `${who} created the topic${title ? ` ${title}` : ""}.`;
+      break;
+    case "topic_edit": {
+      const next = quoted(message2.new_title);
+      use("new_title");
+      sentence = `${who} edited the topic${next ? `, now called ${next}` : ""}.`;
+      break;
+    }
+    case "send_payment": {
+      const amount = amountOf(message2);
+      use("amount", "currency");
+      sentence = `${who} sent a payment${amount ? ` of ${amount}` : ""}.`;
+      break;
+    }
+    case "take_screenshot":
+      sentence = `${who} took a screenshot.`;
+      break;
+    case "information_text": {
+      const info = flattenTelegramText(message2.text).trim();
+      use("text", "text_entities");
+      sentence = info !== "" ? info : `${who}: information.`;
+      break;
+    }
+    case "boost_apply": {
+      const boosts = typeof message2.boosts === "number" ? message2.boosts : undefined;
+      use("boosts");
+      sentence = `${who} boosted the chat${boosts !== undefined ? ` with ${plural(boosts, "boost")}` : ""}.`;
+      break;
+    }
+    default: {
+      const words2 = action.replace(/_/g, " ").trim();
+      sentence = words2 !== "" ? `${who}: ${words2}.` : `${who}: a service event.`;
+    }
+  }
+  const media = telegramMediaLines(message2);
+  const lines = [sentence, ...media.lines, ...remainingFacts(message2, used)];
+  return {
+    text: lines.join(`
+`),
+    mediaFiles: media.mediaFiles,
+    attachments: media.attachments,
+    hasContent: true,
+    unsupported: false
+  };
+}
+var MEDIA_LABELS, TELEGRAM_MEDIA_KEYS, READ_OBJECTS, LATEST_PLAUSIBLE_SECONDS = 4102444800, ZONELESS_DATE;
 var init_message = __esm(() => {
   MEDIA_LABELS = {
     sticker: "Sticker",
@@ -159782,6 +160016,16 @@ var init_message = __esm(() => {
     video_file: "Video",
     audio_file: "Audio"
   };
+  TELEGRAM_MEDIA_KEYS = new Set([
+    "photo",
+    "file",
+    "media_type",
+    "file_name",
+    "sticker_emoji",
+    "performer",
+    "title",
+    "duration_seconds"
+  ]);
   READ_OBJECTS = new Set([
     "contact_information",
     "location_information",
@@ -159794,6 +160038,171 @@ var init_message = __esm(() => {
     "inline_bot_buttons"
   ]);
   ZONELESS_DATE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/;
+});
+
+// src/workers/archive-import/telegram/account.ts
+function accountTitle(section) {
+  return `Telegram account: ${section.label}`;
+}
+function scalarText(value2) {
+  if (typeof value2 === "string")
+    return value2.trim() === "" ? undefined : value2;
+  if (typeof value2 === "number" && Number.isFinite(value2))
+    return String(value2);
+  if (typeof value2 === "boolean")
+    return value2 ? "yes" : "no";
+  return;
+}
+function labelOf(key2) {
+  const words2 = key2.replace(/_/g, " ").trim();
+  return words2 === "" ? key2 : words2.charAt(0).toUpperCase() + words2.slice(1);
+}
+function unixTimeText(value2) {
+  const seconds2 = typeof value2 === "number" ? value2 : typeof value2 === "string" && /^\d{1,12}$/.test(value2.trim()) ? Number(value2) : NaN;
+  if (!Number.isFinite(seconds2) || seconds2 <= 0 || seconds2 >= LATEST_PLAUSIBLE_SECONDS2)
+    return;
+  return new Date(seconds2 * 1000).toISOString();
+}
+function appendFields(lines, indent, record5, skip, depth2) {
+  for (const [key2, value2] of Object.entries(record5)) {
+    if (skip.has(key2) || value2 === null || value2 === undefined)
+      continue;
+    if (key2.endsWith("_unixtime")) {
+      const base = key2.slice(0, -"_unixtime".length);
+      if (base !== "" && scalarText(record5[base]) !== undefined)
+        continue;
+      const iso2 = unixTimeText(value2);
+      if (iso2) {
+        lines.push(`${indent}${labelOf(base === "" ? key2 : base)}: ${iso2}`);
+        continue;
+      }
+    }
+    appendValue(lines, indent, key2, value2, depth2);
+  }
+}
+function appendValue(lines, indent, key2, value2, depth2) {
+  const label = labelOf(key2);
+  const scalar = scalarText(value2);
+  if (scalar !== undefined) {
+    lines.push(`${indent}${label}: ${scalar}`);
+    return;
+  }
+  if (Array.isArray(value2)) {
+    const items = value2.filter((item) => item !== null && item !== undefined);
+    if (items.length === 0)
+      return;
+    if (items.every((item) => scalarText(item) !== undefined)) {
+      lines.push(`${indent}${label}: ${items.map((item) => scalarText(item)).join(", ")}`);
+      return;
+    }
+    if (depth2 >= MAX_INDENT_DEPTH) {
+      lines.push(`${indent}${label}: ${JSON.stringify(items)}`);
+      return;
+    }
+    lines.push(`${indent}${label}:`);
+    for (const item of items) {
+      const plain = scalarText(item);
+      if (plain !== undefined) {
+        lines.push(`${indent}  - ${plain}`);
+      } else if (isRecord12(item)) {
+        lines.push(`${indent}  -`);
+        appendFields(lines, `${indent}    `, item, new Set, depth2 + 1);
+      } else {
+        lines.push(`${indent}  - ${JSON.stringify(item)}`);
+      }
+    }
+    return;
+  }
+  if (isRecord12(value2)) {
+    if (Object.keys(value2).length === 0)
+      return;
+    if (depth2 >= MAX_INDENT_DEPTH) {
+      lines.push(`${indent}${label}: ${JSON.stringify(value2)}`);
+      return;
+    }
+    lines.push(`${indent}${label}:`);
+    appendFields(lines, `${indent}  `, value2, new Set, depth2 + 1);
+  }
+}
+function nameOf(record5) {
+  const name = [text3(record5.first_name), text3(record5.last_name)].filter(Boolean).join(" ").trim();
+  return name === "" ? undefined : name;
+}
+function headline(section, record5) {
+  switch (section.name) {
+    case "personal_information": {
+      const name = nameOf(record5);
+      const user = text3(record5.username);
+      return `Telegram profile${name || user ? `: ${[name, user ? `(${user})` : undefined].filter(Boolean).join(" ")}` : ""}`;
+    }
+    case "contacts":
+      return `Contact: ${nameOf(record5) ?? text3(record5.phone_number) ?? "no name or number in the export"}`;
+    case "frequent_contacts": {
+      const category = text3(record5.category)?.replace(/_/g, " ");
+      return `Frequent contact: ${text3(record5.name) ?? "unnamed"}${category ? ` (${category})` : ""}`;
+    }
+    case "sessions": {
+      const app = [text3(record5.application_name), text3(record5.application_version)].filter(Boolean).join(" ");
+      const device = text3(record5.device_model) ?? text3(record5.platform);
+      return `Telegram session: ${[app || undefined, device ? `on ${device}` : undefined].filter(Boolean).join(" ") || "device not named in the export"}`;
+    }
+    case "web_sessions": {
+      const site = text3(record5.domain_name) ?? text3(record5.bot_username);
+      const browser = text3(record5.browser);
+      return `Web session: ${[site, browser].filter(Boolean).join(", ") || "site not named in the export"}`;
+    }
+    case "profile_pictures":
+      return "Profile picture";
+    case "stories":
+      return "Story";
+    case "profile_music":
+      return "Profile music";
+    default:
+      return "Other Telegram account data";
+  }
+}
+function accountEntryContent(section, value2) {
+  if (!isRecord12(value2)) {
+    const plain = scalarText(value2);
+    const lines2 = [headline(section, {})];
+    if (plain !== undefined)
+      lines2.push(plain);
+    else if (value2 !== null && value2 !== undefined)
+      appendValue(lines2, "", "value", value2, 0);
+    return { text: lines2.join(`
+`), mediaFiles: 0, attachments: [] };
+  }
+  const own3 = telegramMediaLines(value2);
+  const nested = isRecord12(value2.media) ? telegramMediaLines(value2.media) : { lines: [], mediaFiles: 0, attachments: [] };
+  const skip = new Set;
+  if (own3.lines.length > 0)
+    for (const key2 of TELEGRAM_MEDIA_KEYS)
+      skip.add(key2);
+  if (nested.lines.length > 0)
+    skip.add("media");
+  const lines = [headline(section, value2), ...own3.lines, ...nested.lines];
+  appendFields(lines, "", value2, skip, 0);
+  return {
+    text: lines.join(`
+`),
+    mediaFiles: own3.mediaFiles + nested.mediaFiles,
+    attachments: [...own3.attachments, ...nested.attachments]
+  };
+}
+var ACCOUNT_SECTIONS, MAX_INDENT_DEPTH = 8, LATEST_PLAUSIBLE_SECONDS2 = 4102444800;
+var init_account = __esm(() => {
+  init_message();
+  ACCOUNT_SECTIONS = [
+    { name: "personal_information", path: ["personal_information"], label: "profile", whole: true },
+    { name: "profile_pictures", path: ["profile_pictures"], label: "profile pictures", whole: false },
+    { name: "stories", path: ["stories"], label: "stories", whole: false },
+    { name: "profile_music", path: ["profile_music"], label: "profile music", whole: false },
+    { name: "contacts", path: ["contacts", "list"], label: "contacts", whole: false },
+    { name: "frequent_contacts", path: ["frequent_contacts", "list"], label: "frequent contacts", whole: false },
+    { name: "sessions", path: ["sessions", "list"], label: "sessions", whole: false },
+    { name: "web_sessions", path: ["web_sessions", "list"], label: "web sessions", whole: false },
+    { name: "other_data", path: ["other_data"], label: "other data", whole: true }
+  ];
 });
 
 // src/workers/archive-import/telegram/connector.ts
@@ -159884,20 +160293,15 @@ function messageOutcome2(input, event, fetchedAt) {
   if (typeof message2 !== "object" || message2 === null || Array.isArray(message2))
     return { kind: "gap", reason: TELEGRAM_FINDINGS.unreadable };
   const record5 = message2;
-  if (record5.type === "service")
-    return { kind: "skipped", reason: TELEGRAM_FINDINGS.serviceMessage };
-  const content = telegramMessageContent(record5);
+  const service = record5.type === "service";
+  const content = service ? telegramServiceContent(record5) : telegramMessageContent(record5);
   if (!content.hasContent) {
     return content.unsupported ? { kind: "gap", reason: TELEGRAM_FINDINGS.unsupported } : { kind: "skipped", reason: TELEGRAM_FINDINGS.withoutText };
   }
   const findings = [];
   if (content.unsupported)
     findings.push({ kind: TELEGRAM_FINDINGS.unsupported });
-  let body = content.text;
-  if (body.length > TELEGRAM_MAX_ITEM_TEXT_CHARS) {
-    body = cutText(body, TELEGRAM_MAX_ITEM_TEXT_CHARS);
-    findings.push({ kind: ARCHIVE_COMMON_FINDINGS.itemTruncated });
-  }
+  const body = content.text;
   if (content.mediaFiles > 0)
     findings.push({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, count: content.mediaFiles });
   const place = placeOf(event);
@@ -159909,8 +160313,10 @@ function messageOutcome2(input, event, fetchedAt) {
   const conversationId = place.section === "chat" ? "chat" : `${place.section}:${place.chatIndex}`;
   const sent = telegramTime(record5, "date");
   const edited = telegramTime(record5, "edited");
-  const sender = (typeof record5.from === "string" && record5.from.trim() !== "" ? record5.from : undefined) ?? (typeof record5.author === "string" && record5.author.trim() !== "" ? record5.author : undefined);
-  const senderId = telegramScalar(record5.from_id);
+  const named = (value2) => typeof value2 === "string" && value2.trim() !== "" ? value2 : undefined;
+  const sender = service ? named(record5.actor) : named(record5.from) ?? named(record5.author);
+  const senderId = telegramScalar(service ? record5.actor_id : record5.from_id);
+  const serviceAction = service ? named(record5.action) : undefined;
   const messageId = telegramScalar(record5.id);
   const reply = telegramScalar(record5.reply_to_message_id);
   const forwarded = typeof record5.forwarded_from === "string" && record5.forwarded_from.trim() !== "" ? record5.forwarded_from : undefined;
@@ -159938,6 +160344,8 @@ function messageOutcome2(input, event, fetchedAt) {
       ...senderId ? { senderId } : {},
       ...sent.iso ? { sentAt: sent.iso, authoredAt: sent.iso } : {},
       ...edited.iso ? { editedAt: edited.iso } : {},
+      ...service ? { serviceMessage: true } : {},
+      ...serviceAction ? { serviceAction } : {},
       ...messageId ? { telegramMessageId: messageId } : {},
       ...reply ? { replyToMessageId: reply } : {},
       ...forwarded ? { forwardSource: forwarded } : {},
@@ -159948,6 +160356,36 @@ function messageOutcome2(input, event, fetchedAt) {
     fetchedAt
   };
   return { kind: "item", item, findings, assumedZone: sent.assumedZone };
+}
+function accountItem(input, section, ordinal, value2, fetchedAt) {
+  const content = accountEntryContent(section, value2);
+  const title = accountTitle(section);
+  const conversationId = `account:${section.name}`;
+  const providerItemId = sha25610(`account\x00${section.name}\x00${ordinal}`).slice(0, 32);
+  const item = {
+    identity: {
+      family: input.format.family,
+      provider: input.format.provider,
+      accountScope: input.accountScope,
+      providerItemId,
+      providerThreadId: conversationId,
+      providerConversationId: conversationId,
+      localItemId: `${input.accountScope}:${providerItemId}`,
+      sourceVersion: sha25610(content.text).slice(0, 32)
+    },
+    mimeType: "text/plain; charset=utf-8",
+    content: { kind: "text", text: content.text },
+    metadata: Object.freeze({
+      title,
+      chat: title,
+      accountSection: section.name,
+      ...content.attachments.length > 0 ? { attachments: content.attachments } : {},
+      attachmentsNotIngested: content.mediaFiles,
+      contentHash: sha25610(content.text)
+    }),
+    fetchedAt
+  };
+  return { item, mediaFiles: content.mediaFiles };
 }
 function isDamage(error2) {
   return error2 instanceof JsonStreamError && error2.code !== "resume_invalid";
@@ -159996,14 +160434,27 @@ function createTelegramArchiveConnector(input) {
             throw archiveStopFromReaderError(error2, file.relPath);
           }
           const fetchedAt = new Date().toISOString();
-          const reportedSections = new Set(start.resume ? [sectionOfResume(start.resume)].filter((name) => name !== undefined) : []);
           let assumedZone = start.assumedZone;
           let page2 = [];
           let after;
           let unsent = false;
           let emitted = 0;
+          let whole;
+          let held;
           const report = (kind, findingClass, offset, count) => {
             input.report({ kind, class: findingClass, fileIndex: 0, offset, ...count !== undefined ? { count } : {} });
+          };
+          const finishWhole = () => {
+            const part = whole;
+            whole = undefined;
+            if (part.fields.length > 0) {
+              const built = accountItem(input, part.section, 0, Object.fromEntries(part.fields), fetchedAt);
+              page2.push(built.item);
+              if (built.mediaFiles > 0)
+                report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", part.start, built.mediaFiles);
+            }
+            after = part.last;
+            unsent = true;
           };
           for (;; ) {
             if (!input.shouldContinue()) {
@@ -160015,47 +160466,73 @@ function createTelegramArchiveConnector(input) {
               return;
             }
             let event;
-            try {
-              event = json2.next();
-            } catch (error2) {
-              if (!isDamage(error2))
-                throw archiveStopFromReaderError(error2, file.relPath);
-              report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", file.version.size);
-              break;
-            }
-            if (!event)
-              break;
-            if (event.pathIndex >= MESSAGE_PATHS.length) {
-              const section = SECTION_PATHS[event.pathIndex - MESSAGE_PATHS.length].name;
-              if (!reportedSections.has(section)) {
-                reportedSections.add(section);
-                report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
-              }
-            } else if (event.kind === "oversize") {
-              report(TELEGRAM_FINDINGS.tooLarge, "gap", event.start);
+            if (held) {
+              event = held.event;
+              held = undefined;
             } else {
-              const outcome = messageOutcome2(input, event, fetchedAt);
-              if (outcome.kind === "gap") {
-                report(outcome.reason, "gap", event.start);
-              } else if (outcome.kind === "skipped") {
-                report(outcome.reason, "skipped", event.start);
+              try {
+                event = json2.next();
+              } catch (error2) {
+                if (!isDamage(error2))
+                  throw archiveStopFromReaderError(error2, file.relPath);
+                if (whole)
+                  finishWhole();
+                report(ARCHIVE_COMMON_FINDINGS.fileDamaged, "gap", file.version.size);
+                break;
+              }
+            }
+            if (whole && (!event || event.pathIndex !== whole.pathIndex)) {
+              finishWhole();
+              held = { event };
+            } else {
+              if (!event)
+                break;
+              if (event.pathIndex >= MESSAGE_PATHS.length) {
+                const section = ACCOUNT_SECTIONS[event.pathIndex - MESSAGE_PATHS.length];
+                if (section.whole) {
+                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], last: event.resume };
+                  whole.last = event.resume;
+                  if (event.kind === "oversize")
+                    report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
+                  else
+                    whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
+                  continue;
+                }
+                if (event.kind === "oversize") {
+                  report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, "gap", event.start);
+                } else {
+                  const built = accountItem(input, section, Number(event.path[event.path.length - 1]), event.value, fetchedAt);
+                  page2.push(built.item);
+                  if (built.mediaFiles > 0)
+                    report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, "gap", event.start, built.mediaFiles);
+                }
+              } else if (event.kind === "oversize") {
+                report(TELEGRAM_FINDINGS.tooLarge, "gap", event.start);
               } else {
-                page2.push(outcome.item);
-                for (const finding of outcome.findings)
-                  report(finding.kind, "gap", event.start, finding.count);
-                if (outcome.assumedZone && !assumedZone) {
-                  assumedZone = true;
-                  report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, "gap", event.start);
+                const outcome = messageOutcome2(input, event, fetchedAt);
+                if (outcome.kind === "gap") {
+                  report(outcome.reason, "gap", event.start);
+                } else if (outcome.kind === "skipped") {
+                  report(outcome.reason, "skipped", event.start);
+                } else {
+                  page2.push(outcome.item);
+                  for (const finding of outcome.findings)
+                    report(finding.kind, "gap", event.start, finding.count);
+                  if (outcome.assumedZone && !assumedZone) {
+                    assumedZone = true;
+                    report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, "gap", event.start);
+                  }
                 }
               }
+              after = event.resume;
+              unsent = true;
             }
-            after = event.resume;
-            unsent = true;
             const budgetLeft = limit - emitted;
             if (page2.length >= Math.min(pageSizeDefault, budgetLeft) || json2.position - origin >= byteBudget) {
+              const point = after;
               current2();
-              input.reportPosition?.({ fileIndex: 0, offset: after.offset });
-              yield { items: page2, nextCursor: cursorAt2(input, after, assumedZone), done: false };
+              input.reportPosition?.({ fileIndex: 0, offset: point.offset });
+              yield { items: page2, nextCursor: cursorAt2(input, point, assumedZone), done: false };
               emitted += page2.length;
               page2 = [];
               unsent = false;
@@ -160091,11 +160568,12 @@ function createTelegramArchiveConnector(input) {
 function registerTelegramArchiveConnector() {
   registerArchiveFormatConnector("telegram_json", createTelegramArchiveConnector);
 }
-var TELEGRAM_CURSOR_PREFIX = "tg1:", TELEGRAM_DEFAULT_PAGE_SIZE = 200, TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_ITEM_TEXT_CHARS = 1e6, TELEGRAM_MAX_MESSAGE_BYTES, TELEGRAM_FINDINGS, MESSAGE_PATHS, SECTION_PATHS, ITEM_PATHS, CHAT_TYPE_KINDS, CHAT_TYPE_TITLES, SECTION_ROOTS, LISTED_SECTIONS;
+var TELEGRAM_CURSOR_PREFIX = "tg1:", TELEGRAM_DEFAULT_PAGE_SIZE = 200, TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING, TELEGRAM_MAX_MESSAGE_BYTES, TELEGRAM_FINDINGS, MESSAGE_PATHS, ITEM_PATHS, CHAT_TYPE_KINDS, CHAT_TYPE_TITLES, SECTION_ROOTS, LISTED_SECTIONS;
 var init_connector9 = __esm(() => {
   init_archive_formats();
   init_byte_source();
   init_json_stream();
+  init_account();
   init_message();
   TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
   TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
@@ -160111,18 +160589,7 @@ var init_connector9 = __esm(() => {
     ["left_chats", "list", "*", "messages"],
     ["messages"]
   ];
-  SECTION_PATHS = [
-    { path: ["personal_information"], name: "personal_information" },
-    { path: ["profile_pictures"], name: "profile_pictures" },
-    { path: ["stories"], name: "stories" },
-    { path: ["profile_music"], name: "profile_music" },
-    { path: ["contacts", "list"], name: "contacts" },
-    { path: ["frequent_contacts", "list"], name: "frequent_contacts" },
-    { path: ["sessions", "list"], name: "sessions" },
-    { path: ["web_sessions", "list"], name: "web_sessions" },
-    { path: ["other_data"], name: "other_data" }
-  ];
-  ITEM_PATHS = [...MESSAGE_PATHS, ...SECTION_PATHS.map((section) => section.path)];
+  ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
   CHAT_TYPE_KINDS = {
     saved_messages: "direct",
     replies: "direct",
@@ -160140,8 +160607,8 @@ var init_connector9 = __esm(() => {
     replies: "Replies",
     verification_codes: "Telegram verification codes"
   };
-  SECTION_ROOTS = new Set(SECTION_PATHS.map((section) => section.path[0]));
-  LISTED_SECTIONS = new Set(SECTION_PATHS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+  SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
+  LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
 });
 
 // src/workers/archive-import/format-connectors.ts
@@ -160390,7 +160857,7 @@ function itemsPhrase2(family, n) {
   return n === 1 ? nouns.one : nouns.many.replace("{n}", String(n));
 }
 function kindLine(kinds, entry) {
-  const words2 = kinds[entry.kind] ?? kinds.other;
+  const words2 = Object.prototype.hasOwnProperty.call(kinds, entry.kind) ? kinds[entry.kind] : kinds.other;
   const gap = entry.count === 1 ? words2.one : words2.many.replace("{n}", String(entry.count));
   return {
     kind: entry.kind,
@@ -160431,6 +160898,7 @@ function summaryOf2(entry, stopped) {
 }
 function archiveOf(entry) {
   const copy = DASHBOARD_ARCHIVE_COPY;
+  const findings = [...entry.gaps, ...entry.skipped];
   let stopped;
   if (entry.status === "stopped") {
     const words2 = copy.stopped[entry.stop?.code ?? ""] ?? copy.stopped.other;
@@ -160460,8 +160928,8 @@ function archiveOf(entry) {
     started_at: entry.startedAt,
     ...entry.importedAt ? { imported_at: entry.importedAt } : {},
     ...stopped ? { stopped } : {},
-    not_read: entry.gaps.map((gap) => kindLine(copy.gaps, gap)),
-    left_out: entry.skipped.map((gap) => kindLine(copy.gaps, gap)),
+    not_imported: findings.filter((gap) => archiveFindingList(gap.kind) === "not_imported").map((gap) => kindLine(copy.gaps, gap)),
+    how_read: findings.filter((gap) => archiveFindingList(gap.kind) === "how_read").map((gap) => kindLine(copy.gaps, gap)),
     summary: summaryOf2(entry, stopped)
   };
 }
@@ -169332,7 +169800,7 @@ function searchToolResult(raw, options = {}) {
   const lines = [];
   if (evidence.length === 0) {
     if (!panelActive) {
-      lines.push(options.noSourcesConnected ? NO_SOURCES_CONNECTED_TEXT : `Olympus found no Public or Personal evidence for this question in ${plural(coverage.searchedSources, "searched source")}.`);
+      lines.push(options.noSourcesConnected ? NO_SOURCES_CONNECTED_TEXT : `Olympus found no Public or Personal evidence for this question in ${plural2(coverage.searchedSources, "searched source")}.`);
     }
   } else {
     lines.push(panelActive ? PANEL_SEARCH_INSTRUCTION : SEARCH_INSTRUCTION, "");
@@ -169363,7 +169831,7 @@ function terseCoverageLine(coverage) {
   ].filter(Boolean);
   return parts.length > 0 ? `Coverage, to mention only if the user asks why something is missing or the answer depends on it: ${parts.join(", ")}.` : undefined;
 }
-function plural(count2, noun) {
+function plural2(count2, noun) {
   return `${count2} ${noun}${count2 === 1 ? "" : "s"}`;
 }
 function copyPrivateMatch(match) {

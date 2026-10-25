@@ -14,29 +14,38 @@
  *   stream reader, over the message lists. Telegram writes a control character
  *   as `\x0B`, which is not JSON; `json-repair.ts` makes those spaces, byte for
  *   byte, so offsets stay file offsets.
- * - Items: one per message. Thread = the chat, keyed by its place in the file
- *   (section and index, stable for these files): a chat's bare `id` is not
- *   unique across users, groups and channels. Text = the message's words with
- *   links kept, then a line for each picture, file, contact, place, poll,
- *   to-do list, invoice or game it carries. `authoredAt` = `date_unixtime`, else the zone-less `date` read in
- *   this computer's zone (`time_zone_assumed`, counted once).
- * - Left out, counted: service messages (joins, calls, pins) and messages with
- *   nothing to read are `skipped`; media files are named in the text and
- *   counted as `media_not_imported` (the files are never opened), a file the
- *   export itself left out too; each part of the account export that is not
- *   messages is one `section_not_imported`; a message that carries a kind of
- *   content this does not read (a giveaway, a rich message, paid media) is
- *   `message_content_unsupported`, never "nothing to read".
- * - Bounds: item text over TELEGRAM_MAX_ITEM_TEXT_CHARS is cut and counted
- *   (`item_truncated`); a message too large to build is `message_too_large`.
- *   A file that is not whole JSON (cut short by an interrupted export) imports
- *   what came before and counts the file as damaged.
+ * - Items: one per message, service messages included (a join, a call, a pin
+ *   is a plain sentence naming who did it). Thread = the chat, keyed by its
+ *   place in the file (section and index, stable for these files): a chat's
+ *   bare `id` is not unique across users, groups and channels. Text = the
+ *   message's words with links kept, then a line for each picture, file,
+ *   contact, place, poll, to-do list, invoice or game it carries.
+ *   `authoredAt` = `date_unixtime`, else the zone-less `date` read in this
+ *   computer's zone (`time_zone_assumed`, counted once).
+ * - The parts of a whole-account export that are not chats (profile, contacts,
+ *   frequent contacts, sessions, web sessions, profile pictures, stories,
+ *   profile music, other data) are items too: one per entry (a contact, a
+ *   session), the profile and the other data one each, in a thread of their own
+ *   per part ("Telegram account: contacts"), with the entry's fields as text
+ *   (`account.ts`). They have no `authoredAt`: their dates are in the text.
+ * - Left out, counted: messages with nothing to read are `skipped`; media
+ *   files are named in the text and counted as `media_not_imported` (the files
+ *   are never opened), a file the export itself left out too; a message that
+ *   carries a kind of content this does not read (a giveaway, a rich message,
+ *   paid media) is `message_content_unsupported`, never "nothing to read"; an
+ *   entry of the account export too large to build is `section_not_imported`.
+ * - Bounds: nothing is cut. A message (or entry) whose JSON is over
+ *   TELEGRAM_MAX_MESSAGE_BYTES is not built and is `message_too_large`. A file
+ *   that is not whole JSON (cut short by an interrupted export) imports what
+ *   came before and counts the file as damaged.
  * - Resume point: `tg1:<manifest>:<assumed>:<json resume point>`, the JSON
  *   reader's point after a message, or after an entry of a part that is not
  *   messages (section, chat index, message ordinal, byte offset) in a file of
  *   exactly this manifest. Any other manifest, or a point that is not after one
- *   of these, stops the import. The byte budget of a pass counts the parts that
- *   are not messages too, so a long one does not run in a single pass.
+ *   of these, stops the import. A part that is one object (the profile, other
+ *   data) is one item, so a point is placed after the whole of it, never inside.
+ *   The byte budget of a pass counts the parts that are not messages too, so a
+ *   long one does not run in a single pass.
  * - Live Telegram capture is a different provider (`telegram`) in different
  *   stores; nothing here reads or writes it.
  */
@@ -67,20 +76,20 @@ import {
   type JsonStreamEvent,
 } from '../json-stream.ts';
 import { telegramJsonSource } from './json-repair.ts';
-import { cutText, telegramMessageContent, telegramScalar, telegramTime } from './message.ts';
+import { ACCOUNT_SECTIONS, accountEntryContent, accountTitle, type AccountSection } from './account.ts';
+import { telegramMessageContent, telegramScalar, telegramServiceContent, telegramTime } from './message.ts';
 
 export const TELEGRAM_CURSOR_PREFIX = 'tg1:';
 export const TELEGRAM_DEFAULT_PAGE_SIZE = 200;
 export const TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
-/** Text kept per message; longer text is cut and counted as a gap. */
-export const TELEGRAM_MAX_ITEM_TEXT_CHARS = 1_000_000;
-/** A message whose JSON is longer than this is not built (it is counted as too large to read). */
+/** A message (or entry of the account export) whose JSON is longer than this is not built: the reader holds one whole, so this is a memory bound. It is counted as too large to read. */
 export const TELEGRAM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 
 export const TELEGRAM_FINDINGS = {
   tooLarge: 'message_too_large',
   unreadable: 'message_unreadable',
   unsupported: 'message_content_unsupported',
+  /** Old records only: service messages used to be left out. They are items now. */
   serviceMessage: 'service_message',
   withoutText: 'message_without_text',
 } as const;
@@ -91,18 +100,7 @@ const MESSAGE_PATHS: readonly (readonly (string | number)[])[] = [
   ['left_chats', 'list', '*', 'messages'],
   ['messages'],
 ];
-const SECTION_PATHS: ReadonlyArray<{ path: readonly string[]; name: string }> = [
-  { path: ['personal_information'], name: 'personal_information' },
-  { path: ['profile_pictures'], name: 'profile_pictures' },
-  { path: ['stories'], name: 'stories' },
-  { path: ['profile_music'], name: 'profile_music' },
-  { path: ['contacts', 'list'], name: 'contacts' },
-  { path: ['frequent_contacts', 'list'], name: 'frequent_contacts' },
-  { path: ['sessions', 'list'], name: 'sessions' },
-  { path: ['web_sessions', 'list'], name: 'web_sessions' },
-  { path: ['other_data'], name: 'other_data' },
-];
-const ITEM_PATHS = [...MESSAGE_PATHS, ...SECTION_PATHS.map((section) => section.path)];
+const ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
 
 const CHAT_TYPE_KINDS: Readonly<Record<string, SourceConversationKind>> = {
   saved_messages: 'direct',
@@ -155,9 +153,9 @@ function doneCursor(input: ArchiveConnectorInput): string {
   return `${TELEGRAM_CURSOR_PREFIX}${manifestTag(input)}:done`;
 }
 
-const SECTION_ROOTS: ReadonlySet<string> = new Set(SECTION_PATHS.map((section) => section.path[0]!));
+const SECTION_ROOTS: ReadonlySet<string> = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]!));
 /** Parts of the account export whose entries are in a `list` of the part. */
-const LISTED_SECTIONS: ReadonlySet<string> = new Set(SECTION_PATHS.filter((section) => section.path.length === 2).map((section) => section.path[0]!));
+const LISTED_SECTIONS: ReadonlySet<string> = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]!));
 
 function isIndex(value: unknown): boolean {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -253,8 +251,9 @@ function messageOutcome(
   const message = event.value;
   if (typeof message !== 'object' || message === null || Array.isArray(message)) return { kind: 'gap', reason: TELEGRAM_FINDINGS.unreadable };
   const record = message as Record<string, unknown>;
-  if (record.type === 'service') return { kind: 'skipped', reason: TELEGRAM_FINDINGS.serviceMessage };
-  const content = telegramMessageContent(record);
+  // A join, a call or a pin says something too: it is read as a plain sentence naming who did it.
+  const service = record.type === 'service';
+  const content = service ? telegramServiceContent(record) : telegramMessageContent(record);
   if (!content.hasContent) {
     // Nothing read is not nothing there: a kind of content this reader does not know is counted as such.
     return content.unsupported
@@ -264,11 +263,7 @@ function messageOutcome(
 
   const findings: Array<{ kind: string; count?: number }> = [];
   if (content.unsupported) findings.push({ kind: TELEGRAM_FINDINGS.unsupported });
-  let body = content.text;
-  if (body.length > TELEGRAM_MAX_ITEM_TEXT_CHARS) {
-    body = cutText(body, TELEGRAM_MAX_ITEM_TEXT_CHARS);
-    findings.push({ kind: ARCHIVE_COMMON_FINDINGS.itemTruncated });
-  }
+  const body = content.text;
   if (content.mediaFiles > 0) findings.push({ kind: ARCHIVE_COMMON_FINDINGS.mediaNotImported, count: content.mediaFiles });
 
   const place = placeOf(event);
@@ -281,9 +276,10 @@ function messageOutcome(
 
   const sent = telegramTime(record, 'date');
   const edited = telegramTime(record, 'edited');
-  const sender = (typeof record.from === 'string' && record.from.trim() !== '' ? record.from : undefined)
-    ?? (typeof record.author === 'string' && record.author.trim() !== '' ? record.author : undefined);
-  const senderId = telegramScalar(record.from_id);
+  const named = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() !== '' ? value : undefined);
+  const sender = service ? named(record.actor) : named(record.from) ?? named(record.author);
+  const senderId = telegramScalar(service ? record.actor_id : record.from_id);
+  const serviceAction = service ? named(record.action) : undefined;
   const messageId = telegramScalar(record.id);
   const reply = telegramScalar(record.reply_to_message_id);
   const forwarded = typeof record.forwarded_from === 'string' && record.forwarded_from.trim() !== '' ? record.forwarded_from : undefined;
@@ -312,6 +308,8 @@ function messageOutcome(
       ...(senderId ? { senderId } : {}),
       ...(sent.iso ? { sentAt: sent.iso, authoredAt: sent.iso } : {}),
       ...(edited.iso ? { editedAt: edited.iso } : {}),
+      ...(service ? { serviceMessage: true } : {}),
+      ...(serviceAction ? { serviceAction } : {}),
       ...(messageId ? { telegramMessageId: messageId } : {}),
       ...(reply ? { replyToMessageId: reply } : {}),
       ...(forwarded ? { forwardSource: forwarded } : {}),
@@ -322,6 +320,44 @@ function messageOutcome(
     fetchedAt,
   };
   return { kind: 'item', item, findings, assumedZone: sent.assumedZone };
+}
+
+/** The item for one entry of a part of the account export (or for the whole of a part that is one object). */
+function accountItem(
+  input: ArchiveConnectorInput,
+  section: AccountSection,
+  ordinal: number,
+  value: unknown,
+  fetchedAt: string,
+): { item: RawItem; mediaFiles: number } {
+  const content = accountEntryContent(section, value);
+  const title = accountTitle(section);
+  const conversationId = `account:${section.name}`;
+  const providerItemId = sha256(`account\u0000${section.name}\u0000${ordinal}`).slice(0, 32);
+  const item: RawItem = {
+    identity: {
+      family: input.format.family,
+      provider: input.format.provider,
+      accountScope: input.accountScope,
+      providerItemId,
+      providerThreadId: conversationId,
+      providerConversationId: conversationId,
+      localItemId: `${input.accountScope}:${providerItemId}`,
+      sourceVersion: sha256(content.text).slice(0, 32),
+    },
+    mimeType: 'text/plain; charset=utf-8',
+    content: { kind: 'text', text: content.text },
+    metadata: Object.freeze({
+      title,
+      chat: title,
+      accountSection: section.name,
+      ...(content.attachments.length > 0 ? { attachments: content.attachments } : {}),
+      attachmentsNotIngested: content.mediaFiles,
+      contentHash: sha256(content.text),
+    }),
+    fetchedAt,
+  };
+  return { item, mediaFiles: content.mediaFiles };
 }
 
 /** Why a JSON file is not whole: damaged or cut short (a file the reader could read to its end, but no further). */
@@ -375,16 +411,31 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
             throw archiveStopFromReaderError(error, file.relPath);
           }
           const fetchedAt = new Date().toISOString();
-          // A pass that starts inside a part of the account export has already said it.
-          const reportedSections = new Set<string>(start.resume ? [sectionOfResume(start.resume)].filter((name): name is string => name !== undefined) : []);
           let assumedZone = start.assumedZone;
           let page: RawItem[] = [];
           // The resume point after the last message read, and whether a message was read since a page went out.
           let after: JsonResumePoint | undefined;
           let unsent = false;
           let emitted = 0;
+          // The fields of a part that is one object (the profile, other data) wait here until it ends: it is one item,
+          // so no resume point is placed inside it.
+          let whole: { section: AccountSection; pathIndex: number; start: number; fields: Array<[string, unknown]>; last: JsonResumePoint } | undefined;
+          // An event read while the part before it was being finished, handled on the next turn.
+          let held: { event: JsonStreamEvent | undefined } | undefined;
           const report = (kind: string, findingClass: 'gap' | 'skipped', offset: number, count?: number): void => {
             input.report({ kind, class: findingClass, fileIndex: 0, offset, ...(count !== undefined ? { count } : {}) });
+          };
+          // The part that is one object ends here: its item goes out, and the point after its last field is the resume point.
+          const finishWhole = (): void => {
+            const part = whole!;
+            whole = undefined;
+            if (part.fields.length > 0) {
+              const built = accountItem(input, part.section, 0, Object.fromEntries(part.fields), fetchedAt);
+              page.push(built.item);
+              if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', part.start, built.mediaFiles);
+            }
+            after = part.last;
+            unsent = true;
           };
           for (;;) {
             if (!input.shouldContinue()) {
@@ -396,46 +447,68 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
               return;
             }
             let event: JsonStreamEvent | undefined;
-            try {
-              event = json.next();
-            } catch (error) {
-              if (!isDamage(error)) throw archiveStopFromReaderError(error, file.relPath);
-              // The reader returns every message it had finished before the error; the file is counted as damaged at its end.
-              report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', file.version.size);
-              break;
-            }
-            if (!event) break;
-            if (event.pathIndex >= MESSAGE_PATHS.length) {
-              // A part of the account export that is not messages: said once, where it starts.
-              const section = SECTION_PATHS[event.pathIndex - MESSAGE_PATHS.length]!.name;
-              if (!reportedSections.has(section)) {
-                reportedSections.add(section);
-                report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
-              }
-            } else if (event.kind === 'oversize') {
-              report(TELEGRAM_FINDINGS.tooLarge, 'gap', event.start);
+            if (held) {
+              event = held.event;
+              held = undefined;
             } else {
-              const outcome = messageOutcome(input, event, fetchedAt);
-              if (outcome.kind === 'gap') {
-                report(outcome.reason, 'gap', event.start);
-              } else if (outcome.kind === 'skipped') {
-                report(outcome.reason, 'skipped', event.start);
+              try {
+                event = json.next();
+              } catch (error) {
+                if (!isDamage(error)) throw archiveStopFromReaderError(error, file.relPath);
+                // The reader returns every message it had finished before the error; the file is counted as damaged at its end.
+                if (whole) finishWhole();
+                report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', file.version.size);
+                break;
+              }
+            }
+            if (whole && (!event || event.pathIndex !== whole.pathIndex)) {
+              finishWhole();
+              held = { event };
+            } else {
+              if (!event) break;
+              if (event.pathIndex >= MESSAGE_PATHS.length) {
+                // A part of the account export that is not chats.
+                const section = ACCOUNT_SECTIONS[event.pathIndex - MESSAGE_PATHS.length]!;
+                if (section.whole) {
+                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], last: event.resume };
+                  whole.last = event.resume;
+                  if (event.kind === 'oversize') report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
+                  else whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
+                  continue;
+                }
+                if (event.kind === 'oversize') {
+                  report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
+                } else {
+                  const built = accountItem(input, section, Number(event.path[event.path.length - 1]), event.value, fetchedAt);
+                  page.push(built.item);
+                  if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', event.start, built.mediaFiles);
+                }
+              } else if (event.kind === 'oversize') {
+                report(TELEGRAM_FINDINGS.tooLarge, 'gap', event.start);
               } else {
-                page.push(outcome.item);
-                for (const finding of outcome.findings) report(finding.kind, 'gap', event.start, finding.count);
-                if (outcome.assumedZone && !assumedZone) {
-                  assumedZone = true;
-                  report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, 'gap', event.start);
+                const outcome = messageOutcome(input, event, fetchedAt);
+                if (outcome.kind === 'gap') {
+                  report(outcome.reason, 'gap', event.start);
+                } else if (outcome.kind === 'skipped') {
+                  report(outcome.reason, 'skipped', event.start);
+                } else {
+                  page.push(outcome.item);
+                  for (const finding of outcome.findings) report(finding.kind, 'gap', event.start, finding.count);
+                  if (outcome.assumedZone && !assumedZone) {
+                    assumedZone = true;
+                    report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, 'gap', event.start);
+                  }
                 }
               }
+              after = event.resume;
+              unsent = true;
             }
-            after = event.resume;
-            unsent = true;
             const budgetLeft = limit - emitted;
             if (page.length >= Math.min(pageSizeDefault, budgetLeft) || json.position - origin >= byteBudget) {
+              const point = after!;
               current();
-              input.reportPosition?.({ fileIndex: 0, offset: after.offset });
-              yield { items: page, nextCursor: cursorAt(input, after, assumedZone), done: false };
+              input.reportPosition?.({ fileIndex: 0, offset: point.offset });
+              yield { items: page, nextCursor: cursorAt(input, point, assumedZone), done: false };
               emitted += page.length;
               page = [];
               unsent = false;
