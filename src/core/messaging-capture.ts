@@ -6,17 +6,20 @@ import { fileURLToPath } from 'node:url';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
 import {
   TELEGRAM_SOURCE_ID,
+  WHATSAPP_BRIDGE_LOCK_NAME,
   WHATSAPP_SOURCE_ID,
   accountRawPath,
   accountSessionPath,
   folderCaptureDirs,
   folderCaptureEnv,
   folderCaptureEnvRemoved,
+  whatsappStateDirFromValue,
   type LayoutAccount,
 } from './olympus-layout.ts';
 import { captureGrantPathBeside, readCaptureGrantFile } from './messaging-capture-grant-file.ts';
-import { placedAccount } from './source-placement.ts';
+import { accountMovePending, placedAccount } from './source-placement.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry } from './source-registry.ts';
+import { tryHoldFileFlock } from './data-owner-lock.ts';
 import { recordAccountPlacement } from './source-storage.ts';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import type { MessagingPairingConnectedResult, MessagingProducerLaunch, MessagingPairingSource } from './messaging-pairing.ts';
@@ -156,6 +159,8 @@ export type SpawnCapture = (input: {
   executable: string;
   args: readonly string[];
   env: Record<string, string>;
+  /** Descriptors the child inherits from 3 on (the bridge's session lock). */
+  inheritFds?: readonly number[];
 }) => CaptureChild;
 
 export interface MessagingCaptureStatus {
@@ -178,7 +183,9 @@ export type MessagingCaptureReason =
   | 'secret_missing'
   | 'start_failed'
   | 'helper_exited'
-  | 'restarting';
+  | 'restarting'
+  | 'helper_running'
+  | 'account_moving';
 
 /** Whether the helper process is alive now, and how often it exited on its own lately. */
 export interface MessagingCaptureLiveness {
@@ -290,6 +297,11 @@ export class MessagingCaptureSupervisor {
     // Placed before the child creates its first file: it never touches the registry.
     const layoutEnv = definedEnv({ ...process.env, ...(this.options.baseEnv ?? {}) });
     const account = placeAccount(grant, layoutEnv);
+    // Part way through a move into its folder: its files are in two places until a boot finishes or undoes it.
+    if (accountMovePending(account.source_id, layoutEnv)) {
+      await this.stop();
+      return { source: grant.source, state: 'blocked', reason: 'account_moving' };
+    }
     if (account.layout === 'legacy' && !grant.sessionPath) {
       await this.stop();
       return { source: grant.source, state: 'blocked', reason: 'grant_invalid' };
@@ -323,7 +335,19 @@ export class MessagingCaptureSupervisor {
     if (generation !== this.generation - 1) return { source: grant.source, state: 'stopped', reason: 'grant_missing' };
     const spawn = this.options.spawn ?? spawnCapture;
     const launch = resolveCurrentLaunch(this.options, grant.source);
-    const child = spawn({ executable: launch.executable, args: launch.args, env: childEnv });
+    // A WhatsApp bridge holds its session's lock for its whole life: taken here and handed to it as
+    // an inherited descriptor. Another bridge on the session (one left running) keeps this one from starting.
+    const lock = grant.source === 'whatsapp' ? tryHoldFileFlock(join(whatsappStateDirOf(grant, account, layoutEnv), WHATSAPP_BRIDGE_LOCK_NAME)) : undefined;
+    if (grant.source === 'whatsapp' && !lock) return { source: grant.source, state: 'blocked', reason: 'helper_running' };
+    let child: CaptureChild;
+    try {
+      child = spawn({ executable: launch.executable, args: launch.args, env: childEnv, ...(lock ? { inheritFds: [lock.fd] } : {}) });
+    } catch (error) {
+      lock?.release();
+      throw error;
+    }
+    // The child holds the lock now; this process's descriptor goes, so the lock ends when the child does.
+    lock?.handOff();
     this.child = child;
     this.fingerprint = nextFingerprint;
     this.startedAt = (this.options.now ?? Date.now)();
@@ -435,6 +459,11 @@ function hasRegistryEntry(sourceId: string, env: Record<string, string>): boolea
   }
 }
 
+/** The bridge's state folder: the account folder's `raw/whatsapp`, or the one the legacy grant was paired at. */
+function whatsappStateDirOf(grant: MessagingCaptureGrant, account: LayoutAccount, env: Record<string, string>): string {
+  return account.layout === 'folder' ? accountRawPath(account, 'whatsapp', env) : whatsappStateDirFromValue(grant.sessionPath ?? '');
+}
+
 function sessionExists(grant: MessagingCaptureGrant, account: LayoutAccount, env: Record<string, string>): boolean {
   if (account.layout === 'folder') {
     return grant.source === 'telegram'
@@ -447,12 +476,10 @@ function sessionExists(grant: MessagingCaptureGrant, account: LayoutAccount, env
     : existsSync(join(sessionPath, 'session.db'));
 }
 
-function spawnCapture(input: { executable: string; args: readonly string[]; env: Record<string, string> }): CaptureChild {
+function spawnCapture(input: { executable: string; args: readonly string[]; env: Record<string, string>; inheritFds?: readonly number[] }): CaptureChild {
   const child = Bun.spawn([input.executable, ...input.args], {
     env: input.env,
-    stdin: 'ignore',
-    stdout: 'ignore',
-    stderr: 'ignore',
+    stdio: ['ignore', 'ignore', 'ignore', ...(input.inheritFds ?? [])],
   });
   return { exited: child.exited, kill: (signal) => child.kill(signal) };
 }

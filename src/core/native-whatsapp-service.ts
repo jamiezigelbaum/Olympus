@@ -9,7 +9,7 @@ import {
   accountRawPath,
   legacyWhatsAppServiceStateDir,
 } from './olympus-layout.ts';
-import { placedAccount } from './source-placement.ts';
+import { accountMovePending, placedAccount } from './source-placement.ts';
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
@@ -157,6 +157,11 @@ function baseEnvironment(): NodeJS.ProcessEnv {
  * registry and is refused rather than left to point the bridge at another session.
  */
 function captureStateDir(configured: string | undefined, env: NodeJS.ProcessEnv, layoutEnv: NodeJS.ProcessEnv): string {
+  if (accountMovePending(WHATSAPP_SOURCE_ID, layoutEnv)) {
+    throw new NativeProcessConfigurationError(
+      'Olympus WhatsApp capture service: this account is part way through a move into its account folder that Olympus could not finish, so capture waits; its row in Needs you says why.',
+    );
+  }
   const account = placedAccount(WHATSAPP_SOURCE_ID, layoutEnv);
   if (account.layout !== 'folder') return configured ?? legacyWhatsAppServiceStateDir(env);
   const folder = accountRawPath(account, 'whatsapp', layoutEnv);

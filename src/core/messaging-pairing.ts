@@ -1,7 +1,7 @@
 import { ensurePrivateRootDirectorySync, ensurePrivateDirectoryTreeSync } from './atomic-file.ts';
 import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { spawn as spawnChild } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -11,7 +11,9 @@ import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
 import { FileLeaseBusyError, withFileLease } from './file-lease.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
-import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
+import { TELEGRAM_SOURCE_ID, WHATSAPP_BRIDGE_LOCK_NAME, WHATSAPP_SOURCE_ID, type LayoutAccountLayout, type LayoutEnv } from './olympus-layout.ts';
+import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAccountMovePending } from './source-registry.ts';
+import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
@@ -83,6 +85,8 @@ export interface PairingCommandRequest {
   env: Record<string, string | undefined>;
   signal?: AbortSignal;
   onStdoutLine?: (line: string) => void | Promise<void>;
+  /** Descriptors the helper inherits after its private pipe (fd 3): the WhatsApp bridge's session lock. */
+  inheritFds?: number[];
 }
 
 export interface PairingCommandResult {
@@ -170,6 +174,8 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
   // one login, or each put its own in its place (PR #530 review). The kernel
   // drops the lock the moment its holder dies.
   const pairing = async (): Promise<MessagingPairingResult> => {
+    // Under the Telegram pairing lease now, which a boot that moves the account waits for: it must not have moved already.
+    if (options.source === 'telegram') assertPairingPlacement(options.source, layout, registryEnv);
     // A Telegram history that names its account (docs/design/source-storage.md,
     // "One account, live and imported") takes a login from that account only. The
     // pairing then signs in on a copy of the account's login made for it alone,
@@ -201,11 +207,15 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
 
     let result: PairingCommandResult;
     let receipt: PairingReceipt;
+    // The bridge's session lock (core/olympus-layout.ts, WHATSAPP_BRIDGE_LOCK_NAME): held while it pairs, and
+    // handed to it, so a capture bridge on this session, or the boot migration, never runs beside it.
+    const bridgeLock = options.source === 'whatsapp' ? takeWhatsAppBridgeLock(sessionPath, () => assertPairingPlacement(options.source, layout, registryEnv)) : undefined;
     try {
     result = await runner({
       executable: command[0]!,
       args: command.slice(1),
       env: commandEnv,
+      ...(bridgeLock ? { inheritFds: [bridgeLock.fd] } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       onStdoutLine: async (line) => {
         const event = safeJsonObject(line);
@@ -245,11 +255,22 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
       // Whatever stopped it, the login made aside is no one's.
       if (aside) removeTelegramLogin(aside.base);
       throw error;
+    } finally {
+      // The bridge has exited: nothing else holds its descriptor.
+      bridgeLock?.release();
     }
     const chats = options.source === 'telegram' ? parseTelegramDialogs(receipt.dialogs) : [];
     const accountProof = proofForReceipt(options.source, receipt);
     // What a later refusal removes: a login this pairing made, never one that was there before it.
     const madeSession = sessionExisted ? undefined : sessionPath;
+    // Still where it was settled, now that the helper is done and before anything is recorded: a boot
+    // that moved the account meanwhile would leave this login behind, at a place nothing names.
+    try {
+      assertPairingPlacement(options.source, layout, registryEnv);
+    } catch (error) {
+      if (madeSession && options.source === 'telegram') removeTelegramLogin(madeSession);
+      throw error;
+    }
     const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
       accountProof,
@@ -331,6 +352,55 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
       throw new Error('Another Telegram pairing is running on this computer. Finish or cancel it, then re-run olympus connect telegram --pair in your private terminal.');
     }
     throw error;
+  }
+}
+
+/**
+ * The WhatsApp bridge's session lock in its state folder, or a refusal when a
+ * bridge already runs on this session. Once it is held, `stillPlaced` checks
+ * that the account was not moved meanwhile; a refusal then gives back the lock
+ * and the folder this call made, so nothing is left at a place the account
+ * left (a boot that moves it holds the lock in the folder it moves).
+ */
+function takeWhatsAppBridgeLock(stateDir: string, stillPlaced: () => void): HeldFileFlock {
+  const made = mkdirSync(stateDir, { recursive: true, mode: 0o700 }) !== undefined;
+  const lockPath = join(stateDir, WHATSAPP_BRIDGE_LOCK_NAME);
+  const lock = tryHoldFileFlock(lockPath);
+  if (!lock) {
+    throw new Error('A WhatsApp bridge is already running on this session: WhatsApp capture, or another pairing. Finish or cancel the other pairing; a WhatsApp account that is paired and capturing does not need pairing again.');
+  }
+  try {
+    stillPlaced();
+  } catch (error) {
+    lock.release();
+    if (made) {
+      try {
+        rmSync(lockPath, { force: true });
+        rmdirSync(stateDir);
+      } catch {
+        // Something else is in it now: not ours to remove.
+      }
+    }
+    throw error;
+  }
+  return lock;
+}
+
+/**
+ * That the account is still where the pairing settled it: a boot of the worker
+ * may have moved it into its folder (core/source-account-migration.ts) between
+ * the pairing's look and its taking the session's lock. Then the paths it
+ * picked are the old place, and it stops.
+ */
+function assertPairingPlacement(source: MessagingPairingSource, layout: LayoutAccountLayout, env: LayoutEnv): void {
+  let entry;
+  try {
+    entry = findRegistryAccount(readSourceRegistry(env), source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID, DEFAULT_ACCOUNT_SLOT);
+  } catch {
+    return; // The settle that came first read it; a store open will refuse a registry that cannot be read.
+  }
+  if (entry && (sourceAccountMovePending(entry) || entry.layout !== layout)) {
+    throw new Error(`Olympus moved this ${sourceLabel(source)} account's files into its folder while it was pairing, so nothing was paired. Re-run olympus connect ${source} --pair.`);
   }
 }
 
@@ -741,7 +811,7 @@ function sourceLabel(source: MessagingPairingSource): string {
 async function runPairingCommand(request: PairingCommandRequest): Promise<PairingCommandResult> {
   const child = spawnChild(request.executable, request.args, {
     env: request.env,
-    stdio: ['inherit', 'pipe', 'pipe', 'pipe'],
+    stdio: ['inherit', 'pipe', 'pipe', 'pipe', ...(request.inheritFds ?? [])],
   });
   const stdoutLines: string[] = [];
   let forcedError: 'pairing_timeout' | 'pairing_cancelled' | undefined;

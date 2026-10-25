@@ -40,6 +40,12 @@ export interface WhatsAppExtractionSourceOptions {
   candidates: ExtractionCandidateReader;
   locators: WhatsAppExtractionLocatorReader;
   mediaRoots: readonly string[];
+  /**
+   * Maps a locator that names the account's old state folder to the same file
+   * in its account folder, for an account the boot migration moved
+   * (core/source-placement.ts, `whatsappMovedPathMapper`). The stored locator stays.
+   */
+  relocateLocator?: (path: string) => string;
 }
 
 export class WhatsAppExtractionSource implements FileExtractionSource {
@@ -52,8 +58,10 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
   private readonly candidates: ExtractionCandidateReader;
   private readonly locators: WhatsAppExtractionLocatorReader;
   private readonly mediaRoots: readonly string[];
+  private readonly relocateLocator: (path: string) => string;
 
   constructor(options: WhatsAppExtractionSourceOptions) {
+    this.relocateLocator = options.relocateLocator ?? ((path) => path);
     this.id = requireNonEmpty(options.id, 'WhatsApp extraction source id');
     this.corpusId = requireNonEmpty(options.corpusId, 'WhatsApp extraction corpus id');
     this.provider = requireNonEmpty(options.provider, 'WhatsApp extraction provider');
@@ -98,7 +106,7 @@ export class WhatsAppExtractionSource implements FileExtractionSource {
     if (!locator) throw new FileExtractionSourceError('source_item_not_found');
 
     try {
-      const path = await realpath(locator);
+      const path = await realpath(this.relocateLocator(locator));
       if (!(await this.pathIsInsideMediaRoot(path))) {
         throw new FileExtractionSourceError('source_permission_denied');
       }

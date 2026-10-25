@@ -712,20 +712,27 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   judge: SpoolSecretJudge;
   /** Where the bridge saves audio; a media path outside it is never deleted. */
   mediaDir?: string;
+  /**
+   * Maps a media path a line names at the account's old state folder to the
+   * same file in its account folder, for an account the boot migration moved
+   * (core/source-placement.ts, `whatsappMovedPathMapper`). The line keeps its path.
+   */
+  relocateMediaPath?: (path: string) => string;
 }): CaptureSpoolRedactionResult {
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp account');
   const from = positionFromCursor(options.from);
   const through = positionFromCursor(options.through);
   const mediaRoot = options.mediaDir ? existingRealPath(options.mediaDir) : undefined;
+  const relocate = options.relocateMediaPath ?? ((path: string): string => path);
   let owners: Map<string, Set<string>> | undefined;
   // Saved audio is deleted only when this message is the only one that names
   // it: the bridge names a file by message id alone, and an id is unique only
   // within its chat.
   const deleteOwnedMedia = (message: SpoolMessage): void => {
     if (!message.mediaPath || !mediaRoot) return;
-    owners ??= mediaPathOwners(options.spoolDir);
+    owners ??= mediaPathOwners(options.spoolDir, relocate);
     // Keyed by the file itself, so a symlink and its target are one file.
-    const real = existingRealPath(message.mediaPath);
+    const real = existingRealPath(relocate(message.mediaPath));
     if (!real) return;
     const self = chatScopedKey(message.chatJid, message.id);
     if ([...(owners.get(real) ?? [])].some((owner) => owner !== self)) return;
@@ -735,7 +742,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
   // Secret line to name a shared file is the one that deletes it.
   const releaseMedia = (message: SpoolMessage): void => {
     if (!message.mediaPath || !owners) return;
-    const real = existingRealPath(message.mediaPath);
+    const real = existingRealPath(relocate(message.mediaPath));
     if (real) owners.get(real)?.delete(chatScopedKey(message.chatJid, message.id));
   };
   return redactCaptureSpoolLines({
@@ -794,13 +801,13 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
  * Every saved media file the spool names (by its real path), and the
  * messages (chat-scoped) that name it.
  */
-function mediaPathOwners(spoolDir: string): Map<string, Set<string>> {
+function mediaPathOwners(spoolDir: string, relocate: (path: string) => string): Map<string, Set<string>> {
   const owners = new Map<string, Set<string>>();
   for (const file of listSpoolFiles(spoolDir)) {
     for (const line of terminatedLines(join(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message?.mediaPath === undefined) continue;
-      const path = existingRealPath(message.mediaPath);
+      const path = existingRealPath(relocate(message.mediaPath));
       if (path === undefined) continue;
       const named = owners.get(path) ?? new Set<string>();
       named.add(chatScopedKey(message.chatJid, message.id));
