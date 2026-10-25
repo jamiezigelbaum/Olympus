@@ -37,6 +37,7 @@ import { TierSnifferStore } from './sniffer-store.ts';
 import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
 import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { findTierSetLedger } from './tier-set-binding.ts';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
 import { forgetSecretInSideStores } from '../connector-store/secrets-disposition.ts';
 import { TIER_KEY_TRUST_DOMAIN } from '../connector-store/tiered-store-set.ts';
@@ -119,6 +120,8 @@ export async function runTierCommand(args: readonly string[], context: TierCliCo
 interface LocatedItem {
   /** The tier ledger that holds (or will hold) this item's decision. */
   ledgerPath: string;
+  /** The id that ledger must have, when it is the set ledger a store is bound to: opened ledgers are checked against it. */
+  boundLedgerId?: string;
   identity: TierLedgerIdentity & { family: SourceFamily };
   /** The stores' local id for the item, when a store row named it. */
   localItemId?: string;
@@ -133,8 +136,8 @@ function knownStorePaths(context: TierCliContext): string[] {
 interface StoreMatch {
   identity: TierLedgerIdentity & { family: SourceFamily };
   localItemId: string;
-  /** The set ledger this store is bound to, when a tiered store set routed into it. */
-  boundLedgerPath?: string;
+  /** The set ledger this store is bound to, found by its id, when a tiered store set routed into it. */
+  bound?: { path: string; id: string };
   ownLedgerPath: string;
 }
 
@@ -155,14 +158,37 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
       local_item_id: string;
     }>;
     if (rows.length === 0) return [];
-    let boundLedgerPath: string | undefined;
+    let bound: { path: string; id: string } | undefined;
+    let cursor: string | null | undefined;
     try {
-      const binding = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
-        .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
-      const parsed = binding?.cursor ? JSON.parse(binding.cursor) as { ledgerPath?: unknown } : undefined;
-      if (typeof parsed?.ledgerPath === 'string') boundLedgerPath = parsed.ledgerPath;
+      cursor = (db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
+        .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null)?.cursor;
     } catch {
-      // No readable binding: the store's own ledger is the candidate.
+      // No sync_runs table: the store was never bound, and its own ledger is the candidate.
+    }
+    if (cursor) {
+      // A store bound to a set takes its decisions from that set's ledger and
+      // from no other. Where it is now is found by its id, since the recorded
+      // path is only where it was when the store was bound; when it cannot be
+      // found, the command stops rather than write into whatever else is
+      // there (the recorded path, the store's own ledger).
+      let record: { ledgerId?: unknown; ledgerPath?: unknown } | undefined;
+      try {
+        record = JSON.parse(cursor) as { ledgerId?: unknown; ledgerPath?: unknown };
+      } catch {
+        record = undefined;
+      }
+      const found = typeof record?.ledgerId === 'string' && typeof record.ledgerPath === 'string'
+        ? findTierSetLedger(dbPath, { ledgerId: record.ledgerId, ledgerPath: record.ledgerPath })
+        : undefined;
+      if (found === undefined || typeof record?.ledgerId !== 'string') {
+        throw new OperationError(
+          'source_index_error',
+          'The tier ledger this item\'s store is bound to cannot be found, so its tier cannot be read or changed.',
+          'Restore the set ledger (beside the source\'s secure_local store), then run the command again.',
+        );
+      }
+      bound = { path: found, id: record.ledgerId };
     }
     return rows.map((row) => ({
       identity: {
@@ -173,10 +199,11 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
         ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
       },
       localItemId: row.local_item_id,
-      ...(boundLedgerPath ? { boundLedgerPath } : {}),
+      ...(bound ? { bound } : {}),
       ownLedgerPath: tierLedgerPathForStore(dbPath),
     }));
-  } catch {
+  } catch (error) {
+    if (error instanceof OperationError) throw error;
     // A store without the items table (or unreadable) holds nothing to find.
     return [];
   } finally {
@@ -211,20 +238,45 @@ export function locateTierItem(locator: string, context: TierCliContext = {}): L
     const path = tierLedgerPathForStore(dbPath);
     if (existsSync(path)) ledgerPaths.add(path);
   }
-  for (const match of matches) if (match.boundLedgerPath && existsSync(match.boundLedgerPath)) ledgerPaths.add(match.boundLedgerPath);
-  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined));
-  if (deciding.length > 0) return deciding.map((ledgerPath) => ({ ledgerPath, identity, localItemId }));
+  const boundIds = new Map<string, string>();
+  for (const match of matches) {
+    if (!match.bound || !existsSync(match.bound.path)) continue;
+    ledgerPaths.add(match.bound.path);
+    boundIds.set(match.bound.path, match.bound.id);
+  }
+  const located = (ledgerPath: string): LocatedItem => ({
+    ledgerPath,
+    identity,
+    localItemId,
+    ...(boundIds.has(ledgerPath) ? { boundLedgerId: boundIds.get(ledgerPath)! } : {}),
+  });
+  const deciding = [...ledgerPaths].filter((path) => withLedgerAt(path, undefined, (ledger) => ledger.getCurrent(identity) !== undefined, boundIds.get(path)));
+  if (deciding.length > 0) return deciding.map(located);
   const fallback = matches[0]!;
-  return [{ ledgerPath: fallback.boundLedgerPath ?? fallback.ownLedgerPath, identity, localItemId }];
+  return [located(fallback.bound?.path ?? fallback.ownLedgerPath)];
 }
 
 function identityKey(identity: TierLedgerIdentity): string {
   return tierLedgerIdentityKey(identity);
 }
 
-function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T): T {
+/**
+ * Run against the ledger at a path. `expectedId` is the id of the set ledger a
+ * store is bound to: the path was found by reading that id on a connection of
+ * its own, so the handle used here is checked too, because the file can have
+ * been replaced in between. (A replacement has had its schema migrated by this
+ * open before it is checked; that is accepted, since it is closed unused.)
+ */
+function withLedgerAt<T>(ledgerPath: string, now: (() => Date) | undefined, run: (ledger: TierLedger) => T, expectedId?: string): T {
   const ledger = new TierLedger({ dbPath: ledgerPath, ...(now ? { now } : {}) });
   try {
+    if (expectedId !== undefined && ledger.ledgerId() !== expectedId) {
+      throw new OperationError(
+        'source_index_error',
+        'The tier ledger for that item was replaced while it was being read, so nothing was changed.',
+        'Run the command again.',
+      );
+    }
     return run(ledger);
   } finally {
     ledger.close();
@@ -326,7 +378,7 @@ export function runTierSet(args: readonly string[], context: TierCliContext = {}
       contentTier: tierDisplayName(record.contentTier),
       generation: record.generation,
     };
-  }));
+  }, item.boundLedgerId));
   return {
     locator,
     item: publicIdentity(items[0]!.identity),
@@ -346,7 +398,7 @@ export function runTierExplain(args: readonly string[], context: TierCliContext 
       orphaned: orphanedOverride(ledger, item.identity),
       history: ledger.history(item.identity),
       copies: ledger.copies(item.identity),
-    }));
+    }), item.boundLedgerId);
     const snifferPath = tierSnifferPathForLedger(item.ledgerPath);
     let waitingOn: string[] = [];
     if (existsSync(snifferPath)) {
