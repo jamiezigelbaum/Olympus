@@ -3,7 +3,10 @@
 // (docs/design/source-storage.md, delivery step 4b). The expected values are a
 // fixture generated once from the functions as they stood on main
 // (test/fixtures/messaging-resolution-golden.json), never computed with the
-// code under test.
+// code under test. Since step 6 the per-store overrides are gone (owner
+// decision 3): a case that sets one resolves as the environment without it,
+// which the fixture records too; the capture paths a spawner or the Gateway
+// hands over still relocate a legacy account.
 
 import { resolvedStorePath } from '../src/core/source-placement.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -87,6 +90,26 @@ const WHATSAPP_OVERRIDES = [
   'OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH',
 ];
 const OVERRIDE_GROUPS: Record<string, string[]> = { telegram: TELEGRAM_OVERRIDES, whatsapp: WHATSAPP_OVERRIDES };
+// The store overrides step 6 dropped, and what they moved.
+const DROPPED_OVERRIDES = [
+  'OLYMPUS_SOURCE_INDEX_WHATSAPP_CONNECTOR_STORE_DB_PATH',
+  'OLYMPUS_WHATSAPP_CONNECTOR_STORE_DB_PATH',
+  'OLYMPUS_WHATSAPP_LIVE_DRAIN_DB_PATH',
+  'OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH',
+];
+const STORE_KEYS = ['wa.store', 'wa.internal_store', 'wa.lifecycle.stores'];
+const CAPTURE_OVERRIDES = WHATSAPP_OVERRIDES.filter((name) => !DROPPED_OVERRIDES.includes(name));
+
+/**
+ * What a resolver gives in this fixture case since step 6: a dropped override
+ * is as if unset, so its stores sit in the state folder the case names (with
+ * every override set, the one `OLYMPUS_WHATSAPP_STATE_DIR` names).
+ */
+function expectedFor(name: string, key: string): unknown {
+  if (DROPPED_OVERRIDES.some((override) => name === `override:${override}`)) return GOLDEN.default![key];
+  if (name === 'override-all:whatsapp' && STORE_KEYS.includes(key)) return GOLDEN['override:OLYMPUS_WHATSAPP_STATE_DIR']![key];
+  return GOLDEN[name]![key];
+}
 
 let base: string;
 let home: string;
@@ -229,7 +252,7 @@ describe('a legacy messaging account resolves exactly what main resolved', () =>
     withPlatform(platform, () => {
       // Where main cannot work out the data folder at all, no registry can be written either.
       if (!Object.values(results).some((expected) => throwsOf(expected) !== undefined)) writeLegacyRegistry(env);
-      for (const [key, expected] of Object.entries(results)) expectResolves(name, key, env, expected);
+      for (const key of Object.keys(results)) expectResolves(name, key, env, expectedFor(name, key));
     });
   });
 
@@ -267,7 +290,8 @@ describe('a legacy messaging account resolves exactly what main resolved', () =>
   });
 
   test('an override or a plugin-config path pins its account when it has no entry: honored, nothing moves', () => {
-    for (const name of cases.filter((n) => n.startsWith('override:') || n.startsWith('override-all:') || [
+    for (const name of cases.filter((n) => (n.startsWith('override:') && !DROPPED_OVERRIDES.includes(n.slice('override:'.length)))
+      || n.startsWith('override-all:') || [
       'session-with-extension', 'whatsapp-state-is-session-db', 'transcribe-state-only', 'plugin-config-paths',
     ].includes(n))) {
       const { env, platform } = caseEnv(name);
@@ -275,17 +299,17 @@ describe('a legacy messaging account resolves exactly what main resolved', () =>
       withPlatform(platform, () => {
         const set = (names: string[]) => names.some((n) => (env[n] ?? '').trim() !== '');
         // The environment pins the account whose override it sets; the other is a fresh install's folder.
-        const prefixes = [set(TELEGRAM_OVERRIDES) ? 'tg.' : undefined, set(WHATSAPP_OVERRIDES) ? 'wa.' : undefined].filter((p): p is string => p !== undefined);
+        const prefixes = [set(TELEGRAM_OVERRIDES) ? 'tg.' : undefined, set(CAPTURE_OVERRIDES) ? 'wa.' : undefined].filter((p): p is string => p !== undefined);
         expect(prefixes.length, name).toBeGreaterThan(0);
-        for (const [key, expected] of Object.entries(results)) {
-          if (prefixes.some((prefix) => key.startsWith(prefix) || key.startsWith(`script.${prefix}`))) expectResolves(name, key, env, expected);
+        for (const key of Object.keys(results)) {
+          if (prefixes.some((prefix) => key.startsWith(prefix) || key.startsWith(`script.${prefix}`))) expectResolves(name, key, env, expectedFor(name, key));
         }
       });
     }
   });
 
-  test('a blank override pins nothing: a fresh install is a folder', () => {
-    for (const name of ['override-blank:telegram', 'override-blank:whatsapp']) {
+  test('a blank or dropped override pins nothing: a fresh install is a folder', () => {
+    for (const name of ['override-blank:telegram', 'override-blank:whatsapp', ...DROPPED_OVERRIDES.map((override) => `override:${override}`)]) {
       const { env } = caseEnv(name);
       expect(String(resolvers['tg.store.internal']!(env))).toContain('/sources/telegram.messages/1/stores/');
       expect(String(resolvers['wa.state']!(env))).toContain('/sources/whatsapp.personal.messages/1/raw/whatsapp');
