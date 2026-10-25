@@ -91,7 +91,10 @@ export interface ArchiveRemovalOptions {
 
 /**
  * Marks the archive for removal. From this call on no pass imports it, and a
- * removal interrupted by a restart resumes from this status.
+ * removal interrupted by a restart resumes from this status. An import that is
+ * an input of a source is not marked: its items are the source's, with no
+ * record of which input brought which, so they go with the whole source
+ * (docs/design/archive-live-one-dataset.md, section 6).
  */
 export function requestArchiveRemoval(
   state: ArchiveImportStateStore,
@@ -99,7 +102,7 @@ export function requestArchiveRemoval(
   now: () => Date = () => new Date(),
 ): ArchiveImportRecord | undefined {
   return state.update(archiveId, (record) => {
-    if (record.status === 'removing') return;
+    if (record.status === 'removing' || record.target) return false;
     record.status = 'removing';
     record.removal_started_at = now().toISOString();
   });

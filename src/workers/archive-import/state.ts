@@ -34,7 +34,14 @@ export const ARCHIVE_FINDING_SAMPLES_MAX = 50;
 export type ArchiveImportStatus = 'importing' | 'imported' | 'stopped' | 'removing';
 
 export interface ArchiveImportStop {
-  code: 'file_changed' | 'file_missing' | 'file_unreadable' | 'resume_point_invalid' | 'format_unavailable' | 'root_changed';
+  code:
+    | 'file_changed' | 'file_missing' | 'file_unreadable' | 'resume_point_invalid' | 'format_unavailable' | 'root_changed'
+    // The owner pressed Stop: what was imported stays.
+    | 'stopped_by_owner'
+    // An input of a source (below): the account the source now holds is another one than the export's.
+    | 'account_changed'
+    // An input of a source (below): the source is being deleted or moved, or this build has no reader for it.
+    | 'source_unavailable';
   message: string;
   rel_path?: string;
   at: string;
@@ -77,6 +84,41 @@ export interface ArchiveRepeatedItems {
   through?: { fileIndex: number; offset: number };
 }
 
+/**
+ * The source an import is one input of (docs/design/archive-live-one-dataset.md):
+ * its items are written by that source's own connector into the account's own
+ * stores, not under `archive.imports`. Absent on an import that stays under
+ * Archives. Set when the import starts and never changed.
+ */
+export interface ArchiveImportTarget {
+  source_id: string;
+  slot: string;
+  /**
+   * The provider account the export names (opaque: as the source's reader of
+   * the export wrote it), asked about again at every pass. Absent when the
+   * export names none.
+   */
+  import_account_id?: string;
+  /**
+   * The owner confirmed that the export is the account's own, where it could not be proved.
+   */
+  owner_confirmed?: true;
+}
+
+/**
+ * What an import's own run read, for an import that is an input of a source:
+ * "N items from this archive, of which M were already there". Counted once per
+ * position, so a pass replayed after a restart counts nothing twice.
+ */
+export interface ArchiveImportIntake {
+  read: number;
+  already_there: number;
+  /**
+   * The last position counted.
+   */
+  through?: { file_index: number; offset: number };
+}
+
 export interface ArchiveImportRecord {
   archive_id: string;
   format: string;
@@ -113,6 +155,15 @@ export interface ArchiveImportRecord {
    * for progress only: the resume point is the store's committed cursor.
    */
   read_position?: { file_index: number; offset: number };
+  /**
+   * The source this import is an input of (see ArchiveImportTarget). Its
+   * items are the source's, deleted with the source; it has no Remove.
+   */
+  target?: ArchiveImportTarget;
+  /**
+   * What the import read, and how much of it the source already held (inputs of a source only).
+   */
+  intake?: ArchiveImportIntake;
 }
 
 interface PersistedArchiveImportState {
@@ -164,7 +215,9 @@ function validRecord(value: unknown): value is ArchiveImportRecord {
     && (value.status === 'importing' || value.status === 'imported' || value.status === 'stopped' || value.status === 'removing')
     && typeof value.created_at === 'string' && typeof value.updated_at === 'string'
     && isRecord(value.findings) && isRecord(value.findings.gaps) && isRecord(value.findings.skipped)
-    && Array.isArray(value.findings.samples);
+    && Array.isArray(value.findings.samples)
+    && (value.target === undefined || (isRecord(value.target) && typeof value.target.source_id === 'string'
+      && typeof value.target.slot === 'string'));
 }
 
 /**
@@ -212,6 +265,10 @@ export interface NewArchiveImportRecord {
    * folder that were not taken or not looked at). Counted once, here.
    */
   skipped?: Record<string, number>;
+  /**
+   * The source this import is an input of (see ArchiveImportTarget).
+   */
+  target?: ArchiveImportTarget;
 }
 
 export class ArchiveImportStateStore {
@@ -354,6 +411,63 @@ export class ArchiveImportStateStore {
         reach(finding.fileIndex, lastCounted);
       }
       if (last) tally.through = last;
+    });
+  }
+
+  /**
+   * Counts what an input read: one per record of a page, and how many of them
+   * the source already held. `positions` are the records' places in the
+   * archive, in the page's order and strictly increasing; a record at or
+   * before the last position counted was counted on an earlier pass (the same
+   * bytes listed again after a restart) and is not counted again. A page
+   * whose positions are not told is not counted. The dates of the records
+   * read widen the import's date range (it covers what the export holds, not
+   * only what was new).
+   */
+  recordIntake(
+    archiveId: string,
+    outcomes: ReadonlyArray<{ alreadyThere: boolean; authoredAt?: string }>,
+    positions: ReadonlyArray<{ fileIndex: number; offset: number }> | undefined,
+  ): void {
+    if (outcomes.length === 0) return;
+    this.update(archiveId, (record) => {
+      if (record.status !== 'importing') return false;
+      let changed = false;
+      for (const outcome of outcomes) {
+        const at = outcome.authoredAt;
+        if (typeof at !== 'string' || !Number.isFinite(Date.parse(at))) continue;
+        const range = record.date_range;
+        if (!range) {
+          record.date_range = { earliest: at, latest: at };
+          changed = true;
+          continue;
+        }
+        if (at < range.earliest) { range.earliest = at; changed = true; }
+        if (at > range.latest) { range.latest = at; changed = true; }
+      }
+      if (positions && positions.length === outcomes.length) {
+        const intake = record.intake ?? { read: 0, already_there: 0 };
+        const through = intake.through;
+        const past = (at: { fileIndex: number; offset: number }): boolean => !through || at.fileIndex > through.file_index
+          || (at.fileIndex === through.file_index && at.offset > through.offset);
+        let read = 0;
+        let already = 0;
+        outcomes.forEach((outcome, index) => {
+          if (!past(positions[index]!)) return;
+          read += 1;
+          if (outcome.alreadyThere) already += 1;
+        });
+        const last = positions[positions.length - 1]!;
+        if (read > 0 || past(last)) {
+          record.intake = {
+            read: intake.read + read,
+            already_there: intake.already_there + already,
+            through: past(last) ? { file_index: last.fileIndex, offset: last.offset } : through!,
+          };
+          changed = true;
+        }
+      }
+      if (!changed) return false;
     });
   }
 

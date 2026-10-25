@@ -147,7 +147,7 @@ export type ArchiveAgentStart =
 export type ArchiveAgentRemove =
   | { ok: false; code: 'needs_approval'; request_id: string; archive_id: string; name: string; message: string; open: ArchiveOpenTarget }
   | { ok: true; status: 'removing'; archive_id: string; name: string; message: string }
-  | { ok: false; code: 'unknown_archive' | 'too_many_requests' | 'archives_unreadable' | 'requests_unreadable'; message: string };
+  | { ok: false; code: 'unknown_archive' | 'too_many_requests' | 'archives_unreadable' | 'requests_unreadable' | 'part_of_source'; message: string };
 
 export interface ArchiveImportAgent {
   start(path: unknown): ArchiveAgentStart;
@@ -182,6 +182,7 @@ export const ARCHIVE_AGENT_COPY = {
   },
   existingNote: 'A matching path does not show that this file is the one imported: it may have been replaced since, so Olympus recorded a request for the file as it is now. When the person approves, Olympus opens the file, compares it with what it already holds, and says if it is the same export.',
   removing: '{name} is already being removed. Call archive_import with status to see when it is gone.',
+  partOfSource: '{name} is part of a source\'s own history: its items are held together with what the source reads live, so it cannot be removed on its own. It is deleted with the whole source, by the person, from the source\'s card.',
   heldNote: {
     ready: DASHBOARD_ARCHIVE_COPY.heldWhy.ready,
     waiting: DASHBOARD_ARCHIVE_COPY.heldWhy.waiting,
@@ -477,6 +478,7 @@ export function createArchiveImportAgent(deps: ArchiveImportAgentDeps): ArchiveI
       }
       if (!record) return { ok: false, code: 'unknown_archive', message: ARCHIVE_AGENT_COPY.unknownArchive };
       const label = displayText(record.label);
+      if (record.target) return { ok: false, code: 'part_of_source', message: fill(ARCHIVE_AGENT_COPY.partOfSource, { name: label }) };
       if (record.status === 'removing') {
         return {
           ok: true,

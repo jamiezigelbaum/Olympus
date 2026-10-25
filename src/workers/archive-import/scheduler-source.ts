@@ -13,6 +13,13 @@
  * with a removal waiting. The scheduler then runs the removal within seconds;
  * the import cadence is untouched.
  *
+ * An import that is one input of a source (`record.target`) writes the
+ * source's own stores through the source's connector, so its task shares the
+ * source's concurrency key instead: it never runs beside the source's own
+ * pulls, and the source's lane of the family is not built for it. It has no
+ * Remove, so no removal task, and the source's own extraction reads its
+ * children.
+ *
  * Reading later: an archive that is importing or finished has one more task,
  * which reads the child items the import listed by name (an attachment, a
  * photo) through the shared extraction factory, in the same serialization as
@@ -42,6 +49,7 @@ import { runArchiveRemoval } from './removal.ts';
 import type { ArchiveImportRuntime } from './runtime.ts';
 import { pullArchiveImport } from './sync.ts';
 import { archiveCorpusId } from './store.ts';
+import type { ArchiveSourceTargets } from './source-targets.ts';
 
 export const ARCHIVE_IMPORTS_CONCURRENCY_KEY = 'archive.imports';
 
@@ -112,6 +120,10 @@ export interface ArchiveImportsSchedulerSourceInput {
     provider: SourceEmbeddingProvider;
   }>;
   /**
+   * The sources an import can be an input of (default: the runtime's).
+   */
+  targets?: ArchiveSourceTargets;
+  /**
    * Test seams.
    */
   maxItems?: number;
@@ -132,14 +144,33 @@ export function createArchiveImportsSchedulerSource(
     if (record.status !== 'importing' && record.status !== 'removing') continue;
     const archiveId = record.archive_id;
     const family = record.family;
+    const targets = input.targets ?? input.runtime.targets;
+    const sourceKey = record.target ? targets.forSource(record.target.source_id)?.concurrencyKey : undefined;
     tasks.push({
       id: archiveImportTaskId(archiveId),
       kind: 'sync',
       writer: true,
-      concurrencyKey: ARCHIVE_IMPORTS_CONCURRENCY_KEY,
+      concurrencyKey: sourceKey ?? ARCHIVE_IMPORTS_CONCURRENCY_KEY,
       run: async () => {
-        const lane = input.runtime.lane(family);
         const current = input.runtime.state.get(archiveId);
+        if (current?.target) {
+          // An input of a source: no removal, no family lane; the pass resolves the account and writes under the source's runner.
+          const outcome = await pullArchiveImport({
+            state: input.runtime.state,
+            archiveId,
+            targets,
+            shouldContinue: stillImporting(input.runtime, archiveId),
+            media: input.runtime.media,
+            ...(input.maxItems !== undefined ? { maxItems: input.maxItems } : {}),
+          });
+          return {
+            status: outcome.receipt.status,
+            counts: outcome.receipt.counts,
+            ...(outcome.receipt.warnings ? { warnings: outcome.receipt.warnings } : {}),
+            ...(outcome.continueSoon ? { continueSoon: true } : {}),
+          };
+        }
+        const lane = input.runtime.lane(family);
         if (current?.status === 'removing') {
           const outcome = await runArchiveRemoval({
             state: input.runtime.state,
@@ -178,6 +209,8 @@ export function createArchiveImportsSchedulerSource(
     const known = input.runtime.families();
     for (const record of records) {
       if (record.status !== 'importing' && record.status !== 'imported') continue;
+      // An input of a source: the source's own extraction reads its children.
+      if (record.target) continue;
       // A record naming a family no format imports into has nothing to read with.
       const family = known.find((candidate) => candidate === record.family);
       if (!family) continue;

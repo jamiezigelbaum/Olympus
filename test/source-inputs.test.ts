@@ -22,6 +22,7 @@ import {
   type SourceIntakeOutcome,
   type SourceRecordBuilder,
 } from '../src/core/source-inputs.ts';
+import { holdingItems } from '../src/workers/archive-import/source-input.ts';
 import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { HELD_UNTIL_JUDGED_REASON, type TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { TierLedger } from '../src/workers/classification/tier-ledger.ts';
@@ -220,18 +221,14 @@ describe('inputs through a real store set', () => {
   test('a record cut off between legs reports no version, so the next record completes it', async () => {
     const f = lane(HOLD_OPTIONS);
     // A held item's names rest in the Personal store and its content in the Private one.
-    const held = input('archive', 'archive.held', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }], {
-      decorate: (item): RawItem => ({ ...item, holdContentUntilJudged: true }),
-    });
-    await sync(f.set, inputConnector(builder, held));
+    const held = input('archive', 'archive.held', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }]);
+    await sync(f.set, holdingItems(inputConnector(builder, held)));
     expect(f.set.storedItem(f.identity('a'))).toEqual({ version: '1', hasContent: true });
     // The Personal copy of the item's names is lost, as when a run stops after one leg.
     expect(f.stores.internal.tombstoneCopy({ ...f.identity('a'), family: 'file', localItemId: `${ACCOUNT}:a` }, { connectorId: 'test' })).toBe(true);
     expect(f.set.storedItem(f.identity('a'))).toEqual({ hasContent: true });
     // The record that arrives next applies, whatever its version, and the item is whole again.
-    await sync(f.set, inputConnector(builder, input('archive', 'archive.held2', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }], {
-      decorate: (item): RawItem => ({ ...item, holdContentUntilJudged: true }),
-    })));
+    await sync(f.set, holdingItems(inputConnector(builder, input('archive', 'archive.held2', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }]))));
     expect(f.set.storedItem(f.identity('a'))).toEqual({ version: '1', hasContent: true });
   });
 
@@ -271,9 +268,7 @@ describe('inputs through a real store set', () => {
 });
 
 describe('the hold travels with the item', () => {
-  const archiveHeld = (records: Rec[]) => inputConnector(builder, input('archive', 'archive.held', records, {
-    decorate: (item): RawItem => ({ ...item, holdContentUntilJudged: true }),
-  }));
+  const archiveHeld = (records: Rec[]) => holdingItems(inputConnector(builder, input('archive', 'archive.held', records)));
   const live = (records: Rec[]) => inputConnector(builder, input('live', 'fixture_live', records));
   const BODY = 'Quietorchardmarker with ordinary words about bananas and oranges for the picnic on Saturday.';
 

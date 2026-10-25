@@ -26,12 +26,19 @@ import {
   defaultArchiveMediaBindingsPath,
   type ArchiveMediaBindings,
 } from './media-bindings.ts';
+import { archiveSourceTargets, type ArchiveSourceTargets } from './source-targets.ts';
 import { startArchiveImport, type ArchiveImportStart } from './start.ts';
 import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './state.ts';
 import { archiveConnectorStoreDbPaths } from './store.ts';
 
 export interface ArchiveImportRuntime {
   readonly state: ArchiveImportStateStore;
+  /**
+   * The sources an archive can be an input of (source-targets.ts). Imports
+   * of the formats they read join the source's account at approval; with none
+   * registered every import stays under Archives.
+   */
+  readonly targets: ArchiveSourceTargets;
   /**
    * The media bindings of the archives (media-bindings.ts), opened when the
    * first one is needed; the file sits beside the record.
@@ -73,6 +80,10 @@ export interface ArchiveImportRuntime {
 
 export interface ArchiveImportRuntimeOptions {
   env?: Record<string, string | undefined>;
+  /**
+   * Test seam: the sources an archive can be an input of (default: the registered ones).
+   */
+  targets?: ArchiveSourceTargets;
   /**
    * Test seam: the record's path.
    */
@@ -148,6 +159,7 @@ export function createArchiveImportRuntime(options: ArchiveImportRuntimeOptions 
   return {
     state,
     media,
+    targets: options.targets ?? archiveSourceTargets,
     families: () => [...families],
     lane,
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),

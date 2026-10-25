@@ -18,24 +18,38 @@
  * read) are counted on the record as the pages they belong to are listed.
  * A replay after a restart lists the same positions again and is not counted
  * twice (state.ts `recordFindings`).
+ *
+ * An import that is one input of a source (`record.target`,
+ * source-targets.ts) is read by the source's own connector into the account's
+ * own stores: the pass resolves the account again, inside the source's
+ * exclusive runner, before it writes; the resume point is the set's committed
+ * cursor under this input's own connector id, so it never moves the live
+ * cursor; and every item is held until judged. Everything else is the same
+ * pass.
  */
 import { createHash } from 'node:crypto';
 import type { RawItem, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../core/contracts.ts';
+import type { SourceIntakeOutcome } from '../../core/source-inputs.ts';
 import {
   ArchiveImportStoppedError,
   archiveFormatConnector,
   getArchiveFormat,
   type ArchiveConnectorFactory,
+  type ArchiveConnectorInput,
   type ArchiveImportFinding,
 } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
-import type { ConnectorStoreSyncSummary } from '../connector-store/index.ts';
+import { SourceStorageUnavailableError, resolveImportAccount } from '../../core/source-storage.ts';
+import type { ConnectorStoreSyncOptions, ConnectorStoreSyncSummary } from '../connector-store/index.ts';
 import {
   TIER_DOMAIN_ORDER,
   tieredLaneReceiptCounts,
   type TieredLaneReceiptCounts,
+  type TieredStoreSet,
 } from '../connector-store/tiered-store-set.ts';
 import type { ArchiveTierLane } from './lane.ts';
+import { bindInputToFiles, holdingItems, observingIntake } from './source-input.ts';
+import { archiveSourceTargets, type ArchiveSourceTargets } from './source-targets.ts';
 import { archiveMediaAccess, verifyArchiveMediaBindings, type ArchiveMediaBindings } from './media-bindings.ts';
 
 // Where an item is in the archive: the coordinates findings use.
@@ -89,7 +103,15 @@ export interface ArchiveImportPullOutcome {
 
 export interface ArchiveImportPullOptions {
   state: ArchiveImportStateStore;
-  lane: ArchiveTierLane;
+  /**
+   * The family's archive stores: where an import that stays under Archives is
+   * written. Not used by an import that is an input of a source.
+   */
+  lane?: ArchiveTierLane;
+  /**
+   * The sources an import can be an input of (default: the registered ones).
+   */
+  targets?: ArchiveSourceTargets;
   archiveId: string;
   maxItems?: number;
   /**
@@ -305,7 +327,6 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
     ...(current ? { record: current } : {}),
   });
   if (!record || record.status !== 'importing') return idle(record);
-  if (record.family !== options.lane.family) throw new Error('This archive belongs to another family\'s stores.');
 
   // Only an import still importing stops: a removal asked for while this
   // pass read keeps its `removing` status, or the data would never go.
@@ -319,10 +340,111 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
   };
 
   const format = getArchiveFormat(record.format);
+  if (record.target) {
+    // An input of a source: the source's own connector writes it, and the source's runner serializes the account.
+    const target = (options.targets ?? archiveSourceTargets).forSource(record.target.source_id);
+    if (!target || !format || !target.formats.includes(record.format) || format.family !== record.family || format.provider !== record.provider) {
+      return stop({ code: 'source_unavailable', message: 'This build does not read this export into its source.', at: now().toISOString() });
+    }
+    const pass = (): Promise<ArchiveImportPullOutcome> => runPass(options, record, {
+      stop,
+      idle,
+      now,
+      format,
+      sink: (): PassSink | ArchiveImportStop => {
+        let account;
+        try {
+          const resolved = resolveImportAccount(record.target!.source_id, record.target!.import_account_id, {
+            env: options.state.env,
+            ...(record.target!.owner_confirmed === true ? { ownerConfirmed: true } : {}),
+          });
+          // The account Olympus holds now must be the export's: another one stops the import, with nothing more written.
+          if ((resolved.match !== 'same' && resolved.match !== 'new') || !resolved.account) {
+            return { code: 'account_changed', message: 'The account this source holds now is not the one this export belongs to.', at: now().toISOString() };
+          }
+          account = resolved.account;
+        } catch (error) {
+          if (error instanceof SourceStorageUnavailableError) {
+            return { code: 'source_unavailable', message: 'This source is being deleted or moved, so nothing more was imported.', at: now().toISOString() };
+          }
+          throw error;
+        }
+        const lane = target.lane(account, options.state.env);
+        return {
+          set: lane.set,
+          syncOptions: lane.sync,
+          input: true,
+          connector: (input, hooks) => {
+            const bound = bindInputToFiles(target.input(input), record.manifest_sha256);
+            if (!lane.connector.forInput) throw new Error('The source\'s connector has no way to read an archive.');
+            return holdingItems(lane.connector.forInput(observingIntake(bound, hooks.observeIntake)));
+          },
+        };
+      },
+    });
+    return target.exclusive ? target.exclusive(pass) : pass();
+  }
+
+  const lane = options.lane;
+  if (!lane) throw new Error('An import that stays under Archives needs its family\'s stores.');
+  if (record.family !== lane.family) throw new Error('This archive belongs to another family\'s stores.');
   const factory = (options.connectorFactory ?? archiveFormatConnector)(record.format);
   if (!format || !factory || format.family !== record.family || format.provider !== record.provider) {
     return stop({ code: 'format_unavailable', message: 'This build does not read this archive\'s format.', at: now().toISOString() });
   }
+  return runPass(options, record, {
+    stop,
+    idle,
+    now,
+    format,
+    sink: (): PassSink => ({
+      set: lane.set,
+      syncOptions: {
+        placement: ARCHIVE_STORE_PLACEMENT,
+        fetchContent: true,
+        // A child (an attachment, a piece of media) is listed by name with the means to read its bytes
+        // later; reading them is the extraction factory's work, never the listing's.
+        deferMetadataOnlyContent: true,
+      },
+      input: false,
+      connector: (input) => factory(input),
+    }),
+  });
+}
+
+/**
+ * Where one pass writes, and how it reads: the family's archive stores and a
+ * format's connector, or an account's own stores and the source's connector
+ * over this archive as one of its inputs.
+ */
+interface PassSink {
+  set: TieredStoreSet;
+  syncOptions: ConnectorStoreSyncOptions;
+  /**
+   * True for an input of a source: intake is counted, not repeats.
+   */
+  input: boolean;
+  connector(
+    input: ArchiveConnectorInput,
+    hooks: { observeIntake(outcomes: readonly SourceIntakeOutcome[]): void },
+  ): SourceConnector;
+}
+
+async function runPass(
+  options: ArchiveImportPullOptions,
+  record: ArchiveImportRecord,
+  context: {
+    stop: (reason: ArchiveImportStop) => ArchiveImportPullOutcome;
+    idle: (current: ArchiveImportRecord | undefined, warnings?: readonly string[], stopped?: boolean) => ArchiveImportPullOutcome;
+    now: () => Date;
+    format: NonNullable<ReturnType<typeof getArchiveFormat>>;
+    sink: () => PassSink | ArchiveImportStop;
+  },
+): Promise<ArchiveImportPullOutcome> {
+  const { stop, now, format } = context;
+  const picked = context.sink();
+  if ('code' in picked) return stop(picked);
+  const sink = picked;
 
   let root: ScopeRoot;
   try {
@@ -362,7 +484,7 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
     };
     const connectorId = archiveConnectorId(record.archive_id);
     const shouldContinue = options.shouldContinue ?? (() => true);
-    const connector = factory({
+    const connector = sink.connector({
       archiveId: record.archive_id,
       connectorId,
       accountScope: record.archive_id,
@@ -377,6 +499,14 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       ...(options.media ? { media: archiveMediaAccess({ bindings: options.media, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path }) } : {}),
       ...(options.maxBytesPerListing !== undefined ? { maxBytesPerListing: options.maxBytesPerListing } : {}),
       ...(options.pageSize !== undefined ? { pageSize: options.pageSize } : {}),
+    }, {
+      // What the source did with each record of a page, told once the page's records were decided and
+      // before its items go out: counted by position, so a replayed page counts nothing twice.
+      observeIntake: (outcomes) => {
+        const told = itemPositions;
+        itemPositions = undefined;
+        options.state.recordIntake(record.archive_id, outcomes, told);
+      },
     });
     const completion: { digests?: string[] } = {};
     const observed = observeListing(connector, pending, flush, async () => {
@@ -391,8 +521,8 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       }
       completion.digests = digests;
       return true;
-    }, {
-      holds: (identity) => options.lane.set.anyLegHasRow(identity),
+    }, sink.input ? undefined : {
+      holds: (identity) => sink.set.anyLegHasRow(identity),
       positions: () => {
         const told = itemPositions;
         itemPositions = undefined;
@@ -409,17 +539,13 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
     });
 
     // The Private store first: with no store yet, the set would route nothing.
-    const set = options.lane.set;
+    const set = sink.set;
     set.store('secure_local', { create: true });
     const cursor = set.committedCursor(connectorId)?.cursor ?? undefined;
     let run;
     try {
       run = await set.sync(observed.connector, {
-        placement: ARCHIVE_STORE_PLACEMENT,
-        fetchContent: true,
-        // A child (an attachment, a piece of media) is listed by name with the means to read its bytes
-        // later; reading them is the extraction factory's work, never the listing's.
-        deferMetadataOnlyContent: true,
+        ...sink.syncOptions,
         maxItems: Math.max(1, options.maxItems ?? ARCHIVE_IMPORT_MAX_ITEMS_PER_PASS),
         ...(cursor ? { cursor } : {}),
       });
@@ -468,7 +594,7 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
         entry.files.forEach((file, index) => { file.sha256 = digests[index]!; });
       }
     });
-    if (final.stop) return idle(updated, ['archive_import_stopped'], true);
+    if (final.stop) return context.idle(updated, ['archive_import_stopped'], true);
     const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain]!.sync] : []);
     return {
       receipt: receiptOf(updated, {

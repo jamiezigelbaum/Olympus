@@ -34,6 +34,8 @@ export interface SourceRecordEntry {
   identity: SourceItemIdentity;
   /** Whether the record carries this item's content, not only its names. */
   bringsContent: boolean;
+  /** When the item was written (ISO), for the history an input covers. Only the record's own item is asked. */
+  authoredAt?: string;
 }
 
 /**
@@ -105,6 +107,8 @@ export interface SourceIntakeOutcome {
   decision: IntakeDecision;
   /** The store (or an earlier record of this pass) held the record's own item before it. */
   alreadyThere: boolean;
+  /** When the record's own item was written (ISO), when the record says. */
+  authoredAt?: string;
 }
 
 /**
@@ -114,8 +118,6 @@ export interface SourceIntakeOutcome {
  */
 export interface IntakeObservingInput<R = unknown> extends SourceConnectorInput<R> {
   observeIntake?(outcomes: readonly SourceIntakeOutcome[]): void;
-  /** Applied to each item the input's records yield, last (an archive input marks its items held). */
-  decorate?(item: RawItem): RawItem;
 }
 
 const hasContent = (item: RawItem): boolean => item.content.kind !== 'metadata_only';
@@ -164,7 +166,14 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 compareVersions: builder.compareVersions,
               });
               if (decision === 'apply') wanted.add(entry.identity.localItemId);
-              if (index === 0) outcomes.push({ localItemId: entry.identity.localItemId, decision, alreadyThere: stored !== undefined });
+              if (index === 0) {
+                outcomes.push({
+                  localItemId: entry.identity.localItemId,
+                  decision,
+                  alreadyThere: stored !== undefined,
+                  ...(entry.authoredAt !== undefined ? { authoredAt: entry.authoredAt } : {}),
+                });
+              }
             });
             if (wanted.size === 0) continue;
             for (const item of await builder.build(record, wanted)) {
@@ -173,7 +182,7 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 ...(item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {}),
                 hasContent: hasContent(item),
               });
-              items.push(input.decorate ? input.decorate(item) : item);
+              items.push(item);
             }
           }
           input.observeIntake?.(outcomes);
