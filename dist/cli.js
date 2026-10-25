@@ -163913,9 +163913,10 @@ ${relPath(ctx.root, candidate.to)}`));
 ${move.to}`) && !move.from.split("/").includes(".."));
 }
 function syncFolderChains(ctx, folders) {
+  const root = realpathSync24(ctx.root);
   const chain = new Set;
   for (const folder of folders) {
-    let current2 = ctx.root;
+    let current2 = root;
     chain.add(current2);
     for (const part of relative11(ctx.root, folder).split(sep14).filter(Boolean)) {
       current2 = join108(current2, part);
