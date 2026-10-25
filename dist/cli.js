@@ -77753,6 +77753,7 @@ function telegramCaptureStatePaths(env) {
 function exportOlympusData(options) {
   const destination = requirePath(options.destination, "--output");
   const selected = selectSources(options.sourceId);
+  refuseExportDuringMove(selected, options);
   const durabilityBoundary = exportDurabilityBoundary(destination);
   makeDurableDirectory(destination, durabilityBoundary);
   rmSync13(join62(destination, "manifest.json"), { force: true });
@@ -78309,6 +78310,20 @@ function sqliteDeleteTargets(sqlitePath, sqliteStoreId, context2, inAccountFolde
 }
 function legacyStoreIdFor(source) {
   return source.legacySqliteStoreId ?? source.sqliteStoreId;
+}
+function refuseExportDuringMove(selected, options) {
+  const own3 = new Set(selected.flatMap((source) => [source.sourceId, ...source.sourceAliases ?? []]));
+  let moving;
+  try {
+    moving = readSourceRegistry(envForContext(options)).accounts.filter((account) => own3.has(account.source_id) && sourceAccountMovePending(account)).map((account) => account.source_id);
+  } catch (error) {
+    if (!(error instanceof SourceRegistryError))
+      throw error;
+    throw new OperationError("source_index_error", `${error.message} Whether an account is part way through moving into its folder cannot be told, so nothing was exported.`, "Repair or restore that file, then export again.");
+  }
+  if (moving.length === 0)
+    return;
+  throw new OperationError("invalid_params", `${[...new Set(moving)].join(", ")} ${moving.length === 1 ? "is" : "are"} part way through moving into ${moving.length === 1 ? "its" : "their"} account folder, so an export now would leave files out; nothing was exported.`, "Start Olympus so it can finish the move or put the files back, then export again. If the move is stuck, its row in Needs you says why.");
 }
 function selectSources(sourceId) {
   if (!sourceId)
