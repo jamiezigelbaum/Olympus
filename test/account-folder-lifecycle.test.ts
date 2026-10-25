@@ -352,11 +352,19 @@ describe('Delete all', () => {
     put(join(dataRoot, 'unrelated-future-account', 'file'));
     put(join(dataRoot, 'sources', 'some.future.source', '1', 'stores', 'internal.sqlite'));
 
+    // Each history names its provider account (storage step 4e).
+    updateSourceRegistry(env, (registry) => {
+      for (const account of registry.accounts) account.provider_account_hash = `${account.source_id}:owner`;
+    });
     const preview = deleteOlympusData({ all: true, homeDir, env, dryRun: true });
     expect(preview.removed).toContain(join(dataRoot, 'sources'));
     expect(existsSync(readwiseFolder(env))).toBe(true);
 
     const result = deleteOlympusData({ all: true, homeDir, env });
+
+    // The registry outlives the folders here, and no history it lists names an account any more (PR #530 review).
+    expect(readSourceRegistry(env).accounts.length).toBeGreaterThan(0);
+    expect(readSourceRegistry(env).accounts.map((account) => account.provider_account_hash)).toEqual(readSourceRegistry(env).accounts.map(() => undefined));
 
     expect(result.removed).toContain(join(dataRoot, 'sources'));
     expect(existsSync(join(dataRoot, 'sources'))).toBe(false);

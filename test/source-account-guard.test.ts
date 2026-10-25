@@ -67,6 +67,8 @@ function harness(input: {
   restarts?: boolean;
   evidence?: { folders?: string[] | undefined; opens?: boolean | undefined };
   duringCheck?: () => void;
+  /** The account registry's account for the source's history, and what the guard told it. */
+  history?: { id?: string; unreadable?: boolean; recorded: string[] };
 }) {
   let reopenRequests = 0;
   const evidenceCalls = { record: 0, check: [] as string[][] };
@@ -102,6 +104,25 @@ function harness(input: {
     laneHoldsItems: () => input.holds ? input.holds.items : input.holdsItems ?? true,
     laneStoresStale: () => input.storesStale ?? false,
     requestStoreReopen: () => { reopenRequests += 1; return input.restarts ?? false; },
+    ...(input.history
+      ? {
+          historyAccount: {
+            read: () => {
+              if (input.history!.unreadable) throw new Error('registry unreadable');
+              return input.history!.id;
+            },
+            // The registry's rule, for ids compared whole: the first value stays unless the history holds nothing.
+            record: (id: string, { historyEmpty }: { historyEmpty: boolean }) => {
+              const history = input.history!;
+              if (history.id !== undefined && history.id !== id && !historyEmpty) return 'different' as const;
+              const result = history.id === id ? 'same' as const : 'recorded' as const;
+              history.id = id;
+              history.recorded.push(id);
+              return result;
+            },
+          },
+        }
+      : {}),
     ...(input.evidence
       ? {
           ownAccountEvidence: {
@@ -576,5 +597,89 @@ describe('the account guard for a Google source known by its subject (independen
     await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
     expect(ran).toBe(1);
     expect(gmailBinding(registryPath)).toEqual({ provider_account_id: `${SUB}.${RENAMED}`, bound_grant: GRANTED });
+  });
+});
+
+describe('the account its history belongs to (storage step 4e)', () => {
+  test('a connect of another account over a history that names its account is held, and nothing is deleted', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:other');
+    // An import made the history; the binding names no account yet.
+    recordFileSourceConnect({ registryPath, provider: 'dropbox', providerAccountId: 'dbid:other', now: new Date('2026-10-10T22:42:00.000Z') });
+    const history = { id: 'dbid:main', recorded: [] as string[] };
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:other', history });
+    let ran = 0;
+    const outcome = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
+      .catch((reason: unknown) => reason);
+    expect((outcome as SourceAccountChangedError).code).toBe('source_account_changed');
+    expect(ran).toBe(0);
+    // A known change, not an unknown previous account; the history keeps its account.
+    expect(binding(registryPath)).toMatchObject({ purge_required: { reason: 'account_changed' } });
+    expect(history.recorded).toEqual([]);
+  });
+
+  test('the account the history names joins it: the binding takes it, and the history is told once', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:main');
+    recordFileSourceConnect({ registryPath, provider: 'dropbox', providerAccountId: 'dbid:main', now: new Date('2026-10-10T22:42:00.000Z') });
+    const history = { id: 'dbid:main', recorded: [] as string[] };
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:main', history });
+    let ran = 0;
+    const source = accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard });
+    await source.tasks[0]!.run();
+    await source.tasks[0]!.run();
+    expect(ran).toBe(2);
+    expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:main' });
+    expect(history.recorded).toEqual(['dbid:main']);
+  });
+
+  test('a history that names no account learns the bound one', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:main');
+    const history = { recorded: [] as string[] };
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:main', history });
+    await accountBoundSchedulerSource({ source: lane(() => undefined), guard }).tasks[0]!.run();
+    expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:main' });
+    expect(history.recorded).toEqual(['dbid:main']);
+  });
+
+  test('another account bound over empty stores relabels the empty history, so an import of the first account no longer joins it (PR #530 review)', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:other');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({ provider_account_id: 'dbid:main', bound_at: '2026-10-10T22:00:00.000Z' }));
+    recordFileSourceConnect({ registryPath, provider: 'dropbox', providerAccountId: 'dbid:other', now: new Date('2026-10-10T22:42:00.000Z') });
+    const history = { id: 'dbid:main', recorded: [] as string[] };
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:other', holdsItems: false, history });
+    let ran = 0;
+    await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run();
+    expect(ran).toBe(1);
+    expect(binding(registryPath)).toMatchObject({ provider_account_id: 'dbid:other' });
+    expect(history.id).toBe('dbid:other');
+  });
+
+  test('a binding that names another account than a history holding items is refused, whichever wrote first', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:other');
+    updateSourceAccountBinding(sourceAccountBindingsPath(registryPath), 'dropbox.files', () => ({ provider_account_id: 'dbid:other', bound_at: '2026-10-10T22:00:00.000Z' }));
+    const history = { id: 'dbid:main', recorded: [] as string[] };
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:other', holdsItems: true, history });
+    let ran = 0;
+    const outcome = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
+      .catch((reason: unknown) => reason);
+    expect((outcome as SourceAccountChangedError).code).toBe('source_account_changed');
+    expect(ran).toBe(0);
+    expect(history.id).toBe('dbid:main');
+  });
+
+  test('a registry that cannot be read holds the run', async () => {
+    const registryPath = join(tempDir(), 'handles.json');
+    writeGrant(registryPath, 'dbid:main');
+    const history = { unreadable: true, recorded: [] as string[] };
+    const { guard } = harness({ registryPath, tokenAccount: 'dbid:main', history });
+    let ran = 0;
+    const outcome = await accountBoundSchedulerSource({ source: lane(() => { ran += 1; }), guard }).tasks[0]!.run()
+      .catch((reason: unknown) => reason);
+    expect((outcome as SourceAccountChangedError).code).toBe('source_account_unverified');
+    expect(ran).toBe(0);
   });
 });

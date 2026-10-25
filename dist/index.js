@@ -17641,6 +17641,7 @@ var init_source_storage = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_source_placement();
+  init_provider_account_identity();
   init_store_identity();
   init_source_registry();
 });
@@ -27453,6 +27454,13 @@ init_unpaired_sources();
 init_credential_broker();
 init_provider_account_identity();
 init_source_account_binding();
+
+// src/core/provider-account-history.ts
+init_provider_account_identity();
+init_olympus_layout();
+init_source_registry();
+
+// src/core/connect.ts
 var DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 var DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
 var OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;

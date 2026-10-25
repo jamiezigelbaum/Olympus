@@ -318,12 +318,14 @@ import {
   openConnectorStore,
   openSecretLocations,
   recordAccountPlacement,
+  recordProviderAccount,
   replaceEmptyLegacyAccounts,
   sourceAccountUnavailableReason,
   storageAccountForCorpus,
   type StorageAccount,
   type StoreFileOwner,
 } from '../../core/source-storage.ts';
+import { recordedProviderAccount } from '../../core/provider-account-history.ts';
 import { migrateAccountFolders, type AccountMigrationReport } from '../../core/source-account-migration.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
@@ -4220,6 +4222,12 @@ export async function main(): Promise<void> {
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
+        // The registry entry's account: what an import established, and what imports are matched against.
+        historyAccount: {
+          read: () => recordedProviderAccount({ sourceId: lane.sourceId }),
+          record: (providerAccountId, { historyEmpty }) =>
+            recordProviderAccount({ sourceId: lane.sourceId }, providerAccountId, process.env, { historyEmpty }),
+        },
         ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
         // Every guard of a source runs its tasks one at a time (scheduler
         // tasks, the Dropbox dashboard hook and the X operator routes alike):

@@ -38,7 +38,7 @@ import { decideAccountLayout, placedAccount } from '../src/core/source-placement
 import { readSourceRegistry, sourceRegistryPath, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { SourceStorageUnavailableError, placeOwnedAccount, replaceEmptyLegacyAccounts } from '../src/core/source-storage.ts';
 import { settlePairingPlacement } from '../src/core/pairing-placement.ts';
-import { pairingPlacementForCli } from '../src/workers/cli-operations.ts';
+import { pairingAccountForCli, pairingPlacementForCli } from '../src/workers/cli-operations.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { replaceEmptyAccountsAtBoot } from '../src/workers/email-source/server.ts';
 import { defaultWhatsAppMediaRoots, whatsAppLiveSyncScriptPaths } from '../src/workers/whatsapp/store-sync.ts';
@@ -809,8 +809,10 @@ describe('pairing records the account before it picks a path', () => {
     return (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/health')) return new Response('{}');
-      asked.push(url.slice(url.indexOf('/cli/') + '/cli/'.length));
-      return Response.json(pairingPlacementForCli(JSON.parse(String(init?.body)), workerEnv));
+      const operation = url.slice(url.indexOf('/cli/') + '/cli/'.length);
+      asked.push(operation);
+      const body = JSON.parse(String(init?.body));
+      return Response.json(operation === 'pairing-account' ? pairingAccountForCli(body, workerEnv) : pairingPlacementForCli(body, workerEnv));
     }) as typeof fetch;
   }
   const accounts = (env: Env): Array<[string, string]> => readSourceRegistry(env).accounts.map((a) => [a.source_id, a.layout]);
@@ -853,7 +855,9 @@ describe('pairing records the account before it picks a path', () => {
     const asked: string[] = [];
     const sessions: Array<string | undefined> = [];
     const paired = await pairTelegram(f, (path) => sessions.push(path), { env: asWorker(f.env), workerFetch: runningWorker(f.env, asked) });
-    expect(asked).toEqual(['pairing-placement']);
+    // The worker places the account, then records the Telegram account the pairing proved (storage step 4e).
+    expect(asked).toEqual(['pairing-placement', 'pairing-account']);
+    expect(readSourceRegistry(f.env).accounts[0]?.provider_account_hash).toMatch(/^telegram:[0-9a-f]{16}$/);
     expect(paired.result.sessionLayout).toBe('folder');
     expect(sessions).toEqual([`${telegramSessionBasePath({ env: f.env, homeDir: f.home })}`]);
     expect(inside(sessions[0]!, folderOf(TELEGRAM, f.env))).toBe(true);

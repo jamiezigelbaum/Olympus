@@ -92,6 +92,12 @@ export interface SourceRegistryAccount {
   /** `legacy`: the files are still at today's paths. `folder`: inside `sources/<source_id>/<slot>/`. */
   layout: SourceRegistryAccountLayout;
   corpus_ids: string[];
+  /**
+   * The provider account the account's history belongs to: the opaque id of
+   * core/provider-account-identity.ts, or `telegram:<account_ref>`. The first
+   * value stays; a later one that is the same account only adds labels
+   * (recordProviderAccount in core/source-storage.ts).
+   */
   provider_account_hash?: string;
   created_at: string;
   migration?: SourceRegistryMigration;
@@ -186,7 +192,13 @@ export function updateSourceRegistry(
   env: LayoutEnv,
   mutate: (registry: SourceRegistry) => SourceRegistry | void,
 ): SourceRegistry {
-  const path = sourceRegistryPath(env);
+  return updateSourceRegistryAt(sourceRegistryPath(env), mutate);
+}
+
+function updateSourceRegistryAt(
+  path: string,
+  mutate: (registry: SourceRegistry) => SourceRegistry | void,
+): SourceRegistry {
   return withFileLeaseSync(path, (lease) => {
     const current = readSourceRegistryAt(path);
     const next = mutate(current) ?? current;
@@ -223,6 +235,38 @@ export function dropMovePlans(env: LayoutEnv, sourceIds: Iterable<string>): stri
     }
   });
   return dropped;
+}
+
+/**
+ * Forgets which provider account the accounts of these sources belong to: what
+ * a Delete does once it has taken their files, as it forgets the account
+ * binding. The entry itself stays until Delete runs on the registry (delivery
+ * step 5), so without this a connect of another account would be refused over a
+ * history that is no longer there. Writes nothing when no entry names one.
+ */
+export function forgetProviderAccounts(env: LayoutEnv, sourceIds: Iterable<string>): string[] {
+  return forgetProviderAccountsAt(sourceRegistryPath(env), sourceIds);
+}
+
+/**
+ * forgetProviderAccounts at a registry found before anything was deleted (all
+ * of them when `sourceIds` is absent): a Delete that removed what the data
+ * folder is found by would otherwise look in another folder.
+ */
+export function forgetProviderAccountsAt(path: string, sourceIds?: Iterable<string>): string[] {
+  const own = sourceIds === undefined ? undefined : new Set(sourceIds);
+  const named = (account: SourceRegistryAccount): boolean =>
+    (own === undefined || own.has(account.source_id)) && account.provider_account_hash !== undefined;
+  if (!readSourceRegistryAt(path).accounts.some(named)) return [];
+  const forgotten: string[] = [];
+  updateSourceRegistryAt(path, (registry) => {
+    for (const account of registry.accounts) {
+      if (!named(account)) continue;
+      delete account.provider_account_hash;
+      forgotten.push(account.source_id);
+    }
+  });
+  return forgotten;
 }
 
 export function findRegistryAccount(
