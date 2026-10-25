@@ -2096,6 +2096,9 @@ function folderSegment(value, what) {
 function accountFolder(account, env = process.env) {
   return olympusDataPath(env, ACCOUNT_FOLDERS_DIR, folderSegment(account.source_id, "source id"), folderSegment(account.slot, "slot"));
 }
+function accountFoldersRoot(env = process.env) {
+  return olympusDataPath(env, ACCOUNT_FOLDERS_DIR);
+}
 function legacyStoreFile(sourceId, name) {
   if (sourceId === ARCHIVE_IMPORTS) {
     const [family, tier, extra] = name.split(".");
@@ -16540,8 +16543,10 @@ var init_source_registry = __esm(() => {
 
 // src/core/store-identity.ts
 import { existsSync as existsSync11, realpathSync as realpathSync3, statSync as statSync7 } from "node:fs";
-import { basename as basename2, dirname as dirname14, join as join15, resolve as resolve5, sep as sep3 } from "node:path";
+import { basename as basename2, dirname as dirname14, isAbsolute as isAbsolute7, join as join15, relative as relative3, resolve as resolve5, sep as sep3 } from "node:path";
 function layoutPath(identity, layout, env) {
+  if (layout === "legacy" && identity.slot !== DEFAULT_ACCOUNT_SLOT)
+    return;
   try {
     return accountStorePath({ source_id: identity.sourceId, slot: identity.slot, layout }, identity.store, env);
   } catch {
@@ -16580,7 +16585,12 @@ function placedStoreHolder(account, store, env = process.env, registry) {
       return;
     const names = [store.trustDomain, `${store.family}.${store.trustDomain}`];
     const matched = matchStore(account.sourceId, slot, store.dbPath, names, env);
-    return matched && { ...matched, path: store.dbPath, registry: sourceRegistryPath(env) };
+    return matched && {
+      ...matched,
+      identity: { ...matched.identity, incarnation: entry.created_at },
+      path: store.dbPath,
+      registry: sourceRegistryPath(env)
+    };
   } catch {
     return;
   }
@@ -16594,14 +16604,17 @@ function storePlacementView(env = process.env) {
   } catch {}
   let loaded;
   const registry = () => {
-    if (!loaded) {
-      try {
-        loaded = { registry: readSourceRegistry(env) };
-      } catch {
-        loaded = { registry: undefined };
-      }
+    if (loaded)
+      return loaded;
+    if (registryPath === undefined)
+      return loaded = { kind: "unreadable" };
+    try {
+      const read = readSourceRegistry(env);
+      loaded = existsSync11(registryPath) ? { kind: "read", registry: read } : { kind: "missing" };
+    } catch {
+      loaded = { kind: "unreadable" };
     }
-    return loaded.registry;
+    return loaded;
   };
   const absentForSure = (path) => {
     if (!isMissing(path))
@@ -16610,13 +16623,25 @@ function storePlacementView(env = process.env) {
       return true;
     return root !== undefined && isInside(path, root) && existsSync11(root);
   };
+  const verdicts = new Map;
   const storeGone = (identity, seen) => {
-    const known = registry();
-    if (!known || registryPath === undefined)
+    const key2 = JSON.stringify([identity.sourceId, identity.slot, identity.store, identity.incarnation, ...seen]);
+    const known = verdicts.get(key2);
+    if (known !== undefined)
+      return known;
+    const gone = judgeStoreGone(identity, seen);
+    verdicts.set(key2, gone);
+    return gone;
+  };
+  const judgeStoreGone = (identity, seen) => {
+    const state = registry();
+    if (state.kind !== "read")
       return false;
-    const entry = findRegistryAccount(known, identity.sourceId, identity.slot);
+    const entry = findRegistryAccount(state.registry, identity.sourceId, identity.slot);
     if (!entry)
-      return existsSync11(registryPath);
+      return true;
+    if (identity.incarnation !== undefined && isEarlier(identity.incarnation, entry.created_at))
+      return true;
     if (entry.state === "deleted")
       return true;
     if (entry.state === "deleting")
@@ -16626,6 +16651,42 @@ function storePlacementView(env = process.env) {
       return false;
     const other = layoutPath(identity, entry.layout === "folder" ? "legacy" : "folder", env);
     return [own3, ...seen].every(absentForSure) && (other === undefined || isMissing(other));
+  };
+  const folderRoots = () => {
+    const roots = new Set;
+    try {
+      roots.add(resolve5(accountFoldersRoot(env)));
+      if (root !== undefined)
+        roots.add(join15(realpathSync3(root), ACCOUNT_FOLDERS_DIR));
+    } catch {}
+    return [...roots];
+  };
+  const folderPlace = (path) => {
+    for (const folders of folderRoots()) {
+      const inside = relative3(folders, path);
+      if (inside.startsWith("..") || isAbsolute7(inside))
+        continue;
+      const [sourceId, slot, stores, file, ...rest] = inside.split(sep3);
+      if (!sourceId || !slot || stores !== "stores" || !file?.endsWith(".sqlite") || rest.length > 0)
+        continue;
+      return { sourceId, slot, store: file.slice(0, -".sqlite".length) };
+    }
+    return;
+  };
+  let legacyPlaces;
+  const legacyPlaced = (key2) => {
+    if (!legacyPlaces) {
+      legacyPlaces = new Set;
+      const families = archiveImportFamilies();
+      for (const sourceId of FOLDER_LAYOUT_SOURCES) {
+        for (const store of accountStoreNames(sourceId, families)) {
+          const path = layoutPath({ sourceId, slot: DEFAULT_ACCOUNT_SLOT, store }, "legacy", env);
+          if (path !== undefined)
+            legacyPlaces.add(storePathKey(path));
+        }
+      }
+    }
+    return legacyPlaces.has(key2);
   };
   let placed;
   const placedAt = (known) => {
@@ -16647,22 +16708,43 @@ function storePlacementView(env = process.env) {
     }
     return placed;
   };
+  const pathVerdicts = new Map;
+  const judgePathMarker = (path) => {
+    const state = registry();
+    if (state.kind === "unreadable")
+      return "kept";
+    try {
+      const key2 = storePathKey(path);
+      const inFolder = folderPlace(key2) ?? folderPlace(resolve5(path));
+      if (state.kind === "missing")
+        return inFolder !== undefined || legacyPlaced(key2) ? "kept" : "unplaced";
+      const identity = placedAt(state.registry).get(key2);
+      if (identity)
+        return storeGone(identity, [path]) ? "gone" : "kept";
+      if (!inFolder)
+        return "unplaced";
+      return storeGone(inFolder, [path]) ? "gone" : "kept";
+    } catch {
+      return "kept";
+    }
+  };
   return {
     registry: registryPath,
     storeGone,
-    pathMarkerGone(path) {
-      const known = registry();
-      if (!known)
-        return false;
-      let identity;
-      try {
-        identity = placedAt(known).get(storePathKey(path));
-      } catch {
-        return false;
+    pathMarker(path) {
+      let verdict = pathVerdicts.get(path);
+      if (!verdict) {
+        verdict = judgePathMarker(path);
+        pathVerdicts.set(path, verdict);
       }
-      return identity === undefined || storeGone(identity, [path]);
+      return verdict;
     }
   };
+}
+function isEarlier(held, current2) {
+  const before = Date.parse(held);
+  const after = Date.parse(current2);
+  return Number.isFinite(before) && Number.isFinite(after) && before < after;
 }
 function isInside(path, folder) {
   return resolve5(path).startsWith(`${resolve5(folder)}${sep3}`);
@@ -16688,9 +16770,12 @@ var init_store_identity = __esm(() => {
 import { createHash as createHash7, randomUUID as randomUUID4 } from "node:crypto";
 import {
   chmodSync as chmodSync3,
+  closeSync as closeSync7,
   existsSync as existsSync12,
+  fsyncSync as fsyncSync2,
   mkdirSync as mkdirSync10,
   lstatSync as lstatSync6,
+  openSync as openSync7,
   readFileSync as readFileSync15,
   readdirSync as readdirSync2,
   realpathSync as realpathSync4,
@@ -16700,10 +16785,10 @@ import {
   statSync as statSync8,
   writeFileSync as writeFileSync4
 } from "node:fs";
-import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute7, join as join16, resolve as resolve6 } from "node:path";
+import { basename as basename3, dirname as dirname15, isAbsolute as isAbsolute8, join as join16, resolve as resolve6 } from "node:path";
 function mediaCacheDir(env = process.env) {
   const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
-  if (configured && !isAbsolute7(configured))
+  if (configured && !isAbsolute8(configured))
     throw new TypeError(`${MEDIA_CACHE_DIR_ENV} must be an absolute path.`);
   return configured ? join16(configured, "olympus-media") : join16(olympusDataDir(env), "media-cache");
 }
@@ -16717,7 +16802,7 @@ function isSha256(value) {
   return true;
 }
 function isMediaCachePath(path, sha256, dir) {
-  if (!isAbsolute7(path) || !isSha256(sha256) || resolve6(path) !== path)
+  if (!isAbsolute8(path) || !isSha256(sha256) || resolve6(path) !== path)
     return false;
   if (basename3(path) !== `${sha256}.jpg` || !MEDIA_CACHE_DIR_NAMES.has(basename3(dirname15(path))))
     return false;
@@ -16740,7 +16825,7 @@ function mediaHolderName(holder) {
   }
 }
 function mediaHolderKey(holder) {
-  return typeof holder === "string" ? holder : `${storeMarkerName(holder.identity)}@${holder.path}`;
+  return typeof holder === "string" ? holder : `${storeMarkerName(holder)}@${holder.path}@${holder.identity.incarnation ?? ""}`;
 }
 function retainMediaCacheFile(path, sha256, holder, dir) {
   if (!isMediaCachePath(path, sha256, dir))
@@ -16834,12 +16919,23 @@ function addMarker(path, holder) {
     rmSync5(join16(refs, legacy), { force: true });
 }
 function addStoreMarker(refs, holder) {
-  const marker = join16(refs, storeMarkerName(holder.identity));
+  const marker = join16(refs, storeMarkerName(holder));
   const text2 = storeMarkerText(holder);
   if (readMarker(marker) !== text2)
     writePrivateFileAtomicSync(marker, text2);
+  else
+    flushMarker(marker, refs);
   for (const name of pathMarkerNames(holder))
     rmSync5(join16(refs, name), { force: true });
+}
+function flushMarker(marker, refs) {
+  const descriptor = openSync7(marker, "r");
+  try {
+    fsyncSync2(descriptor);
+  } finally {
+    closeSync7(descriptor);
+  }
+  syncDirectorySync(refs);
 }
 function readMarker(marker) {
   try {
@@ -16850,11 +16946,14 @@ function readMarker(marker) {
 }
 function holderGone(marker, markerName, placement) {
   const name = readMarker(marker);
-  if (!name || !isAbsolute7(name) || holderDigest(name) !== markerName)
+  if (!name || !isAbsolute8(name) || holderDigest(name) !== markerName)
     return false;
-  if (existsSync12(name) || !existsSync12(dirname15(name)))
+  if (existsSync12(name))
     return false;
-  return placement.pathMarkerGone(name);
+  const verdict = placement.pathMarker(name);
+  if (verdict !== "unplaced")
+    return verdict === "gone";
+  return existsSync12(dirname15(name));
 }
 function storeHolderGone(marker, placement) {
   const recorded = parseStoreMarker(readMarker(marker));
@@ -16862,8 +16961,9 @@ function storeHolderGone(marker, placement) {
     return false;
   return placement.storeGone(recorded.identity, [recorded.seen]);
 }
-function storeMarkerName(identity) {
-  return `${STORE_MARKER_PREFIX}${holderDigest(JSON.stringify([identity.sourceId, identity.slot, identity.store]))}`;
+function storeMarkerName(holder) {
+  const { sourceId, slot, store } = holder.identity;
+  return `${STORE_MARKER_PREFIX}${holderDigest(JSON.stringify([holder.registry, sourceId, slot, store]))}`;
 }
 function storeMarkerText(holder) {
   return JSON.stringify({
@@ -16871,6 +16971,7 @@ function storeMarkerText(holder) {
     sourceId: holder.identity.sourceId,
     slot: holder.identity.slot,
     store: holder.identity.store,
+    ...holder.identity.incarnation === undefined ? {} : { incarnation: holder.identity.incarnation },
     seen: mediaHolderName(holder.path),
     registry: holder.registry
   });
@@ -16880,12 +16981,14 @@ function parseStoreMarker(text2) {
     return;
   try {
     const parsed = JSON.parse(text2);
-    const { version, sourceId, slot, store, seen, registry } = parsed;
+    const { version, sourceId, slot, store, incarnation, seen, registry } = parsed;
     if (version !== 1 || typeof sourceId !== "string" || typeof slot !== "string" || typeof store !== "string")
       return;
     if (typeof seen !== "string" || typeof registry !== "string" || !sourceId || !slot || !store)
       return;
-    return { identity: { sourceId, slot, store }, seen, registry };
+    if (incarnation !== undefined && typeof incarnation !== "string")
+      return;
+    return { identity: { sourceId, slot, store, ...incarnation === undefined ? {} : { incarnation } }, seen, registry };
   } catch {
     return;
   }
@@ -16902,7 +17005,7 @@ function holderName(holder) {
 }
 function markerNames(holder) {
   if (typeof holder !== "string")
-    return [storeMarkerName(holder.identity), ...pathMarkerNames(holder)];
+    return [storeMarkerName(holder), ...pathMarkerNames(holder)];
   const legacy = legacyHolderName(holder);
   return legacy ? [holderName(holder), legacy] : [holderName(holder)];
 }
@@ -16933,7 +17036,7 @@ var init_media_cache = __esm(() => {
 // src/workers/classification/secret-locations.ts
 import { Database as Database2 } from "bun:sqlite";
 import { createHash as createHash8 } from "node:crypto";
-import { chmodSync as chmodSync4, closeSync as closeSync7, existsSync as existsSync13, mkdirSync as mkdirSync11, openSync as openSync7 } from "node:fs";
+import { chmodSync as chmodSync4, closeSync as closeSync8, existsSync as existsSync13, mkdirSync as mkdirSync11, openSync as openSync8 } from "node:fs";
 import { dirname as dirname16 } from "node:path";
 function screenedSecretLocator(locator) {
   return locator?.trim() && !hasCredentialUrl(locator) && detectSecretFindingKinds(locator).length === 0 ? locator.trim().slice(0, 1000) : null;
@@ -16955,7 +17058,7 @@ class SecretLocationsIndex {
     if (onDisk) {
       mkdirSync11(dirname16(this.dbPath), { recursive: true, mode: 448 });
       if (!existsSync13(this.dbPath))
-        closeSync7(openSync7(this.dbPath, "a", 384));
+        closeSync8(openSync8(this.dbPath, "a", 384));
       chmodSync4(this.dbPath, 384);
     }
     this.db = new Database2(this.dbPath, { create: true });
@@ -27312,7 +27415,7 @@ var init_tier_content_purge = __esm(() => {
 import { spawn } from "node:child_process";
 import { existsSync as existsSync18, statSync as statSync10 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { delimiter as delimiter2, dirname as dirname20, isAbsolute as isAbsolute8, join as join18 } from "node:path";
+import { delimiter as delimiter2, dirname as dirname20, isAbsolute as isAbsolute9, join as join18 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 function helperEnvironment() {
@@ -27543,7 +27646,7 @@ function resolveBun() {
     join18(homedir9(), ".bun", "bin", bunName)
   ];
   for (const candidate of candidates) {
-    if (!candidate || !isAbsolute8(candidate))
+    if (!candidate || !isAbsolute9(candidate))
       continue;
     try {
       if (statSync10(candidate).isFile())
@@ -29113,7 +29216,7 @@ var init_tiered_store_set = __esm(() => {
 });
 
 // src/core/messaging-capture-grant-file.ts
-import { closeSync as closeSync8, constants as constants2, fstatSync, lstatSync as lstatSync8, openSync as openSync8, readFileSync as readFileSync17 } from "node:fs";
+import { closeSync as closeSync9, constants as constants2, fstatSync, lstatSync as lstatSync8, openSync as openSync9, readFileSync as readFileSync17 } from "node:fs";
 import { homedir as homedir10 } from "node:os";
 import { dirname as dirname22, join as join21 } from "node:path";
 function captureGrantPathBeside(source, handleRegistryPath) {
@@ -29132,7 +29235,7 @@ function readCaptureGrantFile(path) {
   }
   let descriptor;
   try {
-    descriptor = openSync8(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
+    descriptor = openSync9(path, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
     const info = fstatSync(descriptor);
     const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
     if (!info.isFile() || (info.mode & 18) !== 0 || currentUid !== undefined && info.uid !== currentUid) {
@@ -29150,7 +29253,7 @@ function readCaptureGrantFile(path) {
     return { kind: "invalid" };
   } finally {
     if (descriptor !== undefined)
-      closeSync8(descriptor);
+      closeSync9(descriptor);
   }
 }
 function captureGrantSessionEvidence(source, grantPath) {
@@ -33807,7 +33910,7 @@ var init_open_target = __esm(() => {
 import { accessSync as accessSync3, constants as fsConstants2, lstatSync as lstatSync10, realpathSync as realpathSync6 } from "node:fs";
 import { execFile, spawn as spawn2, spawnSync as spawnSync3 } from "node:child_process";
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { dirname as dirname23, extname, isAbsolute as isAbsolute9, join as join23 } from "node:path";
+import { dirname as dirname23, extname, isAbsolute as isAbsolute10, join as join23 } from "node:path";
 import { pathToFileURL as pathToFileURL2 } from "node:url";
 function linuxGraphicalSessionReadiness(dependencies = {}) {
   const executables = { ...DEFAULT_EXECUTABLES, ...dependencies.executables };
@@ -33828,7 +33931,7 @@ function linuxGraphicalSessionReadiness(dependencies = {}) {
   const uid = dependencies.uid ?? (typeof process.getuid === "function" ? process.getuid() : -1);
   const inspectPath = dependencies.inspectPath ?? inspectLinuxPath;
   const runtime = manager.XDG_RUNTIME_DIR;
-  if (!runtime || !isAbsolute9(runtime) || runtime.includes("\x00") || runtime.includes(`
+  if (!runtime || !isAbsolute10(runtime) || runtime.includes("\x00") || runtime.includes(`
 `) || runtime.includes("\r")) {
     return { ready: false, reason: "unsafe_runtime_directory" };
   }
@@ -33919,13 +34022,13 @@ function sanitizedDesktopEnvironment(manager, runtime, uid, inspectPath) {
       environment[key2] = value;
   }
   const home = manager.HOME;
-  if (home && isAbsolute9(home) && !/[\0\r\n]/.test(home))
+  if (home && isAbsolute10(home) && !/[\0\r\n]/.test(home))
     environment.HOME = home;
   const bus = manager.DBUS_SESSION_BUS_ADDRESS;
   if (bus === `unix:path=${join23(runtime, "bus")}`)
     environment.DBUS_SESSION_BUS_ADDRESS = bus;
   const authority = manager.XAUTHORITY;
-  if (authority && isAbsolute9(authority)) {
+  if (authority && isAbsolute10(authority)) {
     const info = inspectPath(authority);
     if (info && !info.symbolicLink && info.kind === "file" && info.uid === uid)
       environment.XAUTHORITY = authority;
@@ -33953,7 +34056,7 @@ function resolvedRealpath(path) {
   }
 }
 function isTrustedExecutable(path) {
-  if (!isAbsolute9(path))
+  if (!isAbsolute10(path))
     return false;
   try {
     accessSync3(path, fsConstants2.X_OK);
@@ -33965,7 +34068,7 @@ function isTrustedExecutable(path) {
   }
 }
 function absoluteExecutables(executables) {
-  return Object.values(executables).every((path) => isAbsolute9(path) && !/[\0\r\n]/.test(path));
+  return Object.values(executables).every((path) => isAbsolute10(path) && !/[\0\r\n]/.test(path));
 }
 function runCommandSync(argv, timeoutMs) {
   const result = spawnSync3(argv[0], argv.slice(1), { encoding: "utf8", timeout: timeoutMs, maxBuffer: MAX_COMMAND_OUTPUT });
@@ -34428,7 +34531,7 @@ var init_engine_maintenance = __esm(() => {
 });
 
 // src/workers/credential-broker/unpaired-sources.ts
-import { closeSync as closeSync10, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync11, openSync as openSync10, readFileSync as readFileSync18 } from "node:fs";
+import { closeSync as closeSync11, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync11, openSync as openSync11, readFileSync as readFileSync18 } from "node:fs";
 function unpairedSourcesPath(registryPath) {
   return `${registryPath}.unpaired`;
 }
@@ -34455,7 +34558,7 @@ function readRecordText(path) {
   const flags = constants4.O_RDONLY | (constants4.O_NOFOLLOW ?? 0) | (constants4.O_NONBLOCK ?? 0);
   let fd;
   try {
-    fd = openSync10(path, flags);
+    fd = openSync11(path, flags);
   } catch (error) {
     const code = error.code ?? "UNKNOWN";
     if (code === "ENOENT" || code === "ENOTDIR")
@@ -34473,7 +34576,7 @@ function readRecordText(path) {
     return { kind: "unreadable", reason: `${code}: ${error.message}` };
   } finally {
     try {
-      closeSync10(fd);
+      closeSync11(fd);
     } catch {}
   }
 }
@@ -42079,7 +42182,7 @@ init_worker_transport();
 init_dropbox_files();
 import { createHash as createHash25 } from "node:crypto";
 import { existsSync as existsSync27, lstatSync as lstatSync14, mkdirSync as mkdirSync18, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname31, isAbsolute as isAbsolute11 } from "node:path";
+import { dirname as dirname31, isAbsolute as isAbsolute12 } from "node:path";
 
 // src/workers/email-source/server.ts
 init_vocabulary();
@@ -42090,7 +42193,7 @@ init_linux_desktop_opener();
 
 // src/core/linux-owner-bridge.ts
 import { createHmac, createHash as createHash18, randomBytes as randomBytes3, timingSafeEqual } from "node:crypto";
-import { closeSync as closeSync9, openSync as openSync9, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
+import { closeSync as closeSync10, openSync as openSync10, writeFileSync as writeFileSync5, unlinkSync } from "node:fs";
 import { dirname as dirname24, join as join24 } from "node:path";
 init_worker_transport();
 init_linux_desktop_opener();
@@ -42358,11 +42461,11 @@ class LinuxOwnerBridge {
  location.replace(${JSON.stringify(url)});
  }catch{message.textContent=${JSON.stringify("This browser cannot reach the private *.localhost session origin. The private ticket was not sent. " + DESKTOP_BRIDGE_REMEDY)};}
 })();</script>`;
-    const fd = openSync9(path, "wx", 384);
+    const fd = openSync10(path, "wx", 384);
     try {
       writeFileSync5(fd, html2);
     } finally {
-      closeSync9(fd);
+      closeSync10(fd);
     }
     const ticket = { value, challenge, target, path, expires: this.now() + TICKET_MS };
     this.tickets.set(lane, ticket);
@@ -42872,7 +42975,7 @@ init_provider_client();
 init_http_timeout();
 init_file_extraction_source();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
-import { relative as relative3, resolve as resolve8, sep as sep5 } from "node:path";
+import { relative as relative4, resolve as resolve8, sep as sep5 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
 var DROPBOX_SCOPE_KEY_PROVIDER_PREFIX = "dropbox.";
 var DROPBOX_FOLDER_ID_SCOPE_PREFIX = "folder_id:";
@@ -43020,7 +43123,7 @@ class DropboxExtractionSource {
     if (!rootRealPath)
       return;
     const candidatePath = resolve8(rootRealPath, relativePath);
-    const relativeToRoot = relative3(rootRealPath, candidatePath);
+    const relativeToRoot = relative4(rootRealPath, candidatePath);
     if (relativeToRoot.startsWith("..") || relativeToRoot === "" || relativeToRoot.includes(`..${sep5}`)) {
       return;
     }
@@ -43462,7 +43565,7 @@ import {
 } from "node:fs";
 import { randomUUID as randomUUID6 } from "node:crypto";
 import { homedir as homedir14 } from "node:os";
-import { dirname as dirname26, isAbsolute as isAbsolute10, join as join27 } from "node:path";
+import { dirname as dirname26, isAbsolute as isAbsolute11, join as join27 } from "node:path";
 var DEFAULT_VENICE_MODEL_CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_REFRESH_MIN_INTERVAL_MS = 5 * 60 * 1000;
 var DEFAULT_VENICE_MODEL_CATALOG_TIMEOUT_MS = 1e4;
@@ -43472,7 +43575,7 @@ var MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 var REFRESH_GATES = new Map;
 function defaultVeniceModelCatalogCachePath(env = process.env, homeDir = homedir14(), type = "text") {
   const configuredRoot = env.XDG_CACHE_HOME?.trim();
-  const cacheRoot = configuredRoot && isAbsolute10(configuredRoot) ? configuredRoot : join27(homeDir, ".cache");
+  const cacheRoot = configuredRoot && isAbsolute11(configuredRoot) ? configuredRoot : join27(homeDir, ".cache");
   return join27(cacheRoot, "olympus", type === "embedding" ? "venice-embedding-model-catalog-v1.json" : "venice-model-catalog-v1.json");
 }
 function createVenicePrivacyCategoryResolver(input) {
@@ -49724,7 +49827,7 @@ function publishNativeEmbeddingDrainReadiness(env = process.env, pid = process.p
   if (!instanceId || !CANONICAL_UUID.test(instanceId)) {
     throw new Error(`${NATIVE_SERVICE_INSTANCE_ID_ENV} must be a canonical UUID for native startup.`);
   }
-  if (!readinessPath || !isAbsolute11(readinessPath)) {
+  if (!readinessPath || !isAbsolute12(readinessPath)) {
     throw new Error(`${NATIVE_SERVICE_READINESS_PATH_ENV} must be an absolute path for native startup.`);
   }
   const directory = dirname31(readinessPath);
