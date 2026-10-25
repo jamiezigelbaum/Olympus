@@ -121,7 +121,7 @@ Each layer is searchable in **exactly one** tier at any moment. Metadata rows an
 
 ### 2.1 Unit of judgment
 
-- **Files, notes, documents, emails, bookmarks and highlights:** the item is the unit. An email attachment inherits the higher of its own tier and its parent message's tier.
+- **Files, notes, documents, emails, bookmarks and highlights:** the item is the unit. An attachment or a piece of media is a child item judged on its own, taking no tier from its parent: a child of a Private email can be Personal, and a child is Secrets only when it holds a secret itself (owner, 2026-10-25, replacing "the higher of its own tier and its parent message's tier"; [child items](child-items.md)).
 - **Chats (Telegram, WhatsApp):** a chat-level rule sets a prior, and each message can still be raised to Private or Secrets. A message is never lowered below its chat rule unless the owner overrides that item.
 
 ### 2.2 Classification pipeline (source-agnostic, runs once per item)
