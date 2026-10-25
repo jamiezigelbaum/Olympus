@@ -109,7 +109,7 @@ export interface ExploreResult {
   unlisted: Array<{ key: string; label: string; rowName: string; pressed: boolean }>;
   /** The panel's controls outside the Sources section, pressed once from the first state produced. */
   sections?: SectionControl[];
-  /** The engine had stopped answering after the Sources crawl and was restarted so the other pages could be crawled. */
+  /** The engine had stopped answering after the other pages' crawl and was restarted so the Sources section could be crawled. */
   engineRestart?: { ok: boolean; ms: number; detail: string };
   summary: { listed: number; found: number; pressed: number; missed: number; unlisted: number; presses: number };
   /** Sources a seed was meant to drive and could not bring to the state: the machine claims to drive them, so this blocks. */
@@ -761,11 +761,11 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
   if (result.engineRestart) {
     const restart = result.engineRestart;
     checks.push({
-      id: 'explore.engine-restart', title: 'The engine answered again for the other pages',
+      id: 'explore.engine-restart', title: 'The engine answered again for the Sources section',
       status: restart.ok ? 'warn' : 'fail',
       detail: restart.ok
-        ? `the engine had stopped answering after the Sources crawl (${restart.detail}); it was restarted in ${Math.round(restart.ms / 1000)} s so the other pages could be crawled`
-        : `the engine had stopped answering after the Sources crawl and could not be restarted: ${restart.detail}`,
+        ? `the engine had stopped answering after the other pages' crawl (${restart.detail}); it was restarted in ${Math.round(restart.ms / 1000)} s so the Sources section could be crawled`
+        : `the engine had stopped answering after the other pages' crawl and could not be restarted: ${restart.detail}`,
     });
   }
   if (result.pages) checks.push(...pagesChecks(result.pages));
