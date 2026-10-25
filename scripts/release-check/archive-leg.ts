@@ -6,7 +6,7 @@
  *     stdio MCP: the engine's remote endpoint does not offer it). The answer is `needs_approval` and a request; nothing is read yet.
  *     The owner approves in the dashboard on the computer, with a real press of the request's Import (the route a bearer holder
  *     cannot use: archive approval is for an unlocked browser on the computer only).
- *   - The owner can also choose the file herself: Import another archive (Other archives) opens the picker over the computer's files, the folder is opened,
+ *   - The owner can also choose the file herself: Import an archive opens the picker over the computer's files, the folder is opened,
  *     Import is pressed on the file.
  *   - The import settles. The dashboard's row must say what the fixture holds (archive-fixtures.ts): the format, the messages, the
  *     days, what was not imported and how it was read (two lists), behind a real press of the See button. The agent's own status says
@@ -465,17 +465,17 @@ export function pickerImportJourney(fx: LegFixture, bounds: { startS?: number; s
   return {
     id: `archive-${fx.role}-${fx.format}-import`,
     title: `The owner chooses an archive in the picker and imports it, and the import settles (${fx.format}, ${fx.role})`,
-    source: 'archive import: the owner\'s picker (Import another archive, the folder, Import on the file)',
+    source: 'archive import: the owner\'s picker (Import an archive, the folder, Import on the file)',
     mutates: true,
     steps: [
       {
-        name: 'Open the dashboard: no archive is imported yet, and Import another archive is offered',
+        name: 'Open the dashboard: no archive is imported yet, and Import an archive is offered',
         do: { go: '/dashboard' },
         expect: [{ present: { role: 'button', name: A.importAction }, frame: 'panel' }, { absent: { css: 'li.archive' }, frame: 'panel' }],
         timeoutMs: (bounds.openS ?? OPEN_S) * 1_000,
       },
       {
-        name: 'Press Import another archive: the picker lists the computer\'s folders',
+        name: 'Press Import an archive: the picker lists the computer\'s folders',
         do: { click: { role: 'button', name: A.importAction }, frame: 'panel' },
         // The listing arrives after the picker opens; the next press waits for it.
         expect: [{ text: A.pick.intro, frame: 'panel' }, { present: { css: 'button[data-key^="picker:open:"]', text: FIXTURE_FOLDER, contains: true }, frame: 'panel' }],

@@ -110,7 +110,7 @@ export interface ImportArgs {
   seed: string;
   /** Empties the fixtures folder first (the leg's first stage). */
   resetFolder?: boolean;
-  /** Removes archives an earlier attempt left, so the picker's Import another archive is where this stage looks for it. */
+  /** Removes archives an earlier attempt left, so the picker's Import an archive is where this stage looks for it. */
   clean?: boolean;
   /** After the import settles, wait this long for the held messages to be judged (the private model is on). */
   drainS?: number;
@@ -120,7 +120,7 @@ export interface ImportArgs {
   watchEgress?: boolean;
   settleS?: number;
   startS?: number;
-  /** How long the dashboard may take to show what the first step waits for (the agent's request, the Import another archive button). */
+  /** How long the dashboard may take to show what the first step waits for (the agent's request, the Import an archive button). */
   openS?: number;
   /** How long a Remove of a leftover archive may take. */
   removeS?: number;
