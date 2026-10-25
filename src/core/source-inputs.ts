@@ -34,6 +34,8 @@ export interface SourceRecordEntry {
   identity: SourceItemIdentity;
   /** Whether the record carries this item's content, not only its names. */
   bringsContent: boolean;
+  /** The record is the provider's deletion of this item: at the version the store holds, a deletion beats its content. */
+  deletes?: boolean;
   /** When the item was written (ISO), for the history an input covers. Only the record's own item is asked. */
   authoredAt?: string;
 }
@@ -89,6 +91,7 @@ export function decideIntake(args: {
   input: SourceInputKind;
   version: string | undefined;
   bringsContent: boolean;
+  deletes?: boolean;
   stored: StoredItemState | undefined;
   compareVersions: (a: string, b: string) => number;
 }): IntakeDecision {
@@ -106,6 +109,8 @@ export function decideIntake(args: {
   }
   // A stored item with no version to compare (an old row) is completed by the next record.
   if (order === undefined) return 'apply';
+  // The provider's deletion of the version stored beats its content.
+  if (args.deletes === true && order >= 0) return 'apply';
   if (order > 0) return 'apply';
   if (order < 0) return 'skip_older';
   // An item cut off between legs, or whose rows disagree, is completed by a record of its own version.
@@ -242,6 +247,7 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 input: input.kind,
                 version: entry.identity.sourceVersion,
                 bringsContent: entry.bringsContent,
+                ...(entry.deletes === true ? { deletes: true } : {}),
                 stored,
                 compareVersions: builder.compareVersions,
               });
@@ -264,31 +270,69 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
             }
             // In the record's own order: its item, then its children.
             entries.forEach((entry, index) => {
-              const item = built.get(entry.identity.localItemId);
-              if (!item || index < from) return;
+              const built1 = built.get(entry.identity.localItemId);
+              if (!built1 || index < from) return;
+              // A record that carries no version was accepted as the version the store holds: it keeps that
+              // version, in the pass's own state and in the item it emits, so it can never erase the boundary.
+              const known = stateOf(built1.identity)?.version;
+              const item = built1.identity.sourceVersion === undefined && known !== undefined
+                ? { ...built1, identity: { ...built1.identity, sourceVersion: known } }
+                : built1;
+              const deleted = item.metadata['deleted'] === true;
+              // Names alone take no content away: what the item held before this record is still there.
+              const before = stateOf(item.identity);
               thisPass.set(item.identity.localItemId, {
                 ...(item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {}),
-                hasContent: hasContent(item),
+                hasContent: hasContent(item) || (!deleted && before?.hasContent === true && before.tombstoned !== true),
+                // Names alone do not bring a deleted item or a Secret back: it stays one, at the newer version.
+                ...(deleted || (before?.tombstoned === true && !hasContent(item)) ? { tombstoned: true as const } : {}),
               });
               units.push({ record: offset + position, entry: index, item });
             });
           }
-          // Two versions of one item never share a batch: only the newest accepted one of each item goes on, so
-          // classification, placement and removals see one plan per item. A superseded record goes whole: its
-          // children are the ones its newer version no longer lists (those it still lists come with that version).
-          // Versions in different batches take the ordinary sequential path.
-          const lastOf = new Map<string, number>();
-          units.forEach((unit, at) => lastOf.set(unit.item.identity.localItemId, at));
-          const superseded = new Set<number>();
+          // Each item of a page is reduced, on its own, to its newest accepted record: parents and children
+          // alike, so two versions of one item never share a batch, a plan or a removal. Same version: a
+          // deletion beats a content record, otherwise the later record wins. A child stays if it is the
+          // newest record of its own identity, whichever record it first came with.
+          const winner = new Map<string, number>();
+          const isDeleted = (unit: PageUnit): boolean => unit.item.metadata['deleted'] === true;
           units.forEach((unit, at) => {
-            if (unit.entry === 0 && lastOf.get(unit.item.identity.localItemId) !== at) superseded.add(unit.record);
+            const id = unit.item.identity.localItemId;
+            const best = winner.get(id);
+            if (best === undefined) { winner.set(id, at); return; }
+            const held = units[best]!;
+            const a = unit.item.identity.sourceVersion;
+            const b = held.item.identity.sourceVersion;
+            const order = a === undefined || b === undefined ? 0 : builder.compareVersions(a, b);
+            if (order > 0 || (order === 0 && !(isDeleted(held) && !isDeleted(unit)))) winner.set(id, at);
           });
-          if (superseded.size > 0 || lastOf.size !== units.length) {
-            for (const record of superseded) {
-              const at = outcomeOf.get(record);
-              if (at !== undefined) outcomes[at] = { ...outcomes[at]!, decision: 'skip_older' };
+          if (winner.size !== units.length) {
+            // A newer record that only has the names does not drop the content an older record of this page
+            // brought: the item is the newer version with that content, as it would be one page after the other.
+            for (const [id, at] of winner) {
+              const won = units[at]!;
+              if (isDeleted(won) || hasContent(won.item)) continue;
+              // Only content from after the item's last deletion in this page: nothing of a deleted state comes back.
+              let older: PageUnit | undefined;
+              let deletion: PageUnit | undefined;
+              units.forEach((unit, from) => {
+                if (unit.item.identity.localItemId !== id || from >= at) return;
+                if (isDeleted(unit)) { older = undefined; deletion = unit; }
+                else if (hasContent(unit.item)) { older = unit; deletion = undefined; }
+              });
+              // The merged item resumes from the record that brought its content: a pass cut before it reads that
+              // record again, so the content is never lost to the cut.
+              if (older) units[at] = { record: older.record, entry: older.entry, item: { ...won.item, content: older.item.content } };
+              // Names alone never revive a deleted item: after a deletion in this page it stays a deletion, at the newer version.
+              else if (deletion) units[at] = { record: deletion.record, entry: deletion.entry, item: { ...deletion.item, identity: { ...deletion.item.identity, ...(won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {}) } } };
             }
-            units = units.filter((unit, at) => !superseded.has(unit.record) && lastOf.get(unit.item.identity.localItemId) === at);
+            const kept = new Set(winner.values());
+            for (const [at, unit] of units.entries()) {
+              if (unit.entry !== 0 || kept.has(at)) continue;
+              const told = outcomeOf.get(unit.record);
+              if (told !== undefined) outcomes[told] = { ...outcomes[told]!, decision: 'skip_older' };
+            }
+            units = units.filter((_, at) => kept.has(at));
           }
           input.observeIntake?.(outcomes);
           const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
