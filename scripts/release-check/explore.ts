@@ -154,7 +154,8 @@ export interface PressContext {
   seed: SeedId;
   control: PanelControl;
   kind: ControlKind;
-  before: { keys: string[]; seeded: string[]; rows: Record<string, string>; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
+  /** `loaded`: the controls on the fresh page this press started from, before anything on its path was pressed. */
+  before: { keys: string[]; loaded: string[]; rows: Record<string, string>; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
   after: { controls: PanelControl[]; text: string; open: Array<{ key: string; open: boolean; text?: string }>; url: string };
   opened: string[];
 }
@@ -184,11 +185,12 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
   cancel: (c) => {
     const base = c.control.key.replace(/:no$/, '');
     const gone = !c.after.controls.some((control) => control.key === `${base}:yes`);
-    // Left as it was: the page offers the same controls as when it was seeded, apart from the question itself (a Cancel that did the action would swap Disconnect for Connect, or remove Delete).
+    // Left as it was: the page offers the same controls as on the fresh page the press started from, apart from the question itself (a Cancel that did the action would
+    // swap Disconnect for Connect, or remove Delete). Not the page as seeded: a source can move on by itself in the minutes between (a missing folder found again).
     // Only the source's own row is compared: another source's row can change under the page while it syncs.
     const row = c.control.rowName;
     const rest = (keys: string[]): string[] => keys.filter((key) => !key.startsWith(`${base}:`) && (c.before.rows[key] ?? row) === row).sort();
-    const was = rest(c.before.seeded);
+    const was = rest(c.before.loaded);
     const now = rest(c.after.controls.filter((control) => control.rowName === row).map((control) => control.key));
     const same = was.join('|') === now.join('|');
     // What changed is named, so a source that moved on by itself (a sync starting) can be told from a Cancel that acted.
@@ -533,12 +535,14 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       // A row can change between two loads (a source that was syncing has finished, and its menu has different entries): a control that is not found is looked for once more on another fresh load before it is failed.
       let controlsNow: Awaited<ReturnType<typeof panelControls>> = [];
+      let loaded: Awaited<ReturnType<typeof panelControls>> = [];
       let reachable = true;
       let control: Awaited<ReturnType<typeof panelControls>>[number] | undefined;
       const finalKey = item.path[item.path.length - 1]!;
       for (let attempt = 0; attempt < 2 && !control; attempt += 1) {
         await freshPage();
         await watch();
+        loaded = await panelControls(driver);
         reachable = true;
         // The path's earlier keys are pressed first (a menu opens, a question is asked); the last is the press being judged.
         for (const key of item.path.slice(0, -1)) {
@@ -600,7 +604,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
 
       const context: PressContext = {
         seed: seed.id, control, kind,
-        before: { keys: controlsNow.map((candidate) => candidate.key), seeded: base.map((candidate) => candidate.key), rows: Object.fromEntries(base.map((candidate) => [candidate.key, candidate.rowName])), text: beforeText, open: beforeOpen },
+        before: { keys: controlsNow.map((candidate) => candidate.key), loaded: loaded.map((candidate) => candidate.key), rows: Object.fromEntries(loaded.map((candidate) => [candidate.key, candidate.rowName])), text: beforeText, open: beforeOpen },
         after: { controls: afterControls, text: afterText, open: afterOpen, url: at },
         opened: openedWindows,
       };
