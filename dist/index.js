@@ -15989,6 +15989,12 @@ function budgetedGmailApiClient(inner, budget, provenance) {
       budget.reserve(provenance);
       return inner.getMessage(id, options);
     },
+    ...inner.getProfile ? {
+      getProfile() {
+        budget.reserve(provenance);
+        return inner.getProfile();
+      }
+    } : {},
     ...inner.getAttachment ? {
       getAttachment(messageId, attachmentId) {
         budget.reserve(provenance);
@@ -16132,6 +16138,10 @@ class RestGmailApiClient {
     }
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json;
+  }
+  async getProfile() {
+    const record2 = asRecord14(await this.getJson("users/me/profile"), "Gmail profile");
+    return { emailAddress: stringValue(record2.emailAddress) };
   }
   async getAttachment(messageId, attachmentId) {
     const record2 = asRecord14(await this.getJson(`users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`), "Gmail attachment");
