@@ -314,7 +314,25 @@ kept entry names a module that no longer opens one
 | `credential-broker-state.json`, `handles.json.unpaired` | handle, source id | kept: credential and Unpair custody, no item data (Disconnect and Unpair own them) |
 | `connect-relay/`, `models/`, `local-files/folder-access.json` | none | kept |
 | `~/.olympus/{sources/ingestion-exclusions.json, tier-rules.json, privacy.json}` | optional `source` per rule | kept: the owner's own policy. An exclusion is protective (dropping it would let a reconnected account ingest what the owner refused), and a tier rule is the owner's to change |
-| `media-cache` | holders per store | holders keyed by `(source_id, slot)`; Delete releases them |
+| `media-cache` | holders per store | holders keyed by `(source_id, slot, store)`, not by file path; Delete releases them (below) |
+
+**Media-cache holds name a store, not a file** (`core/store-identity.ts`). A
+store the registry places (a folder-layout source, opened through the storage
+service at the path its account's layout gives it) holds a cached picture under
+its identity, `(source_id, slot, store)` with the store a tier or
+`<family>.<tier>`; the marker also records where the file was last seen, as a
+hint. The sweep decides whether the holder is gone from the registry and the
+layout: gone when the account is `deleted` or no longer listed, or when the
+store is missing at both layouts' paths (and the hint) with the folder to look
+in present; an unreadable or missing registry, or a hold written for another
+data folder, keeps everything. Stores the registry does not place (Reflect and
+Roam mounts, operator mounts, in-memory stores, staging holds) are held by path,
+as before. Moving a store, 4c's rename, therefore needs no call into the media
+cache: nothing in a hold names its path. A path marker an earlier build wrote is
+read by the sweep as the identity of the store the registry puts at that path,
+so a store renamed before it has held its pictures again keeps them, and the
+store replaces the path marker with its identity marker (written durably first)
+the next time it holds them.
 
 A per-source Delete runs the steps (`forgotten` in its result lists each file
 and count; a dry run lists what it would forget) after the account's state is

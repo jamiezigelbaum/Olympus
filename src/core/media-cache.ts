@@ -12,13 +12,24 @@
 // being deleted meanwhile cannot take the file away. A file nothing holds is
 // swept after a day.
 //
-// A marker is named by a digest of its holder's name and carries the name
-// itself, so the sweep can tell a store that is gone (its database file
-// removed) from one that still holds the file. Markers from before names were
-// recorded are empty: a store re-asserts its holds when it is opened, which
-// labels them and drops any marker an earlier build named by a path that was
-// not the store's real path. An empty marker is otherwise kept: the sweep
-// cannot tell whose it is, so it never assumes it is stale.
+// A store the account registry places (core/store-identity.ts) is held by its
+// identity, the account and the store's name inside it, not by the path of its
+// file: its marker is named by a digest of the identity and records the
+// identity (plus where the file was last seen, as a hint). The sweep asks the
+// registry and the layout whether that store still exists, so a store renamed
+// into its account folder keeps every picture with no call into this module.
+// Every other store (a mount, an operator's `--db`, an in-memory store) is
+// held by its path, as before: its marker is named by a digest of the store's
+// real path and carries the path, so the sweep can tell a store that is gone
+// (its database file removed) from one that still holds the file. A path
+// marker an earlier build wrote for a store the registry places keeps working
+// until the store holds its pictures again, which replaces it with the
+// identity marker; meanwhile the sweep reads its path as that store's identity.
+// Markers from before names were recorded are empty: a store re-asserts its
+// holds when it is opened, which labels them and drops any marker an earlier
+// build named by a path that was not the store's real path. An empty marker is
+// otherwise kept: the sweep cannot tell whose it is, so it never assumes it is
+// stale.
 //
 // Every path this module reads, marks or deletes must be one it could have
 // written: a file named `<sha256>.jpg` directly inside a directory named
@@ -43,7 +54,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { writePrivateFileAtomicSync } from './atomic-file.ts';
+import type { LayoutEnv } from './olympus-layout.ts';
 import { olympusDataDir } from './remote-access.ts';
+import { storePathKey, storePlacementView, type StoreHolder, type StoreIdentity, type StorePlacementView } from './store-identity.ts';
 import { SIPS_PATH } from '../workers/file-extraction/extractors/image-preparers.ts';
 import { readyStillImageFormats } from './still-image-readiness.ts';
 
@@ -118,6 +132,13 @@ export function isMediaCachePath(path: string, sha256: string, dir?: string): bo
 }
 
 /**
+ * Who holds a cache file: a store the registry places (held by its identity),
+ * or any other holder named by a string: a store's database path, an
+ * in-memory store (`memory:`), an extraction's staging hold (`staging:`).
+ */
+export type MediaHolder = string | StoreHolder;
+
+/**
  * The name a holder (a store's database path) is recorded under: its real
  * path, so a store opened through a link or a relative path is the same
  * holder.
@@ -153,8 +174,17 @@ export function writeMediaCacheFile(dir: string, bytes: Uint8Array, mimeType: st
   return { path, sha256, mimeType, stagingHolder };
 }
 
+/**
+ * What tells one holder from another within a process: the string as given, or
+ * a store's marker name and the path it was opened at (a store opened at a new
+ * path holds again, which refreshes where its marker says it was seen).
+ */
+export function mediaHolderKey(holder: MediaHolder): string {
+  return typeof holder === 'string' ? holder : `${storeMarkerName(holder.identity)}@${holder.path}`;
+}
+
 /** Records that `holder` (one store) references the cache file for `sha256`. */
-export function retainMediaCacheFile(path: string, sha256: string, holder: string, dir?: string): boolean {
+export function retainMediaCacheFile(path: string, sha256: string, holder: MediaHolder, dir?: string): boolean {
   if (!isMediaCachePath(path, sha256, dir)) return false;
   try {
     addMarker(path, holder);
@@ -170,14 +200,13 @@ export function retainMediaCacheFile(path: string, sha256: string, holder: strin
  * file when no holder references it any more. Returns whether it was removed.
  * A path outside the cache, or not named for its digest, is never touched.
  */
-export function releaseMediaCacheFile(path: string, sha256: string, holder: string, dir?: string): boolean {
+export function releaseMediaCacheFile(path: string, sha256: string, holder: MediaHolder, dir?: string): boolean {
   if (!isMediaCachePath(path, sha256, dir)) return false;
   try {
     const refs = refsDir(path);
-    rmSync(join(refs, holderName(holder)), { force: true });
-    // The same holder's marker as an earlier build named it.
-    const legacy = legacyHolderName(holder);
-    if (legacy) rmSync(join(refs, legacy), { force: true });
+    // The holder's marker, and the same holder's marker as an earlier build
+    // named it (a store's path marker goes with its identity marker).
+    for (const name of markerNames(holder)) rmSync(join(refs, name), { force: true });
     const remaining = existsSync(refs) ? readdirSync(refs) : [];
     if (remaining.length > 0) return false;
     if (existsSync(refs)) rmdirSync(refs);
@@ -196,10 +225,12 @@ export function releaseMediaCacheFile(path: string, sha256: string, holder: stri
  */
 export function sweepMediaCache(
   dir: string,
-  options: { maxAgeMs?: number; now?: number } = {},
+  options: { maxAgeMs?: number; now?: number; env?: LayoutEnv } = {},
 ): number {
   const maxAgeMs = options.maxAgeMs ?? MEDIA_CACHE_ORPHAN_AGE_MS;
   const now = options.now ?? Date.now();
+  // The account registry is read once, and only when a marker needs it.
+  const placement = storePlacementView(options.env ?? process.env);
   const old = (path: string) => {
     try {
       return now - statSync(path).mtimeMs > maxAgeMs;
@@ -226,9 +257,13 @@ export function sweepMediaCache(
       if (existsSync(refs)) {
         for (const marker of readdirSync(refs)) {
           const markerPath = join(refs, marker);
-          if (marker.startsWith('staging-') ? old(markerPath) : holderGone(markerPath, marker)) {
-            rmSync(markerPath, { force: true });
-          }
+          // A staging hold, or a marker write that never finished, goes with age.
+          const gone = marker.startsWith('staging-') || marker.endsWith('.tmp')
+            ? old(markerPath)
+            : marker.startsWith(STORE_MARKER_PREFIX)
+              ? storeHolderGone(markerPath, placement)
+              : holderGone(markerPath, marker, placement);
+          if (gone) rmSync(markerPath, { force: true });
         }
         if (readdirSync(refs).length > 0) continue;
         rmdirSync(refs);
@@ -244,9 +279,13 @@ export function sweepMediaCache(
   return removed;
 }
 
-function addMarker(path: string, holder: string): void {
+function addMarker(path: string, holder: MediaHolder): void {
   const refs = refsDir(path);
   ensureOwnerOnlyDir(refs);
+  if (typeof holder !== 'string') {
+    addStoreMarker(refs, holder);
+    return;
+  }
   const marker = join(refs, holderName(holder));
   const name = mediaHolderName(holder);
   if (readMarker(marker) !== name) writeFileSync(marker, name, { mode: 0o600 });
@@ -254,6 +293,20 @@ function addMarker(path: string, holder: string): void {
   // earlier build named it, which nothing would release.
   const legacy = legacyHolderName(holder);
   if (legacy) rmSync(join(refs, legacy), { force: true });
+}
+
+/**
+ * Holds under the store's identity. The marker is written to a temporary file,
+ * flushed, renamed into place and its folder flushed before the path marker an
+ * earlier build left for the same store goes, so there is no moment at which
+ * neither is on disk.
+ */
+function addStoreMarker(refs: string, holder: StoreHolder): void {
+  const marker = join(refs, storeMarkerName(holder.identity));
+  const text = storeMarkerText(holder);
+  if (readMarker(marker) !== text) writePrivateFileAtomicSync(marker, text);
+  // The path markers an earlier build left for this store, wherever it sat then.
+  for (const name of pathMarkerNames(holder)) rmSync(join(refs, name), { force: true });
 }
 
 function readMarker(marker: string): string | undefined {
@@ -265,17 +318,57 @@ function readMarker(marker: string): string | undefined {
 }
 
 /**
- * Whether the store a marker names is gone: the marker carries the store's
- * real path (and is named for it), no file is there, and the directory it
- * lived in is. A store that exists, by whatever link or relocated path it is
- * opened, keeps its marker; so does one whose directory is missing (a volume
- * not mounted now), an in-memory store, and an empty marker from before names
- * were recorded, whose holder cannot be told.
+ * Whether the store a path marker names is gone: the marker carries the
+ * store's real path (and is named for it), no file is there, and the directory
+ * it lived in is. A store that exists, by whatever link or relocated path it
+ * is opened, keeps its marker; so does one whose directory is missing (a
+ * volume not mounted now), an in-memory store, and an empty marker from before
+ * names were recorded, whose holder cannot be told. A path the account
+ * registry places is a store that may have moved (renamed into its account
+ * folder), so it is judged by the store's identity, not by the path.
  */
-function holderGone(marker: string, markerName: string): boolean {
+function holderGone(marker: string, markerName: string, placement: StorePlacementView): boolean {
   const name = readMarker(marker);
   if (!name || !isAbsolute(name) || holderDigest(name) !== markerName) return false;
-  return !existsSync(name) && existsSync(dirname(name));
+  if (existsSync(name) || !existsSync(dirname(name))) return false;
+  return placement.pathMarkerGone(name);
+}
+
+const STORE_MARKER_PREFIX = 'store-';
+
+/** Whether the store an identity marker names is gone; a marker that cannot be read, or was written for another data folder, is kept. */
+function storeHolderGone(marker: string, placement: StorePlacementView): boolean {
+  const recorded = parseStoreMarker(readMarker(marker));
+  if (!recorded || recorded.registry !== placement.registry) return false;
+  return placement.storeGone(recorded.identity, [recorded.seen]);
+}
+
+function storeMarkerName(identity: StoreIdentity): string {
+  return `${STORE_MARKER_PREFIX}${holderDigest(JSON.stringify([identity.sourceId, identity.slot, identity.store]))}`;
+}
+
+function storeMarkerText(holder: StoreHolder): string {
+  return JSON.stringify({
+    version: 1,
+    sourceId: holder.identity.sourceId,
+    slot: holder.identity.slot,
+    store: holder.identity.store,
+    seen: mediaHolderName(holder.path),
+    registry: holder.registry,
+  });
+}
+
+function parseStoreMarker(text: string | undefined): { identity: StoreIdentity; seen: string; registry: string } | undefined {
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const { version, sourceId, slot, store, seen, registry } = parsed;
+    if (version !== 1 || typeof sourceId !== 'string' || typeof slot !== 'string' || typeof store !== 'string') return undefined;
+    if (typeof seen !== 'string' || typeof registry !== 'string' || !sourceId || !slot || !store) return undefined;
+    return { identity: { sourceId, slot, store }, seen, registry };
+  } catch {
+    return undefined;
+  }
 }
 
 function refsDir(path: string): string {
@@ -289,6 +382,22 @@ function holderDigest(name: string): string {
 function holderName(holder: string): string {
   const digest = holderDigest(mediaHolderName(holder));
   return holder.startsWith('staging:') ? `staging-${digest}` : digest;
+}
+
+/** Every marker a holder may have left: under its identity, under its real path, and as an earlier build named it. */
+function markerNames(holder: MediaHolder): string[] {
+  if (typeof holder !== 'string') return [storeMarkerName(holder.identity), ...pathMarkerNames(holder)];
+  const legacy = legacyHolderName(holder);
+  return legacy ? [holderName(holder), legacy] : [holderName(holder)];
+}
+
+/**
+ * The names an earlier build gave a store's path marker: for the path it is
+ * opened at now, and for each other place the layouts give it (a path that no
+ * longer has a file is named by its real folder, as the real path was then).
+ */
+function pathMarkerNames(holder: StoreHolder): string[] {
+  return [...markerNames(holder.path), ...holder.others.map((other) => holderDigest(storePathKey(other)))];
 }
 
 /**

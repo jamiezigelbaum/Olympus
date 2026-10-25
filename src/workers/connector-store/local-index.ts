@@ -50,11 +50,14 @@ import { itemContentKeptNamesOnly } from '../../core/classification-signals.ts';
 import {
   isMediaCachePath,
   mediaCacheDir,
+  mediaHolderKey,
+  type MediaHolder,
   releaseMediaCacheFile,
   retainMediaCacheFile,
   sweepMediaCache,
 } from '../../core/media-cache.ts';
 import { readyStillImageFormats } from '../../core/still-image-readiness.ts';
+import type { StoreHolder } from '../../core/store-identity.ts';
 import {
   STILL_IMAGE_FORMATS,
   stillImageFormatForMimeType,
@@ -625,6 +628,12 @@ export interface LocalConnectorStoreOptions {
    * first use. `null` records nothing. Read-only stores never record.
    */
   tierLedger?: TierLedger | null;
+  /**
+   * Who this store is in the media cache: set by the storage service for a
+   * store the account registry places, so its picture holds name the account
+   * and not the file's path. Omitted: the store is held by its path.
+   */
+  mediaHolder?: StoreHolder;
 }
 
 export interface ConnectorStoreLocatorIdentityIndexStatus {
@@ -2519,7 +2528,7 @@ export class LocalConnectorStore {
   /** Whether the v14 `media_judgments` table is here (a read-only open of an older store has none). */
   private mediaJudgmentsPresent = false;
   /** This store's name in the media cache's reference markers. */
-  private readonly mediaHolder: string;
+  private readonly mediaHolder: MediaHolder;
   private readonly stillImageFormatsRead: () => ReadonlySet<StillImageFormat>;
   // The four-tier ledger. Declared without an initializer on purpose (see the
   // tree-shaking note on trustReconciliationReadyCursors).
@@ -2545,7 +2554,7 @@ export class LocalConnectorStore {
   constructor(options: LocalConnectorStoreOptions) {
     this.corpusId = requireNonEmpty(options.corpusId, 'Connector store corpus id');
     this.dbPath = requireNonEmpty(options.dbPath, 'Connector store db path');
-    this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : this.dbPath;
+    this.mediaHolder = this.dbPath === ':memory:' ? `memory:${randomUUID()}` : options.mediaHolder ?? this.dbPath;
     const configuredFormats = options.stillImagesRead === undefined ? undefined : resolveStillImageFormats(options.stillImagesRead);
     this.stillImageFormatsRead = configuredFormats ? () => configuredFormats : () => readyStillImageFormats();
     this.family = options.family;
@@ -5646,7 +5655,8 @@ export class LocalConnectorStore {
   private reassertChunkMediaHolds(): void {
     if (!this.chunkMediaColumnsPresent) return;
     reassertedMediaHolders ??= new Set();
-    if (reassertedMediaHolders.has(this.mediaHolder)) return;
+    const holderKey = mediaHolderKey(this.mediaHolder);
+    if (reassertedMediaHolders.has(holderKey)) return;
     try {
       const rows = this.db.query(`
         SELECT DISTINCT media_path, media_sha256 FROM chunks
@@ -5655,7 +5665,7 @@ export class LocalConnectorStore {
       for (const row of rows) {
         if (existsSync(row.media_path)) retainMediaCacheFile(row.media_path, row.media_sha256, this.mediaHolder);
       }
-      reassertedMediaHolders.add(this.mediaHolder);
+      reassertedMediaHolders.add(holderKey);
     } catch {
       // Next pass.
     }

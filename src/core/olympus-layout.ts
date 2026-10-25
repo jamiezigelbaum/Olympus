@@ -395,6 +395,17 @@ export function accountRawPath(
 }
 
 /**
+ * The names an account of this source can give its stores (`accountStorePath`
+ * takes one): a tier, or `<family>.<tier>` for imported archives, whose
+ * families the caller lists.
+ */
+export function accountStoreNames(sourceId: string, archiveFamilies: readonly string[] = []): string[] {
+  return sourceId === ARCHIVE_IMPORTS
+    ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`))
+    : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
+}
+
+/**
  * Every file or folder a `legacy` account of this source could have at its
  * default locations, no override applied: the evidence that an account
  * already lives in the legacy layout. Tier sidecars and SQLite's `-wal` and
@@ -405,9 +416,7 @@ export function legacyAccountPaths(
   env: LayoutEnv = process.env,
   archiveFamilies: readonly string[] = [],
 ): { stores: string[]; raw: string[] } {
-  const names = sourceId === ARCHIVE_IMPORTS
-    ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`))
-    : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
+  const names = accountStoreNames(sourceId, archiveFamilies);
   const stores = names.map((name) => {
     const entry = legacyStoreFile(sourceId, name);
     return entry.dir ? join(entry.dir.default(env), entry.file) : olympusDataPath(env, entry.file);
