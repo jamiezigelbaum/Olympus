@@ -16,6 +16,7 @@ import { archiveLaneStores } from '../src/workers/archive-import/lane.ts';
 import { registerInstalledTierClassification } from '../src/workers/classification/installed-tier-classification-registry.ts';
 import type { TierSniffer } from '../src/workers/classification/tier-classifier.ts';
 import { createParentLabelResolver, unreadableParentOf } from '../src/workers/connector-store/parent-label.ts';
+import { createUnreadableLocators } from '../src/workers/connector-store/unreadable-locators.ts';
 import { moveTieredItem } from '../src/workers/connector-store/tier-move.ts';
 import type { ExtractionUnreadableItem } from '../src/workers/file-extraction/job-store.ts';
 import type { ExtractionItemRef } from '../src/workers/file-extraction/types.ts';
@@ -263,5 +264,49 @@ describe('a file that could not be read names its parent', () => {
     expect(asSource).toEqual([{ name: 'lease.txt', parent: { label: "'Flat'", route: { kind: 'source' } } }]);
     expect(listFor('owner@example.com', 'file-1', () => undefined)).toEqual([{ name: 'lease.txt' }]);
     expect(listFor('owner@example.com', 'file-1', () => { throw new Error('ledger closed'); })).toEqual([{ name: 'lease.txt' }]);
+  });
+});
+
+describe('a child that failed before its text landed is still listed', () => {
+  // The job is filed under the lane's Private home; the child's names, all it has until its text
+  // lands, are in the Personal store. A lookup of the job's corpus alone calls it gone.
+  test('it is found in the lane\'s other store, so it is unreadable and names its parent, not hidden', async () => {
+    const specs = parents();
+    const h = childItemsArchiveHarness(cleanups);
+    const archiveId = h.start();
+    await h.importAll(archiveId, specs);
+    const lane = h.runtime.lane(format.family);
+    const home = archiveCorpusId('secure_local', format.family);
+    const corpora = (['public_safe', 'internal', 'secure_local'] as const).map((domain) => archiveCorpusId(domain, format.family));
+    const resolve = createParentLabelResolver({
+      stores: () => archiveLaneStores(lane),
+      scopes: () => [{ ledger: lane.ledger, corpusIds: new Set(corpora) }],
+    });
+    const ref: ExtractionItemRef = {
+      corpusId: home, provider: format.provider, approvedScopeKey: 'archive', accountScope: archiveId,
+      providerItemId: CHILD, localItemId: fixtureLocalItemId(archiveId, CHILD),
+      sourceVersion: 'v1', contentHash: 'hash', name: 'lease.txt', mimeType: 'text/plain', sizeBytes: 12,
+    };
+
+    // The scenario: the home corpus holds no row for the child; the Personal store does.
+    const holders = archiveLaneStores(lane).filter((store) => store.localContent(ref.localItemId, 0, undefined, { withoutContent: true }) !== undefined);
+    expect(holders.map((store) => store.corpusId)).not.toContain(home);
+    expect(holders.length).toBeGreaterThan(0);
+
+    const locators = createUnreadableLocators({ stores: () => archiveLaneStores(lane), lanes: () => [{ corpusIds: new Set(corpora) }], parentLabels: resolve });
+    const verdict = createUnreadableVerdict({ locate: locators.locate, lanes: () => [{ corpusIds: new Set(corpora), ledger: lane.ledger }] });
+    const items: ExtractionUnreadableItem[] = [{ ref, failedAt: '2026-10-05T00:00:00.000Z' }];
+    expect(verdict(items[0]!)).toBe('unreadable');
+    const files = createUnreadableFiles({
+      items: () => items,
+      verdict,
+      locate: locators.locate,
+      openTarget: () => undefined,
+      parentOf: locators.parentOf,
+    }).computerList([home], 10, {}).files;
+    expect(files).toEqual([{ name: 'lease.txt', parent: { label: LABEL, route: { kind: 'archive', archiveId } } }]);
+
+    // An item no store of the lane holds is still left out.
+    expect(verdict({ ...items[0]!, ref: { ...ref, localItemId: 'nowhere', providerItemId: 'nowhere' } })).toBe('hidden');
   });
 });

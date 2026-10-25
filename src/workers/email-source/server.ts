@@ -313,7 +313,8 @@ import {
   createXBookmarksTierLane,
   defaultXBookmarksSecureConnectorStoreDbPath,
 } from '../x-bookmarks/tier-set.ts';
-import { createParentLabelResolver, unreadableParentOf } from '../connector-store/parent-label.ts';
+import { createParentLabelResolver } from '../connector-store/parent-label.ts';
+import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
 import { createReleaseTierCheck, createTierVisibilityGate } from '../connector-store/tier-visibility.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
@@ -4006,24 +4007,14 @@ export async function main(): Promise<void> {
   // unreadable, on any host; an item no store serves any more is left out of
   // both the count and the list. Source-neutral: every lane's ledger and
   // secret index, by corpus.
-  const locateUnreadableItem = (ref: { corpusId: string; localItemId: string }) => {
-    for (const store of connectorStores) {
-      if (store.corpusId !== ref.corpusId) continue;
-      const found = store.localContent(ref.localItemId, 0, undefined, { withoutContent: true });
-      if (found) return { ...(found.locatorUri ? { locatorUri: found.locatorUri } : {}),
-        ...(found.providerConversationId ? { providerConversationId: found.providerConversationId } : {}) };
-    }
-    return undefined;
-  };
+  const unreadableLocators = createUnreadableLocators({
+    stores: () => connectorStores,
+    lanes: () => tierLanes,
+    parentLabels: parentLabelResolver,
+  });
+  const locateUnreadableItem = unreadableLocators.locate;
   // A file that came inside another item names it (label and route) in the computer's own list.
-  const unreadableParentOfItem = (ref: { corpusId: string; localItemId: string }) => {
-    for (const store of connectorStores) {
-      if (store.corpusId !== ref.corpusId) continue;
-      const identity = store.activeLocalItemRow(ref.localItemId)?.identity;
-      if (identity) return unreadableParentOf(parentLabelResolver, { corpusId: ref.corpusId, sourceItem: identity });
-    }
-    return undefined;
-  };
+  const unreadableParentOfItem = unreadableLocators.parentOf;
   const unreadableVerdict = createUnreadableVerdict({
     locate: locateUnreadableItem,
     lanes: () => tierLanes,
