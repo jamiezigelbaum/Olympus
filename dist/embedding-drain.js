@@ -7981,7 +7981,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -8348,6 +8349,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
@@ -16515,6 +16535,11 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text2 = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text2);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -16530,7 +16555,7 @@ function isArchiveCorpusId(corpusId, trustDomain) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -16624,6 +16649,21 @@ var init_archive_formats = __esm(() => {
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
   });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
+  });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
     "personal_information",
@@ -16672,7 +16712,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   CONNECTOR_FACTORIES = new Map;
 });
@@ -48294,6 +48335,514 @@ var MESSAGE_PATHS = [
 var ITEM_PATHS = [...MESSAGE_PATHS, ...ACCOUNT_SECTIONS.map((section) => section.path)];
 var SECTION_ROOTS = new Set(ACCOUNT_SECTIONS.map((section) => section.path[0]));
 var LISTED_SECTIONS = new Set(ACCOUNT_SECTIONS.filter((section) => section.path.length === 2).map((section) => section.path[0]));
+
+// src/workers/archive-import/evernote/connector.ts
+init_archive_formats();
+init_byte_source();
+init_stop_errors();
+
+// src/workers/archive-import/xml-stream.ts
+var XML_STREAM_MAX_DEPTH = 256;
+var XML_STREAM_MAX_MARKUP_BYTES = 1024 * 1024;
+
+class XmlStreamError extends Error {
+  code;
+  offset;
+  constructor(code, message2, offset) {
+    super(message2);
+    this.name = "XmlStreamError";
+    this.code = code;
+    this.offset = offset;
+  }
+}
+var LT = 60;
+var GT2 = 62;
+var AMP = 38;
+var PREDEFINED = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+function decodeXmlEntities(text3) {
+  if (!text3.includes("&"))
+    return text3;
+  return text3.replace(/&(#x[0-9a-fA-F]{1,6}|#[0-9]{1,7}|[A-Za-z][A-Za-z0-9._-]*);/g, (whole, ref) => {
+    if (ref.startsWith("#")) {
+      const code = ref[1] === "x" ? Number.parseInt(ref.slice(2), 16) : Number.parseInt(ref.slice(1), 10);
+      return Number.isInteger(code) && code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : whole;
+    }
+    return PREDEFINED[ref] ?? whole;
+  });
+}
+var NAME = /^[A-Za-z_:À-￿][\w.:\-·À-￿]*$/;
+var ATTRIBUTE = /\s*([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
+function parseXmlTag(inner) {
+  let text3 = inner;
+  const empty = text3.endsWith("/");
+  if (empty)
+    text3 = text3.slice(0, -1);
+  const nameMatch = /^[^\s/>]+/.exec(text3);
+  if (!nameMatch || !NAME.test(nameMatch[0]))
+    return;
+  const attributes = {};
+  let at = nameMatch[0].length;
+  ATTRIBUTE.lastIndex = at;
+  for (;; ) {
+    if (/^\s*$/.test(text3.slice(at)))
+      break;
+    ATTRIBUTE.lastIndex = at;
+    const match = ATTRIBUTE.exec(text3);
+    if (!match)
+      return;
+    attributes[match[1]] = decodeXmlEntities(match[2] ?? match[3] ?? "");
+    at = ATTRIBUTE.lastIndex;
+  }
+  return { name: nameMatch[0], attributes, empty };
+}
+
+class XmlStreamReader {
+  source;
+  recordPaths;
+  rangeNames;
+  maxRecordBytes;
+  decoder = new TextDecoder("utf-8");
+  chunk = new Uint8Array(0);
+  chunkStart = 0;
+  index = 0;
+  ended = false;
+  stack;
+  mode = "text";
+  markup = [];
+  markupStart = 0;
+  doctypeDepth = 0;
+  doctypeQuote = 0;
+  markupQuote = 0;
+  recordDepth = -1;
+  recordPath = [];
+  recordStart = 0;
+  recordBytes = 0;
+  discarding = false;
+  building = [];
+  cdataHeld = [];
+  rootSeenName;
+  constructor(source, options) {
+    this.source = source;
+    this.recordPaths = options.recordPaths;
+    this.rangeNames = new Set(options.rangeElements ?? []);
+    this.maxRecordBytes = Math.max(1, options.maxRecordBytes);
+    this.stack = [...options.open ?? []];
+    if (this.stack.length > 0)
+      this.rootSeenName = this.stack[0];
+    this.chunkStart = source.position;
+  }
+  get rootName() {
+    return this.rootSeenName;
+  }
+  get open() {
+    return this.stack;
+  }
+  get offset() {
+    return this.chunkStart + this.index;
+  }
+  fail(code, message2, offset = this.offset) {
+    throw new XmlStreamError(code, message2, offset);
+  }
+  fill() {
+    if (this.index < this.chunk.length)
+      return true;
+    if (this.ended)
+      return false;
+    for (;; ) {
+      const position = this.source.position;
+      const next = this.source.next();
+      if (next === undefined) {
+        this.ended = true;
+        return false;
+      }
+      if (next.length === 0)
+        continue;
+      this.chunkStart = position;
+      this.chunk = next;
+      this.index = 0;
+      return true;
+    }
+  }
+  inRecord() {
+    return this.recordDepth >= 0;
+  }
+  keeping() {
+    return this.inRecord() && !this.discarding;
+  }
+  count(bytes) {
+    if (!this.keeping())
+      return;
+    this.recordBytes += bytes;
+    if (this.recordBytes > this.maxRecordBytes) {
+      this.discarding = true;
+      this.building = [];
+    }
+  }
+  top() {
+    return this.building[this.building.length - 1];
+  }
+  flushText() {
+    const open4 = this.top();
+    if (!open4 || open4.pending.length === 0)
+      return;
+    const total = open4.pending.reduce((sum, part) => sum + part.length, 0);
+    const bytes = new Uint8Array(total);
+    let at = 0;
+    for (const part of open4.pending) {
+      bytes.set(part, at);
+      at += part.length;
+    }
+    const text3 = this.decoder.decode(bytes);
+    open4.element.children.push(open4.pendingCdata ? text3 : decodeXmlEntities(text3));
+    open4.pending = [];
+  }
+  keepText(bytes, cdata) {
+    if (!this.keeping() || bytes.length === 0)
+      return;
+    const open4 = this.top();
+    if (!open4)
+      return;
+    if (open4.pending.length > 0 && open4.pendingCdata !== cdata)
+      this.flushText();
+    open4.pendingCdata = cdata;
+    open4.pending.push(bytes.slice());
+    this.count(bytes.length);
+  }
+  inRange() {
+    const open4 = this.top();
+    return !!open4 && this.rangeNames.has(open4.element.name);
+  }
+  matchRecord() {
+    return this.recordPaths.find((path) => path.length === this.stack.length && path.every((name, at) => name === this.stack[at]));
+  }
+  next() {
+    for (;; ) {
+      if (!this.fill()) {
+        if (this.mode !== "text" || this.stack.length > 0) {
+          this.fail("truncated", "The document ends inside an element.");
+        }
+        return;
+      }
+      const event = this.step();
+      if (event)
+        return event;
+    }
+  }
+  step() {
+    const chunk = this.chunk;
+    while (this.index < chunk.length) {
+      switch (this.mode) {
+        case "text": {
+          const lt = chunk.indexOf(LT, this.index);
+          const end = lt < 0 ? chunk.length : lt;
+          if (end > this.index) {
+            const piece = chunk.subarray(this.index, end);
+            if (this.inRange() && this.keeping()) {
+              const open4 = this.top();
+              if (piece.includes(AMP))
+                open4.element.rangeEntities = true;
+              const start = this.offset;
+              const last = open4.element.ranges[open4.element.ranges.length - 1];
+              if (last && last.end === start)
+                last.end = start + piece.length;
+              else
+                open4.element.ranges.push({ start, end: start + piece.length });
+            } else if (this.keeping()) {
+              this.keepText(piece, false);
+            } else if (!this.inRecord() && this.stack.length === 0 && this.rootSeenName !== undefined) {
+              if (piece.some((byte) => byte !== 32 && byte !== 10 && byte !== 13 && byte !== 9)) {
+                this.fail("invalid_xml", "Text after the document's root element.");
+              }
+            }
+            this.index = end;
+          }
+          if (lt >= 0) {
+            this.mode = "markup";
+            this.markup = [];
+            this.markupStart = this.offset;
+            this.markupQuote = 0;
+            this.index += 1;
+          }
+          break;
+        }
+        case "markup": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          this.markup.push(byte);
+          if (this.markup.length > XML_STREAM_MAX_MARKUP_BYTES)
+            this.fail("invalid_xml", "A tag is too long.", this.markupStart);
+          if (this.markup.length === 3 && this.markup[0] === 33 && this.markup[1] === 45 && this.markup[2] === 45) {
+            this.mode = "comment";
+            this.markup = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup) === "![CDATA[") {
+            if (!this.inRecord() && this.stack.length === 0)
+              this.fail("invalid_xml", "A CDATA section outside the document's root element.", this.markupStart);
+            this.mode = "cdata";
+            this.markup = [];
+            this.cdataHeld = [];
+            break;
+          }
+          if (this.markup.length === 8 && String.fromCharCode(...this.markup).toUpperCase() === "!DOCTYPE") {
+            this.mode = "doctype";
+            this.doctypeDepth = 0;
+            this.doctypeQuote = 0;
+            break;
+          }
+          if (this.markup.length === 1 && byte === 63) {
+            this.mode = "pi";
+            this.markup = [];
+            break;
+          }
+          if (byte === 34 || byte === 39) {
+            if (this.markupQuote === 0)
+              this.markupQuote = byte;
+            else if (this.markupQuote === byte)
+              this.markupQuote = 0;
+          }
+          if (byte === GT2 && this.markupQuote === 0) {
+            const event = this.tag();
+            if (event)
+              return event;
+          }
+          break;
+        }
+        case "comment": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup.length >= 2 && this.markup[this.markup.length - 1] === 45 && this.markup[this.markup.length - 2] === 45) {
+            this.mode = "text";
+            this.markup = [];
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 2)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "pi": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (byte === GT2 && this.markup[this.markup.length - 1] === 63) {
+            this.mode = "text";
+            this.markup = [];
+            break;
+          }
+          this.markup.push(byte);
+          if (this.markup.length > 1)
+            this.markup.shift();
+          this.countMarkupLength();
+          break;
+        }
+        case "doctype": {
+          const byte = chunk[this.index];
+          this.index += 1;
+          if (this.inRecord() || this.stack.length > 0)
+            this.fail("invalid_xml", "A document type declaration inside an element.", this.markupStart);
+          if (this.doctypeQuote !== 0) {
+            if (byte === this.doctypeQuote)
+              this.doctypeQuote = 0;
+          } else if (byte === 34 || byte === 39)
+            this.doctypeQuote = byte;
+          else if (byte === 91)
+            this.doctypeDepth += 1;
+          else if (byte === 93)
+            this.doctypeDepth = Math.max(0, this.doctypeDepth - 1);
+          else if (byte === GT2 && this.doctypeDepth === 0) {
+            this.mode = "text";
+            this.markup = [];
+            break;
+          }
+          this.countMarkupLength();
+          break;
+        }
+        case "cdata": {
+          let view = chunk.subarray(this.index);
+          let base = this.offset;
+          if (this.cdataHeld.length > 0) {
+            const joined = new Uint8Array(this.cdataHeld.length + view.length);
+            joined.set(this.cdataHeld, 0);
+            joined.set(view, this.cdataHeld.length);
+            base -= this.cdataHeld.length;
+            view = joined;
+            this.cdataHeld = [];
+          }
+          let close = -1;
+          for (let at = 0;at + 2 < view.length; at += 1) {
+            if (view[at] === 93 && view[at + 1] === 93 && view[at + 2] === GT2) {
+              close = at;
+              break;
+            }
+          }
+          if (close >= 0) {
+            this.cdataText(view.subarray(0, close), base);
+            this.index = chunk.length - (view.length - (close + 3));
+            this.mode = "text";
+            break;
+          }
+          let tail = 0;
+          while (tail < 2 && tail < view.length && view[view.length - 1 - tail] === 93)
+            tail += 1;
+          this.cdataText(view.subarray(0, view.length - tail), base);
+          this.cdataHeld = Array.from(view.subarray(view.length - tail));
+          this.index = chunk.length;
+          break;
+        }
+        default:
+          this.index = chunk.length;
+      }
+    }
+    return;
+  }
+  cdataText(bytes, start) {
+    if (bytes.length === 0)
+      return;
+    if (this.inRange() && this.keeping()) {
+      const open4 = this.top();
+      const last = open4.element.ranges[open4.element.ranges.length - 1];
+      if (last && last.end === start)
+        last.end = start + bytes.length;
+      else
+        open4.element.ranges.push({ start, end: start + bytes.length });
+      return;
+    }
+    this.keepText(bytes, true);
+  }
+  countMarkupLength() {
+    if (this.offset - this.markupStart > XML_STREAM_MAX_MARKUP_BYTES)
+      this.fail("invalid_xml", "Markup is too long.", this.markupStart);
+  }
+  tag() {
+    const bytes = Uint8Array.from(this.markup.slice(0, -1));
+    this.markup = [];
+    this.mode = "text";
+    const tagStart = this.markupStart;
+    const tagEnd = this.offset;
+    const text3 = this.decoder.decode(bytes);
+    if (text3.startsWith("/")) {
+      const name = text3.slice(1).trim();
+      const expected = this.stack[this.stack.length - 1];
+      if (expected === undefined || name !== expected)
+        this.fail("invalid_xml", "An end tag does not close the open element.", tagStart);
+      return this.close(tagEnd, tagEnd - tagStart);
+    }
+    if (text3.startsWith("!"))
+      this.fail("invalid_xml", "Markup that is not XML.", tagStart);
+    const parsed = parseXmlTag(text3);
+    if (!parsed)
+      this.fail("invalid_xml", "A tag that is not XML.", tagStart);
+    if (this.stack.length === 0) {
+      if (this.rootSeenName !== undefined)
+        this.fail("invalid_xml", "A second root element.", tagStart);
+      this.rootSeenName = parsed.name;
+    }
+    this.stack.push(parsed.name);
+    if (this.stack.length > XML_STREAM_MAX_DEPTH)
+      this.fail("too_deep", "Elements are nested too deeply.", tagStart);
+    if (!this.inRecord()) {
+      const path = this.matchRecord();
+      if (path) {
+        this.recordDepth = this.stack.length;
+        this.recordPath = path;
+        this.recordStart = tagStart;
+        this.recordBytes = 0;
+        this.discarding = false;
+        this.building = [];
+      }
+    }
+    if (this.keeping()) {
+      this.flushText();
+      const element = { name: parsed.name, attributes: parsed.attributes, children: [] };
+      if (this.rangeNames.has(parsed.name))
+        element.ranges = [];
+      const parent = this.top();
+      if (parent)
+        parent.element.children.push(element);
+      this.building.push({ element, pending: [], pendingCdata: false });
+      this.count(tagEnd - tagStart);
+    }
+    if (parsed.empty)
+      return this.close(tagEnd, 0);
+    return;
+  }
+  close(end, tagBytes) {
+    if (this.keeping()) {
+      this.flushText();
+      this.count(tagBytes);
+    }
+    const depth = this.stack.length;
+    this.stack.pop();
+    if (!this.inRecord())
+      return;
+    if (this.discarding) {
+      if (depth !== this.recordDepth)
+        return;
+      this.recordDepth = -1;
+      this.discarding = false;
+      this.building = [];
+      return { kind: "oversize", path: this.recordPath, start: this.recordStart, end };
+    }
+    const done = this.building.pop();
+    if (depth !== this.recordDepth || !done)
+      return;
+    this.recordDepth = -1;
+    this.building = [];
+    return { kind: "record", path: this.recordPath, element: done.element, start: this.recordStart, end };
+  }
+}
+
+// src/workers/archive-import/evernote/enml.ts
+var BLOCKS = new Set([
+  "address",
+  "article",
+  "aside",
+  "blockquote",
+  "dd",
+  "details",
+  "div",
+  "dl",
+  "dt",
+  "en-note",
+  "figcaption",
+  "figure",
+  "footer",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "header",
+  "hr",
+  "li",
+  "main",
+  "nav",
+  "ol",
+  "p",
+  "pre",
+  "section",
+  "summary",
+  "table",
+  "tbody",
+  "tfoot",
+  "thead",
+  "tr",
+  "ul"
+]);
+var SILENT = new Set(["script", "style", "head", "title", "object", "embed", "applet"]);
+
+// src/workers/archive-import/evernote/connector.ts
+var EVERNOTE_DEFAULT_MAX_BYTES_PER_LISTING = 256 * 1024 * 1024;
+var FETCH_SLICE_BYTES = 1024 * 1024;
+var BASE64 = (() => {
+  const table = new Int16Array(256).fill(-1);
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let index = 0;index < alphabet.length; index += 1)
+    table[alphabet.charCodeAt(index)] = index;
+  return table;
+})();
 
 // src/workers/archive-import/runtime.ts
 init_lane();

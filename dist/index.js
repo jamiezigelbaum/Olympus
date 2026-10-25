@@ -5684,6 +5684,11 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text2 = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text2);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
@@ -5699,7 +5704,7 @@ function isArchiveCorpusId(corpusId, trustDomain) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -5793,6 +5798,21 @@ var init_archive_formats = __esm(() => {
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
   });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
+  });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
     "personal_information",
@@ -5841,7 +5861,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   CONNECTOR_FACTORIES = new Map;
 });
@@ -13317,7 +13338,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -13684,6 +13706,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
