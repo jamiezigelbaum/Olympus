@@ -251,7 +251,20 @@ export class SecretLocationsIndex {
    * them; rows matching more distinct terms rank first. Location only: never
    * text, and never the names of a Private-metadata item.
    */
-  search(query: string, scope: SecretLocationScope, options: { limit?: number } = {}): SecretLocationMatch[] {
+  search(
+    query: string,
+    scope: SecretLocationScope,
+    options: {
+      limit?: number;
+      /**
+       * Told the identities of the matches before the best are taken, and
+       * names those that must not be shown (a child item whose parent is not
+       * served: its location is its name). An item it names does not count
+       * toward `limit`. A throw hides every match.
+       */
+      hide?: (identities: readonly SecretLocationIdentity[]) => ReadonlySet<SecretLocationIdentity>;
+    } = {},
+  ): SecretLocationMatch[] {
     const terms = secretLocationQueryTerms(query);
     if (terms.length === 0) return [];
     const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
@@ -273,7 +286,22 @@ export class SecretLocationsIndex {
       const score = terms.filter((term) => haystack.includes(term)).length;
       if (score > 0) scored.push({ location, score });
     }
+    const identities = scored.map(({ location }): SecretLocationIdentity => ({
+      provider: location.source,
+      accountScope: location.accountScope,
+      providerItemId: location.providerItemId,
+      ...(location.conversationKey ? { providerConversationId: location.conversationKey } : {}),
+    }));
+    let hidden: ReadonlySet<SecretLocationIdentity> = new Set();
+    if (options.hide && scored.length > 0) {
+      try {
+        hidden = options.hide(identities);
+      } catch {
+        return [];
+      }
+    }
     return scored
+      .filter((_, index) => !hidden.has(identities[index]!))
       .sort((left, right) => right.score - left.score || right.location.detectedAt.localeCompare(left.location.detectedAt))
       .slice(0, limit)
       .map(({ location }) => ({

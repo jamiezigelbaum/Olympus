@@ -17,10 +17,16 @@
 // parents too deep): a child is shown only on positive evidence.
 //
 // A Secret parent is not a deletion (the owner's rule: each child is judged on
-// its own). Its store row is kept as a location only (a tombstoned row at tier
-// S5, no names, no text) and its ledger record says Secrets; either counts as
-// present, and neither is read for anything but that. The parent's names and
-// content are never shown through this module.
+// its own), and neither is it a standing presence. While the provider still
+// lists it, its store row is kept as a location only (a tombstoned row at tier
+// S5, no names, no text), or, when no store ever held a row, the ledger alone
+// knows it is a Secret; either counts as present, and neither is read for
+// anything but that. Once the provider deletes it the location row is retired
+// to an ordinary tombstone (the store does it with the deletion, a feed's or
+// an absence reconcile's, `retireSecretLocation`), and from then on a Secret
+// is judged as any other deleted parent: its children go. Secret
+// classification alone never cascades. The parent's names and content are
+// never shown through this module.
 //
 // The sweep that removes the children of a parent that is gone (the tiered
 // store set, `sweepOrphanedChildren`) asks a narrower question than the read
@@ -95,6 +101,12 @@ export interface ChildVisibilityStore {
   readonly corpusId: string;
   parentLinksOf(identities: readonly ChildProbe[]): Map<string, ParentRef>;
   parentStandings(parents: readonly ParentRef[]): ParentStandingRow[];
+  /**
+   * The same standing, found by an item's identity rather than by the id its
+   * children name, keyed by the asked identity's `tierLedgerIdentityKey`. An
+   * item this store has no row for is absent.
+   */
+  itemStandings(identities: readonly ChildProbe[]): Map<string, ParentStandingRow>;
 }
 
 /**
@@ -195,7 +207,10 @@ function judge(lane: ChildVisibilityLane, parents: readonly ParentRef[], depth: 
         // Never routed: the store that holds its row serves it. Routed with no copy left: nothing does.
         ? state?.record.routed !== true && active.length > 0
         : copies.some((copy) => copy.state === 'current' && active.some((row) => row.corpusId === copy.corpusId));
-      if (!visible && ledger.itemIsSecret(identity)) {
+      // A Secret whose copies were settled but whose location row is not written yet (the row is
+      // still active) is present. Once every row is a tombstone and none is a location, the
+      // provider deleted it: the ledger's record of what it was says nothing about whether it is there.
+      if (!visible && active.length > 0 && ledger.itemIsSecret(identity)) {
         verdicts.set(key, { visible: true, gone: false });
         continue;
       }
@@ -249,6 +264,89 @@ export function goneParents(lane: ChildVisibilityLane, parents: readonly ParentR
     // Nothing is removed on a guess.
   }
   return gone;
+}
+
+/**
+ * The verdict on each item by its own identity (`tierLedgerIdentityKey`), the
+ * same one a child's parent gets: an item no store holds a row for is judged
+ * on the ledger alone, so it is gone unless the ledger knows it as a Secret.
+ * Never throws: whatever cannot be established is hidden and not gone.
+ */
+export function itemVerdicts(lane: ChildVisibilityLane, items: readonly ChildProbe[]): Map<string, ParentVerdict> {
+  const asked = new Map<string, ChildProbe>();
+  for (const item of items) asked.set(tierLedgerIdentityKey(item), item);
+  const out = new Map<string, ParentVerdict>();
+  if (asked.size === 0) return out;
+  try {
+    const refs = new Map<string, ParentRef>();
+    const refKeyOf = new Map<string, string>();
+    for (const store of lane.stores()) {
+      for (const [key, row] of store.itemStandings([...asked.values()])) {
+        const ref: ParentRef = {
+          provider: row.provider,
+          accountScope: row.accountScope,
+          parentLocalItemId: row.parentLocalItemId,
+          identity: row.identity,
+        };
+        refs.set(parentKey(ref), ref);
+        refKeyOf.set(key, parentKey(ref));
+      }
+    }
+    for (const [key, item] of asked) {
+      if (refKeyOf.has(key)) continue;
+      // No store holds a row: a stand-in id no store can match, so the ledger alone is asked.
+      const ref: ParentRef = {
+        provider: item.provider,
+        accountScope: item.accountScope,
+        parentLocalItemId: `identity:${key}`,
+        identity: {
+          provider: item.provider,
+          accountScope: item.accountScope,
+          providerItemId: item.providerItemId,
+          ...(item.providerConversationId ? { providerConversationId: item.providerConversationId } : {}),
+        },
+      };
+      refs.set(parentKey(ref), ref);
+      refKeyOf.set(key, parentKey(ref));
+    }
+    const verdicts = parentVerdicts(lane, [...refs.values()]);
+    for (const [key, refKey] of refKeyOf) out.set(key, verdicts.get(refKey) ?? HIDDEN);
+  } catch {
+    for (const key of asked.keys()) out.set(key, HIDDEN);
+  }
+  return out;
+}
+
+/**
+ * The keys (`tierLedgerIdentityKey`) of those of `probes` that are named as a
+ * child by their own id (`<parent id>#child:<key>`) and whose parent may not
+ * be seen. This reads no link from any row, so it covers a child no store
+ * holds a row for (a Secret child, known to the Secret location index and the
+ * ledger alone) as well as one a store holds. An item whose id is not a
+ * child's is never in the result.
+ */
+export function hiddenByParentIdentity(lane: ChildVisibilityLane, probes: readonly ChildProbe[]): Set<string> {
+  const hidden = new Set<string>();
+  const named: Array<{ key: string; parent: TierLedgerIdentity }> = [];
+  for (const probe of probes) {
+    const parent = parentIdentityOf(probe);
+    if (parent) named.push({ key: tierLedgerIdentityKey(probe), parent });
+  }
+  if (named.length === 0) return hidden;
+  const verdicts = itemVerdicts(lane, named.map((child) => child.parent));
+  for (const child of named) {
+    if (verdicts.get(tierLedgerIdentityKey(child.parent))?.visible !== true) hidden.add(child.key);
+  }
+  return hidden;
+}
+
+/**
+ * `hiddenByParentIdentity`, answered as the probes themselves rather than
+ * their keys, for a caller that holds objects (a Secret location search).
+ */
+export function hiddenProbesByParentIdentity<T extends ChildProbe>(lane: ChildVisibilityLane, probes: readonly T[]): Set<T> {
+  const hidden = hiddenByParentIdentity(lane, probes);
+  return new Set(probes.filter((probe) => hidden.has(tierLedgerIdentityKey(probe))));
 }
 
 /** A child to judge: how the caller names it, and the parent its row names. */

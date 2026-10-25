@@ -64,10 +64,15 @@ export interface ReleaseManifest {
  * - `secret`: classified Secret, or moving to Secret.
  * - `unknown`: cannot be proven (no account scope in a tiered corpus).
  * `gone`: routed, with no current copy left anywhere.
+ * `hiddenByParent`: a child item whose parent may not be seen any more (it is
+ * also `gone`). Unlike an item that moved or left, what an answer said about
+ * such a child may sit in its prose and not in a citation, so a collector
+ * withholds the whole answer rather than dropping the citation.
  */
 export interface ReleaseInputVerdict {
   tier: 'legacy' | 'public_or_personal' | 'private' | 'secret' | 'unknown';
   gone: boolean;
+  hiddenByParent?: boolean;
 }
 
 /** The worker's current tiers and release rules, read when an answer is collected. */

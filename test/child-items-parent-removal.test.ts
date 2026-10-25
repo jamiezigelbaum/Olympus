@@ -192,7 +192,7 @@ describe('a child is hidden the moment its parent is, on every read path', () =>
     expect(gate(hits).map((hit) => hit.sourceItem.providerItemId)).toEqual([M2_CHILD]);
   });
 
-  test('the release check marks a child gone once its parent is: a delayed answer loses the citation, or is withheld when it carried the parent\'s names', async () => {
+  test('the release check marks a child gone once its parent is, and a delayed answer that drew on it is withheld whole', async () => {
     const { lane, identityOf, archiveId } = await importAndRead();
     const check = createReleaseTierCheck(() => [scopeOf(lane)], () => 'allow');
     const namesCorpus = lane.set.openStores().find((store) => store.trustDomain === 'internal')!.corpusId;
@@ -222,21 +222,32 @@ describe('a child is hidden the moment its parent is, on every read path', () =>
     // The child is gone to the check although its own copies are untouched; the sibling's child is not.
     expect(lane.ledger.copies(identityOf(M1_CHILDREN[0]!)).some((copy) => copy.state === 'current')).toBe(true);
     expect(check.inputs([child, sibling]).map((verdict) => verdict.gone)).toEqual([true, false]);
-    // The citation of the gone child is dropped; the sibling's stays.
-    const after = remoteOperationOutput('source_answer_result', answer(M1_CHILDREN[0]!, M2_CHILD), {
+    // The answer that drew on the gone child is withheld whole: its prose carries what the child said, so
+    // dropping the citation would leave that standing. The sibling's child alone is as it was.
+    expect(check.inputs([child, sibling]).map((verdict) => verdict.hiddenByParent === true)).toEqual([true, false]);
+    expect(remoteOperationOutput('source_answer_result', answer(M1_CHILDREN[0]!, M2_CHILD), {
       releaseCheck: check, releaseManifests: written(child, sibling),
-    });
-    expect(after.status).toBe('answered');
-    expect(citations(after)).toHaveLength(1);
+    })).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
+    expect(remoteOperationOutput('source_answer_result', answer(M2_CHILD), {
+      releaseCheck: check, releaseManifests: written(sibling),
+    }).status).toBe('answered');
+    // An answer whose citations were never the child's, but whose inputs include it, is withheld too.
+    expect(remoteOperationOutput('source_answer_result', answer(M2_CHILD), {
+      releaseCheck: check, releaseManifests: written(sibling, child),
+    })).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
     // The paths that withhold on any gone input withhold; an answer of the sibling alone does not.
     expect(answerReleaseWithheldReason(written(child), check)).toBeDefined();
     expect(answerReleaseWithheldReason(written(sibling), check)).toBeUndefined();
-    // The parent's names were in front of the model that wrote the answer, and the parent is gone: nothing of it leaves.
-    // (The sync that reports the deletion forgets the parent's copy rows right after its stores tombstone it.)
-    lane.ledger.removeCopies(identityOf('m1'));
+    // The parent's names were in front of the model that wrote the answer, and the parent is gone: nothing of
+    // it leaves. The parent's ledger copies are untouched here (the sync that reports a deletion forgets
+    // them only after its stores tombstone the parent), so this is the parent's rows speaking, not its copies.
+    expect(lane.ledger.copies(identityOf('m1')).some((copy) => copy.state === 'current')).toBe(true);
+    expect(check.inputs([parentNames]).map((verdict) => verdict.gone)).toEqual([true]);
     expect(remoteOperationOutput('source_answer_result', answer(M2_CHILD), {
       releaseCheck: check, releaseManifests: written(sibling, parentNames),
     })).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
+    // And the sibling parent's names are as they were.
+    expect(check.inputs([input('m2', { layer: 'names' })]).map((verdict) => verdict.gone)).toEqual([false]);
   });
 
   test('a deleted parent gives no label to its child\'s citation', async () => {
@@ -493,6 +504,33 @@ describe('the sweep removes the children of a parent that is gone, and only thos
     expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 1, retry: 0 });
     expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
     for (const id of M1_CHILDREN) expect(lane.ledger.copies(identityOf(id))).toEqual([]);
+  });
+
+  test('a child whose ledger copy rows cannot be forgotten is still owed, and the next pass finishes it', async () => {
+    const { h, archiveId, lane, identityOf } = await importAndRead();
+    deleteParent(lane, identityOf('m1'));
+
+    // The ledger step is the one that fails, once. What the sweep finds a child by is its store row, so that
+    // is removed last and the child is found again.
+    const real = lane.ledger.removeCopies.bind(lane.ledger);
+    let failed = false;
+    lane.ledger.removeCopies = ((identity) => {
+      if (!failed && identity.providerItemId === M1_CHILDREN[0]) {
+        failed = true;
+        throw new Error('synthetic ledger failure');
+      }
+      return real(identity);
+    }) as typeof lane.ledger.removeCopies;
+
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 1, retry: 1 });
+    expect(readable(lane, archiveId, M1_CHILDREN[0]!)).toBe(false);
+    expect(liveRows(h, archiveId, [M1_CHILDREN[0]!]).length).toBeGreaterThan(0);
+    expect(liveCopies(lane.ledger.copies(identityOf(M1_CHILDREN[0]!))).length).toBeGreaterThan(0);
+
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 1, retry: 0 });
+    expect(liveRows(h, archiveId, M1_CHILDREN)).toEqual([]);
+    for (const id of M1_CHILDREN) expect(lane.ledger.copies(identityOf(id))).toEqual([]);
+    expect(await lane.set.sweepOrphanedChildren()).toEqual({ removed: 0, retry: 0 });
   });
 
   test('a sweep asked for during a sync waits for it: nothing is removed while the sync is in flight', async () => {

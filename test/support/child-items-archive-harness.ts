@@ -43,7 +43,7 @@ export interface ChildItemsArchiveHarness {
   pull(archiveId: string, parents: readonly FixtureParentSpec[], options?: Partial<ArchiveImportPullOptions> & { connector?: Partial<FixtureConnectorOptions> }): ReturnType<typeof pullArchiveImport>;
   importAll(archiveId: string, parents: readonly FixtureParentSpec[], options?: Partial<ArchiveImportPullOptions> & { connector?: Partial<FixtureConnectorOptions> }): ReturnType<typeof pullArchiveImport>;
   /** Item rows per tier store for one archive: provider item id -> row. */
-  rows(archiveId: string): Array<{ domain: string; providerItemId: string; tombstoned: number; chunks: number; parent: string | null; locator: string | null; available: number | null; size: number | null }>;
+  rows(archiveId: string): Array<{ domain: string; providerItemId: string; tombstoned: number; trustTier: string; chunks: number; parent: string | null; locator: string | null; available: number | null; size: number | null }>;
   close(): void;
 }
 
@@ -153,13 +153,13 @@ export function childItemsArchiveHarness(cleanups: Array<() => void>): ChildItem
         const db = new Database(path, { readonly: true });
         try {
           const rows = db.query(`
-            SELECT i.provider_item_id AS id, i.tombstoned AS tombstoned, i.parent_local_item_id AS parent,
+            SELECT i.provider_item_id AS id, i.tombstoned AS tombstoned, i.trust_tier AS tier, i.parent_local_item_id AS parent,
               i.deferred_locator AS locator, i.bytes_available AS available, i.size_bytes AS size,
               (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS chunks
             FROM items i WHERE i.account_scope = ? ORDER BY i.item_pk
-          `).all(archiveId) as Array<{ id: string; tombstoned: number; parent: string | null; locator: string | null; available: number | null; size: number | null; chunks: number }>;
+          `).all(archiveId) as Array<{ id: string; tombstoned: number; tier: string; parent: string | null; locator: string | null; available: number | null; size: number | null; chunks: number }>;
           for (const row of rows) {
-            found.push({ domain, providerItemId: row.id, tombstoned: row.tombstoned, chunks: row.chunks, parent: row.parent, locator: row.locator, available: row.available, size: row.size });
+            found.push({ domain, providerItemId: row.id, tombstoned: row.tombstoned, trustTier: row.tier, chunks: row.chunks, parent: row.parent, locator: row.locator, available: row.available, size: row.size });
           }
         } finally {
           db.close();

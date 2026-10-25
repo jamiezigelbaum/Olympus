@@ -315,6 +315,7 @@ import {
 } from '../x-bookmarks/tier-set.ts';
 import { createParentLabelResolver } from '../connector-store/parent-label.ts';
 import { createUnreadableLocators } from '../connector-store/unreadable-locators.ts';
+import { hiddenProbesByParentIdentity } from '../connector-store/child-visibility.ts';
 import { createReleaseTierCheck, createTierVisibilityGate, type TierVisibilityScope } from '../connector-store/tier-visibility.ts';
 import { secretLocationsPathForStore, type SecretLocationsIndex } from '../classification/secret-locations.ts';
 import {
@@ -2574,7 +2575,14 @@ export async function main(): Promise<void> {
       return lane.secrets.search(query, {
         ...(scope.accountScope ? { accountScope: scope.accountScope } : {}),
         ...(scope.filters ? { filters: scope.filters } : {}),
-      }, { limit: 5 });
+      }, {
+        limit: 5,
+        // A Secret child's location is its name: it is shown only while its parent is.
+        hide: (identities) => hiddenProbesByParentIdentity({
+          ledger: () => lane.ledger,
+          stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId)),
+        }, identities),
+      });
     } catch {
       return [];
     }

@@ -24,7 +24,7 @@
 import type { ReleaseCheck, ReleaseInputVerdict } from '../../core/release-manifest.ts';
 import type { SourceIndexRoutedSearchHit, SourceIndexVisibilityGate } from '../../core/source-index/router.ts';
 import { tierLedgerIdentityKey, type TierLedger, type TierLedgerIdentity } from '../classification/tier-ledger.ts';
-import { hiddenChildKeys, type ChildVisibilityStore } from './child-visibility.ts';
+import { hiddenChildKeys, itemVerdicts, type ChildVisibilityStore } from './child-visibility.ts';
 
 export interface TierVisibilityScope {
   ledger: TierLedger;
@@ -155,13 +155,23 @@ export function createReleaseTierCheck(
           };
         }
         // A child whose parent is not served any more is gone, whatever its own
-        // copies say: the answer that cited it is withheld or loses the citation.
+        // copies say, and the answer that drew on it is withheld whole.
         const lane = childLane(scope);
         if (lane) {
-          const orphaned = hiddenChildKeys(lane, governed.map(({ identity }) => identity));
-          if (orphaned.size > 0) {
-            for (const { index, identity } of governed) {
-              if (orphaned.has(tierLedgerIdentityKey(identity))) verdicts[index] = { ...verdicts[index]!, gone: true };
+          const orphaned = hiddenChildKeys(lane, governed.filter(({ index }) => inputs[index]!.layer !== 'names').map(({ identity }) => identity));
+          for (const { index, identity } of governed) {
+            if (inputs[index]!.layer !== 'names' && orphaned.has(tierLedgerIdentityKey(identity))) {
+              verdicts[index] = { ...verdicts[index]!, gone: true, hiddenByParent: true };
+            }
+          }
+          // The parent label's names are the parent's own, so they are judged the way the parent's
+          // children are, by what its rows say now and not by its ledger copies alone: a parent
+          // tombstoned by an absence reconcile keeps its copy rows until the sync that did it ends.
+          const named = governed.filter(({ index }) => inputs[index]!.layer === 'names');
+          if (named.length > 0) {
+            const standing = itemVerdicts(lane, named.map(({ identity }) => identity));
+            for (const { index, identity } of named) {
+              if (standing.get(tierLedgerIdentityKey(identity))?.visible !== true) verdicts[index] = { ...verdicts[index]!, gone: true };
             }
           }
         }

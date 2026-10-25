@@ -479,21 +479,41 @@ export class TieredStoreSet {
   }
 
   /**
-   * The removal of one child: its copy tombstoned in every store of the set,
-   * then the Secret location it may have kept and the ledger's copy rows. A
-   * store that fails leaves the child's row active there, so the sweep finds
-   * it again; nothing after a failure runs for that child.
+   * The removal of one child: the ledger's copy rows and the Secret location
+   * it may have kept, then its row in every store of the set (tombstoned, or,
+   * for a Secret kept as a location only, retired to an ordinary tombstone).
+   * The stores go last because they are what the sweep finds a child by: a step
+   * that fails leaves the child's row there, so the next pass finds it again and
+   * finishes whatever is left. Every step is safe to repeat.
    */
   private removeChild(child: SourceItemIdentity): boolean {
     try {
+      this.ledger.removeCopies(child);
+      this.secrets()?.remove(child);
       for (const store of this.openStores()) {
         store.tombstoneCopy(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        store.retireSecretLocation(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
       }
-      this.secrets()?.remove(child);
-      this.ledger.removeCopies(child);
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * The provider deleted an item that may be a Secret: a store that keeps it
+   * as a location only turns that row into an ordinary tombstone, and, when
+   * `record` is set (the ledger knows it as a Secret) and no store holds any
+   * row for it, the Private store records the deletion. A Secret is present
+   * while its location is (child-visibility.ts), so this is what lets its
+   * children go with it; the Secret classification alone never does.
+   */
+  retireSecretPresence(identity: SourceItemIdentity, options: { record: boolean }): void {
+    const stores = this.openStores();
+    const outcomes = stores.map((store) => store.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID }));
+    if (options.record && outcomes.every((outcome) => outcome === 'none')) {
+      this.store('secure_local', { create: true })
+        ?.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, record: true });
     }
   }
 
@@ -1409,6 +1429,13 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     return this.routeFor(entry.plan, input.store.corpusId, domain);
   }
 
+  /** Secrets the provider no longer lists, found by a store's absence reconcile: their locations go. */
+  retiredSecrets(identities: readonly SourceItemIdentity[]): void {
+    const secrets = this.set.secrets();
+    if (!secrets) return;
+    for (const identity of identities) secrets.remove(identity);
+  }
+
   /** Forget the copy rows of routed items this run deleted or found to be Secrets, now that every leg tombstoned them. */
   finalize(): void {
     for (const identity of this.copyRemovals.values()) this.set.ledger.removeCopies(identity);
@@ -1448,6 +1475,9 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const routed = ledger.isRouted(identity);
     if (item.metadata['deleted'] === true) {
       this.set.secrets()?.remove(identity);
+      if (item.metadata['deletedIdentityResolved'] !== false) {
+        this.set.retireSecretPresence(identity, { record: ledger.itemIsSecret(identity) });
+      }
       if (!routed) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };

@@ -1037,6 +1037,12 @@ export interface ConnectorStoreTierRouteInput {
 
 export interface ConnectorStoreTierRouting {
   route(input: ConnectorStoreTierRouteInput): ConnectorStoreTierRoute | Promise<ConnectorStoreTierRoute>;
+  /**
+   * Secrets whose location-only rows this sync's absence reconcile retired
+   * (the provider no longer lists them), told after the store committed, so
+   * the set can drop the locations it keeps elsewhere. Never throws into the sync.
+   */
+  retiredSecrets?(identities: readonly SourceItemIdentity[]): void;
 }
 
 /**
@@ -3417,6 +3423,64 @@ export class LocalConnectorStore {
   }
 
   /**
+   * What this store's row says of each item named by identity, found the way
+   * `parentStandings` reads it: present and not tombstoned, or kept as a
+   * Secret's location only. Keyed by the asked identity's
+   * `tierLedgerIdentityKey`; an item with no row here is absent.
+   */
+  itemStandings(identities: readonly ChildProbe[]): Map<string, ParentStandingRow> {
+    const out = new Map<string, ParentStandingRow>();
+    if (identities.length === 0) return out;
+    for (let offset = 0; offset < identities.length; offset += 200) {
+      const batch = identities.slice(offset, offset + 200);
+      const rows = this.db.query(`
+        SELECT provider, account_scope, provider_item_id, provider_conversation_id, normalized_conversation, local_item_id, tombstoned, trust_tier,
+          ${this.childItemColumnsPresent ? 'parent_local_item_id' : 'NULL AS parent_local_item_id'}
+        FROM items
+        WHERE (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')})
+      `).all(...batch.flatMap((identity) => [
+        identity.provider,
+        identity.accountScope,
+        normalizeConversationId(identity.providerConversationId),
+        identity.providerItemId,
+      ])) as Array<{
+        provider: string;
+        account_scope: string;
+        provider_item_id: string;
+        provider_conversation_id: string | null;
+        normalized_conversation: string;
+        local_item_id: string;
+        tombstoned: number;
+        trust_tier: string;
+        parent_local_item_id: string | null;
+      }>;
+      const asked = new Map(batch.map((identity) => [
+        [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId].join('\u0000'),
+        identity,
+      ]));
+      for (const row of rows) {
+        const probe = asked.get([row.provider, row.account_scope, row.normalized_conversation, row.provider_item_id].join('\u0000'));
+        if (!probe) continue;
+        out.set(tierLedgerIdentityKey(probe), {
+          provider: row.provider,
+          accountScope: row.account_scope,
+          parentLocalItemId: row.local_item_id,
+          identity: {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...(row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}),
+          },
+          active: row.tombstoned === 0,
+          secret: row.trust_tier === 'S5',
+          ...(row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}),
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
    * The item pks here of children that are not served because their parent is
    * not (child-visibility.ts), for the counts, the aggregates and the
    * embedding sweep that leave out what a reader cannot see. Empty for a store
@@ -3464,15 +3528,17 @@ export class LocalConnectorStore {
   }
 
   /**
-   * The parents of the active children here, `limit` of them in
-   * (parent id, provider, account) order after `after`: what the set's sweep
-   * pages through to find a parent that is gone.
+   * The parents of the children here that are still to be removed if their
+   * parent is gone, `limit` of them in (parent id, provider, account) order
+   * after `after`: what the set's sweep pages through to find a parent that is
+   * gone. A child is still to be removed while its row is active or is kept as
+   * a Secret's location (tombstoned at tier S5).
    */
   activeChildParents(after: ParentRef | undefined, limit: number): ParentRef[] {
     if (!this.childItemColumnsPresent) return [];
     const rows = this.db.query(`
       SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+      WHERE parent_local_item_id IS NOT NULL AND (tombstoned = 0 OR trust_tier = 'S5')
         AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
       GROUP BY parent_local_item_id, provider, account_scope
       ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
@@ -3501,14 +3567,14 @@ export class LocalConnectorStore {
     }));
   }
 
-  /** The active children of a parent here, by their stored parent link. */
+  /** The children of a parent here that are still to be removed (active, or a Secret's location), by their stored parent link. */
   activeChildrenOf(parent: ParentRef): SourceItemIdentity[] {
     if (!this.childItemColumnsPresent) return [];
     const rows = this.db.query(`
       SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
         provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
       FROM items
-      WHERE parent_local_item_id = ? AND provider = ? AND account_scope = ? AND tombstoned = 0
+      WHERE parent_local_item_id = ? AND provider = ? AND account_scope = ? AND (tombstoned = 0 OR trust_tier = 'S5')
       ORDER BY item_pk
     `).all(parent.parentLocalItemId, parent.provider, parent.accountScope) as Array<Pick<ItemRow,
       'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
@@ -3591,6 +3657,106 @@ export class LocalConnectorStore {
       // other chunk here carries them; inside a caller's transaction, after it.
       if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
     }
+  }
+
+  /**
+   * The provider deleted an item that is a Secret (or no longer lists it).
+   * A Secret's row here is kept as a location only, tombstoned at tier S5, and
+   * a Secret counts as present while that row is (child-visibility.ts); this
+   * turns it into an ordinary tombstone, so a deleted Secret is judged as any
+   * other deleted item. Chunks and names were already gone from it.
+   *
+   * - `retired`: the row was a Secret's location and is now an ordinary tombstone.
+   * - `held`: the store holds a row that is not a Secret's location; nothing changed.
+   * - `recorded`: with `record`, the store held no row and now holds an ordinary tombstone, for a
+   *   Secret that no store ever held (only the ledger knew it), so its deletion is a fact somewhere.
+   * - `none`: the store holds no row and none was made.
+   */
+  retireSecretLocation(
+    identity: SourceItemIdentity,
+    options: { connectorId: string; record?: boolean },
+  ): 'retired' | 'held' | 'recorded' | 'none' {
+    return this.db.transaction(() => {
+      const row = this.db.query(`
+        SELECT item_pk, tombstoned, trust_tier FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+      `).get(
+        identity.provider,
+        identity.accountScope,
+        normalizeConversationId(identity.providerConversationId),
+        identity.providerItemId,
+      ) as { item_pk: number; tombstoned: number; trust_tier: string } | null;
+      if (row && !(row.tombstoned === 1 && row.trust_tier === 'S5')) return 'held';
+      if (!row && options.record !== true) return 'none';
+      const syncRunId = `connector-secret-retired-${randomUUID()}`;
+      const now = nowIso();
+      this.db.query(`
+        INSERT INTO sync_runs (
+          sync_run_id, corpus_id, connector_id, status, cursor, items_seen,
+          items_indexed, started_at, completed_at
+        ) VALUES (?, ?, ?, 'completed', NULL, 0, 0, ?, ?)
+      `).run(syncRunId, this.corpusId, options.connectorId, now, now);
+      if (row) {
+        this.retireSecretRow(row.item_pk, syncRunId, now);
+        return 'retired';
+      }
+      this.tombstoneItem(
+        {
+          identity,
+          mimeType: 'application/octet-stream',
+          content: { kind: 'metadata_only' },
+          metadata: {},
+          fetchedAt: now,
+        },
+        options.connectorId,
+        'observed',
+        syncRunId,
+        undefined,
+        false,
+      );
+      return 'recorded';
+    })();
+  }
+
+  /** A Secret's location-only row becomes an ordinary tombstone (`retireSecretLocation`). */
+  private retireSecretRow(itemPk: number, syncRunId: string, now: string): void {
+    this.db.query(`
+      UPDATE items SET trust_tier = ?, deleted_at = ?, indexed_at = ?, sync_run_id = ?
+      WHERE item_pk = ? AND tombstoned = 1 AND trust_tier = 'S5'
+    `).run(conservativeTierForDomain(this.trustDomain), now, now, syncRunId, itemPk);
+  }
+
+  /**
+   * Whether this store keeps any Secret as a location only. Asked once per
+   * sync, to leave the per-item work out of a store that has none.
+   */
+  private keepsSecretLocations(): boolean {
+    return this.db.query(`SELECT 1 AS present FROM items WHERE tombstoned = 1 AND trust_tier = 'S5' LIMIT 1`).get() !== null;
+  }
+
+  /**
+   * The provider listed an item this store keeps as a Secret's location: say
+   * so, so that an absence reconcile can tell it from a Secret the provider no
+   * longer lists. Writes only the owner row, like `reobserveRoutedCopy`.
+   */
+  private reobserveSecretLocation(
+    item: RawItem,
+    connectorId: string,
+    ownershipKind: ConnectorStoreOwnershipKind,
+    syncRunId: string,
+  ): void {
+    const row = this.db.query(`
+      SELECT item_pk FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 1 AND trust_tier = 'S5'
+    `).get(
+      item.identity.provider,
+      item.identity.accountScope,
+      normalizeConversationId(item.identity.providerConversationId),
+      item.identity.providerItemId,
+    ) as { item_pk: number } | null;
+    if (!row) return;
+    this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, nowIso(), 'provider_listing');
   }
 
   /**
@@ -7742,7 +7908,9 @@ export class LocalConnectorStore {
     let itemsIndexed = 0;
     let itemsChanged = 0;
     let itemsTombstoned = 0;
+    const keepsSecretLocations = this.keepsSecretLocations();
     let absenceItemsTombstoned = 0;
+    let retiredSecretLocations: SourceItemIdentity[] = [];
     let windowRemovedItemsTombstoned = 0;
     let windowRemovalsDeferredLocalItemIds: readonly string[] = [];
     let deletedEventItemsTombstoned = 0;
@@ -7872,6 +8040,10 @@ export class LocalConnectorStore {
                 : {}),
             })
             : { kind: 'legacy' };
+          // A Secret this store keeps as a location only is still at the provider while it is listed.
+          if (keepsSecretLocations && itemForStorage.metadata['deleted'] !== true) {
+            this.reobserveSecretLocation(itemForStorage, connector.id, ownershipKind, syncRunId);
+          }
           if (route.kind === 'elsewhere') {
             // Another store of the set holds this item, or nothing does. A
             // copy this store already holds (superseded, kept hidden) is not
@@ -8177,14 +8349,16 @@ export class LocalConnectorStore {
             }
             checkpoint = undefined;
           } else {
-            absenceItemsTombstoned = this.tombstoneItemsMissingFromFullSnapshot(
+            const absent = this.tombstoneItemsMissingFromFullSnapshot(
               connector.id,
               syncRunId,
               scopes,
               reconcileCurrentMembershipAuthority,
               reconcileSnapshotObservedAt,
             );
+            absenceItemsTombstoned = absent.count;
             itemsTombstoned += absenceItemsTombstoned;
+            retiredSecretLocations = absent.retiredSecrets;
             checkpoint = undefined;
           }
         } else {
@@ -8205,6 +8379,15 @@ export class LocalConnectorStore {
       SET status = 'completed', cursor = ?, items_seen = ?, items_indexed = ?, completed_at = ?
       WHERE sync_run_id = ?
     `).run(checkpoint ?? null, itemsSeen, itemsIndexed, nowIso(), syncRunId);
+
+    // The Secrets whose locations the absence reconcile retired: the set drops what it keeps of them.
+    if (retiredSecretLocations.length > 0) {
+      try {
+        tierRouting?.retiredSecrets?.(retiredSecretLocations);
+      } catch {
+        // The location is dropped by the next deletion or purge; the sync itself has completed.
+      }
+    }
 
     // ONE gap per rule, at the end, rather than one per item. A per-item gap
     // would put tens of thousands of lines into a receipt whose whole purpose
@@ -8638,16 +8821,17 @@ export class LocalConnectorStore {
     scopes: readonly ConnectorStoreFullSnapshotScope[],
     currentMembershipAuthority: ConnectorStoreCurrentMembershipAuthority,
     snapshotObservedAt: string | undefined,
-  ): number {
+  ): { count: number; retiredSecrets: SourceItemIdentity[] } {
     return this.db.transaction(() => {
       const now = nowIso();
       let count = 0;
+      const retiredSecrets: SourceItemIdentity[] = [];
       for (const scope of scopes) {
       const rows = currentMembershipAuthority === 'provider_account_snapshot'
         ? this.db.query(`
-            SELECT DISTINCT i.item_pk
+            SELECT DISTINCT i.item_pk, i.tombstoned
             FROM items i
-            WHERE i.tombstoned = 0
+            WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND i.provider = ?
               AND i.account_scope = ?
               AND NOT EXISTS (
@@ -8670,14 +8854,14 @@ export class LocalConnectorStore {
             scope.accountScope,
             syncRunId,
             snapshotObservedAt ?? '',
-          ) as Array<{ item_pk: number }>
+          ) as Array<{ item_pk: number; tombstoned: number }>
         : this.db.query(`
-            SELECT DISTINCT i.item_pk
+            SELECT DISTINCT i.item_pk, i.tombstoned
             FROM items i
             JOIN item_owners owner
               ON owner.item_pk = i.item_pk
               AND owner.connector_id = ?
-            WHERE i.tombstoned = 0
+            WHERE (i.tombstoned = 0 OR i.trust_tier = 'S5')
               AND owner.last_seen_sync_run_id <> ?
               AND i.provider = ?
               AND i.account_scope = ?
@@ -8686,18 +8870,32 @@ export class LocalConnectorStore {
                 WHERE preservation.item_pk = i.item_pk
                   AND preservation.ownership_kind = 'preservation'
               )
-          `).all(connectorId, syncRunId, scope.provider, scope.accountScope) as Array<{ item_pk: number }>;
+          `).all(connectorId, syncRunId, scope.provider, scope.accountScope) as Array<{ item_pk: number; tombstoned: number }>;
 
         for (const row of rows) {
+          // A Secret kept as a location only that the provider no longer lists: it is deleted like any
+          // other item, so the location row becomes an ordinary tombstone (and is not counted as one).
+          if (row.tombstoned === 1) {
+            const located = this.db.query(`
+              SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+                provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+              FROM items WHERE item_pk = ?
+            `).get(row.item_pk) as Pick<ItemRow,
+              'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
+              | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'> | null;
+            this.retireSecretRow(row.item_pk, syncRunId, now);
+            if (located) retiredSecrets.push(sourceItemFromRow({ ...located, rank: 0 } as ItemRow));
+            continue;
+          }
           this.db.query(`
             UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, sync_run_id = ? WHERE item_pk = ?
           `).run(now, now, syncRunId, row.item_pk);
           this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
           this.deleteFtsForItem(row.item_pk);
+          count += 1;
         }
-        count += rows.length;
       }
-      return count;
+      return { count, retiredSecrets };
     })();
   }
 

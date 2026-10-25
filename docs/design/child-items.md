@@ -279,7 +279,11 @@ floor from its parent.
   - Removal first marks the archive's generation retired in the archive
     registry. Extraction enumeration, fetch, egress and landing all check the
     generation, so work already in flight cannot enqueue or land children of
-    a removed archive.
+    a removed archive. A scratch file counts as landing: the archive is asked
+    again right before its folder is made and again once the file is written,
+    and a file written after the mark is removed and the read refused as not
+    found, so a fetch that was paused across a removal leaves no raw bytes
+    behind, even if the worker then dies.
   - Removal then retires the archive's extraction jobs. The job store gains a
     forget step by `(corpus, account scope)`, registered in the forget
     registry; archive corpora are shared by every archive of a family.
@@ -287,7 +291,13 @@ floor from its parent.
     archive account's extraction spool. A file reader's input is raw bytes
     (a recording, a part of a message), so it is written in the account's own
     folder, `raw/extraction-spool/c-<corpus>/a-<account scope>/` (each a
-    digest), in a file named for the process that wrote it. Removing an
+    digest), in a file named for the process that wrote it. Nothing is made at
+    start: the first scratch file made `raw/`, `extraction-spool/` and the
+    owner's folder below the account folder, one level at a time, and only
+    while the account folder is there, so an account that never needs one has
+    none and a Delete that lands under a running worker is never undone.
+    (The spool of accounts that keep no folder is made whole on first write.)
+    Removing an
     account scope removes what a crashed read left. A start removes at once the
     files of a process that is gone and the folders of an owner with no job
     left, in the spool of each account it serves.
@@ -314,9 +324,13 @@ floor from its parent.
     its rows passes through, and the cross-store consumers apply it to the
     items they gather: keyword and vector search, fetch by id, counts and
     status, the embedding sweep, unreadable-file locators, the parent label,
-    the cross-store gate, and the release check (a child whose parent is gone
-    is `gone`, so an answer that cited it loses the citation, or is withheld
-    when it carried the parent's names).
+    the cross-store gate, the Secret location search (a Secret child's
+    location is its name, found by its id since no row need hold it), and the
+    release check. A delayed answer that drew on a child whose parent is gone
+    is withheld whole, not given back without the citation: what it said of
+    the child is in its prose. The parent's names, when the answer carried
+    them, are judged by the same live-row standing, not by the parent's ledger
+    copies, which outlive a tombstone until the sync that made it ends.
   - **Looked up in the child's own tier set.** The ledger that governs the
     child's stores and those stores, and nowhere else. A second install of the
     same source, or another source, can never make a parent stand.
@@ -324,22 +338,37 @@ floor from its parent.
     store that cannot be read, a parent no store has a row for, or a chain
     that is too deep hides the child. Hiding is not removal: only a parent
     that is gone (below) costs its children their rows.
-  - **A Secret parent is not a deletion.** Its row is kept as a location only,
-    or it was caught on its own words before any store wrote it and only the
-    ledger knows it. Either counts as present without being read; its names
-    and content are never shown through the check, and its children are
-    judged on their own words.
+  - **A Secret parent is present while the provider lists it, and no longer.**
+    Classifying a parent as a Secret never takes its children: its row is
+    kept as a location only (tombstoned at tier S5), or it was caught on its
+    own words before any store wrote it and only the ledger knows it. Either
+    counts as present without being read; its names and content are never
+    shown through the check, and its children are judged on their own words.
+    Presence ends with the provider's deletion, which retires the location:
+    the deletion feed does it (`retireSecretLocation` in each open store; a
+    Secret no store ever held gets an ordinary tombstone in the Private store
+    so the deletion is a fact somewhere), and so does a full snapshot that no
+    longer lists it (every sync re-observes the locations it still lists, so
+    an absence reconcile retires only those it does not). A retired Secret is
+    an ordinary deleted parent: its children are hidden at once and swept.
+  - **A Secret child's name is its location.** The Secret location index is
+    read through the same check (by the child's own id, `#child:`), and the
+    sweep covers a child kept as a location only: it removes the location, the
+    ledger's copy rows and the store's S5 row (retired to an ordinary
+    tombstone, which is what stops the sweep finding it again).
   - **A parent moving tiers** is hidden for a moment with its row still
     active. That is not gone, and its children stay hidden with it and return
     with it.
   - **The orphan sweep** is cleanup only: the check already hid the children.
     It runs when the worker starts and after each account sync, and removes
     the children of a parent that is gone (no store holds an active row for it
-    and it is not a Secret) through the normal path: every open store
-    tombstones the child's copy (its chunks, search rows, vectors and media
-    holds go with it), then the Secrets index entry, then the ledger's copy
-    rows, stores first so a half-done removal never reads as a visible child.
-    It is idempotent and works in batches. It never touches the children of a
+    and it is not a Secret that is still present) through the normal path:
+    the ledger's copy rows, the Secrets index entry, and then every open
+    store's row (tombstoned, with its chunks, search rows, vectors and media
+    holds; a Secret's location retired). The stores go last because the sweep
+    finds a child by its store row: a step that fails leaves the child
+    findable, so the debt is discoverable until it is settled, and the child
+    is already hidden meanwhile. It is idempotent and works in batches. It never touches the children of a
     parent that stands. It does not run while a sync is in flight (each batch
     is judged and removed in one synchronous step, and a pass ends when a sync
     starts), so it cannot meet a parent a sync is about to write. A child it

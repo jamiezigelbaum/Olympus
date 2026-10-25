@@ -104,6 +104,7 @@ Inside the data root:
                                  the extraction spool (raw/extraction-spool/):
                                  the raw bytes a file reader is handed while it
                                  reads, under c-<corpus>/a-<account scope>/
+                                 (made by the first file written, never at start)
     session/                     Telegram's pairing session (telegram.session and its -journal);
                                  WhatsApp's session.db lives with its bridge state in raw/whatsapp/
     settings/                    reserved; unused (see below)
