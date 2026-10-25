@@ -45295,10 +45295,10 @@ var init_vocabulary = __esm(() => {
         file_changed: { why: "{file} changed after the import started.", fix: "Choose the file again with Import an archive once it has stopped changing. What is already here is not added twice." },
         file_missing: { why: "{file} is no longer where it was.", fix: "Choose it again with Import an archive from where it is now. What is already here is not added twice." },
         file_unreadable: { why: "Olympus could not read {file}.", fix: "Check that your user account can open it, then choose it again with Import an archive." },
-        resume_point_invalid: { why: "Olympus lost its place in this archive.", fix: "Choose the file again with Import an archive. What is already here is not added twice." },
+        resume_point_invalid: { why: "Olympus lost its place in this archive.", fix: "It cannot go on from here, and choosing the file again does not change that. What it imported stays; deleting the source removes it with the rest of its history." },
         format_unavailable: { why: "This version of Olympus cannot read this kind of archive.", fix: "Update Olympus, then choose the file again with Import an archive." },
         root_changed: { why: "The folder it was in was moved or replaced.", fix: "Choose it again with Import an archive from where it is now. What is already here is not added twice." },
-        account_changed: { why: "The account this source holds now is not the one this export belongs to, so nothing more was imported.", fix: "What it imported stays. To import it into the account it belongs to, connect that account first." },
+        account_changed: { why: "The account this source holds now is not the one this export belongs to, so nothing more was imported.", fix: "What it imported stays. To import it into the account it belongs to, connect that account first, then choose the file again with Import an archive." },
         source_unavailable: { why: "This source was being deleted or moved, so nothing more was imported.", fix: "Once that has finished, choose the file again with Import an archive if you still want it." },
         other: { why: "The import stopped.", fix: "Choose the file again with Import an archive. What is already here is not added twice." }
       }
@@ -53451,10 +53451,9 @@ class TieredStoreSet {
       return store !== undefined && !store.itemPresence(identity2).active;
     });
   }
-  withdrawCopies(item, copies) {
-    for (const copy of copies) {
-      const domain = this.domainForCorpus(copy.corpusId);
-      const { sourceVersion: _incoming, ...withdrawn } = item.identity;
+  withdrawCopies(item, domains) {
+    const { sourceVersion: _incoming, ...withdrawn } = item.identity;
+    for (const domain of domains) {
       this.store(domain)?.tombstoneCopy(withdrawn, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
     }
   }
@@ -53734,6 +53733,7 @@ class TieredRoutingRun {
   counts;
   plans;
   copyRemovals;
+  pendingWithdrawals;
   set;
   mode;
   classification;
@@ -53745,6 +53745,7 @@ class TieredRoutingRun {
     this.legOptions = new Map;
     this.plans = new Map;
     this.copyRemovals = new Map;
+    this.pendingWithdrawals = new Map;
     this.counts = {
       itemsRouted: 0,
       itemsLegacy: 0,
@@ -53783,6 +53784,12 @@ class TieredRoutingRun {
       secrets.remove(identity2);
   }
   finalize() {
+    for (const { item, domains, text: text2 } of this.pendingWithdrawals.values()) {
+      this.set.withdrawCopies(item, domains);
+      for (const domain of text2)
+        this.set.store(domain)?.stripCopyContent(item.identity);
+    }
+    this.pendingWithdrawals.clear();
     for (const identity2 of this.copyRemovals.values())
       this.set.ledger.removeCopies(identity2);
     this.copyRemovals.clear();
@@ -53855,11 +53862,13 @@ class TieredRoutingRun {
     if (contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(currentCopies, placement.copies)) {
       placement = { copies: currentCopies, embedHold: true };
     }
-    if (routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== "secrets" && currentCopies.length > 0 && ledger.getCurrent(identity2)?.state !== "moving" && placementIsRaise(currentCopies, placement.copies)) {
-      this.set.withdrawCopies(item, currentCopies);
-    }
+    const holdsReplacement = routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== "secrets" && ledger.getCurrent(identity2)?.state !== "moving";
+    const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);
+    const placedDomains = new Set(placement.copies.map((copy) => copy.trustDomain));
+    const staleDomains = holdsReplacement ? TIER_DOMAIN_ORDER.filter((domain) => !placedDomains.has(domain) && this.set.store(domain)?.itemPresence(identity2).active === true) : [];
+    const staleText = holdsReplacement ? placement.copies.filter((copy) => copy.layers === "metadata" && (this.set.store(copy.trustDomain)?.storedItemState(identity2)?.chunkCount ?? 0) > 0).map((copy) => copy.trustDomain) : [];
     const recorded = ledger.recordRoutedPlacement(identity2, decision, placement, {
-      staleCopiesGone: routed && this.set.routedCopiesGone(identity2),
+      staleCopiesGone: replacesInPlace || routed && this.set.routedCopiesGone(identity2),
       ...deferred ? { stagedLandingAllowed: true } : {}
     });
     if (recorded.outcome !== "secrets")
@@ -53891,6 +53900,8 @@ class TieredRoutingRun {
         return { kind: "hold", reason: "move_queued" };
       default: {
         this.counts.itemsRouted += 1;
+        if (staleDomains.length > 0 || staleText.length > 0)
+          this.pendingWithdrawals.set(identityKey(identity2), { item, domains: staleDomains, text: staleText });
         if (placement.embedHold)
           this.counts.itemsPendingHeld += 1;
         const copies = new Map;
@@ -164462,10 +164473,11 @@ function createArchiveImportDashboard(options) {
     }
   };
   const resumeStopped = (archive) => {
-    if (!archive.target || archive.status !== "stopped" || archive.stop?.code !== "stopped_by_owner")
+    const resumable = (entry) => entry.target !== undefined && entry.status === "stopped" && entry.stop !== undefined && entry.stop.code !== "resume_point_invalid" && !(entry.stop.code === "account_changed" && entry.target.owner_confirmed === true);
+    if (!resumable(archive))
       return;
     const record5 = state.update(archive.archive_id, (entry) => {
-      if (entry.status !== "stopped" || entry.stop?.code !== "stopped_by_owner")
+      if (!resumable(entry))
         return false;
       entry.status = "importing";
       delete entry.stop;

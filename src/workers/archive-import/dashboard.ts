@@ -573,13 +573,21 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
   };
 
   /**
-   * Picks an import of a source the owner stopped up where it stopped: its
-   * resume point is the source's committed cursor for this input.
+   * Picks an import of a source up where it stopped. Merged imports have no Remove, so choosing the same
+   * export again is their way back. Every stop but one is recoverable: the files, the format reader and the
+   * account are checked again by the next pass before anything is written, and the import stops once more,
+   * with its reason, if the cause is still there. The exception is a lost place in the archive
+   * (`resume_point_invalid`), which no second try changes: that one stays stopped and the card says so.
+   * Its resume point is the source's committed cursor for this input. An account stop that waits for the
+   * owner's yes (`account_changed` of a confirmed import) is answered by `reconfirmArchiveTarget` instead.
    */
   const resumeStopped = (archive: ArchiveImportRecord): ArchiveImportRecord | undefined => {
-    if (!archive.target || archive.status !== 'stopped' || archive.stop?.code !== 'stopped_by_owner') return undefined;
+    const resumable = (entry: ArchiveImportRecord): boolean => entry.target !== undefined && entry.status === 'stopped'
+      && entry.stop !== undefined && entry.stop.code !== 'resume_point_invalid'
+      && !(entry.stop.code === 'account_changed' && entry.target.owner_confirmed === true);
+    if (!resumable(archive)) return undefined;
     const record = state.update(archive.archive_id, (entry) => {
-      if (entry.status !== 'stopped' || entry.stop?.code !== 'stopped_by_owner') return false;
+      if (!resumable(entry)) return false;
       entry.status = 'importing';
       delete entry.stop;
     });

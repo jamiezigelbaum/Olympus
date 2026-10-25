@@ -959,14 +959,11 @@ export class TieredStoreSet {
    * written replaces them. Used only for a record an input brought over an
    * item stored lower than the record's own verdict.
    */
-  withdrawCopies(item: RawItem, copies: readonly { corpusId: string }[]): void {
-    for (const copy of copies) {
-      const domain = this.domainForCorpus(copy.corpusId);
-      // A withdrawal is not the item's deletion: the incoming version is not stamped on it, so the tombstone
-      // keeps the old body's version and a replay of the same record (a crash before the replacement landed)
-      // still reads as newer and stores it.
-      const { sourceVersion: _incoming, ...withdrawn } = item.identity;
-      this.store(domain!)?.tombstoneCopy(withdrawn, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+  withdrawCopies(item: RawItem, domains: readonly SourceTrustDomain[]): void {
+    // A withdrawal is not the item's deletion: the incoming version is not stamped on it.
+    const { sourceVersion: _incoming, ...withdrawn } = item.identity;
+    for (const domain of domains) {
+      this.store(domain)?.tombstoneCopy(withdrawn, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
     }
   }
 
@@ -1481,6 +1478,8 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
   readonly counts: TieredStoreRoutingCounts;
   private readonly plans: Map<string, PlanEntry>;
   private readonly copyRemovals: Map<string, SourceItemIdentity>;
+  /** Lower copies a replacement made stale: withdrawn once the replacement is written in every leg. */
+  private readonly pendingWithdrawals: Map<string, { item: RawItem; domains: readonly SourceTrustDomain[]; text: readonly SourceTrustDomain[] }>;
   private readonly set: TieredStoreSet;
   private readonly mode: 'shared' | 'per_leg';
   /** Resolved once per run: one read of the owner's map and rules, not one per item. */
@@ -1494,6 +1493,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     this.legOptions = new Map();
     this.plans = new Map();
     this.copyRemovals = new Map();
+    this.pendingWithdrawals = new Map();
     this.counts = {
       itemsRouted: 0,
       itemsLegacy: 0,
@@ -1538,6 +1538,11 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
 
   /** Forget the copy rows of routed items this run deleted or found to be Secrets, now that every leg tombstoned them. */
   finalize(): void {
+    for (const { item, domains, text } of this.pendingWithdrawals.values()) {
+      this.set.withdrawCopies(item, domains);
+      for (const domain of text) this.set.store(domain)?.stripCopyContent(item.identity);
+    }
+    this.pendingWithdrawals.clear();
     for (const identity of this.copyRemovals.values()) this.set.ledger.removeCopies(identity);
     this.copyRemovals.clear();
   }
@@ -1649,17 +1654,27 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       placement = { copies: currentCopies, embedHold: true };
     }
     // A record an input brought (it carries the hold) that raises an item stored lower, with the body that
-    // produced the raise, is the item's newer version: it replaces what is stored. The lower copies go BEFORE
-    // the new placement is recorded (a crash between leaves nothing visible and the record is read again),
-    // and the new body lands in its own stores in this write. Queuing a move instead would hide the old body
-    // and later copy it, never the newer one: the input's resume point passes the record at once.
-    if (routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== 'secrets'
-      && currentCopies.length > 0 && ledger.getCurrent(identity)?.state !== 'moving'
-      && placementIsRaise(currentCopies, placement.copies)) {
-      this.set.withdrawCopies(item, currentCopies);
-    }
+    // produced the raise, is the item's newer version: it replaces what is stored. The new placement is recorded
+    // in place (the ledger then names only the new copies, so the old body is no longer served) and the new body
+    // is written to its own stores in this pass; the lower copies are withdrawn only afterwards (`finalize`), so
+    // a crash at any point leaves a body: the old one before the write, both after it (the old one unserved),
+    // and the stale lower row makes the item incomplete, so the same record is read again and finishes the
+    // withdrawal. Queuing a move instead would hide the old body and later copy it, never the newer one.
+    const holdsReplacement = routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== 'secrets'
+      && ledger.getCurrent(identity)?.state !== 'moving';
+    const replacesInPlace = holdsReplacement && currentCopies.length > 0 && placementIsRaise(currentCopies, placement.copies);
+    const placedDomains = new Set(placement.copies.map(copy => copy.trustDomain));
+    const staleDomains = holdsReplacement
+      ? TIER_DOMAIN_ORDER.filter(domain => !placedDomains.has(domain) && this.set.store(domain)?.itemPresence(identity).active === true)
+      : [];
+    // A store that stays in the placement for the names alone (the held body lives in the Private store) may
+    // still carry the old body's chunks: they go too, after the replacement landed.
+    const staleText = holdsReplacement
+      ? placement.copies.filter(copy => copy.layers === 'metadata'
+        && (this.set.store(copy.trustDomain)?.storedItemState(identity)?.chunkCount ?? 0) > 0).map(copy => copy.trustDomain)
+      : [];
     const recorded = ledger.recordRoutedPlacement(identity, decision, placement, {
-      staleCopiesGone: routed && this.set.routedCopiesGone(identity),
+      staleCopiesGone: replacesInPlace || (routed && this.set.routedCopiesGone(identity)),
       ...(deferred ? { stagedLandingAllowed: true } : {}),
     });
     // Left Secrets in this write (the owner's restore): its extraction jobs
@@ -1700,6 +1715,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         return { kind: 'hold', reason: 'move_queued' };
       default: {
         this.counts.itemsRouted += 1;
+        if (staleDomains.length > 0 || staleText.length > 0) this.pendingWithdrawals.set(identityKey(identity), { item, domains: staleDomains, text: staleText });
         if (placement.embedHold) this.counts.itemsPendingHeld += 1;
         const copies = new Map<string, TierCopyLayers>();
         const sensitivity = new Map<string, SourceSensitivity>();

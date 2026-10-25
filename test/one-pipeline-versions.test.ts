@@ -149,26 +149,50 @@ describe('a newer archive record is stored before its cursor advances, whatever 
     expect(h.rows().filter((row) => row.providerItemId === 'a' && row.tombstoned === 0).map((row) => row.version)).toEqual(['9', '9']);
   });
 
-  test('a crash right after the lower copy is withdrawn leaves the old body or the new one: the same record, read again, stores the new body', async () => {
-    const h = onePipelineHarness(cleanups);
-    h.connectLive();
-    h.live.records = [rec('a', 3, 'the live words')];
-    await h.pullLive();
-    const id = await h.startImport('crash.mbox', [rec('a', 9, 'the archive words')]);
-    const original = h.set.withdrawCopies.bind(h.set);
-    let crashed = false;
-    h.set.withdrawCopies = (...args: Parameters<typeof original>) => {
-      original(...args);
-      if (!crashed) { crashed = true; throw new Error('injected crash after the withdrawal'); }
-    };
-    await h.pull(id).catch(() => undefined);
-    expect(crashed).toBe(true);
-    // The withdrawal did not stamp the incoming version: the newer record is still newer than what remains.
-    expect(h.rows().filter((row) => row.providerItemId === 'a').every((row) => row.version !== '9')).toBe(true);
-    const done = await h.importAll(id);
-    expect(done.record?.status).toBe('imported');
-    expect(h.textOf('a')).toBe('the archive words');
-  });
+  // The replacement is written before the lower copy is withdrawn: a crash at any step leaves a body, and
+  // the same record read again finishes the job. Old row versioned (live v3) or without a version.
+  for (const oldRow of ['versioned', 'unversioned'] as const) {
+    for (const step of ['before the new body is written', 'after the new body, before the withdrawal', 'after the withdrawal'] as const) {
+      test(`a crash ${step}, old row ${oldRow}: a body is always there, and reading the record again ends with the new one alone`, async () => {
+        const h = onePipelineHarness(cleanups);
+        h.connectLive();
+        h.live.records = [rec('a', 3, 'the live words')];
+        await h.pullLive();
+        if (oldRow === 'unversioned') {
+          const db = new Database(h.storePaths.internal);
+          try { db.query('UPDATE items SET source_version = NULL').run(); } finally { db.close(); }
+        }
+        const id = await h.startImport('crash.mbox', [rec('a', 9, 'the archive words')]);
+        let crashed = false;
+        const once = (): void => { if (!crashed) { crashed = true; throw new Error('injected crash'); } };
+        if (step === 'before the new body is written') {
+          const store = h.set.store('secure_local', { create: true })!;
+          const original = store.syncFromConnector.bind(store);
+          store.syncFromConnector = ((...args: Parameters<typeof original>) => { once(); return original(...args); }) as typeof original;
+        } else {
+          const original = h.set.withdrawCopies.bind(h.set);
+          h.set.withdrawCopies = (...args: Parameters<typeof original>) => {
+            if (step === 'after the new body, before the withdrawal') once();
+            original(...args);
+            if (step === 'after the withdrawal') once();
+          };
+        }
+        await h.pull(id).catch(() => undefined);
+        expect(crashed).toBe(true);
+        // The import is not finished, and the record is still to be read: the lookup never says it is already there.
+        expect(h.runtime.state.get(id)?.status).not.toBe('imported');
+        // Where the replacement is written first (a lower store of its own, not the Private one), a body is there throughout.
+        const during = h.textOf('a');
+        if (step !== 'before the new body is written') {
+          expect(during.includes('the live words') || during.includes('the archive words')).toBe(true);
+        }
+        const done = await h.importAll(id);
+        expect(done.record?.status).toBe('imported');
+        expect(h.textOf('a')).toBe('the archive words');
+        expect(everyStoredText(h)).not.toContain('the live words');
+      });
+    }
+  }
 });
 
 describe('an accepted record no store can take yet is not passed', () => {

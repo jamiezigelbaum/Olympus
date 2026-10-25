@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DASHBOARD_ARCHIVE_COPY } from '../src/workers/dashboard/vocabulary.ts';
 import { readSourceRegistry, findRegistryAccount } from '../src/core/source-registry.ts';
 import { recordProviderAccount } from '../src/core/source-storage.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
@@ -525,6 +526,40 @@ describe('Stop', () => {
     expect(h.ids()).toEqual(['a', 'b', 'c', 'd']);
     expect(h.runtime.state.get(id)?.status).toBe('imported');
     expect(h.duplicates()).toEqual([]);
+  });
+
+  // Merged imports have no Remove: choosing the same export again is their way back, for every stop a second
+  // try can change. The next pass checks the files, the reader and the account again before it writes.
+  for (const code of ['source_unavailable', 'file_unreadable', 'file_missing', 'root_changed', 'format_unavailable', 'file_changed', 'account_changed'] as const) {
+    test(`an import stopped as ${code} is picked up by choosing the same export again`, async () => {
+      const h = onePipelineHarness(cleanups, { pageSize: 2 });
+      h.connectLive('export-account');
+      const id = await h.startImport('recover.mbox', [rec('a', 1, 'a'), rec('b', 1, 'b'), rec('c', 1, 'c')]);
+      await h.pull(id, { maxItems: 2 });
+      h.runtime.state.update(id, (entry) => {
+        entry.status = 'stopped';
+        entry.stop = { code, message: 'stopped for the test', at: new Date().toISOString() };
+      });
+      const resumed = await h.dashboard.approve({ key: join(h.home, 'Exports', 'recover.mbox') });
+      expect(resumed).toMatchObject({ ok: true, status: 'started', archive_id: id });
+      await h.importAll(id);
+      expect(h.runtime.state.get(id)?.status).toBe('imported');
+      expect(h.ids()).toEqual(['a', 'b', 'c']);
+    });
+  }
+
+  test('a lost place in the archive stays stopped: choosing the file again says it is already there, and the card says what to do', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive('export-account');
+    const id = await h.startImport('lost.mbox', [rec('a', 1, 'a')]);
+    h.runtime.state.update(id, (entry) => {
+      entry.status = 'stopped';
+      entry.stop = { code: 'resume_point_invalid', message: 'lost', at: new Date().toISOString() };
+    });
+    const again = await h.dashboard.approve({ key: join(h.home, 'Exports', 'lost.mbox') });
+    expect(again).toMatchObject({ ok: true, status: 'already_imported', archive_id: id });
+    expect(h.runtime.state.get(id)?.status).toBe('stopped');
+    expect(DASHBOARD_ARCHIVE_COPY.inSource.stoppedWhy.resume_point_invalid.fix).toContain('deleting the source');
   });
 
   test('only an import that is part of a source, and still running, can be stopped', async () => {
