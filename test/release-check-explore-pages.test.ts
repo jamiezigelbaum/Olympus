@@ -36,6 +36,12 @@ interface State {
   httpLink?: boolean;
   /** A disabled button with no reason. */
   silentDisabled?: boolean;
+  /** A disabled button marked busy ("Checking…"), which says what it is doing in its own words. */
+  busyDisabled?: boolean;
+  /** A row whose name says how long ago it came ("· 3m ago"), a minute older on each load, as the Inbox's rows are. */
+  agedRow?: boolean;
+  loads?: number;
+  agedRead?: boolean;
   /** An unnamed field. */
   unnamedField?: boolean;
   /** Reload keeps the confirmation record (a full page load clears window state). */
@@ -94,6 +100,8 @@ class PagesDriver implements JourneyDriver {
       <div id="sheet" ${s.sheetOpen ? '' : 'hidden'}><p>Paste this into your agent.</p><button type="button" class="btn" data-copy-target="#sheet">Copy prompt</button></div>
       ${s.deadButton ? '<button type="button" class="btn">Check readiness</button>' : ''}
       ${s.silentDisabled ? '<button type="button" class="btn" disabled>Wait</button>' : ''}
+      ${s.busyDisabled ? '<button type="button" class="btn" disabled aria-busy="true">Checking…</button>' : ''}
+      ${s.agedRow ? `<button type="button" class="btn" data-aged>What is due? · ${s.loads ?? 0}m ago</button>${s.agedRead ? '<p>Read.</p>' : ''}` : ''}
       ${s.sections ? '<details><summary>Add it yourself instead</summary><button type="button" class="btn">Copy the address</button></details><details open><summary>Advanced</summary><button type="button" class="btn">Show advanced</button></details>' : ''}
       ${s.reloadingSection ? `<details data-zk-section ${s.zkOpen ? 'open' : ''}><summary>Set up zkAPI</summary><button type="button" class="btn" data-zk-add>Add zkAPI to Olympus</button>${s.zkAdded ? '<p>zkAPI added.</p>' : ''}</details>` : ''}
       ${s.signInTab ? '<button type="button" class="btn" data-sign-in>Connect Drive</button>' : ''}
@@ -146,6 +154,7 @@ class PagesDriver implements JourneyDriver {
     });
     for (const level of [1, 2, 3]) on(`details[data-level="${level}"] > summary`, () => { this.state.nestedOpen = level; this.render(); });
     on('[data-deep]', () => { this.state.deepPressed = true; this.render(); });
+    on('[data-aged]', () => { this.state.agedRead = true; this.render(); });
     on('[data-sign-in]', () => {
       const tab = (this.host as any).open('', '_blank');
       if (this.state.signInTab === 'provider') tab.gone = true;
@@ -174,6 +183,8 @@ class PagesDriver implements JourneyDriver {
     this.state.zkOpen = false;
     this.state.nestedOpen = 0;
     this.state.secret = '';
+    this.state.loads = (this.state.loads ?? 0) + 1;
+    this.state.agedRead = false;
     delete this.state.asked;
     (this.host as unknown as { sessionStorage: Storage }).sessionStorage.clear();
     delete (this.host as any).__rcConfirms;
@@ -336,6 +347,16 @@ describe('exploring the other pages', () => {
     expect(disabled.failed.some((step) => /disabled and says nothing about why/.test(step.findings.join(' ')))).toBe(true);
     const field = await run(new PagesDriver({ unnamedField: true }), [PAGES[0]!]);
     expect(field.failed.some((step) => /has no name/.test(step.findings.join(' ')))).toBe(true);
+  });
+
+  test('a busy control says why it is off in its own words, and a row whose time changes between loads is still found and pressed', async () => {
+    const busy = await run(new PagesDriver({ busyDisabled: true }), [PAGES[0]!]);
+    expect(busy.failed).toEqual([]);
+    expect(busy.steps.find((step) => step.name === 'Checking… (disabled)')).toMatchObject({ ok: true, actual: 'it is busy and says so: "Checking…"' });
+    const driver = new PagesDriver({ agedRow: true });
+    const aged = await run(driver, [PAGES[0]!]);
+    expect(aged.steps.find((step) => step.name.startsWith('What is due?'))).toMatchObject({ ok: true, actual: 'the page changed' });
+    expect(driver.pressed).toContain('other');
   });
 
   test('a tab kept blank for a sign-in is judged by where it went: on to the provider or closed again passes, left blank fails', async () => {

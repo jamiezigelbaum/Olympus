@@ -27,7 +27,7 @@
 import type { PageControlEntry, PageInventory } from './explore-pages-inventory.ts';
 import { ASK_VIEW } from './inbox-page.ts';
 import { BLANK_WINDOW } from './probe.ts';
-import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
+import { screenshotWithin, type ElementInfo, type JourneyDriver, type JourneyTrace, type StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
 
 export interface PageDef { id: string; title: string; path: string }
@@ -50,6 +50,8 @@ export interface PageControl {
   target: string | null;
   rel: string | null;
   disabled: boolean;
+  /** Marked busy (aria-busy): its own words say what it is doing. */
+  busy?: boolean;
   reason: string;
   visible: boolean;
   /** `data-*` attribute names on the control and its form. */
@@ -168,7 +170,8 @@ const ENUMERATE = String.raw`(() => {
     const type = clean(el.getAttribute('type'));
     const name = nameOf(el);
     const href = el.getAttribute('href');
-    const base = tag + '|' + type + '|' + name + '|' + (href || '');
+    // Numbers in a name change between loads (an Inbox row's "· 32m ago"); the signature that finds the control again leaves them out.
+    const base = tag + '|' + type + '|' + name.replace(/\d+/g, '#') + '|' + (href || '');
     seen[base] = (seen[base] || 0) + 1;
     const form = el.closest('form');
     const attrs = Array.from(el.getAttributeNames()).filter((a) => a.startsWith('data-') && a !== 'data-rc-n');
@@ -181,6 +184,7 @@ const ENUMERATE = String.raw`(() => {
       }
     }
     const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+    const busy = el.getAttribute('aria-busy') === 'true';
     const parent = el.parentElement;
     // What says why a control is off: its title, what it points to, or the words beside it in a wrapper of its own.
     const solo = parent && parent.querySelectorAll('button, a, input, select, textarea, summary').length === 1;
@@ -199,7 +203,7 @@ const ENUMERATE = String.raw`(() => {
     const submit = (tag === 'button' && (el.getAttribute('type') || 'submit') === 'submit') || (tag === 'input' && type === 'submit');
     out.push({
       n, sig: base + '#' + seen[base], tag, type, name, text: clean(el.textContent).slice(0, 120),
-      href, target: el.getAttribute('target'), rel: el.getAttribute('rel'), disabled, reason: reason.slice(0, 200), values,
+      href, target: el.getAttribute('target'), rel: el.getAttribute('rel'), disabled, busy, reason: reason.slice(0, 200), values,
       visible: vis(el), attrs, formKind, expanded: el.getAttribute('aria-expanded'),
       copy: el.hasAttribute('data-copy-target'), field,
       invalid: !!(submit && form && typeof form.checkValidity === 'function' && !form.checkValidity()),
@@ -324,7 +328,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
     for (const control of audit?.emptyButtons ?? []) findings.push(`a button or link has no name: ${control}`);
     if ((audit?.overflowX ?? 0) > 0) findings.push(`the page scrolls sideways (${audit!.overflowX} px too wide)`);
     for (const control of controls) {
-      if (control.visible && control.disabled && !control.reason.trim()) findings.push(`"${control.name || control.tag}" is disabled and says nothing about why`);
+      if (control.visible && control.disabled && !control.busy && !control.reason.trim()) findings.push(`"${control.name || control.tag}" is disabled and says nothing about why`);
       if (control.visible && control.field && !control.name) findings.push(`a ${control.tag === 'input' ? 'field' : control.tag} has no name (nothing says what to enter)`);
     }
     return findings;
@@ -496,8 +500,10 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
             return;
           }
           if (control.disabled) {
-            const ok = control.reason.trim() !== '';
-            steps.push({ n: steps.length + 1, name: `${control.name || control.tag} (disabled)`, action: `look at "${control.name}"`, expected: 'a disabled control says why', actual: ok ? control.reason : 'it says nothing', ok, ms: now() - started, at: page.path, consoleErrors: [], failedRequests: [], findings: ok ? [] : [`"${control.name}" is disabled and says nothing about why`] });
+            // A busy control ("Checking…") says what it is doing in its own words.
+            const why = control.reason.trim() || (control.busy ? `it is busy and says so: "${control.name}"` : '');
+            const ok = why !== '';
+            steps.push({ n: steps.length + 1, name: `${control.name || control.tag} (disabled)`, action: `look at "${control.name}"`, expected: 'a disabled control says why', actual: ok ? why : 'it says nothing', ok, ms: now() - started, at: page.path, consoleErrors: [], failedRequests: [], findings: ok ? [] : [`"${control.name}" is disabled and says nothing about why`] });
             if (!ok) summary.failed += 1;
             return;
           }
@@ -545,7 +551,7 @@ export async function explorePages(options: PagesOptions): Promise<PagesResult> 
           const shot = `pages-${page.id}/${String(trace.n).padStart(2, '0')}.jpg`;
           // A capture of a page that is not in front never answers; it is given a few seconds and the step goes without a picture.
           phase = 'taking a picture';
-          if (await Promise.race([driver.screenshot(shot).catch(() => false), new Promise<boolean>((done) => setTimeout(() => done(false), 8_000))])) trace.screenshot = shot;
+          if (await screenshotWithin(driver, shot)) trace.screenshot = shot;
           steps.push(trace);
           // What the press revealed gets its own turn, through up to three openers (Connect an agent, then an agent's section, then Add it yourself instead).
           if (after && item.path.length <= MAX_OPENERS) {
