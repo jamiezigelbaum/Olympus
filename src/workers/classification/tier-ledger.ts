@@ -4572,8 +4572,13 @@ function tierLedgerMigrations(): SqliteMigration[] {
       version: 12,
       name: 'tier_deletion_hold',
       up(db) {
+        // Re-runnable on a ledger already at this shape (a test rewinds a
+        // fully built ledger's version and opens it again).
+        const columns = db.query('PRAGMA table_info(tier_parent_deletion_intent)').all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === 'observed_after')) {
+          db.exec("ALTER TABLE tier_parent_deletion_intent ADD COLUMN observed_after TEXT NOT NULL DEFAULT ''");
+        }
         db.exec(`
-          ALTER TABLE tier_parent_deletion_intent ADD COLUMN observed_after TEXT NOT NULL DEFAULT '';
           UPDATE tier_parent_deletion_intent SET observed_after = noted_at WHERE observed_after = '';
           CREATE TABLE IF NOT EXISTS tier_deletion_hold (
             provider TEXT NOT NULL,
