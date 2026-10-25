@@ -320,7 +320,8 @@ kept entry names a module that no longer opens one
 store the registry places (a folder-layout source, opened through the storage
 service at the path its account's layout gives it) holds a cached picture under
 its identity, `(source_id, slot, store)` with the store a tier or
-`<family>.<tier>`. The marker's name is a digest of the registry's path and the
+`<family>.<tier>`. The marker's name is a digest of the registry's path (its
+folder's real path, so every spelling of the data folder names one hold) and the
 identity (two data folders can share one media cache and carry the same account
 and store names). It records the account's incarnation, the registry entry's
 `created_at`, and where the file was last seen, as a hint. The sweep decides
@@ -328,7 +329,10 @@ whether the holder is gone from the registry and the layout: gone when the
 account is `deleted` or no longer listed in a registry that was read, when the
 hold is of an earlier incarnation than the entry (the account was re-created),
 or when the store is missing at both layouts' paths (and the hint) with the
-folder to look in present. A registry that cannot be read, a hold written for
+folder to look in present. A folder that is not there says nothing, even inside
+the data folder: it may be a volume not mounted now, so an account folder gone
+while its entry is still `active` keeps its pictures until the entry is
+`deleted`. A registry that cannot be read, a hold written for
 another data folder, and a hold with no incarnation (written before the field
 existed, judged by the store alone) keep everything; a registry that is not
 there keeps every hold by identity and every path marker for a path an account
@@ -340,8 +344,7 @@ holds) are held by path, as before. Moving a store, 4c's rename, therefore
 needs no call into the media cache: nothing in a hold names its path. A path
 marker an earlier build wrote is read by the sweep as the identity of the store
 the registry puts at that path, and a path in an account folder is judged by
-its account even when the folder went with it (the missing-folder exemption,
-which keeps a volume not mounted now, applies to paths no account could have),
+its account (a deleted account releases it even when its folder went with it),
 so a store renamed before it has held its pictures again keeps them. The store
 replaces the path marker with its identity marker the next time it holds them:
 the marker is written durably first, and a retry that finds the same marker
@@ -349,7 +352,12 @@ already there flushes it and its folder before the path marker goes. The incarna
 check takes effect once step 5 marks an entry `deleted` and makes a new one on
 reconnect (and then needs the lookup to find the current entry). Today's Delete
 leaves the entry `active` with the same `created_at` and releases the holds
-itself, so until then a reconnect cannot be told from the account it follows.
+itself, so until then a reconnect cannot be told from the account it follows,
+and a Delete that stops after removing the folder and before releasing leaves
+its pictures held (kept, never dropped). Step 5 should give each entry a value
+that only ever changes by replacement (an incarnation token): `created_at`
+compared as earlier-than leaks, not drops, when the clock moved backwards between
+the two entries.
 
 A per-source Delete runs the steps (`forgotten` in its result lists each file
 and count; a dry run lists what it would forget) after the account's state is

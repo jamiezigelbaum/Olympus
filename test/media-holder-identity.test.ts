@@ -11,7 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import * as atomicFile from '../src/core/atomic-file.ts';
@@ -489,8 +489,24 @@ describe('a deleted account', () => {
     closeStore(store);
     expect(sweep()).toBe(0);
     expect(existsSync(media.path)).toBe(true);
-    // The delete that today leaves the registry as it was: the folder is gone and a missed release is made up.
+    // The store removed from its folder: nothing at the legacy place has to be looked at.
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${dbPath}${suffix}`, { force: true });
+    expect(sweep()).toBe(1);
+    expect(existsSync(media.path)).toBe(false);
+  });
+
+  test('an account folder that is not there keeps the pictures until the account says it is deleted', async () => {
+    account('dropbox.files', 'folder');
+    const dbPath = storeFile('dropbox.files', 'folder');
+    const store = serviceStore('dropbox.files', dbPath);
+    const media = await landPicture(store, 36);
+    closeStore(store);
+    // A volume mounted inside the data folder and not mounted now looks the same
+    // as a delete that stopped before releasing: neither says the store is gone.
     rmSync(dirname(dirname(dbPath)), { recursive: true, force: true });
+    expect(sweep()).toBe(0);
+    expect(existsSync(media.path)).toBe(true);
+    setAccount('dropbox.files', { state: 'deleted' });
     expect(sweep()).toBe(1);
     expect(existsSync(media.path)).toBe(false);
   });
@@ -775,6 +791,40 @@ describe('two data folders that share one media cache', () => {
     expect(sweep()).toBe(0);
     expect(existsSync(picture.path)).toBe(true);
     expect(releaseMediaCacheFile(picture.path, picture.sha256, theirs)).toBe(true);
+    expect(existsSync(picture.path)).toBe(false);
+  });
+});
+
+describe('a data folder reached by another spelling', () => {
+  test('names the same hold, so a release through either spelling leaves nothing behind', () => {
+    entry('local.files', '1', 'folder');
+    const alias = join(base, 'data-link');
+    symlinkSync(env.XDG_DATA_HOME!, alias);
+    const aliasEnv: Env = { HOME: base, XDG_DATA_HOME: alias };
+    const viaLink = holderOf('local.files', '1', storeFileOf('local.files', '1', 'folder', 'secure_local', aliasEnv), aliasEnv);
+    const direct = holderOf('local.files', '1', storeFileOf('local.files', '1', 'folder'));
+    expect(viaLink.registry).toBe(direct.registry);
+
+    const picture = writeMediaCacheFile(cache, jpeg(81), 'image/jpeg');
+    expect(retainMediaCacheFile(picture.path, picture.sha256, viaLink)).toBe(true);
+    expect(retainMediaCacheFile(picture.path, picture.sha256, direct)).toBe(true);
+    releaseMediaCacheFile(picture.path, picture.sha256, picture.stagingHolder);
+    expect(identityMarkers(picture)).toHaveLength(1);
+    expect(releaseMediaCacheFile(picture.path, picture.sha256, direct)).toBe(true);
+    expect(existsSync(picture.path)).toBe(false);
+  });
+
+  test('is judged by the sweep of either spelling', () => {
+    entry('local.files', '1', 'folder');
+    const alias = join(base, 'data-link');
+    symlinkSync(env.XDG_DATA_HOME!, alias);
+    const aliasEnv: Env = { HOME: base, XDG_DATA_HOME: alias };
+    const viaLink = holderOf('local.files', '1', storeFileOf('local.files', '1', 'folder', 'secure_local', aliasEnv), aliasEnv);
+    const picture = writeMediaCacheFile(cache, jpeg(82), 'image/jpeg');
+    expect(retainMediaCacheFile(picture.path, picture.sha256, viaLink)).toBe(true);
+    releaseMediaCacheFile(picture.path, picture.sha256, picture.stagingHolder);
+    setAccount('local.files', { state: 'deleted' });
+    expect(sweep()).toBe(1);
     expect(existsSync(picture.path)).toBe(false);
   });
 });

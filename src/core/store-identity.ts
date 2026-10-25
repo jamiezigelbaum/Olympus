@@ -105,6 +105,22 @@ export function storePathKey(path: string): string {
   return join(real, basename(path));
 }
 
+/**
+ * The registry a hold names, spelled one way however the data folder was
+ * reached (a link, another case on a volume that ignores case): a hold taken
+ * through one spelling is released, and judged by the sweep, through any other.
+ */
+export function registryKey(env: LayoutEnv = process.env): string {
+  const path = sourceRegistryPath(env);
+  let folder = resolve(dirname(path));
+  try {
+    folder = realpathSync.native(folder);
+  } catch {
+    // A data folder that is not there yet: its spelling is all there is.
+  }
+  return join(folder, basename(path));
+}
+
 /** The identity of the store at this path, with the paths the layouts give it. */
 function matchStore(
   sourceId: string,
@@ -149,7 +165,7 @@ export function placedStoreHolder(
       ...matched,
       identity: { ...matched.identity, incarnation: entry.created_at },
       path: store.dbPath,
-      registry: sourceRegistryPath(env),
+      registry: registryKey(env),
     };
   } catch {
     return undefined;
@@ -165,7 +181,7 @@ export function storeHolderAtPath(sourceId: string, dbPath: string, env: LayoutE
   if (dbPath === ':memory:' || !FOLDER_LAYOUT_SOURCES.includes(sourceId)) return undefined;
   try {
     const matched = matchStore(sourceId, DEFAULT_ACCOUNT_SLOT, dbPath, accountStoreNames(sourceId, archiveImportFamilies()), env);
-    return matched && { ...matched, path: dbPath, registry: sourceRegistryPath(env) };
+    return matched && { ...matched, path: dbPath, registry: registryKey(env) };
   } catch {
     return undefined;
   }
@@ -185,8 +201,8 @@ export interface StorePlacementView {
    * the file's path, which is no longer there). A path the registry places, or
    * that sits in an account folder, is judged as its identity is: `gone` or
    * `kept`, so a store renamed into its account folder is not mistaken for a
-   * deleted one before it has held its pictures again, and a folder deleted
-   * with its account does not leave its markers behind. A registry that cannot
+   * deleted one before it has held its pictures again, and a folder that went
+   * with a deleted account does not leave its markers behind. A registry that cannot
    * be read, or is not there while the path is one it would place, says
    * `kept`. Any other path is `unplaced`: the caller decides, as it always did.
    */
@@ -201,9 +217,11 @@ type RegistryRead =
 
 export function storePlacementView(env: LayoutEnv = process.env): StorePlacementView {
   let registryPath: string | undefined;
+  let registryName: string | undefined;
   let root: string | undefined;
   try {
     registryPath = sourceRegistryPath(env);
+    registryName = registryKey(env);
     root = olympusDataRoot(env);
   } catch {
     // A data folder that cannot be worked out: nothing can be told gone.
@@ -222,12 +240,13 @@ export function storePlacementView(env: LayoutEnv = process.env): StorePlacement
     return loaded;
   };
 
-  /** Not there, and in a place where "not there" is believable: its folder is, or it sat in the data folder, which is. */
-  const absentForSure = (path: string): boolean => {
-    if (!isMissing(path)) return false;
-    if (!isMissing(dirname(path))) return true;
-    return root !== undefined && isInside(path, root) && existsSync(root);
-  };
+  /**
+   * Not there, in a folder that is: a folder that is not there may be a volume
+   * not mounted now, even inside the data folder, so it says nothing. A store
+   * whose whole account folder went (a delete that stopped before releasing its
+   * pictures) is released by its account's state, not by its path.
+   */
+  const absentForSure = (path: string): boolean => isMissing(path) && !isMissing(dirname(path));
 
   // One sweep asks about the same store for every picture it holds.
   const verdicts = new Map<string, boolean>();
@@ -337,7 +356,7 @@ export function storePlacementView(env: LayoutEnv = process.env): StorePlacement
   };
 
   return {
-    registry: registryPath,
+    registry: registryName,
     storeGone,
     pathMarker(path) {
       let verdict = pathVerdicts.get(path);
@@ -355,10 +374,6 @@ function isEarlier(held: string, current: string): boolean {
   const before = Date.parse(held);
   const after = Date.parse(current);
   return Number.isFinite(before) && Number.isFinite(after) && before < after;
-}
-
-function isInside(path: string, folder: string): boolean {
-  return resolve(path).startsWith(`${resolve(folder)}${sep}`);
 }
 
 /** Whether a path is certainly not there: a dangling link counts, a folder the process may not search does not. */

@@ -352,9 +352,9 @@ function holderGone(marker: string, markerName: string, placement: StorePlacemen
   const name = readMarker(marker);
   if (!name || !isAbsolute(name) || holderDigest(name) !== markerName) return false;
   if (existsSync(name)) return false;
-  // A path in an account folder is the account's, and is judged by it even when
-  // the folder went with the account. Any other path with its folder missing is
-  // a volume not mounted now.
+  // A path in an account folder is the account's, and is judged by it: a
+  // deleted account releases it even when its folder went too. Any other path
+  // with its folder missing is a volume not mounted now.
   const verdict = placement.pathMarker(name);
   if (verdict !== 'unplaced') return verdict === 'gone';
   return existsSync(dirname(name));
