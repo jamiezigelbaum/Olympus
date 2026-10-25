@@ -85,13 +85,22 @@ decides again.
   source's own order (Telegram: edit date, then reactions; WhatsApp: the
   message time; mail does not change), whichever input it came from. An
   older record never overwrites a newer one, so a queued live record cannot
-  undo a later edit the archive holds.
+  undo a later edit the archive holds. The stored version is the newest any
+  row of the item holds, whatever the item's completeness or visibility: an
+  item written to one leg only, or left as a Secret's location or a
+  deletion's tombstone, still has its version, so an old export never
+  restores what was deleted or made a Secret, nor overwrites a partly
+  written item. A record of an incomplete item's own version completes it.
 - At the same version, a record applies only when it brings content the
   stored item lacks: mail outside the Gmail window is names-only, and a live
   WhatsApp photo is metadata only (the bridge downloads voice notes alone).
   Otherwise the stored item stays, and live is kept on a tie.
 - A second archive of the same history adds only what is newer or missing.
   Re-importing an export is caught by its file identity, as today.
+- Each version of an item an input brings is accepted, classified and routed
+  on its own (an edit that adds a key is a Secret even if the version before
+  it was ordinary), and the input's resume point never passes a record whose
+  accepted version no store has taken.
 
 ### 3. The hold travels with the item
 
@@ -318,11 +327,34 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   choosing the same export again resumes a stopped import from its cursor.
 - **What the design left unstated.** A newer archive record over an item
   that live already stored as Personal raises the item to Private (the hold
-  is the item's, so it applies to the replacement); the set's raise hides the
-  Personal copy first, and the move runs in the background (automatically
-  only with local-only embeddings, otherwise on the owner-approved migrate
-  path). At the same version this does not arise unless the stored item lacked
-  its content. Revisit when the first real source adopts inputs.
+  is the item's, so it applies to the replacement). A raise that queued a
+  move would hide the old body and later copy it, never the newer one, and
+  the archive's resume point had already passed the record, so the set
+  replaces the item in one write instead: the lower copies go first, then
+  the new body lands in the Private store, held until judged. A record whose
+  item is in the middle of a move cannot be stored yet: the set keeps its
+  resume point and the import is not complete until it is, so the next pass
+  reads the record again. (A names-only newer record over an item whose text
+  was not read still leaves the stored copies as they are, as every lane
+  does.) At the same version none of this arises unless the stored item
+  lacked its content. Revisit when the first real source adopts inputs.
+- **Item budget.** A listing's limit counts items, not records: a record
+  that expands into a parent and children is cut inside the record when the
+  budget runs out, and the page carries a cursor that resumes inside it
+  (parent stored, children pending). An import is marked imported only when
+  the stores consumed the listing's last page.
+- **Account confirmation.** The owner's yes is bound to the account it was
+  given for (the registry account's incarnation and its provider account),
+  recorded with the import and checked at every pass. A source bound to
+  another account since, or an account that is gone, stops the import with
+  nothing more written; choosing the export again asks the question again.
+- **Delete.** An import record that cannot be read fails the whole-source
+  delete (no store is removed; the owner runs it again once the file reads),
+  so no import survives to put the history back.
+- **Delete wording.** The delete confirmation on the computer says that the
+  archives imported into the source go with it and the files stay where they
+  are. The ChatGPT surface has no imports list, so its confirmation says
+  nothing of them (open).
 - **Counting.** An import counts its own run ("N items from this archive, of
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts
