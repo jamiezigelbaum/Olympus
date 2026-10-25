@@ -274,6 +274,8 @@ function observeListing(
     add(count: number, at?: { repeatedAt: ItemPosition[]; through: ItemPosition | undefined }): void;
   },
 ): { connector: SourceConnector; completed(): boolean; dates(): { earliest?: string; latest?: string } } {
+  // The listing reached its end and the files are unchanged. Whether the stores consumed that last page is the
+  // pass's to check (a leg's `traversalComplete`): this runs before the page is stored.
   let completed = false;
   const seenThisPass = new Set<string>();
   let earliest: string | undefined;
@@ -558,7 +560,11 @@ async function runPass(
     }
     flush();
 
-    const complete = observed.completed();
+    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain]!.sync] : []);
+    // The listing reached its end and every file is unchanged, AND the stores consumed every item of
+    // the last page: a page the store did not finish (an item budget ran out inside it) is not stored,
+    // so the import is not complete however the listing ended.
+    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete);
     const dates = observed.dates();
     const final: { stop?: ArchiveImportStop } = {};
     // Indexing the last page yielded after the bindings were checked: they are checked again as the
@@ -595,7 +601,6 @@ async function runPass(
       }
     });
     if (final.stop) return context.idle(updated, ['archive_import_stopped'], true);
-    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run.byDomain[domain] ? [run.byDomain[domain]!.sync] : []);
     return {
       receipt: receiptOf(updated, {
         legs,

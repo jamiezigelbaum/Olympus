@@ -192,6 +192,10 @@ export interface OnePipelineHarness {
   evidence: { current: ArchiveAccountEvidence };
   /** Held while a pass reads: an archive input waits here before each page. */
   gate: { before?: ((firstIndex: number) => void | Promise<void>) | undefined };
+  /** The source's one connector (its live input, and `forInput` for an archive). */
+  connector: SourceConnector;
+  /** When on, an archive input's listing ignores the item limit it is given (a connector that hands back more than its budget). */
+  ignoreLimit: { on: boolean };
   /** Whether the live source is already connected (an account of it exists). */
   connectLive(providerAccountId?: string | null): void;
   /** One live pull, by the source's own lane. */
@@ -254,6 +258,7 @@ export function onePipelineHarness(cleanups: Array<() => void>, options: Fixture
   const archiveLog: InputLog = { cursors: [], pages: 0 };
   const evidence: { current: ArchiveAccountEvidence } = { current: { kind: 'account', importAccountId: 'export-account' } };
   const gate: OnePipelineHarness['gate'] = {};
+  const ignoreLimit = { on: false };
   const exportRecords = new Map<string, readonly FxRecord[]>();
   const exclusive = createExclusiveRunner();
 
@@ -292,7 +297,18 @@ export function onePipelineHarness(cleanups: Array<() => void>, options: Fixture
     kind: 'live',
     records: pagesOf(() => live.records, pageSize, liveLog),
   };
-  const connector: SourceConnector = withInputs(inputConnector(fixtureBuilder, liveInput), fixtureBuilder);
+  const plain: SourceConnector = withInputs(inputConnector(fixtureBuilder, liveInput), fixtureBuilder);
+  const connector: SourceConnector = Object.create(plain) as SourceConnector;
+  connector.forInput = (archiveInput: SourceConnectorInput): SourceConnector => {
+    const inner = plain.forInput!(archiveInput);
+    if (!ignoreLimit.on) return inner;
+    const unbounded = Object.create(inner) as SourceConnector;
+    unbounded.listItems = (listOptions = {}) => {
+      const { limit: _limit, ...rest } = listOptions;
+      return inner.listItems(rest);
+    };
+    return unbounded;
+  };
   const syncOptions = { fetchContent: true, placement: FIXTURE_PLACEMENT, deferMetadataOnlyContent: true };
 
   const target: ArchiveSourceTarget = {
@@ -358,7 +374,7 @@ export function onePipelineHarness(cleanups: Array<() => void>, options: Fixture
   cleanups.push(close);
 
   const harness: OnePipelineHarness = {
-    base, home, env, runtime, targets, dashboard, set, stores, storePaths, exclusive, live, liveLog, archiveLog, evidence, gate,
+    base, home, env, runtime, targets, dashboard, set, stores, storePaths, exclusive, live, liveLog, archiveLog, evidence, gate, ignoreLimit, connector,
     connectLive(providerAccountId: string | null = 'export-account') {
       // What the live connector does when it connects: the account exists, and names the provider's account.
       const account = { sourceId: FIXTURE_SOURCE_ID };

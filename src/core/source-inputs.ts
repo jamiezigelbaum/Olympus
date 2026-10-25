@@ -123,9 +123,53 @@ export interface IntakeObservingInput<R = unknown> extends SourceConnectorInput<
 const hasContent = (item: RawItem): boolean => item.content.kind !== 'metadata_only';
 
 /**
+ * Where a listing stopped inside a page of an input's records: the cursor the
+ * input handed out for the page's start, how many of its records were
+ * handled, and how many of the next record's entries (the record's own item,
+ * then its children) were. A page that is stored whole keeps the input's own
+ * cursor; only a page cut by the item budget carries this one.
+ */
+const RESUME_PREFIX = '~in1~';
+const RESUME_PATTERN = /^~in1~(\d+)~(\d+)~([\s\S]*)$/u;
+
+interface ResumePoint {
+  /** The input's own cursor for the start of the page the listing stopped in; absent: the input's start. */
+  inner: string | undefined;
+  records: number;
+  entries: number;
+}
+
+function encodeResume(point: ResumePoint): string {
+  return `${RESUME_PREFIX}${point.records}~${point.entries}~${point.inner ?? ''}`;
+}
+
+function decodeResume(cursor: string | undefined): ResumePoint {
+  if (cursor === undefined) return { inner: undefined, records: 0, entries: 0 };
+  const found = RESUME_PATTERN.exec(cursor);
+  // A cursor the input handed out (or one this module cannot read) is the input's own.
+  if (!found) return { inner: cursor, records: 0, entries: 0 };
+  return { inner: found[3] ? found[3] : undefined, records: Number(found[1]), entries: Number(found[2]) };
+}
+
+/** One item of a page, with where in the page it came from. */
+interface PageUnit {
+  /** Records of the input's stream since its last page cursor, up to and including this unit's record. */
+  record: number;
+  entry: number;
+  item: RawItem;
+}
+
+/**
  * The connector of one input of a source: its id is the input's, its listing
  * reads the input's records, and it applies the intake rule and builds items
  * with the source's own builder. A source's `forInput` returns this.
+ *
+ * The listing's `limit` bounds the ITEMS it yields, not the records it reads:
+ * a record is its own item and its children, so a page of records can hold
+ * more items than the budget. A page that does not fit is cut there and
+ * yielded `truncated`, with a cursor that resumes inside it (at a record and an
+ * entry of it); the part not yielded is decided and built again on the next
+ * pass. A page is `done` only when every item of it was yielded.
  */
 export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: IntakeObservingInput<R>): SourceConnector {
   const connector: SourceConnector = {
@@ -136,27 +180,46 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
     classificationSignals: (item) => builder.classificationSignals(item),
     listItems(options: SourceConnectorListOptions = {}): AsyncIterable<SourceConnectorListPage> {
       const lookup = options.storedItem;
+      const budget = options.limit;
       return (async function* (): AsyncGenerator<SourceConnectorListPage> {
         // What this pass applied so far: it is stored only once the pass was listed, so the store
         // cannot say what an earlier record of the same pass did.
         const thisPass = new Map<string, StoredItemState>();
         const stateOf = (identity: SourceItemIdentity): StoredItemState | undefined =>
           thisPass.get(identity.localItemId) ?? lookup?.(identity);
+        const resume = decodeResume(options.cursor);
+        // The input's stream is read from `base`; `offset` records of it came before the page being read.
+        let base = resume.inner;
+        let offset = 0;
+        let recordsToSkip = resume.records;
+        let entriesToSkip = resume.entries;
+        let yielded = 0;
         const pages: AsyncIterable<SourceRecordPage<R>> = input.records({
-          ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
+          ...(base !== undefined ? { cursor: base } : {}),
           ...(options.limit !== undefined ? { limit: options.limit } : {}),
         });
         for await (const page of pages) {
-          const items: RawItem[] = [];
+          const units: PageUnit[] = [];
           const outcomes: SourceIntakeOutcome[] = [];
-          for (const record of page.records) {
+          for (const [position, record] of page.records.entries()) {
+            const skipped = (): void => { outcomes.push({ localItemId: '', decision: 'skip_same', alreadyThere: false }); };
+            // Records an earlier pass handled before it was cut: they were counted then.
+            if (recordsToSkip > 0) {
+              recordsToSkip -= 1;
+              skipped();
+              continue;
+            }
             const entries = builder.entriesOf(record);
+            // The record's own item and the first of its children an earlier pass handled are not decided again.
+            const from = Math.min(entriesToSkip, entries.length);
+            entriesToSkip = 0;
             if (entries.length === 0) {
-              outcomes.push({ localItemId: '', decision: 'skip_same', alreadyThere: false });
+              skipped();
               continue;
             }
             const wanted = new Set<string>();
             entries.forEach((entry, index) => {
+              if (index < from) return;
               const stored = stateOf(entry.identity);
               const decision = decideIntake({
                 input: input.kind,
@@ -175,17 +238,45 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 });
               }
             });
+            if (from > 0) skipped();
             if (wanted.size === 0) continue;
+            const built = new Map<string, RawItem>();
             for (const item of await builder.build(record, wanted)) {
-              if (!wanted.has(item.identity.localItemId)) continue;
+              if (wanted.has(item.identity.localItemId)) built.set(item.identity.localItemId, item);
+            }
+            // In the record's own order: its item, then its children.
+            entries.forEach((entry, index) => {
+              const item = built.get(entry.identity.localItemId);
+              if (!item || index < from) return;
               thisPass.set(item.identity.localItemId, {
                 ...(item.identity.sourceVersion !== undefined ? { version: item.identity.sourceVersion } : {}),
                 hasContent: hasContent(item),
               });
-              items.push(item);
-            }
+              units.push({ record: offset + position, entry: index, item });
+            });
           }
           input.observeIntake?.(outcomes);
+          const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
+          if (units.length > room) {
+            // The page holds more than the pass may store: yield what fits, resume at the first unit that does not.
+            if (room <= 0) return;
+            const next = units[room]!;
+            yield {
+              items: units.slice(0, room).map((unit) => unit.item),
+              nextCursor: encodeResume({ inner: base, records: next.record, entries: next.entry }),
+              done: false,
+              truncated: true,
+            };
+            return;
+          }
+          const items = units.map((unit) => unit.item);
+          yielded += items.length;
+          if (page.nextCursor !== undefined) {
+            base = page.nextCursor;
+            offset = 0;
+          } else {
+            offset += page.records.length;
+          }
           yield page.truncated === true
             ? { items, ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}), done: false, truncated: true }
             : { items, ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}), done: page.done };
