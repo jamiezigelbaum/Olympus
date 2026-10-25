@@ -4691,6 +4691,94 @@ export class LocalConnectorStore {
   }
 
   /**
+   * One page of the active items strictly UNDER a path-shaped locator, in the
+   * index's own order (the locator folded to ASCII lower case, then the row),
+   * and where the next page starts. Same range and the same case-insensitive
+   * match as {@link activeItemsUnderLocatorIfIndexed}, on the exact spelling
+   * only (no non-ASCII fallback), but a caller that must see EVERY row of a
+   * large folder walks it page by page instead of asking for a longer prefix:
+   * a page that comes back full carries `next`, and passing it as `after`
+   * continues exactly past the last row read, however many rows sort first.
+   * `next` is an opaque position; rows written or removed meanwhile do not
+   * move it. An index that has not finished its bounded backfill answers with
+   * nothing, as the other lookups do. Identity coordinates and the stored
+   * locator only — no title or text.
+   */
+  pageActiveItemsUnderLocatorIfIndexed(input: {
+    provider: string;
+    accountScope: string;
+    locatorUri: string;
+    limit: number;
+    after?: string;
+  }): { items: Array<{ identity: SourceItemIdentity; locatorUri: string }>; next?: string } {
+    if (!this.locatorIdentityIndexState().completed) return { items: [] };
+    const folder = input.locatorUri.replace(/\/+$/, '');
+    if (folder === '' || !Number.isSafeInteger(input.limit) || input.limit <= 0) return { items: [] };
+    let position: [string, number] | undefined;
+    if (input.after !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(input.after);
+        if (Array.isArray(parsed) && typeof parsed[0] === 'string' && Number.isSafeInteger(parsed[1])) position = [parsed[0], parsed[1] as number];
+      } catch {
+        // An unreadable position starts over.
+      }
+    }
+    // The position is the lower bound of the index range itself (a row-value comparison would
+    // scan from the start of the folder, page after page); the second term skips the rows
+    // already read among those that share the position's folded path.
+    const start = position
+      ? { sql: 'locator.normalized_locator >= ?', params: [position[0]] as Array<string | number> }
+      : { sql: "locator.normalized_locator >= LOWER(?) || '/'", params: [folder] as Array<string | number> };
+    const rows = this.db.query(`
+      SELECT
+        locator.item_pk, locator.normalized_locator,
+        i.provider_item_id, i.provider_file_id, i.local_item_id,
+        i.source_version, i.locator_uri
+      FROM item_locator_identities locator
+      JOIN items i ON i.item_pk = locator.item_pk
+      WHERE locator.provider = ?
+        AND locator.account_scope = ?
+        AND locator.normalized_conversation = ''
+        AND ${start.sql}
+        AND locator.normalized_locator < LOWER(?) || '0'
+        ${position ? 'AND (locator.normalized_locator > ? OR locator.item_pk > ?)' : ''}
+        AND i.tombstoned = 0
+      ORDER BY locator.normalized_locator, locator.item_pk
+      LIMIT ?
+    `).all(
+      input.provider, input.accountScope, ...start.params, folder,
+      ...(position ? position : []),
+      input.limit,
+    ) as Array<{
+      item_pk: number;
+      normalized_locator: string;
+      provider_item_id: string;
+      provider_file_id: string | null;
+      local_item_id: string;
+      source_version: string | null;
+      locator_uri: string | null;
+    }>;
+    const items = rows.flatMap((row) => row.locator_uri
+      ? [{
+          identity: {
+            family: this.family,
+            provider: input.provider,
+            accountScope: input.accountScope,
+            providerItemId: row.provider_item_id,
+            ...(row.provider_file_id ? { providerFileId: row.provider_file_id } : {}),
+            localItemId: row.local_item_id,
+            ...(row.source_version ? { sourceVersion: row.source_version } : {}),
+          },
+          locatorUri: row.locator_uri,
+        }]
+      : []);
+    const last = rows.at(-1);
+    return rows.length >= input.limit && last
+      ? { items, next: JSON.stringify([last.normalized_locator, last.item_pk]) }
+      : { items };
+  }
+
+  /**
    * Every active item whose path-shaped locator is a file or folder directly
    * under `/` (`/notes.txt`, never `/a/b.txt`). A folder's own listing cannot
    * ask for this: {@link activeItemsUnderLocatorIfIndexed} refuses `/` on

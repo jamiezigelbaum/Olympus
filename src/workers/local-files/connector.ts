@@ -208,6 +208,24 @@ function folderKeysOf(scopePath: string): string[] {
   return keys.reverse();
 }
 
+/** The deletion of an indexed item whose identity the store already resolved (`locatorUri` is where it was indexed). */
+export function localFilesDeletedItem(identity: SourceItemIdentity, locatorUri: string, at: Date): RawItem {
+  return {
+    identity,
+    mimeType: 'application/octet-stream',
+    content: { kind: 'metadata_only' },
+    metadata: Object.freeze({
+      entryKind: 'deleted',
+      deleted: true,
+      deletedIdentityResolved: true,
+      name: locatorUri.slice(locatorUri.lastIndexOf('/') + 1),
+      locatorUri,
+      pathDisplay: locatorUri,
+    }),
+    fetchedAt: at.toISOString(),
+  };
+}
+
 export function createLocalFilesSourceConnector(options: LocalFilesConnectorOptions): LocalFilesSourceConnector {
   const root = normalizeScopePath(options.root);
   const now = options.now ?? (() => new Date());
@@ -292,20 +310,8 @@ export function createLocalFilesSourceConnector(options: LocalFilesConnectorOpti
     fetchedAt: now().toISOString(),
   });
 
-  const deletedItem = (identity: SourceItemIdentity, locatorUri: string): RawItem => ({
-    identity,
-    mimeType: 'application/octet-stream',
-    content: { kind: 'metadata_only' },
-    metadata: Object.freeze({
-      entryKind: 'deleted',
-      deleted: true,
-      deletedIdentityResolved: true,
-      name: locatorUri.slice(locatorUri.lastIndexOf('/') + 1),
-      locatorUri,
-      pathDisplay: locatorUri,
-    }),
-    fetchedAt: now().toISOString(),
-  });
+  const deletedItem = (identity: SourceItemIdentity, locatorUri: string): RawItem =>
+    localFilesDeletedItem(identity, locatorUri, now());
 
   /** The deletions a path that no longer exists stands for: itself, and everything indexed under it. */
   const deletionsFor = (scopePath: string, seen: Set<string>): RawItem[] => {

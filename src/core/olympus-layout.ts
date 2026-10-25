@@ -13,8 +13,8 @@
  * lifecycle module both resolve through it.
  */
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { resolveLinuxEngineLayout, standaloneLinuxDataDir } from './linux-engine-layout.ts';
 
 export type LayoutEnv = Record<string, string | undefined>;
 
@@ -667,4 +667,205 @@ function legacyMessagingPaths(sourceId: string, env: LayoutEnv): { stores: strin
     return { stores: [], raw: [join(legacyCaptureDataRoot(env), 'whatsapp-live'), legacyWhatsAppServiceStateDir(env)] };
   }
   return { stores: [], raw: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Everything Olympus itself writes
+//
+// Files on this computer never index Olympus's own folders: its stores, the
+// credential references and session secrets beside them, and the capture
+// services' state. `olympusOwnRoots` is the one list of them. It follows each
+// writer's own resolution, so a root is where the writer puts it under the
+// environment (XDG homes, the Linux install receipt) in effect, and the
+// folders that writers fix under the home are named here too, for an install
+// whose environment has changed since.
+
+/** `OLYMPUS_MEDIA_CACHE_DIR`: a folder the owner names to hold prepared photo copies. */
+export const MEDIA_CACHE_DIR_ENV = 'OLYMPUS_MEDIA_CACHE_DIR';
+
+/**
+ * Where prepared photo copies are kept: `<data root>/media-cache`, or a
+ * dedicated `olympus-media` subdirectory of `OLYMPUS_MEDIA_CACHE_DIR`.
+ * `mediaCacheDir` (core/media-cache.ts) adds its checks to this answer.
+ */
+export function mediaCacheRoot(env: LayoutEnv = process.env): string {
+  const configured = env[MEDIA_CACHE_DIR_ENV]?.trim();
+  return configured ? join(configured, 'olympus-media') : olympusDataPath(env, 'media-cache');
+}
+
+/** A WhatsApp state location as a folder: the value names the folder, or the `session.db` inside it. */
+export function whatsappStateDirFromValue(value: string): string {
+  const trimmed = value.trim();
+  return basename(trimmed) === 'session.db' ? dirname(trimmed) : trimmed;
+}
+
+/**
+ * The Linux install's own folders: where the receipt (else the environment)
+ * puts the config, data, state, cache, package and runtime folders. A receipt
+ * outranks a shell whose XDG homes have since changed. Nothing off Linux, and
+ * nothing when the layout cannot be read: the environment's roots still apply.
+ */
+function linuxInstallRoots(env: LayoutEnv): string[] {
+  if (process.platform !== 'linux') return [];
+  try {
+    const layout = resolveLinuxEngineLayout(env);
+    return [
+      layout.configDir,
+      layout.dataDir,
+      layout.packageDir,
+      join(layout.dataHome, 'olympus'),
+      dirname(layout.stateDir),
+      dirname(layout.cacheDir),
+      ...(layout.runtimeDir ? [layout.runtimeDir] : []),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * What an install's plugin config says about where the capture services keep
+ * their state (`worker.telegramCapture.stateDir` / `spoolDir`,
+ * `worker.whatsappCapture.stateDir`). The config module hands it over
+ * (`configuredCaptureLocations`); this module reads no config itself.
+ */
+export interface OlympusCaptureConfig {
+  telegramStateDir?: string;
+  telegramSpoolDir?: string;
+  whatsappStateDir?: string;
+}
+
+/**
+ * Folders an install shares with other things, and so never Olympus's own as a
+ * whole: the home, the XDG homes and the base folders under them, the Mac's
+ * Library folders. Anything above one of them is shared too.
+ */
+export function olympusSharedBases(env: LayoutEnv = process.env): string[] {
+  const home = layoutHome(env);
+  const bases = [
+    home,
+    join(home, '.local'),
+    join(home, '.local', 'share'),
+    join(home, '.local', 'state'),
+    join(home, '.config'),
+    join(home, '.cache'),
+    join(home, 'Library'),
+    join(home, 'Library', 'Application Support'),
+    join(home, 'Library', 'Logs'),
+  ];
+  for (const [name, value] of Object.entries(env)) {
+    if (name.startsWith('XDG_') && value?.trim()) bases.push(value.trim());
+  }
+  return bases.filter((path) => isAbsolute(path)).map((path) => resolve(path));
+}
+
+/**
+ * Whether a folder can be Olympus's whole: it is not one of `sharedBases`, nor
+ * a folder above one. Compared as spelled, and without regard to case on a Mac.
+ * Where a link really leads needs the file system, so this module does not
+ * look: a caller that resolves links asks again with the real destination and
+ * the real spellings of the bases.
+ */
+export function isDedicatedFolder(path: string, sharedBases: readonly string[]): boolean {
+  const fold = (value: string): string => process.platform === 'darwin' ? value.toLowerCase() : value;
+  const folder = fold(resolve(path));
+  if (folder === '/') return false;
+  return !sharedBases.some((base) => {
+    const shared = fold(resolve(base));
+    return shared === folder || shared.startsWith(`${folder}/`);
+  });
+}
+
+/** `isDedicatedFolder` against this environment's `olympusSharedBases`. */
+export function isDedicatedOlympusFolder(path: string, env: LayoutEnv = process.env): boolean {
+  return isDedicatedFolder(path, olympusSharedBases(env));
+}
+
+/** Where Olympus itself writes: folders that are wholly its own, and where the capture services were moved to. */
+export interface OlympusOwnLocations {
+  /** Where the install and its defaults put things, whatever the environment says about the capture services. */
+  fixed: string[];
+  /**
+   * Where an environment variable or the plugin config moved a capture
+   * service's folder to, each one dedicated as spelled. A caller that resolves
+   * links checks where it really leads before treating it as Olympus's whole.
+   */
+  moved: string[];
+}
+
+/**
+ * Every place Olympus itself writes to, as absolute paths in the spelling its
+ * writers use (a caller that compares against real paths resolves links
+ * itself). Relative locations a writer would accept are left out: they name no
+ * fixed place.
+ *
+ *  - data: the data root, the media cache, and the legacy roots above (the
+ *    capture services' state, Telegram's stores and gateway state);
+ *  - config: `worker.env`, the dashboard session secret, the secret store and
+ *    `handles.json`. `handles.json` and the secret store sit under
+ *    `<home>/.config/olympus` whatever `XDG_CONFIG_HOME` says; the Linux
+ *    install keeps its own under `$XDG_CONFIG_HOME/olympus`;
+ *  - state: the lifecycle, credential-health and drain-guard state under
+ *    `<home>/.local/state/olympus`, and the Telegram reader's under
+ *    `$XDG_STATE_HOME/olympus`;
+ *  - cache: the WhatsApp bridge and the Telegram Python under
+ *    `$XDG_CACHE_HOME/olympus` (`<home>/.cache/olympus` by default);
+ *  - the Mac's app folder and logs under `~/Library`;
+ *  - the Linux install's folders (`linuxInstallRoots`);
+ *  - `moved`: the capture services' state and spool folders when an
+ *    environment variable or the plugin config (`capture`) moves them, and only
+ *    a dedicated folder (`isDedicatedOlympusFolder`). One that names the home
+ *    folder, a shared base or a folder above one is Olympus's in part only,
+ *    and Olympus protects no part of it (docs/design/local-files.md, "Known limits").
+ */
+export function olympusOwnLocations(env: LayoutEnv = process.env, capture: OlympusCaptureConfig = {}): OlympusOwnLocations {
+  const home = layoutHome(env);
+  const xdg = (name: string, fallback: string): string => env[name]?.trim() || join(home, fallback);
+  const fixed: string[] = [
+    olympusDataRoot(env),
+    mediaCacheRoot(env),
+    legacyCaptureDataRoot(env),
+    legacyWhatsAppServiceStateDir(env),
+    legacyTelegramStoreRoot(env),
+    join(xdg('XDG_STATE_HOME', '.local/state'), 'olympus', 'telegram-capture-gateway'),
+    join(home, '.olympus'),
+    join(home, '.config', 'olympus'),
+    join(home, '.local', 'share', 'olympus'),
+    join(home, '.local', 'share', 'openclaw', 'olympus'),
+    join(home, '.local', 'state', 'olympus'),
+    join(home, '.cache', 'olympus'),
+    join(home, 'Library', 'Logs', 'Olympus'),
+    join(home, 'Library', 'Application Support', 'Olympus'),
+    join(xdg('XDG_CONFIG_HOME', '.config'), 'olympus'),
+    join(xdg('XDG_STATE_HOME', '.local/state'), 'olympus'),
+    join(xdg('XDG_CACHE_HOME', '.cache'), 'olympus'),
+    ...linuxInstallRoots(env),
+  ];
+  const moved: string[] = [];
+  const place = (value: string | undefined): void => {
+    const trimmed = value?.trim();
+    if (!trimmed || !isAbsolute(trimmed)) return;
+    const dir = resolve(trimmed);
+    if (isDedicatedOlympusFolder(dir, env)) moved.push(dir);
+  };
+  const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
+  if (whatsappState) place(whatsappStateDirFromValue(whatsappState));
+  place(capture.whatsappStateDir);
+  place(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR);
+  place(capture.telegramStateDir);
+  // The reader writes to the first of these that is set (the plugin config
+  // outranks the environment for it); the worker reads the other two. Each is a
+  // place the spool may be.
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR);
+  place(capture.telegramSpoolDir);
+  const clean = (paths: string[]): string[] => [...new Set(paths.filter((path) => isAbsolute(path)).map((path) => resolve(path)))];
+  return { fixed: clean(fixed), moved: clean(moved) };
+}
+
+/** Every folder of `olympusOwnLocations`, as spelled: all of them wholly Olympus's. */
+export function olympusOwnRoots(env: LayoutEnv = process.env, capture: OlympusCaptureConfig = {}): string[] {
+  const own = olympusOwnLocations(env, capture);
+  return [...new Set([...own.fixed, ...own.moved])];
 }

@@ -14,6 +14,14 @@
  */
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import { configuredCaptureLocations } from '../../core/config.ts';
+import {
+  isDedicatedFolder,
+  olympusOwnLocations,
+  olympusSharedBases,
+  type OlympusCaptureConfig,
+} from '../../core/olympus-layout.ts';
 
 export const VOLUME_SEGMENT_PREFIX = '@';
 const MAX_SCOPE_PATH_LENGTH = 4_096;
@@ -167,6 +175,12 @@ export interface DefaultExclusionContext {
   home: string;
   /** Real roots of the local Dropbox folder, when the operator configured them. */
   syncedRoots?: readonly string[];
+  /**
+   * The folders Olympus itself writes to (core/olympus-layout.ts
+   * `olympusOwnLocations`), each as it is spelled and as the file system resolves
+   * it. They are never indexed, and no choice of the person turns them on.
+   */
+  ownRoots?: readonly string[];
   platform?: NodeJS.Platform;
   /**
    * Whether the volume with this id (undefined: the computer's own) ignores
@@ -178,13 +192,69 @@ export interface DefaultExclusionContext {
 
 export function defaultExclusionContext(
   env: Record<string, string | undefined> = process.env,
+  capture: OlympusCaptureConfig = configuredCaptureLocations(env),
 ): DefaultExclusionContext {
   // The home folder as the file system names it: walked paths are real paths,
   // so a home reached through a link (/home -> /var/home) must be compared as
   // its real self or none of the folders that are off by default would match.
   let home = env.HOME?.trim() || homedir();
   try { home = realpathSync.native(home); } catch { /* keep the configured path */ }
-  return { home, syncedRoots: configuredSyncedRoots(env), platform: process.platform };
+  return {
+    home,
+    syncedRoots: configuredSyncedRoots(env),
+    ownRoots: resolvedOwnRoots(env, capture),
+    platform: process.platform,
+  };
+}
+
+/**
+ * Olympus's own folders as the walk will see them: walked paths are real paths,
+ * so a folder reached through a link (a data folder moved to another disk and
+ * linked back) is listed under both spellings. A folder that does not exist yet
+ * is resolved through the part of its path that does.
+ *
+ * A folder is Olympus's whole only if it is a dedicated one: not the home
+ * folder, a shared base (`~/.local/share`, `~/.config`, the Mac's Library, the
+ * XDG homes) or a folder above one. That is judged for the spelling and for
+ * where it really leads, against the shared bases spelled and resolved alike:
+ * a link that carries an override to the home folder or a shared base makes it
+ * no own folder at all, so nothing outside Olympus's own files is ever turned off.
+ * (The layout module cannot look at links, which is why this is judged here.)
+ */
+function resolvedOwnRoots(env: Record<string, string | undefined>, capture: OlympusCaptureConfig): string[] {
+  const own = olympusOwnLocations(env, capture);
+  const bases = olympusSharedBases(env);
+  const shared = [...new Set([...bases, ...bases.map(realPathThroughExisting)])];
+  const dedicated = (path: string): boolean => isDedicatedFolder(path, shared);
+  const roots = new Set<string>();
+  const add = (path: string): void => {
+    try { roots.add(normalizeScopePath(path)); } catch { /* not a usable path */ }
+  };
+  // Where the install puts things: each spelling that is a dedicated folder.
+  for (const path of own.fixed) {
+    for (const spelling of [path, realPathThroughExisting(path)]) if (dedicated(spelling)) add(spelling);
+  }
+  // Where an override moved a capture service to: both spellings, or neither.
+  for (const path of own.moved) {
+    const real = realPathThroughExisting(path);
+    if (!dedicated(path) || !dedicated(real)) continue;
+    add(path);
+    add(real);
+  }
+  return [...roots];
+}
+
+/** The real path of `path`, or, when it is not there yet, of its nearest existing parent with the rest appended. */
+function realPathThroughExisting(path: string): string {
+  const rest: string[] = [];
+  let existing = path;
+  for (;;) {
+    try { return join(realpathSync.native(existing), ...[...rest].reverse()); } catch { /* not there: try its parent */ }
+    const parent = dirname(existing);
+    if (parent === existing) return path;
+    rest.push(basename(existing));
+    existing = parent;
+  }
 }
 
 function configuredSyncedRoots(env: Record<string, string | undefined>): string[] {
@@ -204,6 +274,51 @@ function configuredSyncedRoots(env: Record<string, string | undefined>): string[
   }
 }
 
+// The own roots by lower-cased spelling, built once per list. The exact
+// comparison, which depends on how the folder's volume treats case, is made
+// only on a root whose lower-cased spelling matches.
+const ownRootIndexes = new WeakMap<readonly string[], Map<string, string[]>>();
+
+function ownRootsNamed(path: string, context: Pick<DefaultExclusionContext, 'ownRoots'>): readonly string[] {
+  const roots = context.ownRoots;
+  if (!roots || roots.length === 0) return [];
+  let index = ownRootIndexes.get(roots);
+  if (!index) {
+    index = new Map();
+    for (const root of roots) {
+      const key = root.toLowerCase();
+      index.set(key, [...(index.get(key) ?? []), root]);
+    }
+    ownRootIndexes.set(roots, index);
+  }
+  return index.get(path.toLowerCase()) ?? [];
+}
+
+/** Whether `scopePath` is one of Olympus's own folders (not one inside it). */
+export function isOwnRoot(
+  scopePath: string,
+  context: Pick<DefaultExclusionContext, 'ownRoots' | 'platform' | 'volumeIgnoresCase'>,
+): boolean {
+  const named = ownRootsNamed(scopePath, context);
+  return named.length > 0 && named.some((root) => foldScopePath(root, context) === foldScopePath(scopePath, context));
+}
+
+/** Whether `scopePath` is one of Olympus's own folders, or lies inside one. */
+export function isInsideOwnRoot(
+  scopePath: string,
+  context: Pick<DefaultExclusionContext, 'ownRoots' | 'platform' | 'volumeIgnoresCase'>,
+): boolean {
+  if (!context.ownRoots || context.ownRoots.length === 0) return false;
+  const { volumeId, path } = splitScopePath(scopePath);
+  // Each folder on the way down, the path itself last. A pass asks this of every
+  // file, so the prefixes are cut from the normalized path rather than rebuilt.
+  for (let cut = path.indexOf('/', 1); ; cut = path.indexOf('/', cut + 1)) {
+    const prefix = cut === -1 ? path : path.slice(0, cut);
+    if (isOwnRoot(volumeId ? scopePathFor(prefix, volumeId) : prefix, context)) return true;
+    if (cut === -1) return false;
+  }
+}
+
 /**
  * Why `scopePath` (a path of the primary volume, or a volume-prefixed one) is
  * off by default, judged on this one folder name alone; undefined when it is
@@ -217,6 +332,8 @@ export function defaultExclusionForFolder(
   const name = path === '/' ? '' : path.slice(path.lastIndexOf('/') + 1);
   const lower = name.toLowerCase();
   if (lower === '') return undefined;
+  // Olympus's own folders, wherever its environment and install put them.
+  if (isOwnRoot(scopePathFor(path, volumeId), context)) return 'olympus_data';
   if (TRASH_SEGMENTS.has(lower)) return 'trash';
   if (VCS_SEGMENTS.has(lower)) return 'version_control';
   if (DEPENDENCY_SEGMENTS.has(lower)) return 'dependencies';
@@ -232,7 +349,8 @@ export function defaultExclusionForFolder(
   if (platform === 'darwin' && here === at('/Library')) return 'system_library';
   if (platform !== 'darwin' && here === at('/.local/share/Trash')) return 'trash';
   if (here === at('/.cache')) return 'cache';
-  // Olympus's own stores: reading them back would index the index.
+  // Olympus's own stores, as an install whose environment has changed left them:
+  // reading them back would index the index.
   if (here === at('/.olympus') || here === at('/.openclaw') || here === at('/.local/share/openclaw')) return 'olympus_data';
   if (here === at('/Dropbox') || here.startsWith(at('/Dropbox ('))) return 'synced_by_another_source';
   const parentHere = scopeParentPath(path);
