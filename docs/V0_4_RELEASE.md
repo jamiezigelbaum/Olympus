@@ -92,8 +92,10 @@ file registers one forget step. Removing a source's data becomes a rename
 at worker restart. This replaces the hand-kept per-source file list in
 `src/data-lifecycle.ts` and the store-custody and fence work in #467, which
 is frozen (owner, 2026-10-24) after eight review rounds traced every finding
-to the unowned, unlisted layout. Owner decisions 1–5 approved 2026-10-24.
-Design, migration, tests and delivery steps:
+to the unowned, unlisted layout. Owner decisions 1–5 approved 2026-10-24;
+decision 6 (imported history joins the live account and goes only with its
+Delete) 2026-10-25, with step 4e (account identity) added ahead of archive
+ingestion's Telegram and mail steps. Design, migration, tests and delivery steps:
 [source storage](design/source-storage.md).
 
 ## File tidy with the private model (owner direction 2026-10-25)
