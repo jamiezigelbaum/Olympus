@@ -182,10 +182,19 @@ describe('P1b: new items are routed by their recorded tiers', () => {
       expect(chunksOf(secure, 'new-biopsy')).toBeGreaterThan(0);
       expect(vectorsOf(secure, 'new-biopsy')).toBe(0);
       expect([...fixture.local.inputs, ...fixture.cloud.inputs].some((input) => input.includes('patient starts treatment'))).toBe(false);
-      // Secrets: in no store, no provider call, location only.
-      for (const snapshot of [internal, secure, publicStore]) {
+      // Secrets: no provider call, location only. The one row is the Private store's location (a
+      // tombstone at tier S5 with no names, no text, no chunks and no vectors), which is what keeps
+      // the Secret present while the provider lists it; the other stores hold nothing of it.
+      for (const snapshot of [internal, publicStore]) {
         expect(snapshot.items.some((item) => item.local_item_id === localId('new-secret'))).toBe(false);
       }
+      expect(secure.items.filter((item) => item.local_item_id === localId('new-secret'))).toEqual([
+        expect.objectContaining({
+          tombstoned: 1, trust_tier: 'S5', title: null, search_text: null, locator_uri: null,
+        }),
+      ]);
+      expect(chunksOf(secure, 'new-secret')).toBe(0);
+      expect(vectorsOf(secure, 'new-secret')).toBe(0);
       expect([...fixture.local.inputs, ...fixture.cloud.inputs].some((input) => input.includes('AKIA'))).toBe(false);
       expect(fixture.secrets.get(identityOf('new-secret'))).toMatchObject({
         source: 'fixture',

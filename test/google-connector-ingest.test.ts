@@ -111,7 +111,8 @@ describe('Google connector-store ingestion', () => {
     expect(client.contentCalls).toEqual(['file-plain', 'file-therapy', 'file-passwords']);
 
     // Cleared names are Personal while the own-record body is Private.
-    // The Secret lands in no store at all (location only).
+    // The Secret keeps a location only: one row in the Private store (a tombstone at tier S5 with no
+    // names and no text), and nothing in the Personal store.
     expect(result.internal.itemsSeen).toBe(3);
     expect(result.internal.itemsIndexed).toBe(2);
     expect(result.internal.itemsRejected).toBe(0);
@@ -119,8 +120,9 @@ describe('Google connector-store ingestion', () => {
     expect(result.secure.itemsSeen).toBe(3);
     expect(result.secure.itemsIndexed).toBe(1);
     expect(result.secure.itemsRejected).toBe(0);
-    expect(result.secure.itemsRoutedElsewhere).toBe(2);
-    expect(secureStore.hasItemRow({ provider: 'google_drive', accountScope: 'personal', providerItemId: 'file-passwords' })).toBe(false);
+    expect(result.secure.itemsRoutedElsewhere).toBe(1);
+    expect(secureStore.hasItemRow({ provider: 'google_drive', accountScope: 'personal', providerItemId: 'file-passwords' })).toBe(true);
+    expect(await localContent(secureStore, 'personal:file-passwords')).toBeUndefined();
     expect(internalStore.hasItemRow({ provider: 'google_drive', accountScope: 'personal', providerItemId: 'file-passwords' })).toBe(false);
 
     const plain = await localContent(internalStore, 'personal:file-plain');
