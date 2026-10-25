@@ -16,8 +16,9 @@
  * (journey-driver.ts), and a qualification run runs them on the planted pictures too (reviewer-plants.ts), so every rule is held to
  * the bug planted for it and to the screens with nothing planted.
  *
- * Advisory until a qualification run catches every planted bug and finds nothing on the pictures with nothing planted: until then a
- * finding is a warning, never a failed release.
+ * Blocking since 2026-10-25: a finding fails the run. Earned by Linux qualification run 20261025t130646-d27f (every planted bug caught,
+ * 23 of 23, nothing on the 20 screens with nothing planted) and full runs with nothing found on all 20 screens on Linux
+ * (20261025t130925-32c3) and the Mac (20261025t130313-a558). A rule changed later is qualified again before it ships.
  */
 import type { CheckResult } from './report.ts';
 
@@ -25,7 +26,7 @@ export const LAYOUT_RULES = ['monospace-text', 'clipped-text', 'overlapping-text
 export type LayoutRule = typeof LAYOUT_RULES[number];
 
 /** Whether a finding fails the run. Turned on in a reviewed change, with the qualification run that earned it. */
-export const LAYOUT_RULES_BLOCKING = false;
+export const LAYOUT_RULES_BLOCKING = true;
 
 export const isLayoutRule = (kind: unknown): kind is LayoutRule => (LAYOUT_RULES as readonly unknown[]).includes(kind);
 
