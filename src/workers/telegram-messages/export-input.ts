@@ -121,7 +121,7 @@ export function telegramExportInput(
     inputId: archive.connectorId,
     kind: 'archive',
     records(listOptions = {}): AsyncIterable<SourceRecordPage<TelegramRecordItems>> {
-      return telegramExportPages<TelegramRecordItems>(archive, listOptions, {
+      const pages = telegramExportPages<TelegramRecordItems>(archive, listOptions, {
         message(event) {
           const at = event.start;
           const outcome = telegramExportMessageRecord(context, telegramExportChat(event), event.value);
@@ -145,6 +145,13 @@ export function telegramExportInput(
           return { unit: { record: built.record }, mediaFiles: built.mediaFiles };
         },
       });
+      return (async function* (): AsyncGenerator<SourceRecordPage<TelegramRecordItems>> {
+        for await (const page of pages) {
+          // Where each record is, so the import counts each once however a replay cuts the pages.
+          archive.reportItemPositions?.(page.positions.map((offset) => ({ fileIndex: 0, offset })));
+          yield { records: page.records, nextCursor: page.nextCursor, done: page.done };
+        }
+      })();
     },
   };
 }

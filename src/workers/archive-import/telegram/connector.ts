@@ -391,14 +391,14 @@ export async function* telegramExportPages<U>(
   input: ArchiveConnectorInput,
   options: { cursor?: string; limit?: number } | undefined,
   make: TelegramExportMake<U>,
-): AsyncGenerator<{ records: U[]; nextCursor: string; done: boolean }> {
+): AsyncGenerator<{ records: U[]; positions: number[]; nextCursor: string; done: boolean }> {
   const pageSizeDefault = Math.max(1, input.pageSize ?? TELEGRAM_DEFAULT_PAGE_SIZE);
   const byteBudget = Math.max(1, input.maxBytesPerListing ?? TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING);
   const file = input.files[0];
   if (!file || input.files.length !== 1) throw new Error('A Telegram export is one result.json.');
   const start = parseCursor(input, options?.cursor);
   if (start.done) {
-    yield { records: [], nextCursor: doneCursor(input), done: true };
+    yield { records: [], positions: [], nextCursor: doneCursor(input), done: true };
     return;
   }
   const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
@@ -430,6 +430,8 @@ export async function* telegramExportPages<U>(
     }
     let assumedZone = start.assumedZone;
     let page: U[] = [];
+    // Where each unit of the page is in the file (the offset of its first byte), in the page's order.
+    let positions: number[] = [];
     // The resume point after the last message read, and whether a message was read since a page went out.
     let after: JsonResumePoint | undefined;
     let unsent = false;
@@ -453,6 +455,7 @@ export async function* telegramExportPages<U>(
       if (!part.dropped && part.fields.length > 0) {
         const built = make.account(part.section, 0, Object.fromEntries(part.fields));
         page.push(built.unit);
+        positions.push(part.start);
         if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', part.start, built.mediaFiles);
       }
       after = part.last;
@@ -463,7 +466,7 @@ export async function* telegramExportPages<U>(
         if (after && unsent) {
           current();
           input.reportPosition?.({ fileIndex: 0, offset: after.offset });
-          yield { records: page, nextCursor: cursorAt(input, after, assumedZone), done: false };
+          yield { records: page, positions, nextCursor: cursorAt(input, after, assumedZone), done: false };
         }
         return;
       }
@@ -512,6 +515,7 @@ export async function* telegramExportPages<U>(
           } else {
             const built = make.account(section, Number(event.path[event.path.length - 1]), event.value);
             page.push(built.unit);
+            positions.push(event.start);
             if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', event.start, built.mediaFiles);
           }
         } else if (event.kind === 'oversize') {
@@ -524,6 +528,7 @@ export async function* telegramExportPages<U>(
             report(outcome.reason, 'skipped', event.start);
           } else {
             page.push(outcome.unit);
+            positions.push(event.start);
             for (const finding of outcome.findings) report(finding.kind, 'gap', event.start, finding.count);
             if (outcome.assumedZone && !assumedZone) {
               assumedZone = true;
@@ -539,16 +544,17 @@ export async function* telegramExportPages<U>(
         const point = after!;
         current();
         input.reportPosition?.({ fileIndex: 0, offset: point.offset });
-        yield { records: page, nextCursor: cursorAt(input, point, assumedZone), done: false };
+        yield { records: page, positions, nextCursor: cursorAt(input, point, assumedZone), done: false };
         emitted += page.length;
         page = [];
+        positions = [];
         unsent = false;
         if (emitted >= limit || json.position - origin >= byteBudget) return;
       }
     }
     current();
     // A cut-short or damaged file ends the listing with what was read; it is counted, not hidden.
-    yield { records: page, nextCursor: doneCursor(input), done: true };
+    yield { records: page, positions, nextCursor: doneCursor(input), done: true };
   } finally {
     reader.close();
   }
