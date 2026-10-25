@@ -521,7 +521,7 @@ export function exchangesObservation(question: SuiteQuestion, agentId: string, f
 
 async function judgeAnswer(judge: Judge | undefined, question: SuiteQuestion, text: string): Promise<CheckResult | undefined> {
   if (!judge || (question.kind !== 'personal' && question.kind !== 'file') || !text) return undefined;
-  return judgeCheck(`${question.id}.quality`, `${question.id}: the answer matches what a correct answer says`, await judge.judge({ criteria: question.expectation, evidence: text }));
+  return judgeCheck(`${question.id}.quality`, `${question.id}: the answer matches what a correct answer says`, await judge.judge({ criteria: question.expectation, evidence: text }), { expectation: question.expectation, answer: text });
 }
 
 async function runModelAgents(run: Run, bridge: ReturnType<typeof machineToolBridge>, judge: Judge | undefined): Promise<void> {
