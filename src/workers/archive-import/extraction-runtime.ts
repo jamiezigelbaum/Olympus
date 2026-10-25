@@ -71,6 +71,8 @@ export function createArchiveExtractionRuntime(input: ArchiveExtractionRuntimeIn
     const lanes = input.runtime.existingLanes();
     const openStores = lanes.map((lane) => ({ lane, stores: archiveLaneStores(lane) }));
     // A lane's Private store is the corpus's home: until it exists there is nothing to read from.
+    // Every import pass makes it before listing anything (sync.ts), even when every parent is judged
+    // Personal, so a lane with a child to read always has it.
     const served = openStores.filter(({ lane, stores }) => stores.some((store) => store.corpusId === archiveCorpusId('secure_local', lane.family)));
     const key = served
       .map(({ lane, stores }) => `${lane.family}:${stores.map((store) => store.corpusId).sort().join(',')}`)

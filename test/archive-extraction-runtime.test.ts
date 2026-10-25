@@ -55,6 +55,26 @@ describe('the archive lanes\' extraction runtime', () => {
     expect(extraction.runner()).toBe(extraction.runner());
   });
 
+  test('serves a family whose parents were all judged Personal at once: the import still made the Private home', async () => {
+    // A cached verdict or an owner rule puts the parents' names and text in Personal straight away.
+    registerInstalledTierClassification({
+      forLedger: () => ({ sniffer: { id: 'scripted', judge: () => ({ verdict: 'decided', tier: 'private', code: 'ordinary:0.99' }) } }),
+    });
+    const h = childItemsArchiveHarness(cleanups);
+    const archiveId = h.start();
+    await h.importAll(archiveId, mailbox());
+    // Nothing of this archive is in the Private store, and the child is listed by name in Personal...
+    expect(h.rows(archiveId).map((row) => row.domain)).toEqual(['internal', 'internal']);
+    expect(h.rows(archiveId).some((row) => row.providerItemId.includes('#child:'))).toBe(true);
+    // ...but every import pass makes the Private store first (it is the home children are read into), so it is there to serve.
+    expect(h.runtime.lane(format.family).set.store('secure_local')).toBeDefined();
+
+    const extraction = createArchiveExtractionRuntime({ runtime: h.runtime, env: h.env, jobsDbPath: join(h.base, 'jobs.sqlite'), warn: () => {} });
+    cleanups.push(() => extraction.close());
+    expect(extraction.runner()).toBeDefined();
+    expect(extraction.corpusIds()).toEqual([archiveCorpusId('secure_local', format.family)]);
+  });
+
   test('is closed for good by close(): nothing is served afterwards', async () => {
     const h = childItemsArchiveHarness(cleanups);
     const archiveId = h.start();
