@@ -25,6 +25,8 @@ import {
   telegramChat, telegramFullExport, telegramJson, telegramPhoto, telegramService, telegramText,
 } from '../../test/support/archive-fixtures-telegram.ts';
 import { chatText, chatZip, mediaNames, notice, type SyntheticMessage } from '../../test/support/archive-fixtures-whatsapp.ts';
+import { apiMessage as gmailApiMessage, mail as gmailMail, takeoutMbox } from '../../test/support/archive-fixtures-gmail.ts';
+import type { GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
 
 /** The folder under the home directory the archives are written to, and the picker's first press. */
 export const FIXTURE_FOLDER = 'rc-archives';
@@ -467,6 +469,77 @@ export const ARCHIVE_FORMATS: Readonly<Record<string, ArchiveFixtureSpec>> = {
   [WHATSAPP_FORMAT]: WHATSAPP_FIXTURES,
   [REFLECT_FORMAT]: REFLECT_FIXTURES,
   [ROAM_FORMAT]: ROAM_FIXTURES,
+};
+
+// ---------------------------------------------------------------------------
+// Import beside live: a source's own export joins its live data
+// (docs/design/archive-live-one-dataset.md). Not in ARCHIVE_FORMATS: such an import has no row under Other archives and no Remove
+// (its history goes with the source's Delete), and its source needs a live input, so the leg's archive path does not fit it. The
+// leg's journey for it is still to build; test/release-check-source-input-fixtures.test.ts runs each case through the product.
+
+/** An import beside live: the export, the live records the source already holds, and what the source must hold after. */
+export interface SourceInputFixtureSpec {
+  /** The id the report uses. */
+  id: string;
+  /** The archive format the export is. */
+  format: string;
+  /** The source it joins, and its card's label. */
+  sourceId: string;
+  label: string;
+  extension: string;
+  /** The export, and the live input's records (in the live reader's own shape) that are there before it is imported. */
+  small(token: string): BuiltArchive & {
+    live: readonly GmailMessage[];
+    /** What the import's own run counts: what it read, and how much of that the source already held. */
+    read: number;
+    alreadyThere: number;
+    /** The distinct items the source holds after the import: each once. */
+    items: number;
+  };
+}
+
+/**
+ * A Google Takeout mbox of the owner's Gmail account: four messages Takeout names by Gmail's id, one of them already held live and
+ * one held live by name only (older than the content window), and one Spam message left out. The token is in the bodies of the two
+ * messages only the export brings in full.
+ */
+function gmailTakeoutSmall(token: string): ReturnType<SourceInputFixtureSpec['small']> {
+  const held = gmailMail(101, { date: '2024-03-04T12:00:00.000Z', body: 'Packing for the lake trip: tent, stove, two jackets.' });
+  const namesOnly = gmailMail(102, { date: '2015-03-05T12:00:00.000Z', body: `The old ferry timetable, kept since 2015. Reference word: ${token}.` });
+  const fresh = gmailMail(103, { date: '2024-03-06T12:00:00.000Z', body: `Lentil soup: onion, carrot, lentils. Same reference word: ${token}.` });
+  const other = gmailMail(104, { date: '2024-03-09T12:00:00.000Z', body: 'The photos are in the shared album.' });
+  const spam = gmailMail(105, { date: '2023-12-30T12:00:00.000Z', labels: ['Spam', 'Unread'], labelIds: ['SPAM', 'UNREAD'], body: 'A synthetic offer.' });
+  return {
+    bytes: bytesOf(takeoutMbox([held, namesOnly, fresh, other, spam])),
+    live: [gmailApiMessage(held), gmailApiMessage(namesOnly)],
+    read: 4,
+    alreadyThere: 2,
+    items: 4,
+    expect: {
+      label: 'Gmail',
+      citationLabel: 'Gmail',
+      family: 'email',
+      messages: 4,
+      earliest: '2015-03-05',
+      latest: '2024-03-09',
+      notImported: [{ kind: 'spam_or_trash', count: 1 }],
+      howRead: [],
+    },
+  };
+}
+
+export const GMAIL_TAKEOUT_FIXTURES: SourceInputFixtureSpec = {
+  id: 'gmail_takeout',
+  format: 'mbox',
+  sourceId: 'gmail.email',
+  label: 'Gmail',
+  extension: '.mbox',
+  small: gmailTakeoutSmall,
+};
+
+/** Every import-beside-live case. A later source adds its entry here. */
+export const SOURCE_INPUT_FORMATS: Readonly<Record<string, SourceInputFixtureSpec>> = {
+  [GMAIL_TAKEOUT_FIXTURES.id]: GMAIL_TAKEOUT_FIXTURES,
 };
 
 /** The format the picker, model-off and changed-file stages use. */
