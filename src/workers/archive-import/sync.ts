@@ -362,6 +362,12 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
             && !sameImportAccount(record.target!.confirmed_account, importAccountIdentity(record.target!.source_id, options.state.env))) {
             return { code: 'account_changed', message: 'The account this source holds now is not the one you said this export belongs to.', at: now().toISOString() };
           }
+          // An account that is gone (the source's data was deleted since the import began) is never made again
+          // by an import: it was created when the import was approved, and a record that outlived its delete
+          // must not put the history back.
+          if (importAccountIdentity(record.target!.source_id, options.state.env) === undefined) {
+            return { code: 'source_unavailable', message: 'This source\'s account is gone, so nothing more was imported.', at: now().toISOString() };
+          }
           const resolved = resolveImportAccount(record.target!.source_id, record.target!.import_account_id, {
             env: options.state.env,
             ...(record.target!.owner_confirmed === true ? { ownerConfirmed: true } : {}),

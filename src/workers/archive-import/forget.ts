@@ -15,8 +15,13 @@ import { ArchiveImportStateStore, defaultArchiveImportStatePath } from './state.
 
 /**
  * Forgets the imports that are inputs of the named sources, and their media
- * bindings. Returns how many records went (on a dry run, would go). A record
- * that cannot be read is left alone, as the registry's other JSON steps do.
+ * bindings. Returns how many records went (on a dry run, would go).
+ *
+ * A record that cannot be read FAILS the step, and with it the whole-source
+ * delete (the forget registry's rule: no store is removed, and every step is
+ * safe to run again once the cause is fixed). Reading it as "none" would delete
+ * the source while an import still going into it survives, and that import
+ * would put the source's history back once the file reads again.
  */
 export function forgetSourceArchiveImports(
   env: Record<string, string | undefined>,
@@ -26,14 +31,9 @@ export function forgetSourceArchiveImports(
   const path = defaultArchiveImportStatePath(env);
   if (!existsSync(path)) return 0;
   const state = new ArchiveImportStateStore({ path, env });
-  let doomed: string[];
-  try {
-    doomed = state.list()
-      .filter((record) => record.target !== undefined && sourceIds.includes(record.target.source_id))
-      .map((record) => record.archive_id);
-  } catch {
-    return 0;
-  }
+  const doomed = state.list()
+    .filter((record) => record.target !== undefined && sourceIds.includes(record.target.source_id))
+    .map((record) => record.archive_id);
   if (doomed.length === 0 || options.dryRun === true) return doomed.length;
   const bindings = createArchiveMediaBindings({ path: archiveMediaBindingsPath(path), env });
   try {

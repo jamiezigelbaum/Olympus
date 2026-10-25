@@ -6,11 +6,12 @@
 // source or format is involved, because the spine is source-neutral.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSourceRegistry, findRegistryAccount } from '../src/core/source-registry.ts';
 import { recordProviderAccount } from '../src/core/source-storage.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
+import { ForgetStepError } from '../src/core/source-forget-registry.ts';
 import { HELD_UNTIL_JUDGED_REASON } from '../src/workers/classification/tier-classifier.ts';
 import { archiveConnectorId } from '../src/workers/archive-import/state.ts';
 import { archiveImportTaskId, createArchiveImportsSchedulerSource } from '../src/workers/archive-import/scheduler-source.ts';
@@ -545,5 +546,51 @@ describe('deleting the whole source', () => {
     const left = h.runtime.state.list().map((record) => record.archive_id);
     expect(left).not.toContain(merged);
     expect(left).toContain(apart.archive_id);
+  });
+  test('fails loudly when an import record cannot be read: nothing is removed and the delete stays to be run again, and then it leaves no import behind', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive('export-account');
+    h.live.records = [rec('live-item', 1, 'live')];
+    await h.pullLive();
+    const merged = await h.startImport('unreadable.mbox', [rec('a', 1, 'a'), rec('b', 1, 'b'), rec('c', 1, 'c')]);
+    await h.pull(merged, { maxItems: 2 });
+    expect(h.runtime.state.get(merged)?.status).toBe('importing');
+    const recordPath = h.runtime.state.path;
+    const readable = readFileSync(recordPath, 'utf8');
+
+    writeFileSync(recordPath, '{ not an import record');
+    let failure: unknown;
+    try {
+      deleteOlympusData({ sourceId: FIXTURE_SOURCE_ID, homeDir: h.home });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(ForgetStepError);
+    expect((failure as ForgetStepError).stepId).toBe('archive-imports-of-source');
+    // No store was removed: the delete is incomplete, not "done with zero imports".
+    for (const path of Object.values(h.storePaths)) expect(existsSync(path)).toBe(true);
+    expect(h.ids()).toContain('live-item');
+
+    // Once the record reads again the same delete finishes, and the import that was going into the source is gone with it.
+    writeFileSync(recordPath, readable);
+    deleteOlympusData({ sourceId: FIXTURE_SOURCE_ID, homeDir: h.home });
+    for (const path of Object.values(h.storePaths)) expect(existsSync(path)).toBe(false);
+    expect(h.runtime.state.list().map((record) => record.archive_id)).not.toContain(merged);
+  });
+
+  test('an import record that outlived the delete writes nothing and puts no history back', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive('export-account');
+    const merged = await h.startImport('outlived.mbox', [rec('a', 1, 'a'), rec('b', 1, 'b')]);
+    await h.pull(merged, { maxItems: 1 });
+    const recordPath = h.runtime.state.path;
+    const survivor = readFileSync(recordPath, 'utf8');
+    deleteOlympusData({ sourceId: FIXTURE_SOURCE_ID, homeDir: h.home });
+    // The record comes back (a file that read again, a restore): it must not recreate the account.
+    writeFileSync(recordPath, survivor);
+    const outcome = await h.pull(merged);
+    expect(outcome.record?.status).toBe('stopped');
+    expect(['account_changed', 'source_unavailable']).toContain(outcome.record?.stop?.code);
+    for (const path of Object.values(h.storePaths)) expect(existsSync(path)).toBe(false);
   });
 });
