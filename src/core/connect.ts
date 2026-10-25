@@ -72,6 +72,7 @@ import {
 } from './source-account-binding.ts';
 import type { LayoutEnv } from './olympus-layout.ts';
 import { assertTelegramHistoryAccount } from './pairing-placement.ts';
+import { followProviderAccountRename } from './source-storage.ts';
 
 const DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
@@ -120,6 +121,11 @@ export interface ConnectOAuthOptions {
    * CLI connect path, which has no publisher concept and writes nothing new.
    */
   clientIdSource?: 'publisher' | 'byo';
+  /**
+   * The data folder whose registry names each source's history account
+   * (followProviderAccountRename); the process's own by default.
+   */
+  historyEnv?: LayoutEnv;
 }
 
 export interface ConnectResult {
@@ -746,6 +752,15 @@ async function completeOAuthSourceConnection(
         if (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId) {
           throw new Error('Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.');
         }
+        // The history first: the rename is proven by the replaced grant's own
+        // token whatever the binding does next, and a history left on the old
+        // address would refuse every sync (PR #530 review).
+        followProviderAccountRename(
+          { sourceId: accountBoundSourceIdForProvider(definition.provider)! },
+          bound,
+          replaced.ownAccountId,
+          prepared.options.historyEnv ?? process.env,
+        );
         followFileSourceRename({
           registryPath: prepared.registryPath,
           provider: definition.provider,

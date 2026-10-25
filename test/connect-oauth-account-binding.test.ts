@@ -16,8 +16,10 @@ import {
   updateSourceAccountBinding,
 } from '../src/core/source-account-binding.ts';
 import { readConnectedHandleRegistry, upsertConnectedHandle } from '../src/workers/credential-broker/connected-handles.ts';
+import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
 import {
   DEFAULT_PROVIDER_IDENTITY_ENDPOINTS,
+  compareProviderAccounts,
   googleAccountIdFromAddress,
   googlePermissionLabel,
   googleSubjectLabel,
@@ -76,6 +78,7 @@ function installDir() {
   const dir = mkdtempSync(join(tmpdir(), 'olympus-connect-account-binding-'));
   dirs.push(dir);
   return {
+    dir,
     registryPath: join(dir, 'handles.json'),
     statePath: join(dir, 'oauth-state.json'),
     secretStore: new EncryptedFileSecretStore({
@@ -775,6 +778,20 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     updateSourceAccountBinding(sourceAccountBindingsPath(install.registryPath), 'gmail.email', () => ({
       provider_account_id: googleAccountIdFromAddress('owner@example.test'),
     }));
+    // The history its syncs recorded names the same address (PR #530 review).
+    const historyEnv = { HOME: install.dir, XDG_DATA_HOME: join(install.dir, 'data') };
+    updateSourceRegistry(historyEnv, (registry) => {
+      registry.accounts.push({
+        source_id: 'gmail.email',
+        slot: '1',
+        state: 'active',
+        layout: 'folder',
+        corpus_ids: ['secure_local.gmail.email'],
+        provider_account_hash: googleAccountIdFromAddress('owner@example.test'),
+        created_at: '2026-09-01T00:00:00.000Z',
+      });
+    });
+    const historyAccount = () => readSourceRegistry(historyEnv).accounts[0]?.provider_account_hash;
     // The admin renamed the address: both the old grant's token and the new
     // grant's read the new address; only the new grant was given openid.
     let oldGrantLookupFails = false;
@@ -808,6 +825,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
       secretStore: install.secretStore,
       openBrowser: false,
       fetch: fetchMock,
+      historyEnv,
       onAuthorizationUrl: async (url) => {
         const consent = new URL(url);
         const callback = new URL(consent.searchParams.get('redirect_uri')!);
@@ -824,6 +842,7 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     const between = readSourceAccountBindings(sourceAccountBindingsPath(install.registryPath));
     expect(between.kind === 'ok' ? between.bindings.sources['gmail.email'] : undefined)
       .toEqual({ provider_account_id: googleAccountIdFromAddress('owner@example.test') });
+    expect(historyAccount()).toBe(googleAccountIdFromAddress('owner@example.test'));
     // Then it answers, and the reconnect keeps the source.
     oldGrantLookupFails = false;
     const result = await connect();
@@ -832,6 +851,9 @@ describe('Dropbox connect records the account its grant belongs to', () => {
     expect(read.kind === 'ok' ? read.bindings.sources['gmail.email'] : undefined).toEqual({
       provider_account_id: `${googleSubjectLabel('109876543210987654321')}.${googleAccountIdFromAddress('renamed@example.test')}`,
     });
+    // The history follows the rename, so the next sync finds one account.
+    expect(historyAccount()).toBe(googleAccountIdFromAddress('renamed@example.test'));
+    expect(compareProviderAccounts(historyAccount()!, read.kind === 'ok' ? read.bindings.sources['gmail.email']!.provider_account_id! : '')).toBe('same');
   }, 30_000);
 
   describe('an address-only Gmail source whose address changed before it migrated (independent review rounds 3-4)', () => {

@@ -22,6 +22,7 @@ import {
 } from '../src/core/source-registry.ts';
 import {
   SourceStorageUnavailableError,
+  followProviderAccountRename,
   recordedProviderAccount,
   recordProviderAccount,
   resolveImportAccount,
@@ -101,6 +102,21 @@ describe('recording the account a history belongs to', () => {
     expect(() => recordProviderAccount({ sourceId: 'telegram.messages' }, 'telegram:0123456789abcdef', env))
       .toThrow(SourceStorageUnavailableError);
     expect(recordedProviderAccount({ sourceId: 'telegram.messages' }, env)).toBeUndefined();
+  });
+
+  test('a rename the replaced grant proved moves a history known by its address alone, and nothing else (PR #530 review)', () => {
+    const renamed = googleAccountIdFromAddress('renamed@example.com');
+    entry('gmail.email', ADDRESS);
+    expect(followProviderAccountRename({ sourceId: 'gmail.email' }, ADDRESS, renamed, env)).toBe(true);
+    expect(hashOf('gmail.email')).toBe(renamed);
+    // The binding then learns the subject: the same account to the history.
+    expect(recordProviderAccount({ sourceId: 'gmail.email' }, composeProviderAccountId([SUB, renamed])!, env)).toBe('same');
+    // A history known by its subject, or by another address, stays.
+    entry('google_drive.docs', GMAIL);
+    expect(followProviderAccountRename({ sourceId: 'google_drive.docs' }, ADDRESS, renamed, env)).toBe(false);
+    expect(hashOf('google_drive.docs')).toBe(GMAIL);
+    expect(followProviderAccountRename({ sourceId: 'gmail.email' }, ADDRESS, renamed, env)).toBe(false);
+    expect(followProviderAccountRename({ sourceId: 'x.posts' }, ADDRESS, renamed, env)).toBe(false);
   });
 
   test('a Delete forgets it for the deleted sources only', () => {

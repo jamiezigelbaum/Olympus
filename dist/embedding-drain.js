@@ -35157,6 +35157,7 @@ var init_connect = __esm(() => {
   init_provider_account_identity();
   init_source_account_binding();
   init_pairing_placement();
+  init_source_storage();
   DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
   DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
   OAUTH_TOKEN_RESPONSE_LIMIT_BYTES = 64 * 1024;

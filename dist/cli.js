@@ -35057,6 +35057,23 @@ function recordProviderAccount(account, providerAccountId, env = process.env, op
   });
   return decided.result;
 }
+function followProviderAccountRename(account, from, to, env = process.env) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const follows = (registry) => {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    return entry !== undefined && unavailableState(entry) === undefined && entry.provider_account_hash !== undefined && compareProviderAccounts(entry.provider_account_hash, from) === "same" && entry.provider_account_hash !== to;
+  };
+  if (!follows(readSourceRegistry(env)))
+    return false;
+  let followed = false;
+  updateSourceRegistry(env, (registry) => {
+    if (!follows(registry))
+      return;
+    findRegistryAccount(registry, account.sourceId, slot).provider_account_hash = to;
+    followed = true;
+  });
+  return followed;
+}
 function placeSidecar(env, account, path, readOnly) {
   const registry = readSourceRegistry(env);
   assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
@@ -35706,6 +35723,7 @@ async function completeOAuthSourceConnection(prepared, code) {
       if (now?.connectedAt !== replaced.grantConnectedAt || now?.providerAccountId !== replaced.recordedAccountId) {
         throw new Error("Another connection change landed while this one confirmed the account. No credentials were stored and nothing changed; connect again.");
       }
+      followProviderAccountRename({ sourceId: accountBoundSourceIdForProvider(definition.provider) }, bound, replaced.ownAccountId, prepared.options.historyEnv ?? process.env);
       followFileSourceRename({
         registryPath: prepared.registryPath,
         provider: definition.provider,
@@ -36782,6 +36800,7 @@ var init_connect = __esm(() => {
   init_provider_account_identity();
   init_source_account_binding();
   init_pairing_placement();
+  init_source_storage();
   DEFAULT_OAUTH_AUTHORIZATION_TIMEOUT_MS = 10 * 60 * 1000;
   DEFAULT_OAUTH_TOKEN_EXCHANGE_TIMEOUT_MS = 60 * 1000;
   DROPBOX_OAUTH_SCOPES = ["files.metadata.read", "files.content.read", "sharing.read", "account_info.read"];

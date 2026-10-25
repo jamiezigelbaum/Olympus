@@ -300,6 +300,39 @@ export function recordProviderAccount(
 }
 
 /**
+ * A connect that followed an address-only binding to what the replaced
+ * grant's own token names now (followFileSourceRename) follows the history the
+ * same way: an entry that names `from`'s account, by that address alone, takes
+ * `to`. Otherwise the binding names the renamed account while the entry still
+ * names the old address, and every sync is refused (PR #530 review). An entry
+ * that knows an immutable label is left as it is: the next sync decides it by
+ * that label. No entry, or one being deleted or moved, changes nothing.
+ */
+export function followProviderAccountRename(
+  account: StorageAccount,
+  from: string,
+  to: string,
+  env: LayoutEnv = process.env,
+): boolean {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const follows = (registry: SourceRegistry): boolean => {
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    return entry !== undefined && unavailableState(entry) === undefined
+      && entry.provider_account_hash !== undefined
+      && compareProviderAccounts(entry.provider_account_hash, from) === 'same'
+      && entry.provider_account_hash !== to;
+  };
+  if (!follows(readSourceRegistry(env))) return false;
+  let followed = false;
+  updateSourceRegistry(env, (registry) => {
+    if (!follows(registry)) return;
+    findRegistryAccount(registry, account.sourceId, slot)!.provider_account_hash = to;
+    followed = true;
+  });
+  return followed;
+}
+
+/**
  * Where an import of a source's history goes:
  * - `same`: into that account, the one the source's entry names (or, once the
  *   owner confirmed it, the one entry the source has);

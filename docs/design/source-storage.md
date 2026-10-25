@@ -290,7 +290,10 @@ Storage's part (step 4e):
   - A sync runs only once the entry and the binding name one account. A binding
     moved to another account over stores that hold nothing (which the guard
     allows) moves the entry with it; one that disagrees with an entry over
-    stored items is refused the same way.
+    stored items is refused the same way. A connect that follows a binding
+    known by its Google address alone through a rename the replaced grant's
+    own token proves (`followFileSourceRename`) moves an entry known by that
+    address with it (`followProviderAccountRename`).
   - An import into an account-bound source (Dropbox, Drive, Gmail, X) resolves
     its account and writes inside the source's exclusive runner
     (`runExclusiveForSource`), so the guard cannot bind another account between
