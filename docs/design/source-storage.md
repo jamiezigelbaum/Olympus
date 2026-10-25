@@ -141,7 +141,8 @@ Inside the data root:
   per-account (`raw/x-reconcile.sqlite`). The request budgets stay shared too.
 - **Reflect and Roam stay legacy for now.** They name their paths through
   JSON mounts. Telegram and WhatsApp accounts are folders on a fresh install
-  (4b); an existing messaging account keeps its legacy paths until step 4d.
+  (4b); an existing messaging account moves into its folder in step 4d
+  ("Messaging accounts" under Migration).
 - **Gateway-run capture stays legacy after 4d too.** In OpenClaw-hosted mode
   the Gateway runs the capture services, and the worker can neither stop nor
   coordinate them, so an account whose capture the Gateway owns, or whose
@@ -548,8 +549,9 @@ everything else.
 One-time, at worker boot, holding the owner lock, after the re-placement of
 empty accounts and before adoption is enabled and anything mounts
 (`migrateAccountFolders` in `core/source-account-migration.ts`, called from the
-worker's `main()`). Step 4c moves every folder-layout source but Telegram and
-WhatsApp; those two are step 4d and the pass never touches them. For each
+worker's `main()`). Step 4c built it for every folder-layout source but
+Telegram and WhatsApp; step 4d moves those two the same way, with what
+"Messaging accounts" below adds. For each
 account whose `layout` is `legacy` (the entries step 2 adopted, plus an entry
 created now, slot `1`, for any source with legacy files and none yet), in this
 order:
@@ -743,6 +745,108 @@ need a program outside what Olympus controls or one that can already do worse:
   is made and again before each file, and each destination's identity is checked
   at the end. Swapping one in that instant takes a process that can already write
   and remove everything the move touches, so it gains no access it did not have.
+
+**Messaging accounts (step 4d).** A Telegram or WhatsApp account goes through
+the same look, fold, plan, rename, verify and flip, with these additions
+(`core/source-account-migration.ts`, `core/messaging-account-move.ts`):
+
+- *What moves where.* From the default legacy places only (an override pins):
+  Telegram's stores (`legacyTelegramStoreRoot`, which ignores
+  `XDG_DATA_HOME`) to `stores/<tier>.sqlite`; its login
+  `<capture>/telegram/telegram.personal.session` (and `-journal`) to
+  `session/telegram.session`; the pairing lease beside it
+  (`telegram.personal.pairing.lock.db`) to `session/telegram.pairing.lock.db`;
+  any login a killed pairing left aside (`telegram.personal.pairing-<pid>-<tag>.session`)
+  to `session/telegram.pairing-<pid>-<tag>.session`, where Unpair and the next
+  pairing look for it; the gateway state `<state>/telegram-capture-gateway/`
+  to `raw/telegram-gateway/`; the spool `<capture>/telegram-capture/spool/` to
+  `raw/telegram-spool/`; and an earlier drain's `<state>/telegram-spool-drain/`
+  (read by nothing now) to `raw/telegram-spool-drain/`, so a Delete of the
+  folder takes it. WhatsApp's two stores leave `<capture>/whatsapp-live/` for
+  `stores/` first, then that folder is renamed whole to `raw/whatsapp/`
+  (`session.db` and its logs, `spool/`, `media/`, the QR files), as 4b lays a
+  folder account out. `<capture>` is `<XDG data home>/olympus` and `<state>`
+  `<XDG state home>/olympus`; folders the move emptied (`telegram/`,
+  `telegram-capture/`) are removed after the flip, and at each later boot if a
+  boot stopped in between. The session database inside the WhatsApp folder is
+  not folded: it moves with its logs in the one folder rename.
+- *Paths outside the data folder in the plan.* The capture and state roots
+  (and Telegram's store folder, when `XDG_DATA_HOME` moves the data root away
+  from it) are outside the data root on macOS and OpenClaw-hosted installs.
+  The plan names a path there as `@capture/...`, `@state/...` or
+  `@telegram-stores/...`, relative to that root (`migrationPathRoots` in
+  `olympus-layout.ts`), so the registry still names no home folder; the
+  link checks, the folder fsyncs and the device check work from the root that
+  holds each path. A 4c build reads such a plan (it is valid schema 3) and
+  reports it stuck, touching nothing, as it does any plan for a source it does
+  not move. On a standalone Linux install the capture root is the data root.
+- *A running capture keeps the account where it is (`busy`).* The pass takes,
+  and holds until the account's pass ends, the lock each capture helper holds
+  while it runs, at both places its state folder can be: the Telegram reader's
+  `gateway.lock` (it takes it itself, `gateway_process_lock` in
+  `scripts/telegram-telethon-reader.py`) and the WhatsApp bridge's
+  `bridge.lock` (below). A lock another process holds leaves the account where
+  it is this boot; a helper that starts meanwhile finds the lock taken and
+  exits, to be started again later. A Telegram pairing that is running holds
+  its lease, which the pass opens like any database: busy too. A plan left part
+  way waits the same way for a boot at which no helper runs.
+- *The bridge's session lock (decided here).* The Go bridge has no lock of its
+  own, so two bridges could run on one session and nothing showed the pass that
+  one was running. Whoever starts a bridge now takes a `flock` on `bridge.lock`
+  in its state folder and hands the bridge that descriptor (the worker's
+  capture supervisor, and pairing for `--pair-only`), closing its own copy: the
+  bridge holds the lock for its whole life, after its spawner is gone too, and
+  the kernel drops it when the bridge exits. A second bridge on the session is
+  not started (capture reports `helper_running`, pairing refuses). Chosen over a
+  lock taken in the Go program, which would change the bridge's source: the
+  worker runs the bridge build named by the source's fingerprint and does not
+  build it, so every install would lose WhatsApp capture until it paired again.
+  Residual: a bridge a pre-4d worker started and left running when it was
+  killed holds no lock, so it is not seen.
+- *Records outside the data folder.* Every legacy pairing wrote the session's
+  absolute path into the capture grant (`sessionPath`, and
+  `OLYMPUS_TELEGRAM_SESSION_PATH` / `OLYMPUS_WHATSAPP_STATE_DIR` in its
+  producer env) and into the secret store (`<source>.<role>.session_path`, which
+  Unpair treats as the authority). Before the pass (switch on) the worker reads them: a
+  grant or stored path that names anything but the default legacy session, a
+  grant that starts capture with another path override, or an Unpair that did
+  not finish (its record names the files) is `pinned`; one that cannot be read is
+  `unreadable`. A grant that names the default session does not pin here (it
+  still pins an account with no entry from a folder, as in 4b). After the pass,
+  at every boot, each record of an account a move finished that still names its
+  old place is rewritten to what a folder pairing writes: the grant without its
+  paths, a stored session path as the folder's (`session/telegram`,
+  `raw/whatsapp`). The records sit in the config folder, so they are not in the
+  plan: the flip is the commit and the rewrite follows it; until it runs, the
+  capture child is given the folder's paths last (4b) and nothing reads the old
+  ones for a folder account. The rewrite changes the grant, so its child starts
+  once more.
+- *Paths in data.* The bridge writes each saved file's absolute path into its
+  spool lines (`media_path`) and the store keeps it as the item's locator. They
+  are not rewritten (the move writes nothing but file names): for an account
+  whose move is done, a path under the old state folder is read as the same
+  path under `raw/whatsapp/` (`whatsappMovedPathMapper`), by the Secrets
+  redaction of the spool (so a Secret line's audio is still found and deleted)
+  and by media extraction. A citation that shows an old item's locator still
+  names the old place.
+- *Second WhatsApp state folder.* The Gateway service's default and the cron
+  sync's ignore `XDG_DATA_HOME`; when one of them is not the folder that would
+  move and holds anything, the account stays where it is (`files_elsewhere`).
+- *Nothing starts on an account part way.* While a plan is pending, the
+  worker's capture supervisor starts no helper (`account_moving`), a pairing
+  refuses, and the Gateway-run services refuse to start.
+- *An empty claim folder.* A pairing that settled on the legacy paths claims
+  them by making the legacy capture folder (4b); one that failed before its
+  helper wrote anything left that folder, and it kept the account `legacy` for
+  good. At boot, before the re-placement and whatever the switch says, such a
+  folder is removed when the entry is `active`, `legacy`, lists no corpus and has
+  no plan, nothing pins the account, the folder holds only the pairing lease's
+  or the bridge's lock files, no pairing holds them, and it has not changed for
+  an hour (`reclaimEmptyCaptureClaims` in `core/source-storage.ts`); the
+  re-placement then decides as if no pairing had happened.
+- *What stays legacy.* An account whose capture the Gateway owns, or whose
+  paths an override, a plugin-config setting, a grant, a stored session path or
+  an unfinished Unpair pins (see Layout, "Gateway-run capture stays legacy").
 
 **What stays put.** Settings stay in the shared config files (see Layout). The
 X usage ledger stays shared; only X's reconcile state moves. Legacy pre-1.0
