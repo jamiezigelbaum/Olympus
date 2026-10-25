@@ -163912,13 +163912,30 @@ ${relPath(ctx.root, candidate.to)}`));
   return (migration.moves ?? []).every((move) => pairs.has(`${move.from}
 ${move.to}`) && !move.from.split("/").includes(".."));
 }
+function syncFolderChains(ctx, folders) {
+  const chain = new Set;
+  for (const folder of folders) {
+    let current2 = ctx.root;
+    chain.add(current2);
+    for (const part of relative11(ctx.root, folder).split(sep14).filter(Boolean)) {
+      current2 = join108(current2, part);
+      chain.add(current2);
+    }
+  }
+  for (const folder of chain) {
+    if (lookAt(folder).kind === "dir")
+      syncFolder(folder);
+  }
+}
 function makeFolders(ctx, moves) {
   try {
     const real = realpathSync24(ctx.root);
+    const destinations = new Set;
     for (const move of moves) {
       const destination = dirname84(absPath(ctx.root, move.to));
       if (!destinationIsOurs(ctx, absPath(ctx.root, move.to)))
         throw Object.assign(new Error("link"), { code: "ELOOP" });
+      destinations.add(destination);
       let current2 = real;
       for (const part of relative11(ctx.root, destination).split(sep14).filter(Boolean)) {
         current2 = join108(current2, part);
@@ -163928,11 +163945,12 @@ function makeFolders(ctx, moves) {
         if (found.kind !== "absent")
           throw Object.assign(new Error("not a folder"), { code: "ENOTDIR" });
         mkdirSync55(current2, { mode: 448 });
-        syncFolder(dirname84(current2));
-        syncFolder(current2);
       }
     }
+    syncFolderChains(ctx, [...destinations]);
   } catch (error2) {
+    if (error2 instanceof AccountMigrationKilled)
+      throw error2;
     throw new MoveFault("failed", "move_failed", `The account folder could not be made (${errorCode2(error2)}).`);
   }
 }
@@ -164090,6 +164108,13 @@ function revert(ctx, sourceId, slot, migration, fault) {
     });
   }
   checkpoint("revert");
+  try {
+    syncFolderChains(ctx, moves.map((move) => dirname84(absPath(ctx.root, move.from))));
+  } catch (error2) {
+    if (error2 instanceof AccountMigrationKilled)
+      throw error2;
+    throw new MoveFault("failed", "move_failed", `The folders the files go back to could not be made durable (${errorCode2(error2)}).`);
+  }
   const back = [...moves].reverse();
   const lost = [];
   back.forEach((move, index) => {
