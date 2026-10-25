@@ -14564,6 +14564,39 @@ var init_vocabulary = __esm(() => {
       other: { why: "The import stopped.", fix: "Remove this archive and import it again." }
     },
     thisFile: "A file of this archive",
+    account: {
+      line: "{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?",
+      note: "Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.",
+      add: "Add to {source}",
+      apart: "Keep it under Archives",
+      addFor: "Add {name} to {source}",
+      apartFor: "Keep {name} under Archives",
+      sourceFallback: "this source"
+    },
+    inSource: {
+      listLabel: "Imported archives",
+      importingLine: "{percent}% read · {items} from this archive so far",
+      importingLineNone: "{percent}% read",
+      importedLine: "{items} from this archive",
+      importedWhen: " · imported {when}",
+      alreadyThere: { one: ", of which 1 was already there", many: ", of which {n} were already there" },
+      notRunningLine: "{percent}% read. It goes on from there once imports can run.",
+      stop: "Stop",
+      stopped: "Stopped {name}. What it imported stays.",
+      covers: { imported: "History imported up to {to}", live: "live since {since}" },
+      stoppedWhy: {
+        stopped_by_owner: { why: "You stopped this import. What it imported stays.", fix: "To go on from here, choose the same file again with Import an archive." },
+        file_changed: { why: "{file} changed after the import started.", fix: "Choose the file again with Import an archive once it has stopped changing. What is already here is not added twice." },
+        file_missing: { why: "{file} is no longer where it was.", fix: "Choose it again with Import an archive from where it is now. What is already here is not added twice." },
+        file_unreadable: { why: "Olympus could not read {file}.", fix: "Check that your user account can open it, then choose it again with Import an archive." },
+        resume_point_invalid: { why: "Olympus lost its place in this archive.", fix: "Choose the file again with Import an archive. What is already here is not added twice." },
+        format_unavailable: { why: "This version of Olympus cannot read this kind of archive.", fix: "Update Olympus, then choose the file again with Import an archive." },
+        root_changed: { why: "The folder it was in was moved or replaced.", fix: "Choose it again with Import an archive from where it is now. What is already here is not added twice." },
+        account_changed: { why: "The account this source holds now is not the one this export belongs to, so nothing more was imported.", fix: "What it imported stays. To import it into the account it belongs to, connect that account first." },
+        source_unavailable: { why: "This source was being deleted or moved, so nothing more was imported.", fix: "Once that has finished, choose the file again with Import an archive if you still want it." },
+        other: { why: "The import stopped.", fix: "Choose the file again with Import an archive. What is already here is not added twice." }
+      }
+    },
     gaps: {
       message_too_large: { one: "1 message too large to read", many: "{n} messages too large to read" },
       message_unreadable: { one: "1 message could not be read", many: "{n} messages could not be read" },
@@ -19761,6 +19794,104 @@ var init_ingestion_health_state = __esm(() => {
   init_olympus_layout();
 });
 
+// src/workers/archive-import/continuation-cache.ts
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  put(key, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
+var init_continuation_cache = __esm(() => {
+  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+  archiveContinuations = new ContinuationCache;
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire5 } from "node:module";
+var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire4 = createRequire5(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/state.ts
+var init_state = __esm(() => {
+  init_source_placement();
+  init_source_storage();
+  init_atomic_file();
+  init_archive_formats();
+  init_file_lease();
+});
+
+// src/workers/archive-import/media-bindings.ts
+var init_media_bindings = __esm(() => {
+  init_sqlite_migrations();
+  init_scope_safe_fs();
+  init_source_placement();
+  init_source_storage();
+  init_state();
+});
+
+// src/workers/archive-import/forget.ts
+var init_forget = __esm(() => {
+  init_continuation_cache();
+  init_media_bindings();
+  init_state();
+});
+
 // src/core/this-computer.ts
 var init_this_computer = __esm(() => {
   init_atomic_file();
@@ -19796,6 +19927,8 @@ var init_source_forget_registry = __esm(() => {
   init_source_scope_approval();
   init_mail_source_scope();
   init_source_account_binding();
+  init_forget();
+  init_state();
   init_this_computer();
   init_source_dashboard();
   init_source_scheduler_state();
@@ -19804,15 +19937,6 @@ var init_source_forget_registry = __esm(() => {
   init_olympus_layout();
   init_source_placement();
   init_tier_migration_reports();
-});
-
-// src/workers/archive-import/state.ts
-var init_state = __esm(() => {
-  init_source_placement();
-  init_source_storage();
-  init_atomic_file();
-  init_archive_formats();
-  init_file_lease();
 });
 
 // src/workers/archive-import/store.ts
@@ -19828,23 +19952,6 @@ var init_store2 = __esm(() => {
     trustDomain: "secure_local",
     secretsInContent: true
   });
-});
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire5 } from "node:module";
-var runtimeRequire4, SCOPE_FILE_MAX_RANGE_BYTES;
-var init_scope_safe_fs = __esm(() => {
-  runtimeRequire4 = createRequire5(import.meta.url);
-  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
-});
-
-// src/workers/archive-import/media-bindings.ts
-var init_media_bindings = __esm(() => {
-  init_sqlite_migrations();
-  init_scope_safe_fs();
-  init_source_placement();
-  init_source_storage();
-  init_state();
 });
 
 // src/workers/archive-import/byte-source.ts
