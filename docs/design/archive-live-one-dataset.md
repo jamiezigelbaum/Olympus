@@ -363,7 +363,27 @@ input yet, so nothing changes for a real install until steps 4 to 7.
 ## To verify before step 4
 
 - Telegram Desktop writes bare chat ids, with the type telling the marked
-  form. Check against a real export.
+  form. **Checked 2026-10-25** against the owner's full-account JSON export
+  (133 chats and 85 left chats, about 449,000 messages). A script read field
+  names and the form of ids only, never names or text.
+  - Chat ids are bare positive integers, and the type gives the marked form:
+    `private_group` takes `-id` and `private_supergroup` takes `-100id`. The
+    export held only groups and supergroups, so direct chats, bots and
+    channels are still unchecked.
+  - Senders are `user<id>` or `channel<id>`. Edits carry `edited_unixtime`;
+    reactions carry `reactions`.
+  - **History from before a group became a supergroup** is listed under the
+    supergroup with negative message ids: 475 messages in 18 supergroups, all
+    but one dated before the migration. Live capture would see these under
+    the old group's id, with positive ids, so they cannot match exactly.
+    Step 4 imports them as items of their own under the supergroup. A
+    duplicate is possible only if live capture also read the old group, and
+    it reads the newest 150 messages of a chat.
+  - **Left chats repeat some messages byte for byte** (5 chats, about 2,000
+    messages). They are imported once, by id.
+  - **The export can carry no account information.** This one has no
+    `personal_information`, so it gives no account hash. It joins the account
+    at the owner's confirmation, like a single-chat export (section 7).
 - Takeout's mbox separator line carries the Gmail message id in decimal (the
   API id is its hex). If not, mail matches by its headers only.
 - The WhatsApp export's chat names equal the bridge's contact names for
