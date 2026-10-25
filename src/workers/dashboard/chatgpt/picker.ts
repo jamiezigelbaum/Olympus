@@ -131,6 +131,8 @@ export interface ChatGptArchivePicked {
   name: string;
   status: 'started' | 'checking' | 'already_imported';
   archiveName?: string;
+  /** The source a started import joined (its name), when it joined one. */
+  source?: { label: string };
 }
 
 /** The folder picked in pick mode: its opaque key and its name, for the caller's own view only. */
@@ -456,6 +458,7 @@ export function chatgptPickerProgram(kit: ChatGptPickerKit): ChatGptPicker {
       const done = p.pick.archive.done;
       const picked: ChatGptArchivePicked = { name: typeof content.name === 'string' && content.name ? content.name : name, status };
       if (typeof content.archive_name === 'string' && content.archive_name) picked.archiveName = content.archive_name;
+      if (status === 'started' && content.source && typeof content.source.label === 'string' && content.source.label) picked.source = { label: content.source.label };
       stopTimer();
       p = null;
       session++;

@@ -332,7 +332,8 @@ async function archiveApprove(options: DashboardPanelToolsOptions, args: Record<
       status,
       name,
       ...(archiveName ? { archive_name: archiveName } : {}),
-      ...(status === 'confirm_account' && sourceId ? { source: { id: sourceId, label: sourceLabel } } : {}),
+      // Which source asks about its account, or which source a started import joined.
+      ...((status === 'confirm_account' || status === 'started') && sourceId ? { source: { id: sourceId, label: sourceLabel } } : {}),
       ...(status === 'confirm_account' && answer.parsed.reconfirm === true ? { reconfirm: true } : {}),
     },
   };

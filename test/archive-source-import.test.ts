@@ -34,7 +34,8 @@ describe('a source\'s own Import an archive', () => {
     h.connectLive();
     const path = h.writeExport('own.mbox', []);
     const result = await h.dashboard.approve({ key: path, sourceId: FIXTURE_SOURCE_ID });
-    expect(result).toMatchObject({ ok: true, status: 'started' });
+    // The answer names the card it joined, so the line can say where it shows.
+    expect(result).toMatchObject({ ok: true, status: 'started', source: { id: FIXTURE_SOURCE_ID, label: FIXTURE_LABEL } });
     const records = h.runtime.state.list();
     expect(records).toHaveLength(1);
     expect(records[0]!.target?.source_id).toBe(FIXTURE_SOURCE_ID);
@@ -53,6 +54,7 @@ describe('a source\'s own Import an archive', () => {
     // The same file through Import another archive (no source named) is taken, by what it is, under Archives.
     const apart = await h.dashboard.approve({ key: path });
     expect(apart).toMatchObject({ ok: true, status: 'started' });
+    expect(apart.ok && apart.status === 'started' ? apart.source : 'none').toBeUndefined();
     expect(h.runtime.state.list()[0]!.target).toBeUndefined();
   });
 

@@ -97,8 +97,9 @@ export function archiveImportScheduling(scheduler: { enabled: boolean; sourceIds
   return selected.length > 0 && !selected.includes(SCHEDULER_SOURCE_IDS.archiveImports) ? 'not_selected' : 'on';
 }
 
+// A start names the source the import joined (`source`, its card); absent when it stays under Other archives.
 export type ArchiveApproveResult =
-  | { ok: true; status: 'started'; archive_id: string; name: string }
+  | { ok: true; status: 'started'; archive_id: string; name: string; source?: { id: string; label: string } }
   /**
    * The export is of a source this computer holds an account of, and nothing in
    * it proves the account is that one: nothing was imported. The sheet asks the
@@ -226,7 +227,6 @@ export const ARCHIVE_APPROVE_COPY = {
   not_an_input: 'Only an import that is part of a source can be stopped. Remove stops and deletes an archive.',
   not_importing: 'This import is not running.',
   source_unavailable: 'The source this export belongs to is being deleted or moved. Try again once that has finished.',
-  /** A source's own Import an archive, given an export that is not that source's. */
   not_this_source: "This isn't a {source} export. From the {source} card, Olympus imports only these: {formats}. For any other export, use Import another archive under Other archives.",
   unknown_source: "Olympus can't import archives into this source. Use Import another archive.",
 } as const;
@@ -351,6 +351,12 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
 
   const refusal = (code: string, message: string): ArchiveApproveResult => ({ ok: false, code, message });
 
+  // The card an import joined, for the line that says where it shows.
+  const joinedSource = (record: ArchiveImportRecord): { source?: { id: string; label: string } } => {
+    if (!record.target) return {};
+    const target = options.runtime.targets.forSource(record.target.source_id);
+    return { source: { id: target?.cardId ?? record.target.source_id, label: named(target?.label ?? record.target.source_id) } };
+  };
   // The formats a source's connector reads, as this build knows them.
   const sourceFormats = (target: ArchiveSourceTarget): ArchiveFormatDefinition[] =>
     target.formats.flatMap((formatId) => {
@@ -543,7 +549,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         answered();
         if (again) {
           refresh();
-          return { ok: true, status: 'started', archive_id: again.archive_id, name };
+          return { ok: true, status: 'started', archive_id: again.archive_id, name, ...joinedSource(again) };
         }
         return { ok: true, status: 'already_imported', archive_id: archive.archive_id, name, archive_name: named(archive.label) };
       }
@@ -552,7 +558,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
         refresh();
-        return { ok: true, status: 'started', archive_id: resumed.archive_id, name };
+        return { ok: true, status: 'started', archive_id: resumed.archive_id, name, ...joinedSource(resumed) };
       }
       return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
@@ -590,7 +596,7 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           if (result.kind === 'started') {
             answered();
             refresh();
-            return { ok: true, status: 'started', archive_id: result.archive.archive_id, name };
+            return { ok: true, status: 'started', archive_id: result.archive.archive_id, name, ...joinedSource(result.archive) };
           }
           if (result.kind === 'already_imported') {
             answered();

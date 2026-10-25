@@ -321,6 +321,13 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     expect(list.textContent).not.toContain('No archives imported yet');
   });
 
+  test('with archives imported, Import another archive stays the section\'s own button, never in ⋯', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-imported', [TELEGRAM], meta([ARCHIVE])) });
+    const row = page.doc.querySelector('section.other-archives li.row.source')!;
+    expect(Array.from(row.querySelectorAll('.source-actions button')).map((node) => node.textContent)).toContain('Import another archive');
+    expect(menuLabels(row)).not.toContain('Import another archive');
+  });
+
   test('a source that reads its own exports has Import an archive in its ⋯ menu; one that does not, has none', async () => {
     const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]) });
     expect(menuLabels(sourceRow(page, 'Telegram'))).toEqual(['Import an archive']);
@@ -338,7 +345,7 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     const page = await mount({
       [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
       [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
-      [ARCHIVE_APPROVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: 'result.json' } }),
+      [ARCHIVE_APPROVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: 'result.json', source: { id: 'telegram.messages', label: 'Telegram' } } }),
     });
     const row = sourceRow(page, 'Telegram');
     (row.querySelector('summary') as HTMLElement).click();
@@ -351,7 +358,9 @@ describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-
     (page.doc.querySelector('[data-key="picker:open:/Users/you/Telegram exports"]') as HTMLButtonElement).click();
     await settle();
     page.button(fill(A.pick.makePrivateFor, { name: 'result.json' })).click();
-    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.started, { name: 'result.json' })));
+    // The line says where it shows: the source it joined, not Other archives.
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.startedIn, { name: 'result.json', source: 'Telegram' })));
+    expect(page.text()).toContain('Importing result.json into Telegram. It shows in Telegram as it is read.');
     expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([
       { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/Users/you/Telegram exports/result.json', source_id: 'telegram.messages' } },
     ]);

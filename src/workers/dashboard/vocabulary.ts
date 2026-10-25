@@ -2159,11 +2159,11 @@ export const DASHBOARD_ARCHIVE_COPY = {
    */
   account: {
     line: '{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?',
-    note: 'Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.',
+    note: 'Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Other archives, it stays apart, with its own Remove.',
     add: 'Add to {source}',
-    apart: 'Keep it under Archives',
+    apart: 'Keep it under Other archives',
     addFor: 'Add {name} to {source}',
-    apartFor: 'Keep {name} under Archives',
+    apartFor: 'Keep {name} under Other archives',
     sourceFallback: 'this source',
     /** The same question for an import already inside a source, stopped because the source now holds another account. */
     reconfirm: {
@@ -2338,7 +2338,9 @@ export const DASHBOARD_ARCHIVE_COPY = {
   tryAgain: 'Try again',
   dismiss: 'Dismiss',
   /** After a choice in the picker. */
-  started: 'Importing {name}. It shows under Archives as it is read.',
+  started: 'Importing {name}. It shows under Other archives as it is read.',
+  /** An import that joined a source: it shows in that source's card. */
+  startedIn: 'Importing {name} into {source}. It shows in {source} as it is read.',
   checking: 'Checking whether {name} is already imported…',
   already: '{name} is already imported as {archive}.',
   alreadyUnnamed: '{name} is already imported.',

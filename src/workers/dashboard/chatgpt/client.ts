@@ -822,7 +822,11 @@ export function chatgptDashboardClient(
     } else if (fix.archiveImport === true && picker) {
       // Import an archive (computer only): the picker over this computer's files, in place; from a
       // source's ⋯ menu, for that source's exports only.
-      action = () => startArchivePick(key, typeof fix.archiveSource === 'string' ? fix.archiveSource : '');
+      action = () => {
+        // Back on the dashboard after the picker, the ⋯ menu it came from is closed.
+        if (source) state.open['menu:' + source.id] = false;
+        startArchivePick(key, typeof fix.archiveSource === 'string' ? fix.archiveSource : '');
+      };
     } else if (typeof fix.archiveFocus === 'string' && fix.archiveFocus) {
       // A Needs you line about one archive or request (computer only): straight to it, in place.
       action = () => focusArchive(String(fix.archiveFocus));
@@ -1140,6 +1144,13 @@ export function chatgptDashboardClient(
     // and no second Sync now while one is checking.
     const menu = (Array.isArray(source.menu) ? source.menu : []).map((entry: Any) => archiveFix(archives, entry)).filter((entry: Any) =>
       (!fix || !entry || entry.label !== fix.label || entry.tool !== fix.tool) && !(checking && isSync(entry)));
+    // Under Other archives, Import another archive is the section's own button, always in sight, never in ⋯.
+    if (other) {
+      const importing = (entry: Any) => !!entry && (entry.archiveImport === true || entry.label === H.copy.archives.importAction);
+      const shown = menu.filter(importing)[0];
+      if (shown && !importing(fix)) add(controls, fixControl(shown, 'import:' + id, 'plain', true, context));
+      for (let at = menu.length - 1; at >= 0; at -= 1) if (importing(menu[at])) menu.splice(at, 1);
+    }
     // Unpair for a paired chat app, on the computer only: the pairing lives here.
     const unpair = unpairEntry(id);
     if (unpair) menu.push(unpair);
@@ -1342,7 +1353,10 @@ export function chatgptDashboardClient(
     const archive = typeof outcome.archiveName === 'string' ? outcome.archiveName : typeof outcome.archive_name === 'string' ? outcome.archive_name : '';
     if (outcome.status === 'checking') return fill(A.checking, { name });
     if (outcome.status === 'already_imported') return archive ? fill(A.already, { name, archive }) : fill(A.alreadyUnnamed, { name });
-    return outcome.status === 'started' ? fill(A.started, { name }) : '';
+    // A start says where the import shows: the card of the source it joined, or Other archives.
+    const source = outcome.source && typeof outcome.source.label === 'string' ? outcome.source.label : '';
+    if (outcome.status === 'started') return source ? fill(A.startedIn, { name, source }) : fill(A.started, { name });
+    return '';
   }
 
   /** What an Archives row control did, from the list read before it (names are the computer's own). */

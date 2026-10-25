@@ -1247,7 +1247,7 @@ export function previewArchiveApprove(args: { key?: unknown; request_id?: unknow
   // A source's own Import an archive: only that source's exports (archive-import/dashboard.ts not_this_source).
   const own = typeof args.source_id === 'string' ? PREVIEW_ARCHIVE_SOURCES.find((entry) => entry.sourceId === args.source_id) : undefined;
   if (own) {
-    if (own.accepts(name)) return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name } };
+    if (own.accepts(name)) return { content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name, source: { id: own.sourceId, label: own.label } } };
     return {
       content: [{ type: 'text', text: ARCHIVE_APPROVE_COPY.not_this_source.split('{source}').join(own.label).split('{formats}').join(own.formats.map((format) => format.label).join(', ')) }],
       structuredContent: { error: 'not_this_source' },
