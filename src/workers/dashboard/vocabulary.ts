@@ -2131,6 +2131,52 @@ export const DASHBOARD_ARCHIVE_COPY = {
   /** A file of the archive, when the stop names none. */
   thisFile: 'A file of this archive',
   /**
+   * An export of a source Olympus already reads, whose account the export does
+   * not prove is the connected one: the import sheet asks, and nothing is
+   * imported until the person answers.
+   */
+  account: {
+    line: '{name} does not say which {source} account it came from. Is it the {source} account Olympus has connected?',
+    note: 'Added to {source}, it joins what Olympus already reads there, and anything {source} already has is not added twice. Kept under Archives, it stays apart, with its own Remove.',
+    add: 'Add to {source}',
+    apart: 'Keep it under Archives',
+    addFor: 'Add {name} to {source}',
+    apartFor: 'Keep {name} under Archives',
+    sourceFallback: 'this source',
+  },
+  /**
+   * An import that is one input of a source, inside that source's card: its own
+   * progress and findings, how much of it the source already had, and Stop.
+   * It has no Remove: its items are the source's, deleted with the whole source.
+   */
+  inSource: {
+    listLabel: 'Imported archives',
+    importingLine: '{percent}% read · {items} from this archive so far',
+    importingLineNone: '{percent}% read',
+    importedLine: '{items} from this archive',
+    importedWhen: ' · imported {when}',
+    /** Appended to a count line when the source already had some of the archive's items. */
+    alreadyThere: { one: ', of which 1 was already there', many: ', of which {n} were already there' },
+    notRunningLine: '{percent}% read. It goes on from there once imports can run.',
+    stop: 'Stop',
+    stopped: 'Stopped {name}. What it imported stays.',
+    /** What the card says about the history its inputs cover. */
+    covers: { imported: 'History imported up to {to}', live: 'live since {since}' },
+    /** Why an import stopped and what to do: none of them has a Remove, so each says how to go on. */
+    stoppedWhy: {
+      stopped_by_owner: { why: 'You stopped this import. What it imported stays.', fix: 'To go on from here, choose the same file again with Import an archive.' },
+      file_changed: { why: '{file} changed after the import started.', fix: 'Choose the file again with Import an archive once it has stopped changing. What is already here is not added twice.' },
+      file_missing: { why: '{file} is no longer where it was.', fix: 'Choose it again with Import an archive from where it is now. What is already here is not added twice.' },
+      file_unreadable: { why: 'Olympus could not read {file}.', fix: 'Check that your user account can open it, then choose it again with Import an archive.' },
+      resume_point_invalid: { why: 'Olympus lost its place in this archive.', fix: 'Choose the file again with Import an archive. What is already here is not added twice.' },
+      format_unavailable: { why: 'This version of Olympus cannot read this kind of archive.', fix: 'Update Olympus, then choose the file again with Import an archive.' },
+      root_changed: { why: 'The folder it was in was moved or replaced.', fix: 'Choose it again with Import an archive from where it is now. What is already here is not added twice.' },
+      account_changed: { why: 'The account this source holds now is not the one this export belongs to, so nothing more was imported.', fix: 'What it imported stays. To import it into the account it belongs to, connect that account first.' },
+      source_unavailable: { why: 'This source was being deleted or moved, so nothing more was imported.', fix: 'Once that has finished, choose the file again with Import an archive if you still want it.' },
+      other: { why: 'The import stopped.', fix: 'Choose the file again with Import an archive. What is already here is not added twice.' },
+    },
+  },
+  /**
    * One sentence for each kind of finding an archive reports. Which of the two
    * lists a kind is shown in (`lists`) is `listOf`, directly below.
    */

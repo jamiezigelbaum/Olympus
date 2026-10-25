@@ -25,7 +25,10 @@ import type {
   ComputerArchiveEntry,
   ComputerArchiveRequest,
   ComputerArchivesMeta,
+  ComputerSourceImportEntry,
+  ComputerSourceImportsMeta,
 } from '../chatgpt/dashboard-contract.ts';
+import { SourceStorageUnavailableError } from '../../core/source-storage.ts';
 import type { LocalFilesArchiveBrowser } from '../local-files/scope-browser.ts';
 import { createArchiveImportAgent, type ArchiveImportAgent } from './agent.ts';
 import { SCHEDULER_SOURCE_IDS } from '../source-scheduler.ts';
@@ -35,6 +38,7 @@ import type { ArchiveImportRuntime } from './runtime.ts';
 import {
   commitArchiveImport,
   prepareArchiveImport,
+  resolveArchiveTarget,
   type ArchiveImportStart,
   type PreparedArchiveImport,
 } from './start.ts';
@@ -91,23 +95,48 @@ export function archiveImportScheduling(scheduler: { enabled: boolean; sourceIds
 
 export type ArchiveApproveResult =
   | { ok: true; status: 'started'; archive_id: string; name: string }
+  /**
+   * The export is of a source this computer holds an account of, and nothing in
+   * it proves the account is that one: nothing was imported. The sheet asks the
+   * owner, then approves again with `confirmAccount` (add it to the account) or
+   * `keepApart` (keep it under Archives).
+   */
+  | { ok: true; status: 'confirm_account'; name: string; source: { id: string; label: string } }
   | { ok: true; status: 'checking'; request_id: string; name: string }
   | { ok: true; status: 'already_imported'; archive_id: string; name: string; archive_name: string }
   | { ok: false; code: string; message: string; access?: { state: string; message: string; settings_url?: string } };
 
 export type ArchiveSimpleResult = { ok: true } | { ok: false; code: string; message: string };
 
+// What the owner answered when asked which account an export belongs to.
+export interface ArchiveAccountAnswer {
+  confirmAccount?: true;
+  keepApart?: true;
+}
+
 export interface ArchiveImportDashboard {
   browse(request: { parentKey?: string; cursor?: string }): Promise<ArchiveBrowseList>;
-  approve(request: { key: string } | { requestId: string }): Promise<ArchiveApproveResult>;
+  approve(request: ({ key: string } | { requestId: string }) & ArchiveAccountAnswer): Promise<ArchiveApproveResult>;
   decline(requestId: string): ArchiveSimpleResult;
   remove(archiveId: string): ArchiveSimpleResult;
+  /**
+   * Stops an import that is an input of a source. What it imported so far
+   * stays in the source; approving the same export again picks it up where it
+   * stopped.
+   */
+  stop(archiveId: string): ArchiveSimpleResult;
   /**
    * The person's approval of an agent's request to remove an archive: the
    * same removal Remove runs, for the archive the request names.
    */
   approveRemoval(requestId: string): ArchiveSimpleResult;
   view(): ComputerArchivesMeta;
+  /**
+   * The imports that joined a source, grouped by the source's card: each with
+   * its own progress, findings and how many of its items the source already
+   * held, and the history the inputs cover.
+   */
+  sourceImports(): ComputerSourceImportsMeta[];
   /**
    * What an agent may do (agent.ts): ask for an import or a removal, and
    * read the same list. It approves and removes nothing; only the methods
@@ -179,6 +208,10 @@ export const ARCHIVE_APPROVE_COPY = {
   not_an_import: 'This request is not an import.',
   not_a_removal: 'This request is not to remove an archive.',
   already_removing: 'This archive is already being removed.',
+  part_of_source: "This import's items are held together with what the source reads live, so it has no Remove of its own. Deleting the whole source from its card deletes them.",
+  not_an_input: 'Only an import that is part of a source can be stopped. Remove stops and deletes an archive.',
+  not_importing: 'This import is not running.',
+  source_unavailable: 'The source this export belongs to is being deleted or moved. Try again once that has finished.',
 } as const;
 
 /**
@@ -422,14 +455,18 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
    * importing (failed, Try again); either must still stand, as it was, once
    * its path is resolved.
    */
-  const approvePath = (path: string, from?: { requestId: string; status: 'pending' | 'failed' }): ArchiveApproveResult => {
+  const approvePath = async (
+    path: string,
+    from?: { requestId: string; status: 'pending' | 'failed' },
+    answer: ArchiveAccountAnswer = {},
+  ): Promise<ArchiveApproveResult> => {
     const name = named(posix.basename(path));
     // An agent's request becomes the import or its check; Try again starts afresh.
     const requestId = from?.status === 'pending' ? from.requestId : undefined;
     const answered = (): void => {
       if (from) requests.remove(from.requestId);
     };
-    const prepared = prepareArchiveImport({ state, path });
+    const prepared = prepareArchiveImport({ state, path, targets: options.runtime.targets });
     if (prepared.kind === 'unsupported') {
       const said = fill(ARCHIVE_APPROVE_COPY.unsupported, { formats: prepared.supported.join(', ') });
       return refusal('unsupported', prepared.advice ? `${said} ${prepared.advice}` : said);
@@ -441,12 +478,40 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     }
     if (prepared.kind === 'already_imported') {
       answered();
+      // An import of a source the owner stopped is picked up where it stopped.
+      const resumed = resumeStopped(prepared.archive);
+      if (resumed) {
+        refresh();
+        return { ok: true, status: 'started', archive_id: resumed.archive_id, name };
+      }
       return { ok: true, status: 'already_imported', archive_id: prepared.archive.archive_id, name, archive_name: named(prepared.archive.label) };
     }
     // From here the approval moves into the record or the checks, under the
     // approvals' exclusion; the root is closed or handed to its check.
     let handed = false;
     try {
+      // Which account the export joins, if it joins a source: settled before anything is recorded,
+      // inside the source's own lock, and again by every pass before it writes.
+      try {
+        const resolution = await resolveArchiveTarget(prepared, {
+          targets: options.runtime.targets,
+          env: state.env,
+          ...(answer.confirmAccount === true ? { ownerConfirmed: true } : {}),
+          ...(answer.keepApart === true ? { keepApart: true } : {}),
+        });
+        if (resolution.kind === 'unproven') {
+          const source = options.runtime.targets.forSource(resolution.sourceId);
+          return {
+            ok: true,
+            status: 'confirm_account',
+            name,
+            source: { id: source?.cardId ?? resolution.sourceId, label: named(source?.label ?? resolution.sourceId) },
+          };
+        }
+      } catch (error) {
+        if (error instanceof SourceStorageUnavailableError) return refusal('source_unavailable', ARCHIVE_APPROVE_COPY.source_unavailable);
+        throw error;
+      }
       return exclusive((): ArchiveApproveResult => {
         // Declined or dismissed while its path was resolved: not imported.
         if (from && requests.get(from.requestId)?.status !== from.status) return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
@@ -477,6 +542,20 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     } finally {
       if (!handed) prepared.root.close();
     }
+  };
+
+  /**
+   * Picks an import of a source the owner stopped up where it stopped: its
+   * resume point is the source's committed cursor for this input.
+   */
+  const resumeStopped = (archive: ArchiveImportRecord): ArchiveImportRecord | undefined => {
+    if (!archive.target || archive.status !== 'stopped' || archive.stop?.code !== 'stopped_by_owner') return undefined;
+    const record = state.update(archive.archive_id, (entry) => {
+      if (entry.status !== 'stopped' || entry.stop?.code !== 'stopped_by_owner') return false;
+      entry.status = 'importing';
+      delete entry.stop;
+    });
+    return record?.status === 'importing' ? record : undefined;
   };
 
   /**
@@ -565,6 +644,68 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
     };
   };
 
+  // One import that is an input of a source, as its source's card shows it.
+  const importEntryOf = (record: ArchiveImportRecord): ComputerSourceImportEntry => {
+    const earliest = dateOnly(record.date_range?.earliest);
+    const latest = dateOnly(record.date_range?.latest);
+    const stopFile = record.stop?.rel_path ? named(posix.basename(record.stop.rel_path)) : undefined;
+    const intake = record.intake;
+    return {
+      id: record.archive_id,
+      name: named(record.label),
+      format: getArchiveFormat(record.format)?.label ?? record.format,
+      family: record.family,
+      where: where(posix.join(record.root_path, record.chosen_rel_path || '.')),
+      // An import never marked for removal reads as stopped, if an older record ever says so.
+      status: record.status === 'removing' ? 'stopped' : record.status,
+      read: intake ? Math.max(0, Math.floor(intake.read)) : 0,
+      alreadyThere: intake ? Math.max(0, Math.floor(intake.already_there)) : 0,
+      ...(record.status === 'importing' ? { percent: percent(record) } : {}),
+      ...(earliest ? { earliest } : {}),
+      ...(latest ? { latest } : {}),
+      startedAt: record.created_at,
+      ...(record.completed_at ? { importedAt: record.completed_at } : {}),
+      ...(record.status === 'stopped' && record.stop ? { stop: { code: record.stop.code, ...(stopFile ? { file: stopFile } : {}) } } : {}),
+      gaps: gapsOf(record),
+      skipped: tallies(record.findings.skipped),
+    };
+  };
+
+  const sourceImportsOf = (records: readonly ArchiveImportRecord[]): ComputerSourceImportsMeta[] => {
+    const bySource = new Map<string, ArchiveImportRecord[]>();
+    for (const record of records) {
+      if (!record.target) continue;
+      bySource.set(record.target.source_id, [...(bySource.get(record.target.source_id) ?? []), record]);
+    }
+    return [...bySource].map(([sourceId, grouped]) => {
+      const target = options.runtime.targets.forSource(sourceId);
+      const entries = grouped.map(importEntryOf);
+      const dates = entries.flatMap((entry) => (entry.earliest && entry.latest ? [entry] : []));
+      const importedFrom = dates.map((entry) => entry.earliest!).sort()[0];
+      const importedTo = dates.map((entry) => entry.latest!).sort().reverse()[0];
+      let liveSince: string | undefined;
+      try {
+        const slot = grouped[0]!.target!.slot;
+        liveSince = dateOnly(target?.liveSince?.({ sourceId, slot }, state.env));
+      } catch {
+        // Not known now: the card says nothing about the live history rather than a wrong day.
+      }
+      const covers = {
+        ...(importedFrom ? { importedFrom } : {}),
+        ...(importedTo ? { importedTo } : {}),
+        ...(liveSince ? { liveSince } : {}),
+      };
+      const setting = scheduling();
+      return {
+        sourceId: target?.cardId ?? sourceId,
+        imports: entries,
+        ...(Object.keys(covers).length > 0 ? { covers } : {}),
+        // An import that would never run: the setting why, as on the Archives row.
+        ...(setting !== 'on' && entries.some((entry) => entry.status === 'importing') ? { notRunning: setting } : {}),
+      };
+    });
+  };
+
   const requestOf = (request: ArchiveImportRequest, records: readonly ArchiveImportRecord[]): ComputerArchiveRequest => {
     const archive = request.archive_id ? records.find((record) => record.archive_id === request.archive_id) : undefined;
     if (request.kind === 'remove') {
@@ -619,6 +760,8 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       return { ok: false, code: 'unknown_archive', message: ARCHIVE_APPROVE_COPY.unknown_archive };
     }
     if (record.status === 'removing') return { ok: false, code: 'already_removing', message: ARCHIVE_APPROVE_COPY.already_removing };
+    // An input of a source has no Remove of its own: its items are the source's, deleted with the source.
+    if (record.target) return { ok: false, code: 'part_of_source', message: ARCHIVE_APPROVE_COPY.part_of_source };
     requestArchiveRemoval(state, archiveId, options.now);
     // A finished check pointing at it, and any request to remove it, say nothing true any more.
     for (const request of requests.list()) {
@@ -655,6 +798,10 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       // Nothing is approved that would never run.
       const blocked = notRunning();
       if (blocked) return blocked;
+      const answer: ArchiveAccountAnswer = {
+        ...(request.confirmAccount === true ? { confirmAccount: true as const } : {}),
+        ...(request.keepApart === true ? { keepApart: true as const } : {}),
+      };
       if ('requestId' in request) {
         const waiting = requests.get(request.requestId);
         if (waiting?.status === 'failed') {
@@ -662,18 +809,18 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
           // approval of the same path, the old outcome kept until it starts.
           const resolved = await options.browser.resolvePath(waiting.path);
           if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
-          return approvePath(resolved.path, { requestId: waiting.request_id, status: 'failed' });
+          return approvePath(resolved.path, { requestId: waiting.request_id, status: 'failed' }, answer);
         }
         if (!waiting || waiting.status !== 'pending') return refusal('not_waiting', ARCHIVE_APPROVE_COPY.not_waiting);
         // A request to remove an archive is answered by approveRemoval, never read as a path.
         if (waiting.kind !== 'import') return refusal('not_an_import', ARCHIVE_APPROVE_COPY.not_an_import);
         const resolved = await options.browser.resolvePath(waiting.path);
         if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
-        return approvePath(resolved.path, { requestId: waiting.request_id, status: 'pending' });
+        return approvePath(resolved.path, { requestId: waiting.request_id, status: 'pending' }, answer);
       }
       const resolved = await options.browser.resolve(request.key);
       if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message, ...(resolved.access ? { access: resolved.access } : {}) };
-      return approvePath(resolved.path);
+      return approvePath(resolved.path, undefined, answer);
     },
 
     decline(requestId) {
@@ -690,6 +837,22 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       const blocked = notRunning();
       if (blocked && !blocked.ok) return { ok: false, code: blocked.code, message: blocked.message };
       return removeNow(archiveId);
+    },
+
+    stop(archiveId) {
+      const record = state.get(archiveId);
+      if (!record) return { ok: false, code: 'unknown_archive', message: ARCHIVE_APPROVE_COPY.unknown_archive };
+      if (!record.target) return { ok: false, code: 'not_an_input', message: ARCHIVE_APPROVE_COPY.not_an_input };
+      if (record.status !== 'importing') return { ok: false, code: 'not_importing', message: ARCHIVE_APPROVE_COPY.not_importing };
+      const at = (options.now ?? (() => new Date()))().toISOString();
+      const stopped = state.update(archiveId, (entry) => {
+        if (entry.status !== 'importing') return false;
+        entry.status = 'stopped';
+        entry.stop = { code: 'stopped_by_owner', message: 'The owner stopped this import. What it imported stays.', at };
+      });
+      if (stopped?.status !== 'stopped') return { ok: false, code: 'not_importing', message: ARCHIVE_APPROVE_COPY.not_importing };
+      refresh();
+      return { ok: true };
     },
 
     approveRemoval(requestId) {
@@ -714,13 +877,15 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       } catch (error) {
         return { ...base, archives: [], requests: [], unreadable: { reason: recordUnreadableReason(error), file: shown(state.path), list: 'archives' } };
       }
+      // The imports that joined a source are shown in that source's card (sourceImports), not here.
+      const apart = records.filter((record) => !record.target);
       let asked: ArchiveImportRequest[];
       try {
         asked = requests.list();
       } catch (error) {
         return {
           ...base,
-          archives: records.map(entryOf),
+          archives: apart.map(entryOf),
           requests: [],
           unreadable: { reason: recordUnreadableReason(error), file: shown(requests.path), list: 'requests' },
         };
@@ -728,11 +893,20 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       const setting = scheduling();
       return {
         ...base,
-        archives: records.map(entryOf),
+        archives: apart.map(entryOf),
         requests: askingNow(asked, records).map((request) => requestOf(request, records)),
         // Any archive here: its import or removal would not run, and neither would Remove.
         ...(setting !== 'on' && records.length > 0 ? { notRunning: setting } : {}),
       };
+    },
+
+    sourceImports() {
+      try {
+        return sourceImportsOf(state.list());
+      } catch {
+        // The record cannot be read: the Archives row says so; a source's card shows no imports.
+        return [];
+      }
     },
 
     present() {
@@ -750,14 +924,16 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         attention.push({ kind: 'unreadable', reason: recordUnreadableReason(error) });
       }
       for (const record of records) {
-        if (record.status === 'stopped') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
+        // The owner's own Stop is not something that needs them.
+        if (record.status === 'stopped' && record.stop?.code !== 'stopped_by_owner') attention.push({ kind: 'stopped', id: record.archive_id, name: record.label });
       }
       // An import or a removal the scheduler will never run, and the setting why.
       const setting = scheduling();
       if (setting !== 'on' && stuck(records)) attention.push({ kind: 'scheduler', setting });
       const counted = new Map<string, { items: number; held: number }>();
       for (const record of records) {
-        if (record.status === 'removing') continue;
+        // An import of a source keeps its items in the source: the source's card counts them.
+        if (record.status === 'removing' || record.target) continue;
         const tally = counts(record);
         if (tally) counted.set(record.archive_id, tally);
         else attention.push({ kind: 'counts', id: record.archive_id, name: record.label });
@@ -782,10 +958,12 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
         const held = [...counted.values()].reduce((sum, tally) => sum + tally.held, 0);
         if (held > 0) attention.push({ kind: 'held', count: held, model });
       }
+      // Imports of a source are that source's card's, not the Archives row's.
+      const apart = records.filter((record) => !record.target);
       return {
-        archives: records.length,
+        archives: apart.length,
         // Nothing reads as importing while this computer's settings keep it from running.
-        importing: setting === 'on' && records.some((record) => record.status === 'importing' || record.status === 'removing'),
+        importing: setting === 'on' && apart.some((record) => record.status === 'importing' || record.status === 'removing'),
         ...(attention.length > 0 ? { attention } : {}),
       };
     },

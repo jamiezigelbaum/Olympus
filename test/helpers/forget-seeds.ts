@@ -31,6 +31,7 @@ import { tierMigrationReportDir, tierMigrationStatePath } from '../../src/worker
 import { TierLedger, tierLedgerPathForStore } from '../../src/workers/classification/tier-ledger.ts';
 import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } from '../../src/workers/source-scheduler-state.ts';
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../../src/workers/file-extraction/job-store.ts';
+import { defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
 
 export interface SeededSource {
@@ -540,6 +541,46 @@ export const SEEDED_FILES: readonly SeededFile[] = [
       if (!existsSync(path)) return 0;
       return (JSON.parse(readFileSync(path, 'utf8')) as { sources: Array<{ source_id: string }> }).sources
         .filter((entry) => entry.source_id === source.source_id).length;
+    },
+  },
+  {
+    stepId: 'archive-imports-of-source',
+    mine: MINE,
+    other: OTHER,
+    path: (layout) => defaultArchiveImportStatePath(layout.env),
+    seed(layout) {
+      const record = (archiveId: string, target?: SeededSource) => ({
+        archive_id: archiveId,
+        format: 'mbox',
+        provider: 'synthetic',
+        family: 'email',
+        label: 'SYNTHETIC export.mbox',
+        root_path: '/synthetic',
+        root_identity: { dev: '1', ino: '2' },
+        chosen_rel_path: 'export.mbox',
+        files: [{ rel_path: 'export.mbox', size: 3 }],
+        manifest_sha256: 'e'.repeat(64),
+        status: 'imported',
+        created_at: APPROVED_AT,
+        updated_at: APPROVED_AT,
+        findings: { gaps: {}, skipped: {}, samples: [] },
+        ...(target ? { target: { source_id: target.source_id, slot: '1' } } : {}),
+      });
+      // Two imports that are inputs of the two sources, and one that stays under Archives.
+      writeJson(defaultArchiveImportStatePath(layout.env), {
+        version: 1,
+        archives: [
+          record('11111111-1111-4111-8111-1111111111a1', MINE),
+          record('11111111-1111-4111-8111-1111111111a2', OTHER),
+          record('11111111-1111-4111-8111-1111111111a3'),
+        ],
+      });
+    },
+    left(layout, source) {
+      const path = defaultArchiveImportStatePath(layout.env);
+      if (!existsSync(path)) return 0;
+      return (JSON.parse(readFileSync(path, 'utf8')) as { archives: Array<{ target?: { source_id: string } }> }).archives
+        .filter((entry) => entry.target?.source_id === source.source_id).length;
     },
   },
   {

@@ -22,6 +22,7 @@ import {
   ARCHIVE_BROWSE_TOOL_NAME,
   ARCHIVE_DECLINE_TOOL_NAME,
   ARCHIVE_REMOVE_TOOL_NAME,
+  ARCHIVE_STOP_TOOL_NAME,
   COMPUTER_HOST_TOOL_NAMES,
   COMPUTER_META_KEY,
   DASHBOARD_TOOL_NAME,
@@ -76,10 +77,11 @@ describe('the panel\'s tool lists', () => {
       ARCHIVE_APPROVE_TOOL_NAME,
       ARCHIVE_DECLINE_TOOL_NAME,
       ARCHIVE_REMOVE_TOOL_NAME,
+      ARCHIVE_STOP_TOOL_NAME,
     ]);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(UNPAIR_SOURCE_TOOL_NAME);
     expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(OPEN_UNREADABLE_FILE_TOOL_NAME);
-    for (const name of [ARCHIVE_BROWSE_TOOL_NAME, ARCHIVE_APPROVE_TOOL_NAME, ARCHIVE_DECLINE_TOOL_NAME, ARCHIVE_REMOVE_TOOL_NAME]) {
+    for (const name of [ARCHIVE_BROWSE_TOOL_NAME, ARCHIVE_APPROVE_TOOL_NAME, ARCHIVE_DECLINE_TOOL_NAME, ARCHIVE_REMOVE_TOOL_NAME, ARCHIVE_STOP_TOOL_NAME]) {
       expect(PANEL_TOOL_NAMES as readonly string[]).not.toContain(name);
     }
     for (const name of ['olympus_search', 'olympus_answer', 'olympus_source_status']) {

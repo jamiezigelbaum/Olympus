@@ -603,6 +603,7 @@ export const DASHBOARD_ARCHIVE_IMPORT_LOCAL_PATHS: readonly string[] = [
   '/dashboard/archive-import/approve',
   '/dashboard/archive-import/decline',
   '/dashboard/archive-import/remove',
+  '/dashboard/archive-import/stop',
 ];
 
 function isDashboardArchiveImportLocalRoute(request: Request): boolean {
@@ -666,6 +667,7 @@ function isDashboardControlRoute(request: Request): boolean {
     '/dashboard/archive-import/approve',
     '/dashboard/archive-import/decline',
     '/dashboard/archive-import/remove',
+    '/dashboard/archive-import/stop',
     '/dashboard/agents/pairing-code',
     '/dashboard/agents/keys',
     '/dashboard/agents/revoke',

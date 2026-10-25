@@ -6058,6 +6058,7 @@ export async function main(): Promise<void> {
     unreadableFiles: () => unreadableFiles,
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
     archives: () => archiveImportDashboard.view(),
+    sourceImports: () => archiveImportDashboard.sourceImports(),
   });
 
   const socketPath = prepareWorkerSocket();

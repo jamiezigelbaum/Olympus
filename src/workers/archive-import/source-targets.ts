@@ -59,6 +59,10 @@ export interface ArchiveSourceLane {
 export interface ArchiveSourceTarget {
   /** The source's id in the storage service's registry. */
   readonly sourceId: string;
+  /** What the owner calls the source ("Gmail"): the import sheet and the source's card say it. */
+  readonly label: string;
+  /** The source's card on the dashboard when its id there is not `sourceId`. */
+  readonly cardId?: string;
   /** The archive formats whose records this source's connector reads. */
   readonly formats: readonly string[];
   /**
@@ -70,6 +74,12 @@ export interface ArchiveSourceTarget {
   /** The export as an input of the source: its records in the live reader's shape. */
   input(archive: ArchiveConnectorInput): SourceConnectorInput;
   lane(account: Required<StorageAccount>, env: LayoutEnv): ArchiveSourceLane;
+  /**
+   * The day (YYYY-MM-DD) the source began reading this account live, when it
+   * knows: the card says which history its live input covers beside the one
+   * the imports do.
+   */
+  liveSince?(account: Required<StorageAccount>, env: LayoutEnv): string | undefined;
   /**
    * For a source whose account guard can bind another account over its
    * stores: the guard's own exclusive runner, held while an import resolves

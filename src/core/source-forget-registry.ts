@@ -26,6 +26,8 @@ import { defaultIngestionHealthStatePath, forgetIngestionHealthState } from './i
 import { defaultFileSourceScopeStatePath, forgetFileSourceScopeApproval } from './source-scope-approval.ts';
 import { defaultMailSourceScopeStatePath, forgetMailSourceScopeApproval } from './mail-source-scope.ts';
 import { forgetSourceAccountBindings, sourceAccountBindingsPath } from './source-account-binding.ts';
+import { forgetSourceArchiveImports } from '../workers/archive-import/forget.ts';
+import { defaultArchiveImportStatePath } from '../workers/archive-import/state.ts';
 import { defaultThisComputerStatePath, forgetThisComputerSources } from './this-computer.ts';
 import {
   defaultSourceDashboardHistoryDbPath,
@@ -336,6 +338,16 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     forget(account, context, { dryRun }) {
       const path = defaultThisComputerStatePath(context.handleRegistryPath);
       return line(path, 'connections', forgetThisComputerSources(context.handleRegistryPath, sourceIdsOf(account, context), { dryRun }));
+    },
+  },
+  {
+    // The imports that were inputs of this source: their items went with its stores; the record and the media files they bound stay outside.
+    id: 'archive-imports-of-source',
+    file: 'archive-imports.json',
+    modules: [],
+    forget(account, context, { dryRun }) {
+      const path = defaultArchiveImportStatePath(context.env);
+      return line(path, 'imports of this source', forgetSourceArchiveImports(context.env, sourceIdsOf(account, context), { dryRun }));
     },
   },
   {
