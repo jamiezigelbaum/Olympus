@@ -5684,11 +5684,33 @@ function readsJsonExport(entry, format) {
   }
   return notesJsonFormat(entry) === format;
 }
+function looksLikeEnex(head) {
+  const text2 = archiveHeadText(head).replace(/^\ufeff/, "");
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text2);
+  return start !== null && (start[1] ?? start[2]) === "en-export";
+}
 function isTelegramJsonHead(head) {
   if (!head || head.length === 0)
     return false;
   const text2 = new TextDecoder("utf-8").decode(head);
   return TELEGRAM_FULL_HEAD.test(text2) || TELEGRAM_CHAT_HEAD.test(text2);
+}
+function archiveSourceCards(formats = ARCHIVE_FORMATS) {
+  const cards = new Map;
+  for (const format of formats) {
+    if (!format.sourceCard)
+      continue;
+    const card = cards.get(format.sourceCard.id) ?? { id: format.sourceCard.id, label: format.sourceCard.label, formats: [] };
+    card.formats.push(format);
+    cards.set(card.id, card);
+  }
+  return [...cards.values()];
+}
+function archiveFormatForProvider(provider, formats = ARCHIVE_FORMATS) {
+  return formats.find((format) => format.provider === provider);
+}
+function isArchiveProvider(provider, formats = ARCHIVE_FORMATS) {
+  return provider === ARCHIVE_NEUTRAL_PROVIDER || archiveFormatForProvider(provider, formats) !== undefined;
 }
 function archiveCorpusId(trustDomain, family) {
   return `${trustDomain}.archive.${family}`;
@@ -5699,7 +5721,7 @@ function isArchiveCorpusId(corpusId, trustDomain) {
 function archiveImportFamilies(formats = ARCHIVE_FORMATS) {
   return [...new Set(formats.map((format) => format.family))];
 }
-var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, CONNECTOR_FACTORIES;
+var FROM_LINE, MBOX_ARCHIVE_FORMAT, WHATSAPP_DATE, WHATSAPP_TIME, WHATSAPP_FIRST_LINE, WHATSAPP_LINE_NOISE, WHATSAPP_NARROW_SPACES, WHATSAPP_TEXT_NAME, WHATSAPP_ARCHIVE_FORMAT, leniencyDecoder, WEEKDAYS, MONTHS, DAILY_NOTE_FILE, REFLECT_NOTES_LIST_KEY = "notes", REFLECT_BODY_KEYS, REFLECT_NOTE_KEYS, ROAM_TIME_KEYS, SCANNED, REFLECT_JSON_ARCHIVE_FORMAT, REFLECT_MARKDOWN_ARCHIVE_FORMAT, ROAM_JSON_ARCHIVE_FORMAT, EVERNOTE_ENEX_ARCHIVE_FORMAT, JSON_STRING, TELEGRAM_EXPORT_SECTIONS, TELEGRAM_FULL_HEAD, TELEGRAM_CHAT_HEAD, TELEGRAM_HTML_NAME, TELEGRAM_JSON_ARCHIVE_FORMAT, ARCHIVE_FORMATS, ARCHIVE_NEUTRAL_PROVIDER = "archive", CONNECTOR_FACTORIES;
 var init_archive_formats = __esm(() => {
   FROM_LINE = [70, 114, 111, 109, 32];
   MBOX_ARCHIVE_FORMAT = Object.freeze({
@@ -5760,6 +5782,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export in JSON (the .json file, or the .zip that holds it)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "reflect"))
   });
@@ -5770,6 +5793,7 @@ var init_archive_formats = __esm(() => {
     provider: "reflect",
     chooseHint: "a Reflect export as Markdown (the .zip file)",
     citationLabel: "Reflect",
+    sourceCard: Object.freeze({ id: "reflect.archive", label: "Reflect" }),
     probeNames: Object.freeze(["*, *, ????.md"]),
     detect: (probe) => detectFile(probe, (entry) => {
       if (!entry.members || /^roam/i.test(entry.name))
@@ -5790,8 +5814,25 @@ var init_archive_formats = __esm(() => {
     provider: "roam",
     chooseHint: "a Roam export in JSON (the .json file from Export All, or the .zip that holds it)",
     citationLabel: "Roam",
+    sourceCard: Object.freeze({ id: "roam.archive", label: "Roam" }),
     probeNames: Object.freeze(["*.json"]),
     detect: (probe) => detectFile(probe, (entry) => readsJsonExport(entry, "roam"))
+  });
+  EVERNOTE_ENEX_ARCHIVE_FORMAT = Object.freeze({
+    id: "evernote-enex",
+    label: "Evernote export (.enex)",
+    family: "note",
+    provider: "evernote",
+    chooseHint: "an Evernote export (the .enex file, or a folder of them)",
+    citationLabel: "Evernote",
+    sourceCard: Object.freeze({ id: "evernote.archive", label: "Evernote" }),
+    probeNames: Object.freeze(["*.enex"]),
+    detect(probe) {
+      if (probe.chosen.kind === "file")
+        return looksLikeEnex(probe.chosen.head) ? [""] : undefined;
+      const files = probe.children.filter((entry) => entry.kind === "file" && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head)).map((entry) => entry.relPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      return files.length > 0 ? files : undefined;
+    }
   });
   JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
   TELEGRAM_EXPORT_SECTIONS = Object.freeze([
@@ -5841,7 +5882,8 @@ var init_archive_formats = __esm(() => {
     REFLECT_JSON_ARCHIVE_FORMAT,
     REFLECT_MARKDOWN_ARCHIVE_FORMAT,
     ROAM_JSON_ARCHIVE_FORMAT,
-    TELEGRAM_JSON_ARCHIVE_FORMAT
+    TELEGRAM_JSON_ARCHIVE_FORMAT,
+    EVERNOTE_ENEX_ARCHIVE_FORMAT
   ]);
   CONNECTOR_FACTORIES = new Map;
 });
@@ -13317,7 +13359,8 @@ var init_credential_broker = __esm(() => {
     "whatsapp_business",
     "apple_messages",
     "reflect",
-    "roam"
+    "roam",
+    "evernote"
   ];
   CREDENTIAL_PROVIDERS = [
     ...PUBLIC_CREDENTIAL_PROVIDERS,
@@ -13684,6 +13727,25 @@ var init_credential_broker = __esm(() => {
         backendState: {
           kind: "archive_path",
           archiveRootAlias: "roam_archive",
+          readerWorker: "archive_import_reader",
+          contentBounds: "approved_archive_root",
+          backendLabel: "local_private:archive_import"
+        }
+      },
+      {
+        handle: "evernote.archive",
+        provider: "evernote",
+        sessionKind: "archive_path",
+        accountRole: "archive",
+        trustDomain: "internal",
+        allowedCapabilities: ["evernote.archive.import"],
+        scopes: [],
+        tokenEnvNames: [],
+        statusEnvNames: ["OLYMPUS_CREDENTIAL_EVERNOTE_ARCHIVE_READY"],
+        expiresInSeconds: 3600,
+        backendState: {
+          kind: "archive_path",
+          archiveRootAlias: "evernote_archive",
           readerWorker: "archive_import_reader",
           contentBounds: "approved_archive_root",
           backendLabel: "local_private:archive_import"
@@ -14143,6 +14205,10 @@ var DEFAULT_DROPBOX_CONTENT_EXTRACTION_STALL_HOURS = 6, DROPBOX_CONTENT_EXTRACTI
 var init_ingestion_throughput = __esm(() => {
   init_operation_error();
 });
+
+// src/core/whatsapp-notice.ts
+var WHATSAPP_UNOFFICIAL_CLIENT_NOTICE = "WhatsApp connects through an unofficial client. WhatsApp's terms don't allow third-party clients, and accounts have been restricted or banned for using them. Connect only if you accept that risk.";
+
 // src/workers/dashboard/scheduler-markers.ts
 var OPERATOR_PAUSED_SCHEDULER_MARKERS;
 var init_scheduler_markers = __esm(() => {
@@ -19578,7 +19644,7 @@ var init_public_source_capabilities = __esm(() => {
 });
 
 // src/workers/source-dashboard.ts
-var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS;
+var DASHBOARD_CONNECTION_REGISTRY_UNREADABLE_LABEL = "connection state unreadable", DASHBOARD_UNPAIR_STATE_UNREADABLE_LABEL = "unpair state unreadable", DASHBOARD_UNPAIR_INCOMPLETE_LABEL = "Unpair incomplete — manual cleanup required", DASHBOARD_UNSETTLED_CUSTODY_LABELS, DASHBOARD_CREDENTIAL_CONTENTION_KINDS, DASHBOARD_MANUAL_SYNC_SHOWN_MS, MIN_PROGRESS_WINDOW_MS, SAMPLE_RETENTION_MS, DASHBOARD_SENSITIVITY_TIERS, ARCHIVE_IMPORTS_CARD_ID = "archive.imports", DASHBOARD_SUPPORTED_SOURCES;
 var init_source_dashboard = __esm(() => {
   init_olympus_layout();
   init_google_handle_compatibility();
@@ -19648,6 +19714,153 @@ var init_source_dashboard = __esm(() => {
       }
     ]
   };
+  DASHBOARD_SUPPORTED_SOURCES = [
+    {
+      source_id: "gmail.email",
+      primary_corpus_id: "internal.email",
+      corpus_source_ids: ["gmail.email"],
+      ingestion_ledger_source_id: "email",
+      label: "Gmail",
+      provider: "gmail",
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "gmail" }
+    },
+    {
+      source_id: "google_drive.docs",
+      primary_corpus_id: "internal.drive.docs",
+      corpus_source_ids: ["google_drive.docs"],
+      ingestion_ledger_source_id: "google_drive",
+      label: "Google Drive",
+      provider: "google_drive",
+      family: "file",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "google-drive" }
+    },
+    {
+      source_id: "dropbox.files",
+      primary_corpus_id: "secure_local.dropbox.files",
+      corpus_source_ids: ["dropbox.files"],
+      ingestion_ledger_source_id: "dropbox",
+      label: "Dropbox",
+      provider: "dropbox",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "oauth",
+      connect_action: { kind: "oauth", source: "dropbox" }
+    },
+    {
+      source_id: "local.files",
+      primary_corpus_id: "secure_local.local.files",
+      corpus_source_ids: ["local.files"],
+      ingestion_ledger_source_id: "local_files",
+      label: "Files on this computer",
+      provider: "local_files",
+      family: "file",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      sync_name: { mid: "your files", start: "Your files", plural: true },
+      connect_action: { kind: "this_computer", source: "local.files" }
+    },
+    {
+      source_id: "archive.imports",
+      primary_corpus_id: "secure_local.archive.email",
+      corpus_source_ids: ["archive.imports"],
+      owns_corpus: (corpus) => corpus.corpus_id.split(".")[1] === "archive" || isArchiveProvider(corpus.provider),
+      ingestion_ledger_source_id: "archive_imports",
+      label: "Archives",
+      provider: ARCHIVE_NEUTRAL_PROVIDER,
+      family: "email",
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    },
+    {
+      source_id: "x.bookmarks",
+      primary_corpus_id: "internal.x.bookmarks",
+      corpus_source_ids: ["x.bookmarks"],
+      ingestion_ledger_source_id: "x",
+      label: "X bookmarks",
+      provider: "x",
+      family: "x",
+      trust_domain: "internal",
+      connect_kind: "oauth",
+      content_arrives_extracted: true,
+      connect_action: { kind: "oauth", source: "x" }
+    },
+    {
+      source_id: "telegram.messages",
+      primary_corpus_id: "internal.telegram.messages",
+      corpus_source_ids: ["telegram.messages"],
+      ingestion_ledger_source_id: "telegram",
+      label: "Telegram",
+      provider: "telegram",
+      family: "chat",
+      trust_domain: "internal",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages",
+      connect_action: {
+        kind: "guided_session",
+        source: "telegram",
+        instructions: [
+          "Telegram pairs with a phone-number login on this computer.",
+          "Ask your agent to start Telegram pairing; this card updates once the login completes."
+        ]
+      }
+    },
+    {
+      source_id: "whatsapp.personal.messages",
+      primary_corpus_id: "secure_local.whatsapp.messages",
+      corpus_source_ids: ["whatsapp.personal.messages"],
+      ingestion_ledger_source_id: "whatsapp",
+      label: "WhatsApp",
+      provider: "whatsapp_personal",
+      family: "chat",
+      trust_domain: "secure_local",
+      connect_kind: "pairing",
+      content_arrives_extracted: true,
+      raw_message_copies: "messages_and_media",
+      connect_action: {
+        kind: "guided_session",
+        source: "whatsapp",
+        instructions: [
+          "WhatsApp pairs by scanning a QR code from your phone (WhatsApp, then Linked devices).",
+          WHATSAPP_UNOFFICIAL_CLIENT_NOTICE,
+          "Ask your agent to start WhatsApp pairing; this card updates once the scan completes."
+        ]
+      }
+    },
+    {
+      source_id: "readwise.library",
+      primary_corpus_id: "internal.readwise.library",
+      corpus_source_ids: ["readwise.library"],
+      ingestion_ledger_source_id: "readwise",
+      label: "Readwise",
+      provider: "readwise",
+      family: "readwise",
+      trust_domain: "internal",
+      connect_kind: "api_token",
+      content_arrives_extracted: true,
+      connect_action: { kind: "api_key", source: "readwise" }
+    },
+    ...archiveSourceCards().map((card) => ({
+      source_id: card.id,
+      primary_corpus_id: archiveCorpusId("secure_local", card.formats[0].family),
+      corpus_source_ids: [],
+      owns_corpus: () => false,
+      ingestion_ledger_source_id: card.id,
+      public_source_id: ARCHIVE_IMPORTS_CARD_ID,
+      label: card.label,
+      provider: card.formats[0].provider,
+      family: card.formats[0].family,
+      trust_domain: "secure_local",
+      connect_kind: "local",
+      connect_action: { kind: "archive_import" }
+    }))
+  ];
 });
 
 // src/workers/google-connectors/gmail-live-control.ts

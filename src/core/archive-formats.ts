@@ -639,6 +639,44 @@ export const ROAM_JSON_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
   detect: (probe: ArchiveProbe) => detectFile(probe, (entry) => readsJsonExport(entry, 'roam')),
 });
 
+// --- Evernote export (.enex) ------------------------------------------------------
+
+/**
+ * Whether a file's first bytes are an Evernote export: XML whose root (or
+ * document type) is `en-export`, after the XML declaration, a byte order mark,
+ * comments and space.
+ */
+export function looksLikeEnex(head: Uint8Array | undefined): boolean {
+  const text = archiveHeadText(head).replace(/^\ufeff/, '');
+  const start = /^\s*(?:<\?xml[\s\S]*?\?>)?(?:\s*<!--[\s\S]*?-->)*\s*(?:<!DOCTYPE\s+([A-Za-z_][\w.:-]*)|<([A-Za-z_][\w.:-]*))/i.exec(text);
+  return start !== null && (start[1] ?? start[2]) === 'en-export';
+}
+
+/**
+ * Evernote's export: one `.enex` file (a notebook, or the notes chosen in
+ * "Export notes"), or a folder of them. Each note's attachments are inside the
+ * file, in base64, and become child items read on their own. A zip holding
+ * .enex files is not read; choosing one says what is.
+ */
+export const EVERNOTE_ENEX_ARCHIVE_FORMAT: ArchiveFormatDefinition = Object.freeze({
+  id: 'evernote-enex',
+  label: 'Evernote export (.enex)',
+  family: 'note',
+  provider: 'evernote',
+  chooseHint: 'an Evernote export (the .enex file, or a folder of them)',
+  citationLabel: 'Evernote',
+  sourceCard: Object.freeze({ id: 'evernote.archive', label: 'Evernote' }),
+  probeNames: Object.freeze(['*.enex']),
+  detect(probe: ArchiveProbe): readonly string[] | undefined {
+    if (probe.chosen.kind === 'file') return looksLikeEnex(probe.chosen.head) ? [''] : undefined;
+    const files = probe.children
+      .filter((entry) => entry.kind === 'file' && !isJunkArchiveMember(entry.name) && looksLikeEnex(entry.head))
+      .map((entry) => entry.relPath)
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return files.length > 0 ? files : undefined;
+  },
+});
+
 // --- Telegram Desktop export -----------------------------------------------------
 
 const JSON_STRING = String.raw`"(?:[^"\\]|\\.)*"`;
@@ -707,6 +745,7 @@ export const ARCHIVE_FORMATS: readonly ArchiveFormatDefinition[] = Object.freeze
   REFLECT_MARKDOWN_ARCHIVE_FORMAT,
   ROAM_JSON_ARCHIVE_FORMAT,
   TELEGRAM_JSON_ARCHIVE_FORMAT,
+  EVERNOTE_ENEX_ARCHIVE_FORMAT,
 ]);
 
 export function getArchiveFormat(formatId: string): ArchiveFormatDefinition | undefined {

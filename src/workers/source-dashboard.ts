@@ -1587,6 +1587,12 @@ export interface DashboardSupportedSourceDefinition {
   // keys rows by its own short source id, which is NOT always the provider —
   // WhatsApp is `whatsapp` there and `whatsapp_personal` here.
   ingestion_ledger_source_id: string;
+  /**
+   * The public source this card is part of, when its id is not one: an
+   * import-only source's card shows imports the public Archives source holds
+   * (`archive.imports`), and states that source's capabilities.
+   */
+  public_source_id?: string;
   label: string;
   provider: string;
   family: string;
@@ -1995,6 +2001,7 @@ export const DASHBOARD_SUPPORTED_SOURCES: DashboardSupportedSourceDefinition[] =
     corpus_source_ids: [],
     owns_corpus: () => false,
     ingestion_ledger_source_id: card.id,
+    public_source_id: ARCHIVE_IMPORTS_CARD_ID,
     label: card.label,
     provider: card.formats[0]!.provider,
     family: card.formats[0]!.family,
@@ -2918,7 +2925,7 @@ function sourceCardFromDefinition(
     provider: definition.provider,
     family: definition.family,
     trust_domain: trustDomain,
-    capabilities: renderPublicSourceCapabilityForDashboard(definition.source_id as V04PublicSourceId),
+    capabilities: renderPublicSourceCapabilityForDashboard((definition.public_source_id ?? definition.source_id) as V04PublicSourceId),
     ...(fileSourceScopeStatus !== undefined
       ? {
           scope_selection: {
