@@ -75,6 +75,7 @@ import { evaluateInbox, privateLinkIdsIn, privateNoteIn, type InboxObservation }
 import { commandJudge, judgeCheck, type Judge } from './judge.ts';
 import type { AgentConfig } from './machine-agent.ts';
 import { journeyChecks, type JourneyTrace } from './journey.ts';
+import { JOURNEYS } from './journeys.ts';
 import { layoutChecks, layoutFindings, layoutQualificationCheck, scoreLayoutRules } from './layout-rules.ts';
 import type { PlantedPicture } from './reviewer-plants.ts';
 import { buildInventory } from './explore-inventory.ts';
@@ -947,7 +948,12 @@ async function runJourneyLeg(run: Run, outDir: string): Promise<void> {
   if (options.skipJourneys) return;
   const only = options.onlyJourneys?.length ? ` --only ${sh(options.onlyJourneys.join(','))}` : '';
   const plants = options.reviewerPlants ? ' --plants' : '';
-  const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${plants}`, 2_400_000));
+  // A journey whose setup comes from a leg this run skipped is skipped too, and says so: its failure would be the run's, not the product's.
+  const skippedLegs = new Set([...(options.skipSuite ? ['suite'] : []), ...(options.skipInbox ? ['inbox'] : [])]);
+  const unmet = JOURNEYS.filter((journey) => (!options.onlyJourneys?.length || options.onlyJourneys.includes(journey.id)) && journey.needs?.some((leg) => skippedLegs.has(leg)));
+  for (const journey of unmet) run.add({ id: `journey.${journey.id}`, title: journey.title, status: 'skip', detail: `needs the ${journey.needs!.filter((leg) => skippedLegs.has(leg)).join(' and ')} leg, which this run skipped` });
+  const skip = unmet.length ? ` --skip ${sh(unmet.map((journey) => journey.id).join(','))}` : '';
+  const done = await run.phase('journeys', () => run.agent('journeys', `--out ~/rc/journeys${only}${skip}${plants}`, 2_400_000));
   const result = done.result;
   if (!result || !Array.isArray(result.traces)) {
     run.add({ id: 'journeys.ran', title: 'The journeys were walked in the owner\'s browser', status: 'fail', detail: `no result from the machine (exit ${done.code}): ${done.stderr.slice(-200)}` });

@@ -592,6 +592,18 @@ describe('visual baselines', () => {
     expect(() => selectJourneys(['no-such-journey'])).toThrow(/no-such-journey/);
     expect(() => selectJourneys([JOURNEYS[0]!.id, 'typo'])).toThrow(/typo/);
     expect(selectJourneys([JOURNEYS[0]!.id]).length).toBe(1);
+    expect(() => selectJourneys(undefined, ['typo'])).toThrow(/typo/);
+  });
+
+  test('a journey set up by another leg names it, and a run can skip it', () => {
+    // 2026-10-25: a qualification run skipped the suite and the Inbox leg, and these two failed for want of what those legs set up.
+    expect(JOURNEYS.find((journey) => journey.id === 'agent-never-expired')!.needs).toEqual(['suite']);
+    expect(JOURNEYS.find((journey) => journey.id === 'inbox-delete-one')!.needs).toEqual(['inbox']);
+    const ids = selectJourneys(undefined, ['agent-never-expired', 'inbox-delete-one']).map((journey) => journey.id);
+    expect(ids).not.toContain('agent-never-expired');
+    expect(ids).not.toContain('inbox-delete-one');
+    expect(ids.length).toBe(JOURNEYS.length - 2);
+    expect(selectJourneys(['agent-never-expired', 'no-public-tier'], ['agent-never-expired']).map((journey) => journey.id)).toEqual(['no-public-tier']);
   });
 
   test('the mask makes the parts that vary between runs the same text, in the page and in plain strings', () => {

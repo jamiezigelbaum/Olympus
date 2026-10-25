@@ -167,6 +167,7 @@ export const JOURNEYS: readonly Journey[] = [
     id: 'agent-never-expired',
     title: 'An agent that connected and worked is listed as connected, never expired',
     source: 'bug found by hand: connecting an agent showed "expired" after it worked (#399)',
+    needs: ['suite'],
     steps: [
       {
         name: 'Open the Agents page',
@@ -286,6 +287,7 @@ export const JOURNEYS: readonly Journey[] = [
     title: 'Deleting one Inbox answer removes that answer and only that one',
     source: 'owner test plan: the private-answers Inbox',
     mutates: true,
+    needs: ['inbox'],
     steps: [
       { name: 'Open the Inbox page', do: { open: 'private' }, expect: [{ count: { css: '[data-pa-question]' }, atLeast: 2 }] },
       {
@@ -461,9 +463,9 @@ export const JOURNEYS: readonly Journey[] = [
 export const journeyIds = (): string[] => JOURNEYS.map((journey) => journey.id);
 
 /** The journeys for a run, in order: those that leave the install as it was first, then those that change it. */
-export function selectJourneys(only?: readonly string[]): Journey[] {
-  const unknown = (only ?? []).filter((id) => !JOURNEYS.some((journey) => journey.id === id));
+export function selectJourneys(only?: readonly string[], skip: readonly string[] = []): Journey[] {
+  const unknown = [...(only ?? []), ...skip].filter((id) => !JOURNEYS.some((journey) => journey.id === id));
   if (unknown.length > 0) throw new Error(`unknown journey id(s): ${unknown.join(', ')}; known: ${journeyIds().join(', ')}`);
-  const chosen = only === undefined || only.length === 0 ? [...JOURNEYS] : JOURNEYS.filter((journey) => only.includes(journey.id));
+  const chosen = (only === undefined || only.length === 0 ? [...JOURNEYS] : JOURNEYS.filter((journey) => only.includes(journey.id))).filter((journey) => !skip.includes(journey.id));
   return [...chosen.filter((journey) => journey.mutates !== true), ...chosen.filter((journey) => journey.mutates === true)];
 }

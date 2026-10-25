@@ -84,6 +84,11 @@ export interface Journey {
   steps: JourneyStep[];
   /** Changes the install's state: runs after the journeys that do not, and the screens are captured before it. */
   mutates?: boolean;
+  /**
+   * Legs of the run that set up what it checks (an agent that connected and worked; answered private questions in the Inbox). A run
+   * that skips one of them (`--skip-suite`, `--skip-inbox`) skips the journey and says why, rather than failing it.
+   */
+  needs?: Array<'suite' | 'inbox'>;
   allowConsole?: RegExp[];
   allowRequests?: Array<{ url: RegExp; status?: number }>;
 }
