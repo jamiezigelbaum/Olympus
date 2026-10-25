@@ -116,10 +116,12 @@ extraction. Live items are unchanged.
   Live capture periods cannot replace this: the bridge receives missed
   messages after a reconnect with their original times, and a full queue
   drops a message while capture is running.
-  - The export's times carry no zone. The input aligns them on the overlap:
-    the whole-quarter-hour offset under which most keys match is used; when
-    none fits, this computer's zone is used and reported as assumed, as
-    today.
+  - The export's times carry no zone. The input chooses a time zone, not
+    an offset, and converts each line with the rules for its own date, so
+    daylight-saving changes are followed. It tries this computer's zone
+    first, then the zones whose offset on the overlap's dates fits, and
+    keeps the one under which most keys match; when none matches, this
+    computer's zone is used and reported as assumed, as today.
   - A message the two sides show differently can still appear twice: a
     contact renamed between export and capture, a caption the bridge dropped
     (until the caption fix), a message the bridge never wrote. The input
