@@ -488,10 +488,11 @@ order:
    lost in the move costs nothing. The pass runs at boot, before any worker has
    the stores open, but another connection may still hold one (a leftover
    process, a command-line tool): the checkpoint waits at most 2 s for it, and
-   the first database that is busy, or whose frames could not all be
-   checkpointed, ends the fold. The account then stays where it is this boot
-   (`log_not_folded`) and moves at a later boot, once the other connection is
-   gone; not a Needs you row. A file that is not a database is left alone when
+   no longer than what is left of the boot's deadline (see Time), and the first
+   database that is busy ends the fold. The account then stays where it is this
+   boot (`busy`) and moves at a later boot, once the other connection is gone;
+   not a Needs you row. A database whose frames could not all be checkpointed
+   for another reason is `log_not_folded`. A file that is not a database is left alone when
    none of its logs holds bytes (it moves as the opaque file it is and the
    check records it `damaged`); with a log that holds bytes it is
    `log_not_folded` too. The checkpoint is the only write the pass makes to a
@@ -501,7 +502,11 @@ order:
    `-wal` and `-journal` together exceed 64 MiB, or that would take the boot past
    128 MiB read in total, or whose estimated time at 10 MiB/s does not fit in what
    is left of the 15 s check budget, is recorded `not_checked`; one that does not
-   open is `damaged`. This only records and never blocks. Reading a database may
+   open is `damaged`. This only records and never blocks, with one exception: a
+   database another connection has locked (an exclusive writer, say) is not
+   worked around. Opening it waits at most 2 s, no longer than what is left of
+   the deadline, and is never tried again in another mode; the account stays
+   where it is this boot (`busy`), and the other databases are not waited for. Reading a database may
    make its `-shm`, so the account is looked at again, and the plan names what is
    there; a log with bytes in it again (something wrote after the fold, so the
    folded file is no longer the whole database) is `log_not_folded` too. Then
@@ -515,12 +520,16 @@ order:
 4. **Rename** every planned file into the folder. Nothing is copied, so each is
    atomic and instant whatever its size, and none replaces what is there: a file
    is hard-linked to its new name (which fails with `EEXIST` where `rename(2)`
-   would replace what another process put there since the look) and then unlinked
-   from the old one; a kill between the two leaves one inode under two names,
-   which the next boot finishes. A folder is renamed, which the kernel refuses
-   onto a non-empty folder or a file. Residual: `rename(2)` of a folder replaces
-   an EMPTY folder that appeared in the instant since the look (it holds nothing
-   to lose, and the planned folder takes its place). A file system that makes no
+   would replace what another process put there since the look), the folder that
+   now holds the new name is fsynced, and only then is the old name unlinked: at
+   no moment can a power failure find the file with no name that survives it.
+   A kill between the link and the unlink leaves one inode under two names, which
+   the next boot finishes the same way (it fsyncs the folder of the name that
+   stays before it removes the other); going back is the same, the other way. A
+   folder is renamed, which the kernel refuses onto a non-empty folder or a file,
+   and both of its parents are fsynced right after. Residual: `rename(2)` of a
+   folder replaces an EMPTY folder that appeared in the instant since the look (it
+   holds nothing to lose, and the planned folder takes its place). A file system that makes no
    hard links (the link answers `EPERM`, `ENOTSUP`, `EOPNOTSUPP`, `ENOSYS` or
    `EMLINK`) keeps the account where it is, `no_hard_links`, with what had moved
    put back and the reason recorded; no other way of moving a file is tried,
@@ -528,14 +537,16 @@ order:
    destination. Not a Needs you row. Before each rename the destination's
    folders are checked for links again.
    Every folder the move makes is fsynced with its parent as it is made, and after
-   the last rename the folders each file left and went to are fsynced, before the
-   registry records anything that depends on the renames.
+   the last rename the folders each file left (the unlinks) and went to are fsynced
+   again, before the registry records anything that depends on the renames.
 5. **Verify.** Each destination has the planned `(dev, ino, size)`, then each
    database that opened before opens and its schema reads (read-only; a database
    with no `-wal` beside it, which macOS's SQLite will not open read-only, is
    opened writable but query-only, and only when no write waits outside its file,
    because closing a writable connection merges one). A failure undoes the
-   move. A file that is in neither place is a failure, and so is a `-wal` or
+   move; a database another program holds at that moment (`busy`, same wait) is
+   not a fault of the move: everything goes back as a skip, with no Needs you row.
+   A file that is in neither place is a failure, and so is a `-wal` or
    `-journal` that held bytes when the plan was made: that is committed data not
    yet in its database file, so only a `-shm` (rebuilt from the log on the next
    open) and a log that was empty may be missing. (This build plans only empty
@@ -560,8 +571,13 @@ plan (reported stuck, and a Needs you row), and the plan is cleared only when
 every planned file is at its old place, whoever put it there: a copy restored
 from a backup lets the undo finish. A plan this build did not write is left
 alone and reported stuck. An account that ended in a move back is not started
-again in the same boot. If the account's files are deleted while a plan is part
-way, the plan is dropped. The re-placement of empty accounts, which runs first at
+again in the same boot. A plan is dropped only by the
+Delete that took the account's files, which removes the plan from the registry
+(under the owner lock, after the files, so a Delete that stops in between leaves a
+plan the next boot reports and a second Delete clears). Without a Delete, a plan
+whose every file is in neither place is the same loss as any other file lost: the
+account stays closed with its plan and a Needs you row, and nothing is made in its
+place. The re-placement of empty accounts, which runs first at
 boot, skips an entry with a plan pending: a crash after the last rename leaves
 an entry that lists no corpus and no file at a legacy place, which is not an
 empty account.
@@ -581,25 +597,50 @@ worst case is arithmetic. It assumes a disk no slower than 10 MiB/s sequential
 and 50 ms per fsync (an old external drive).
 
 - Starting an account, a plan left part way included, stops at 45 s from the
-  pass's start; accounts not reached go on at the next boot.
+  pass's start; accounts not reached go on at the next boot. That deadline is
+  also the boot's wait for other connections: every open and checkpoint waits at
+  most 2 s, and no longer than what is left of it. A busy database ends its
+  account's pass for this boot, and is never retried in another mode, so an
+  account waits once, and an account started at 44.9 s waits almost not at all.
 - Folding the logs reads each log once and writes it once into its database:
   the account's logs are capped at 32 MiB (`log_large`), so at most 64 MiB of
   transfer, 6.4 s, and two fsyncs per database (the checkpoint's own), at most
   38 databases (an imported-archive account with three families), 3.8 s. The
-  wait for another connection is 2 s, once: the first busy database ends the
-  fold and the account waits for the next boot.
+  wait for another connection is at most 2 s, once, as above.
 - `quick_check` reads at most 64 MiB per database and 128 MiB per boot
   (12.8 s), and only if the estimate fits the 15 s check budget, decided
   before it starts. After the fold the logs are empty, so the opens of the
   checks and of the verify read no log.
 - An account has at most 152 files to move (an imported-archive account with
-  three families; 52 for any other source): a link and an unlink each, 15 s if
-  every metadata operation takes 50 ms, and about 12 folders to fsync, 0.6 s.
+  three families; 52 for any other source): a link, a folder fsync and an
+  unlink each, 22.8 s if every metadata operation takes 50 ms, and about 12
+  folders to fsync at the end, 0.6 s.
 
 The worst account starts at 44.9 s, folds its logs in 10.2 s (55.1 s), spends
-12.8 s on `quick_check` (67.9 s), renames (83.5 s), and verifies with a
-handful of opens of empty logs: about 85 s, inside 180 s. A move put back costs
-the renames again, 15.6 s more.
+12.8 s on `quick_check` (67.9 s), renames (91.3 s), and verifies with a
+handful of opens of empty logs: about 92 s, inside 180 s. A move put back costs
+the renames again, 23.4 s more.
+
+**What the move does not defend against.** Two things, on purpose, because they
+need a program outside what Olympus controls or one that can already do worse:
+
+- *A program that is not Olympus writing an Olympus store during the move.* Every
+  Olympus writer is excluded by the owner lock the migrating worker holds through
+  the whole pass: the worker holds it for its life, a command-line command takes
+  it or asks the running worker to do the work (`core/cli-via-worker.ts`), and
+  every operator script holds it for its run (`withDataOwnerLock`,
+  `runUnderDataOwnerLock`). The store-open guard lists the one program that runs
+  beside the engine, the release check's machine agent, and it opens read-only.
+  A program that is not Olympus and writes an Olympus store at boot, for example
+  an SQLite connection that commits into a new `-wal` after the pass has looked
+  and stays open, is not excluded by anything: looking once more cannot close
+  that window, and the fold, the second look and the check at the end make only
+  the usual cases (a leftover process, a log left by a crash) safe.
+- *A folder on the way swapped for a link in the instant between its check and
+  the rename.* Every folder on the way is checked for being a link when the plan
+  is made and again before each file, and each destination's identity is checked
+  at the end. Swapping one in that instant takes a process that can already write
+  and remove everything the move touches, so it gains no access it did not have.
 
 **What stays put.** Settings stay in the shared config files (see Layout). The
 X usage ledger stays shared; only X's reconcile state moves. Legacy pre-1.0
