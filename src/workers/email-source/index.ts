@@ -274,7 +274,7 @@ import {
 } from '../connector-store/index.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { connectThisComputerSource, disconnectThisComputerSource, readThisComputerHandles } from '../../core/this-computer.ts';
-import { dataDeleteCustody, deleteOlympusDataWithCustody, forgetSourceRowsAgain, requireSource, type DataDeleteWithCustodyResult, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { dataDeleteCustody, deleteOlympusDataWithCustody, requireSource, type DataDeleteWithCustodyResult, type LifecyclePathContext } from '../../data-lifecycle.ts';
 import type { ModelKeyReloadRequest } from '../../core/model-key-reload.ts';
 import { WORKER_CLI_OPERATIONS, WORKER_CLI_ROUTE_PREFIX, type WorkerCliOperation } from '../../core/cli-via-worker.ts';
 import { carriesRelayMarker } from '../../core/remote-access.ts';
@@ -2455,10 +2455,10 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
         // takes the source out of the scheduler before any store byte goes.
         // Like Disconnect it refuses while a read for the source runs and runs
         // under the grant lock, so a concurrent Connect cannot interleave. The
-        // worker holds the source's SQLite files open, so after the delete it
-        // is restarted to reopen them; with no supervisor to do that the route
-        // refuses BEFORE deleting rather than leave stale handles serving
-        // deleted rows.
+        // worker holds the source's SQLite files open, so it marks the account
+        // `deleting` and restarts, and the boot removes the files before
+        // anything opens them; with no supervisor to restart it the route
+        // refuses before marking anything.
         if (request.method === 'POST' && url.pathname === '/dashboard/delete-source-data') {
           return await withDashboardGrantMutation(async () => {
           if (!sourceDashboard) {
@@ -2484,7 +2484,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
             throw new EmailSourceWorkerError(
               500,
               'delete_failed',
-              'Olympus could not finish deleting this source\'s indexed data. Retry; the worker is restarting to reopen its stores.',
+              'Olympus could not delete this source\'s indexed data; it is still there. Retry.',
             );
           }
           return json({
@@ -3703,7 +3703,7 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
       throw new EmailSourceWorkerError(
         500,
         'delete_failed',
-        'Olympus could not finish deleting this source\'s indexed data. Retry; the worker is restarting to reopen its stores.',
+        'Olympus could not delete this source\'s indexed data; it is still there. Retry.',
       );
     }
     return { ...outcome.result, worker_restarting: outcome.restarting };
@@ -3714,10 +3714,11 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
    * custody rule of the CLI's `data delete --source`: Disconnect (or Unpair)
    * first. The one delete the dashboard's "Delete source data" and the CLI,
    * while Olympus runs, both go through. The worker holds the source's SQLite
-   * files open, so after a real delete it is restarted to reopen them; with no
-   * supervisor to do that this refuses BEFORE deleting rather than leave stale
-   * handles serving deleted rows. A dry run changes nothing, so it needs
-   * neither the restart nor an idle source.
+   * files open, so a real delete forgets the account's shared rows, marks it
+   * `deleting` and restarts the worker, whose boot removes its files before
+   * anything mounts (data-lifecycle.ts, `deleteMarkedAccounts`); with no
+   * supervisor to restart it this refuses before changing anything. A dry run
+   * changes nothing, so it needs neither the restart nor an idle source.
    */
   async function deleteSourceDataInWorker(
     sourceId: string,
@@ -3794,34 +3795,18 @@ export function createEmailSourceWorker(options: EmailSourceWorkerOptions = {}):
           throw new EmailSourceWorkerError(409, 'delete_unavailable', 'Capture has not confirmed it stopped, so Olympus did not delete anything. Retry once it has.');
         }
       }
-      let deleted: DataDeleteWithCustodyResult | undefined;
-      let failure: unknown;
+      // This worker holds the account's stores open, so it removes nothing:
+      // the account is marked `deleting` (the storage service opens none of its
+      // files from here on) and the restart removes it at boot, before anything
+      // mounts (deleteMarkedAccounts). A delete refused or failed before the mark
+      // leaves the account as it was, with nothing to reopen.
+      let deleted: DataDeleteWithCustodyResult;
       try {
-        deleted = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext });
+        deleted = deleteOlympusDataWithCustody({ ...custodyInput, ...pathContext, applyAtRestart: true });
       } catch (error) {
-        failure = error;
+        return { ok: false as const, error, restarting: false };
       }
-      // Whatever the delete did, some stores may already be gone: the
-      // worker reopens them either way. After a delete that went through, it
-      // repeats the source's forget steps once the worker has stopped: until
-      // then a dashboard poll reads the deleted stores through handles still
-      // open and records their counts again, and the watch pass can queue
-      // matches from them.
-      const reload: ModelKeyReloadRequest | undefined = deleted
-        ? {
-            beforeExit: () => {
-              try {
-                forgetSourceRowsAgain({ sourceId, ...pathContext });
-              } catch {
-                // The delete already forgot these rows; a repeat that fails
-                // must not keep the worker from restarting.
-                console.error(`Olympus could not repeat ${sourceId}'s forget steps before the restart; run the delete again to clear any rows written back.`);
-              }
-            },
-          }
-        : undefined;
-      const restarting = restart.request(reload);
-      return deleted ? { ok: true as const, result: deleted, restarting } : { ok: false as const, error: failure, restarting };
+      return { ok: true as const, result: deleted, restarting: restart.request() };
     });
   }
 

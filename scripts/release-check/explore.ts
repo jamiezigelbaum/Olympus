@@ -23,7 +23,7 @@
  */
 import { kindOf, type ControlKind, type SeedId } from './explore-kinds.ts';
 import type { InventoryControl } from './explore-inventory.ts';
-import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
+import { screenshotWithin, type ElementInfo, type JourneyDriver, type JourneyTrace, type StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
 import { pagesChecks, type PagesOptions, type PagesResult } from './explore-pages.ts';
 import { BLANK_WINDOW } from './probe.ts';
@@ -46,6 +46,8 @@ export interface PanelControl {
   openKey?: string;
   /** The heading of the section the control is in. */
   section?: string;
+  /** Marked busy (aria-busy): its own words say what it is doing ("Checking…" while a sync runs). */
+  busy?: boolean;
 }
 
 /** A control of the panel outside the Sources section (Needs you, Privacy, Models, On this computer). */
@@ -109,7 +111,7 @@ export interface ExploreResult {
   unlisted: Array<{ key: string; label: string; rowName: string; pressed: boolean }>;
   /** The panel's controls outside the Sources section, pressed once from the first state produced. */
   sections?: SectionControl[];
-  /** The engine had stopped answering after the Sources crawl and was restarted so the other pages could be crawled. */
+  /** The engine had stopped answering after the other pages' crawl and was restarted so the Sources section could be crawled. */
   engineRestart?: { ok: boolean; ms: number; detail: string };
   summary: { listed: number; found: number; pressed: number; missed: number; unlisted: number; presses: number };
   /** Sources a seed was meant to drive and could not bring to the state: the machine claims to drive them, so this blocks. */
@@ -154,7 +156,8 @@ export interface PressContext {
   seed: SeedId;
   control: PanelControl;
   kind: ControlKind;
-  before: { keys: string[]; seeded: string[]; rows: Record<string, string>; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
+  /** `loaded`: the controls on the fresh page this press started from, before anything on its path was pressed. */
+  before: { keys: string[]; loaded: string[]; rows: Record<string, string>; text: string; open: Array<{ key: string; open: boolean; text?: string }> };
   after: { controls: PanelControl[]; text: string; open: Array<{ key: string; open: boolean; text?: string }>; url: string };
   opened: string[];
 }
@@ -184,11 +187,12 @@ export const EXPECTATIONS: Partial<Record<ControlKind, (context: PressContext) =
   cancel: (c) => {
     const base = c.control.key.replace(/:no$/, '');
     const gone = !c.after.controls.some((control) => control.key === `${base}:yes`);
-    // Left as it was: the page offers the same controls as when it was seeded, apart from the question itself (a Cancel that did the action would swap Disconnect for Connect, or remove Delete).
+    // Left as it was: the page offers the same controls as on the fresh page the press started from, apart from the question itself (a Cancel that did the action would
+    // swap Disconnect for Connect, or remove Delete). Not the page as seeded: a source can move on by itself in the minutes between (a missing folder found again).
     // Only the source's own row is compared: another source's row can change under the page while it syncs.
     const row = c.control.rowName;
     const rest = (keys: string[]): string[] => keys.filter((key) => !key.startsWith(`${base}:`) && (c.before.rows[key] ?? row) === row).sort();
-    const was = rest(c.before.seeded);
+    const was = rest(c.before.loaded);
     const now = rest(c.after.controls.filter((control) => control.rowName === row).map((control) => control.key));
     const same = was.join('|') === now.join('|');
     // What changed is named, so a source that moved on by itself (a sync starting) can be told from a Cancel that acted.
@@ -246,7 +250,7 @@ export async function pageFindings(driver: JourneyDriver, controls?: PanelContro
   }
   const list = controls ?? await panelControls(driver);
   for (const control of list) {
-    if (control.visible && control.disabled && !control.reason) findings.push(`"${control.name || control.key}" is disabled and says nothing about why${control.rowName ? ` (${control.rowName})` : ''}`);
+    if (control.visible && control.disabled && !control.busy && !control.reason) findings.push(`"${control.name || control.key}" is disabled and says nothing about why${control.rowName ? ` (${control.rowName})` : ''}`);
   }
   const unfixed = await driver.probe('panel', `(() => {
     const rows = Array.from(document.querySelectorAll('li.row.need, li.row.source.need-row'));
@@ -533,12 +537,14 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       // A row can change between two loads (a source that was syncing has finished, and its menu has different entries): a control that is not found is looked for once more on another fresh load before it is failed.
       let controlsNow: Awaited<ReturnType<typeof panelControls>> = [];
+      let loaded: Awaited<ReturnType<typeof panelControls>> = [];
       let reachable = true;
       let control: Awaited<ReturnType<typeof panelControls>>[number] | undefined;
       const finalKey = item.path[item.path.length - 1]!;
       for (let attempt = 0; attempt < 2 && !control; attempt += 1) {
         await freshPage();
         await watch();
+        loaded = await panelControls(driver);
         reachable = true;
         // The path's earlier keys are pressed first (a menu opens, a question is asked); the last is the press being judged.
         for (const key of item.path.slice(0, -1)) {
@@ -563,8 +569,10 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
       }
       if (control.disabled) {
         // Pressed: a disabled control must do nothing, and has to say why (the page rule above); it counts as found, not as pressed.
-        steps.push({ n: steps.length + 1, name: `${control.name || control.key} (disabled)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a disabled control says why', actual: control.reason || 'it says nothing', ok: control.reason !== '', ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: control.reason ? [] : [`"${control.name}" is disabled and says nothing about why`] });
-        if (!control.reason) failedHere += 1;
+        // A busy control ("Checking…") says what it is doing in its own words.
+        const why = control.reason || (control.busy ? `it is busy and says so: "${control.name}"` : '');
+        steps.push({ n: steps.length + 1, name: `${control.name || control.key} (disabled)`, action: `look at ${control.rowName} "${control.name}"`, expected: 'a disabled control says why', actual: why || 'it says nothing', ok: why !== '', ms: now() - started, at: '/dashboard', consoleErrors: [], failedRequests: [], findings: why ? [] : [`"${control.name}" is disabled and says nothing about why`] });
+        if (!why) failedHere += 1;
         continue;
       }
       const beforeText = await panelText(driver);
@@ -600,7 +608,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
 
       const context: PressContext = {
         seed: seed.id, control, kind,
-        before: { keys: controlsNow.map((candidate) => candidate.key), seeded: base.map((candidate) => candidate.key), rows: Object.fromEntries(base.map((candidate) => [candidate.key, candidate.rowName])), text: beforeText, open: beforeOpen },
+        before: { keys: controlsNow.map((candidate) => candidate.key), loaded: loaded.map((candidate) => candidate.key), rows: Object.fromEntries(loaded.map((candidate) => [candidate.key, candidate.rowName])), text: beforeText, open: beforeOpen },
         after: { controls: afterControls, text: afterText, open: afterOpen, url: at },
         opened: openedWindows,
       };
@@ -668,7 +676,7 @@ export async function explore(options: ExploreOptions): Promise<ExploreResult> {
         consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests: requests.map((request) => `${request.text} -> ${request.status || 'failed'}${request.detail ? ` (${request.detail})` : ''}`), findings: [...new Set(findings)].slice(0, 10),
       };
       const shot = `explore-${seed.id}/${String(trace.n).padStart(2, '0')}.jpg`;
-      if (await driver.screenshot(shot).catch(() => false)) trace.screenshot = shot;
+      if (await screenshotWithin(driver, shot)) trace.screenshot = shot;
       steps.push(trace);
 
       // What the press opened gets its own turn: a question's Confirm and Cancel (keys that extend the control's own). What a confirmed press
@@ -761,11 +769,11 @@ export function exploreChecks(result: ExploreResult): CheckResult[] {
   if (result.engineRestart) {
     const restart = result.engineRestart;
     checks.push({
-      id: 'explore.engine-restart', title: 'The engine answered again for the other pages',
+      id: 'explore.engine-restart', title: 'The engine answered again for the Sources section',
       status: restart.ok ? 'warn' : 'fail',
       detail: restart.ok
-        ? `the engine had stopped answering after the Sources crawl (${restart.detail}); it was restarted in ${Math.round(restart.ms / 1000)} s so the other pages could be crawled`
-        : `the engine had stopped answering after the Sources crawl and could not be restarted: ${restart.detail}`,
+        ? `the engine had stopped answering after the other pages' crawl (${restart.detail}); it was restarted in ${Math.round(restart.ms / 1000)} s so the Sources section could be crawled`
+        : `the engine had stopped answering after the other pages' crawl and could not be restarted: ${restart.detail}`,
     });
   }
   if (result.pages) checks.push(...pagesChecks(result.pages));

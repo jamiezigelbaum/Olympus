@@ -28,8 +28,6 @@ const ALLOWED: Record<string, string> = {
   'src/workers/apple-messages/connector.ts': 'reads the macOS Messages chat.db, never an Olympus store',
   'src/core/messaging-pairing.ts': 'copies and writes the Telegram login a pairing proves (telegram.session), never an Olympus store',
   // X's state outside the stores.
-  'src/workers/x-bookmarks/live-control.ts':
-    'X\'s API usage ledger: the quota ledger, shared across accounts and kept when X is deleted, so it stays in the data folder and outside the account folder; not a tier store',
   'src/workers/x-bookmarks/reconcile-state.ts':
     'X\'s reconcile state: per-account state, not a tier store; it sits in the account\'s raw/ folder (beside the usage ledger for a legacy account) and goes with the account\'s folder on Delete',
   // Imported archives' state outside the stores.
@@ -81,6 +79,8 @@ const SHARED_FILES: Record<string, string> = {
   'src/workers/file-extraction/job-store.ts': 'the shared extraction job ledger',
   'src/workers/file-extraction/job-names.ts': 'the shared extraction job ledger, opened to clear or restore captured names',
   'src/workers/google-connectors/request-budget.ts': 'the shared Google request-budget ledger',
+  'src/workers/x-bookmarks/live-control.ts':
+    'X\'s API usage ledger: the quota ledger, kept when X is deleted, so it stays in the data folder; the deleted account\'s sync positions are forgotten',
 };
 
 const GUARDED_CLASSES = ['LocalConnectorStore', 'TierLedger', 'SecretLocationsIndex', 'TierSnifferStore'];

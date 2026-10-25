@@ -39,6 +39,8 @@ import { extractionJobsDbPaths, forgetExtractionJobs } from '../workers/file-ext
 import { forgetExtractionSpool } from '../workers/file-extraction/spool.ts';
 import { accountExtractionSpoolRoot } from './olympus-layout.ts';
 import { placedAccount } from './source-placement.ts';
+import { xBookmarksApiUsageDbPath } from './olympus-layout.ts';
+import { forgetXBookmarksSyncState } from '../workers/x-bookmarks/live-control.ts';
 import {
   forgetTierMigrationReports,
   forgetTierMigrationSelectors,
@@ -310,6 +312,16 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     forget(account, context, { dryRun }) {
       const path = tierMigrationStatePath(context.env);
       return line(path, 'migration batch selectors', forgetTierMigrationSelectors(path, sourceIdsOf(account, context), { dryRun }));
+    },
+  },
+  {
+    // The X usage ledger is the quota ledger and stays; only the deleted account's sync positions go.
+    id: 'x-bookmarks-sync-state',
+    file: 'x-bookmarks-api-usage.sqlite',
+    modules: ['src/workers/x-bookmarks/live-control.ts'],
+    forget(account, context, { dryRun }) {
+      const path = xBookmarksApiUsageDbPath(context.env);
+      return line(path, 'sync positions', forgetXBookmarksSyncState(path, sourceIdsOf(account, context), { dryRun }));
     },
   },
   {

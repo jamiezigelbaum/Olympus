@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
-import { deleteOlympusData, exportOlympusData, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { deleteOlympusData, exportOlympusData, lifecycleAccountFiles, type LifecyclePathContext } from '../src/data-lifecycle.ts';
 import { pinMessagingLegacy } from './fixtures/legacy-messaging-registry.ts';
 
 const SPOOL_LINE = JSON.stringify({
@@ -25,8 +25,8 @@ const SPOOL_LINE = JSON.stringify({
 });
 const SESSION_SECRET = 'whatsmeow device keys';
 
-function whatsappSpec() {
-  return lifecycleSourceSpecs().find((spec) => spec.sourceId === 'whatsapp.personal.messages')!;
+function whatsappFiles(context: LifecyclePathContext) {
+  return lifecycleAccountFiles('whatsapp.personal.messages', context);
 }
 
 // The installer's own list of state-dir artifacts
@@ -56,7 +56,7 @@ describe('lifecycle covers the raw WhatsApp state beside the connector store', (
     const homeDir = join(dir, 'home');
     try {
       pinMessagingLegacy({ HOME: homeDir });
-      const storePath = whatsappSpec().connectorStorePaths!({ homeDir })[0]!;
+      const storePath = whatsappFiles({ homeDir }).stores[0]!;
       mkdirSync(dirname(storePath), { recursive: true });
       const db = new Database(storePath, { create: true });
       db.exec('CREATE TABLE preserved (value TEXT NOT NULL);');
@@ -83,7 +83,7 @@ describe('lifecycle covers the raw WhatsApp state beside the connector store', (
     const destination = join(dir, 'export');
     try {
       pinMessagingLegacy({ HOME: homeDir });
-      const storePath = whatsappSpec().connectorStorePaths!({ homeDir })[0]!;
+      const storePath = whatsappFiles({ homeDir }).stores[0]!;
       mkdirSync(dirname(storePath), { recursive: true });
       const db = new Database(storePath, { create: true });
       db.exec('CREATE TABLE preserved (value TEXT NOT NULL);');
@@ -144,11 +144,11 @@ describe('lifecycle covers the raw WhatsApp state beside the connector store', (
       // rather than imported, so this stays a statement about paths and not a
       // second construction of the live store.
       // Its Personal tier store (P1c, created on first need) sits in the same state dir.
-      expect(whatsappSpec().connectorStorePaths!(context)).toEqual([
+      expect(whatsappFiles(context).stores).toEqual([
         join(stateDir, 'connector-store.db'),
         join(stateDir, 'connector-store-internal.db'),
       ]);
-      expect(whatsappSpec().rawStatePaths!(context)).toContain(join(stateDir, 'spool'));
+      expect(whatsappFiles(context).raw).toContain(join(stateDir, 'spool'));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

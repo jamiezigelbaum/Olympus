@@ -22,7 +22,7 @@ import type { ArchiveConnectorInput } from '../../src/core/archive-formats.ts';
 import { inputConnector, type IntakeObservingInput, type SourceRecordBuilder } from '../../src/core/source-inputs.ts';
 import { placeOwnedAccount, recordProviderAccount } from '../../src/core/source-storage.ts';
 import { createExclusiveRunner } from '../../src/workers/source-account-guard.ts';
-import { lifecycleSourceSpecs } from '../../src/data-lifecycle.ts';
+import { lifecycleAccountFiles } from '../../src/data-lifecycle.ts';
 import { SecretLocationsIndex } from '../../src/workers/classification/secret-locations.ts';
 import { TierLedger } from '../../src/workers/classification/tier-ledger.ts';
 import { secretLocationsPathForStore } from '../../src/workers/classification/tier-ledger-path.ts';
@@ -263,8 +263,7 @@ export function onePipelineHarness(cleanups: Array<() => void>, options: Fixture
   const exclusive = createExclusiveRunner();
 
   // The account's own stores, where the data lifecycle keeps them.
-  const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === FIXTURE_SOURCE_ID)!;
-  const [secureStorePath, internalStorePath] = spec.connectorStorePaths!({ homeDir: home });
+  const [secureStorePath, internalStorePath] = lifecycleAccountFiles(FIXTURE_SOURCE_ID, { homeDir: home }).stores;
   const storePaths = { internal: internalStorePath!, secure_local: secureStorePath! };
   mkdirSync(dirname(storePaths.internal), { recursive: true });
   const ledger = new TierLedger({ dbPath: tieredStoreSetLedgerPath(storePaths.secure_local) });

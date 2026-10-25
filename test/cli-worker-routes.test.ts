@@ -15,7 +15,7 @@ import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src
 import { connectThisComputerSource } from '../src/core/this-computer.ts';
 import { findRegistryAccount, readSourceRegistry } from '../src/core/source-registry.ts';
 import { dashboardQueryTokenFromWorkerAuthToken } from '../src/core/worker-auth.ts';
-import { deleteOlympusDataWithCustody, exportOlympusData, lifecycleDataRoot, lifecycleSourceSpecs, type LifecyclePathContext } from '../src/data-lifecycle.ts';
+import { deleteMarkedAccounts, deleteOlympusDataWithCustody, exportOlympusData, lifecycleAccountFiles, lifecycleDataRoot, type LifecyclePathContext } from '../src/data-lifecycle.ts';
 import { runTierCommand } from '../src/workers/classification/tier-cli.ts';
 import { writeConnectedHandleRegistry, readConnectedHandleRegistry, type ConnectedHandleRegistry } from '../src/workers/credential-broker/connected-handles.ts';
 import { createEmailSourceWorker } from '../src/workers/email-source/index.ts';
@@ -156,7 +156,7 @@ describe('what the CLI routes return', () => {
 
   test('data-export writes the export the CLI writes itself, where it is told', async () => {
     const dir = tempDir('olympus-cli-route-export-');
-    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!.connectorStorePaths!({})[0]!;
+    const store = lifecycleAccountFiles('x.bookmarks', {}).stores[0]!;
     mkdirSync(dirname(store), { recursive: true });
     writeFileSync(store, 'not a database');
     const viaRoute = join(dir, 'via-route');
@@ -271,7 +271,7 @@ describe('data-delete: the dashboard\'s delete, by id', () => {
       : { version: 1, handles: [] };
     writeConnectedHandleRegistry(registry, registryPath);
     const context = { homeDir, env: {} };
-    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === (options.sourceId ?? 'dropbox.files'))!.connectorStorePaths!(context)[0]!;
+    const store = lifecycleAccountFiles((options.sourceId ?? 'dropbox.files'), context).stores[0]!;
     mkdirSync(dirname(store), { recursive: true });
     writeFileSync(store, 'indexed');
     const restarts = { requested: 0 };
@@ -299,7 +299,7 @@ describe('data-delete: the dashboard\'s delete, by id', () => {
     return { registryPath, context, store, restarts, del };
   }
 
-  test('deletes a disconnected source\'s indexed data and asks the worker to reopen its stores', async () => {
+  test('marks a disconnected source\'s indexed data for deletion and restarts the worker, whose boot removes it', async () => {
     const f = fixture();
     const response = await f.del({ source_id: 'dropbox.files', dry_run: false });
     expect(response.status).toBe(200);
@@ -308,13 +308,16 @@ describe('data-delete: the dashboard\'s delete, by id', () => {
       mode: 'source',
       sourceId: 'dropbox.files',
       dryRun: false,
-      // The store, then the account folder that held it.
+      pending: true,
+      // The store, then the account folder that held it: removed at the restart.
       removed: [f.store, dirname(dirname(f.store))],
       custody: { requirement: 'source_disconnected', ready: true, observed: 'disconnected' },
       worker_restarting: true,
     });
-    expect(existsSync(f.store)).toBe(false);
+    expect(existsSync(f.store)).toBe(true);
     expect(f.restarts.requested).toBe(1);
+    deleteMarkedAccounts(f.context);
+    expect(existsSync(f.store)).toBe(false);
   });
 
   test('refuses, deleting nothing, a command for a data root this worker does not own, or for none', async () => {

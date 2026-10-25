@@ -16,7 +16,7 @@ import {
 } from '../src/core/data-owner-lock.ts';
 import { olympusDataRoot } from '../src/core/olympus-layout.ts';
 import { loadConfig } from '../src/core/config.ts';
-import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { OperationError } from '../src/core/operation-error.ts';
 import {
   WorkerUnreachableError,
@@ -336,7 +336,7 @@ describe('the CLI while Olympus runs', () => {
     const other = mkdtempSync(join(tmpdir(), 'olympus-cli-other-root-'));
     roots.push(other);
     await startHolder(sharedEnv({ XDG_DATA_HOME: other }));
-    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!.connectorStorePaths!({})[0]!;
+    const store = lifecycleAccountFiles('dropbox.files', {}).stores[0]!;
     mkdirSync(dirname(store), { recursive: true });
     writeFileSync(store, 'indexed');
     // Not a database: later tests in this home export and read its stores.
@@ -365,7 +365,7 @@ describe('the CLI while Olympus runs', () => {
     const localDir = join(out, 'local');
     const workerDir = join(out, 'worker');
     // One real store to snapshot.
-    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!.connectorStorePaths!({})[0]!;
+    const store = lifecycleAccountFiles('x.bookmarks', {}).stores[0]!;
     mkdirSync(dirname(store), { recursive: true });
     const seeded = new Database(store, { create: true });
     seeded.exec('CREATE TABLE rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL);');

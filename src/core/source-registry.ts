@@ -238,11 +238,67 @@ export function dropMovePlans(env: LayoutEnv, sourceIds: Iterable<string>): stri
 }
 
 /**
+ * Marks an account `deleting` (docs/design/source-storage.md, "Delete"): from
+ * this write on, the storage service opens none of its files, and the worker's
+ * next boot removes them before anything mounts (data-lifecycle.ts,
+ * `deleteMarkedAccounts`). Every entry of the source (its id or an old one) in
+ * the slot is marked; a source with files but no entry yet (never adopted) gets
+ * one, at the layout its files are in. Marking an account already `deleting`
+ * writes nothing.
+ */
+export function markSourceAccountDeleting(
+  env: LayoutEnv,
+  account: { sourceIds: readonly string[]; sourceId: string; slot: string; layout: SourceRegistryAccountLayout },
+): void {
+  const own = new Set(account.sourceIds);
+  const mine = (entry: SourceRegistryAccount): boolean => own.has(entry.source_id) && entry.slot === account.slot;
+  const current = readSourceRegistry(env).accounts.filter(mine);
+  if (current.length > 0 && current.every((entry) => entry.state === 'deleting')) return;
+  updateSourceRegistry(env, (registry) => {
+    const entries = registry.accounts.filter(mine);
+    for (const entry of entries) entry.state = 'deleting';
+    if (entries.length === 0) {
+      registry.accounts.push({
+        source_id: account.sourceId,
+        slot: account.slot,
+        state: 'deleting',
+        layout: account.layout,
+        corpus_ids: [],
+        created_at: new Date().toISOString(),
+      });
+    }
+  });
+}
+
+/**
+ * Drops the `deleting` entries of an account whose files and rows are gone, at
+ * a registry found before anything was removed: the account no longer exists,
+ * and a reconnect starts a new one, placed afresh (with a new `created_at`, so
+ * a picture hold of the old one is told apart). Writes nothing when there is
+ * none.
+ */
+export function dropDeletedAccountsAt(path: string, sourceIds: Iterable<string>, slot: string): string[] {
+  const own = new Set(sourceIds);
+  const done = (entry: SourceRegistryAccount): boolean => own.has(entry.source_id) && entry.slot === slot && entry.state === 'deleting';
+  if (!readSourceRegistryAt(path).accounts.some(done)) return [];
+  const dropped: string[] = [];
+  updateSourceRegistryAt(path, (registry) => {
+    registry.accounts = registry.accounts.filter((entry) => {
+      if (!done(entry)) return true;
+      dropped.push(entry.source_id);
+      return false;
+    });
+  });
+  return dropped;
+}
+
+/**
  * Forgets which provider account the accounts of these sources belong to: what
  * a Delete does once it has taken their files, as it forgets the account
- * binding. The entry itself stays until Delete runs on the registry (delivery
- * step 5), so without this a connect of another account would be refused over a
- * history that is no longer there. Writes nothing when no entry names one.
+ * binding. A Delete drops a marked entry with its files; this covers one it
+ * could not mark (an unreadable registry, repaired since) and Delete all, so a
+ * connect of another account is never refused over a history that is no longer
+ * there. Writes nothing when no entry names one.
  */
 export function forgetProviderAccounts(env: LayoutEnv, sourceIds: Iterable<string>): string[] {
   return forgetProviderAccountsAt(sourceRegistryPath(env), sourceIds);

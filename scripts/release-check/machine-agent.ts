@@ -41,7 +41,7 @@ import { capturePlants, captureScreens, CdpJourneyDriver, type CapturedScreen } 
 import type { PlantedPicture } from './reviewer-plants.ts';
 import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
-import { explore, pagesAccessibilityAudit, withPageAudits, type Seed } from './explore.ts';
+import { explore, pagesAccessibilityAudit, withPageAudits, type Accessibility, type Seed } from './explore.ts';
 import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
 import { explorePages, inboxAnswers } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
@@ -1391,6 +1391,9 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
   let opened: OpenedBrowser | undefined;
   let failure: string | undefined;
   let result: Awaited<ReturnType<typeof explore>> | undefined;
+  let pages: Awaited<ReturnType<typeof explorePages>> | undefined;
+  let pageAudit: ReturnType<typeof pagesAccessibilityAudit> | undefined;
+  let engineRestart: { ok: boolean; ms: number; detail: string } | undefined;
   try {
     opened = await openBrowser(browser!, 'chrome-profile-explore', EXPLORE_DEBUG_PORT, true);
     const driver = new CdpJourneyDriver({
@@ -1408,35 +1411,49 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
       },
     });
     await driver.start();
-    // The first opening link signs the browser in and Unlock opens the controls (the Private answers page offers it); the dashboard then opens in that session.
+    // The first opening link signs the browser in and Unlock opens the controls (the Private answers page offers it); the pages then open in that session.
     await driver.open('private');
     // The accessibility checker's script, put on the machine by the orchestrator beside the inventory; without it the audit is skipped and says so.
     const axePath = join(WORKDIR, 'axe.min.js');
     const axeSource = existsSync(axePath) ? readFileSync(axePath, 'utf8') : undefined;
-    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: startedAt + 45 * 60_000, ...(axeSource ? { axeSource } : {}) });
-    // The computer's other pages, in the same signed-in browser, after the Sources section (Lock ends the session, so it comes last).
-    // Each is audited as it loads, in the same accessibility check.
+    // The computer's other pages come first, on the install as the earlier phases left it. The Sources states that follow disconnect and
+    // delete, and a product failure there (an engine that stops answering) must not hide these pages. Each page is audited as it loads,
+    // in the same accessibility check. Lock ends the session, so the Sources crawl signs in again.
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
-      // An engine that stopped answering in the Sources crawl has already failed there. It is restarted the owner's way so the other
-      // pages are still crawled, and the restart is reported: one failure must not hide the rest.
-      try { await waitForEngine(30_000); } catch (error) {
-        const stopped = error instanceof Error ? error.message : String(error);
-        const restarted = await restartEngine(300_000);
-        result = { ...result, engineRestart: { ok: restarted.ok, ms: restarted.ms, detail: restarted.ok ? stopped : `${stopped}; ${restarted.detail ?? 'the restart failed'}` } };
-        if (restarted.ok) await driver.open('private');
-      }
-      const pageAudit = axeSource ? pagesAccessibilityAudit(axeSource) : undefined;
+      pageAudit = axeSource ? pagesAccessibilityAudit(axeSource) : undefined;
       // The Inbox is filled first, by asking the local model as the owner would, so its Read and Delete are pressed too.
       const prepare = inboxAnswers(driver, { questions: INBOX_SEED_QUESTIONS });
-      const pages = await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 75 * 60_000, prepare, ...(pageAudit ? { audit: pageAudit.audit } : {}) });
-      result = { ...result, pages, ...(pageAudit ? { accessibility: withPageAudits(result.accessibility, pageAudit) } : {}) };
+      pages = await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 30 * 60_000, prepare, ...(pageAudit ? { audit: pageAudit.audit } : {}) });
     }
+    // An engine that stopped answering in the pages crawl has already failed there. It is restarted the owner's way so the Sources
+    // section is still crawled, and the restart is reported: one failure must not hide the rest.
+    try { await waitForEngine(30_000); } catch (error) {
+      const stopped = error instanceof Error ? error.message : String(error);
+      const restarted = await restartEngine(300_000);
+      engineRestart = { ok: restarted.ok, ms: restarted.ms, detail: restarted.ok ? stopped : `${stopped}; ${restarted.detail ?? 'the restart failed'}` };
+    }
+    await driver.open('private');
+    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: startedAt + 75 * 60_000, ...(axeSource ? { axeSource } : {}) });
+    result = {
+      ...result,
+      ...(engineRestart ? { engineRestart } : {}),
+      ...(pages ? { pages } : {}),
+      ...(pageAudit ? { accessibility: withPageAudits(result.accessibility, pageAudit) } : {}),
+    };
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
   } finally {
     opened?.close();
     stopBridge();
+  }
+  // A failure in the Sources crawl (signing in again on an engine that is gone) keeps what the pages crawl found.
+  if (!result && pages) {
+    const skipped: Accessibility = { status: 'skipped', reason: `the Sources section was not crawled: ${failure ?? 'it did not run'}` };
+    result = {
+      seeds: [], traces: [], coverage: [], unlisted: [], summary: { listed: 0, found: 0, pressed: 0, missed: 0, unlisted: 0, presses: 0 },
+      accessibility: pageAudit ? withPageAudits(skipped, pageAudit) : skipped, pages, ...(engineRestart ? { engineRestart } : {}),
+    };
   }
   writeFileSync(join(outDir, 'explore.json'), JSON.stringify(result ?? null));
   const archive = join(WORKDIR, 'explore.tgz');

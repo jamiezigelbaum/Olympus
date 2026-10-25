@@ -27,8 +27,8 @@ interface PanelState {
   deadSync?: boolean;
   /** Disconnect forgets to ask. */
   noQuestion?: boolean;
-  /** A disabled Sync now with or without its reason. */
-  disabledSync?: 'reason' | 'silent';
+  /** A disabled Sync now with or without its reason, or busy ("Checking…", marked aria-busy, as the product draws it while a sync runs). */
+  disabledSync?: 'reason' | 'silent' | 'busy';
   /** Pressing Sync now logs a console error. */
   syncLogs?: boolean;
   /** Connect opens this address in a new window. */
@@ -57,6 +57,8 @@ interface PanelState {
   staleLogs?: boolean;
   /** The page logs a console error while it loads. */
   loadLogs?: boolean;
+  /** From this many loads on, Readwise's menu offers one more action by itself (the source moved on, as a found-again folder does). */
+  extraAfter?: number;
   /** The panel's other sections: a Needs-you row whose fix is a sign-in, and Privacy's Edit inside a closed section. */
   otherSections?: boolean;
   privacyOpen?: boolean;
@@ -85,13 +87,13 @@ class PanelDriver implements JourneyDriver {
   }
   private render(): void {
     const s = this.state;
-    const sync = s.disabledSync ? `<button data-key="menu:readwise.library:0" disabled>Sync now</button>${s.disabledSync === 'reason' ? '<span class="reason">Waiting for the first sync</span>' : ''}` : `<button data-key="menu:readwise.library:0">Sync now</button>`;
+    const sync = s.disabledSync === 'busy' ? '<button data-key="menu:readwise.library:0" disabled aria-busy="true">Checking…</button>' : s.disabledSync ? `<button data-key="menu:readwise.library:0" disabled>Sync now</button>${s.disabledSync === 'reason' ? '<span class="reason">Waiting for the first sync</span>' : ''}` : `<button data-key="menu:readwise.library:0">Sync now</button>`;
     const disconnect = s.confirming
       ? `<span class="fix confirm"><span class="reason strong">Disconnect Readwise?</span><button data-key="menu:readwise.library:1:yes">Confirm disconnect</button><button data-key="menu:readwise.library:1:no">Cancel</button></span>`
       : `<span class="fix"><button data-key="menu:readwise.library:1">Disconnect</button></span>`;
     const row = s.connected
       ? `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">${s.line}</p></div>
-          <details class="menu" data-open-key="menu:readwise.library" ${s.menuOpen ? 'open' : ''}><summary data-key="summary:menu:readwise.library">⋯<span class="sr">More actions for Readwise</span></summary><div class="menu-panel"><span class="fix">${sync}</span>${disconnect}</div></details></li>`
+          <details class="menu" data-open-key="menu:readwise.library" ${s.menuOpen ? 'open' : ''}><summary data-key="summary:menu:readwise.library">⋯<span class="sr">More actions for Readwise</span></summary><div class="menu-panel"><span class="fix">${sync}</span>${disconnect}${s.extraAfter !== undefined && this.loads >= s.extraAfter ? '<span class="fix"><button data-key="menu:readwise.library:9">Check now</button></span>' : ''}</div></details></li>`
       : `<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Readwise</span></p><p class="muted">Not connected</p></div><div class="source-actions"><span class="fix"><button data-key="primary:readwise.library">Connect</button></span></div></li>`;
     const need = s.bareProblem ? '<ul><li class="row need"><div class="need-body"><p class="row-text">Readwise is stuck</p></div></li></ul>' : '';
     const gmail = s.gmailRow ? '<li class="row source"><div class="source-main"><p class="source-head"><span class="source-name">Gmail</span></p></div><div class="source-actions"><span class="fix"><button data-key="primary:gmail.email">Connect</button></span></div></li>' : '';
@@ -131,6 +133,7 @@ class PanelDriver implements JourneyDriver {
   }
   at = '/dashboard';
   gone = false;
+  loads = 0;
   stale = 0;
   /** What window.open was called with (the page-side recorder reads this through the stubbed __rcOpened). */
   readonly opened: string[] = [];
@@ -160,7 +163,7 @@ class PanelDriver implements JourneyDriver {
   async go(): Promise<void> { this.reset(); }
   async reload(): Promise<void> { this.reset(); }
   /** A fresh page: the server's state (connected or not) stays; the page's own (menu open, question asked, windows opened) starts over. */
-  private reset(): void { if (this.state.loadLogs) this.events.console.push('ReferenceError: boot is not defined'); this.state.menuOpen = false; this.state.privacyOpen = false; this.state.privacyEditing = false; this.state.confirming = false; this.opened.length = 0; this.at = '/dashboard'; this.gone = false; this.render(); }
+  private reset(): void { this.loads += 1; if (this.state.loadLogs) this.events.console.push('ReferenceError: boot is not defined'); this.state.menuOpen = false; this.state.privacyOpen = false; this.state.privacyEditing = false; this.state.confirming = false; this.opened.length = 0; this.at = '/dashboard'; this.gone = false; this.render(); }
   async setViewport(): Promise<void> {}
   async where(): Promise<string> { return this.at; }
   async pages(): Promise<number> { return this.pagesOpen; }
@@ -325,6 +328,11 @@ describe('exploring the Sources section', () => {
     const reasonResult = await explore({ driver: reason, seeds: [populated(reason)], inventory: inventory(), ...quick() });
     expect(exploreChecks(reasonResult).find((entry) => entry.id === 'explore.populated')!.status).toBe('pass');
     expect(reasonResult.coverage.find((entry) => entry.id === 'readwise.library:sync')?.detail).toContain('disabled');
+    // A busy control says what it is doing in its own words.
+    const busy = new PanelDriver({ disabledSync: 'busy' });
+    const busyResult = await explore({ driver: busy, seeds: [populated(busy)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(busyResult).find((entry) => entry.id === 'explore.populated')!.status).toBe('pass');
+    expect(busyResult.traces[0]!.steps.find((step) => step.name.startsWith('Checking…'))?.actual).toBe('it is busy and says so: "Checking…"');
   });
 
   test('a problem with no way to fix it fails', async () => {
@@ -393,7 +401,7 @@ describe('exploring the Sources section', () => {
     expect(result.summary.presses).toBeGreaterThan(1);
   });
 
-  test('a Cancel that performs the action fails: the page is compared with how it was seeded', async () => {
+  test('a Cancel that performs the action fails: the page is compared with the fresh page the press started from', async () => {
     const driver = new PanelDriver({ cancelDisconnects: true });
     const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
     const check = exploreChecks(result).find((entry) => entry.id === 'explore.populated')!;
@@ -402,8 +410,15 @@ describe('exploring the Sources section', () => {
     expect(check.detail).toMatch(/no longer offers [^;)]*menu:readwise\.library:1/);
   });
 
+  test('a source that moves on by itself between the seed and a Cancel is not blamed on the Cancel', async () => {
+    const driver = new PanelDriver({ extraAfter: 3 });
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    const cancel = result.traces.flatMap((trace) => trace.steps).find((step) => step.name.startsWith('Readwise: Cancel'));
+    expect(cancel).toMatchObject({ ok: true, actual: 'the question closed' });
+  });
+
   test('See why has to open and say something', () => {
-    const make = (open: boolean, text: string) => ({ seed: 'populated', kind: 'see-why', before: { keys: [], seeded: [], text: '', open: [] }, after: { controls: [], text: '', open: [{ key: 'why:x', open, text }], url: '/dashboard' }, opened: [], control: { key: 'summary:why:x' } }) as never;
+    const make = (open: boolean, text: string) => ({ seed: 'populated', kind: 'see-why', before: { keys: [], loaded: [], text: '', open: [] }, after: { controls: [], text: '', open: [{ key: 'why:x', open, text }], url: '/dashboard' }, opened: [], control: { key: 'summary:why:x' } }) as never;
     expect(EXPECTATIONS['see-why']!(make(true, 'Because the key was refused.')).ok).toBe(true);
     expect(EXPECTATIONS['see-why']!(make(true, '')).ok).toBe(false);
     expect(EXPECTATIONS['see-why']!(make(false, 'text')).ok).toBe(false);
@@ -512,12 +527,12 @@ describe('exploring the Sources section', () => {
     expect(kindOf('x', 'Unpair Telegram')).toBe('unpair');
   });
 
-  test('an engine restarted before the other pages is reported: a warning when it came back, a failure when it did not', async () => {
+  test('an engine restarted before the Sources section is reported: a warning when it came back, a failure when it did not', async () => {
     const driver = new PanelDriver();
     const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
     expect(exploreChecks(result).some((check) => check.id === 'explore.engine-restart')).toBe(false);
     const back = exploreChecks({ ...result, engineRestart: { ok: true, ms: 41_000, detail: 'the engine was not ready (models included) within 30 s' } }).find((check) => check.id === 'explore.engine-restart');
-    expect(back).toMatchObject({ status: 'warn', detail: 'the engine had stopped answering after the Sources crawl (the engine was not ready (models included) within 30 s); it was restarted in 41 s so the other pages could be crawled' });
+    expect(back).toMatchObject({ status: 'warn', detail: 'the engine had stopped answering after the other pages\' crawl (the engine was not ready (models included) within 30 s); it was restarted in 41 s so the Sources section could be crawled' });
     expect(exploreChecks({ ...result, engineRestart: { ok: false, ms: 300_000, detail: 'not ready' } }).find((check) => check.id === 'explore.engine-restart')?.status).toBe('fail');
   });
 

@@ -19,7 +19,7 @@ import {
 } from '../src/core/olympus-layout.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
 import { defaultXBookmarksReconcileStateDbPath } from '../src/workers/x-bookmarks/reconcile-state.ts';
-import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { olympusDataDir } from '../src/core/remote-access.ts';
 import { defaultRemoteConnectionsDbPath } from '../src/core/remote-connections.ts';
 
@@ -68,14 +68,14 @@ describe('olympus layout', () => {
     expect(defaultXBookmarksApiUsageDbPath(env)).toBe(`${olympusDataRoot(env)}/x-bookmarks-api-usage.sqlite`);
     expect(defaultXBookmarksReconcileStateDbPath(env)).toBe(folderPath);
     expect(defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env))).toBe(folderPath);
-    const lifecycle = lifecycleSourceSpecs().find((spec) => spec.sourceId === 'x.bookmarks');
-    expect(lifecycle?.accountStateSqlite?.({ env }).map((entry) => entry.path)).toContain(folderPath);
+    // A folder account's reconcile state is in its folder, which a Delete takes whole.
+    expect(folderPath.startsWith(`${lifecycleAccountFiles('x.bookmarks', { env }).folder}/`)).toBe(true);
     // An account an override pins keeps the old rule: beside the usage ledger.
     const pinned = { HOME: home, OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH: '/pinned/usage.sqlite' };
     const workerPath = `${defaultXBookmarksApiUsageDbPath(pinned)}.reconcile`;
     expect(workerPath).toBe('/pinned/usage.sqlite.reconcile');
     expect(defaultXBookmarksReconcileStateDbPath(pinned)).toBe(workerPath);
-    expect(lifecycle?.accountStateSqlite?.({ env: pinned }).map((entry) => entry.path)).toContain(workerPath);
+    expect(lifecycleAccountFiles('x.bookmarks', { env: pinned }).rawDatabases.map((entry) => entry.path)).toContain(workerPath);
   });
 });
 

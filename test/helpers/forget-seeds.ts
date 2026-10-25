@@ -33,6 +33,8 @@ import { LocalSourceSchedulerStateStore, defaultSourceSchedulerStateDbPath } fro
 import { LocalFileExtractionJobStore, defaultFileExtractionJobsDbPath } from '../../src/workers/file-extraction/job-store.ts';
 import { defaultArchiveImportStatePath } from '../../src/workers/archive-import/state.ts';
 import type { ForgetAccount, ForgetContext } from '../../src/core/source-forget-registry.ts';
+import { xBookmarksApiUsageDbPath } from '../../src/core/olympus-layout.ts';
+import { LocalXBookmarksApiUsageStore } from '../../src/workers/x-bookmarks/live-control.ts';
 
 export interface SeededSource {
   source_id: string;
@@ -464,6 +466,29 @@ export const SEEDED_FILES: readonly SeededFile[] = [
     left: (layout, source) => identifyingSelectors(layout, source),
   },
   {
+    // X's usage ledger is X's alone: its sync positions are the account's, the ledger itself stays.
+    stepId: 'x-bookmarks-sync-state',
+    mine: { source_id: 'x.bookmarks', corpus_id: 'internal.x.bookmarks', ledger_id: 'x_bookmarks' },
+    other: MINE,
+    otherHasRows: false,
+    path: (layout) => xBookmarksApiUsageDbPath(layout.env),
+    seed(layout) {
+      const usage = new LocalXBookmarksApiUsageStore(xBookmarksApiUsageDbPath(layout.env));
+      usage.recordHeadCheckpoint('personal', '777');
+      usage.close();
+    },
+    left(layout, source) {
+      const path = xBookmarksApiUsageDbPath(layout.env);
+      if (source.source_id !== 'x.bookmarks' || !existsSync(path)) return 0;
+      const db = new Database(path, { readonly: true });
+      try {
+        return (db.query('SELECT count(*) AS n FROM x_bookmarks_live_state').get() as { n: number }).n;
+      } finally {
+        db.close();
+      }
+    },
+  },
+  {
     stepId: 'file-source-scopes',
     mine: MINE,
     other: OTHER,
@@ -600,6 +625,9 @@ export const SEEDED_FILES: readonly SeededFile[] = [
     },
   },
 ];
+
+/** The files `MINE` has rows in: every step's but those whose pair is another source (Gmail's mail scope, the computer connection, X's sync positions). */
+export const SEEDED_FOR_MINE: readonly SeededFile[] = SEEDED_FILES.filter((file) => file.mine.source_id === MINE.source_id);
 
 export function seedAllFiles(layout: ForgetLayout): void {
   for (const file of SEEDED_FILES) file.seed(layout);

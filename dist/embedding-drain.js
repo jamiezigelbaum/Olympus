@@ -30469,7 +30469,9 @@ function openConnectorStore(account, options, env = process.env) {
 function recordAccountPlacement(account, path, env = process.env) {
   if (!adoptionEnabled)
     return;
-  placeBeforeFirstFile(env, readSourceRegistry(env), account, path);
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeBeforeFirstFile(env, registry, account, path);
 }
 function placeBeforeFirstFile(env, registry, account, path) {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
@@ -33107,6 +33109,7 @@ var X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS, X_BOOKMARKS_RECONCILE_INTERVAL_MS, 
 var init_live_control2 = __esm(() => {
   init_olympus_layout();
   init_sqlite_migrations();
+  init_connector3();
   X_BOOKMARKS_HEAD_FRESHNESS_THRESHOLD_MS = 5 * 60000;
   X_BOOKMARKS_RECONCILE_INTERVAL_MS = 24 * 60 * 60000;
   X_BOOKMARKS_RECONCILE_FRESHNESS_THRESHOLD_MS = 26 * 60 * 60000;
@@ -35928,60 +35931,10 @@ var init_remote_open = __esm(() => {
   init_open_targets();
 });
 
-// src/core/file-extraction-source.ts
-import { createHash as createHash20 } from "node:crypto";
-function splitScopedLocalItemId(localItemId) {
-  const separator = localItemId.indexOf(":");
-  if (separator <= 0 || separator === localItemId.length - 1)
-    return;
-  return {
-    accountScope: localItemId.slice(0, separator),
-    providerItemId: localItemId.slice(separator + 1)
-  };
-}
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
-var init_file_extraction_source = __esm(() => {
-  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-    source_item_not_found: "failed_terminal",
-    source_permission_denied: "failed_terminal",
-    source_version_gone: "failed_terminal",
-    source_content_unavailable: "skipped_unsupported",
-    source_request_rejected: "failed_terminal",
-    source_too_large: "skipped_too_large",
-    source_rate_limited: "failed_retryable",
-    source_unavailable: "failed_retryable",
-    source_auth_expired: "failed_retryable",
-    source_budget_exhausted: "failed_retryable",
-    network_unreachable: "failed_retryable",
-    network_socket_closed: "failed_retryable"
-  });
-  FileExtractionSourceError = class FileExtractionSourceError extends Error {
-    errorKind;
-    settleAs;
-    retryable;
-    errorHash;
-    constructor(errorKind, options = {}) {
-      super(errorKind);
-      this.name = "FileExtractionSourceError";
-      this.errorKind = errorKind;
-      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
-      this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
-      if (errorHash)
-        this.errorHash = errorHash;
-    }
-  };
-});
-
 // src/workers/file-extraction/spool.ts
 var EXTRACTION_SPOOL_STALE_MS;
 var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
-});
-
-// src/workers/whatsapp/extraction-source.ts
-var init_extraction_source = __esm(() => {
-  init_file_extraction_source();
 });
 
 // src/workers/whatsapp/reaction-index.ts
@@ -41605,136 +41558,6 @@ var init_google_connectors = __esm(() => {
   init_corpora();
 });
 
-// connect-relay/shared/tokens.ts
-var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
-var init_tokens = __esm(() => {
-  PATTERN = {
-    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
-    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
-    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
-    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
-    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
-  };
-});
-
-// src/workers/remote-oauth/pinned-clients.ts
-var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
-var init_pinned_clients = __esm(() => {
-  GROK_REDIRECT_URIS = Object.freeze([
-    "https://grok.com/connectors-oauth-exchange-code/",
-    "https://console.x.ai/connectors-oauth-exchange-code/"
-  ]);
-  CURSOR_REDIRECT_URIS = Object.freeze([
-    CURSOR_REDIRECT_URI,
-    "https://www.cursor.com/bot/mcp/oauth/callback",
-    "https://grok.com/connectors-oauth-exchange-code/"
-  ]);
-});
-
-// src/core/remote-oauth-store.ts
-var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
-var init_remote_oauth_store = __esm(() => {
-  init_tokens();
-  init_pinned_clients();
-  init_operation_caller();
-  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
-  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
-  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
-  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
-});
-
-// src/core/remote-connections.ts
-var init_remote_connections = __esm(() => {
-  init_operation_error();
-  init_worker_auth();
-  init_operation_caller();
-  init_sqlite_migrations();
-  init_remote_oauth_store();
-  init_waiting_private_questions();
-  init_tokens();
-  init_linux_engine_layout();
-  init_olympus_layout();
-});
-
-// src/core/ingestion-health-state.ts
-var init_ingestion_health_state = __esm(() => {
-  init_atomic_file();
-  init_olympus_layout();
-});
-
-// src/workers/archive-import/continuation-cache.ts
-function sameKey(a, b) {
-  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
-}
-
-class ContinuationCache {
-  entries = [];
-  maxEntries;
-  maxBytes;
-  maxIdleMs;
-  now;
-  constructor(options = {}) {
-    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
-    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
-    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
-    this.now = options.now ?? Date.now;
-  }
-  get size() {
-    this.expire();
-    return this.entries.length;
-  }
-  get retainedBytes() {
-    this.expire();
-    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
-  }
-  put(key2, continuation) {
-    this.expire();
-    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
-    if (continuation.retainedBytes > this.maxBytes)
-      return;
-    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
-    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
-      this.entries.shift();
-  }
-  take(key2, offset) {
-    this.expire();
-    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
-    if (index < 0)
-      return;
-    const [parked] = this.entries.splice(index, 1);
-    return parked.continuation.position === offset ? parked.continuation : undefined;
-  }
-  dropArchive(archiveId) {
-    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
-  }
-  clear() {
-    this.entries = [];
-  }
-  retainedTotal() {
-    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
-  }
-  expire() {
-    const cutoff = this.now() - this.maxIdleMs;
-    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
-      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
-    }
-  }
-}
-var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
-var init_continuation_cache = __esm(() => {
-  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
-  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
-  archiveContinuations = new ContinuationCache;
-});
-
-// src/core/scope-safe-fs.ts
-import { createRequire as createRequire5 } from "node:module";
-var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
-var init_scope_safe_fs = __esm(() => {
-  runtimeRequire3 = createRequire5(import.meta.url);
-  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
-});
-
 // src/workers/archive-import/state.ts
 var ARCHIVE_IMPORTS_SOURCE_ID2 = "archive.imports";
 var init_state = __esm(() => {
@@ -41743,63 +41566,6 @@ var init_state = __esm(() => {
   init_atomic_file();
   init_archive_formats();
   init_file_lease();
-});
-
-// src/workers/archive-import/media-bindings.ts
-var init_media_bindings = __esm(() => {
-  init_sqlite_migrations();
-  init_scope_safe_fs();
-  init_source_placement();
-  init_source_storage();
-  init_state();
-});
-
-// src/workers/archive-import/forget.ts
-var init_forget = __esm(() => {
-  init_continuation_cache();
-  init_media_bindings();
-  init_state();
-});
-
-// src/core/this-computer.ts
-var init_this_computer = __esm(() => {
-  init_atomic_file();
-  init_file_lease();
-  init_file_scope_sources();
-});
-
-// src/workers/source-scheduler-state.ts
-var init_source_scheduler_state = __esm(() => {
-  init_olympus_layout();
-  init_sqlite_migrations();
-});
-
-// src/workers/classification/tier-migration-reports.ts
-var init_tier_migration_reports = __esm(() => {
-  init_atomic_file();
-  init_olympus_layout();
-});
-
-// src/core/source-forget-registry.ts
-var init_source_forget_registry = __esm(() => {
-  init_operation_error();
-  init_remote_connections();
-  init_waiting_private_questions();
-  init_source_watch();
-  init_ingestion_health_state();
-  init_source_scope_approval();
-  init_mail_source_scope();
-  init_source_account_binding();
-  init_forget();
-  init_state();
-  init_this_computer();
-  init_source_dashboard();
-  init_source_scheduler_state();
-  init_job_names();
-  init_spool();
-  init_olympus_layout();
-  init_source_placement();
-  init_tier_migration_reports();
 });
 
 // src/workers/archive-import/store.ts
@@ -41815,6 +41581,44 @@ var init_store2 = __esm(() => {
     trustDomain: "secure_local",
     secretsInContent: true
   });
+});
+
+// src/core/scope-safe-fs.ts
+import { createRequire as createRequire5 } from "node:module";
+var runtimeRequire3, SCOPE_FILE_MAX_RANGE_BYTES;
+var init_scope_safe_fs = __esm(() => {
+  runtimeRequire3 = createRequire5(import.meta.url);
+  SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
+});
+
+// src/workers/archive-import/media-bindings.ts
+var init_media_bindings = __esm(() => {
+  init_sqlite_migrations();
+  init_scope_safe_fs();
+  init_source_placement();
+  init_source_storage();
+  init_state();
+});
+
+// src/core/account-files.ts
+var STORE_ORDER, SOURCE_ALIASES;
+var init_account_files = __esm(() => {
+  init_olympus_layout();
+  init_archive_formats();
+  init_source_placement();
+  init_source_registry();
+  init_source_ingestion_policy();
+  init_messaging_capture_grant_file();
+  init_pairing_session_paths();
+  init_store2();
+  init_media_bindings();
+  init_reconcile_state();
+  STORE_ORDER = {
+    [WHATSAPP_SOURCE_ID]: ["secure_local", "internal"]
+  };
+  SOURCE_ALIASES = {
+    [WHATSAPP_SOURCE_ID]: ["whatsapp.messages"]
+  };
 });
 
 // src/workers/archive-import/byte-source.ts
@@ -42730,6 +42534,208 @@ var init_requests = __esm(() => {
   STATUSES = new Set(["pending", "checking", "already_imported", "failed"]);
 });
 
+// src/core/source-delete-holds.ts
+var init_source_delete_holds = __esm(() => {
+  init_requests();
+});
+
+// connect-relay/shared/tokens.ts
+var SECRET = "[A-Za-z0-9_-]{43}", INSTALL = "[a-z2-7]{32}", PATTERN;
+var init_tokens = __esm(() => {
+  PATTERN = {
+    access: new RegExp(`^oly2\\.(${INSTALL})\\.${SECRET}$`),
+    refresh: new RegExp(`^oly2r\\.(${INSTALL})\\.${SECRET}$`),
+    code: new RegExp(`^oly2c\\.(${INSTALL})\\.${SECRET}$`),
+    handoff: new RegExp(`^oly2g\\.(${INSTALL})\\.${SECRET}$`),
+    private: new RegExp(`^oly2p\\.(${INSTALL})\\.${SECRET}$`)
+  };
+});
+
+// src/workers/remote-oauth/pinned-clients.ts
+var GROK_REDIRECT_URIS, CURSOR_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback", CURSOR_REDIRECT_URIS;
+var init_pinned_clients = __esm(() => {
+  GROK_REDIRECT_URIS = Object.freeze([
+    "https://grok.com/connectors-oauth-exchange-code/",
+    "https://console.x.ai/connectors-oauth-exchange-code/"
+  ]);
+  CURSOR_REDIRECT_URIS = Object.freeze([
+    CURSOR_REDIRECT_URI,
+    "https://www.cursor.com/bot/mcp/oauth/callback",
+    "https://grok.com/connectors-oauth-exchange-code/"
+  ]);
+});
+
+// src/core/remote-oauth-store.ts
+var REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, REMOTE_PAIRING_CODE_TTL_MS, PAIRING_SELECTOR_LENGTH = 4, PAIRING_SECRET_LENGTH = 8, PAIRING_CODE_LENGTH, UNUSED_CLIENT_PRUNE_AGE_MS;
+var init_remote_oauth_store = __esm(() => {
+  init_tokens();
+  init_pinned_clients();
+  init_operation_caller();
+  REMOTE_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600;
+  REMOTE_PAIRING_CODE_TTL_MS = 10 * 60000;
+  PAIRING_CODE_LENGTH = PAIRING_SELECTOR_LENGTH + PAIRING_SECRET_LENGTH;
+  UNUSED_CLIENT_PRUNE_AGE_MS = 24 * 3600000;
+});
+
+// src/core/remote-connections.ts
+var init_remote_connections = __esm(() => {
+  init_operation_error();
+  init_worker_auth();
+  init_operation_caller();
+  init_sqlite_migrations();
+  init_remote_oauth_store();
+  init_waiting_private_questions();
+  init_tokens();
+  init_linux_engine_layout();
+  init_olympus_layout();
+});
+
+// src/core/ingestion-health-state.ts
+var init_ingestion_health_state = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/workers/archive-import/continuation-cache.ts
+function sameKey(a, b) {
+  return a.archiveId === b.archiveId && a.manifestTag === b.manifestTag && a.fileIndex === b.fileIndex && a.memberIndex === b.memberIndex;
+}
+
+class ContinuationCache {
+  entries = [];
+  maxEntries;
+  maxBytes;
+  maxIdleMs;
+  now;
+  constructor(options = {}) {
+    this.maxEntries = options.maxEntries ?? CONTINUATION_CACHE_MAX_ENTRIES;
+    this.maxBytes = options.maxBytes ?? CONTINUATION_CACHE_MAX_BYTES;
+    this.maxIdleMs = options.maxIdleMs ?? CONTINUATION_CACHE_MAX_IDLE_MS;
+    this.now = options.now ?? Date.now;
+  }
+  get size() {
+    this.expire();
+    return this.entries.length;
+  }
+  get retainedBytes() {
+    this.expire();
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  put(key2, continuation) {
+    this.expire();
+    this.entries = this.entries.filter((parked) => !sameKey(parked.key, key2));
+    if (continuation.retainedBytes > this.maxBytes)
+      return;
+    this.entries.push({ key: { ...key2 }, continuation, parkedAt: this.now() });
+    while (this.entries.length > this.maxEntries || this.retainedTotal() > this.maxBytes)
+      this.entries.shift();
+  }
+  take(key2, offset) {
+    this.expire();
+    const index = this.entries.findIndex((parked2) => sameKey(parked2.key, key2));
+    if (index < 0)
+      return;
+    const [parked] = this.entries.splice(index, 1);
+    return parked.continuation.position === offset ? parked.continuation : undefined;
+  }
+  dropArchive(archiveId) {
+    this.entries = this.entries.filter((parked) => parked.key.archiveId !== archiveId);
+  }
+  clear() {
+    this.entries = [];
+  }
+  retainedTotal() {
+    return this.entries.reduce((sum, parked) => sum + parked.continuation.retainedBytes, 0);
+  }
+  expire() {
+    const cutoff = this.now() - this.maxIdleMs;
+    if (this.entries.some((parked) => parked.parkedAt < cutoff)) {
+      this.entries = this.entries.filter((parked) => parked.parkedAt >= cutoff);
+    }
+  }
+}
+var CONTINUATION_CACHE_MAX_ENTRIES = 4, CONTINUATION_CACHE_MAX_BYTES, CONTINUATION_CACHE_MAX_IDLE_MS, archiveContinuations;
+var init_continuation_cache = __esm(() => {
+  CONTINUATION_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+  CONTINUATION_CACHE_MAX_IDLE_MS = 10 * 60 * 1000;
+  archiveContinuations = new ContinuationCache;
+});
+
+// src/workers/archive-import/forget.ts
+var init_forget = __esm(() => {
+  init_continuation_cache();
+  init_media_bindings();
+  init_state();
+});
+
+// src/core/this-computer.ts
+var init_this_computer = __esm(() => {
+  init_atomic_file();
+  init_file_lease();
+  init_file_scope_sources();
+});
+
+// src/workers/source-scheduler-state.ts
+var init_source_scheduler_state = __esm(() => {
+  init_olympus_layout();
+  init_sqlite_migrations();
+});
+
+// src/workers/classification/tier-migration-reports.ts
+var init_tier_migration_reports = __esm(() => {
+  init_atomic_file();
+  init_olympus_layout();
+});
+
+// src/core/source-forget-registry.ts
+var init_source_forget_registry = __esm(() => {
+  init_operation_error();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_watch();
+  init_ingestion_health_state();
+  init_source_scope_approval();
+  init_mail_source_scope();
+  init_source_account_binding();
+  init_forget();
+  init_state();
+  init_this_computer();
+  init_source_dashboard();
+  init_source_scheduler_state();
+  init_job_names();
+  init_spool();
+  init_olympus_layout();
+  init_source_placement();
+  init_olympus_layout();
+  init_live_control2();
+  init_tier_migration_reports();
+});
+
+// src/data-lifecycle.ts
+var init_data_lifecycle = __esm(() => {
+  init_olympus_layout();
+  init_source_placement();
+  init_data_owner_lock();
+  init_source_storage();
+  init_account_files();
+  init_source_delete_holds();
+  init_atomic_file();
+  init_operation_error();
+  init_sqlite_migrations();
+  init_remote_connections();
+  init_waiting_private_questions();
+  init_source_forget_registry();
+  init_source_registry();
+  init_sovereignty();
+  init_pairing_session_paths();
+  init_unpaired_sources();
+  init_source_corpus_registry();
+  init_public_source_capabilities();
+  init_worker_service();
+  init_media_cache();
+  init_store_identity();
+});
+
 // src/workers/readwise/tier-set.ts
 var init_tier_set2 = __esm(() => {
   init_source_placement();
@@ -42744,54 +42750,6 @@ var init_tier_set3 = __esm(() => {
   init_source_storage();
   init_tiered_store_set();
   init_connector3();
-});
-
-// src/workers/whatsapp/index.ts
-var init_whatsapp = __esm(() => {
-  init_live_connector();
-  init_store_sync2();
-  init_extraction_source();
-});
-
-// src/data-lifecycle.ts
-var init_data_lifecycle = __esm(() => {
-  init_olympus_layout();
-  init_source_placement();
-  init_data_owner_lock();
-  init_source_storage();
-  init_atomic_file();
-  init_operation_error();
-  init_sqlite_migrations();
-  init_remote_connections();
-  init_waiting_private_questions();
-  init_source_forget_registry();
-  init_source_registry();
-  init_source_ingestion_policy();
-  init_dropbox_files();
-  init_store();
-  init_archive_formats();
-  init_store2();
-  init_state();
-  init_media_bindings();
-  init_requests();
-  init_google_connectors();
-  init_telegram_messages();
-  init_readwise();
-  init_tier_set2();
-  init_x_bookmarks();
-  init_tier_set3();
-  init_reconcile_state();
-  init_live_control2();
-  init_whatsapp();
-  init_sovereignty();
-  init_messaging_capture_grant_file();
-  init_pairing_session_paths();
-  init_unpaired_sources();
-  init_source_corpus_registry();
-  init_public_source_capabilities();
-  init_worker_service();
-  init_media_cache();
-  init_store_identity();
 });
 
 // src/workers/source-ingestion-ledger.ts
@@ -44418,7 +44376,52 @@ init_worker_auth();
 // src/workers/email-source/file-extraction-runtime.ts
 init_credential_broker();
 init_types();
-init_file_extraction_source();
+
+// src/core/file-extraction-source.ts
+import { createHash as createHash20 } from "node:crypto";
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+  source_item_not_found: "failed_terminal",
+  source_permission_denied: "failed_terminal",
+  source_version_gone: "failed_terminal",
+  source_content_unavailable: "skipped_unsupported",
+  source_request_rejected: "failed_terminal",
+  source_too_large: "skipped_too_large",
+  source_rate_limited: "failed_retryable",
+  source_unavailable: "failed_retryable",
+  source_auth_expired: "failed_retryable",
+  source_budget_exhausted: "failed_retryable",
+  network_unreachable: "failed_retryable",
+  network_socket_closed: "failed_retryable"
+});
+var ERROR_HASH_CHARS = 32;
+
+class FileExtractionSourceError extends Error {
+  errorKind;
+  settleAs;
+  retryable;
+  errorHash;
+  constructor(errorKind, options = {}) {
+    super(errorKind);
+    this.name = "FileExtractionSourceError";
+    this.errorKind = errorKind;
+    this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
+    this.retryable = this.settleAs === "failed_retryable";
+    const errorHash = options.detailForHash === undefined ? undefined : createHash20("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+    if (errorHash)
+      this.errorHash = errorHash;
+  }
+}
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
+
+// src/workers/email-source/file-extraction-runtime.ts
 init_media_cache();
 init_olympus_layout();
 init_source_placement();
@@ -44429,7 +44432,6 @@ init_connector_store();
 init_dropbox_content_hash();
 init_provider_client();
 init_http_timeout();
-init_file_extraction_source();
 import { readFile as readFile3, realpath, stat as stat2 } from "node:fs/promises";
 import { relative as relative4, resolve as resolve9, sep as sep5 } from "node:path";
 var DROPBOX_CONTENT_BASE_URL = "https://content.dropboxapi.com/2";
@@ -44793,7 +44795,6 @@ init_store();
 init_drive();
 
 // src/workers/google-connectors/drive-extraction-source.ts
-init_file_extraction_source();
 init_drive();
 init_request_budget();
 var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
@@ -44808,7 +44809,6 @@ var GOOGLE_DRIVE_EXTRACTION_MIME_TYPES = Object.freeze([
 ]);
 
 // src/workers/email-source/file-extraction-runtime.ts
-init_extraction_source();
 init_store_sync2();
 
 // src/workers/file-extraction/job-store.ts
@@ -44934,7 +44934,6 @@ init_media_cache();
 init_operation_error();
 init_model_transport();
 init_types();
-init_file_extraction_source();
 init_command_runner();
 init_tier_classifier();
 init_bounded_text();
@@ -46252,10 +46251,6 @@ init_store();
 
 // src/workers/local-files/own-roots-cleanup.ts
 init_tiered_store_set();
-
-// src/workers/local-files/connector.ts
-init_file_extraction_source();
-
 // src/core/file-mime.ts
 var MIME_BY_EXTENSION = Object.freeze({
   pdf: "application/pdf",
@@ -46617,7 +46612,12 @@ init_readwise();
 init_embeddings();
 init_x_bookmarks();
 init_live_control2();
-init_whatsapp();
+
+// src/workers/whatsapp/index.ts
+init_live_connector();
+init_store_sync2();
+
+// src/workers/source-scheduler.ts
 init_telegram_messages();
 init_source_scheduler_state();
 init_credential_broker();
@@ -48320,12 +48320,10 @@ init_store2();
 
 // src/workers/archive-import/extraction-source.ts
 init_archive_formats();
-init_file_extraction_source();
 init_scope_safe_fs();
 
 // src/workers/file-extraction/connector-source.ts
 init_spool();
-init_file_extraction_source();
 
 // src/workers/archive-import/extraction-source.ts
 init_spool();
@@ -49200,7 +49198,6 @@ init_provider();
 init_assets();
 init_manifest();
 init_source_watch();
-init_whatsapp();
 init_source_dashboard();
 init_source_ingestion_ledger();
 init_connected_handles();
