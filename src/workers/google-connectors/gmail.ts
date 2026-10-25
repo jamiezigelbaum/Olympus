@@ -6,16 +6,16 @@ import type {
   RawItem,
   SourceClassificationSignals,
   SourceConnector,
+  SourceConnectorFetchOptions,
   SourceConnectorListOptions,
   SourceConnectorListPage,
 } from '../../core/contracts.ts';
-import { namesOnlyContentScopeMetadata } from '../../core/classification-signals.ts';
 import {
   sourceInvocationProvenance,
   type SourceInvocationProvenance,
 } from '../../core/invocation-provenance.ts';
 import { gmailAfterBound, gmailBeforeBound } from '../../core/mail-source-scope.ts';
-import { MAX_FROM_HEADER_CHARS, senderMatchesRule } from '../../core/sender-rules.ts';
+import { senderMatchesRule } from '../../core/sender-rules.ts';
 import type { OwnerTierRule } from '../classification/tier-classifier.ts';
 import {
   createEnvCredentialBroker,
@@ -34,6 +34,14 @@ import {
   metadataString,
   metadataStringArray,
 } from './classification.ts';
+import {
+  gmailClassificationSignals,
+  gmailMailItems,
+  gmailMessageItem,
+  type GmailMailAttachment,
+  type GmailMailBuild,
+  type GmailMailRecord,
+} from './gmail-mail-record.ts';
 import {
   GoogleDailyRequestBudget,
   GoogleRequestBudgetError,
@@ -110,6 +118,8 @@ export interface GoogleGmailSourceConnectorOptions {
   scope?: GmailConnectorScope;
   /** Clock for traversal start and watermark caps (tests). */
   now?: () => number;
+  /** How mail is built into items (gmail-mail-record.ts): attachments as children of their message. */
+  build?: GmailMailBuild;
 }
 
 /** Metadata reads for retained Private scope confirmation per connector pass. */
@@ -184,6 +194,12 @@ interface GmailCursor {
    * a message's own Date header, which the sender controls.
    */
   startedMs?: number;
+  /**
+   * A pass stopped inside one message's attachments (more of them than the
+   * pass's item budget): the next pass lists the rest, from the `from`-th,
+   * before it reads the page again.
+   */
+  childOf?: { id: string; from: number };
 }
 
 export interface GmailSourceConnectorTraversalStatus {
@@ -207,6 +223,8 @@ export interface GmailApiClient {
   listMessages(request: GmailListMessagesRequest): Promise<GmailListMessagesResponse>;
   /** `metadata` returns headers and labels only; the body never leaves Gmail. */
   getMessage(id: string, options?: GmailGetMessageOptions): Promise<GmailMessage>;
+  /** One attachment's bytes (base64url), by the part's attachment id. */
+  getAttachment?(messageId: string, attachmentId: string): Promise<{ data: string; size?: number }>;
   /** Scope-picker tooling only; the traversal never lists labels. */
   listLabels?(): Promise<GmailLabel[]>;
   getLabel?(id: string): Promise<GmailLabel>;
@@ -289,6 +307,9 @@ export class GoogleGmailSourceConnector implements SourceConnector {
   private itemsSkippedStored = 0;
   private readonly ingestFilterOptions: EmailIngestFilterOptions;
   private readonly itemsByLocalId = new Map<string, RawItem>();
+  private readonly build: GmailMailBuild;
+  /** The messages this run read whole, so an attachment of one is read without asking for it again. */
+  private readonly messagesById = new Map<string, GmailMessage>();
 
   constructor(options: GoogleGmailSourceConnectorOptions = {}) {
     const env = options.env ?? process.env;
@@ -311,6 +332,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     this.injectedClient = options.apiClient;
     this.scope = options.scope;
     this.now = options.now ?? (() => Date.now());
+    this.build = options.build ?? {};
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     // The approved scope says which categories are skipped. An explicit
     // operator setting still wins; otherwise the scope replaces the built-in
@@ -359,9 +381,34 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       ? (!staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs)
       : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
+    // The listing's limit bounds the ITEMS it yields (the store stops at it), and a message is its own item
+    // and its attachments: a message's items go on one page, or wait for the next pass.
+    let itemRoom = remaining;
+    if (resume.childOf && !staleLeg) {
+      // The last pass stopped inside a message's attachments (more than one pass may hold): the rest first.
+      const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
+      this.providerRequests += 1;
+      remaining -= 1;
+      itemRoom -= rest.items.length;
+      const cursorFields = {
+        ...(watermarkMs !== undefined ? { watermarkMs } : {}),
+        ...(highWaterMs !== undefined ? { highWaterMs } : {}),
+        ...(pageToken ? { pageToken } : {}),
+        ...(metadataLeg ? { phase: 'metadata' as const } : {}),
+        ...(startedMs !== undefined ? { startedMs } : {}),
+      };
+      if (rest.next !== undefined) {
+        const nextCursor = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
+        yield { items: rest.items, ...(nextCursor ? { nextCursor } : {}), done: false, truncated: true };
+        return;
+      }
+      const nextCursor = encodeGmailCursor(cursorFields);
+      yield { items: rest.items, ...(nextCursor ? { nextCursor } : {}), done: false };
+      if (remaining <= 0 || itemRoom <= 0) return;
+    }
     const requestedPageTokens = new Set<string>();
     let listPages = 0;
-    while (remaining > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
+    while (remaining > 0 && itemRoom > 0 && listPages < MAX_GMAIL_LIST_PAGES_PER_RUN) {
       if (pageToken) assertNewProviderPage(requestedPageTokens, pageToken);
       this.providerRequests += 1;
       listPages += 1;
@@ -374,8 +421,10 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       const items: RawItem[] = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
+      /** Set when a message's attachments did not fit this pass: where the next one resumes inside it. */
+      let childOf: { id: string; from: number } | undefined;
       for (const message of listed) {
-        if (messagesFetched >= remaining) break;
+        if (messagesFetched >= remaining || items.length >= itemRoom) break;
         messagesExamined += 1;
         // Mail Olympus already holds is never observed again under a scope.
         // Gmail messages are immutable, so a re-read could only replace a
@@ -395,7 +444,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
             this.providerRequests += 1;
             const metadata = await client.getMessage(message.id, { format: 'metadata', metadataHeaders: GMAIL_METADATA_HEADERS });
             const received = internalDateNumber({ internalDate: metadata.internalDate });
-            const item = rawItemFromGmailMessage(metadata, this.account, { metadataOnly: true });
+            const item = gmailMessageItem(gmailMailRecordFromMessage(metadata, { metadataOnly: true }), this.account);
             const subject = metadataString(item.metadata, 'subject');
             const from = metadataString(item.metadata, 'from');
             const skipped = this.scope.skipSenders?.some(rule => senderMatchesRule(from, rule))
@@ -426,7 +475,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           this.itemsSkippedStored += 1;
           continue;
         }
-        const item = rawItemFromGmailMessage(fetched, this.account, { metadataOnly: metadataLeg || beforeCutoff });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff });
+        const [item, ...children] = gmailMailItems(record, this.account, this.build) as [RawItem, ...RawItem[]];
         this.attachmentsDeclared += metadataCount(item.metadata, 'attachmentCount');
         this.attachmentBytesDeclared += metadataCount(item.metadata, 'attachmentBytesDeclared');
         this.attachmentsNotIngested += metadataCount(item.metadata, 'attachmentsNotIngested');
@@ -459,19 +509,47 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           else this.itemsSkippedCategory += 1;
           continue;
         }
+        // A message and its attachments go out together. One that does not fit beside what this page holds
+        // waits for the next pass (it is not stored, so it is listed again); one that does not fit even alone
+        // goes with the attachments that fit, and the next pass resumes inside it.
+        if (items.length + 1 + children.length > itemRoom && items.length > 0) {
+          messagesExamined -= 1;
+          break;
+        }
+        const unit = [item, ...children].slice(0, Math.max(1, itemRoom - items.length));
+        if (unit.length < 1 + children.length) childOf = { id: record.id, from: unit.length - 1 };
         // Populated on the way past so fetchItem is a cache read. The shipped
         // connector re-fetched every metadata_only item, doubling messages.get
         // inside a bounded slice.
-        this.itemsByLocalId.set(item.identity.localItemId, item);
-        items.push(item);
+        for (const entry of unit) this.itemsByLocalId.set(entry.identity.localItemId, entry);
+        this.messagesById.set(fetched.id, fetched);
+        items.push(...unit);
+        if (childOf) break;
       }
       remaining -= messagesFetched;
-      pageToken = page.nextPageToken;
+      itemRoom -= items.length;
+      if (childOf) {
+        // Stopped inside a message: the same provider page is read again from here (its stored messages are
+        // skipped), after the rest of this message's attachments.
+        const nextCursor = encodeGmailCursor({
+          ...(watermarkMs !== undefined ? { watermarkMs } : {}),
+          ...(highWaterMs !== undefined ? { highWaterMs } : {}),
+          ...(pageToken ? { pageToken } : {}),
+          ...(metadataLeg ? { phase: 'metadata' as const } : {}),
+          ...(startedMs !== undefined ? { startedMs } : {}),
+          childOf,
+        });
+        yield { items, ...(nextCursor ? { nextCursor } : {}), done: false, truncated: true };
+        return;
+      }
       // The traversal is complete only when the provider has no further page
       // AND the bound did not truncate this one. The shipped connector called
       // every bounded slice done, which told the spine that a partial window
       // was a full traversal.
       const pageTruncated = messagesExamined < listed.length;
+      // A page the item budget cut short is read again from its own token (the messages already stored on it
+      // are skipped), never from the next page's, which would pass over the ones it did not reach.
+      if (!pageTruncated) pageToken = page.nextPageToken;
       const legDone = !pageToken && !pageTruncated;
       // The content leg finishing hands over to the metadata leg instead of
       // ending the traversal; the watermark waits until both legs are read.
@@ -530,7 +608,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
    * duplicate quota — and the spine calls fetchItem for every item that listed
    * as metadata_only.
    */
-  async fetchItem(localItemId: string): Promise<RawItem> {
+  async fetchItem(localItemId: string, options?: SourceConnectorFetchOptions): Promise<RawItem> {
+    if (options?.deferredBytes) return this.fetchAttachment(localItemId, options.deferredBytes.locator);
     const item = this.itemsByLocalId.get(localItemId)
       ?? this.itemsByLocalId.get(`${this.account}:${localItemId}`);
     if (!item) {
@@ -540,6 +619,53 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     }
     this.fetchItemCacheHits += 1;
     return item;
+  }
+
+  /**
+   * One attachment's bytes (a child item, 2.1.0), from the locator its row
+   * keeps: the message is read once (the listing's copy when this run listed
+   * it), and the part's bytes are inline or asked for by the part's
+   * attachment id. Every request is the traversal's, under the same budget.
+   */
+  private async fetchAttachment(localItemId: string, locator: string): Promise<RawItem> {
+    const where = parseGmailPartLocator(locator);
+    if (!where) throw new Error('This Gmail attachment cannot be found from what Olympus kept.');
+    const client = await this.clientForRequest();
+    let message = this.messagesById.get(where.messageId);
+    if (!message) {
+      this.providerRequests += 1;
+      message = await client.getMessage(where.messageId);
+      this.messagesById.set(where.messageId, message);
+    }
+    const part = gmailPartAt(message.payload, where.partId);
+    const record = gmailMailRecordFromMessage(message);
+    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === localItemId
+      || item.identity.localItemId === `${this.account}:${localItemId}`);
+    if (!part || !child) throw new Error('This Gmail attachment is no longer in its message.');
+    let data = part.body?.data;
+    if (!data && part.body?.attachmentId) {
+      if (!client.getAttachment) throw new Error('This Gmail client cannot read attachments.');
+      this.providerRequests += 1;
+      data = (await client.getAttachment(where.messageId, part.body.attachmentId)).data;
+    }
+    if (data === undefined) throw new Error('Gmail returned no bytes for this attachment.');
+    const bytes = new Uint8Array(Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
+    return { ...child, content: { kind: 'bytes', mimeType: child.mimeType, bytes } };
+  }
+
+  /** The attachments of one message from the `from`-th on, as many as `room` holds, and where the rest start. */
+  private async attachmentsFrom(
+    client: GmailApiClient,
+    at: { id: string; from: number },
+    room: number,
+  ): Promise<{ items: RawItem[]; next?: number }> {
+    const message = await client.getMessage(at.id);
+    this.messagesById.set(at.id, message);
+    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message), this.account, this.build);
+    const items = children.slice(at.from, at.from + Math.max(1, room));
+    for (const item of items) this.itemsByLocalId.set(item.identity.localItemId, item);
+    const next = at.from + items.length;
+    return { items, ...(next < children.length ? { next } : {}) };
   }
 
   traversalStatus(): GmailSourceConnectorTraversalStatus {
@@ -573,14 +699,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
    * claimed; the shared tier classifier decides the tier.
    */
   classificationSignals(item: RawItem): SourceClassificationSignals {
-    const subject = metadataString(item.metadata, 'subject') ?? metadataString(item.metadata, 'title');
-    const sender = metadataString(item.metadata, 'from');
-    const labels = metadataStringArray(item.metadata, 'labels');
-    return {
-      ...(subject ? { title: subject } : {}),
-      ...(sender ? { sender } : {}),
-      ...(labels.length > 0 ? { labels } : {}),
-    };
+    return gmailClassificationSignals(item);
   }
 
   private async clientForRequest(): Promise<GmailApiClient> {
@@ -803,6 +922,14 @@ function budgetedGmailApiClient(
       budget.reserve(provenance);
       return inner.getMessage(id, options);
     },
+    ...(inner.getAttachment
+      ? {
+        getAttachment(messageId: string, attachmentId: string) {
+          budget.reserve(provenance);
+          return inner.getAttachment!(messageId, attachmentId);
+        },
+      }
+      : {}),
     ...(inner.listLabels
       ? {
         listLabels() {
@@ -845,7 +972,7 @@ export function promotedWatermark(input: {
 }
 
 function encodeGmailCursor(cursor: GmailCursor): string | undefined {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf) {
     return undefined;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString('base64url')}`;
@@ -859,7 +986,7 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
   try {
     const parsed = JSON.parse(
       Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), 'base64url').toString('utf8'),
-    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown; phase?: unknown; startedMs?: unknown };
+    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown; phase?: unknown; startedMs?: unknown; childOf?: unknown };
     const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
     const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
     const startedMs = decodeCursorEpochMs(parsed.startedMs);
@@ -874,16 +1001,28 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
       throw new Error('invalid');
     }
     if (parsed.phase !== undefined && parsed.phase !== 'metadata') throw new Error('invalid');
+    const childOf = decodeChildOf(parsed.childOf);
     return {
       ...(watermarkMs !== undefined ? { watermarkMs } : {}),
       ...(highWaterMs !== undefined ? { highWaterMs } : {}),
       ...(typeof parsed.pageToken === 'string' ? { pageToken: parsed.pageToken.trim() } : {}),
       ...(parsed.phase === 'metadata' ? { phase: 'metadata' as const } : {}),
       ...(startedMs !== undefined ? { startedMs } : {}),
+      ...(childOf ? { childOf } : {}),
     };
   } catch {
     throw new TypeError('Gmail connector cursor is invalid.');
   }
+}
+
+function decodeChildOf(value: unknown): { id: string; from: number } | undefined {
+  if (value === undefined) return undefined;
+  const record = value as { id?: unknown; from?: unknown } | null;
+  if (!record || typeof record !== 'object' || typeof record.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(record.id)
+    || typeof record.from !== 'number' || !Number.isSafeInteger(record.from) || record.from < 0) {
+    throw new Error('invalid');
+  }
+  return { id: record.id, from: record.from };
 }
 
 function decodeCursorEpochMs(value: unknown): number | undefined {
@@ -978,6 +1117,16 @@ class RestGmailApiClient implements GmailApiClient {
     return json as GmailMessage;
   }
 
+  async getAttachment(messageId: string, attachmentId: string): Promise<{ data: string; size?: number }> {
+    const record = asRecord(await this.getJson(
+      `users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    ), 'Gmail attachment');
+    return {
+      data: stringValue(record.data),
+      ...(typeof record.size === 'number' && Number.isSafeInteger(record.size) ? { size: record.size } : {}),
+    };
+  }
+
   async listLabels(): Promise<GmailLabel[]> {
     const record = asRecord(await this.getJson('users/me/labels'), 'Gmail labels list response');
     return Array.isArray(record.labels)
@@ -1043,7 +1192,9 @@ function gmailRetryDelayMs(response: Response, attempt: number): number {
   return Math.min(250 * 2 ** Math.max(0, attempt - 1), 5_000);
 }
 
-const GMAIL_METADATA_HEADERS = ['Subject', 'From', 'To', 'Date'] as const;
+// Message-ID too: an imported mbox of this account is matched to stored mail by it
+// (docs/design/archive-live-one-dataset.md, section 4).
+const GMAIL_METADATA_HEADERS = ['Subject', 'From', 'To', 'Date', 'Message-ID'] as const;
 
 function gmailLabelFromJson(record: Record<string, unknown>): GmailLabel {
   const type = record.type === 'system' || record.type === 'user' ? record.type : undefined;
@@ -1057,121 +1208,103 @@ function gmailLabelFromJson(record: Record<string, unknown>): GmailLabel {
   };
 }
 
-function rawItemFromGmailMessage(
+/**
+ * A Gmail API message as the connector's one record shape, a parsed mail
+ * (gmail-mail-record.ts): the live input's half of reading mail. An imported
+ * mbox of the account yields the same record, and both are built into items by
+ * `gmailMailItems`.
+ */
+export function gmailMailRecordFromMessage(
   message: GmailMessage,
-  account: string,
   options: { metadataOnly?: boolean } = {},
-): RawItem {
+): GmailMailRecord {
   const headers = headersFromPart(message.payload);
-  const subject = headers.get('subject') ?? '(no subject)';
-  // Sender-controlled and uncapped from Gmail. A longer header is stored as
-  // its first 4 KB plus a truncation mark, one character over the bound every
-  // sender-rule parse applies, so a truncated From is always unparseable.
-  const rawFrom = headers.get('from') ?? '';
-  const from = rawFrom.length > MAX_FROM_HEADER_CHARS ? `${rawFrom.slice(0, MAX_FROM_HEADER_CHARS)}…` : rawFrom;
-  const date = parsedDate(headers.get('date')) ?? internalDateIso(message.internalDate);
-  // Mail older than the approved window: subject, sender, date and labels
-  // only. No body and no snippet (the snippet is body text), so the item stays
-  // findable by name and can be upgraded to full content later.
   const metadataOnly = options.metadataOnly === true;
-  const attachments = gmailAttachmentInventory(message.payload);
-  // Mail inside the window is read as its envelope (Subject/From/To/Date), its
-  // snippet and its body, so an attachment-only message already has text. A
-  // message with none of those would be stored with no chunks and stay owed
-  // reading forever, though it has nothing more to read: it reads as its
-  // attachment names, else as the subject line the title already shows.
-  const text = metadataOnly
-    ? ''
-    : extractMessageText(message) || (attachments.lines.length > 0 ? attachments.lines.join('\n') : `Subject: ${subject}`);
-  const fetchedAt = new Date().toISOString();
+  const plain: string[] = [];
+  const html: string[] = [];
+  if (!metadataOnly) collectPartText(message.payload, plain, html);
+  const messageId = bareMessageId(headers.get('message-id'));
   return {
-    identity: {
-      family: 'email',
-      provider: 'gmail',
-      accountScope: account,
-      providerItemId: message.id,
-      ...(message.threadId ? { providerThreadId: message.threadId } : {}),
-      localItemId: `${account}:${message.id}`,
-      ...(message.historyId ? { sourceVersion: message.historyId } : {}),
+    id: message.id,
+    ...(message.threadId ? { threadId: message.threadId } : {}),
+    ...(message.historyId ? { historyId: message.historyId, sourceVersion: message.historyId } : {}),
+    ...(message.internalDate ? { internalDate: message.internalDate } : {}),
+    labelIds: message.labelIds ?? [],
+    headers: {
+      ...(headers.get('subject') ? { subject: headers.get('subject')! } : {}),
+      ...(headers.get('from') ? { from: headers.get('from')! } : {}),
+      ...(headers.get('to') ? { to: headers.get('to')! } : {}),
+      ...(headers.get('date') ? { date: headers.get('date')! } : {}),
+      ...(messageId ? { messageId } : {}),
     },
-    mimeType: 'message/rfc822',
-    content: !metadataOnly && text.trim() ? { kind: 'text', text } : { kind: 'metadata_only' },
-    metadata: Object.freeze({
-      title: subject,
-      subject,
-      from,
-      ...(date ? { authoredAt: date } : {}),
-      // Carried verbatim: it is the traversal's incremental watermark, and
-      // Gmail's `after:` operator speaks the same clock.
-      ...(message.internalDate ? { internalDate: message.internalDate } : {}),
-      ...(message.historyId ? { historyId: message.historyId } : {}),
-      ...(message.snippet && !metadataOnly ? { snippet: message.snippet } : {}),
-      // Marks mail kept by name only under the approved window. The shared
-      // tier path reads it: such an item has no content to judge, so its
-      // content layer settles at ingest instead of waiting for text.
-      ...(metadataOnly ? namesOnlyContentScopeMetadata() : {}),
-      labels: message.labelIds ?? [],
-      attachmentCount: attachments.count,
-      attachmentBytesDeclared: attachments.bytes,
-      // Name, type, size and MIME part of each attachment, searchable with the
-      // message. No attachment bytes are fetched; the message id plus the part
-      // id is what a later fetch needs (Gmail re-issues attachment ids).
-      ...(attachments.lines.length > 0 ? { attachments: attachments.lines } : {}),
-      // This is an explicit product boundary, not a claim that an empty text
-      // body means the message was fully covered.
-      attachmentsNotIngested: attachments.count,
-      locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.id)}`,
-      contentHash: hashString(`${message.historyId ?? ''}:${metadataOnly ? 'metadata_only' : text}`),
-    }),
-    fetchedAt,
+    ...(message.snippet && !metadataOnly ? { snippet: message.snippet } : {}),
+    body: plain.length > 0 ? plain.join('\n\n') : html.map(stripHtml).join('\n\n'),
+    metadataOnly,
+    attachments: gmailAttachments(message.id, message.payload, false),
   };
 }
 
-function gmailAttachmentInventory(
-  part: GmailMessagePart | undefined,
-): { count: number; bytes: number; lines: string[] } {
-  if (!part) return { count: 0, bytes: 0, lines: [] };
+/** The Message-ID header without its angle brackets. */
+export function bareMessageId(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const inner = trimmed.startsWith('<') && trimmed.endsWith('>') ? trimmed.slice(1, -1).trim() : trimmed;
+  return inner || undefined;
+}
+
+/** The locator of one MIME part of a Gmail message: what a later read of its bytes needs. */
+const GMAIL_PART_LOCATOR_PREFIX = 'gmail-part1:';
+
+export function gmailPartLocator(messageId: string, partId: string): string {
+  return `${GMAIL_PART_LOCATOR_PREFIX}${messageId}:${partId}`;
+}
+
+function parseGmailPartLocator(locator: string): { messageId: string; partId: string } | undefined {
+  if (!locator.startsWith(GMAIL_PART_LOCATOR_PREFIX)) return undefined;
+  const rest = locator.slice(GMAIL_PART_LOCATOR_PREFIX.length);
+  const split = rest.indexOf(':');
+  if (split <= 0) return undefined;
+  const messageId = rest.slice(0, split);
+  const partId = rest.slice(split + 1);
+  return /^[A-Za-z0-9_-]{1,128}$/.test(messageId) && /^[0-9.]{0,64}$/.test(partId) ? { messageId, partId } : undefined;
+}
+
+/**
+ * Every MIME part with a file name, in tree order. A part inside another one
+ * with a file name (a file in a forwarded message) is named but `nested`: it is
+ * read with the part that holds it, never as a child of its own.
+ */
+function gmailAttachments(messageId: string, part: GmailMessagePart | undefined, inside: boolean): GmailMailAttachment[] {
+  if (!part) return [];
   const filename = part.filename?.trim();
   const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0
     ? part.body!.size!
     : undefined;
-  let count = filename ? 1 : 0;
-  let bytes = size ?? 0;
-  const lines = filename ? [gmailAttachmentLine(filename, part, size)] : [];
+  const partId = part.partId?.trim() ?? '';
+  const found: GmailMailAttachment[] = filename
+    ? [{
+      partId,
+      filename,
+      ...(part.mimeType?.trim() ? { mimeType: part.mimeType.trim() } : {}),
+      ...(size !== undefined ? { size } : {}),
+      // A part Gmail gave no id cannot be found again.
+      ...(part.partId !== undefined ? { locator: gmailPartLocator(messageId, partId) } : {}),
+      ...(inside ? { nested: true } : {}),
+    }]
+    : [];
+  for (const child of part.parts ?? []) found.push(...gmailAttachments(messageId, child, inside || Boolean(filename)));
+  return found;
+}
+
+/** The part a part path names, in a message's tree. */
+function gmailPartAt(part: GmailMessagePart | undefined, partId: string): GmailMessagePart | undefined {
+  if (!part) return undefined;
+  if ((part.partId?.trim() ?? '') === partId) return part;
   for (const child of part.parts ?? []) {
-    const nested = gmailAttachmentInventory(child);
-    count += nested.count;
-    bytes += nested.bytes;
-    lines.push(...nested.lines);
+    const found = gmailPartAt(child, partId);
+    if (found) return found;
   }
-  return { count, bytes, lines };
-}
-
-function gmailAttachmentLine(filename: string, part: GmailMessagePart, size: number | undefined): string {
-  const details = [
-    part.mimeType?.trim() || undefined,
-    size !== undefined ? `${size} bytes` : undefined,
-    part.partId?.trim() ? `part ${part.partId.trim()}` : undefined,
-  ].filter((value): value is string => Boolean(value));
-  return `Attachment: ${filename.slice(0, MAX_ATTACHMENT_NAME_CHARS)}${details.length > 0 ? ` (${details.join(', ')})` : ''}`;
-}
-
-const MAX_ATTACHMENT_NAME_CHARS = 256;
-
-function metadataCount(metadata: Readonly<Record<string, unknown>>, key: string): number {
-  const value = metadata[key];
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-
-function extractMessageText(message: GmailMessage): string {
-  const plain: string[] = [];
-  const html: string[] = [];
-  collectPartText(message.payload, plain, html);
-  const selected = plain.length > 0 ? plain.join('\n\n') : html.map(stripHtml).join('\n\n');
-  return [headersSummary(message.payload), message.snippet, selected]
-    .map((part) => part?.trim())
-    .filter((part): part is string => Boolean(part))
-    .join('\n\n');
+  return undefined;
 }
 
 function collectPartText(part: GmailMessagePart | undefined, plain: string[], html: string[]): void {
@@ -1203,15 +1336,6 @@ function headersFromPart(part: GmailMessagePart | undefined): Map<string, string
   return headers;
 }
 
-function headersSummary(part: GmailMessagePart | undefined): string {
-  const headers = headersFromPart(part);
-  return [
-    headers.get('subject') ? `Subject: ${headers.get('subject')}` : undefined,
-    headers.get('from') ? `From: ${headers.get('from')}` : undefined,
-    headers.get('to') ? `To: ${headers.get('to')}` : undefined,
-    headers.get('date') ? `Date: ${headers.get('date')}` : undefined,
-  ].filter(Boolean).join('\n');
-}
 
 function decodeBase64Url(value: string): string {
   const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
@@ -1227,17 +1351,7 @@ function stripHtml(value: string): string {
     .trim();
 }
 
-function parsedDate(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
 
-function internalDateIso(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const ms = Number.parseInt(value, 10);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
-}
 
 function normalizeGmailMaxMessages(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_GMAIL_SYNC_MAX_MESSAGES;
@@ -1262,6 +1376,11 @@ function optionalStringProp(record: Record<string, unknown>, key: string): Recor
 
 function safeProviderDetail(value: string): string {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]').slice(0, 500);
+}
+
+function metadataCount(metadata: Readonly<Record<string, unknown>>, key: string): number {
+  const value = metadata[key];
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 function hashString(value: string): string {
