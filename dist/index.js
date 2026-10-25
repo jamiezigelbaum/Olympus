@@ -17132,6 +17132,12 @@ var init_media_cache = __esm(() => {
   MEDIA_CACHE_ORPHAN_AGE_MS = 24 * 60 * 60000;
   MEDIA_CACHE_DIR_NAMES = new Set(["media-cache", "olympus-media"]);
 });
+
+// src/workers/classification/tier-set-binding.ts
+var init_tier_set_binding = __esm(() => {
+  init_olympus_layout();
+  init_tier_ledger();
+});
 // src/workers/connector-store/tier-placement.ts
 var init_tier_placement = __esm(() => {
   init_types();
@@ -17428,6 +17434,7 @@ var init_local_index = __esm(() => {
   init_tier_ledger();
   init_tier_classifier();
   init_secret_locations();
+  init_tier_set_binding();
   init_tier_placement();
   init_secrets_disposition();
   init_source_ingestion_exclusions();
