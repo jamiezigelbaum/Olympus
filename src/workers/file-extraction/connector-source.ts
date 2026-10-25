@@ -12,9 +12,15 @@
  * Nothing here names a source family.
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve, sep } from 'node:path';
-import { extractionSpoolFileName, extractionSpoolOwnerDir, pruneExtractionSpoolOwner } from './spool.ts';
+import {
+  discardExtractionSpoolFile,
+  extractionSpoolFileName,
+  extractionSpoolOwnerDir,
+  makeExtractionSpoolOwnerDir,
+  pruneExtractionSpoolOwner,
+} from './spool.ts';
 import type { RawItem, SourceConnector } from '../../core/contracts.ts';
 import {
   FileExtractionSourceError,
@@ -72,7 +78,8 @@ export interface FileFetchConnector extends SourceConnector {
       expectedVersion?: string;
       deferredBytes?: { locator: string };
       spoolDir: string;
-      spoolRoot?: string;
+      spoolAnchor?: string;
+      stillServed?: () => boolean;
     },
   ): Promise<{ item: RawItem; path: string; spooled: boolean }>;
 }
@@ -117,12 +124,22 @@ export async function readItemToFile(
     deferredBytes?: { locator: string };
     spoolDir: string;
     /**
-     * The spool root `spoolDir` is inside. It is made once, at start; this read
-     * makes the owner's folder in it and no more, so a root that is gone (the
-     * account's folder was deleted under a running worker) is not made again,
-     * which would bring the deleted folder back.
+     * The existing folder the spool lives in (the account's own folder), under
+     * which the spool and the owner's folder are made by this read, one level
+     * at a time (`makeExtractionSpoolOwnerDir`). A folder that is gone (the
+     * account was deleted under a running worker) refuses the read with no
+     * bytes written, so it is not brought back. Without it the whole path is
+     * made.
      */
-    spoolRoot?: string;
+    spoolAnchor?: string;
+    /**
+     * Whether what is being read is still served. Asked right before the
+     * owner's folder is made and again before the written file is handed over;
+     * once it says no, no file is left and the read is refused as not found,
+     * so an account scope removed while its bytes were being fetched does not
+     * get its scratch file back.
+     */
+    stillServed?: () => boolean;
   },
 ): Promise<{ item: RawItem; path: string; spooled: boolean }> {
   if (isFileFetchConnector(connector)) return connector.fetchItemToFile(localItemId, options);
@@ -134,20 +151,24 @@ export async function readItemToFile(
     throw new FileExtractionSourceError('source_too_large');
   }
   const path = join(options.spoolDir, extractionSpoolFileName());
+  const served = (): boolean => options.stillServed?.() ?? true;
+  const refuseGone = (): never => {
+    discardExtractionSpoolFile(path, options.spoolDir);
+    throw new FileExtractionSourceError('source_item_not_found');
+  };
   // The folder is the owner's own and is removed when it empties; a removal that
   // lands between the make and the write is made again.
   for (let attempt = 0; ; attempt += 1) {
     try {
-      if (options.spoolRoot !== undefined && !existsSync(options.spoolRoot)) {
-        throw new Error('The extraction spool folder is gone.');
-      }
-      mkdirSync(options.spoolDir, { recursive: true, mode: 0o700 });
+      if (!served()) refuseGone();
+      makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
       writeFileSync(path, bytes, { mode: 0o600 });
       break;
     } catch (error) {
       if (attempt >= 3 || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
+  if (!served()) refuseGone();
   return { item, path, spooled: true };
 }
 
@@ -322,7 +343,7 @@ export function createConnectorFileExtractionSource(
           ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
           ...(deferred ? { deferredBytes: { locator: deferred.locator } } : {}),
           spoolDir,
-          spoolRoot: fileOptions.spoolDir,
+          ...(fileOptions.spoolAnchor !== undefined ? { spoolAnchor: fileOptions.spoolAnchor } : {}),
         });
       } catch (error) {
         throw asSourceError(error);

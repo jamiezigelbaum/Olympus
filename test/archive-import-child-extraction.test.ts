@@ -186,7 +186,7 @@ function runnerWith(
   h: ReturnType<typeof childItemsArchiveHarness>,
   extractor: Extractor,
   parentsOf: (archiveId: string) => FixtureParentSpec[],
-  options: { spoolDir?: string } = {},
+  options: { spoolDir?: string; onFetch?: (localItemId: string) => void | Promise<void>; bounded?: boolean } = {},
 ) {
   const lane = h.runtime.lane(format.family);
   const secure = lane.set.store('secure_local', { create: true })!;
@@ -197,6 +197,8 @@ function runnerWith(
   const connectorFactory = (): ArchiveConnectorFactory => (input): SourceConnector => createFixtureChildConnector({
     accountScope: input.accountScope, provider: format.provider, family: format.family, id: input.connectorId,
     parents: parentsOf(input.archiveId), log: h.log,
+    ...(options.onFetch ? { onFetch: options.onFetch } : {}),
+    ...(options.bounded !== undefined ? { bounded: options.bounded } : {}),
   });
   const [config] = archiveFileExtractionCorpora({ state: h.runtime.state, families: [format.family] });
   const source = archiveFileExtractionSourceFactory({ state: h.runtime.state, connectorFactory })({ config: config!, store: secure, view });
@@ -324,6 +326,63 @@ describe('a scratch file has an owner', () => {
     // Nothing of an account in its folder is written to the folder legacy accounts share.
     expect(existsSync(extractionSpoolRoot(h.env))).toBe(false);
   }, 30_000);
+
+  // The bytes are fetched in memory and written after (the format's connector writes no file), or the
+  // format's connector writes the file itself before its fetch returns.
+  for (const ownWrites of [false, true]) {
+    test(`a removal that lands while the bytes are being fetched leaves no scratch file, even if the worker then dies (${ownWrites ? 'the connector writes the file' : 'the bytes are written after the fetch'})`, async () => {
+      const h = childItemsArchiveHarness(cleanups);
+      const archiveId = h.start();
+      const parents = lease();
+      await h.importAll(archiveId, parents);
+
+      let reading!: () => void;
+      const started = new Promise<void>((resolve) => { reading = resolve; });
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let fetches = 0;
+      // The reader never returns: nothing disposes the file it is handed (a crash).
+      let handed = 0;
+      const extractor: Extractor = {
+        kind: 'never_returning_file_reader', version: 'test', input: { kind: 'file' }, egress: 'local', accepts: () => true,
+        async extract() {
+          handed += 1;
+          await new Promise<never>(() => {});
+          throw new Error('unreachable');
+        },
+      };
+      const spoolRoot = archiveSpoolRoot(h);
+      const { runner, key } = runnerWith(h, extractor, () => parents, {
+        spoolDir: spoolRoot,
+        bounded: ownWrites,
+        onFetch: async () => {
+          fetches += 1;
+          if (fetches > 1) return;
+          reading();
+          await held;
+        },
+      });
+      await runner.plan({ ...key(archiveId), limit: 10 });
+      void runner.run(key(archiveId));
+      await started;
+
+      // The archive is removed while the first item's bytes are being fetched.
+      if (!ownWrites) expect(filesIn(spoolRoot)).toEqual([]);
+      requestArchiveRemoval(h.runtime.state, archiveId);
+      const lane = h.runtime.lane(format.family);
+      let outcome = await runArchiveRemoval({ state: h.runtime.state, lane, archiveId });
+      while (outcome.kind === 'progress') outcome = await runArchiveRemoval({ state: h.runtime.state, lane, archiveId });
+      expect(outcome.kind).toBe('removed');
+      expect(h.runtime.state.get(archiveId)).toBeUndefined();
+
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // The fetch finished after the removal: no reader was handed a file, and no raw file or owner folder is left.
+      expect(handed).toBe(0);
+      expect(filesIn(spoolRoot)).toEqual([]);
+      expect(existsSync(spoolRoot) ? readdirSync(spoolRoot) : []).toEqual([]);
+    }, 30_000);
+  }
 
   test('the production runtime keeps the archive account\'s scratch files in its folder, and sweeps what a dead process left there at start', async () => {
     const h = childItemsArchiveHarness(cleanups);

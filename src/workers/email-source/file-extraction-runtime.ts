@@ -39,7 +39,7 @@ import {
 import type { RawItem } from '../../core/contracts.ts';
 import { mediaCacheDir, sweepMediaCache } from '../../core/media-cache.ts';
 import { extractionSpoolRoot } from '../../core/olympus-layout.ts';
-import { extractionSpoolRootForCorpus } from '../../core/source-placement.ts';
+import { extractionSpoolPlacementForCorpus } from '../../core/source-placement.ts';
 import { extractionSpoolOwnerKey, prepareExtractionSpool } from '../file-extraction/spool.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
@@ -276,7 +276,7 @@ export function createFileExtractionRuntime(
   );
 
   // Each account keeps the scratch files a file reader's input is written to in its own folder
-  // (core/source-placement.ts, `extractionSpoolRootForCorpus`), so deleting the account takes them
+  // (core/source-placement.ts, `extractionSpoolPlacementForCorpus`), so deleting the account takes them
   // with it. A root is prepared once, when the first corpus that uses it is served: what a crash
   // left in it goes now, not after a day (files of a process that is gone, and the folders of an
   // account scope or source that has no job left).
@@ -340,15 +340,17 @@ export function createFileExtractionRuntime(
       }
     };
     // A spool that cannot be prepared only means this corpus's file readers get bytes instead.
-    const spoolDir = prepareSpool(extractionSpoolRootForCorpus({
+    const placement = extractionSpoolPlacementForCorpus({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
       storePath: store.dbPath,
-    }, env));
+    }, env);
+    const spoolDir = prepareSpool(placement.root);
     corpora.push({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
       ...(spoolDir ? { spoolDir } : {}),
+      ...(spoolDir && placement.anchor !== undefined ? { spoolAnchor: placement.anchor } : {}),
       source: async () => {
         options.scopeGuard?.assertAuthorized({ config, store });
         const source = await buildSource({ config, store, ...(view ? { view } : {}) });

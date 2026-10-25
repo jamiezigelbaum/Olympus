@@ -280,6 +280,11 @@ export interface ExtractionRunnerCorpus {
    * which is for a corpus that names none.
    */
   spoolDir?: string;
+  /**
+   * The existing folder `spoolDir` is under, for an account that keeps its
+   * files in a folder (`ExtractionFetchFileOptions.spoolAnchor`).
+   */
+  spoolAnchor?: string;
 }
 
 export interface FileExtractionRunnerOptions {
@@ -859,6 +864,7 @@ export function createFileExtractionRunner(
       });
 
       const spoolDir = corpus.spoolDir ?? options.spoolDir;
+      const spoolAnchor = corpus.spoolDir !== undefined ? corpus.spoolAnchor : undefined;
       const records: ExtractionRunRecord[] = [];
       let consecutiveRetryableFailures = 0;
       let paused = false;
@@ -889,6 +895,7 @@ export function createFileExtractionRunner(
             return source;
           },
           ...(spoolDir !== undefined ? { spoolDir } : {}),
+          ...(spoolAnchor !== undefined ? { spoolAnchor } : {}),
           now,
         });
 
@@ -993,6 +1000,7 @@ interface SettleOneJobInput {
   corpus: ExtractionRunnerCorpus;
   resolveSource: () => Promise<FileExtractionSource>;
   spoolDir?: string;
+  spoolAnchor?: string;
   now: () => Date;
 }
 
@@ -1092,6 +1100,7 @@ async function settleOneJobHeld(input: SettleOneJobInput, staged: { media?: Extr
         fetchedFile = await source.fetchFile(job.ref, {
           ...(maxBytes !== undefined ? { maxBytes } : {}),
           spoolDir: input.spoolDir,
+          ...(input.spoolAnchor !== undefined ? { spoolAnchor: input.spoolAnchor } : {}),
         });
         staged.file = fetchedFile;
       } else {

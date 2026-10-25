@@ -135,6 +135,12 @@ export interface ExtractionFetchFileOptions {
    * folder returns that file's path (no copy) and leaves `dispose` empty.
    */
   spoolDir: string;
+  /**
+   * The existing folder `spoolDir` is under when it is an account's own (see
+   * `readItemToFile`): the spool is made below it on the first write, and a
+   * write is refused once it is gone.
+   */
+  spoolAnchor?: string;
 }
 
 /**

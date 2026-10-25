@@ -5,18 +5,18 @@
 // folder. Only an account that lives in the legacy layout uses the folder every
 // legacy account shares, and only for it does the forget step look there.
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
 import { accountExtractionSpoolRoot, accountFolder, extractionSpoolRoot } from '../src/core/olympus-layout.ts';
-import { extractionSpoolRootForCorpus, placedAccount, resolvedStorePath } from '../src/core/source-placement.ts';
+import { extractionSpoolPlacementForCorpus, extractionSpoolRootForCorpus, placedAccount, resolvedStorePath } from '../src/core/source-placement.ts';
 import { updateSourceRegistry } from '../src/core/source-registry.ts';
 import { deleteOlympusData } from '../src/data-lifecycle.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../src/workers/dropbox-files/connector-store.ts';
 import { readItemToFile } from '../src/workers/file-extraction/connector-source.ts';
-import { extractionSpoolOwnerDir } from '../src/workers/file-extraction/spool.ts';
+import { extractionSpoolOwnerDir, prepareExtractionSpool } from '../src/workers/file-extraction/spool.ts';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -126,31 +126,82 @@ describe('a read under a running worker', () => {
     },
   } as unknown as SourceConnector;
 
-  test('writes its file under the owner\'s folder in the spool', async () => {
+  test('makes the spool on its first write, below the account\'s folder, owner-only', async () => {
     const { env } = fixture();
     record(env, 'readwise.library', 'folder');
+    const folder = accountFolder({ source_id: 'readwise.library', slot: '1' }, env);
+    mkdirSync(folder, { recursive: true });
     const root = accountExtractionSpoolRoot(placedAccount('readwise.library', env), env);
-    mkdirSync(root, { recursive: true, mode: 0o700 });
     const owner = extractionSpoolOwnerDir(root, { corpusId: 'internal.readwise.library', accountScope: 'x' });
+    expect(existsSync(join(folder, 'raw'))).toBe(false);
 
-    const read = await readItemToFile(connector, 'x:item', { spoolDir: owner, spoolRoot: root });
+    const read = await readItemToFile(connector, 'x:item', { spoolDir: owner, spoolAnchor: folder });
 
     expect(read.spooled).toBe(true);
     expect(read.path.startsWith(`${root}/`)).toBe(true);
     expect(existsSync(read.path)).toBe(true);
+    expect(statSync(root).mode & 0o777).toBe(0o700);
+    expect(statSync(owner).mode & 0o777).toBe(0o700);
   });
 
-  test('does not bring back an account\'s folder that a Delete removed under it', async () => {
+  test('does not bring back an account\'s folder that a Delete removed under it, and writes no bytes', async () => {
     const { env } = fixture();
     record(env, 'readwise.library', 'folder');
     const folder = accountFolder({ source_id: 'readwise.library', slot: '1' }, env);
     const root = accountExtractionSpoolRoot(placedAccount('readwise.library', env), env);
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    rmSync(folder, { recursive: true, force: true });
     const owner = extractionSpoolOwnerDir(root, { corpusId: 'internal.readwise.library', accountScope: 'x' });
+    expect(existsSync(folder)).toBe(false);
 
-    await expect(readItemToFile(connector, 'x:item', { spoolDir: owner, spoolRoot: root })).rejects.toThrow();
+    await expect(readItemToFile(connector, 'x:item', { spoolDir: owner, spoolAnchor: folder })).rejects.toThrow();
 
     expect(existsSync(folder)).toBe(false);
+  });
+
+  test('a shared (legacy) spool is made whole on the first write', async () => {
+    const { env } = fixture();
+    const shared = extractionSpoolRoot(env);
+    const owner = extractionSpoolOwnerDir(shared, { corpusId: 'internal.readwise.library', accountScope: 'x' });
+    expect(existsSync(shared)).toBe(false);
+
+    const read = await readItemToFile(connector, 'x:item', { spoolDir: owner });
+
+    expect(existsSync(read.path)).toBe(true);
+  });
+
+  test('preparing a spool that is not there makes nothing', () => {
+    const { env } = fixture();
+    record(env, 'readwise.library', 'folder');
+    const folder = accountFolder({ source_id: 'readwise.library', slot: '1' }, env);
+    mkdirSync(folder, { recursive: true });
+    const root = accountExtractionSpoolRoot(placedAccount('readwise.library', env), env);
+
+    expect(prepareExtractionSpool(root)).toBe(root);
+
+    expect(readdirSync(folder)).toEqual([]);
+  });
+
+  test('says where the account\'s folder is for a corpus in a folder, and nothing for a legacy one', () => {
+    const { env } = fixture();
+    record(env, 'dropbox.files', 'folder');
+    const storePath = resolvedStorePath('dropbox.files', 'secure_local', env);
+    const folder = accountFolder({ source_id: 'dropbox.files', slot: '1' }, env);
+    expect(extractionSpoolPlacementForCorpus({ ...DROPBOX, storePath }, env).anchor).toBe(folder);
+    expect(extractionSpoolPlacementForCorpus({ ...DROPBOX, storePath: ':memory:' }, env).anchor).toBeUndefined();
+  });
+
+  test('refuses, leaving no file, once what it reads is no longer served', async () => {
+    const { env } = fixture();
+    const shared = extractionSpoolRoot(env);
+    const owner = extractionSpoolOwnerDir(shared, { corpusId: 'internal.readwise.library', accountScope: 'x' });
+
+    // Retired before the folder is made: nothing is made.
+    await expect(readItemToFile(connector, 'x:item', { spoolDir: owner, stillServed: () => false })).rejects.toThrow();
+    expect(existsSync(shared)).toBe(false);
+
+    // Retired while the bytes were being written: the file is taken back.
+    let asked = 0;
+    await expect(readItemToFile(connector, 'x:item', { spoolDir: owner, stillServed: () => (asked += 1) === 1 })).rejects.toThrow();
+    expect(asked).toBe(2);
+    expect(existsSync(owner)).toBe(false);
   });
 });

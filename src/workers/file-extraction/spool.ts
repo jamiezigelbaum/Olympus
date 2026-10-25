@@ -17,7 +17,7 @@
 
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, rmdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 /**
  * A file left in the spool this long is the leftover of a crash (a read
@@ -162,18 +162,21 @@ export interface PrepareExtractionSpoolOptions {
 }
 
 /**
- * Creates the folder owner-only if it is not there, and sweeps what a crash
- * left: a file whose writing process is gone, a folder of an owner with no
- * job, and anything older than `EXTRACTION_SPOOL_STALE_MS`. It waits for
- * nothing else: another process's reads are in files of a running process,
- * and this one's are in files of its own pid. Never throws: a spool that
- * cannot be prepared only means file readers get bytes instead, as before.
+ * Sweeps what a crash left in the spool, if the spool is there: a file whose
+ * writing process is gone, a folder of an owner with no job, and anything
+ * older than `EXTRACTION_SPOOL_STALE_MS`. It makes nothing: the folder is made
+ * by the first scratch file written in it (`makeExtractionSpoolOwnerDir`), so
+ * an account that never needs one has no spool folder, and returns the folder
+ * either way. It waits for nothing else: another process's reads are in files
+ * of a running process, and this one's are in files of its own pid. Never
+ * throws: a spool that cannot be swept only means a leftover waits for the
+ * next start.
  */
 export function prepareExtractionSpool(dir: string, options: PrepareExtractionSpoolOptions = {}): string | undefined {
   const now = options.now ?? Date.now;
   const running = options.processRunning ?? processIsRunning;
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!existsSync(dir)) return dir;
     chmodSync(dir, 0o700);
     let owners: ReadonlySet<string> | null | undefined;
     const ownersWithJobs = (): ReadonlySet<string> | null => {
@@ -252,5 +255,59 @@ export function prepareExtractionSpool(dir: string, options: PrepareExtractionSp
     return dir;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Takes back a scratch file a read wrote, with its owner's folder and that
+ * folder's corpus folder if nothing else is in them. Never throws, and never
+ * removes the spool itself.
+ */
+export function discardExtractionSpoolFile(path: string, ownerDir: string): void {
+  rmSync(path, { force: true });
+  for (const dir of [ownerDir, dirname(ownerDir)]) {
+    try {
+      rmdirSync(dir);
+    } catch {
+      return;
+    }
+  }
+}
+
+/**
+ * Makes the owner's folder before a scratch file is written in it.
+ *
+ * With an `anchor` (the account's own folder, which must be there) every
+ * folder from the anchor down to the owner's is made one level at a time,
+ * owner-only, and a level that is already there is left as it is. The anchor
+ * itself is never made: if the account's folder has been deleted under a
+ * running worker the write is refused with `ENOENT` (and no folder comes back),
+ * rather than bringing the deleted account folder back. Without an anchor (the
+ * spool shared by accounts that keep no folder) the whole path is made.
+ */
+export function makeExtractionSpoolOwnerDir(ownerDir: string, anchor?: string): void {
+  if (anchor === undefined) {
+    mkdirSync(ownerDir, { recursive: true, mode: 0o700 });
+    return;
+  }
+  const levels = relative(anchor, ownerDir);
+  if (levels === '' || levels.startsWith('..') || isAbsolute(levels)) {
+    throw new Error('The extraction spool folder is not inside its account folder.');
+  }
+  let anchored = false;
+  try {
+    anchored = statSync(anchor).isDirectory();
+  } catch {
+    anchored = false;
+  }
+  if (!anchored) throw new Error('The extraction spool folder is gone.');
+  let path = anchor;
+  for (const level of levels.split(sep)) {
+    path = join(path, level);
+    try {
+      mkdirSync(path, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
   }
 }

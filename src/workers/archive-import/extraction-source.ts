@@ -34,6 +34,7 @@ import {
   readItemToFile,
   readItemWithin,
 } from '../file-extraction/connector-source.ts';
+import { discardExtractionSpoolFile } from '../file-extraction/spool.ts';
 import type { FileExtractionSource } from '../file-extraction/types.ts';
 import { archiveFileEntries, verifyArchiveManifest } from './manifest.ts';
 import { archiveMediaAccess, type ArchiveMediaBindings } from './media-bindings.ts';
@@ -239,7 +240,20 @@ export function archiveAccountConnector(input: {
     async *listItems(): AsyncIterable<SourceConnectorListPage> {},
     fetchItem: (localItemId, options) => using((inner) => inner.fetchItem(localItemId, options)),
     fetchItemWithin: (localItemId, options) => using((inner) => readItemWithin(inner, localItemId, options)),
-    fetchItemToFile: (localItemId, options) => using((inner) => readItemToFile(inner, localItemId, options)),
+    // The scratch file is made only while the archive is served, and is taken back if a removal
+    // lands while the bytes are being fetched: a removal marks the record first and forgets the
+    // archive's scratch files after, so a file written after the mark is seen here and removed.
+    // The format's own connector may write the file itself, so the answer is asked again once
+    // the file is written, whoever wrote it.
+    fetchItemToFile: async (localItemId, options) => {
+      const served = (): boolean => archiveServed(input.state, input.archiveId, input.family);
+      const handed = await using((inner) => readItemToFile(inner, localItemId, { ...options, stillServed: served }));
+      if (!served()) {
+        if (handed.spooled) discardExtractionSpoolFile(handed.path, options.spoolDir);
+        throw new FileExtractionSourceError('source_item_not_found');
+      }
+      return handed;
+    },
     classificationSignals: (): SourceClassificationSignals => ({}),
   };
   return connector;
