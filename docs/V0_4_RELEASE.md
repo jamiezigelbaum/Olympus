@@ -75,6 +75,18 @@ to the unowned, unlisted layout. Owner decisions 1–5 approved 2026-10-24.
 Design, migration, tests and delivery steps:
 [source storage](design/source-storage.md).
 
+## File tidy with the private model (owner direction 2026-10-25)
+
+Planned, not built. A person's own AI tidies their files with a separate
+skill (Agent-Skills `file-tidy`); Olympus never changes their files. Olympus
+adds one read-only, local CLI command that classifies files the person names
+and, for Private files, returns only a date, a counterparty and a document type
+written by the built-in private model; Secrets go to no model. Independent
+review (Astra, 2026-10-25): sound with changes, folded into the design. The
+skill's helper fixes land first, in Agent-Skills. Design, privacy wording,
+acceptance checks and delivery sequence:
+[file tidy](design/file-tidy.md).
+
 ## Olympus 1.0 (ChatGPT)
 
 Status: active, 2026-10-02. Owner decision 2026-10-01 (Decisions, below):

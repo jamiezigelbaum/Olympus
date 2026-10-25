@@ -48,6 +48,10 @@ interface State {
   reloadingSection?: boolean;
   zkOpen?: boolean;
   zkAdded?: boolean;
+  /** Sections inside sections, as the agent picker has (Connect an agent, an agent, Add it yourself instead), each opened by its summary. */
+  nested?: boolean;
+  nestedOpen?: number;
+  deepPressed?: boolean;
   /** A sign-in button that keeps a blank tab while its address comes, as the product does, then sends it on to the provider, leaves it blank, or closes it. */
   signInTab?: 'provider' | 'blank' | 'closes';
 }
@@ -90,6 +94,7 @@ class PagesDriver implements JourneyDriver {
       ${s.sections ? '<details><summary>Add it yourself instead</summary><button type="button" class="btn">Copy the address</button></details><details open><summary>Advanced</summary><button type="button" class="btn">Show advanced</button></details>' : ''}
       ${s.reloadingSection ? `<details data-zk-section ${s.zkOpen ? 'open' : ''}><summary>Set up zkAPI</summary><button type="button" class="btn" data-zk-add>Add zkAPI to Olympus</button>${s.zkAdded ? '<p>zkAPI added.</p>' : ''}</details>` : ''}
       ${s.signInTab ? '<button type="button" class="btn" data-sign-in>Connect Drive</button>' : ''}
+      ${s.nested ? `<details data-level="1" ${(s.nestedOpen ?? 0) >= 1 ? 'open' : ''}><summary>Level one</summary><details data-level="2" ${(s.nestedOpen ?? 0) >= 2 ? 'open' : ''}><summary>Level two</summary><details data-level="3" ${(s.nestedOpen ?? 0) >= 3 ? 'open' : ''}><summary>Level three</summary><button type="button" class="btn" data-deep>Deep button</button>${s.deepPressed ? '<p>Deep button pressed.</p>' : ''}</details></details></details>` : ''}
       ${s.secret ? secret : ''}
       <ul>${rows}</ul>
       ${s.noLockOnConnector && this.path.endsWith('connector') ? '' : s.locked ? '<form data-control-session-kind="unlock"><button type="submit">Unlock</button></form>' : '<form data-control-session-kind="lock"><button type="submit">Lock</button></form>'}
@@ -135,6 +140,8 @@ class PagesDriver implements JourneyDriver {
       if (win.confirm('This adds zkAPI. Continue?')) this.state.zkAdded = true;
       this.render();
     });
+    for (const level of [1, 2, 3]) on(`details[data-level="${level}"] > summary`, () => { this.state.nestedOpen = level; this.render(); });
+    on('[data-deep]', () => { this.state.deepPressed = true; this.render(); });
     on('[data-sign-in]', () => {
       const tab = (this.host as any).open('', '_blank');
       if (this.state.signInTab === 'provider') tab.gone = true;
@@ -160,6 +167,7 @@ class PagesDriver implements JourneyDriver {
   private reset(): void {
     this.state.sheetOpen = false;
     this.state.zkOpen = false;
+    this.state.nestedOpen = 0;
     this.state.secret = '';
     (this.host as unknown as { sessionStorage: Storage }).sessionStorage.clear();
     delete (this.host as any).__rcConfirms;
@@ -255,6 +263,13 @@ describe('exploring the other pages', () => {
     expect(names).not.toContain('Copy the address');
     expect(names).toContain('Add it yourself instead');
     expect(names).toContain('Show advanced');
+  });
+
+  test('a control three sections deep is reached through each one in turn and pressed', async () => {
+    const driver = new PagesDriver({ nested: true });
+    const { steps } = await run(driver, [PAGES[0]!]);
+    expect(steps.find((step) => step.name.startsWith('Deep button'))).toMatchObject({ name: 'Deep button (after 3 earlier presses)', ok: true });
+    expect(driver.state.deepPressed).toBe(true);
   });
 
   test('a control reached through a section that reloads the page still has its question answered, not left to the browser', async () => {

@@ -40,7 +40,7 @@ import { findBrowser, openBrowser, type Cdp, type OpenedBrowser } from './browse
 import { captureScreens, CdpJourneyDriver, type CapturedScreen } from './journey-driver.ts';
 import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
-import { explore, type Seed } from './explore.ts';
+import { explore, pagesAccessibilityAudit, withPageAudits, type Seed } from './explore.ts';
 import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
 import { explorePages } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
@@ -1396,11 +1396,15 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     await driver.open('private');
     // The accessibility checker's script, put on the machine by the orchestrator beside the inventory; without it the audit is skipped and says so.
     const axePath = join(WORKDIR, 'axe.min.js');
-    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: startedAt + 45 * 60_000, ...(existsSync(axePath) ? { axeSource: readFileSync(axePath, 'utf8') } : {}) });
+    const axeSource = existsSync(axePath) ? readFileSync(axePath, 'utf8') : undefined;
+    result = await explore({ driver, seeds: exploreSeeds(config), inventory, signedIn: true, deadlineAt: startedAt + 45 * 60_000, ...(axeSource ? { axeSource } : {}) });
     // The computer's other pages, in the same signed-in browser, after the Sources section (Lock ends the session, so it comes last).
+    // Each is audited as it loads, in the same accessibility check.
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
-      result = { ...result, pages: await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 75 * 60_000 }) };
+      const pageAudit = axeSource ? pagesAccessibilityAudit(axeSource) : undefined;
+      const pages = await explorePages({ driver, inventory: pagesInventory, deadlineAt: startedAt + 75 * 60_000, ...(pageAudit ? { audit: pageAudit.audit } : {}) });
+      result = { ...result, pages, ...(pageAudit ? { accessibility: withPageAudits(result.accessibility, pageAudit) } : {}) };
     }
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);

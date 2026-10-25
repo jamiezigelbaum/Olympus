@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
-import { EXPECTATIONS, exploreChecks, explore, auditAccessibility, type AxeViolation, type Seed } from '../scripts/release-check/explore.ts';
+import { EXPECTATIONS, exploreChecks, explore, auditAccessibility, pagesAccessibilityAudit, withPageAudits, type AxeViolation, type Seed } from '../scripts/release-check/explore.ts';
 import { buildInventory, setLiteral } from '../scripts/release-check/explore-inventory.ts';
 import { kindOf } from '../scripts/release-check/explore-kinds.ts';
 import type { ElementInfo, JourneyDriver, PageEvents } from '../scripts/release-check/journey.ts';
@@ -257,6 +257,19 @@ describe('exploring the Sources section', () => {
     const critical = new PanelDriver();
     critical.axe = { host: [violation('critical', 'button-name')], panel: [] };
     expect(exploreChecks(await explore({ driver: critical, seeds: [populated(critical)], inventory: inventory(), axeSource: '/* axe */', ...quick() })).find((check) => check.id === 'explore.accessibility')!.status).toBe('fail');
+  });
+
+  test('the other pages are audited as they load, and their states join the one accessibility check', async () => {
+    const page = new PanelDriver();
+    page.axe = { host: [{ rule: 'color-contrast', impact: 'serious', help: 'contrast', helpUrl: 'https://dequeuniversity.com/rules/axe/4.14/color-contrast', nodeCount: 1, nodes: [{ target: 'p.hint', html: '<p class="hint">x</p>', summary: 'Fix' }] }], panel: [] };
+    const pages = pagesAccessibilityAudit('/* axe */');
+    expect(await pages.audit(page, { id: 'keys', title: 'Keys', path: '/dashboard?keys' })).toEqual([]);
+    const clean = new PanelDriver();
+    const result = await explore({ driver: clean, seeds: [populated(clean)], inventory: inventory(), axeSource: '/* axe */', ...quick() });
+    expect(exploreChecks(result).find((entry) => entry.id === 'explore.accessibility')!.status).toBe('pass');
+    const check = exploreChecks({ ...result, accessibility: withPageAudits(result.accessibility, pages) }).find((entry) => entry.id === 'explore.accessibility')!;
+    expect(check.status).toBe('fail');
+    expect(check.detail).toContain('color-contrast (serious, keys page/host)');
   });
 
   test('a frame the checker cannot audit fails the audit (a page that was not checked is not a page that passed)', async () => {
