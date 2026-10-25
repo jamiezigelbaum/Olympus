@@ -237,25 +237,15 @@ function scopeKeyFilter(
   return { [FILTER_KEYS[definition.filterFamily][role]]: [...keys] } as ConnectorStoreSearchFilters;
 }
 
-/**
- * `alwaysExcluded`: keys no choice turns on (a source's own places the person
- * can never select, such as Olympus's data folders on this computer). They are
- * left out of every read whatever the approval says, so what was indexed there
- * before the rule existed is never returned.
- */
 export function fileSourceScopeContentFilters(
   approval: FileSourceScopeApprovalSnapshot,
-  alwaysExcluded: readonly string[] = [],
 ): { allowed: false } | { allowed: true; filters?: ConnectorStoreSearchFilters } {
   if (approval.status !== 'approved' || !approval.accountGeneration) return { allowed: false };
   const definition = getFileScopeSource(approval.sourceId);
   if (!definition) return { allowed: false };
-  const deniedKeys = [...new Set([
-    ...approval.selections
-      .filter((selection) => selection.state !== 'ingest')
-      .map((selection) => selection.key),
-    ...alwaysExcluded,
-  ])];
+  const deniedKeys = approval.selections
+    .filter((selection) => selection.state !== 'ingest')
+    .map((selection) => selection.key);
   const base: ConnectorStoreSearchFilters = {
     provider: definition.provider,
     sourceScopeGeneration: approval.accountGeneration,
@@ -283,17 +273,13 @@ export function fileSourceScopeContentFilters(
 
 export function fileSourceScopeMetadataFilters(
   approval: FileSourceScopeApprovalSnapshot,
-  alwaysExcluded: readonly string[] = [],
 ): { allowed: false } | { allowed: true; filters: ConnectorStoreSearchFilters } {
   if (approval.status !== 'approved' || !approval.accountGeneration) return { allowed: false };
   const definition = getFileScopeSource(approval.sourceId);
   if (!definition) return { allowed: false };
-  const excludedKeys = [...new Set([
-    ...approval.selections
-      .filter((selection) => selection.state === 'exclude')
-      .map((selection) => selection.key),
-    ...alwaysExcluded,
-  ])];
+  const excludedKeys = approval.selections
+    .filter((selection) => selection.state === 'exclude')
+    .map((selection) => selection.key);
   const metadataOnlyKeys = approval.selections
     .filter((selection) => selection.state === 'metadata_only')
     .map((selection) => selection.key);
@@ -312,38 +298,6 @@ export function fileSourceScopeMetadataFilters(
   return {
     allowed: true,
     filters: { ...base, ...scopeKeyFilter(definition, 'include', includedKeys) },
-  };
-}
-
-/**
- * What a search, an answer or a listing may read of a file source's connector
- * store under `approval`: the names filter, whether content may be read at all,
- * and the content filter. `alwaysExcluded` is left out of both (see
- * `fileSourceScopeContentFilters`).
- */
-export type FileSourceReadScope = { allowed: false } | {
-  allowed: true;
-  accountScope: string;
-  filters: ConnectorStoreSearchFilters;
-  contentAllowed: boolean;
-  contentFilters?: ConnectorStoreSearchFilters;
-};
-
-export function fileSourceScopeReadScope(
-  approval: FileSourceScopeApprovalSnapshot,
-  accountScope: string,
-  alwaysExcluded: readonly string[] = [],
-): FileSourceReadScope {
-  if (approval.status !== 'approved') return { allowed: false };
-  const metadataScope = fileSourceScopeMetadataFilters(approval, alwaysExcluded);
-  if (!metadataScope.allowed) return { allowed: false };
-  const contentScope = fileSourceScopeContentFilters(approval, alwaysExcluded);
-  return {
-    allowed: true,
-    accountScope,
-    filters: metadataScope.filters,
-    contentAllowed: contentScope.allowed,
-    ...(contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}),
   };
 }
 

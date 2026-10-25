@@ -2331,7 +2331,7 @@ function linuxInstallRoots(env) {
     return [];
   }
 }
-function sharedBases(env) {
+function olympusSharedBases(env = process.env) {
   const home = layoutHome(env);
   const bases = [
     home,
@@ -2350,20 +2350,23 @@ function sharedBases(env) {
   }
   return bases.filter((path) => isAbsolute4(path)).map((path) => resolve3(path));
 }
-function isDedicatedOlympusFolder(path, env = process.env) {
+function isDedicatedFolder(path, sharedBases) {
   const fold = (value) => process.platform === "darwin" ? value.toLowerCase() : value;
   const folder = fold(resolve3(path));
   if (folder === "/")
     return false;
-  return !sharedBases(env).some((base) => {
-    const shared = fold(base);
+  return !sharedBases.some((base) => {
+    const shared = fold(resolve3(base));
     return shared === folder || shared.startsWith(`${folder}/`);
   });
+}
+function isDedicatedOlympusFolder(path, env = process.env) {
+  return isDedicatedFolder(path, olympusSharedBases(env));
 }
 function olympusOwnLocations(env = process.env, capture = {}) {
   const home = layoutHome(env);
   const xdg = (name, fallback) => env[name]?.trim() || join6(home, fallback);
-  const folders = [
+  const fixed = [
     olympusDataRoot(env),
     mediaCacheRoot(env),
     legacyCaptureDataRoot(env),
@@ -2383,35 +2386,27 @@ function olympusOwnLocations(env = process.env, capture = {}) {
     join6(xdg("XDG_CACHE_HOME", ".cache"), "olympus"),
     ...linuxInstallRoots(env)
   ];
-  const files = [];
-  const placed = (value, artifacts) => {
+  const moved = [];
+  const place = (value) => {
     const trimmed = value?.trim();
     if (!trimmed || !isAbsolute4(trimmed))
       return;
     const dir = resolve3(trimmed);
-    if (isDedicatedOlympusFolder(dir, env)) {
-      folders.push(dir);
-      return;
-    }
-    for (const sub of artifacts.folders)
-      folders.push(join6(dir, sub));
-    for (const file of artifacts.files)
-      files.push({ dir, name: file.name, globs: file.globs });
+    if (isDedicatedOlympusFolder(dir, env))
+      moved.push(dir);
   };
   const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
   if (whatsappState)
-    placed(whatsappStateDirFromValue(whatsappState), WHATSAPP_STATE_ARTIFACTS);
-  placed(capture.whatsappStateDir, WHATSAPP_STATE_ARTIFACTS);
-  placed(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR, SPOOL_ARTIFACTS);
-  placed(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR, TELEGRAM_STATE_ARTIFACTS);
-  placed(capture.telegramStateDir, TELEGRAM_STATE_ARTIFACTS);
-  placed(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR, SPOOL_ARTIFACTS);
-  placed(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR, SPOOL_ARTIFACTS);
-  placed(capture.telegramSpoolDir, SPOOL_ARTIFACTS);
-  return {
-    folders: [...new Set(folders.filter((path) => isAbsolute4(path)).map((path) => resolve3(path)))],
-    files
-  };
+    place(whatsappStateDirFromValue(whatsappState));
+  place(capture.whatsappStateDir);
+  place(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR);
+  place(capture.telegramStateDir);
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR);
+  place(capture.telegramSpoolDir);
+  const clean = (paths) => [...new Set(paths.filter((path) => isAbsolute4(path)).map((path) => resolve3(path)))];
+  return { fixed: clean(fixed), moved: clean(moved) };
 }
 var ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, STORE_NAME, TIERS, gmailStore = (infix, overrideInfix) => ({
   file: `gmail-${infix}connector-store.sqlite`,
@@ -2425,7 +2420,7 @@ var ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, STORE_NAME, TIERS, gmailSto
 }), localFilesStore = (infix, overrideInfix) => ({
   file: `local-files-${infix}connector-store.sqlite`,
   override: `OLYMPUS_SOURCE_INDEX_LOCAL_FILES_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_LAYOUT_SOURCES, overrideNamesOf = (entry) => entry?.override === undefined ? [] : typeof entry.override === "string" ? [entry.override] : entry.override, RAW_OWNER, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES, MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", SPOOL_FILES, WHATSAPP_STATE_ARTIFACTS, TELEGRAM_STATE_ARTIFACTS, SPOOL_ARTIFACTS;
+}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_LAYOUT_SOURCES, overrideNamesOf = (entry) => entry?.override === undefined ? [] : typeof entry.override === "string" ? [entry.override] : entry.override, RAW_OWNER, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES, MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR";
 var init_olympus_layout = __esm(() => {
   init_linux_engine_layout();
   FOLDER_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -2538,33 +2533,6 @@ var init_olympus_layout = __esm(() => {
     "OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR",
     "OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR"
   ];
-  SPOOL_FILES = [
-    { name: /^\d{4}-\d{2}-\d{2}\.jsonl$/, globs: ["????-??-??.jsonl"] }
-  ];
-  WHATSAPP_STATE_ARTIFACTS = {
-    folders: ["spool", "media"],
-    files: [
-      { name: /^session\.db(?:-wal|-shm|-journal)?$/, globs: ["session.db", "session.db-wal", "session.db-shm", "session.db-journal"] },
-      { name: /^qr\.(?:txt|png)(?:\.tmp)?$/, globs: ["qr.txt", "qr.png", "qr.png.tmp"] },
-      { name: /^(?:native-service-readiness|pairing-status)\.json$/, globs: ["native-service-readiness.json", "pairing-status.json"] },
-      { name: /^\.(?:native-service-readiness\.json\.tmp|pairing-status-)[^/]*$/, globs: [".native-service-readiness.json.tmp*", ".pairing-status-*"] },
-      {
-        name: /^connector-store[^/]*\.db(?:-wal|-shm|-journal)?$/,
-        globs: ["connector-store*.db", "connector-store*.db-wal", "connector-store*.db-shm", "connector-store*.db-journal"]
-      }
-    ]
-  };
-  TELEGRAM_STATE_ARTIFACTS = {
-    folders: [],
-    files: [
-      {
-        name: /^(?:state\.json|gateway\.lock|backfill-requests\.jsonl|native-service-readiness\.json)$/,
-        globs: ["state.json", "gateway.lock", "backfill-requests.jsonl", "native-service-readiness.json"]
-      },
-      { name: /^\.(?:state|native-service-readiness)\.json\.tmp\.\d+$/, globs: [".state.json.tmp.*", ".native-service-readiness.json.tmp.*"] }
-    ]
-  };
-  SPOOL_ARTIFACTS = { folders: [], files: SPOOL_FILES };
 });
 
 // src/workers/source-index/built-in-embedding/manifest.ts
@@ -32083,38 +32051,37 @@ function defaultExclusionContext(env = process.env, capture = configuredCaptureL
   try {
     home = realpathSync4.native(home);
   } catch {}
-  const own3 = resolvedOwnLocations(env, home, capture);
   return {
     home,
     syncedRoots: configuredSyncedRoots(env),
-    ownRoots: own3.roots,
-    ownFiles: own3.files,
+    ownRoots: resolvedOwnRoots(env, capture),
     platform: process.platform
   };
 }
-function resolvedOwnLocations(env, home, capture) {
+function resolvedOwnRoots(env, capture) {
   const own3 = olympusOwnLocations(env, capture);
-  const spellings = (path) => {
-    const keys = new Set;
-    for (const spelling of [path, realPathThroughExisting(path)]) {
-      try {
-        keys.add(normalizeScopePath(spelling));
-      } catch {}
-    }
-    return [...keys];
-  };
+  const bases = olympusSharedBases(env);
+  const shared = [...new Set([...bases, ...bases.map(realPathThroughExisting)])];
+  const dedicated = (path) => isDedicatedFolder(path, shared);
   const roots = new Set;
-  for (const root of own3.folders) {
-    for (const key2 of spellings(root))
-      if (!isWithinScopePath(home, key2))
-        roots.add(key2);
+  const add = (path) => {
+    try {
+      roots.add(normalizeScopePath(path));
+    } catch {}
+  };
+  for (const path of own3.fixed) {
+    for (const spelling of [path, realPathThroughExisting(path)])
+      if (dedicated(spelling))
+        add(spelling);
   }
-  const files = [];
-  for (const rule of own3.files) {
-    for (const dir of spellings(rule.dir))
-      files.push({ ...rule, dir });
+  for (const path of own3.moved) {
+    const real = realPathThroughExisting(path);
+    if (!dedicated(path) || !dedicated(real))
+      continue;
+    add(path);
+    add(real);
   }
-  return { roots: [...roots], files };
+  return [...roots];
 }
 function realPathThroughExisting(path) {
   const rest = [];
@@ -32228,7 +32195,7 @@ function defaultExclusionForFolder(scopePath, context2) {
     return "synced_by_another_source";
   return;
 }
-var VOLUME_SEGMENT_PREFIX = "@", MAX_SCOPE_PATH_LENGTH = 4096, UNSAFE_PATH_CHARACTERS, VOLUME_ID_PATTERN, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES, ownRootIndexes, ownFileIndexes;
+var VOLUME_SEGMENT_PREFIX = "@", MAX_SCOPE_PATH_LENGTH = 4096, UNSAFE_PATH_CHARACTERS, VOLUME_ID_PATTERN, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES, ownRootIndexes;
 var init_paths = __esm(() => {
   init_config();
   init_olympus_layout();
@@ -32263,7 +32230,6 @@ var init_paths = __esm(() => {
   ]);
   SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
   ownRootIndexes = new WeakMap;
-  ownFileIndexes = new WeakMap;
 });
 
 // src/workers/local-files/scope.ts
@@ -44702,10 +44668,6 @@ init_tier_set();
 init_scope();
 init_store();
 
-// src/workers/local-files/provider-store-sync.ts
-init_embeddings();
-init_tiered_store_set();
-
 // src/workers/local-files/connector.ts
 init_file_extraction_source();
 
@@ -45040,8 +45002,17 @@ function unwrap(loaded) {
 var LOCAL_FILES_CURSOR_PREFIX = "lf1:";
 var LOCAL_FILES_POLL_CURSOR = `${LOCAL_FILES_CURSOR_PREFIX}poll`;
 
-// src/workers/local-files/provider-store-sync.ts
+// src/workers/local-files/own-roots-cleanup.ts
 init_paths();
+
+// src/workers/local-files/provider-store-sync.ts
+init_embeddings();
+init_tiered_store_set();
+init_paths();
+init_scope();
+init_store();
+
+// src/workers/local-files/own-roots-cleanup.ts
 init_scope();
 init_store();
 

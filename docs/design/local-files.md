@@ -142,44 +142,61 @@ state, its caches, and on a Mac its app and log folders under `~/Library`.
 These cannot be turned on, by choosing a parent (home, the whole computer) or
 by choosing the folder by name. The list is `olympusOwnLocations` in
 `core/olympus-layout.ts`, built from the same resolvers the writers use, so it
-follows an XDG home, the Linux install receipt, `OLYMPUS_MEDIA_CACHE_DIR`, and
-the capture services' environment variables and plugin config
-(`worker.telegramCapture.stateDir` / `spoolDir`, `worker.whatsappCapture.stateDir`,
-read as `loadConfig` reads them) to wherever they point. A folder reached
-through a link is excluded under both spellings. The engine's folder listing
-marks such a folder "Olympus's own data", not selectable and without children,
-which the dashboard shows as its disabled controls ("Olympus cannot read this
-folder."), and a choice of one is refused when it is saved. The live watch
-never reports them.
+follows an XDG home, the Linux install receipt and `OLYMPUS_MEDIA_CACHE_DIR`
+to wherever they point. It also follows a capture service that was moved: the
+environment variables `OLYMPUS_WHATSAPP_STATE_DIR`,
+`OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR`, `OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR`,
+`OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR` and `OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR`,
+and the engine's plugin config (`worker.telegramCapture.stateDir` / `spoolDir`,
+`worker.whatsappCapture.stateDir`, read as `loadConfig` reads them). The engine's
+folder listing marks such a folder "Olympus's own data", not selectable and
+without children, which the dashboard shows as its disabled controls ("Olympus
+cannot read this folder."), and a choice of one is refused when it is saved. The
+scope decision denies it and the live watch never reports it.
 
-A capture folder an owner moved is Olympus's whole only when it is a dedicated
-folder. When it is the home folder, a folder above it, or a base that other
-things share (`~/.local/share`, `~/.config`, `~/.local/state`, `~/.cache`,
-`~/Library`, `~/Library/Application Support`, an `XDG_*` value, or anything
-above one of those), only what the writer puts there is Olympus's: the
-bridge's `session.db` (with `-wal`, `-shm`, `-journal`), `qr.txt` / `qr.png`,
-the pairing status and readiness receipts, the connector stores
-(`connector-store*.db`), `spool/` and `media/`; the Telegram reader's
-`state.json`, `gateway.lock`, `backfill-requests.jsonl` and readiness receipt;
-and a spool's `YYYY-MM-DD.jsonl` files. These are decided file by file, in the
-scope decision and in the watch ignore patterns; the names are read from
-`tools/whatsapp-bridge/main.go` and `scripts/telegram-telethon-reader.py`.
+A moved folder is Olympus's whole only when it is a dedicated folder: not the
+home folder, a base that other things share (`~/.local/share`, `~/.config`,
+`~/.local/state`, `~/.cache`, `~/Library`, `~/Library/Application Support`,
+`~/Library/Logs`, an `XDG_*` value), or a folder above one of those. That is
+judged for the folder as the owner wrote it and for where it really leads: a
+link that carries a move to the home folder or a shared base makes it no own
+folder (`resolvedOwnRoots` in `local-files/paths.ts`; the layout module itself
+reads no file system). A folder that is not dedicated adds nothing: Olympus
+cannot tell its files from the person's there, and excluding the whole folder
+would hide the person's own files. A dedicated folder reached through a link is
+excluded under both spellings.
 
 What an earlier version indexed inside an own folder (a folder the owner had
-chosen by name) is never returned: every read scope of the source (search,
-answers, listings, status, extraction candidates) excludes the own folders
-(`fileSourceScopeReadScope`), whatever the approval says. The next pass of any
-folder also deletes those items from the index (`ownRootDeletions` in the
-connector), the way it deletes a file that is gone. A source whose only chosen
-folder is an own folder has no pass, so its items stay out of sight until a
-folder is chosen again or the source is disconnected.
+chosen by name) is removed at worker start, before the worker answers anything
+(`createLocalFilesOwnRootsCleanup` in `local-files/own-roots-cleanup.ts`, run
+from `email-source/server.ts`). It finds the stored items under each own folder
+and keeps those the scanner itself would call inside it (`isInsideOwnRoot`,
+with the case rules of the volume holding the path: `~/Capture` beside an own
+`~/capture` is another folder on a volume that keeps case, and stays). It
+removes them through the deletion path every other removal takes, a connector
+listing deleted items into the lane's tier stores, so the item, its text and
+its entry in the secret-locations index go together. It is bounded (5,000 items
+or 10 seconds per run), so a large backlog cannot hold up start-up; what it
+leaves goes at the next run: the next start, or the next pass of any chosen
+folder, which asks first. It covers the case where an own folder was the only
+folder chosen. Reads are not filtered by it: a read scope comes from the saved
+approval alone, as for every file source.
 
-Known limits: the Telegram session file and the per-store `*_DB_PATH`
-overrides (individual files), the WhatsApp live-drain media and transcribe
-folders, the Telegram drain cursor, and a data folder on a disk that is not the
-computer's own are not in the list. An OpenClaw-hosted plugin config
-(`openclaw.json`) is not read, only the engine's own; set the environment
-variable in `worker.env` there.
+Known limits, places this rule does not cover:
+
+- Single files an owner points at with a per-store override (`*_DB_PATH`) or the
+  Telegram session file, and the WhatsApp live-drain media and transcribe
+  folders and the Telegram drain cursor.
+- A move to a folder that is not dedicated, as above: the writer's files in the
+  home folder or in `~/.local/share` are the person's files as far as this source
+  can tell. Move the writer to a folder of its own to keep them out.
+- A data folder on a disk that is not the computer's own.
+- An OpenClaw-hosted plugin config (`openclaw.json`) is not read, only the
+  engine's own; set the environment variable in `worker.env` there.
+- A clean-up that is cut short, or that waits for the index of stored paths to
+  finish preparing, leaves the rest until the next run. A source whose only
+  chosen folder is an own folder has no pass, so the rest waits for the next
+  start.
 
 ### iCloud Drive
 

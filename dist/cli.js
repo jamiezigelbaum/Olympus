@@ -10108,7 +10108,7 @@ function linuxInstallRoots(env) {
     return [];
   }
 }
-function sharedBases(env) {
+function olympusSharedBases(env = process.env) {
   const home = layoutHome(env);
   const bases = [
     home,
@@ -10127,20 +10127,23 @@ function sharedBases(env) {
   }
   return bases.filter((path) => isAbsolute9(path)).map((path) => resolve4(path));
 }
-function isDedicatedOlympusFolder(path, env = process.env) {
+function isDedicatedFolder(path, sharedBases) {
   const fold = (value) => process.platform === "darwin" ? value.toLowerCase() : value;
   const folder = fold(resolve4(path));
   if (folder === "/")
     return false;
-  return !sharedBases(env).some((base) => {
-    const shared = fold(base);
+  return !sharedBases.some((base) => {
+    const shared = fold(resolve4(base));
     return shared === folder || shared.startsWith(`${folder}/`);
   });
+}
+function isDedicatedOlympusFolder(path, env = process.env) {
+  return isDedicatedFolder(path, olympusSharedBases(env));
 }
 function olympusOwnLocations(env = process.env, capture = {}) {
   const home = layoutHome(env);
   const xdg = (name, fallback) => env[name]?.trim() || join19(home, fallback);
-  const folders = [
+  const fixed = [
     olympusDataRoot(env),
     mediaCacheRoot(env),
     legacyCaptureDataRoot(env),
@@ -10160,35 +10163,27 @@ function olympusOwnLocations(env = process.env, capture = {}) {
     join19(xdg("XDG_CACHE_HOME", ".cache"), "olympus"),
     ...linuxInstallRoots(env)
   ];
-  const files = [];
-  const placed = (value, artifacts) => {
+  const moved = [];
+  const place = (value) => {
     const trimmed = value?.trim();
     if (!trimmed || !isAbsolute9(trimmed))
       return;
     const dir = resolve4(trimmed);
-    if (isDedicatedOlympusFolder(dir, env)) {
-      folders.push(dir);
-      return;
-    }
-    for (const sub of artifacts.folders)
-      folders.push(join19(dir, sub));
-    for (const file of artifacts.files)
-      files.push({ dir, name: file.name, globs: file.globs });
+    if (isDedicatedOlympusFolder(dir, env))
+      moved.push(dir);
   };
   const whatsappState = env.OLYMPUS_WHATSAPP_STATE_DIR?.trim();
   if (whatsappState)
-    placed(whatsappStateDirFromValue(whatsappState), WHATSAPP_STATE_ARTIFACTS);
-  placed(capture.whatsappStateDir, WHATSAPP_STATE_ARTIFACTS);
-  placed(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR, SPOOL_ARTIFACTS);
-  placed(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR, TELEGRAM_STATE_ARTIFACTS);
-  placed(capture.telegramStateDir, TELEGRAM_STATE_ARTIFACTS);
-  placed(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR, SPOOL_ARTIFACTS);
-  placed(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR, SPOOL_ARTIFACTS);
-  placed(capture.telegramSpoolDir, SPOOL_ARTIFACTS);
-  return {
-    folders: [...new Set(folders.filter((path) => isAbsolute9(path)).map((path) => resolve4(path)))],
-    files
-  };
+    place(whatsappStateDirFromValue(whatsappState));
+  place(capture.whatsappStateDir);
+  place(env.OLYMPUS_WHATSAPP_LIVE_DRAIN_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_STATE_DIR);
+  place(capture.telegramStateDir);
+  place(env.OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR);
+  place(env.OLYMPUS_TELEGRAM_SPOOL_DRAIN_SPOOL_DIR);
+  place(capture.telegramSpoolDir);
+  const clean = (paths) => [...new Set(paths.filter((path) => isAbsolute9(path)).map((path) => resolve4(path)))];
+  return { fixed: clean(fixed), moved: clean(moved) };
 }
 var ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, STORE_NAME, TIERS, gmailStore = (infix, overrideInfix) => ({
   file: `gmail-${infix}connector-store.sqlite`,
@@ -10202,7 +10197,7 @@ var ACCOUNT_FOLDERS_DIR = "sources", FOLDER_SEGMENT, STORE_NAME, TIERS, gmailSto
 }), localFilesStore = (infix, overrideInfix) => ({
   file: `local-files-${infix}connector-store.sqlite`,
   override: `OLYMPUS_SOURCE_INDEX_LOCAL_FILES_${overrideInfix}CONNECTOR_STORE_DB_PATH`
-}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_LAYOUT_SOURCES, overrideNamesOf = (entry) => entry?.override === undefined ? [] : typeof entry.override === "string" ? [entry.override] : entry.override, RAW_OWNER, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES, MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR", SPOOL_FILES, WHATSAPP_STATE_ARTIFACTS, TELEGRAM_STATE_ARTIFACTS, SPOOL_ARTIFACTS;
+}), LEGACY_STORES, ARCHIVE_IMPORTS = "archive.imports", ARCHIVE_FILE_LABEL, FOLDER_LAYOUT_SOURCES, overrideNamesOf = (entry) => entry?.override === undefined ? [] : typeof entry.override === "string" ? [entry.override] : entry.override, RAW_OWNER, ARCHIVE_STATE_OVERRIDE = "OLYMPUS_ARCHIVE_IMPORTS_STATE_PATH", X_USAGE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_API_USAGE_DB_PATH", X_RECONCILE_OVERRIDE = "OLYMPUS_SOURCE_INDEX_X_RECONCILE_STATE_DB_PATH", LEGACY_RAW_OVERRIDES, TELEGRAM_SOURCE_ID = "telegram.messages", WHATSAPP_SOURCE_ID = "whatsapp.personal.messages", MESSAGING_RAW_NAMES, NATIVE_CAPTURE_OWNER_ENV_NAMES, TELEGRAM_PATH_OVERRIDES, WHATSAPP_PATH_OVERRIDES, MEDIA_CACHE_DIR_ENV = "OLYMPUS_MEDIA_CACHE_DIR";
 var init_olympus_layout = __esm(() => {
   init_linux_engine_layout();
   FOLDER_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -10315,33 +10310,6 @@ var init_olympus_layout = __esm(() => {
     "OLYMPUS_WHATSAPP_TRANSCRIBE_STATE_DIR",
     "OLYMPUS_WHATSAPP_TRANSCRIBE_MEDIA_DIR"
   ];
-  SPOOL_FILES = [
-    { name: /^\d{4}-\d{2}-\d{2}\.jsonl$/, globs: ["????-??-??.jsonl"] }
-  ];
-  WHATSAPP_STATE_ARTIFACTS = {
-    folders: ["spool", "media"],
-    files: [
-      { name: /^session\.db(?:-wal|-shm|-journal)?$/, globs: ["session.db", "session.db-wal", "session.db-shm", "session.db-journal"] },
-      { name: /^qr\.(?:txt|png)(?:\.tmp)?$/, globs: ["qr.txt", "qr.png", "qr.png.tmp"] },
-      { name: /^(?:native-service-readiness|pairing-status)\.json$/, globs: ["native-service-readiness.json", "pairing-status.json"] },
-      { name: /^\.(?:native-service-readiness\.json\.tmp|pairing-status-)[^/]*$/, globs: [".native-service-readiness.json.tmp*", ".pairing-status-*"] },
-      {
-        name: /^connector-store[^/]*\.db(?:-wal|-shm|-journal)?$/,
-        globs: ["connector-store*.db", "connector-store*.db-wal", "connector-store*.db-shm", "connector-store*.db-journal"]
-      }
-    ]
-  };
-  TELEGRAM_STATE_ARTIFACTS = {
-    folders: [],
-    files: [
-      {
-        name: /^(?:state\.json|gateway\.lock|backfill-requests\.jsonl|native-service-readiness\.json)$/,
-        globs: ["state.json", "gateway.lock", "backfill-requests.jsonl", "native-service-readiness.json"]
-      },
-      { name: /^\.(?:state|native-service-readiness)\.json\.tmp\.\d+$/, globs: [".state.json.tmp.*", ".native-service-readiness.json.tmp.*"] }
-    ]
-  };
-  SPOOL_ARTIFACTS = { folders: [], files: SPOOL_FILES };
 });
 
 // src/workers/classification/tier-ledger-path.ts
@@ -64132,38 +64100,37 @@ function defaultExclusionContext(env = process.env, capture = configuredCaptureL
   try {
     home2 = realpathSync9.native(home2);
   } catch {}
-  const own3 = resolvedOwnLocations(env, home2, capture);
   return {
     home: home2,
     syncedRoots: configuredSyncedRoots(env),
-    ownRoots: own3.roots,
-    ownFiles: own3.files,
+    ownRoots: resolvedOwnRoots(env, capture),
     platform: process.platform
   };
 }
-function resolvedOwnLocations(env, home2, capture) {
+function resolvedOwnRoots(env, capture) {
   const own3 = olympusOwnLocations(env, capture);
-  const spellings = (path) => {
-    const keys = new Set;
-    for (const spelling of [path, realPathThroughExisting(path)]) {
-      try {
-        keys.add(normalizeScopePath(spelling));
-      } catch {}
-    }
-    return [...keys];
-  };
+  const bases = olympusSharedBases(env);
+  const shared = [...new Set([...bases, ...bases.map(realPathThroughExisting)])];
+  const dedicated = (path) => isDedicatedFolder(path, shared);
   const roots = new Set;
-  for (const root of own3.folders) {
-    for (const key2 of spellings(root))
-      if (!isWithinScopePath(home2, key2))
-        roots.add(key2);
+  const add = (path) => {
+    try {
+      roots.add(normalizeScopePath(path));
+    } catch {}
+  };
+  for (const path of own3.fixed) {
+    for (const spelling of [path, realPathThroughExisting(path)])
+      if (dedicated(spelling))
+        add(spelling);
   }
-  const files = [];
-  for (const rule of own3.files) {
-    for (const dir of spellings(rule.dir))
-      files.push({ ...rule, dir });
+  for (const path of own3.moved) {
+    const real = realPathThroughExisting(path);
+    if (!dedicated(path) || !dedicated(real))
+      continue;
+    add(path);
+    add(real);
   }
-  return { roots: [...roots], files };
+  return [...roots];
 }
 function realPathThroughExisting(path) {
   const rest = [];
@@ -64231,35 +64198,6 @@ function isInsideOwnRoot(scopePath, context2) {
       return false;
   }
 }
-function isOwnFile(scopePath, context2) {
-  const rules = context2.ownFiles;
-  if (!rules || rules.length === 0)
-    return false;
-  let index = ownFileIndexes.get(rules);
-  if (!index) {
-    index = new Map;
-    for (const rule of rules) {
-      const key2 = rule.dir.toLowerCase();
-      index.set(key2, [...index.get(key2) ?? [], rule]);
-    }
-    ownFileIndexes.set(rules, index);
-  }
-  const { volumeId, path } = splitScopePath(scopePath);
-  const slash = path.lastIndexOf("/");
-  if (slash < 0 || slash === path.length - 1)
-    return false;
-  const parent = scopePathFor(path.slice(0, slash) || "/", volumeId);
-  const named = index.get(parent.toLowerCase());
-  if (!named)
-    return false;
-  const foldedParent = foldScopePath(parent, context2);
-  const folded = foldScopePath(scopePath, context2);
-  const foldedName = folded.slice(folded.lastIndexOf("/") + 1);
-  return named.some((rule) => foldScopePath(rule.dir, context2) === foldedParent && rule.name.test(foldedName));
-}
-function isOwnPath(scopePath, context2) {
-  return isInsideOwnRoot(scopePath, context2) || isOwnFile(scopePath, context2);
-}
 function defaultExclusionForFolder(scopePath, context2) {
   const { volumeId, path } = splitScopePath(scopePath);
   const name = path === "/" ? "" : path.slice(path.lastIndexOf("/") + 1);
@@ -64319,7 +64257,7 @@ function deepestDefaultExclusion(scopePath, context2) {
   }
   return found;
 }
-var VOLUME_SEGMENT_PREFIX = "@", MAX_SCOPE_PATH_LENGTH = 4096, UNSAFE_PATH_CHARACTERS, VOLUME_ID_PATTERN, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES, ownRootIndexes, ownFileIndexes;
+var VOLUME_SEGMENT_PREFIX = "@", MAX_SCOPE_PATH_LENGTH = 4096, UNSAFE_PATH_CHARACTERS, VOLUME_ID_PATTERN, DEFAULT_EXCLUSION_LABELS, CACHE_SEGMENTS, TRASH_SEGMENTS, VCS_SEGMENTS, DEPENDENCY_SEGMENTS, BUILD_SEGMENTS, SYNCED_FOLDER_NAMES, ownRootIndexes;
 var init_paths = __esm(() => {
   init_config();
   init_olympus_layout();
@@ -64354,7 +64292,6 @@ var init_paths = __esm(() => {
   ]);
   SYNCED_FOLDER_NAMES = new Set(["dropbox", "google drive"]);
   ownRootIndexes = new WeakMap;
-  ownFileIndexes = new WeakMap;
 });
 
 // src/workers/local-files/scope.ts
@@ -64362,7 +64299,7 @@ function decideLocalFilesPath(approval, scopePath, context2) {
   const path = normalizeScopePath(scopePath);
   if (isDataOwnerLockName(path.slice(path.lastIndexOf("/") + 1)))
     return "denied";
-  if (isOwnPath(path, context2))
+  if (isInsideOwnRoot(path, context2))
     return "denied";
   const selected = approval.selections.map((selection) => ({ key: safeKey(selection.key), state: selection.state })).filter((selection) => selection.key !== undefined && scopePathIsWithin(path, selection.key, context2));
   const defaultOff = deepestDefaultExclusion(path, context2);
@@ -64409,7 +64346,6 @@ function createScopeBoundLocalFilesContentScope(input) {
     },
     ignoresCase: (scopePath) => scopePathsIgnoreCase(input.context, scopePath),
     decide: (scopePath) => decideLocalFilesPath(current2(), scopePath, input.context),
-    ownRoots: () => input.context.ownRoots ?? [],
     snapshotDecider() {
       const approval = current2();
       return (scopePath) => decideLocalFilesPath(approval, scopePath, input.context);
@@ -147374,9 +147310,6 @@ function watchIgnoreGlobs(context2, extra = []) {
     globs.push(root);
   for (const root of context2.ownRoots ?? [])
     globs.push(root);
-  for (const file of context2.ownFiles ?? [])
-    for (const glob of file.globs)
-      globs.push(`${file.dir}/${glob}`);
   return [...globs, ...extra];
 }
 function ignoreGlobsForRoot(globs, rootReal) {
@@ -147675,6 +147608,22 @@ function folderKeysOf(scopePath) {
   }
   return keys.reverse();
 }
+function localFilesDeletedItem(identity2, locatorUri, at) {
+  return {
+    identity: identity2,
+    mimeType: "application/octet-stream",
+    content: { kind: "metadata_only" },
+    metadata: Object.freeze({
+      entryKind: "deleted",
+      deleted: true,
+      deletedIdentityResolved: true,
+      name: locatorUri.slice(locatorUri.lastIndexOf("/") + 1),
+      locatorUri,
+      pathDisplay: locatorUri
+    }),
+    fetchedAt: at.toISOString()
+  };
+}
 function createLocalFilesSourceConnector(options) {
   const root = normalizeScopePath(options.root);
   const now = options.now ?? (() => new Date);
@@ -147745,20 +147694,7 @@ function createLocalFilesSourceConnector(options) {
     }),
     fetchedAt: now().toISOString()
   });
-  const deletedItem = (identity2, locatorUri) => ({
-    identity: identity2,
-    mimeType: "application/octet-stream",
-    content: { kind: "metadata_only" },
-    metadata: Object.freeze({
-      entryKind: "deleted",
-      deleted: true,
-      deletedIdentityResolved: true,
-      name: locatorUri.slice(locatorUri.lastIndexOf("/") + 1),
-      locatorUri,
-      pathDisplay: locatorUri
-    }),
-    fetchedAt: now().toISOString()
-  });
+  const deletedItem = (identity2, locatorUri) => localFilesDeletedItem(identity2, locatorUri, now());
   const deletionsFor = (scopePath, seen) => {
     const store = options.store;
     if (!store)
@@ -147842,40 +147778,6 @@ function createLocalFilesSourceConnector(options) {
       }
     }
     return absent;
-  };
-  const ownRootDeletions = (deletedSeen) => {
-    const store = options.store;
-    const ownRoots = options.scope.ownRoots?.() ?? [];
-    if (!store?.activeItemsUnderLocatorIfIndexed || ownRoots.length === 0)
-      return [];
-    if (store.lookupsReady && !store.lookupsReady())
-      return [];
-    const items = [];
-    const judge = (stored, base) => {
-      if (!pathIsAtOrBelow(stored.locatorUri, base))
-        return;
-      if (deletedSeen.has(stored.identity.providerItemId))
-        return;
-      deletedSeen.add(stored.identity.providerItemId);
-      items.push(deletedItem(stored.identity, stored.locatorUri));
-    };
-    for (const base of ownRoots) {
-      const self = store.activeIdentityForLocatorIfIndexed({
-        provider: LOCAL_FILES_PROVIDER,
-        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-        locatorUri: base
-      });
-      if (self)
-        judge({ identity: self, locatorUri: base }, base);
-      for (const stored of store.activeItemsUnderLocatorIfIndexed({
-        provider: LOCAL_FILES_PROVIDER,
-        accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
-        locatorUri: base,
-        limit: ABSENCE_SCAN_LIMIT
-      }))
-        judge(stored, base);
-    }
-    return items;
   };
   const leadsToSelection = (scopePath) => options.scope.roots().some((entry) => entry.scopePath !== root && pathIsAtOrBelow(entry.scopePath, scopePath));
   async function* walk(scopeRoot, startRel, decide2, stats, emitted) {
@@ -148089,14 +147991,6 @@ function createLocalFilesSourceConnector(options) {
               }
             }
           }
-          for (const deletion of ownRootDeletions(deletedSeen)) {
-            page2.push(deletion);
-            if (page2.length >= pageSize) {
-              options.scope.assertCurrent();
-              yield { items: page2, done: false };
-              page2 = [];
-            }
-          }
           options.scope.assertCurrent();
           options.onWalk?.(stats);
           if (options.watch && wroteSnapshot) {
@@ -148248,16 +148142,8 @@ function localFilesConnectorIdForScope(approvedScopeKey, scope) {
   const hash = createHash75("sha256").update(`${LOCAL_FILES_ACCOUNT_SCOPE}\x00${approvedScopeKey}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `local.files.${hash}`;
 }
-function createLocalFilesProviderStoreSyncHandler(options) {
-  if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
-    throw new Error("Local files secure_local embeddings require a local/private or approved Venice embedding provider.");
-  }
-  const tierSet = options.tierSet;
-  if (tierSet && tierSet.legSpec("secure_local")?.store !== options.store) {
-    throw new Error("The local files tier set's secure leg must be the lane's own store.");
-  }
-  const connectorIdFor = (approvedScopeKey) => localFilesConnectorIdForScope(approvedScopeKey, options.scope);
-  const storeView = tierSet ? {
+function localFilesStoreView(store, tierSet) {
+  return tierSet ? {
     activeIdentityForLocatorIfIndexed(input) {
       for (const domain of TIER_DOMAIN_ORDER) {
         const identity2 = tierSet.store(domain)?.activeIdentityForLocatorIfIndexed(input);
@@ -148290,14 +148176,30 @@ function createLocalFilesProviderStoreSyncHandler(options) {
       return TIER_DOMAIN_ORDER.every((domain) => tierSet.store(domain)?.locatorIdentityIndexReady() ?? true);
     }
   } : {
-    activeIdentityForLocatorIfIndexed: (input) => options.store.activeIdentityForLocatorIfIndexed(input),
-    activeItemsUnderLocatorIfIndexed: (input) => options.store.activeItemsUnderLocatorIfIndexed(input),
-    activeItemsDirectlyUnderRootIfIndexed: (input) => options.store.activeItemsDirectlyUnderRootIfIndexed(input),
-    lookupsReady: () => options.store.locatorIdentityIndexReady()
+    activeIdentityForLocatorIfIndexed: (input) => store.activeIdentityForLocatorIfIndexed(input),
+    activeItemsUnderLocatorIfIndexed: (input) => store.activeItemsUnderLocatorIfIndexed(input),
+    activeItemsDirectlyUnderRootIfIndexed: (input) => store.activeItemsDirectlyUnderRootIfIndexed(input),
+    lookupsReady: () => store.locatorIdentityIndexReady()
   };
+}
+function createLocalFilesProviderStoreSyncHandler(options) {
+  if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
+    throw new Error("Local files secure_local embeddings require a local/private or approved Venice embedding provider.");
+  }
+  const tierSet = options.tierSet;
+  if (tierSet && tierSet.legSpec("secure_local")?.store !== options.store) {
+    throw new Error("The local files tier set's secure leg must be the lane's own store.");
+  }
+  const connectorIdFor = (approvedScopeKey) => localFilesConnectorIdForScope(approvedScopeKey, options.scope);
+  const storeView = localFilesStoreView(options.store, tierSet);
   return {
     connectorIdForScope: connectorIdFor,
     async pull(request) {
+      if (options.beforePull) {
+        try {
+          await options.beforePull();
+        } catch {}
+      }
       const approvedScopeKey = request.approved_scope_key.trim();
       const root = localFilesRootOfApprovedScopeKey(approvedScopeKey);
       const connectorId = connectorIdFor(approvedScopeKey);
@@ -148448,6 +148350,119 @@ var init_provider_store_sync2 = __esm(() => {
   init_tiered_store_set();
   init_connector4();
   init_paths();
+  init_scope();
+  init_store();
+});
+
+// src/workers/local-files/own-roots-cleanup.ts
+function createLocalFilesOwnRootsCleanup(options) {
+  const { store, tierSet, context: context2 } = options;
+  const maxItems = Math.max(1, options.maxItems ?? DEFAULT_MAX_ITEMS);
+  const maxMs = Math.max(0, options.maxMs ?? DEFAULT_MAX_MS);
+  const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH);
+  const view3 = localFilesStoreView(store, tierSet);
+  let finished = (context2.ownRoots ?? []).length === 0;
+  let running;
+  let toldWaiting = false;
+  const inside = (locatorUri) => {
+    try {
+      return isInsideOwnRoot(locatorUri, context2);
+    } catch {
+      return false;
+    }
+  };
+  const found = (limit) => {
+    const items = new Map;
+    for (const base of context2.ownRoots ?? []) {
+      for (let window2 = Math.max(limit, FIRST_LOOK);; window2 = Math.min(window2 * 4, SCAN_LIMIT)) {
+        const stored = view3.activeItemsUnderLocatorIfIndexed?.({
+          provider: LOCAL_FILES_PROVIDER,
+          accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
+          locatorUri: base,
+          limit: window2
+        }) ?? [];
+        for (const item of stored) {
+          if (items.has(item.identity.providerItemId) || !inside(item.locatorUri))
+            continue;
+          items.set(item.identity.providerItemId, item);
+          if (items.size >= limit)
+            return [...items.values()];
+        }
+        if (stored.length < window2 || window2 >= SCAN_LIMIT)
+          break;
+      }
+    }
+    return [...items.values()];
+  };
+  const deletionsConnector = (items) => ({
+    id: LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID,
+    family: "file",
+    async authenticate() {},
+    async* listItems() {
+      yield { items, done: true };
+    },
+    async fetchItem() {
+      throw new Error("The clean-up lists deletions only.");
+    },
+    classificationSignals() {
+      return {};
+    }
+  });
+  const remove = async (batch) => {
+    const at = new Date;
+    const connector = deletionsConnector(batch.map((item) => localFilesDeletedItem(item.identity, item.locatorUri, at)));
+    const sync = { placement: LOCAL_FILES_STORE_PLACEMENT, fetchContent: false };
+    if (tierSet)
+      await tierSet.sync(connector, sync, { commitCursor: false });
+    else
+      await store.syncFromConnector(connector, sync);
+  };
+  const once = async () => {
+    if (view3.lookupsReady && !view3.lookupsReady()) {
+      if (!toldWaiting)
+        options.log?.("The index of stored paths is still being prepared; what is inside Olympus's own folders is removed at the next run.");
+      toldWaiting = true;
+      return { removed: 0, complete: false };
+    }
+    const started = Date.now();
+    let removed = 0;
+    let previous = new Set;
+    for (;; ) {
+      const left = found(Math.max(1, Math.min(batchSize, maxItems - removed)));
+      if (left.length === 0) {
+        finished = true;
+        return { removed, complete: true };
+      }
+      if (left.some((item) => previous.has(item.identity.providerItemId))) {
+        options.log?.("The store did not remove some items inside Olympus's own folders; they are tried again at the next run.");
+        return { removed, complete: false };
+      }
+      if (removed >= maxItems || Date.now() - started >= maxMs)
+        return { removed, complete: false };
+      await remove(left);
+      removed += left.length;
+      previous = new Set(left.map((item) => item.identity.providerItemId));
+    }
+  };
+  return {
+    run() {
+      if (finished)
+        return Promise.resolve({ removed: 0, complete: true });
+      running ??= once().catch((error2) => {
+        options.log?.(`Items inside Olympus's own folders could not be removed this run (${error2 instanceof Error ? error2.name : "error"}); they are tried again at the next.`);
+        return { removed: 0, complete: false };
+      }).finally(() => {
+        running = undefined;
+      });
+      return running;
+    }
+  };
+}
+var LOCAL_FILES_OWN_ROOTS_CLEANUP_CONNECTOR_ID = "local.files.own-roots-cleanup", SCAN_LIMIT = 250000, FIRST_LOOK = 500, DEFAULT_MAX_ITEMS = 5000, DEFAULT_MAX_MS = 1e4, DEFAULT_BATCH = 200;
+var init_own_roots_cleanup = __esm(() => {
+  init_connector4();
+  init_paths();
+  init_provider_store_sync2();
   init_scope();
   init_store();
 });
@@ -162572,16 +162587,13 @@ function scopeKeyFilter(definition, role, keys) {
     return {};
   return { [FILTER_KEYS[definition.filterFamily][role]]: [...keys] };
 }
-function fileSourceScopeContentFilters(approval, alwaysExcluded = []) {
+function fileSourceScopeContentFilters(approval) {
   if (approval.status !== "approved" || !approval.accountGeneration)
     return { allowed: false };
   const definition = getFileScopeSource(approval.sourceId);
   if (!definition)
     return { allowed: false };
-  const deniedKeys = [...new Set([
-    ...approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => selection.key),
-    ...alwaysExcluded
-  ])];
+  const deniedKeys = approval.selections.filter((selection) => selection.state !== "ingest").map((selection) => selection.key);
   const base = {
     provider: definition.provider,
     sourceScopeGeneration: approval.accountGeneration,
@@ -162605,16 +162617,13 @@ function fileSourceScopeContentFilters(approval, alwaysExcluded = []) {
     }
   };
 }
-function fileSourceScopeMetadataFilters(approval, alwaysExcluded = []) {
+function fileSourceScopeMetadataFilters(approval) {
   if (approval.status !== "approved" || !approval.accountGeneration)
     return { allowed: false };
   const definition = getFileScopeSource(approval.sourceId);
   if (!definition)
     return { allowed: false };
-  const excludedKeys = [...new Set([
-    ...approval.selections.filter((selection) => selection.state === "exclude").map((selection) => selection.key),
-    ...alwaysExcluded
-  ])];
+  const excludedKeys = approval.selections.filter((selection) => selection.state === "exclude").map((selection) => selection.key);
   const metadataOnlyKeys = approval.selections.filter((selection) => selection.state === "metadata_only").map((selection) => selection.key);
   const base = {
     provider: definition.provider,
@@ -162631,21 +162640,6 @@ function fileSourceScopeMetadataFilters(approval, alwaysExcluded = []) {
   return {
     allowed: true,
     filters: { ...base, ...scopeKeyFilter(definition, "include", includedKeys) }
-  };
-}
-function fileSourceScopeReadScope(approval, accountScope, alwaysExcluded = []) {
-  if (approval.status !== "approved")
-    return { allowed: false };
-  const metadataScope = fileSourceScopeMetadataFilters(approval, alwaysExcluded);
-  if (!metadataScope.allowed)
-    return { allowed: false };
-  const contentScope = fileSourceScopeContentFilters(approval, alwaysExcluded);
-  return {
-    allowed: true,
-    accountScope,
-    filters: metadataScope.filters,
-    contentAllowed: contentScope.allowed,
-    ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
   };
 }
 function fileSourceScopeMetadataEnabled(approval) {
@@ -184797,7 +184791,12 @@ async function main() {
     volumeIgnoresCase: (volumeId, path) => localFilesVolumes.ignoresCase(volumeId, path)
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
-  const alwaysExcludedFor = (sourceId) => sourceId === LOCAL_FILES_SOURCE_ID ? localFilesExclusionContext.ownRoots ?? [] : [];
+  const localFilesOwnRootsCleanup = localFilesConnectorStore ? createLocalFilesOwnRootsCleanup({
+    store: localFilesConnectorStore,
+    ...localFilesTierLane ? { tierSet: localFilesTierLane.set } : {},
+    context: localFilesExclusionContext,
+    log: (message2) => console.warn(`[local-files] ${message2}`)
+  }) : undefined;
   let localFilesSyncCache;
   const localFilesSyncFor = (ref) => {
     if (!localFilesConnectorStore || !fileSourceScopeAuthority)
@@ -184814,6 +184813,7 @@ async function main() {
       hub: localFilesWatchHub,
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
+      ...localFilesOwnRootsCleanup ? { beforePull: () => localFilesOwnRootsCleanup.run() } : {},
       ...localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider) ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) } : {}
     });
     localFilesSyncCache = { key: key2, handler };
@@ -184956,7 +184956,7 @@ async function main() {
         },
         resolveCandidateFilters: () => {
           const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
-          const scope = approval ? fileSourceScopeContentFilters(approval, alwaysExcludedFor(LOCAL_FILES_SOURCE_ID)) : { allowed: false };
+          const scope = approval ? fileSourceScopeContentFilters(approval) : { allowed: false };
           if (!scope.allowed || !scope.filters) {
             throw new OperationError("source_index_policy_violation", "Current local files full-ingestion scope is required before candidate enumeration.");
           }
@@ -185061,7 +185061,7 @@ async function main() {
         const approval = fileSourceScopeAuthority?.snapshot(sourceId);
         if (!approval)
           return false;
-        const scope = fileSourceScopeContentFilters(approval, alwaysExcludedFor(sourceId));
+        const scope = fileSourceScopeContentFilters(approval);
         return scope.allowed && reader.itemMatchesSearchFilters(ref.localItemId, ref.accountScope, scope.filters);
       }
     },
@@ -185152,10 +185152,20 @@ async function main() {
     const approval = fileSourceScopeAuthority?.snapshot(sourceId);
     if (!approval || approval.status !== "approved")
       return { allowed: false };
+    const metadataScope = fileSourceScopeMetadataFilters(approval);
+    if (!metadataScope.allowed)
+      return { allowed: false };
+    const contentScope = fileSourceScopeContentFilters(approval);
     const scopeAccount = fileScopeAccount(sourceId);
     if (!scopeAccount)
       return { allowed: false };
-    return fileSourceScopeReadScope(approval, scopeAccount.accountScope, alwaysExcludedFor(sourceId));
+    return {
+      allowed: true,
+      accountScope: scopeAccount.accountScope,
+      filters: metadataScope.filters,
+      contentAllowed: contentScope.allowed,
+      ...contentScope.allowed && contentScope.filters ? { contentFilters: contentScope.filters } : {}
+    };
   };
   const connectorStoreStatusScope = (store) => {
     if (store === gmailSecureConnectorStore) {
@@ -186994,6 +187004,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
       }
     })), withWorkerBearerAuth(withEngineBriefRoute2(worker.fetch, { view: (signal) => engineBriefView(chatgptSurface, signal) }), { authToken, requireOwnerSocket: !!socketPath, sessionSecret: dashboardSessionSecret.secret }))))))), !!socketPath)
   };
+  await localFilesOwnRootsCleanup?.run();
   const startServer = () => socketPath ? Bun.serve({ unix: socketPath, fetch(request, server2) {
     server2.timeout(request, 0);
     if (new URL(request.url).pathname === DESKTOP_OWNER_OPEN_PATH) {
@@ -187781,6 +187792,7 @@ var init_server5 = __esm(async () => {
   init_tier_set();
   init_scope();
   init_store();
+  init_own_roots_cleanup();
   init_provider_store_sync2();
   init_scheduler_source();
   init_runtime2();
