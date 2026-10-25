@@ -427,10 +427,11 @@ This follows the versioned change gate in `docs/ENGINEERING_PROCESS.md`:
     a child, and the cited child must name its parent. Examples:
     - a lease term in a PDF attached to an email;
     - a word spoken in a voice note.
-  - The instantiated private held-out run (`bun run eval:real`) is a **merge
-    precondition** of the spine pull request. If the owner-private dataset
-    cannot be reached, merging needs the owner's explicit exception, recorded
-    on the pull request.
+  - The instantiated private held-out run (`bun run eval:real`) was a merge
+    precondition of the spine pull request. The owner waived it for merge by
+    an exception on 2026-10-25 (recorded on the pull request): the fixture
+    held-out cases are the receipt, and the private run happens once a real
+    install with data exists.
 - **Review.** Astra on this design (done, below), then the critical-review
   receipt on the implementing pull request's head.
 - **Checks named for the spine:**

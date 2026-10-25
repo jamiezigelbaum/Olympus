@@ -367,8 +367,9 @@ section consolidates and supersedes all other policy wording.
   Eval: the fixture held-out harness gains cases whose answer exists only
   inside a child, with the cited child naming its parent
   (`test/eval-child-items.test.ts`). The instantiated private run
-  (`bun run eval:real`) is a merge precondition of the spine pull request and
-  needs the owner-private dataset.
+  (`bun run eval:real`) needs the owner-private dataset; the owner waived it
+  for merge by an exception on 2026-10-25, and it runs once a real install
+  with data exists. The fixture held-out cases are the receipt.
   Critical-review gate: a source-contract change; it needs fresh independent
   review of its head before merge, alongside required CI under
   `docs/ENGINEERING_PROCESS.md`.
