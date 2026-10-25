@@ -69,6 +69,10 @@ export interface FxRecord {
   body?: string;
   sentAt?: string;
   children?: readonly FxChild[];
+  /** The record carries no version (the source did not say). */
+  unversioned?: true;
+  /** The record is the provider's deletion of the item. */
+  deleted?: true;
 }
 
 const localId = (providerItemId: string): string => `${FIXTURE_ACCOUNT_SCOPE}:${providerItemId}`;
@@ -82,7 +86,7 @@ function identityOf(record: FxRecord, providerItemId = record.id, child?: FxChil
     accountScope: FIXTURE_ACCOUNT_SCOPE,
     providerItemId,
     localItemId: localId(providerItemId),
-    sourceVersion: String(record.version),
+    ...(record.unversioned === true ? {} : { sourceVersion: String(record.version) }),
     ...(child ? { parent: { providerItemId: record.id, localItemId: localId(record.id) } } : {}),
   };
 }
@@ -91,7 +95,7 @@ function identityOf(record: FxRecord, providerItemId = record.id, child?: FxChil
 export const fixtureBuilder: SourceRecordBuilder<FxRecord> = {
   family: 'email',
   entriesOf: (record) => [
-    { identity: identityOf(record), bringsContent: record.body !== undefined, ...(record.sentAt ? { authoredAt: record.sentAt } : {}) },
+    { identity: identityOf(record), bringsContent: record.body !== undefined, ...(record.deleted === true ? { deletes: true } : {}), ...(record.sentAt ? { authoredAt: record.sentAt } : {}) },
     ...(record.children ?? []).map((child) => ({
       identity: identityOf(record, fixtureChildId(record.id, child.key), child),
       bringsContent: false,
@@ -102,8 +106,8 @@ export const fixtureBuilder: SourceRecordBuilder<FxRecord> = {
     {
       identity: identityOf(record),
       mimeType: 'text/plain',
-      content: record.body === undefined ? { kind: 'metadata_only' } : { kind: 'text', text: record.body },
-      metadata: Object.freeze({ name: record.subject, title: record.subject, ...(record.sentAt ? { sentAt: record.sentAt } : {}), legacyDomain: 'internal' }),
+      content: record.body === undefined || record.deleted === true ? { kind: 'metadata_only' } : { kind: 'text', text: record.body },
+      metadata: Object.freeze({ name: record.subject, title: record.subject, ...(record.sentAt ? { sentAt: record.sentAt } : {}), ...(record.deleted === true ? { deleted: true } : {}), legacyDomain: 'internal' }),
       fetchedAt: '2026-10-25T00:00:00.000Z',
     },
     ...(record.children ?? []).map((child): RawItem => ({
