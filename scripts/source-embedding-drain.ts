@@ -8,9 +8,6 @@ import { loadConfig, normalizeSourceWorkerBaseUrl } from '../src/core/config.ts'
 import { DataOwnerBusyError, withDataOwnerLock } from '../src/core/data-owner-lock.ts';
 import { withWorkerAuthHeader, workerAuthTokenFromConfig } from '../src/core/worker-auth.ts';
 import { createWorkerFetch } from '../src/core/worker-transport.ts';
-import {
-  DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
-} from '../src/workers/dropbox-files/index.ts';
 import { createSourceIndexEmbeddingProviderFromEnv } from '../src/workers/email-source/server.ts';
 import { openConnectorStore, storageAccountForCorpus } from '../src/core/source-storage.ts';
 import {
@@ -499,8 +496,6 @@ export function optionsFromEnv(
   const rosterEnabled = [
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_ENABLED',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_ENABLED',
-    'OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH',
-    DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_WHATSAPP_ENABLED',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_X_BOOKMARKS_ENABLED',
     'OLYMPUS_SOURCE_EMBEDDING_DRAIN_INTERNAL_TELEGRAM_ENABLED',
@@ -588,8 +583,7 @@ export function secureLocalBackfillDryRunFromEnv(
   const configs: DryRunStoreConfig[] = [
     {
       corpusId: DROPBOX_CORPUS_ID,
-      dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_DROPBOX_STORE_DB_PATH?.trim()
-        || resolvedStorePath('dropbox.files', 'secure_local', env),
+      dbPath: resolvedStorePath('dropbox.files', 'secure_local', env),
       family: 'file' as const,
       trustDomain: 'secure_local' as const,
     },
@@ -597,8 +591,7 @@ export function secureLocalBackfillDryRunFromEnv(
       ? []
       : [{
           corpusId: EMAIL_CORPUS_ID as typeof EMAIL_CORPUS_ID,
-          dbPath: env.OLYMPUS_SOURCE_EMBEDDING_DRAIN_EMAIL_DB_PATH?.trim()
-            || resolvedStorePath('gmail.email', 'secure_local', env),
+          dbPath: resolvedStorePath('gmail.email', 'secure_local', env),
           family: 'email' as const,
           trustDomain: 'secure_local' as const,
         }]),

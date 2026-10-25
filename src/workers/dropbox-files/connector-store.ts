@@ -36,11 +36,6 @@ export const DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID = DROPBOX_FILES_CORPUS_ID;
 export const DROPBOX_INTERNAL_FILES_CORPUS_ID = 'internal.dropbox.files';
 export const DROPBOX_PUBLIC_FILES_CORPUS_ID = 'public_safe.dropbox.files';
 
-export const DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH';
-export const DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH';
-
 /** Every Dropbox tier store's corpus, by trust domain. */
 export const DROPBOX_TIER_CORPUS_IDS: Readonly<Record<SourceTrustDomain, string>> = Object.freeze({
   public_safe: DROPBOX_PUBLIC_FILES_CORPUS_ID,
@@ -70,9 +65,6 @@ export const DROPBOX_INGESTION_EXCLUSION_SOURCE = 'dropbox.personal';
  * "unevaluable" for every file of the named type, and fail them all closed.
  */
 export const DROPBOX_ENFORCEABLE_EXCLUSION_CRITERIA = ['path_prefix', 'media'] as const;
-
-export const DROPBOX_CONNECTOR_STORE_DB_PATH_ENV =
-  'OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH';
 
 /**
  * Where an EXISTING Dropbox file (one stored before per-item routing) rests:

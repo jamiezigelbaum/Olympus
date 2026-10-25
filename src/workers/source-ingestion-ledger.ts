@@ -1,4 +1,4 @@
-import { resolvedStorePath } from '../core/source-placement.ts';
+import { hasFolderLayout, placedRosterStores } from '../core/source-placement.ts';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -31,8 +31,6 @@ import {
   type SourceIndexStatusResult,
 } from './source-index/status.ts';
 import {
-  GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
-  GMAIL_SECURE_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   googleDriveIngestionExclusionMatcher,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
@@ -42,11 +40,6 @@ import type {
 } from './connector-store/index.ts';
 import { SourceStorageUnavailableError, openConnectorStore, storageAccountForCorpus } from '../core/source-storage.ts';
 import { lifecycleStoreFileOwner } from '../data-lifecycle.ts';
-import { READWISE_SECURE_LIBRARY_CORPUS_ID } from './readwise/tier-set.ts';
-import { X_BOOKMARKS_SECURE_CORPUS_ID } from './x-bookmarks/tier-set.ts';
-import {
-  WHATSAPP_INTERNAL_CORPUS_ID,
-} from './whatsapp/store-sync.ts';
 import {
   DROPBOX_FILES_CORPUS_ID,
   DROPBOX_INTERNAL_FILES_CORPUS_ID,
@@ -55,10 +48,6 @@ import {
   createDropboxTierConnectorStore,
   dropboxIngestionExclusionMatcher,
 } from './dropbox-files/index.ts';
-import {
-  INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-  PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-} from './telegram-messages/index.ts';
 import {
   LOCAL_FILES_CORPUS_ID,
   LOCAL_FILES_INTERNAL_CORPUS_ID,
@@ -1558,115 +1547,8 @@ function unassignedAttention(unassigned: SourceIngestionUnassignedCorpora): stri
 function localConnectorStores(env: Record<string, string | undefined>): Array<ConstructorParameters<typeof LocalConnectorStore>[0]> {
   return mergeConnectorStoreDefinitions([
     ...connectorStoresFromEnv(env.OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON),
-    {
-      corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath('gmail.email', 'internal', env),
-      family: 'email',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath('gmail.email', 'secure_local', env),
-      family: 'email',
-      trustDomain: 'secure_local',
-    },
-    {
-      corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath('google_drive.docs', 'internal', env),
-      family: 'file',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-      dbPath: resolvedStorePath('google_drive.docs', 'secure_local', env),
-      family: 'file',
-      trustDomain: 'secure_local',
-    },
-    {
-      corpusId: DROPBOX_FILES_CORPUS_ID,
-      dbPath: resolvedStorePath('dropbox.files', 'secure_local', env),
-      family: 'file',
-      trustDomain: 'secure_local',
-    },
-    {
-      corpusId: DROPBOX_INTERNAL_FILES_CORPUS_ID,
-      dbPath: resolvedStorePath('dropbox.files', 'internal', env),
-      family: 'file',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: DROPBOX_PUBLIC_FILES_CORPUS_ID,
-      dbPath: resolvedStorePath('dropbox.files', 'public_safe', env),
-      family: 'file',
-      trustDomain: 'public_safe',
-    },
-    {
-      corpusId: LOCAL_FILES_CORPUS_ID,
-      dbPath: resolvedStorePath('local.files', 'secure_local', env),
-      family: 'file',
-      trustDomain: 'secure_local',
-    },
-    {
-      corpusId: LOCAL_FILES_INTERNAL_CORPUS_ID,
-      dbPath: resolvedStorePath('local.files', 'internal', env),
-      family: 'file',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: LOCAL_FILES_PUBLIC_CORPUS_ID,
-      dbPath: resolvedStorePath('local.files', 'public_safe', env),
-      family: 'file',
-      trustDomain: 'public_safe',
-    },
-    {
-      corpusId: 'internal.readwise.library',
-      dbPath: resolvedStorePath('readwise.library', 'internal', env),
-      family: 'readwise',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID,
-      dbPath: resolvedStorePath('readwise.library', 'secure_local', env),
-      family: 'readwise',
-      trustDomain: 'secure_local',
-    },
-    {
-      corpusId: X_BOOKMARKS_SECURE_CORPUS_ID,
-      dbPath: resolvedStorePath('x.bookmarks', 'secure_local', env),
-      family: 'x',
-      trustDomain: 'secure_local',
-    },
-    {
-      corpusId: WHATSAPP_INTERNAL_CORPUS_ID,
-      dbPath: resolvedStorePath('whatsapp.personal.messages', 'internal', env),
-      family: 'chat',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: 'internal.x.bookmarks',
-      dbPath: resolvedStorePath('x.bookmarks', 'internal', env),
-      family: 'x',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: 'secure_local.whatsapp.messages',
-      // The writer's own resolution, so OLYMPUS_WHATSAPP_STATE_DIR is honored here too.
-      dbPath: resolvedStorePath('whatsapp.personal.messages', 'secure_local', env),
-      family: 'chat',
-      trustDomain: 'secure_local',
-    },
-    {
-      corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
-      dbPath: resolvedStorePath('telegram.messages', 'internal', env),
-      family: 'chat',
-      trustDomain: 'internal',
-    },
-    {
-      corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-      dbPath: resolvedStorePath('telegram.messages', 'secure_local', env),
-      family: 'chat',
-      trustDomain: 'secure_local',
-    },
+    // Every account's stores, wherever its layout puts them (core/source-placement.ts).
+    ...placedRosterStores(env),
     // Imported archives: one store set per family, read without writing.
     ...archiveImportFamilies().flatMap((family) => ARCHIVE_TIER_DOMAINS.map((trustDomain) => ({
       corpusId: archiveCorpusId(trustDomain, family),
@@ -1690,7 +1572,7 @@ function connectorStoresFromEnv(raw: string | undefined): Array<ConstructorParam
   if (!Array.isArray(parsed)) {
     throw new Error('OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON must be a JSON array.');
   }
-  return parsed.map((entry) => {
+  return parsed.flatMap((entry) => {
     if (!entry || typeof entry !== 'object') {
       throw new Error('Each connector store entry must be an object.');
     }
@@ -1699,15 +1581,17 @@ function connectorStoresFromEnv(raw: string | undefined): Array<ConstructorParam
     const corpusId = typeof record.corpusId === 'string' ? record.corpusId.trim() : '';
     const family = typeof record.family === 'string' ? record.family.trim() : '';
     const trustDomain = typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '';
+    // A source whose stores are placed names no path: its entry adds only a principal.
+    if (corpusId && hasFolderLayout(storageAccountForCorpus({ corpusId, trustDomain }).sourceId)) return [];
     if (!dbPath || !corpusId || !family || !trustDomain) {
       throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
     }
-    return {
+    return [{
       dbPath,
       corpusId,
       family: family as ConstructorParameters<typeof LocalConnectorStore>[0]['family'],
       trustDomain: trustDomain as ConstructorParameters<typeof LocalConnectorStore>[0]['trustDomain'],
-    };
+    }];
   });
 }
 

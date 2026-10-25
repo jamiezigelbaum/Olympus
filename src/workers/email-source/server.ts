@@ -1,4 +1,4 @@
-import { resolvedStorePath, resolvedRawPath } from '../../core/source-placement.ts';
+import { hasFolderLayout, resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
 import { DASHBOARD_PRIVATE_ANSWERS_COPY as PRIVATE_ANSWERS_COPY } from '../dashboard/vocabulary.ts';
 import { anonymousInboxConnectionId, localInboxLabel, askWithAnonymousInbox } from './local-private-answers.ts';
 import { installWorkerShutdownSignals } from '../../core/worker-shutdown.ts';
@@ -7179,7 +7179,8 @@ export interface ConnectorStoreMountParsingOptions {
 }
 
 interface ValidatedConnectorStoreMountDeclaration {
-  dbPath: string;
+  /** Absent, or ignored, for a source whose stores the engine places (core/source-placement.ts `hasFolderLayout`). */
+  dbPath?: string;
   corpusId: string;
   family: Parameters<typeof defineConnectorCorpus>[0]['family'];
   trustDomain: Parameters<typeof defineConnectorCorpus>[0]['trustDomain'];
@@ -7237,6 +7238,23 @@ export function parseConnectorStoreMountsFromEnv(
   for (const declaration of declarations) {
     try {
       const collidingStore = collidingStoresByCorpusId.get(declaration.corpusId);
+      // A source whose stores the engine places names no path here (source
+      // storage step 6): its declaration only adds a principal to the store
+      // its lane opened, and a dbPath it carries is ignored.
+      if (hasFolderLayout(storageAccountForCorpus(declaration, options.registeredCorpora).sourceId)) {
+        if (!collidingStore) {
+          throw new Error('its source keeps its stores where Olympus places them; a declaration can only add a principal to the store its lane opened, and that lane is not open.');
+        }
+        const { dbPath: _ignored, ...placed } = declaration;
+        assertConnectorStoreMountIdentity(placed, collidingStore);
+        mounts.push({
+          store: collidingStore,
+          ...(declaration.principal ? { principal: declaration.principal } : {}),
+          ...(declaration.chatPrincipal ? { chatPrincipal: declaration.chatPrincipal } : {}),
+        });
+        continue;
+      }
+      if (!declaration.dbPath) throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
       if (collidingStore) assertConnectorStoreMountIdentity(declaration, collidingStore);
       const pathOwnerCorpusId = ownerCorpusIdByDbPath.get(declaration.dbPath);
       if (pathOwnerCorpusId !== undefined && pathOwnerCorpusId !== declaration.corpusId) {
@@ -7279,7 +7297,7 @@ function assertConnectorStoreMountIdentity(
   store: LocalConnectorStore,
 ): void {
   const mismatches = [
-    ...(declaration.dbPath === store.dbPath
+    ...(declaration.dbPath === undefined || declaration.dbPath === store.dbPath
       ? []
       : [`dbPath ${JSON.stringify(declaration.dbPath)} does not match lane ${JSON.stringify(store.dbPath)}`]),
     ...(declaration.family === store.family
@@ -7303,10 +7321,10 @@ function validateConnectorStoreMountDeclaration(entry: unknown): ValidatedConnec
   const corpusId = typeof record.corpusId === 'string' ? record.corpusId.trim() : '';
   const family = typeof record.family === 'string' ? record.family.trim() : '';
   const trustDomain = typeof record.trustDomain === 'string' ? record.trustDomain.trim() : '';
-  if (!dbPath || !corpusId || !family || !trustDomain) {
+  if (!corpusId || !family || !trustDomain) {
     throw new Error('Connector store entries require dbPath, corpusId, family, trustDomain.');
   }
-  if (!isAbsolute(dbPath)) {
+  if (dbPath && !isAbsolute(dbPath)) {
     throw new Error('Connector store dbPath must be absolute.');
   }
   // Both enums are checked before the casts below. Every secure gate in this
@@ -7337,7 +7355,7 @@ function validateConnectorStoreMountDeclaration(entry: unknown): ValidatedConnec
     if (family === 'chat') chatPrincipal = principal;
   }
   return {
-    dbPath,
+    ...(dbPath ? { dbPath } : {}),
     corpusId,
     family: family as Parameters<typeof defineConnectorCorpus>[0]['family'],
     trustDomain: trustDomain as Parameters<typeof defineConnectorCorpus>[0]['trustDomain'],

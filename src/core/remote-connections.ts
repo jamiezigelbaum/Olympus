@@ -18,7 +18,7 @@ import { Database } from 'bun:sqlite';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { OperationError } from './operation-error.ts';
 import { readWorkerSetupEnv } from './worker-auth.ts';
 import { sanitizeCallerDisplayName } from './operation-caller.ts';
@@ -109,8 +109,6 @@ interface ConnectionRow {
   provider: string | null;
 }
 
-export const REMOTE_CONNECTIONS_DB_PATH_ENV = 'OLYMPUS_REMOTE_CONNECTIONS_DB_PATH';
-
 /**
  * Where the schema v1 database is copied before migration 2 (OAuth grants)
  * rewrites it. An older Olympus refuses a v2 database by design, so rolling
@@ -128,20 +126,13 @@ export function remoteConnectionsPreV2BackupPath(dbPath: string): string {
 
 /**
  * Where the connection database lives for a process with this environment:
- * an explicit `OLYMPUS_REMOTE_CONNECTIONS_DB_PATH`, else the shared Olympus
- * data directory. The worker calls this with its own environment (the service
- * environment with worker.env layered in).
+ * the shared Olympus data directory (no env variable relocates it since
+ * source-storage step 6). The worker calls this with its own environment (the
+ * service environment with worker.env layered in).
  */
 export function resolveRemoteConnectionsDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
-  if (explicit) {
-    if (!isAbsolute(explicit)) {
-      throw new TypeError(`${REMOTE_CONNECTIONS_DB_PATH_ENV} must be an absolute path.`);
-    }
-    return explicit;
-  }
   return defaultRemoteConnectionsDbPath(env);
 }
 
@@ -151,17 +142,14 @@ export function resolveRemoteConnectionsDbPath(
  * The shell's XDG_DATA_HOME is not the worker's: the supervised worker runs
  * with the service environment plus worker.env. So on a managed install the
  * path keys come from worker.env, the way the CLI already finds the worker's
- * auth token there. An explicit path in the shell still wins, because that is
- * the owner saying which database they mean. With no worker.env (a source
- * checkout, a foreground worker) the shell environment is the worker's.
+ * auth token there. With no worker.env (a source checkout, a foreground
+ * worker) the shell environment is the worker's.
  */
 export function resolveRemoteConnectionsDbPathForCli(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const explicit = env[REMOTE_CONNECTIONS_DB_PATH_ENV]?.trim();
-  if (explicit) return resolveRemoteConnectionsDbPath({ [REMOTE_CONNECTIONS_DB_PATH_ENV]: explicit });
-  const standalone = standaloneLinuxDataDir(env);
-  if (standalone) return join(standalone, 'remote-connections.sqlite');
+  // A standalone Linux receipt names the data root itself, whatever the shell says.
+  if (standaloneLinuxDataDir(env)) return resolveRemoteConnectionsDbPath(env);
   // Located only from a HOME in the environment handed in, like
   // environmentWithWorkerSetupEnv: a scoped environment never reads the
   // process owner's install by accident.
@@ -169,7 +157,6 @@ export function resolveRemoteConnectionsDbPathForCli(
   if (!workerEnv) return resolveRemoteConnectionsDbPath(env);
   return resolveRemoteConnectionsDbPath({
     ...(env.HOME !== undefined ? { HOME: env.HOME } : {}),
-    ...(workerEnv[REMOTE_CONNECTIONS_DB_PATH_ENV] ? { [REMOTE_CONNECTIONS_DB_PATH_ENV]: workerEnv[REMOTE_CONNECTIONS_DB_PATH_ENV] } : {}),
     ...(workerEnv.XDG_DATA_HOME ? { XDG_DATA_HOME: workerEnv.XDG_DATA_HOME } : {}),
   });
 }
