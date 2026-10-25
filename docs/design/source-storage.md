@@ -234,6 +234,48 @@ Inside the data root:
   account's data is kept is refused with "Delete the previous account's
   data first".
 
+### One account, live and imported
+
+Archive imports and live connectors keep one dataset per account
+([archive-live-one-dataset.md](archive-live-one-dataset.md), #524). An archive
+of a source that has a live connector is one more input to that source's
+connector. Its items land in the account's own stores, corpus ids and tier
+ledger, and they converge with the live items rather than sit beside them.
+Storage's part (step 4e):
+
+- **Imports for a live source get no stores of their own.** `archive.imports`
+  stays the source for archive-only formats (Reflect, Roam, Evernote), for mail
+  that matches no Gmail account, and for an archive of another account than the
+  connected one. Its `<family>.<tier>` stores, account scopes and per-import
+  Remove are unchanged. Archive import never shipped in a release, so nothing
+  existing is folded in. Reading `<tier>.archive.<family>` corpora for formats
+  that feed a live source ends once ingestion's per-source steps land.
+- **An entry names its provider account.** `provider_account_hash` holds the
+  opaque id `provider-account-identity.ts` defines: labels joined with `.`, so
+  no address or provider id is written to the registry. Whoever first
+  establishes the account writes it:
+  - a live connect, from the account the worker binds in
+    `source-account-bindings.json` (which keeps its own role of stopping a sync
+    on a different account);
+  - a Telegram pairing, from the pairing proof's `account_ref`;
+  - an import that carries the id.
+
+  The first value stays. A later one may only add labels
+  (`mergeProviderAccountIds`). WhatsApp has no account id, live or archived.
+- **An import finds its account through the storage service**, under the
+  registry lease, by `compareProviderAccounts` against the source's entry:
+  - `same`: that account;
+  - no entry for the source: a new `folder` entry, with the import's id or
+    none, which a later connect or pairing joins;
+  - `unproven` (one side has no id, or only labels that cannot decide) when the
+    source has one account: that account, once the owner confirms in the
+    import sheet;
+  - `different`: not this account; the import stays under `archive.imports` (a
+    second slot once slots exist).
+- **Connect and pairing check the entry.** One whose entry holds a different
+  account is refused with "delete that history first". 4b's "an account with an
+  entry follows it" compares the id, not only the source.
+
 ## Storage service
 
 One module in the worker, `src/core/source-storage.ts`, is the only code
@@ -415,6 +457,10 @@ store, and the registry state is what the Delete feature reports and
 retries from (another restart). Other sources are unaffected and the engine
 starts normally. A crash at any point resumes at the next boot from the
 registry state, because each step is idempotent and the rename is atomic.
+
+History imported into a live source is that account's history: an account's
+Delete takes it, and it is never removed on its own (owner decision 6).
+Imports under `archive.imports` keep their own Remove, by their account scope.
 
 What this removes from #467: the custody lock per store, the delete-fence
 file and its in-memory stand-in stores, canonical-path intent bindings, and
@@ -812,7 +858,8 @@ touch the store path (`eval/`).
      store opened by a 4a worker on a fresh install among them, stays legacy
      until 4d. No existing file moves; the Go bridge's own session lock moves
      to 4d.
-   - **4c, the boot migration of existing non-messaging accounts**, behind
+   - **4c, the boot migration of existing non-messaging accounts (done,
+     #508)**, behind
      `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1` in the worker environment (off by
      default), with the tests in "What must not break". Built on two changes
      that came first, so that moving a store is only renaming files: media-cache
@@ -837,7 +884,17 @@ touch the store path (`eval/`).
      you row; one crash mid-move resumed; the downgrade behavior. The owner
      signs this off here.
    - **4d, the messaging migration**, including the Go bridge's session
-     lock, which 4b leaves as it is.
+     lock, which 4b leaves as it is. An archive-only Telegram or WhatsApp
+     account (history, no session) is a `folder` account from the start.
+   - **4e, account identity**, before archive ingestion's Telegram and mail
+     steps (#524). The registry's `provider_account_hash` is written by connect
+     (from the account binding) and by Telegram pairing. The storage service
+     resolves an import's account as "One account, live and imported" says.
+     Connect and pairing refuse an entry that holds a different account. Proof:
+     an import joins its live account, creates one when there is none and is
+     joined by the next connect, waits for the owner when unproven, and stays
+     under `archive.imports` when different. A pairing onto another account's
+     history is refused.
 5. **Delete, export, uninstall on the registry.** Replace
    `lifecycleSourceSpecs` with the registry: a per-source delete marks the
    account `deleting` and the boot pass removes it; export and uninstall
@@ -855,7 +912,7 @@ proven on Mac, standalone Linux and OpenClaw-hosted.
 
 ## Owner decisions
 
-All five approved by the owner, 2026-10-24.
+Decisions 1 to 5 approved by the owner on 2026-10-24, and 6 on 2026-10-25.
 
 1. **One folder per account, with slots.** Connecting a different account
    for the same source creates a new folder; the old one stays as
@@ -875,6 +932,10 @@ All five approved by the owner, 2026-10-24.
    (`source-scheduler.ts:516-522` has no cancel today).
 5. **Leave pre-1.0 index files** for Delete all to remove, rather than
    deleting them during migration.
+6. **Imported history joins the account.** An import merged into a live
+   source becomes part of that account's history. It is deleted only with the
+   account's data, never on its own. Imports kept under `archive.imports`
+   keep their own Remove.
 
 ## Out of scope
 
