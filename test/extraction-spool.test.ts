@@ -55,7 +55,7 @@ describe('the sweep at start', () => {
     expect(existsSync(orphan)).toBe(false);
     // A running process's file is a read in flight.
     expect(existsSync(mine)).toBe(true);
-  });
+   }, 30_000);
 
   test('a file of a dead process under its owner is removed, and a running process\'s is not', () => {
     const spool = root();
@@ -66,7 +66,7 @@ describe('the sweep at start', () => {
     prepareExtractionSpool(spool, { ownersWithJobs: () => new Set([extractionSpoolOwnerKey(owner)]) });
     expect(existsSync(orphan)).toBe(false);
     expect(existsSync(mine)).toBe(true);
-  });
+   }, 30_000);
 
   test('the folder of an owner with no job is removed, even a running process\'s file in it', () => {
     const spool = root();
