@@ -76,6 +76,9 @@ import { migrateAccountFoldersAtBoot } from '../src/workers/email-source/server.
 
 type Env = Record<string, string>;
 
+// Telegram's and WhatsApp's moves (step 4d) have their own proof: test/source-account-migration-messaging.test.ts.
+const MESSAGING = ['telegram.messages', 'whatsapp.personal.messages'];
+
 const roots: string[] = [];
 afterEach(() => {
   __accountMigrationTestHooks.reset();
@@ -306,7 +309,7 @@ function expectDatabasesOpen(env: Env, sourceId: string, legacy: string[], where
 // ---------------------------------------------------------------------------
 
 describe('the move', () => {
-  test.each(migratableSources().map((sourceId) => [sourceId]))('%s: every file is renamed into its folder, same file, nothing copied, and no store or ledger is written to beyond the log fold', (sourceId) => {
+  test.each(migratableSources().filter((sourceId) => !MESSAGING.includes(sourceId)).map((sourceId) => [sourceId]))('%s: every file is renamed into its folder, same file, nothing copied, and no store or ledger is written to beyond the log fold', (sourceId) => {
     const { env, root } = fixture();
     const legacy = install(env, sourceId);
     // The same file (its inode) before and after; the bytes are compared from the fold on, which is the only write to a database.
@@ -1454,7 +1457,7 @@ describe('a plan the registry holds', () => {
     expect(existsSync(join(root, '..', 'escape.sqlite'))).toBe(false);
   });
 
-  test('a plan for a source this step does not move (a messaging account) is not followed either', () => {
+  test('a messaging plan that names a folder this build does not know is not followed either', () => {
     const { env, root } = fixture();
     updateSourceRegistry(env, (registry) => {
       registry.accounts.push({
@@ -1464,7 +1467,11 @@ describe('a plan the registry holds', () => {
         layout: 'legacy',
         corpus_ids: [],
         created_at: '2026-10-01T00:00:00.000Z',
-        migration: { state: 'moving', at: '2026-10-24T00:00:00.000Z', moves: [] },
+        migration: {
+          state: 'moving',
+          at: '2026-10-24T00:00:00.000Z',
+          moves: [{ role: 'raw', from: '@elsewhere/telegram/telegram.personal.session', to: 'sources/telegram.messages/1/session/telegram.session', kind: 'file', dev: '1', ino: '2', size: 3 }],
+        },
       });
     });
     const before = tree(root);

@@ -705,36 +705,81 @@ function legacyMessagingPaths(sourceId: string, env: LayoutEnv): { stores: strin
 
 // ---------------------------------------------------------------------------
 // Moving an existing account into its folder (docs/design/source-storage.md,
-// "Migration of existing installs"; delivery step 4c)
+// "Migration of existing installs"; delivery steps 4c and 4d)
 //
 // The boot migration renames an account's files from where they have always
-// been to where `accountStorePath` and `accountRawPath` put them. These two
+// been to where `accountStorePath` and `accountRawPath` put them. These
 // functions are its whole knowledge of the legacy side: the files an account of
 // a source owns at the default legacy locations (no override applied; an
 // override pins the account and the migration skips it), paired with the name
-// the folder layout gives each.
+// the folder layout gives each, and the folders those locations sit in.
 
-/** The sources whose existing accounts the boot migration moves: every one with a folder layout but the messaging sources (step 4d). */
+/** The sources whose existing accounts the boot migration moves: every one with a folder layout (Telegram and WhatsApp since step 4d). */
 export function migratableSources(): readonly string[] {
-  return FOLDER_LAYOUT_SOURCES.filter((sourceId) => sourceId !== TELEGRAM_SOURCE_ID && sourceId !== WHATSAPP_SOURCE_ID);
+  return FOLDER_LAYOUT_SOURCES;
 }
 
 /** A file or folder an account owns at its legacy location, and what the folder layout calls it. */
 export interface LegacyAccountFile {
-  /** `store`: a tier store (its tier sidecars follow); `raw`: raw state kept outside the stores. */
+  /** `store`: a tier store (its tier sidecars follow); `raw`: anything else the account keeps. */
   area: 'store' | 'raw';
-  /** The tier (or `<family>.<tier>` for an archive) for a store, the `AccountRawName` for raw state. */
+  /** The tier (or `<family>.<tier>` for an archive) for a store; for raw state its `AccountRawName`, or a name of its own with `folderPath`. */
   name: string;
   /** Where it sits at the default legacy location, absolute. */
   legacy: string;
-  /** Raw state only: a folder, a SQLite database (its `-wal` and `-shm` follow) or a plain file. */
+  /** Raw state only: a folder, a SQLite database (its `-wal`, `-shm` and `-journal` follow) or a plain file. */
   rawKind?: 'dir' | 'db' | 'file';
+  /** Where it goes in the account folder (`/`-separated, relative to it), when `name` is not an `AccountRawName`. */
+  folderPath?: string;
+}
+
+/** Telegram's login base at its default legacy place (Telethon adds `.session`), as pairing has always put it. */
+export function legacyTelegramSessionBase(env: LayoutEnv = process.env): string {
+  return join(legacyCaptureDataRoot(env), 'telegram', 'telegram.personal');
+}
+
+/** The WhatsApp bridge's state folder at its default legacy place, where pairing, the bridge and the worker put it. */
+export function legacyWhatsAppDefaultStateDir(env: LayoutEnv = process.env): string {
+  return join(legacyCaptureDataRoot(env), 'whatsapp-live');
+}
+
+/**
+ * The folders a legacy account's files can sit in, each with the tag the
+ * migration's plan writes a path under (`@<tag>/...`), so the registry never
+ * names a home folder: the data root (no tag), Telegram's store folder (which
+ * ignores `XDG_DATA_HOME`), the capture root (`<XDG data home>/olympus`) and
+ * the state root (`<XDG state home>/olympus`). A path is written under the
+ * first of these that holds it; on a standalone Linux install the capture root
+ * is the data root.
+ */
+export function migrationPathRoots(env: LayoutEnv = process.env): Array<{ tag: string; root: string }> {
+  return [
+    { tag: '', root: olympusDataRoot(env) },
+    { tag: 'telegram-stores', root: legacyTelegramStoreRoot(env) },
+    { tag: 'capture', root: legacyCaptureDataRoot(env) },
+    { tag: 'state', root: olympusStateRoot(env) },
+  ];
+}
+
+/**
+ * A login a Telegram pairing made aside and left behind
+ * (`<base>.pairing-<pid>-<tag>.session`, core/pairing-session-paths.ts) is named
+ * after its login's base, so in the account folder it is named after
+ * `session/telegram`: the name it takes there, or undefined for any other name.
+ */
+export function folderNameOfStagedTelegramLogin(legacyName: string, env: LayoutEnv = process.env): string | undefined {
+  const own = basename(legacyTelegramSessionBase(env));
+  if (!legacyName.startsWith(own)) return undefined;
+  const rest = legacyName.slice(own.length);
+  return /^\.pairing-\d{1,10}-[0-9a-f]{8}\.session(?:-journal)?$/.test(rest) ? `telegram${rest}` : undefined;
 }
 
 /**
  * Every file or folder an account of a migratable source can own at its default
  * legacy locations, whether or not it exists. Tier sidecars and `-wal`/`-shm`
- * are not listed; the migration adds them to each store.
+ * are not listed; the migration adds them to each store. Stores come first: a
+ * WhatsApp account's stores sit inside the bridge's state folder and leave it
+ * before the folder itself is renamed.
  */
 export function legacyAccountFiles(
   sourceId: string,
@@ -745,11 +790,10 @@ export function legacyAccountFiles(
   const names = sourceId === ARCHIVE_IMPORTS
     ? archiveFamilies.flatMap((family) => TIERS.map((tier) => `${family}.${tier}`))
     : Object.entries(LEGACY_STORES[sourceId] ?? {}).flatMap(([tier, file]) => (file ? [tier] : []));
-  const files: LegacyAccountFile[] = names.map((name) => ({
-    area: 'store',
-    name,
-    legacy: olympusDataPath(env, legacyStoreFile(sourceId, name).file),
-  }));
+  const files: LegacyAccountFile[] = names.map((name) => {
+    const entry = legacyStoreFile(sourceId, name);
+    return { area: 'store', name, legacy: entry.dir ? join(entry.dir.default(env), entry.file) : olympusDataPath(env, entry.file) };
+  });
   if (sourceId === 'local.files') files.push({ area: 'raw', name: 'watch', legacy: olympusDataPath(env, 'local-files-watch'), rawKind: 'dir' });
   if (sourceId === 'x.bookmarks') {
     files.push({ area: 'raw', name: 'x-reconcile.sqlite', legacy: `${olympusDataPath(env, 'x-bookmarks-api-usage.sqlite')}.reconcile`, rawKind: 'db' });
@@ -759,6 +803,22 @@ export function legacyAccountFiles(
       { area: 'raw', name: 'archive-imports.json', legacy: olympusDataPath(env, 'archive-imports.json'), rawKind: 'file' },
       { area: 'raw', name: 'archive-import-requests.json', legacy: olympusDataPath(env, 'archive-import-requests.json'), rawKind: 'file' },
     );
+  }
+  if (sourceId === TELEGRAM_SOURCE_ID) {
+    const base = legacyTelegramSessionBase(env);
+    const state = olympusStateRoot(env);
+    files.push(
+      // The login (Telethon's SQLite file) and the pairing lock beside it (a file lease, core/file-lease.ts).
+      { area: 'raw', name: 'telegram-session', legacy: `${base}.session`, rawKind: 'db', folderPath: 'session/telegram.session' },
+      { area: 'raw', name: 'telegram-pairing-lock', legacy: `${base}.pairing.lock.db`, rawKind: 'db', folderPath: 'session/telegram.pairing.lock.db' },
+      { area: 'raw', name: 'telegram-gateway', legacy: join(state, 'telegram-capture-gateway'), rawKind: 'dir' },
+      { area: 'raw', name: 'telegram-spool', legacy: join(legacyCaptureDataRoot(env), 'telegram-capture', 'spool'), rawKind: 'dir' },
+      // An earlier drain's cursor, read by nothing now: it moves so that a Delete of the folder takes it.
+      { area: 'raw', name: 'telegram-spool-drain', legacy: join(state, 'telegram-spool-drain'), rawKind: 'dir', folderPath: 'raw/telegram-spool-drain' },
+    );
+  }
+  if (sourceId === WHATSAPP_SOURCE_ID) {
+    files.push({ area: 'raw', name: 'whatsapp', legacy: legacyWhatsAppDefaultStateDir(env), rawKind: 'dir' });
   }
   return files;
 }

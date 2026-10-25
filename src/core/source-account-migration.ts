@@ -1,8 +1,13 @@
 /**
  * The boot migration: moves an existing account's files from where they have
  * always been into its account folder (docs/design/source-storage.md,
- * "Migration of existing installs"; delivery step 4c). Telegram and WhatsApp
- * are step 4d and are never touched here.
+ * "Migration of existing installs"; delivery steps 4c and 4d). Telegram's and
+ * WhatsApp's accounts (4d) move the same way, with three more things: their
+ * old places are outside the data folder (the capture and state roots, named
+ * in the plan by a tag), a capture helper that is running keeps its account
+ * where it is (its lock is held through the pass), and their records outside
+ * the data folder (capture grant, stored session paths) are weighed before and
+ * rewritten after the move (core/messaging-account-move.ts).
  *
  * It runs once per worker boot, under the owner lock, after
  * `replaceEmptyLegacyAccounts` and before adoption is enabled and anything
@@ -56,18 +61,27 @@
  * Deliberately light, like the registry: no workers. The only database opens
  * are the fold and the checks in core/source-storage.ts.
  */
-import { linkSync, lstatSync, mkdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
+import { linkSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../workers/classification/tier-ledger-path.ts';
 import { archiveImportFamilies } from './archive-formats.ts';
 import { syncDirectorySync } from './atomic-file.ts';
+import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import {
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_SOURCE_ID,
   accountFolder,
   accountFoldersRoot,
   accountRawPath,
   accountStorePath,
+  folderNameOfStagedTelegramLogin,
   legacyAccountFiles,
+  legacyTelegramSessionBase,
+  legacyWhatsAppDefaultStateDir,
+  legacyWhatsAppLiveSyncStateDir,
+  legacyWhatsAppServiceStateDir,
   migratableSources,
+  migrationPathRoots,
   olympusDataRoot,
   type AccountRawName,
   type LayoutAccount,
@@ -187,6 +201,8 @@ export const __accountMigrationTestHooks: {
   beforeMove?: (from: string, to: string) => void;
   /** Replaces `fsync` of a folder (the pass makes its renames durable through it). */
   syncDirectory?: (path: string) => void;
+  /** Replaces the take of a capture helper's lock (`tryHoldFileFlock`). */
+  captureLock?: (path: string) => HeldFileFlock | undefined;
   /** Replaces the bounds above, one by one. */
   limits?: Partial<{
     quickCheckStoreMaxBytes: number;
@@ -205,6 +221,7 @@ export const __accountMigrationTestHooks: {
     delete this.quickCheckBudgetMs;
     delete this.beforeMove;
     delete this.syncDirectory;
+    delete this.captureLock;
     delete this.limits;
   },
 };
@@ -212,6 +229,31 @@ export const __accountMigrationTestHooks: {
 export function accountFolderMigrationEnabled(env: LayoutEnv = process.env): boolean {
   return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === '1';
 }
+
+const MESSAGING_SOURCES: readonly string[] = [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID];
+const isMessaging = (sourceId: string): boolean => MESSAGING_SOURCES.includes(sourceId);
+
+/**
+ * What a messaging account's records outside the data folder say about where
+ * its session is, gathered before the pass (core/messaging-account-move.ts):
+ * the capture grant, the session paths the secret store holds and an Unpair
+ * that did not finish. `pin` keeps the account where it is because one of them
+ * names another place; `unreadable` because one cannot be read. A messaging
+ * source with no facts is not considered at all.
+ */
+export interface MessagingMoveFacts {
+  pin?: string;
+  unreadable?: string;
+}
+
+export interface AccountMigrationOptions {
+  messaging?: Partial<Record<string, MessagingMoveFacts>>;
+}
+
+/** The name of the lock a WhatsApp bridge holds in its state folder (`raw/whatsapp/bridge.lock`), through the descriptor its spawner hands it. */
+export const WHATSAPP_BRIDGE_LOCK_NAME = 'bridge.lock';
+/** The lock the Telegram reader takes in its gateway state folder (`scripts/telegram-telethon-reader.py`, `gateway_process_lock`). */
+export const TELEGRAM_GATEWAY_LOCK_NAME = 'gateway.lock';
 
 // ---------------------------------------------------------------------------
 // What an account owns
@@ -248,10 +290,38 @@ function candidates(sourceId: string, slot: string, env: LayoutEnv): Candidate[]
       add('secrets', secretLocationsPathForStore(file.legacy), secretLocationsPathForStore(to), 'file', true);
       add('sniffer', tierSnifferPathForStore(file.legacy), tierSnifferPathForStore(to), 'file', true);
     } else {
-      add('raw', file.legacy, accountRawPath(account, file.name as AccountRawName, env), file.rawKind === 'dir' ? 'dir' : 'file', file.rawKind === 'db');
+      const to = file.folderPath
+        ? join(accountFolder(account, env), ...file.folderPath.split('/'))
+        : accountRawPath(account, file.name as AccountRawName, env);
+      add('raw', file.legacy, to, file.rawKind === 'dir' ? 'dir' : 'file', file.rawKind === 'db');
+    }
+  }
+  if (sourceId === TELEGRAM_SOURCE_ID) {
+    // Logins a killed pairing left aside go with the login they were made from
+    // (Unpair and the next pairing find them by its name). Looked for in both
+    // places, so a plan part way is checked against the same list.
+    const legacyDir = dirname(legacyTelegramSessionBase(env));
+    const folderDir = join(accountFolder(account, env), 'session');
+    const own = basename(legacyTelegramSessionBase(env));
+    const staged = new Set<string>();
+    for (const name of listNames(legacyDir)) if (folderNameOfStagedTelegramLogin(name, env)) staged.add(name);
+    for (const name of listNames(folderDir)) {
+      const legacyName = name.startsWith('telegram.pairing-') ? `${own}${name.slice('telegram'.length)}` : undefined;
+      if (legacyName && folderNameOfStagedTelegramLogin(legacyName, env)) staged.add(legacyName);
+    }
+    for (const name of [...staged].sort()) {
+      found.push({ role: 'raw', from: join(legacyDir, name), to: join(folderDir, folderNameOfStagedTelegramLogin(name, env)!), kind: 'file', db: false });
     }
   }
   return found;
+}
+
+function listNames(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
 }
 
 /** What `lstat` says about a path, in the terms the migration decides by. */
@@ -283,6 +353,9 @@ function lookAt(path: string): Look {
 interface Context {
   env: LayoutEnv;
   root: string;
+  /** The folders legacy files sit in, the data root first (`migrationPathRoots`). */
+  roots: Array<{ tag: string; root: string }>;
+  messaging: Partial<Record<string, MessagingMoveFacts>> | undefined;
   now: () => number;
   /** When the boot stops starting accounts, and stops waiting for other connections. */
   deadline: number;
@@ -292,9 +365,37 @@ interface Context {
   quickCheckBytes: number;
 }
 
-/** Paths in the registry are relative to the data root and written with `/`, so the file never names a home folder. */
-const relPath = (root: string, path: string): string => relative(root, path).split(sep).join('/');
-const absPath = (root: string, rel: string): string => join(root, ...rel.split('/'));
+/** The folder of `migrationPathRoots` that holds a path (the first one, the data root before the others), and the path below it. */
+function rootOf(ctx: Pick<Context, 'roots'>, path: string): { tag: string; root: string; below: string } | undefined {
+  for (const { tag, root } of ctx.roots) {
+    const below = relative(root, path);
+    if (below === '..' || below.startsWith(`..${sep}`) || isAbsolute(below)) continue;
+    return { tag, root, below };
+  }
+  return undefined;
+}
+
+/**
+ * Paths in the registry are written with `/` relative to the data root, or, for
+ * a messaging account's files outside it, as `@<tag>/...` relative to the
+ * folder that tag names (`migrationPathRoots`), so the file never names a home
+ * folder.
+ */
+function relPath(ctx: Pick<Context, 'roots'>, path: string): string {
+  const at = rootOf(ctx, path);
+  if (!at) throw new TypeError('A migration path must sit in a folder the layout names.');
+  const below = at.below.split(sep).join('/');
+  return at.tag ? `@${at.tag}/${below}` : below;
+}
+
+function absPath(ctx: Pick<Context, 'roots' | 'root'>, rel: string): string {
+  if (!rel.startsWith('@')) return join(ctx.root, ...rel.split('/'));
+  const slash = rel.indexOf('/');
+  const tag = rel.slice(1, slash < 0 ? undefined : slash);
+  const root = ctx.roots.find((candidate) => candidate.tag === tag && tag !== '')?.root;
+  if (root === undefined || slash < 0) throw new TypeError(`A migration path names a folder this build does not know (${JSON.stringify(tag)}).`);
+  return join(root, ...rel.slice(slash + 1).split('/'));
+}
 
 const checkpoint = (at: string): void => __accountMigrationTestHooks.checkpoint?.(at);
 
@@ -439,9 +540,10 @@ function nearRealPath(path: string): string {
  */
 function destinationIsOurs(ctx: Context, destination: string): boolean {
   const parent = dirname(destination);
-  const below = relative(ctx.root, parent);
-  if (below === '..' || below.startsWith(`..${sep}`) || isAbsolute(below)) return false;
-  return nearRealPath(parent) === join(nearRealPath(ctx.root), below);
+  // A messaging account's old places are below the capture or the state root, which are checked the same way.
+  const at = rootOf(ctx, parent);
+  if (!at) return false;
+  return nearRealPath(parent) === join(nearRealPath(at.root), at.below);
 }
 
 function nearestExisting(path: string): string {
@@ -458,10 +560,41 @@ function nearestExisting(path: string): string {
   }
 }
 
+/**
+ * Whether something keeps the account where it is before any file is looked
+ * at: an env override or a mount, and for messaging the Gateway owning its
+ * capture, or its records outside the data folder (a capture grant or a stored
+ * session path that names another place, an Unpair that did not finish), or a
+ * second WhatsApp state folder (the Gateway service's and the cron sync's
+ * ignore `XDG_DATA_HOME`) that is not the one that would move. A capture grant
+ * that names the default place does not pin: it is rewritten once the account
+ * has moved (core/messaging-account-move.ts).
+ */
+function pinFor(ctx: Context, sourceId: string): Extract<Inspection, { kind: 'skip' }> | undefined {
+  const { env } = ctx;
+  const pin = legacyPinFor(sourceId, env, isMessaging(sourceId) ? { captureGrant: false } : {});
+  if (pin) return skip('pinned', `${pin} names where its files are, so they stay there.`) as Extract<Inspection, { kind: 'skip' }>;
+  if (!isMessaging(sourceId)) return undefined;
+  const facts = ctx.messaging?.[sourceId];
+  if (facts?.unreadable) return skip('unreadable', facts.unreadable) as Extract<Inspection, { kind: 'skip' }>;
+  if (facts?.pin) return skip('pinned', facts.pin) as Extract<Inspection, { kind: 'skip' }>;
+  if (sourceId === WHATSAPP_SOURCE_ID) {
+    const moving = resolve(legacyWhatsAppDefaultStateDir(env));
+    for (const other of [legacyWhatsAppServiceStateDir(env), legacyWhatsAppLiveSyncStateDir(env, env.HOME?.trim() || undefined)]) {
+      if (resolve(other) === moving) continue;
+      const found = look(other);
+      if (found.kind === 'absent') continue;
+      if (found.kind === 'unreadable') return skip('unreadable', 'A WhatsApp state folder outside the data folder cannot be looked at.') as Extract<Inspection, { kind: 'skip' }>;
+      return skip('files_elsewhere', 'A second WhatsApp state folder sits outside the data folder, so it cannot be told which one is the account\'s.') as Extract<Inspection, { kind: 'skip' }>;
+    }
+  }
+  return undefined;
+}
+
 function inspect(ctx: Context, sourceId: string, slot: string, entry: SourceRegistryAccount | undefined): Inspection {
-  const { env, root } = ctx;
-  const pin = legacyPinFor(sourceId, env);
-  if (pin) return skip('pinned', `${pin} names where its files are, so they stay there.`);
+  const { env } = ctx;
+  const pinned = pinFor(ctx, sourceId);
+  if (pinned) return pinned;
   const present: Array<{ candidate: Candidate; found: Extract<Look, { dev: bigint }> }> = [];
   for (const candidate of candidates(sourceId, slot, env)) {
     const found = look(candidate.from);
@@ -517,8 +650,8 @@ function inspect(ctx: Context, sourceId: string, slot: string, entry: SourceRegi
   }
   const moves = present.map(({ candidate, found }): SourceRegistryMove => ({
     role: candidate.role,
-    from: relPath(root, candidate.from),
-    to: relPath(root, candidate.to),
+    from: relPath(ctx, candidate.from),
+    to: relPath(ctx, candidate.to),
     kind: candidate.kind,
     ...(candidate.db ? { db: true as const } : {}),
     dev: String(found.dev),
@@ -542,7 +675,7 @@ function checkDatabases(ctx: Context, moves: SourceRegistryMove[]): { checked: N
   const totalMax = limit('quickCheckTotalMaxBytes', QUICK_CHECK_TOTAL_MAX_BYTES);
   const checked: NonNullable<SourceRegistryMigration['checked']> = [];
   for (const move of moves.filter((candidate) => candidate.db)) {
-    const path = absPath(ctx.root, move.from);
+    const path = absPath(ctx, move.from);
     const reads = storeFileReads(path, waitMs(ctx));
     // Another connection has it: wait for the next boot, rather than again for each way of looking.
     if (reads === 'busy') return { busy: `${basename(move.from)} is in use by another program, so the account stays where it is for now.` };
@@ -579,7 +712,12 @@ function planIsCanonical(ctx: Context, sourceId: string, slot: string, migration
   } catch {
     return false;
   }
-  const pairs = new Set(known.map((candidate) => `${relPath(ctx.root, candidate.from)}\n${relPath(ctx.root, candidate.to)}`));
+  let pairs: Set<string>;
+  try {
+    pairs = new Set(known.map((candidate) => `${relPath(ctx, candidate.from)}\n${relPath(ctx, candidate.to)}`));
+  } catch {
+    return false;
+  }
   return (migration.moves ?? []).every((move) => pairs.has(`${move.from}\n${move.to}`) && !move.from.split('/').includes('..'));
 }
 
@@ -594,13 +732,15 @@ function planIsCanonical(ctx: Context, sourceId: string, slot: string, migration
  * is a link (a link below the root is never followed: it is not a folder).
  */
 function syncFolderChains(ctx: Context, folders: string[]): void {
-  // The data folder may itself be a link: the folders synced are the real ones it leads to.
-  const root = realpathSync(ctx.root);
   const chain = new Set<string>();
   for (const folder of folders) {
-    let current = root;
+    // Each chain starts at the folder of `migrationPathRoots` that holds it: the data root for every destination.
+    const at = rootOf(ctx, folder);
+    if (!at) throw Object.assign(new Error('outside every root'), { code: 'EINVAL' });
+    // That folder may itself be a link: the folders synced are the real ones it leads to.
+    let current = realpathSync(at.root);
     chain.add(current);
-    for (const part of relative(ctx.root, folder).split(sep).filter(Boolean)) {
+    for (const part of at.below.split(sep).filter(Boolean)) {
       current = join(current, part);
       chain.add(current);
     }
@@ -624,8 +764,8 @@ function makeFolders(ctx: Context, moves: SourceRegistryMove[]): void {
     const real = realpathSync(ctx.root);
     const destinations = new Set<string>();
     for (const move of moves) {
-      const destination = dirname(absPath(ctx.root, move.to));
-      if (!destinationIsOurs(ctx, absPath(ctx.root, move.to))) throw Object.assign(new Error('link'), { code: 'ELOOP' });
+      const destination = dirname(absPath(ctx, move.to));
+      if (!destinationIsOurs(ctx, absPath(ctx, move.to))) throw Object.assign(new Error('link'), { code: 'ELOOP' });
       destinations.add(destination);
       let current = real;
       for (const part of relative(ctx.root, destination).split(sep).filter(Boolean)) {
@@ -652,8 +792,8 @@ function makeFolders(ctx: Context, moves: SourceRegistryMove[]): void {
 function syncMoveFolders(ctx: Context, moves: SourceRegistryMove[]): void {
   const folders = new Set<string>();
   for (const move of moves) {
-    folders.add(dirname(absPath(ctx.root, move.from)));
-    folders.add(dirname(absPath(ctx.root, move.to)));
+    folders.add(dirname(absPath(ctx, move.from)));
+    folders.add(dirname(absPath(ctx, move.to)));
   }
   try {
     for (const folder of folders) {
@@ -669,7 +809,7 @@ function removeEmptyFolders(ctx: Context, moves: SourceRegistryMove[]): void {
   const stop = accountFoldersRoot(ctx.env);
   const folders = new Set<string>();
   for (const move of moves) {
-    for (let folder = dirname(absPath(ctx.root, move.to)); folder === stop || folder.startsWith(`${stop}${sep}`); folder = dirname(folder)) {
+    for (let folder = dirname(absPath(ctx, move.to)); folder === stop || folder.startsWith(`${stop}${sep}`); folder = dirname(folder)) {
       folders.add(folder);
       if (folder === stop) break;
     }
@@ -704,8 +844,8 @@ const isPlanned = (found: Look, move: SourceRegistryMove): boolean =>
  */
 function moveOne(ctx: Context, move: SourceRegistryMove, direction: 'forward' | 'back'): 'moved' | 'there' | 'lost' {
   const [from, to] = direction === 'forward'
-    ? [absPath(ctx.root, move.from), absPath(ctx.root, move.to)]
-    : [absPath(ctx.root, move.to), absPath(ctx.root, move.from)];
+    ? [absPath(ctx, move.from), absPath(ctx, move.to)]
+    : [absPath(ctx, move.to), absPath(ctx, move.from)];
   const source = look(from);
   const target = look(to);
   const name = basename(move.from);
@@ -761,7 +901,7 @@ function moveOne(ctx: Context, move: SourceRegistryMove, direction: 'forward' | 
 /** The same dev, ino and size at the destination as the plan recorded at the old place. */
 function verifyIdentity(ctx: Context, moves: SourceRegistryMove[]): void {
   for (const move of moves) {
-    const found = look(absPath(ctx.root, move.to));
+    const found = look(absPath(ctx, move.to));
     if (found.kind === 'absent' && isDisposable(move)) continue;
     if ((found.kind !== 'file' && found.kind !== 'dir') || found.kind !== move.kind) {
       throw new MoveFault('failed', 'verify_failed', `${basename(move.from)} is not there after the move.`);
@@ -784,8 +924,8 @@ function verifyIdentity(ctx: Context, moves: SourceRegistryMove[]): void {
  */
 function verifyRestored(ctx: Context, moves: SourceRegistryMove[]): void {
   for (const move of moves) {
-    const back = look(absPath(ctx.root, move.from));
-    if (isPlanned(look(absPath(ctx.root, move.to)), move)) {
+    const back = look(absPath(ctx, move.from));
+    if (isPlanned(look(absPath(ctx, move.to)), move)) {
       throw new MoveFault('failed', 'move_failed', `${basename(move.from)} is still in the account folder.`);
     }
     if (back.kind === 'absent' && isDisposable(move)) continue;
@@ -813,7 +953,7 @@ function forward(ctx: Context, sourceId: string, slot: string, migration: Source
   verifyIdentity(ctx, moves);
   for (const move of moves) {
     if (move.db !== true || isCompanion(move.from) || stateBefore(migration, move) === 'damaged') continue;
-    const reads = storeFileReads(absPath(ctx.root, move.to), waitMs(ctx));
+    const reads = storeFileReads(absPath(ctx, move.to), waitMs(ctx));
     // Another program has it open: not a fault of the move. Everything goes back, and the account tries again at the next boot.
     if (reads === 'busy') throw new MoveFault('skipped', 'busy', `${basename(move.from)} is in use by another program, so the account stays where it is for now.`);
     if (reads !== 'reads') {
@@ -833,6 +973,7 @@ function forward(ctx: Context, sourceId: string, slot: string, migration: Source
     };
   });
   checkpoint('flipped');
+  removeEmptiedLegacyFolders(ctx, sourceId, slot);
 }
 
 /** Puts every file back, then records why. A pending `reverting` record is what a crash in here resumes from. */
@@ -848,7 +989,7 @@ function revert(ctx: Context, sourceId: string, slot: string, migration: SourceR
   // The folders the files go back to are made durable first, as the account folder's were: nothing is removed from the account
   // folder before the places the files return to have survived a power failure.
   try {
-    syncFolderChains(ctx, moves.map((move) => dirname(absPath(ctx.root, move.from))));
+    syncFolderChains(ctx, moves.map((move) => dirname(absPath(ctx, move.from))));
   } catch (error) {
     if (error instanceof AccountMigrationKilled) throw error;
     throw new MoveFault('failed', 'move_failed', `The folders the files go back to could not be made durable (${errorCode(error)}).`);
@@ -901,12 +1042,25 @@ type Outcome =
   | { kind: 'nothing' };
 
 /** Finishes or undoes a plan the registry holds. */
-function runPlan(ctx: Context, account: SourceRegistryAccount): Outcome {
+function runPlan(ctx: Context, account: SourceRegistryAccount, options: { locksHeld?: boolean } = {}): Outcome {
   const migration = account.migration!;
   const { source_id: sourceId, slot } = account;
   if (!migratableSources().includes(sourceId) || !planIsCanonical(ctx, sourceId, slot, migration)) {
     return { kind: 'stuck', detail: 'Its move plan is not one this build wrote, so nothing was touched.' };
   }
+  // The move that wrote the plan holds them already (a second `flock` in this process would find them taken).
+  if (options.locksHeld) return runHeldPlan(ctx, sourceId, slot, migration);
+  // A capture helper that runs now holds its files: the plan waits for a boot at which none does.
+  const locks = holdCaptureLocks(ctx, sourceId, slot);
+  if (!Array.isArray(locks)) return { kind: 'skipped', reason: locks.reason };
+  try {
+    return runHeldPlan(ctx, sourceId, slot, migration);
+  } finally {
+    for (const lock of locks) lock.release();
+  }
+}
+
+function runHeldPlan(ctx: Context, sourceId: string, slot: string, migration: SourceRegistryMigration): Outcome {
   try {
     if (migration.state === 'reverting') {
       const reason = migration.reason ?? 'verify_failed';
@@ -963,7 +1117,7 @@ function foldLogs(ctx: Context, moves: SourceRegistryMove[]): Extract<Inspection
   const notFolded = (detail: string): Extract<Inspection, { kind: 'skip' }> => ({ kind: 'skip', reason: 'log_not_folded', detail });
   for (const move of moves) {
     if (move.db !== true || isCompanion(move.from)) continue;
-    const path = absPath(ctx.root, move.from);
+    const path = absPath(ctx, move.from);
     const result = storeFileCheckpoint(path, waitMs(ctx));
     if (result === 'folded') continue;
     if (result === 'not_a_database') {
@@ -980,7 +1134,94 @@ function foldLogs(ctx: Context, moves: SourceRegistryMove[]): Extract<Inspection
   return undefined;
 }
 
+/**
+ * The locks a messaging account's capture helper holds while it runs, taken at
+ * both places its state folder can be (the old one and the account folder's):
+ * Telegram's reader takes `gateway.lock` in its gateway state, and a WhatsApp
+ * bridge holds `bridge.lock` in its state folder through the descriptor its
+ * spawner hands it (core/messaging-capture.ts). Held through the account's whole
+ * pass, so no helper starts on the files while they move (one that tries finds
+ * the lock taken and exits, to be started again later). A lock another process
+ * holds is `busy`: the account stays where it is this boot. Only a folder that
+ * is there gets a lock file; it moves with the folder.
+ */
+function holdCaptureLocks(ctx: Context, sourceId: string, slot: string): HeldFileFlock[] | Extract<Inspection, { kind: 'skip' }> {
+  if (!isMessaging(sourceId)) return [];
+  const account: LayoutAccount = { source_id: sourceId, slot, layout: 'folder' };
+  const telegram = sourceId === TELEGRAM_SOURCE_ID;
+  const legacyDir = legacyAccountFiles(sourceId, ctx.env).find((file) => file.name === (telegram ? 'telegram-gateway' : 'whatsapp'))!.legacy;
+  const dirs = [legacyDir, accountRawPath(account, telegram ? 'telegram-gateway' : 'whatsapp', ctx.env)];
+  const name = telegram ? TELEGRAM_GATEWAY_LOCK_NAME : WHATSAPP_BRIDGE_LOCK_NAME;
+  const held: HeldFileFlock[] = [];
+  const giveBack = (inspection: Inspection): Extract<Inspection, { kind: 'skip' }> => {
+    for (const lock of held) lock.release();
+    return inspection as Extract<Inspection, { kind: 'skip' }>;
+  };
+  for (const dir of dirs) {
+    if (lookAt(dir).kind !== 'dir') continue;
+    let lock: HeldFileFlock | undefined;
+    try {
+      lock = (__accountMigrationTestHooks.captureLock ?? tryHoldFileFlock)(join(dir, name));
+    } catch {
+      return giveBack(skip('unreadable', `Its capture lock (${name}) cannot be taken.`));
+    }
+    if (!lock) {
+      return giveBack(skip('busy', `Its ${telegram ? 'Telegram reader' : 'WhatsApp bridge'} is running, so the account stays where it is for now.`));
+    }
+    held.push(lock);
+  }
+  return held;
+}
+
+/**
+ * After a messaging account's move: the old folders it emptied (Telegram's
+ * `telegram/` and `telegram-capture/` in the capture root) are removed, so
+ * nothing is left at the old place. One that holds anything stays, and so does
+ * every root. Run again at each boot for an account a move finished, in case a
+ * boot stopped between the flip and this.
+ */
+function removeEmptiedLegacyFolders(ctx: Context, sourceId: string, slot: string): void {
+  if (!isMessaging(sourceId)) return;
+  const rootFolders = new Set(ctx.roots.map(({ root }) => resolve(root)));
+  const folders = new Set<string>();
+  try {
+    for (const candidate of candidates(sourceId, slot, ctx.env)) {
+      const folder = resolve(dirname(candidate.from));
+      if (!rootFolders.has(folder) && rootOf(ctx, folder)) folders.add(folder);
+    }
+  } catch {
+    return;
+  }
+  for (const folder of [...folders].sort((a, b) => b.length - a.length)) {
+    if (lookAt(folder).kind !== 'dir') continue;
+    try {
+      rmdirSync(folder);
+      syncFolder(dirname(folder));
+    } catch {
+      // Not empty, or already gone.
+    }
+  }
+}
+
 function startMove(ctx: Context, sourceId: string, slot: string, entry: SourceRegistryAccount | undefined): Outcome {
+  const pinned = pinFor(ctx, sourceId);
+  if (pinned) {
+    recordSkip(ctx, sourceId, slot, entry, pinned);
+    return { kind: 'skipped', reason: pinned.reason };
+  }
+  const locks = holdCaptureLocks(ctx, sourceId, slot);
+  if (!Array.isArray(locks)) {
+    recordSkip(ctx, sourceId, slot, entry, locks);
+    return { kind: 'skipped', reason: locks.reason };
+  }
+  try {
+    return startHeldMove(ctx, sourceId, slot, entry);
+  } finally {
+    for (const lock of locks) lock.release();
+  }
+}
+
+function startHeldMove(ctx: Context, sourceId: string, slot: string, entry: SourceRegistryAccount | undefined): Outcome {
   let inspection = inspect(ctx, sourceId, slot, entry);
   if (inspection.kind === 'move') {
     // The logs are folded into the databases first, so that what is planned and moved is whole files.
@@ -1010,7 +1251,7 @@ function startMove(ctx: Context, sourceId: string, slot: string, entry: SourceRe
         account.migration = { state: 'moving', at: new Date(ctx.now()).toISOString(), moves, ...(checked.length > 0 ? { checked } : {}) };
       }, { create: true });
       checkpoint('plan');
-      return runPlan(ctx, readSourceRegistryAccount(ctx, sourceId, slot));
+      return runPlan(ctx, readSourceRegistryAccount(ctx, sourceId, slot), { locksHeld: true });
     }
   }
   if (inspection.kind === 'skip') {
@@ -1026,10 +1267,12 @@ function readSourceRegistryAccount(ctx: Context, sourceId: string, slot: string)
   return account;
 }
 
-function context(env: LayoutEnv): Context | undefined {
+function context(env: LayoutEnv, options: AccountMigrationOptions): Context | undefined {
   let root: string;
+  let roots: Context['roots'];
   try {
     root = olympusDataRoot(env);
+    roots = migrationPathRoots(env);
   } catch {
     return undefined; // The data folder cannot be worked out here.
   }
@@ -1038,6 +1281,9 @@ function context(env: LayoutEnv): Context | undefined {
   return {
     env,
     root,
+    // A root a relative XDG value names would anchor to wherever the process runs: such a place is never one the plan names.
+    roots: roots.filter((candidate) => isAbsolute(candidate.root)),
+    messaging: options.messaging,
     now,
     deadline: Number.POSITIVE_INFINITY,
     quickCheckSpentMs: 0,
@@ -1049,14 +1295,16 @@ function context(env: LayoutEnv): Context | undefined {
 /**
  * Worker boot, under the owner lock, before anything mounts. Finishes or undoes
  * any plan the registry holds, then (with the switch on) starts moving each
- * legacy account of a migratable source until the budget runs out. Throws what
- * the registry throws when it cannot be read: then nothing is known about any
- * account, and the caller carries on as it always did.
+ * legacy account of a migratable source until the budget runs out. A messaging
+ * account is started only when `options.messaging` has its facts (the worker's
+ * boot gathers them, core/messaging-account-move.ts). Throws what the registry
+ * throws when it cannot be read: then nothing is known about any account, and
+ * the caller carries on as it always did.
  */
-export function migrateAccountFolders(env: LayoutEnv = process.env): AccountMigrationReport {
+export function migrateAccountFolders(env: LayoutEnv = process.env, options: AccountMigrationOptions = {}): AccountMigrationReport {
   const report: AccountMigrationReport = { moved: [], resumed: [], movedBack: [], skipped: [], stuck: [], deferred: [], errors: [] };
   const registry = readSourceRegistry(env);
-  const ctx = context(env);
+  const ctx = context(env, options);
   if (!ctx) return report;
   const run = (sourceId: string, work: () => Outcome, resumed = false): void => {
     try {
@@ -1088,9 +1336,16 @@ export function migrateAccountFolders(env: LayoutEnv = process.env): AccountMigr
     }
     run(account.source_id, () => runPlan(ctx, account), true);
   }
+  // A messaging account a move finished: what a boot that stopped right after the flip left at the old place goes.
+  for (const account of readSourceRegistry(env).accounts) {
+    if (isMessaging(account.source_id) && account.state === 'active' && account.layout === 'folder' && account.migration?.state === 'done') {
+      removeEmptiedLegacyFolders(ctx, account.source_id, account.slot);
+    }
+  }
   if (!accountFolderMigrationEnabled(env)) return report;
   for (const sourceId of migratableSources()) {
     if (handled.has(sourceId)) continue;
+    if (isMessaging(sourceId) && ctx.messaging?.[sourceId] === undefined) continue;
     const entry = findRegistryAccount(readSourceRegistry(env), sourceId, DEFAULT_ACCOUNT_SLOT);
     if (entry && (entry.state !== 'active' || entry.layout !== 'legacy' || sourceAccountMovePending(entry))) continue;
     if (ctx.now() >= deadline) {

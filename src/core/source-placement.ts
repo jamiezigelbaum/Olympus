@@ -252,20 +252,23 @@ export function declaredConnectorStoreMounts(env: LayoutEnv = process.env): Decl
  * What pins this source's files to their legacy paths, in words, when
  * something does: an env override, a connector-store mount (and, for
  * messaging, native capture ownership or a capture grant that names its
- * session). The boot migration leaves such an account where it is.
+ * session). The boot migration leaves such an account where it is. It weighs
+ * a messaging account's capture grant itself (`captureGrant: false`): a grant
+ * that names the default legacy session is what every legacy pairing wrote, and
+ * the move rewrites it (core/messaging-account-move.ts).
  */
-export function legacyPinFor(sourceId: string, env: LayoutEnv = process.env): string | undefined {
-  return pinnedLegacyBy(sourceId, env);
+export function legacyPinFor(sourceId: string, env: LayoutEnv = process.env, options: { captureGrant?: boolean } = {}): string | undefined {
+  return pinnedLegacyBy(sourceId, env, options.captureGrant !== false);
 }
 
 /** The override or mount that pins this source to the legacy layout, if any. */
-function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
+function pinnedLegacyBy(sourceId: string, env: LayoutEnv, withGrant = true): string | undefined {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim()) return name;
   }
   const native = nativeCaptureOwnerPin(sourceId, env);
   if (native) return native;
-  const grant = captureGrantPin(sourceId, env);
+  const grant = withGrant ? captureGrantPin(sourceId, env) : undefined;
   if (grant) return grant;
   const mounts = declaredConnectorStoreMounts(env);
   // The worker refuses a list it cannot read; until it is fixed nothing may move.
