@@ -68,7 +68,9 @@ import { archiveImportFamilies } from './archive-formats.ts';
 import { syncDirectorySync } from './atomic-file.ts';
 import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import {
+  TELEGRAM_GATEWAY_LOCK_NAME,
   TELEGRAM_SOURCE_ID,
+  WHATSAPP_BRIDGE_LOCK_NAME,
   WHATSAPP_SOURCE_ID,
   accountFolder,
   accountFoldersRoot,
@@ -250,10 +252,6 @@ export interface AccountMigrationOptions {
   messaging?: Partial<Record<string, MessagingMoveFacts>>;
 }
 
-/** The name of the lock a WhatsApp bridge holds in its state folder (`raw/whatsapp/bridge.lock`), through the descriptor its spawner hands it. */
-export const WHATSAPP_BRIDGE_LOCK_NAME = 'bridge.lock';
-/** The lock the Telegram reader takes in its gateway state folder (`scripts/telegram-telethon-reader.py`, `gateway_process_lock`). */
-export const TELEGRAM_GATEWAY_LOCK_NAME = 'gateway.lock';
 
 // ---------------------------------------------------------------------------
 // What an account owns

@@ -11,7 +11,7 @@ import {
   folderCaptureEnv,
   legacyTelegramGatewayStateDir,
 } from './olympus-layout.ts';
-import { placedAccount } from './source-placement.ts';
+import { accountMovePending, placedAccount } from './source-placement.ts';
 import {
   createNativeProcessService,
   NativeProcessConfigurationError,
@@ -252,6 +252,11 @@ function applyConfiguredPaths(config: OlympusConfig, env: NodeJS.ProcessEnv): vo
  * refused rather than left to point the reader at another session.
  */
 function applyFolderPaths(config: OlympusConfig, layoutEnv: NodeJS.ProcessEnv, env: NodeJS.ProcessEnv): void {
+  if (accountMovePending(TELEGRAM_SOURCE_ID, layoutEnv)) {
+    throw new NativeProcessConfigurationError(
+      'Olympus Telegram capture service: this account is part way through a move into its account folder that Olympus could not finish, so capture waits; its row in Needs you says why.',
+    );
+  }
   const account = placedAccount(TELEGRAM_SOURCE_ID, layoutEnv);
   if (account.layout !== 'folder') return;
   const folder = folderCaptureEnv(account, layoutEnv);

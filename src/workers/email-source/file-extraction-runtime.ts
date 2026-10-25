@@ -39,7 +39,7 @@ import {
 import type { RawItem } from '../../core/contracts.ts';
 import { mediaCacheDir, sweepMediaCache } from '../../core/media-cache.ts';
 import { extractionSpoolRoot } from '../../core/olympus-layout.ts';
-import { extractionSpoolPlacementForCorpus } from '../../core/source-placement.ts';
+import { extractionSpoolPlacementForCorpus, whatsappMovedPathMapper } from '../../core/source-placement.ts';
 import { extractionSpoolOwnerKey, prepareExtractionSpool } from '../file-extraction/spool.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
@@ -772,6 +772,7 @@ function defaultSourceFactories(
         candidates: connectorStoreExtractionCandidateReader(input.store),
         locators: input.store,
         mediaRoots: defaultWhatsAppMediaRoots(env),
+        relocateLocator: whatsappMovedPathMapper(env),
       });
     }],
   ]);

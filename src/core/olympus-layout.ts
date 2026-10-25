@@ -482,6 +482,17 @@ export function legacyAccountPaths(
 export const TELEGRAM_SOURCE_ID = 'telegram.messages';
 export const WHATSAPP_SOURCE_ID = 'whatsapp.personal.messages';
 
+/**
+ * The session lock of a WhatsApp bridge, `bridge.lock` in its state folder: a
+ * `flock` its spawner takes and hands to the bridge as an inherited descriptor
+ * (core/messaging-capture.ts, core/messaging-pairing.ts), so the bridge holds
+ * it for its whole life, after its spawner is gone too. One bridge per
+ * session, and the boot migration does not move a session a bridge runs on.
+ */
+export const WHATSAPP_BRIDGE_LOCK_NAME = 'bridge.lock';
+/** The lock the Telegram reader takes in its gateway state folder (`scripts/telegram-telethon-reader.py`, `gateway_process_lock`). */
+export const TELEGRAM_GATEWAY_LOCK_NAME = 'gateway.lock';
+
 /** Raw state of a messaging account (`accountRawPath`). */
 export type MessagingRawName =
   | 'telegram-spool'

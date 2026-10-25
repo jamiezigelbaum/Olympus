@@ -30,15 +30,25 @@
  * No instance cache: callers share the objects they open, as before.
  */
 import { Database } from 'bun:sqlite';
-import { existsSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, lstatSync, readdirSync, rmSync, rmdirSync, statSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { closeSqliteStore } from './sqlite-store.ts';
 import { SecretLocationsIndex } from '../workers/classification/secret-locations.ts';
 import { TierSnifferStore } from '../workers/classification/sniffer-store.ts';
 import { TierLedger, type TierLedgerOptions } from '../workers/classification/tier-ledger.ts';
 import { LocalConnectorStore, type LocalConnectorStoreOptions } from '../workers/connector-store/local-index.ts';
-import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
-import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
+import {
+  TELEGRAM_SOURCE_ID,
+  WHATSAPP_BRIDGE_LOCK_NAME,
+  WHATSAPP_SOURCE_ID,
+  legacyCaptureClaimDir,
+  legacyTelegramSessionBase,
+  type LayoutAccountLayout,
+  type LayoutEnv,
+} from './olympus-layout.ts';
+import { tryHoldFileFlock } from './data-owner-lock.ts';
+import { isFileLeaseSidecarName, withFileLeaseSync } from './file-lease.ts';
+import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, legacyPinFor, storageAccountForCorpus } from './source-placement.ts';
 import { compareProviderAccounts, mergeProviderAccountIds } from './provider-account-identity.ts';
 import { placedStoreHolder } from './store-identity.ts';
 import {
@@ -193,6 +203,93 @@ export function placeOwnedAccount(account: StorageAccount, env: LayoutEnv = proc
   return layout ?? 'legacy';
 }
 
+/** How old an empty claim folder must be before a boot takes it back: longer than any pairing waits for its helper (ten minutes). */
+export const CAPTURE_CLAIM_RECLAIM_AGE_MS = 60 * 60_000;
+
+/**
+ * A pairing that settled on the legacy paths claims them by making the legacy
+ * capture folder (core/pairing-placement.ts), which the placement decision
+ * reads as files already there. One that then failed before its helper wrote
+ * anything left that folder empty (or holding only its own lock files), and it
+ * kept the account `legacy` for good. Worker boot, under the owner lock and
+ * before the re-placement below: such a folder is removed when all of these
+ * hold, so the re-placement can then decide as if no pairing had happened:
+ * - the account's entry is `active`, `legacy`, lists no corpus and has no move
+ *   pending, and nothing pins it (an override, native capture, a capture grant);
+ * - the folder is a real folder that holds nothing but the Telegram pairing
+ *   lease's files or the WhatsApp bridge's lock file;
+ * - no pairing holds those locks now, and the folder has not changed for an
+ *   hour (a pairing that runs in another environment, an override of its own,
+ *   keeps its lock elsewhere).
+ * Returns the source ids whose claim was taken back.
+ */
+export function reclaimEmptyCaptureClaims(env: LayoutEnv = process.env): string[] {
+  const reclaimed: string[] = [];
+  let registry: SourceRegistry;
+  try {
+    registry = readSourceRegistry(env);
+  } catch {
+    return reclaimed;
+  }
+  for (const sourceId of [TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID]) {
+    const entry = findRegistryAccount(registry, sourceId, DEFAULT_ACCOUNT_SLOT);
+    if (!entry || entry.state !== 'active' || entry.layout !== 'legacy' || entry.corpus_ids.length > 0 || sourceAccountMovePending(entry)) continue;
+    if (legacyPinFor(sourceId, env)) continue;
+    const claim = legacyCaptureClaimDir(sourceId, env);
+    if (!claim) continue;
+    let stat;
+    try {
+      stat = lstatSync(claim);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory() || Date.now() - stat.mtimeMs < CAPTURE_CLAIM_RECLAIM_AGE_MS) continue;
+    const leaseTarget = sourceId === TELEGRAM_SOURCE_ID ? `${basename(legacyTelegramSessionBase(env))}.pairing` : undefined;
+    let names: string[];
+    try {
+      names = readdirSync(claim);
+    } catch {
+      continue;
+    }
+    const ownLock = (name: string): boolean => (leaseTarget ? isFileLeaseSidecarName(leaseTarget, name) : name === WHATSAPP_BRIDGE_LOCK_NAME);
+    if (!names.every(ownLock)) continue;
+    if (removeClaimUnderItsLock(claim, names, leaseTarget)) reclaimed.push(sourceId);
+  }
+  return reclaimed;
+}
+
+/** Removes the claim folder's lock files and the folder, holding the lock they are, so no pairing starts in between. */
+function removeClaimUnderItsLock(claim: string, names: string[], leaseTarget: string | undefined): boolean {
+  const remove = (): boolean => {
+    try {
+      for (const name of names) rmSync(join(claim, name), { force: true });
+      rmdirSync(claim);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (leaseTarget) {
+    try {
+      return withFileLeaseSync(join(claim, leaseTarget), () => remove(), { acquireTimeoutMs: 1 });
+    } catch {
+      return false; // A pairing holds it, or it cannot be taken: the claim stands.
+    }
+  }
+  let lock;
+  try {
+    lock = tryHoldFileFlock(join(claim, WHATSAPP_BRIDGE_LOCK_NAME));
+  } catch {
+    return false;
+  }
+  if (!lock) return false;
+  try {
+    return remove();
+  } finally {
+    lock.release();
+  }
+}
+
 /**
  * Worker boot, under the owner lock and before anything mounts: an account the
  * registry lists as `legacy` that holds nothing yet is placed in a folder
@@ -212,6 +309,7 @@ export function placeOwnedAccount(account: StorageAccount, env: LayoutEnv = proc
  *   them can be looked at.
  */
 export function replaceEmptyLegacyAccounts(env: LayoutEnv = process.env): string[] {
+  reclaimEmptyCaptureClaims(env);
   const eligible = (account: SourceRegistry['accounts'][number]): boolean =>
     account.state === 'active'
     && account.layout === 'legacy'

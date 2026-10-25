@@ -11,7 +11,8 @@ import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
 import { FileLeaseBusyError, withFileLease } from './file-lease.ts';
 import { closeSqliteStore } from './sqlite-store.ts';
-import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
+import { TELEGRAM_SOURCE_ID, WHATSAPP_BRIDGE_LOCK_NAME, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
+import { tryHoldFileFlock, type HeldFileFlock } from './data-owner-lock.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
 import { assertTelegramHistoryAccount, telegramHistoryAccount, telegramHistoryAccountError } from './provider-account-history.ts';
@@ -83,6 +84,8 @@ export interface PairingCommandRequest {
   env: Record<string, string | undefined>;
   signal?: AbortSignal;
   onStdoutLine?: (line: string) => void | Promise<void>;
+  /** Descriptors the helper inherits after its private pipe (fd 3): the WhatsApp bridge's session lock. */
+  inheritFds?: number[];
 }
 
 export interface PairingCommandResult {
@@ -201,11 +204,15 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
 
     let result: PairingCommandResult;
     let receipt: PairingReceipt;
+    // The bridge's session lock (core/olympus-layout.ts, WHATSAPP_BRIDGE_LOCK_NAME): held while it pairs, and
+    // handed to it, so a capture bridge on this session, or the boot migration, never runs beside it.
+    const bridgeLock = options.source === 'whatsapp' ? takeWhatsAppBridgeLock(sessionPath) : undefined;
     try {
     result = await runner({
       executable: command[0]!,
       args: command.slice(1),
       env: commandEnv,
+      ...(bridgeLock ? { inheritFds: [bridgeLock.fd] } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       onStdoutLine: async (line) => {
         const event = safeJsonObject(line);
@@ -245,6 +252,9 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
       // Whatever stopped it, the login made aside is no one's.
       if (aside) removeTelegramLogin(aside.base);
       throw error;
+    } finally {
+      // The bridge has exited: nothing else holds its descriptor.
+      bridgeLock?.release();
     }
     const chats = options.source === 'telegram' ? parseTelegramDialogs(receipt.dialogs) : [];
     const accountProof = proofForReceipt(options.source, receipt);
@@ -332,6 +342,16 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     }
     throw error;
   }
+}
+
+/** The WhatsApp bridge's session lock in its state folder, or a refusal when a bridge already runs on this session. */
+function takeWhatsAppBridgeLock(stateDir: string): HeldFileFlock {
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const lock = tryHoldFileFlock(join(stateDir, WHATSAPP_BRIDGE_LOCK_NAME));
+  if (!lock) {
+    throw new Error('A WhatsApp bridge is already running on this session (capture, or another pairing). Finish or cancel the other pairing, or Unpair WhatsApp first, then re-run olympus connect whatsapp --pair.');
+  }
+  return lock;
 }
 
 async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: string): Promise<string> {
@@ -741,7 +761,7 @@ function sourceLabel(source: MessagingPairingSource): string {
 async function runPairingCommand(request: PairingCommandRequest): Promise<PairingCommandResult> {
   const child = spawnChild(request.executable, request.args, {
     env: request.env,
-    stdio: ['inherit', 'pipe', 'pipe', 'pipe'],
+    stdio: ['inherit', 'pipe', 'pipe', 'pipe', ...(request.inheritFds ?? [])],
   });
   const stdoutLines: string[] = [];
   let forcedError: 'pairing_timeout' | 'pairing_cancelled' | undefined;
