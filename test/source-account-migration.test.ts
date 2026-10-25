@@ -298,7 +298,7 @@ function expectDatabasesOpen(env: Env, sourceId: string, legacy: string[], where
   expect(databases.length, label).toBeGreaterThan(0);
   for (const path of databases) {
     const place = where === 'folder' ? destinationOf(env, path, sourceId) : path;
-    expect(storeFileReads(place), `${label}: ${place} does not open`).toBe(true);
+    expect(storeFileReads(place), `${label}: ${place} does not open`).toBe('reads');
   }
 }
 
@@ -1625,7 +1625,7 @@ describe('a file lost while the move is part way', () => {
 
     expect(report.moved).toEqual(['dropbox.files']);
     expect(entryOf(env, 'dropbox.files')!.layout).toBe('folder');
-    expect(storeFileReads(resolvedStorePath('dropbox.files', 'secure_local', env))).toBe(true);
+    expect(storeFileReads(resolvedStorePath('dropbox.files', 'secure_local', env))).toBe('reads');
   });
 });
 

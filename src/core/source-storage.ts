@@ -360,41 +360,57 @@ function hasUnmergedWrites(path: string): boolean {
   return existsSync(`${path}-journal`);
 }
 
+/** Whether an error from SQLite means another connection has the database locked, as opposed to the database being unreadable. */
+function isBusyError(error: unknown): boolean {
+  const code = String((error as { code?: unknown })?.code ?? '');
+  const message = String((error as { message?: unknown })?.message ?? error);
+  return /SQLITE_(BUSY|LOCKED)/.test(code) || /locked|busy/i.test(message);
+}
+
+/** A wait for another connection, in whole milliseconds, never negative. */
+const busyWait = (ms: number): number => Math.max(0, Math.floor(ms));
+
 /**
  * Opens a store file to look at it, and proves its schema reads. It is opened
  * read-only first. A read-only connection cannot open a WAL database that has
  * no `-wal` beside it (macOS's SQLite refuses), which is how a store looks
  * after a clean close and would read as damaged, so then, and only when no
  * write waits outside the main file (closing a writable connection merges
- * it), the file is opened writable but query-only. Throws when neither way
- * reads it. Nothing is written to the database.
+ * it), the file is opened writable but query-only. A file another connection
+ * has locked is an answer and not a reason to try another way, which would
+ * wait again: it throws at once, after at most `busyTimeoutMs`. Throws when
+ * neither way reads it. Nothing is written to the database.
  */
-function openToLookAt(path: string): Database {
+function openToLookAt(path: string, busyTimeoutMs: number): Database {
   let failure: unknown;
   for (const mode of [{ readonly: true, create: false }, { readwrite: true, create: false }] as const) {
     if ('readwrite' in mode && hasUnmergedWrites(path)) break;
     let db: Database | undefined;
     try {
       db = new Database(path, mode);
-      db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+      db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)}; PRAGMA query_only = ON;`);
       db.query('SELECT count(*) AS n FROM sqlite_master').get();
       return db;
     } catch (error) {
       failure = error;
       if (db) closeSqliteStore(db, { checkpoint: false });
+      if (isBusyError(error)) break;
     }
   }
   throw failure ?? new Error('The store has writes outside its file.');
 }
 
+/** What looking at a store file came to: `busy` when another connection kept it from being read within the wait. */
+export type StoreFileLook = 'reads' | 'damaged' | 'busy';
+
 /** Whether a store file opens and its schema reads. Writes nothing to it (SQLite's own `-wal` and `-shm` aside). */
-export function storeFileReads(path: string): boolean {
+export function storeFileReads(path: string, busyTimeoutMs = 2_000): StoreFileLook {
   let db: Database | undefined;
   try {
-    db = openToLookAt(path);
-    return true;
-  } catch {
-    return false;
+    db = openToLookAt(path, busyTimeoutMs);
+    return 'reads';
+  } catch (error) {
+    return isBusyError(error) ? 'busy' : 'damaged';
   } finally {
     if (db) closeSqliteStore(db, { checkpoint: false });
   }
@@ -402,16 +418,17 @@ export function storeFileReads(path: string): boolean {
 
 /**
  * `PRAGMA quick_check` on a store file, query-only: `ok`, or `damaged` for anything else, a file that will not open
- * included. It is synchronous and cannot be interrupted, so the caller bounds it by size beforehand.
+ * included; `busy` when another connection kept it from being read within the wait. It is synchronous and cannot be
+ * interrupted, so the caller bounds it by size beforehand.
  */
-export function storeFileQuickCheck(path: string): 'ok' | 'damaged' {
+export function storeFileQuickCheck(path: string, busyTimeoutMs = 2_000): 'ok' | 'damaged' | 'busy' {
   let db: Database | undefined;
   try {
-    db = openToLookAt(path);
+    db = openToLookAt(path, busyTimeoutMs);
     const rows = db.query('PRAGMA quick_check').all() as Array<Record<string, unknown>>;
     return rows.length === 1 && Object.values(rows[0]!)[0] === 'ok' ? 'ok' : 'damaged';
-  } catch {
-    return 'damaged';
+  } catch (error) {
+    return isBusyError(error) ? 'busy' : 'damaged';
   } finally {
     if (db) closeSqliteStore(db, { checkpoint: false });
   }
@@ -434,14 +451,14 @@ export function storeFileCheckpoint(path: string, busyTimeoutMs = 2_000): StoreF
   let db: Database | undefined;
   try {
     db = new Database(path, { readwrite: true, create: false });
-    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))};`);
+    db.exec(`PRAGMA busy_timeout = ${busyWait(busyTimeoutMs)};`);
     const row = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as Record<string, unknown> | null;
     const [busy, log, checkpointed] = row ? Object.values(row) : [];
     // Not in write-ahead mode: the pragma answers 0, -1, -1.
     return busy === 0 && log === checkpointed ? 'folded' : 'busy';
   } catch (error) {
     const message = String((error as { message?: unknown })?.message ?? error);
-    if (/locked|busy/i.test(message)) return 'busy';
+    if (isBusyError(error)) return 'busy';
     if (/not a database|malformed|corrupt/i.test(message)) return 'not_a_database';
     return 'failed';
   } finally {

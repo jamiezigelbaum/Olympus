@@ -35,9 +35,11 @@
  *    where it goes and its identity (dev, ino, size). From here the account is
  *    closed.
  * 5. Move every file into the folder (a store with its `-shm` and tier
- *    sidecars): a hard link to the new name, then the old name removed, so a
- *    file another process put at the destination is never replaced. Nothing is
- *    copied. A file system that makes no hard links keeps the account where it is.
+ *    sidecars): a hard link to the new name, the new folder made durable, and
+ *    only then the old name removed, so a file another process put at the
+ *    destination is never replaced and a power failure never finds a file
+ *    with no durable name. Nothing is copied. A file system that makes no hard
+ *    links keeps the account where it is.
  * 6. Verify: the same identity at every destination, then an open of each
  *    database that opened before (it writes nothing). A failure undoes the move.
  * 7. In one registry write: `layout: 'folder'` and the plan marked done.
@@ -45,6 +47,11 @@
  * A crash anywhere resumes from the plan at the next boot. A failed check
  * moves everything back, leaves the account `legacy` and leaves a record the
  * dashboard turns into a Needs you row (`sourceStorageNotices`).
+ *
+ * Every database open and checkpoint waits for another connection at most
+ * 2 s, and no longer than what is left of the boot's deadline. A database
+ * another connection has locked is not worked around: the account stays where
+ * it is this boot (`busy`).
  *
  * Deliberately light, like the registry: no workers. The only database opens
  * are the fold and the checks in core/source-storage.ts.
@@ -98,8 +105,13 @@ export const QUICK_CHECK_STORE_MAX_BYTES = 64 * 1024 * 1024;
 export const QUICK_CHECK_TOTAL_MAX_BYTES = 128 * 1024 * 1024;
 /** Most `-wal` and `-journal` bytes one account may have when the pass looks at it: folding them into the databases reads them once, and opening a database reads its log. */
 export const ACCOUNT_LOG_MAX_BYTES = 32 * 1024 * 1024;
-/** How long folding one database's log waits for another connection, in milliseconds. The first database that is busy ends the fold for its account. */
-export const FOLD_BUSY_TIMEOUT_MS = 2_000;
+/**
+ * The longest one wait for another connection may be, in milliseconds, for a
+ * checkpoint or an open alike, and never longer than what is left of the boot's
+ * deadline (`waitMs`). The first database that is busy ends its account's
+ * pass, so an account waits once.
+ */
+export const LOCK_WAIT_CAP_MS = 2_000;
 
 /** Why an account stays where it is. Short codes; the registry holds them beside plain words. */
 export type AccountMigrationSkipReason =
@@ -111,6 +123,7 @@ export type AccountMigrationSkipReason =
   | 'files_elsewhere'
   | 'log_large'
   | 'log_not_folded'
+  | 'busy'
   | 'no_hard_links';
 
 /** Why a move was undone. */
@@ -125,6 +138,7 @@ const SKIP_REASONS: ReadonlySet<string> = new Set<AccountMigrationSkipReason>([
   'files_elsewhere',
   'log_large',
   'log_not_folded',
+  'busy',
   'no_hard_links',
 ]);
 
@@ -270,6 +284,8 @@ interface Context {
   env: LayoutEnv;
   root: string;
   now: () => number;
+  /** When the boot stops starting accounts, and stops waiting for other connections. */
+  deadline: number;
   quickCheckSpentMs: number;
   quickCheckBudgetMs: number;
   /** Bytes `PRAGMA quick_check` has read so far this boot. */
@@ -282,36 +298,46 @@ const absPath = (root: string, rel: string): string => join(root, ...rel.split('
 
 const checkpoint = (at: string): void => __accountMigrationTestHooks.checkpoint?.(at);
 
+/** How long one checkpoint or open may wait for another connection: the cap, and no more than the boot's deadline leaves. */
+const waitMs = (ctx: Context): number => Math.max(0, Math.min(LOCK_WAIT_CAP_MS, ctx.deadline - ctx.now()));
+
 const limit = (name: 'quickCheckStoreMaxBytes' | 'quickCheckTotalMaxBytes' | 'accountLogMaxBytes', fallback: number): number =>
   __accountMigrationTestHooks.limits?.[name] ?? fallback;
 
 /** Errors that mean "this file system makes no hard links", not "this file cannot move". */
 const NO_HARD_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EMLINK']);
 
+const syncFolder = (path: string): void => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path);
+
 /**
- * Moves one file or folder to a place nothing else may already hold. A file is
- * linked to its new name (which fails with `EEXIST` if the name is taken, where
- * a rename would replace what is there) and then unlinked from the old one; a
- * kill between the two leaves one file under two names, which the next call
- * finishes (`moveOne`). A file system that makes no hard links is not worked
- * around: the error ends the move (`moveOne` reads it as the account's skip). Node has no
- * portable no-replace rename for folders: `rename(2)` of a folder fails onto a
- * non-empty folder or any file, and replaces only an EMPTY folder, which another
- * process would have to have made in the instant since the look.
+ * Moves one file or folder to a place nothing else may already hold, and never
+ * leaves it without a durable name. A file is linked to its new name (which
+ * fails with `EEXIST` if the name is taken, where a rename would replace what is
+ * there), the folder that now holds the new name is fsynced, and only then is the
+ * old name removed: whatever a power failure persists, the file has a name that
+ * survives. A kill between the link and the unlink leaves one file under two
+ * names, which the next call finishes (`moveOne`). A file system that makes no
+ * hard links is not worked around: the error ends the move (`moveOne` reads it as
+ * the account's skip). Node has no portable no-replace rename for folders:
+ * `rename(2)` of a folder fails onto a non-empty folder or any file, and replaces
+ * only an EMPTY folder, which another process would have to have made in the
+ * instant since the look. A folder is moved by one rename that changes two
+ * parents, and both are fsynced before anything else is done.
  */
 function moveWithoutReplacing(from: string, to: string, kind: 'file' | 'dir'): void {
   if (kind === 'dir') {
     renameSync(from, to);
+    syncFolder(dirname(to));
+    syncFolder(dirname(from));
     return;
   }
   (__accountMigrationTestHooks.link ?? linkSync)(from, to);
+  syncFolder(dirname(to));
   unlinkSync(from);
 }
 
 const moveFile = (from: string, to: string, kind: 'file' | 'dir'): void =>
   (__accountMigrationTestHooks.rename ?? moveWithoutReplacing)(from, to, kind);
-
-const syncFolder = (path: string): void => (__accountMigrationTestHooks.syncDirectory ?? syncDirectorySync)(path);
 
 function errorCode(error: unknown): string {
   return (error as NodeJS.ErrnoException)?.code ?? 'error';
@@ -511,25 +537,35 @@ function inspect(ctx: Context, sourceId: string, slot: string, entry: SourceRegi
  * is assumed to take at the slowest disk the bounds allow for. A database that
  * does not fit is recorded `not_checked`.
  */
-function checkDatabases(ctx: Context, moves: SourceRegistryMove[]): NonNullable<SourceRegistryMigration['checked']> {
+function checkDatabases(ctx: Context, moves: SourceRegistryMove[]): { checked: NonNullable<SourceRegistryMigration['checked']> } | { busy: string } {
   const storeMax = limit('quickCheckStoreMaxBytes', QUICK_CHECK_STORE_MAX_BYTES);
   const totalMax = limit('quickCheckTotalMaxBytes', QUICK_CHECK_TOTAL_MAX_BYTES);
-  return moves.filter((move) => move.db).map((move) => {
+  const checked: NonNullable<SourceRegistryMigration['checked']> = [];
+  for (const move of moves.filter((candidate) => candidate.db)) {
     const path = absPath(ctx.root, move.from);
-    if (!storeFileReads(path)) return { file: move.to, result: 'damaged' as const };
+    const reads = storeFileReads(path, waitMs(ctx));
+    // Another connection has it: wait for the next boot, rather than again for each way of looking.
+    if (reads === 'busy') return { busy: `${basename(move.from)} is in use by another program, so the account stays where it is for now.` };
+    if (reads === 'damaged') {
+      checked.push({ file: move.to, result: 'damaged' });
+      continue;
+    }
     const bytes = moves
       .filter((other) => other.from === move.from || other.from === `${move.from}-wal` || other.from === `${move.from}-journal`)
       .reduce((total, other) => total + other.size, 0);
     const estimateMs = (bytes / ASSUMED_BYTES_PER_SECOND) * 1000;
     if (bytes > storeMax || ctx.quickCheckBytes + bytes > totalMax || ctx.quickCheckSpentMs + estimateMs > ctx.quickCheckBudgetMs) {
-      return { file: move.to, result: 'not_checked' as const };
+      checked.push({ file: move.to, result: 'not_checked' });
+      continue;
     }
     const started = ctx.now();
-    const result = storeFileQuickCheck(path);
+    const result = storeFileQuickCheck(path, waitMs(ctx));
     ctx.quickCheckSpentMs += ctx.now() - started;
     ctx.quickCheckBytes += bytes;
-    return { file: move.to, result };
-  });
+    if (result === 'busy') return { busy: `${basename(move.from)} is in use by another program, so the account stays where it is for now.` };
+    checked.push({ file: move.to, result });
+  }
+  return { checked };
 }
 
 // ---------------------------------------------------------------------------
@@ -655,6 +691,8 @@ function moveOne(ctx: Context, move: SourceRegistryMove, direction: 'forward' | 
       && source.dev === target.dev && source.ino === target.ino && (move.ino === '' || String(source.ino) === move.ino)
     ) {
       try {
+        // The name that stays is made durable before the other one goes, as in the move itself.
+        syncFolder(dirname(to));
         unlinkSync(from);
       } catch (error) {
         throw new MoveFault('failed', 'move_failed', `${name} could not be moved (${errorCode(error)}).`);
@@ -742,7 +780,10 @@ function forward(ctx: Context, sourceId: string, slot: string, migration: Source
   verifyIdentity(ctx, moves);
   for (const move of moves) {
     if (move.db !== true || isCompanion(move.from) || stateBefore(migration, move) === 'damaged') continue;
-    if (!storeFileReads(absPath(ctx.root, move.to))) {
+    const reads = storeFileReads(absPath(ctx.root, move.to), waitMs(ctx));
+    // Another program has it open: not a fault of the move. Everything goes back, and the account tries again at the next boot.
+    if (reads === 'busy') throw new MoveFault('skipped', 'busy', `${basename(move.from)} is in use by another program, so the account stays where it is for now.`);
+    if (reads !== 'reads') {
       throw new MoveFault('failed', 'verify_failed', `${basename(move.from)} does not open after the move.`);
     }
   }
@@ -818,25 +859,12 @@ type Outcome =
   | { kind: 'stuck'; detail: string }
   | { kind: 'nothing' };
 
-/** Nothing the plan names is in either place: the account's files were deleted while the move was part way. */
-function planIsMoot(ctx: Context, migration: SourceRegistryMigration): boolean {
-  const moves = migration.moves ?? [];
-  return moves.length > 0 && moves.every((move) => look(absPath(ctx.root, move.from)).kind === 'absent' && look(absPath(ctx.root, move.to)).kind === 'absent');
-}
-
 /** Finishes or undoes a plan the registry holds. */
 function runPlan(ctx: Context, account: SourceRegistryAccount): Outcome {
   const migration = account.migration!;
   const { source_id: sourceId, slot } = account;
   if (!migratableSources().includes(sourceId) || !planIsCanonical(ctx, sourceId, slot, migration)) {
     return { kind: 'stuck', detail: 'Its move plan is not one this build wrote, so nothing was touched.' };
-  }
-  if (planIsMoot(ctx, migration)) {
-    updateAccount(ctx, sourceId, slot, (entry) => {
-      if (!entry.migration || !sourceAccountMovePending(entry)) throw new EntryChanged();
-      delete entry.migration;
-    });
-    return { kind: 'nothing' };
   }
   try {
     if (migration.state === 'reverting') {
@@ -895,7 +923,7 @@ function foldLogs(ctx: Context, moves: SourceRegistryMove[]): Extract<Inspection
   for (const move of moves) {
     if (move.db !== true || isCompanion(move.from)) continue;
     const path = absPath(ctx.root, move.from);
-    const result = storeFileCheckpoint(path, FOLD_BUSY_TIMEOUT_MS);
+    const result = storeFileCheckpoint(path, waitMs(ctx));
     if (result === 'folded') continue;
     if (result === 'not_a_database') {
       // Nothing to fold into: fine unless it has log bytes that would be lost with it.
@@ -903,9 +931,10 @@ function foldLogs(ctx: Context, moves: SourceRegistryMove[]): Extract<Inspection
       if (logs.every((log) => log.size === 0)) continue;
       return notFolded(`${basename(move.from)} is not a database, and it has a log that would be lost, so the account stays where it is.`);
     }
-    return notFolded(result === 'busy'
-      ? `${basename(move.from)} is open elsewhere, so its write-ahead log could not be folded into it; the account stays where it is for now.`
-      : `${basename(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
+    if (result === 'busy') {
+      return { kind: 'skip', reason: 'busy', detail: `${basename(move.from)} is in use by another program, so its write-ahead log could not be folded into it; the account stays where it is for now.` };
+    }
+    return notFolded(`${basename(move.from)}'s write-ahead log could not be folded into it, so the account stays where it is.`);
   }
   return undefined;
 }
@@ -921,7 +950,13 @@ function startMove(ctx: Context, sourceId: string, slot: string, entry: SourceRe
     }
     checkpoint('folded');
     // Reading a database can make its `-shm`, so look again afterwards: the plan names what is there.
-    const checked = checkDatabases(ctx, inspection.moves);
+    const looked = checkDatabases(ctx, inspection.moves);
+    if ('busy' in looked) {
+      const busy = skip('busy', looked.busy) as Extract<Inspection, { kind: 'skip' }>;
+      recordSkip(ctx, sourceId, slot, entry, busy);
+      return { kind: 'skipped', reason: busy.reason };
+    }
+    const { checked } = looked;
     inspection = inspect(ctx, sourceId, slot, entry);
     // A log with bytes in it again: someone is writing, so the folded file is no longer the whole database.
     if (inspection.kind === 'move' && inspection.moves.some((move) => move.db !== true && (move.from.endsWith('-wal') || move.from.endsWith('-journal')) && move.size > 0)) {
@@ -963,6 +998,7 @@ function context(env: LayoutEnv): Context | undefined {
     env,
     root,
     now,
+    deadline: Number.POSITIVE_INFINITY,
     quickCheckSpentMs: 0,
     quickCheckBudgetMs: __accountMigrationTestHooks.quickCheckBudgetMs ?? QUICK_CHECK_BUDGET_MS,
     quickCheckBytes: 0,
@@ -1001,6 +1037,8 @@ export function migrateAccountFolders(env: LayoutEnv = process.env): AccountMigr
   // One deadline for starting any account, a plan left part way included: what one account can cost after it
   // starts is bounded (see the constants above), so the pass ends within the deadline plus that.
   const deadline = ctx.now() + (__accountMigrationTestHooks.budgetMs ?? MIGRATION_BUDGET_MS);
+  // The same deadline ends the waits for other connections: an open or checkpoint waits no longer than what is left of it.
+  ctx.deadline = deadline;
   for (const account of registry.accounts.filter(sourceAccountMovePending)) {
     handled.add(account.source_id);
     if (ctx.now() >= deadline) {
