@@ -365,11 +365,210 @@ function isDamage(error: unknown): boolean {
   return error instanceof JsonStreamError && error.code !== 'resume_invalid';
 }
 
-export function createTelegramArchiveConnector(input: ArchiveConnectorInput): SourceConnector {
+/** What one message of the export becomes, for whoever reads the export: a unit of its own, or a finding. */
+export type TelegramExportMessageOutcome<U> =
+  | { kind: 'unit'; unit: U; findings: Array<{ kind: string; count?: number }>; assumedZone: boolean }
+  | { kind: 'skipped'; reason: string }
+  | { kind: 'gap'; reason: string };
+
+/** How a reader of the export turns its entries into units (an item of the archive, a record of the Telegram connector). */
+export interface TelegramExportMake<U> {
+  /** One message of a chat, with its chat's header in `event.frame` (`telegramExportChat`). */
+  message(event: JsonStreamEvent): TelegramExportMessageOutcome<U>;
+  /** One entry of a part of the account export that is not chats (or the whole of a part that is one object). */
+  account(section: AccountSection, ordinal: number, value: unknown): { unit: U; mediaFiles: number };
+}
+
+/**
+ * The export's walk, shared by every reader of it: the file through the
+ * scope-safe range reader and the JSON stream reader, bounded per message and
+ * per pass, damage counted, and a resume point after each message or entry
+ * bound to exactly these files (see the module comment). A page goes out when
+ * it holds the page size (or what is left of `limit`) or the pass's byte
+ * budget is read.
+ */
+export async function* telegramExportPages<U>(
+  input: ArchiveConnectorInput,
+  options: { cursor?: string; limit?: number } | undefined,
+  make: TelegramExportMake<U>,
+): AsyncGenerator<{ records: U[]; nextCursor: string; done: boolean }> {
   const pageSizeDefault = Math.max(1, input.pageSize ?? TELEGRAM_DEFAULT_PAGE_SIZE);
   const byteBudget = Math.max(1, input.maxBytesPerListing ?? TELEGRAM_DEFAULT_MAX_BYTES_PER_LISTING);
   const file = input.files[0];
   if (!file || input.files.length !== 1) throw new Error('A Telegram export is one result.json.');
+  const start = parseCursor(input, options?.cursor);
+  if (start.done) {
+    yield { records: [], nextCursor: doneCursor(input), done: true };
+    return;
+  }
+  const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
+  let reader: ScopeFileReader;
+  try {
+    reader = input.root.openFile(file.relPath, { expected: file.version });
+  } catch (error) {
+    throw archiveStopFromReaderError(error, file.relPath);
+  }
+  // Before each page goes out: the file is still the version opened, at its name too.
+  const current = (): void => {
+    try {
+      reader.assertCurrent();
+    } catch (error) {
+      throw archiveStopFromReaderError(error, file.relPath);
+    }
+  };
+  try {
+    const origin = start.resume?.offset ?? 0;
+    let json: JsonStreamReader;
+    try {
+      json = new JsonStreamReader(telegramJsonSource(fileByteSource(reader, { start: origin })), {
+        itemPaths: ITEM_PATHS,
+        maxItemBytes: TELEGRAM_MAX_MESSAGE_BYTES,
+        ...(start.resume ? { resume: start.resume } : {}),
+      });
+    } catch (error) {
+      throw archiveStopFromReaderError(error, file.relPath);
+    }
+    let assumedZone = start.assumedZone;
+    let page: U[] = [];
+    // The resume point after the last message read, and whether a message was read since a page went out.
+    let after: JsonResumePoint | undefined;
+    let unsent = false;
+    let emitted = 0;
+    // The fields of a part that is one object (the profile, other data) wait here until it ends: it is one item,
+    // so no resume point is placed inside it. Its fields together are held to the bound of one message: a part
+    // larger than that is one gap, read on to its end without keeping its fields.
+    let whole: {
+      section: AccountSection; pathIndex: number; start: number; fields: Array<[string, unknown]>; bytes: number; dropped: boolean;
+      last: JsonResumePoint;
+    } | undefined;
+    // An event read while the part before it was being finished, handled on the next turn.
+    let held: { event: JsonStreamEvent | undefined } | undefined;
+    const report = (kind: string, findingClass: 'gap' | 'skipped', offset: number, count?: number): void => {
+      input.report({ kind, class: findingClass, fileIndex: 0, offset, ...(count !== undefined ? { count } : {}) });
+    };
+    // The part that is one object ends here: its unit goes out, and the point after its last field is the resume point.
+    const finishWhole = (): void => {
+      const part = whole!;
+      whole = undefined;
+      if (!part.dropped && part.fields.length > 0) {
+        const built = make.account(part.section, 0, Object.fromEntries(part.fields));
+        page.push(built.unit);
+        if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', part.start, built.mediaFiles);
+      }
+      after = part.last;
+      unsent = true;
+    };
+    for (;;) {
+      if (!input.shouldContinue()) {
+        if (after && unsent) {
+          current();
+          input.reportPosition?.({ fileIndex: 0, offset: after.offset });
+          yield { records: page, nextCursor: cursorAt(input, after, assumedZone), done: false };
+        }
+        return;
+      }
+      let event: JsonStreamEvent | undefined;
+      if (held) {
+        event = held.event;
+        held = undefined;
+      } else {
+        try {
+          event = json.next();
+        } catch (error) {
+          if (!isDamage(error)) throw archiveStopFromReaderError(error, file.relPath);
+          // The reader returns every message it had finished before the error; the file is counted as damaged at its end.
+          if (whole) finishWhole();
+          report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', file.version.size);
+          break;
+        }
+      }
+      if (whole && (!event || event.pathIndex !== whole.pathIndex)) {
+        finishWhole();
+        held = { event };
+      } else {
+        if (!event) break;
+        if (event.pathIndex >= MESSAGE_PATHS.length) {
+          // A part of the account export that is not chats.
+          const section = ACCOUNT_SECTIONS[event.pathIndex - MESSAGE_PATHS.length]!;
+          if (section.whole) {
+            whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], bytes: 0, dropped: false, last: event.resume };
+            whole.last = event.resume;
+            if (event.kind === 'oversize') {
+              report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
+            } else if (!whole.dropped) {
+              whole.bytes += event.end - event.start;
+              if (whole.bytes > TELEGRAM_MAX_MESSAGE_BYTES) {
+                whole.dropped = true;
+                whole.fields = [];
+                report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', whole.start);
+              } else {
+                whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
+              }
+            }
+            continue;
+          }
+          if (event.kind === 'oversize') {
+            report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
+          } else {
+            const built = make.account(section, Number(event.path[event.path.length - 1]), event.value);
+            page.push(built.unit);
+            if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', event.start, built.mediaFiles);
+          }
+        } else if (event.kind === 'oversize') {
+          report(TELEGRAM_FINDINGS.tooLarge, 'gap', event.start);
+        } else {
+          const outcome = make.message(event);
+          if (outcome.kind === 'gap') {
+            report(outcome.reason, 'gap', event.start);
+          } else if (outcome.kind === 'skipped') {
+            report(outcome.reason, 'skipped', event.start);
+          } else {
+            page.push(outcome.unit);
+            for (const finding of outcome.findings) report(finding.kind, 'gap', event.start, finding.count);
+            if (outcome.assumedZone && !assumedZone) {
+              assumedZone = true;
+              report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, 'gap', event.start);
+            }
+          }
+        }
+        after = event.resume;
+        unsent = true;
+      }
+      const budgetLeft = limit - emitted;
+      if (page.length >= Math.min(pageSizeDefault, budgetLeft) || json.position - origin >= byteBudget) {
+        const point = after!;
+        current();
+        input.reportPosition?.({ fileIndex: 0, offset: point.offset });
+        yield { records: page, nextCursor: cursorAt(input, point, assumedZone), done: false };
+        emitted += page.length;
+        page = [];
+        unsent = false;
+        if (emitted >= limit || json.position - origin >= byteBudget) return;
+      }
+    }
+    current();
+    // A cut-short or damaged file ends the listing with what was read; it is counted, not hidden.
+    yield { records: page, nextCursor: doneCursor(input), done: true };
+  } finally {
+    reader.close();
+  }
+}
+
+/** The header of the chat a message event is in: its name, type and bare id. */
+export function telegramExportChat(event: JsonStreamEvent): { name?: string; type?: string; id?: string } {
+  const frame = event.frame;
+  const id = telegramScalar(frame.id);
+  return {
+    ...(typeof frame.name === 'string' && frame.name.trim() !== '' ? { name: frame.name } : {}),
+    ...(typeof frame.type === 'string' ? { type: frame.type } : {}),
+    ...(id ? { id } : {}),
+  };
+}
+
+export function createTelegramArchiveConnector(input: ArchiveConnectorInput): SourceConnector {
+  const file = input.files[0];
+  if (!file || input.files.length !== 1) throw new Error('A Telegram export is one result.json.');
+  const fetchedAt = new Date().toISOString();
   return {
     id: input.connectorId,
     family: input.format.family,
@@ -378,162 +577,17 @@ export function createTelegramArchiveConnector(input: ArchiveConnectorInput): So
     },
     listItems(options?: SourceConnectorListOptions): AsyncIterable<SourceConnectorListPage> {
       return (async function* (): AsyncGenerator<SourceConnectorListPage> {
-        const start = parseCursor(input, options?.cursor);
-        if (start.done) {
-          yield { items: [], nextCursor: doneCursor(input), done: true };
-          return;
-        }
-        const limit = options?.limit !== undefined && options.limit > 0 ? options.limit : Number.POSITIVE_INFINITY;
-        let reader: ScopeFileReader;
-        try {
-          reader = input.root.openFile(file.relPath, { expected: file.version });
-        } catch (error) {
-          throw archiveStopFromReaderError(error, file.relPath);
-        }
-        // Before each page goes out: the file is still the version opened, at its name too.
-        const current = (): void => {
-          try {
-            reader.assertCurrent();
-          } catch (error) {
-            throw archiveStopFromReaderError(error, file.relPath);
-          }
-        };
-        try {
-          const origin = start.resume?.offset ?? 0;
-          let json: JsonStreamReader;
-          try {
-            json = new JsonStreamReader(telegramJsonSource(fileByteSource(reader, { start: origin })), {
-              itemPaths: ITEM_PATHS,
-              maxItemBytes: TELEGRAM_MAX_MESSAGE_BYTES,
-              ...(start.resume ? { resume: start.resume } : {}),
-            });
-          } catch (error) {
-            throw archiveStopFromReaderError(error, file.relPath);
-          }
-          const fetchedAt = new Date().toISOString();
-          let assumedZone = start.assumedZone;
-          let page: RawItem[] = [];
-          // The resume point after the last message read, and whether a message was read since a page went out.
-          let after: JsonResumePoint | undefined;
-          let unsent = false;
-          let emitted = 0;
-          // The fields of a part that is one object (the profile, other data) wait here until it ends: it is one item,
-          // so no resume point is placed inside it. Its fields together are held to the bound of one message: a part
-          // larger than that is one gap, read on to its end without keeping its fields.
-          let whole: {
-            section: AccountSection; pathIndex: number; start: number; fields: Array<[string, unknown]>; bytes: number; dropped: boolean;
-            last: JsonResumePoint;
-          } | undefined;
-          // An event read while the part before it was being finished, handled on the next turn.
-          let held: { event: JsonStreamEvent | undefined } | undefined;
-          const report = (kind: string, findingClass: 'gap' | 'skipped', offset: number, count?: number): void => {
-            input.report({ kind, class: findingClass, fileIndex: 0, offset, ...(count !== undefined ? { count } : {}) });
-          };
-          // The part that is one object ends here: its item goes out, and the point after its last field is the resume point.
-          const finishWhole = (): void => {
-            const part = whole!;
-            whole = undefined;
-            if (!part.dropped && part.fields.length > 0) {
-              const built = accountItem(input, part.section, 0, Object.fromEntries(part.fields), fetchedAt);
-              page.push(built.item);
-              if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', part.start, built.mediaFiles);
-            }
-            after = part.last;
-            unsent = true;
-          };
-          for (;;) {
-            if (!input.shouldContinue()) {
-              if (after && unsent) {
-                current();
-                input.reportPosition?.({ fileIndex: 0, offset: after.offset });
-                yield { items: page, nextCursor: cursorAt(input, after, assumedZone), done: false };
-              }
-              return;
-            }
-            let event: JsonStreamEvent | undefined;
-            if (held) {
-              event = held.event;
-              held = undefined;
-            } else {
-              try {
-                event = json.next();
-              } catch (error) {
-                if (!isDamage(error)) throw archiveStopFromReaderError(error, file.relPath);
-                // The reader returns every message it had finished before the error; the file is counted as damaged at its end.
-                if (whole) finishWhole();
-                report(ARCHIVE_COMMON_FINDINGS.fileDamaged, 'gap', file.version.size);
-                break;
-              }
-            }
-            if (whole && (!event || event.pathIndex !== whole.pathIndex)) {
-              finishWhole();
-              held = { event };
-            } else {
-              if (!event) break;
-              if (event.pathIndex >= MESSAGE_PATHS.length) {
-                // A part of the account export that is not chats.
-                const section = ACCOUNT_SECTIONS[event.pathIndex - MESSAGE_PATHS.length]!;
-                if (section.whole) {
-                  whole ??= { section, pathIndex: event.pathIndex, start: event.start, fields: [], bytes: 0, dropped: false, last: event.resume };
-                  whole.last = event.resume;
-                  if (event.kind === 'oversize') {
-                    report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
-                  } else if (!whole.dropped) {
-                    whole.bytes += event.end - event.start;
-                    if (whole.bytes > TELEGRAM_MAX_MESSAGE_BYTES) {
-                      whole.dropped = true;
-                      whole.fields = [];
-                      report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', whole.start);
-                    } else {
-                      whole.fields.push([String(event.path[event.path.length - 1]), event.value]);
-                    }
-                  }
-                  continue;
-                }
-                if (event.kind === 'oversize') {
-                  report(ARCHIVE_COMMON_FINDINGS.sectionNotImported, 'gap', event.start);
-                } else {
-                  const built = accountItem(input, section, Number(event.path[event.path.length - 1]), event.value, fetchedAt);
-                  page.push(built.item);
-                  if (built.mediaFiles > 0) report(ARCHIVE_COMMON_FINDINGS.mediaNotImported, 'gap', event.start, built.mediaFiles);
-                }
-              } else if (event.kind === 'oversize') {
-                report(TELEGRAM_FINDINGS.tooLarge, 'gap', event.start);
-              } else {
-                const outcome = messageOutcome(input, event, fetchedAt);
-                if (outcome.kind === 'gap') {
-                  report(outcome.reason, 'gap', event.start);
-                } else if (outcome.kind === 'skipped') {
-                  report(outcome.reason, 'skipped', event.start);
-                } else {
-                  page.push(outcome.item);
-                  for (const finding of outcome.findings) report(finding.kind, 'gap', event.start, finding.count);
-                  if (outcome.assumedZone && !assumedZone) {
-                    assumedZone = true;
-                    report(ARCHIVE_COMMON_FINDINGS.timeZoneAssumed, 'gap', event.start);
-                  }
-                }
-              }
-              after = event.resume;
-              unsent = true;
-            }
-            const budgetLeft = limit - emitted;
-            if (page.length >= Math.min(pageSizeDefault, budgetLeft) || json.position - origin >= byteBudget) {
-              const point = after!;
-              current();
-              input.reportPosition?.({ fileIndex: 0, offset: point.offset });
-              yield { items: page, nextCursor: cursorAt(input, point, assumedZone), done: false };
-              emitted += page.length;
-              page = [];
-              unsent = false;
-              if (emitted >= limit || json.position - origin >= byteBudget) return;
-            }
-          }
-          current();
-          // A cut-short or damaged file ends the listing with what was read; it is counted, not hidden.
-          yield { items: page, nextCursor: doneCursor(input), done: true };
-        } finally {
-          reader.close();
+        for await (const page of telegramExportPages<RawItem>(input, options, {
+          message: (event) => {
+            const outcome = messageOutcome(input, event, fetchedAt);
+            return outcome.kind === 'item' ? { kind: 'unit', unit: outcome.item, findings: outcome.findings, assumedZone: outcome.assumedZone } : outcome;
+          },
+          account: (section, ordinal, value) => {
+            const built = accountItem(input, section, ordinal, value, fetchedAt);
+            return { unit: built.item, mediaFiles: built.mediaFiles };
+          },
+        })) {
+          yield { items: page.records, nextCursor: page.nextCursor, done: page.done };
         }
       })();
     },
