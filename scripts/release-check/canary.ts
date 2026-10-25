@@ -194,7 +194,8 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
   const opens: Array<{ id: string; title: string; script: string }> = options.os === 'linux'
     ? [
       { id: 'canary.window.launcher', title: 'Dashboard window from the launcher', script: `gtk-launch ${LINUX_DESKTOP_ID}` },
-      { id: 'canary.window.link', title: 'Dashboard window from an olympus:// link', script: `xdg-open ${shellQuote(DASHBOARD_LINK)}` },
+      // Bounded on the machine: an xdg-open that cannot run the handler falls back to a browser and can stay in the foreground.
+      { id: 'canary.window.link', title: 'Dashboard window from an olympus:// link', script: `timeout -k 5 40 xdg-open ${shellQuote(DASHBOARD_LINK)}` },
     ]
     : [
       { id: 'canary.window.launcher', title: 'Dashboard window from olympus dashboard', script: `${OLYMPUS} dashboard >/dev/null` },
@@ -215,7 +216,12 @@ export async function runCanary(machine: Machine, options: CanaryOptions): Promi
     const launched = await sh(open.script);
     let opened: Array<DesktopWindow & { reused: boolean }> = [];
     let outcome: { status: CheckStatus; detail: string } | undefined;
-    if (launched.code !== 0) outcome = { status: 'fail', detail: `the command failed (exit ${launched.code}): ${(launched.stderr.trim() || launched.stdout.trim()).slice(0, 300)}` };
+    if (launched.code !== 0) {
+      outcome = { status: 'fail', detail: `the command failed (exit ${launched.code}): ${(launched.stderr.trim() || launched.stdout.trim()).slice(0, 300)}` };
+      // What a failed command still opened (a browser it fell back to) is closed like any other window the check opened.
+      const after = await listed();
+      if (typeof after !== 'string') opened = openedWindows(before, after);
+    }
     const deadline = Date.now() + (options.windowTimeoutMs ?? 45_000);
     while (!outcome) {
       const after = await listed();
