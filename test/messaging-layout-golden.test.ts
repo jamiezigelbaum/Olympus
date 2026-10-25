@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { FOLDER_LAYOUT_SOURCES, legacyCaptureDataRoot, legacyTelegramGatewayStateDir, legacyTelegramStoreRoot, legacyWhatsAppServiceStateDir } from '../src/core/olympus-layout.ts';
-import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import {
   telegramPairingSessionPaths,
   telegramSessionBasePath,
@@ -36,9 +36,7 @@ import golden from './fixtures/messaging-resolution-golden.json';
 type Env = Record<string, string | undefined>;
 type Resolvers = Record<string, (env: Env) => unknown>;
 
-const spec = (sourceId: string) => lifecycleSourceSpecs().find((entry) => entry.sourceId === sourceId)!;
-const telegramSpec = () => spec('telegram.messages');
-const whatsappSpec = () => spec('whatsapp.personal.messages');
+const files = (sourceId: string, env: Env) => lifecycleAccountFiles(sourceId, { env });
 
 const resolvers: Resolvers = {
   'tg.store.internal': (env) => defaultInternalTelegramConnectorStoreDbPath(env),
@@ -50,10 +48,10 @@ const resolvers: Resolvers = {
   'tg.session_base': (env) => telegramSessionBasePath({ env }),
   'tg.session_base+home': (env) => telegramSessionBasePath({ env, homeDir: env.HOME! }),
   'tg.session_paths': (env) => telegramPairingSessionPaths({ env }),
-  'tg.lifecycle.stores': (env) => telegramSpec().connectorStorePaths!({ env }),
-  'tg.lifecycle.raw': (env) => telegramSpec().rawStatePaths!({ env }),
-  'tg.lifecycle.preservation': (env) => telegramSpec().preservationOnlyPaths!({ env }),
-  'tg.lifecycle.pairing': (env) => telegramSpec().pairingSessionPaths!({ env }),
+  'tg.lifecycle.stores': (env) => files('telegram.messages', env).stores,
+  'tg.lifecycle.raw': (env) => files('telegram.messages', env).raw,
+  'tg.lifecycle.preservation': (env) => files('telegram.messages', env).preserved,
+  'tg.lifecycle.pairing': (env) => files('telegram.messages', env).pairing,
   'wa.state': (env) => defaultWhatsAppStateDir(env),
   'wa.spool': (env) => defaultWhatsAppSpoolDir(env),
   'wa.media': (env) => defaultWhatsAppMediaDir(env),
@@ -63,9 +61,9 @@ const resolvers: Resolvers = {
   'wa.pair_state': (env) => whatsappStateDir({ env }),
   'wa.pair_state+home': (env) => whatsappStateDir({ env, homeDir: env.HOME! }),
   'wa.pair_paths': (env) => whatsappPairingSessionPaths({ env }),
-  'wa.lifecycle.stores': (env) => whatsappSpec().connectorStorePaths!({ env }),
-  'wa.lifecycle.raw': (env) => whatsappSpec().rawStatePaths!({ env }),
-  'wa.lifecycle.pairing': (env) => whatsappSpec().pairingSessionPaths!({ env }),
+  'wa.lifecycle.stores': (env) => files('whatsapp.personal.messages', env).stores,
+  'wa.lifecycle.raw': (env) => files('whatsapp.personal.messages', env).raw,
+  'wa.lifecycle.pairing': (env) => files('whatsapp.personal.messages', env).pairing,
   // scripts/whatsapp-live-sync.ts: its own legacy resolution (it ignored XDG and the spool and store overrides), expected from the script as it stood on main.
   'script.wa.paths': (env) => {
     const { spoolDir, dbPath } = whatsAppLiveSyncScriptPaths(env, env.HOME);

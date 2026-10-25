@@ -14,7 +14,7 @@ import {
   defaultSourceCorpusRegistryConfig,
 } from '../src/core/source-corpus-registry.ts';
 import { updateSourceRegistry } from '../src/core/source-registry.ts';
-import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { createSourceExclusionMatcherFromPrefixes } from '../src/core/source-ingestion-exclusions.ts';
 import { assessContentExtractionThroughput } from '../src/core/ingestion-throughput.ts';
 import type { RawItem, SourceConnector } from '../src/core/contracts.ts';
@@ -288,9 +288,7 @@ describe('source ingestion ledger', () => {
       family: 'chat',
       trustDomain: 'secure_local',
     });
-    const whatsappPath = lifecycleSourceSpecs()
-      .find((spec) => spec.sourceId === 'whatsapp.personal.messages')!
-      .connectorStorePaths!({ env })[0]!;
+    const whatsappPath = lifecycleAccountFiles('whatsapp.personal.messages', { env }).stores[0]!;
     const whatsapp = new LocalConnectorStore({
       dbPath: whatsappPath,
       corpusId: 'secure_local.whatsapp.messages',

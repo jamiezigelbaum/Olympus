@@ -10,6 +10,7 @@
 // erased it (it lives inside a known Olympus root) while export never copied
 // it or even reported it as skipped.
 
+import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -18,7 +19,6 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import {
   exportDurabilityBoundary,
   exportOlympusData,
-  lifecycleSourceSpecs,
   verifyOlympusDataExport,
 } from '../src/data-lifecycle.ts';
 
@@ -68,7 +68,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       const storePath = spec.connectorStorePaths!({ homeDir })[0]!;
       seedWalStore(storePath, 'committed-before-export');
       expect(existsSync(`${storePath}-wal`)).toBe(true);
@@ -91,7 +91,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       const storePath = spec.connectorStorePaths!({ homeDir })[0]!;
       seedWalStore(storePath, 'integrity');
 
@@ -114,7 +114,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       const storePath = spec.connectorStorePaths!({ homeDir })[0]!;
       mkdirSync(dirname(storePath), { recursive: true });
       writeFileSync(storePath, 'not a database');
@@ -133,7 +133,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const destination = join(dir, 'export');
     try {
       pinMessagingLegacy({ HOME: homeDir });
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'whatsapp.personal.messages');
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'whatsapp.personal.messages');
       expect(spec).toBeDefined();
       expect(spec!.connectorStorePaths!({ homeDir })[0]).toBe(whatsappStorePath(homeDir));
 
@@ -179,7 +179,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'exports', 'olympus', '2026-08-18');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       seedWalStore(spec.connectorStorePaths!({ homeDir })[0]!, 'deep-destination');
 
       const result = exportOlympusData({ destination, sourceId: 'x.bookmarks', homeDir });
@@ -200,7 +200,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       const storePath = spec.connectorStorePaths!({ homeDir })[0]!;
       seedWalStore(storePath, 'first-run');
 
@@ -224,7 +224,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       seedWalStore(spec.connectorStorePaths!({ homeDir })[0]!, 'manifest-ordering');
 
       const result = exportOlympusData({ destination, homeDir });
@@ -245,7 +245,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       seedWalStore(spec.connectorStorePaths!({ homeDir })[0]!, 'verified');
 
       const exported = exportOlympusData({ destination, sourceId: 'x.bookmarks', homeDir });
@@ -275,7 +275,7 @@ describe('data export produces a verified crash-durable snapshot', () => {
     const homeDir = join(dir, 'home');
     const destination = join(dir, 'export');
     try {
-      const spec = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'x.bookmarks')!;
+      const spec = lifecycleViews().find((entry) => entry.sourceId === 'x.bookmarks')!;
       seedWalStore(spec.connectorStorePaths!({ homeDir })[0]!, 'verified');
       const exported = exportOlympusData({ destination, sourceId: 'x.bookmarks', homeDir });
       writeFileSync(join(destination, exported.artifacts[0]!.relativePath), 'changed');

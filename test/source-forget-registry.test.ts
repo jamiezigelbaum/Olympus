@@ -17,6 +17,7 @@ import {
   MINE,
   OTHER,
   SEEDED_FILES,
+  SEEDED_FOR_MINE,
   accountOf,
   contextOf,
   layoutUnder,
@@ -189,11 +190,11 @@ describe('runForgetSteps', () => {
 
     // One line per file the source has rows in: not the mail scope (Gmail's
     // alone) nor this-computer.json (Dropbox is not connected to the computer).
-    expect(lines).toHaveLength(SEEDED_FILES.length - 2);
+    expect(lines).toHaveLength(SEEDED_FOR_MINE.length);
     expect(lines[0]).toMatch(/waiting-private-questions\.sqlite \(private answers: 1\)$/);
     for (const file of SEEDED_FILES) {
       // The mail scope is Gmail's alone, so this source never had one.
-      if (file.stepId === 'mail-source-scopes' || file.stepId === 'this-computer') continue;
+      if (!SEEDED_FOR_MINE.includes(file)) continue;
       expect(file.left(layout, MINE), file.stepId).toBe(0);
       expect(file.left(layout, OTHER), file.stepId).toBeGreaterThan(0);
     }

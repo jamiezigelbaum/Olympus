@@ -145,6 +145,14 @@ export function accountFoldersRoot(env: LayoutEnv = process.env): string {
   return olympusDataPath(env, ACCOUNT_FOLDERS_DIR);
 }
 
+/** The data root's folder of deleted accounts' folders, renamed away and awaiting removal. */
+export const ACCOUNT_TRASH_DIR = '.trash';
+
+/** `<data>/.trash`: a per-source Delete renames the account's folder here, then empties it. */
+export function accountTrashRoot(env: LayoutEnv = process.env): string {
+  return olympusDataPath(env, ACCOUNT_TRASH_DIR);
+}
+
 const TIERS = ['secure_local', 'internal', 'public_safe'] as const;
 type LegacyTier = (typeof TIERS)[number];
 
@@ -1061,4 +1069,47 @@ export function olympusOwnLocations(env: LayoutEnv = process.env, capture: Olymp
 export function olympusOwnRoots(env: LayoutEnv = process.env, capture: OlympusCaptureConfig = {}): string[] {
   const own = olympusOwnLocations(env, capture);
   return [...new Set([...own.fixed, ...own.moved])];
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall (docs/design/source-storage.md, "Export and uninstall"; step 5)
+
+/**
+ * The folders an uninstall deals with, the one list of them: what the macOS
+ * uninstaller names as kept (site/uninstall.sh keeps data and says where it
+ * is) and what the standalone Linux `--purge` removes (site/uninstall-linux.sh),
+ * beside the machinery each tracks itself. Every root Olympus writes data,
+ * settings, state or caches under is here, the legacy capture root and the
+ * Telegram reader's state among them, so nothing is left that neither names.
+ * The scripts run no Olympus code, so each spells the list in its own words;
+ * test/uninstall-roots.test.ts holds both to this one.
+ *
+ * Linux removes only the install's own folders, which its receipt proves it
+ * made: config, data, package, state and cache. A folder outside them (the
+ * legacy capture root `<data home>/olympus`, the Telegram reader's state in
+ * `<state home>/olympus`) may be an OpenClaw-hosted install's on the same
+ * account, so the purge never infers it is its own; a legacy messaging
+ * account's files there move into the data folder with its migration
+ * (delivery step 4d), and a folder account's are there already.
+ */
+export function olympusUninstallRoots(env: LayoutEnv = process.env, platform: NodeJS.Platform = process.platform): string[] {
+  const home = layoutHome(env);
+  if (platform === 'linux') {
+    const layout = resolveLinuxEngineLayout(env);
+    return [...new Set([layout.configDir, layout.dataDir, layout.packageDir, layout.stateDir, layout.cacheDir])];
+  }
+  return [...new Set([
+    join(home, '.olympus'),
+    join(home, '.config', 'olympus'),
+    olympusDataRoot(env),
+    // Telegram's legacy stores ignore XDG_DATA_HOME, and so does the WhatsApp capture service's state.
+    legacyTelegramStoreRoot(env),
+    legacyCaptureDataRoot(env),
+    dirname(legacyWhatsAppServiceStateDir(env)),
+    olympusStateRoot(env),
+    join(home, '.local', 'state', 'olympus'),
+    join(env.XDG_CACHE_HOME?.trim() || join(home, '.cache'), 'olympus'),
+    join(home, '.cache', 'olympus'),
+    join(home, 'Library', 'Logs', 'Olympus'),
+  ])];
 }

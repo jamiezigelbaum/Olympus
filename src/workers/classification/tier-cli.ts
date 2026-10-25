@@ -16,7 +16,7 @@
 
 import { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
-import { lifecycleSourceSpecs, type LifecyclePathContext } from '../../data-lifecycle.ts';
+import { lifecycleStorePaths, type LifecyclePathContext } from '../../data-lifecycle.ts';
 import { defaultMailSourceScopeStatePath, readMailSourceScopeApproval } from '../../core/mail-source-scope.ts';
 import { handleRegistryPathFromEnv, readConnectedHandleRegistry } from '../credential-broker/connected-handles.ts';
 import { OperationError } from '../../core/operation-error.ts';
@@ -129,7 +129,7 @@ interface LocatedItem {
 
 function knownStorePaths(context: TierCliContext): string[] {
   const paths = context.storePaths
-    ?? lifecycleSourceSpecs().flatMap((spec) => spec.connectorStorePaths?.(context) ?? []);
+    ?? lifecycleStorePaths(context);
   return [...new Set(paths)].filter((path) => path !== ':memory:' && existsSync(path));
 }
 

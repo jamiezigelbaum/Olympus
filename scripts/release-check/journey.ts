@@ -19,6 +19,19 @@
 import { describeTarget, wireTarget, type Target, type WireTarget } from './probe.ts';
 import type { CheckResult } from './report.ts';
 
+/** How long a step's screenshot is waited for: a loaded machine can keep the browser from drawing for minutes, and the picture is evidence, not the step. */
+export const SCREENSHOT_BOUND_MS = 8_000;
+
+/** Takes the step's screenshot, or goes on without one once the bound has passed. */
+export async function screenshotWithin(driver: Pick<JourneyDriver, 'screenshot'>, shot: string, boundMs = SCREENSHOT_BOUND_MS): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([driver.screenshot(shot).catch(() => false), new Promise<boolean>((done) => { timer = setTimeout(() => done(false), boundMs); })]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The format
 
@@ -442,7 +455,7 @@ export async function runJourney(driver: JourneyDriver, journey: Journey, option
       n: index + 1, name: step.name, action: describeAction(step.do), expected, actual, ok, ms: now() - stepStarted, at: at.replace(/token=[^&#]*/g, 'token=…'),
       consoleErrors: consoleErrors.map((message) => message.slice(0, 300)), failedRequests, findings,
     };
-    if (await driver.screenshot(shot).catch(() => false)) trace.screenshot = shot;
+    if (await screenshotWithin(driver, shot)) trace.screenshot = shot;
     if (!ok) trace.inventory = await inventoryOf(driver).catch(() => ({ text: '', controls: [] }));
     steps.push(trace);
     if (!ok) {

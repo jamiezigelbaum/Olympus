@@ -9,7 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 import { PNG } from 'pngjs';
 import { findChange, outline } from '../scripts/release-check/visual-boxes.ts';
-import { journeyChecks, runJourney, type ElementInfo, type Journey, type JourneyDriver, type PageEvents } from '../scripts/release-check/journey.ts';
+import { journeyChecks, runJourney, screenshotWithin, type ElementInfo, type Journey, type JourneyDriver, type PageEvents } from '../scripts/release-check/journey.ts';
 import { PROBE_SOURCE, describeTarget, type WireTarget } from '../scripts/release-check/probe.ts';
 import { JOURNEYS, selectJourneys } from '../scripts/release-check/journeys.ts';
 import { DASHBOARD_CHATGPT_PAGE_COPY as PANEL, DASHBOARD_CHATGPT_PRIVACY_COPY as PRIVACY } from '../src/workers/dashboard/vocabulary.ts';
@@ -657,5 +657,15 @@ describe('run options and the report', () => {
     for (const needle of ['Step-by-step traces', 'traces/save/02-press-save.jpg', 'click button', 'console error', 'boom', 'GET /x -&gt; 500', 'Visual baselines', 'visual/a.baseline.png', 'visual/a.diff.png', 'Approved', 'Difference']) {
       expect(html, needle).toContain(needle);
     }
+  });
+});
+
+describe('a step\'s screenshot', () => {
+  test('a screenshot the browser does not draw in time is given up, so the step goes on without one', async () => {
+    const started = Date.now();
+    expect(await screenshotWithin({ screenshot: () => new Promise<boolean>(() => {}) }, 'x.jpg', 50)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(await screenshotWithin({ screenshot: async () => true }, 'x.jpg', 50)).toBe(true);
+    expect(await screenshotWithin({ screenshot: async () => { throw new Error('no frame'); } }, 'x.jpg', 50)).toBe(false);
   });
 });

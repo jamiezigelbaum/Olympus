@@ -334,7 +334,7 @@ import { recordedProviderAccount } from '../../core/provider-account-history.ts'
 import { accountFolderMigrationEnabled, migrateAccountFolders, type AccountMigrationOptions, type AccountMigrationReport } from '../../core/source-account-migration.ts';
 import { messagingMoveFacts, repointMovedMessagingAccounts } from '../../core/messaging-account-move.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
-import { lifecycleStoreFileOwner } from '../../data-lifecycle.ts';
+import { deleteMarkedAccounts, lifecycleStoreFileOwner, type DeleteMarkedAccountsReport } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import { CHAT_SCOPE_FILTER_CODEC } from '../chat/chat-scope-filter.ts';
 import { createEnvCredentialBroker } from '../credential-broker/index.ts';
@@ -2089,6 +2089,25 @@ export async function startWorkerWithLaunch(launch: WorkerLaunch): Promise<void>
 let dataOwnerLock: HeldDataOwnerLock | undefined;
 
 /**
+ * Under the owner lock, first, before anything mounts or any capture starts
+ * (docs/design/source-storage.md, "Delete"): removes each account a Delete
+ * marked `deleting` (data-lifecycle.ts, `deleteMarkedAccounts`). An account
+ * that cannot be removed stays marked, and closed, until a later boot; the
+ * other accounts and the worker start as always.
+ */
+export function deleteMarkedAccountsAtBoot(env: Record<string, string | undefined>): DeleteMarkedAccountsReport | undefined {
+  try {
+    const report = deleteMarkedAccounts({ env });
+    for (const { sourceId, removed } of report.deleted) console.log(`[storage] ${sourceId}'s data was deleted (${removed} files and folders).`);
+    for (const { sourceId, message } of report.failed) console.warn(`[storage] ${sourceId}'s data could not be deleted yet (${message}); it stays closed and the next start tries again.`);
+    return report;
+  } catch (error) {
+    console.warn(`[storage] Could not check which accounts are being deleted (${error instanceof Error ? error.message : 'unknown error'}); every account stays closed until the registry is repaired.`);
+    return undefined;
+  }
+}
+
+/**
  * Under the owner lock and before anything mounts (core/source-storage.ts,
  * `replaceEmptyLegacyAccounts`). A failure here changes nothing and does not
  * stop the worker: the accounts stay where the registry has them.
@@ -2165,6 +2184,8 @@ export async function main(): Promise<void> {
   // root. A second worker on it waits a short while (restarts overlap), then
   // exits without mounting anything (core/data-owner-lock.ts).
   dataOwnerLock = takeWorkerDataOwnerLock(process.env);
+  // An account a Delete marked is removed before anything else looks at it.
+  deleteMarkedAccountsAtBoot(process.env);
   // An account recorded as legacy that holds nothing is placed in a folder instead.
   replaceEmptyAccountsAtBoot(process.env);
   // With the switch on, existing accounts move into their folders; a move under way is finished or undone.
