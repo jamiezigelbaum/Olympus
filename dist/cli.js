@@ -33000,9 +33000,13 @@ var init_local_index = __esm(() => {
         AND normalized_conversation = ? AND provider_item_id = ?
       LIMIT 1
     `).get(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
-      if (!row || row.tombstoned === 1)
+      if (!row)
         return;
-      return { ...row.source_version ? { version: row.source_version } : {}, chunkCount: row.chunk_count };
+      return {
+        ...row.source_version ? { version: row.source_version } : {},
+        chunkCount: row.tombstoned === 1 ? 0 : row.chunk_count,
+        tombstoned: row.tombstoned === 1
+      };
     }
     itemPresence(identity2) {
       const row = this.db.query(`
@@ -35454,8 +35458,10 @@ var init_local_index = __esm(() => {
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
         if (existing && (!activeOnly || existing.tombstoned === 0)) {
           this.db.query(`
-          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ? WHERE item_pk = ?
-        `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
+          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ?,
+            source_version = COALESCE(?, source_version)
+          WHERE item_pk = ?
+        `).run(now, now, tombstoneTrustTier, syncRunId, identity2.sourceVersion ?? null, existing.item_pk);
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(existing.item_pk);
           this.deleteFtsForItem(existing.item_pk);
           if (tombstoneTrustTier === "S5")
@@ -35471,10 +35477,10 @@ var init_local_index = __esm(() => {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id, parent_local_item_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id, source_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-      `).run(identity2.provider, identity2.family, identity2.accountScope, identity2.providerItemId, identity2.providerConversationId ?? null, identity2.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity2.parent?.localItemId ?? null);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+      `).run(identity2.provider, identity2.family, identity2.accountScope, identity2.providerItemId, identity2.providerConversationId ?? null, identity2.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity2.parent?.localItemId ?? null, identity2.sourceVersion ?? null);
         const inserted = this.db.query(`SELECT item_pk FROM items
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity2.provider, identity2.accountScope, normalizeConversationId(identity2.providerConversationId), identity2.providerItemId);
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
@@ -37610,6 +37616,27 @@ function resolveImportAccount(sourceId, importAccountId, options = {}) {
       return { match: "unproven", account };
   }
   return { match: "same", account };
+}
+function importAccountIdentity(sourceId, env = process.env) {
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, sourceId, DEFAULT_STORAGE_SLOT);
+  const entry = findRegistryAccount(registry, sourceId, DEFAULT_STORAGE_SLOT);
+  return entry ? JSON.stringify([entry.created_at, entry.provider_account_hash ?? null]) : undefined;
+}
+function sameImportAccount(confirmed, current2) {
+  if (confirmed === undefined || current2 === undefined)
+    return false;
+  try {
+    const [thenAt, thenAccount] = JSON.parse(confirmed);
+    const [nowAt, nowAccount] = JSON.parse(current2);
+    if (thenAt !== nowAt)
+      return false;
+    if (thenAccount === null || nowAccount === null)
+      return thenAccount === nowAccount;
+    return compareProviderAccounts(thenAccount, nowAccount) === "same";
+  } catch {
+    return false;
+  }
 }
 function placeSidecar(env, account, path, readOnly) {
   const registry = readSourceRegistry(env);
@@ -43777,12 +43804,7 @@ function forgetSourceArchiveImports(env, sourceIds, options = {}) {
   if (!existsSync41(path))
     return 0;
   const state = new ArchiveImportStateStore({ path, env });
-  let doomed;
-  try {
-    doomed = state.list().filter((record) => record.target !== undefined && sourceIds.includes(record.target.source_id)).map((record) => record.archive_id);
-  } catch {
-    return 0;
-  }
+  const doomed = state.list().filter((record) => record.target !== undefined && sourceIds.includes(record.target.source_id)).map((record) => record.archive_id);
   if (doomed.length === 0 || options.dryRun === true)
     return doomed.length;
   const bindings = createArchiveMediaBindings({ path: archiveMediaBindingsPath(path), env });
@@ -45146,6 +45168,7 @@ var init_vocabulary = __esm(() => {
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
     deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
+    deleteDataImports: "Archives you imported into {source} are part of it: their history goes too, and the archive files themselves stay where they are.",
     deleteDataDone: "Indexed data deleted",
     disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -53320,7 +53343,7 @@ class TieredStoreSet {
     if (options.settle !== false)
       await this.settleStoredItems();
     const run = new TieredRoutingRun(this, "shared");
-    const traversal = recordedTraversal(connector, (identity2) => this.storedItem(identity2));
+    const traversal = recordedTraversal(connector, (identity2, compareVersions) => this.storedItem(identity2, compareVersions));
     const legRuns = [];
     const ran = new Set;
     const embed = options.embed !== false;
@@ -53339,9 +53362,10 @@ class TieredStoreSet {
     }
     run.finalize();
     const cursor = legRuns[0]?.sync.cursor;
-    if (options.commitCursor !== false)
+    const unstored = run.counts.itemsUnstored > 0;
+    if (options.commitCursor !== false && !unstored)
       this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
-    return tieredRun(legRuns, run.counts, cursor);
+    return tieredRun(legRuns, run.counts, unstored ? undefined : cursor);
   }
   async syncLegs(...args) {
     try {
@@ -53427,6 +53451,12 @@ class TieredStoreSet {
       return store !== undefined && !store.itemPresence(identity2).active;
     });
   }
+  withdrawCopies(item, copies) {
+    for (const copy of copies) {
+      const domain = this.domainForCorpus(copy.corpusId);
+      this.store(domain)?.tombstoneCopy(item.identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+    }
+  }
   routedWithoutAnyCopy(identity2) {
     if (this.ledger.copies(identity2).length > 0)
       return false;
@@ -53435,7 +53465,7 @@ class TieredStoreSet {
   anyLegHasRow(identity2) {
     return TIER_DOMAIN_ORDER.some((domain) => this.store(domain)?.hasItemRow(identity2) === true);
   }
-  storedItem(identity2) {
+  storedItem(identity2, compareVersions) {
     const found = [];
     for (const domain of TIER_DOMAIN_ORDER) {
       const state = this.store(domain)?.storedItemState(identity2);
@@ -53444,16 +53474,25 @@ class TieredStoreSet {
     }
     if (found.length === 0)
       return;
-    const hasContent = found.some((leg) => leg.chunkCount > 0);
-    const versions = new Set(found.map((leg) => leg.version));
-    const cutOff = this.ledger.copies(identity2).some((copy) => {
+    const newest = found.reduce((best, leg) => leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best, undefined);
+    const top = newest === undefined ? found : found.filter((leg) => leg.version !== undefined && compareVersions(leg.version, newest) === 0);
+    const below = found.filter((leg) => !top.includes(leg));
+    const topActive = top.filter((leg) => !leg.tombstoned);
+    const tombstoned = topActive.length === 0;
+    const cutOff = !tombstoned && this.ledger.copies(identity2).some((copy) => {
       if (copy.state === "superseded")
         return false;
       const domain = this.domainForCorpus(copy.corpusId);
-      return domain !== undefined && !found.some((leg) => leg.domain === domain);
+      return domain !== undefined && !topActive.some((leg) => leg.domain === domain);
     });
-    const agreed = versions.size === 1 ? [...versions][0] : undefined;
-    return { ...!cutOff && agreed ? { version: agreed } : {}, hasContent };
+    const staleActive = below.some((leg) => !leg.tombstoned);
+    const incomplete = cutOff || staleActive;
+    return {
+      ...newest !== undefined ? { version: newest } : {},
+      hasContent: topActive.some((leg) => leg.chunkCount > 0),
+      ...tombstoned ? { tombstoned: true } : {},
+      ...incomplete ? { incomplete: true } : {}
+    };
   }
   classification() {
     const resolved = resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
@@ -53712,18 +53751,22 @@ class TieredRoutingRun {
       itemsPendingHeld: 0,
       movesQueued: 0,
       routedDeletions: 0,
-      contentUnreadHeld: 0
+      contentUnreadHeld: 0,
+      itemsUnstored: 0
     };
   }
   async route(input) {
     const domain = this.set.domainForCorpus(input.store.corpusId);
     if (!domain)
       throw new Error("A tier route was asked by a store outside its set.");
-    const key2 = identityKey(input.item.identity);
+    const key2 = `${identityKey(input.item.identity)}\x00${input.item.identity.sourceVersion ?? ""}`;
     let entry = this.plans.get(key2);
     if (!entry) {
       entry = { plan: this.planFor(input), identity: input.item.identity, handedOff: false };
       this.plans.set(key2, entry);
+      if (entry.plan.kind === "hold" && entry.plan.reason === "move_queued" && input.item.holdContentUntilJudged === true) {
+        this.counts.itemsUnstored += 1;
+      }
     }
     if (this.mode === "per_leg" && !entry.handedOff) {
       entry.handedOff = true;
@@ -53810,6 +53853,9 @@ class TieredRoutingRun {
     const toContent = copyServingLayer(placement.copies, "content");
     if (contentRead && decision.contentPending && fromContent && toContent && trustDomainRank(toContent.trustDomain) < trustDomainRank(fromContent.trustDomain) && !placementIsRaise(currentCopies, placement.copies)) {
       placement = { copies: currentCopies, embedHold: true };
+    }
+    if (routed && contentRead && item.holdContentUntilJudged === true && decision.contentTier !== "secrets" && currentCopies.length > 0 && ledger.getCurrent(identity2)?.state !== "moving" && placementIsRaise(currentCopies, placement.copies)) {
+      this.set.withdrawCopies(item, currentCopies);
     }
     const recorded = ledger.recordRoutedPlacement(identity2, decision, placement, {
       staleCopiesGone: routed && this.set.routedCopiesGone(identity2),
@@ -137514,7 +137560,8 @@ function chatgptDashboardClient(config2, pickerProgram, privacyProgram) {
         const run2 = action;
         wrap.className = "fix confirm";
         const sourceWords2 = source ? String(source.label || "") : "";
-        const named = sourceWords2 && fix.tool === config2.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords2 }) : sourceWords2 && fix.tool === config2.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords2 }) : "";
+        const importsGo = source && sourceImportsMeta(source.id) ? " " + fill2(P.deleteDataImports, { source: sourceWords2 }) : "";
+        const named = sourceWords2 && fix.tool === config2.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords2 }) + importsGo : sourceWords2 && fix.tool === config2.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords2 }) : "";
         add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run2, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
           render(key2);
@@ -163495,11 +163542,15 @@ async function resolveArchiveTarget(prepared, options) {
   if (source.evidence.kind === "archives")
     return { kind: "apart", reason: "not_this_source" };
   const importAccountId = source.evidence.kind === "account" ? source.evidence.importAccountId : undefined;
-  const resolve21 = () => resolveImportAccount(source.sourceId, importAccountId, {
-    env: options.env,
-    ...options.ownerConfirmed === true ? { ownerConfirmed: true } : {}
-  });
-  const resolved = target.exclusive ? await target.exclusive(async () => resolve21()) : resolve21();
+  const resolve21 = () => {
+    const resolution = resolveImportAccount(source.sourceId, importAccountId, {
+      env: options.env,
+      ...options.ownerConfirmed === true ? { ownerConfirmed: true } : {}
+    });
+    const identity3 = options.ownerConfirmed === true && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
+    return { resolution, identity: identity3 };
+  };
+  const { resolution: resolved, identity: identity2 } = target.exclusive ? await target.exclusive(async () => resolve21()) : resolve21();
   if (resolved.match === "different")
     return { kind: "apart", reason: "different_account" };
   if (resolved.match === "unproven" || !resolved.account)
@@ -163508,10 +163559,37 @@ async function resolveArchiveTarget(prepared, options) {
     source_id: source.sourceId,
     slot: resolved.account.slot,
     ...importAccountId !== undefined ? { import_account_id: importAccountId } : {},
-    ...options.ownerConfirmed === true ? { owner_confirmed: true } : {}
+    ...options.ownerConfirmed === true ? { owner_confirmed: true } : {},
+    ...identity2 !== undefined ? { confirmed_account: identity2 } : {}
   };
   prepared.record.target = joined;
   return { kind: "joined", target: joined };
+}
+async function reconfirmArchiveTarget(state, archive, options) {
+  const joined = archive.target;
+  if (!joined)
+    return;
+  const target = options.targets.forSource(joined.source_id);
+  if (!target)
+    return;
+  const settle = () => {
+    const resolved = resolveImportAccount(joined.source_id, joined.import_account_id, { env: state.env, ownerConfirmed: true });
+    if (resolved.match !== "same" && resolved.match !== "new" || !resolved.account)
+      return;
+    return importAccountIdentity(joined.source_id, state.env);
+  };
+  const identity2 = target.exclusive ? await target.exclusive(async () => settle()) : settle();
+  if (identity2 === undefined)
+    return;
+  const record5 = state.update(archive.archive_id, (entry) => {
+    if (entry.status !== "stopped" || entry.stop?.code !== "account_changed" || !entry.target)
+      return false;
+    entry.target.owner_confirmed = true;
+    entry.target.confirmed_account = identity2;
+    entry.status = "importing";
+    delete entry.stop;
+  });
+  return record5?.status === "importing" ? record5 : undefined;
 }
 function commitArchiveImport(state, prepared, digests) {
   if (prepared.copies.length > 0) {
@@ -164291,6 +164369,32 @@ function createArchiveImportDashboard(options) {
       return refusal3(code, ARCHIVE_APPROVE_COPY[code] ?? ARCHIVE_APPROVE_COPY.unreadable);
     }
     if (prepared.kind === "already_imported") {
+      const archive = prepared.archive;
+      if (archive.target?.owner_confirmed === true && archive.status === "stopped" && archive.stop?.code === "account_changed") {
+        if (answer.confirmAccount !== true) {
+          const source = options.runtime.targets.forSource(archive.target.source_id);
+          return {
+            ok: true,
+            status: "confirm_account",
+            name,
+            source: { id: source?.cardId ?? archive.target.source_id, label: named(source?.label ?? archive.target.source_id) }
+          };
+        }
+        let again;
+        try {
+          again = await reconfirmArchiveTarget(state, archive, { targets: options.runtime.targets });
+        } catch (error2) {
+          if (error2 instanceof SourceStorageUnavailableError)
+            return refusal3("source_unavailable", ARCHIVE_APPROVE_COPY.source_unavailable);
+          throw error2;
+        }
+        answered();
+        if (again) {
+          refresh();
+          return { ok: true, status: "started", archive_id: again.archive_id, name };
+        }
+        return { ok: true, status: "already_imported", archive_id: archive.archive_id, name, archive_name: named(archive.label) };
+      }
       answered();
       const resumed = resumeStopped(prepared.archive);
       if (resumed) {
@@ -165235,6 +165339,10 @@ var init_extraction_runtime = __esm(() => {
   init_extraction_source3();
   init_lane();
 });
+
+// src/core/source-inputs.ts
+var init_source_inputs = () => {};
+
 // src/workers/archive-import/source-input.ts
 function bindInputToFiles(input, manifestSha256) {
   const prefix = `${manifestSha256}|`;
@@ -165278,6 +165386,7 @@ function holdingItems(connector) {
 }
 var init_source_input = __esm(() => {
   init_archive_formats();
+  init_source_inputs();
 });
 
 // src/workers/archive-import/sync.ts
@@ -165449,6 +165558,12 @@ async function pullArchiveImport(options) {
       sink: () => {
         let account;
         try {
+          if (record5.target.owner_confirmed === true && !sameImportAccount(record5.target.confirmed_account, importAccountIdentity(record5.target.source_id, options.state.env))) {
+            return { code: "account_changed", message: "The account this source holds now is not the one you said this export belongs to.", at: now().toISOString() };
+          }
+          if (importAccountIdentity(record5.target.source_id, options.state.env) === undefined) {
+            return { code: "source_unavailable", message: "This source's account is gone, so nothing more was imported.", at: now().toISOString() };
+          }
           const resolved = resolveImportAccount(record5.target.source_id, record5.target.import_account_id, {
             env: options.state.env,
             ...record5.target.owner_confirmed === true ? { ownerConfirmed: true } : {}
@@ -165627,7 +165742,9 @@ async function runPass(options, record5, context2) {
       throw error2;
     }
     flush();
-    const complete = observed.completed();
+    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run2.byDomain[domain] ? [run2.byDomain[domain].sync] : []);
+    const waiting = run2.routing.itemsUnstored;
+    const complete = observed.completed() && legs.length > 0 && legs.every((leg) => leg.traversalComplete) && waiting === 0;
     const dates = observed.dates();
     const final = {};
     let mediaChange;
@@ -165664,7 +165781,6 @@ async function runPass(options, record5, context2) {
     });
     if (final.stop)
       return context2.idle(updated, ["archive_import_stopped"], true);
-    const legs = TIER_DOMAIN_ORDER.flatMap((domain) => run2.byDomain[domain] ? [run2.byDomain[domain].sync] : []);
     return {
       receipt: receiptOf(updated, {
         legs,
@@ -165674,9 +165790,12 @@ async function runPass(options, record5, context2) {
         }),
         complete,
         stopped: false,
-        warnings: legs.flatMap((leg) => leg.gaps)
+        warnings: [
+          ...legs.flatMap((leg) => leg.gaps),
+          ...waiting > 0 ? [`archive_items_waiting: ${waiting} item(s) are in the middle of a tier move and are read again once it is done.`] : []
+        ]
       }),
-      continueSoon: !complete,
+      continueSoon: !complete && waiting === 0,
       ...updated ? { record: updated } : {}
     };
   } finally {

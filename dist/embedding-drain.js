@@ -23041,9 +23041,13 @@ var init_local_index = __esm(() => {
         AND normalized_conversation = ? AND provider_item_id = ?
       LIMIT 1
     `).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
-      if (!row || row.tombstoned === 1)
+      if (!row)
         return;
-      return { ...row.source_version ? { version: row.source_version } : {}, chunkCount: row.chunk_count };
+      return {
+        ...row.source_version ? { version: row.source_version } : {},
+        chunkCount: row.tombstoned === 1 ? 0 : row.chunk_count,
+        tombstoned: row.tombstoned === 1
+      };
     }
     itemPresence(identity) {
       const row = this.db.query(`
@@ -25495,8 +25499,10 @@ var init_local_index = __esm(() => {
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         if (existing && (!activeOnly || existing.tombstoned === 0)) {
           this.db.query(`
-          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ? WHERE item_pk = ?
-        `).run(now, now, tombstoneTrustTier, syncRunId, existing.item_pk);
+          UPDATE items SET tombstoned = 1, deleted_at = ?, indexed_at = ?, trust_tier = ?, sync_run_id = ?,
+            source_version = COALESCE(?, source_version)
+          WHERE item_pk = ?
+        `).run(now, now, tombstoneTrustTier, syncRunId, identity.sourceVersion ?? null, existing.item_pk);
           this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(existing.item_pk);
           this.deleteFtsForItem(existing.item_pk);
           if (tombstoneTrustTier === "S5")
@@ -25512,10 +25518,10 @@ var init_local_index = __esm(() => {
         INSERT INTO items (
           provider, family, account_scope, provider_item_id, provider_conversation_id,
           local_item_id, mime_type, fetched_at, indexed_at, trust_tier,
-          tombstoned, deleted_at, sync_run_id, parent_local_item_id
+          tombstoned, deleted_at, sync_run_id, parent_local_item_id, source_version
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity.parent?.localItemId ?? null);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+      `).run(identity.provider, identity.family, identity.accountScope, identity.providerItemId, identity.providerConversationId ?? null, identity.localItemId, item.mimeType, item.fetchedAt, now, tombstoneTrustTier, now, syncRunId, identity.parent?.localItemId ?? null, identity.sourceVersion ?? null);
         const inserted = this.db.query(`SELECT item_pk FROM items
          WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?`).get(identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId);
         this.rememberItemOwner(inserted.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
@@ -34026,6 +34032,7 @@ var init_vocabulary = __esm(() => {
     deleteDataConfirm: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records. Your files and accounts are not touched. This cannot be undone.",
     deleteDataConfirmMessages: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages. Your {source} account and the messages in the app are not touched. This cannot be undone.",
     deleteDataConfirmMessagesMedia: "Delete indexed data for {source}? Olympus removes everything it indexed from {source} on this computer: search results, summaries and its privacy records, and also its own copies of your messages, voice notes and media. Your {source} account and the messages in the app are not touched. This cannot be undone.",
+    deleteDataImports: "Archives you imported into {source} are part of it: their history goes too, and the archive files themselves stay where they are.",
     deleteDataDone: "Indexed data deleted",
     disconnectConfirm: "Disconnect {source}? Olympus stops reading it. What it already indexed stays on this computer until you delete it.",
     syncCheckingLine: dashboardManualSyncPendingLine("{source}"),
@@ -36893,7 +36900,8 @@ function chatgptDashboardClient(config, pickerProgram, privacyProgram) {
         const run = action;
         wrap.className = "fix confirm";
         const sourceWords = source ? String(source.label || "") : "";
-        const named = sourceWords && fix.tool === config.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) : sourceWords && fix.tool === config.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
+        const importsGo = source && sourceImportsMeta(source.id) ? " " + fill2(P.deleteDataImports, { source: sourceWords }) : "";
+        const named = sourceWords && fix.tool === config.deleteDataTool ? fill2(fix.deletesCopies === "messages_and_media" ? P.deleteDataConfirmMessagesMedia : fix.deletesCopies === "messages" ? P.deleteDataConfirmMessages : P.deleteDataConfirm, { source: sourceWords }) + importsGo : sourceWords && fix.tool === config.disconnectTool ? fill2(P.disconnectConfirm, { source: sourceWords }) : "";
         add(wrap, el("span", "reason strong", typeof fix.confirmText === "string" && fix.confirmText ? fix.confirmText : named || P.confirmPrompt), button(fill2(P.confirm, { label: String(fix.label).toLowerCase() }), key2 + ":yes", run, "danger"), button(P.cancel, key2 + ":no", () => {
           state.confirming = "";
           render(key2);
