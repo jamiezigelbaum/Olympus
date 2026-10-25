@@ -275,6 +275,19 @@ async function waitForEngine(timeoutMs: number): Promise<number> {
   throw new Error(`the engine was not ready (models included) within ${Math.round(timeoutMs / 1000)} s`);
 }
 
+/** Restarts the engine the owner's way and waits for it (models included). */
+async function restartEngine(timeoutMs: number): Promise<{ ok: boolean; ms: number; detail?: string }> {
+  const started = Date.now();
+  const restart = olympus(['engine', 'restart'], { timeoutMs: 180_000 });
+  if (restart.code !== 0) return { ok: false, ms: Date.now() - started, detail: `engine restart exited ${restart.code}: ${restart.stderr.slice(0, 200)}` };
+  try {
+    await waitForEngine(timeoutMs);
+    return { ok: true, ms: Date.now() - started };
+  } catch (error) {
+    return { ok: false, ms: Date.now() - started, detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 async function prepareSource(): Promise<never> {
   const config = readConfig();
   const p = platform();
@@ -1405,6 +1418,14 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     // Each is audited as it loads, in the same accessibility check.
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
+      // An engine that stopped answering in the Sources crawl has already failed there. It is restarted the owner's way so the other
+      // pages are still crawled, and the restart is reported: one failure must not hide the rest.
+      try { await waitForEngine(30_000); } catch (error) {
+        const stopped = error instanceof Error ? error.message : String(error);
+        const restarted = await restartEngine(300_000);
+        result = { ...result, engineRestart: { ok: restarted.ok, ms: restarted.ms, detail: restarted.ok ? stopped : `${stopped}; ${restarted.detail ?? 'the restart failed'}` } };
+        if (restarted.ok) await driver.open('private');
+      }
       const pageAudit = axeSource ? pagesAccessibilityAudit(axeSource) : undefined;
       // The Inbox is filled first, by asking the local model as the owner would, so its Read and Delete are pressed too.
       const prepare = inboxAnswers(driver, { questions: INBOX_SEED_QUESTIONS });
@@ -1558,17 +1579,7 @@ function archiveHost(): ArchiveHost {
     watchEgress: async (browserPid) => startEgressWatch(await relayAddresses(readConfig().relay), browserPid),
     search: archiveSearch,
     readStores: readArchiveStores,
-    async restartEngine(timeoutMs) {
-      const started = Date.now();
-      const restart = olympus(['engine', 'restart'], { timeoutMs: 180_000 });
-      if (restart.code !== 0) return { ok: false, ms: Date.now() - started, detail: `engine restart exited ${restart.code}: ${restart.stderr.slice(0, 200)}` };
-      try {
-        await waitForEngine(timeoutMs);
-        return { ok: true, ms: Date.now() - started };
-      } catch (error) {
-        return { ok: false, ms: Date.now() - started, detail: error instanceof Error ? error.message : String(error) };
-      }
-    },
+    restartEngine,
   };
 }
 
