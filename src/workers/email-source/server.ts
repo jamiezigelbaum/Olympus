@@ -450,10 +450,15 @@ import {
 } from '../../core/file-scope-sources.ts';
 import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.ts';
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
+import { gmailArchiveTarget } from '../google-connectors/gmail-archive-target.ts';
+import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
+import { archiveSourceTargets } from '../archive-import/source-targets.ts';
+import { createLaneTieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import {
   SourceAccountChangedError,
   guardAccountBoundLanes,
   createSourceAccountGuard,
+  runExclusiveForSource,
   runGuarded,
   type SourceAccountGuard,
   type SourceAccountGuardOptions,
@@ -2798,6 +2803,55 @@ export async function main(): Promise<void> {
         }),
       })
     : undefined;
+  // An mbox export of a Gmail account is an input of the Gmail connector
+  // (docs/design/archive-live-one-dataset.md, step 6): its mail joins the
+  // Gmail stores, matched by Gmail's own ids, under the account it proves and
+  // the owner confirms. Without the Gmail lane, every mbox stays under
+  // Archives, as before.
+  if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
+    let gmailArchiveSet: { key: string; set: ReturnType<typeof createLaneTieredStoreSet> } | undefined;
+    archiveSourceTargets.register(gmailArchiveTarget({
+      concurrencyKey: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
+      exclusive: (task) => connectedHandleRegistryPath
+        ? runExclusiveForSource(connectedHandleRegistryPath, GMAIL_SOURCE_ID, task)
+        : task(),
+      lane: () => {
+        const handle = selectedSourceCredentialHandle({
+          env: process.env, pinEnvName: 'OLYMPUS_SOURCE_INDEX_GMAIL_CREDENTIAL_HANDLE',
+          provider: 'gmail', capability: 'gmail.email.sync', handles: readActiveConnectedHandles(process.env),
+        });
+        // The owner's "always Private" rules of the current mail approval, as the live lane applies them.
+        const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
+        let ownerRules: NonNullable<ReturnType<typeof gmailConnectorScopeFromApproval>['ownerTierRules']> = [];
+        try {
+          const approval = scopeRef && fileSourceScopeAuthority ? fileSourceScopeAuthority.assertCurrentMail(scopeRef) : undefined;
+          if (approval) ownerRules = gmailConnectorScopeFromApproval(approval).ownerTierRules ?? [];
+        } catch {
+          // No current approval: no owner rules apply, as live reads nothing without one.
+        }
+        const key = JSON.stringify(ownerRules);
+        if (gmailArchiveSet?.key !== key) {
+          gmailArchiveSet = {
+            key,
+            set: createLaneTieredStoreSet({
+              setId: GMAIL_SOURCE_ID,
+              internalStore: gmailInternalConnectorStore,
+              secureStore: gmailSecureConnectorStore,
+              ...(gmailTierLane?.publicStore ? { publicLeg: gmailTierLane.publicStore } : {}),
+              ...(gmailTierLane?.secrets ? { secretLocations: gmailTierLane.secrets } : {}),
+              tierClassification: { ...(ownerRules.length > 0 ? { rules: [...ownerRules] } : {}) },
+            }),
+          };
+        }
+        return {
+          set: gmailArchiveSet.set,
+          sync: gmailLaneSyncOptions(ownerRules),
+          // The account scope live Gmail writes under, so both inputs name one item.
+          account: handle?.accountRole?.trim() || accountFromGoogleHandle(handle?.handle),
+        };
+      },
+    }));
+  }
   // Exactly one Drive day counter per runtime, durable across restart.
   // Constructing it before the stores also keeps an invalid budget env from
   // creating the store files at all.
