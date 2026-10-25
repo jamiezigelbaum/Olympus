@@ -105,6 +105,8 @@ test('after the move, changes made while Olympus was stopped are found from the 
   // While Olympus is stopped, files change; the next boot moves the account.
   writeFileSync(join(proj, 'written-while-stopped.txt'), 'three');
   rmSync(join(proj, 'gone-while-stopped.txt'));
+  // macOS keeps a closed connection's file open until it is collected, and a file renamed under it will not reopen.
+  Bun.gc(true);
   const report = migrateAccountFolders({ ...env, [MIGRATE_ACCOUNT_FOLDERS_ENV]: '1' });
   expect(report, JSON.stringify(report)).toMatchObject({ moved: ['local.files'], movedBack: [], stuck: [] });
   enableSourceRegistryAdoption();
