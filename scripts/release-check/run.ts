@@ -1425,6 +1425,11 @@ export function parseCli(argv: readonly string[]): RunOptions {
   if (baselines !== undefined && baselines.startsWith('--')) throw new Error('--baselines is the folder of approved pictures');
   if (has('--update-baselines') && baselines === undefined) throw new Error('--update-baselines needs --baselines <dir> to write into');
   if (has('--update-baselines') && has('--skip-journeys')) throw new Error('--update-baselines needs the screens; drop --skip-journeys');
+  // Approved pictures show the pages as a full run leaves them when the screens are taken: after the relay, every agent's questions
+  // and the Inbox leg. A run without one of them shows other pages (2026-10-25: a refresh without the questions and the Inbox leg
+  // wrote an Agents page 0.4 to 0.8% different). The legs after the screens (archive import, the control crawl) may be skipped.
+  const changesScreens = ['--skip-relay', '--skip-suite', '--skip-inbox', '--agents', '--mistier', '--inbox-selftest'].filter(has);
+  if (has('--update-baselines') && changesScreens.length > 0) throw new Error(`--update-baselines takes the pictures of a full run; drop ${changesScreens.join(', ')}`);
   if (has('--reviewer-plants') && has('--skip-journeys')) throw new Error('--reviewer-plants takes its pictures with the screens; drop --skip-journeys');
   if (has('--reviewer-plants') && has('--update-baselines')) throw new Error('--reviewer-plants is a qualification run; it never writes baselines');
   const onlyJourneys = get('--only-journeys');
