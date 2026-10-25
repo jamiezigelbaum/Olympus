@@ -26,9 +26,11 @@
 // Files are named by RECEIVE date (UTC wall clock), not message timestamp, so
 // only the newest file ever grows — that append-only ordering is what makes
 // the TypeScript connector's "file:line" cursor resumable. Non-text payloads
-// (images, voice notes, documents, ...) are recorded with empty text and a
-// media_type note; protocol-only noise (key distribution, receipts) is not
-// spooled at all. Batches are fsynced before the writer sleeps. Restarts can
+// (images, voice notes, documents, ...) are recorded with a media_type note
+// and their caption as the text (empty when there is none); protocol-only
+// noise (key distribution, receipts) is not spooled at all. Beside the spool
+// files, capture-status.json says whether capture is connected and how many
+// messages a full queue dropped (capture_status.go). Batches are fsynced before the writer sleeps. Restarts can
 // re-deliver recent offline messages; downstream ingest dedupes on the
 // WhatsApp message id, so duplicate spool lines are harmless.
 package main
@@ -933,8 +935,10 @@ func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audi
 			writer.enqueue(rec)
 		}
 	case *events.Disconnected:
+		writer.markConnected(false)
 		log.Printf("olympus-whatsapp-bridge: disconnected; whatsmeow auto-reconnect will retry with backoff")
 	case *events.Connected:
+		writer.markConnected(true)
 		log.Printf("olympus-whatsapp-bridge: connected")
 		// Native capture publishes its startup proof here and nowhere earlier:
 		// Connected means this process authenticated the reused session, so a
@@ -943,8 +947,10 @@ func handleEvent(ctx context.Context, client *whatsmeow.Client, audioStore *audi
 			markReady()
 		}
 	case *events.LoggedOut:
+		writer.markConnected(false)
 		reportFatal(fatalEvents, "logged out by the phone (Linked Devices); restart the daemon and re-pair")
 	case *events.StreamReplaced:
+		writer.markConnected(false)
 		reportFatal(fatalEvents, "stream replaced: another client connected with this session; restarting")
 	}
 }
@@ -1059,17 +1065,23 @@ func classifyPayload(msg *waE2E.Message) (text string, mediaType string, ok bool
 	if ext := msg.GetExtendedTextMessage(); ext != nil && ext.GetText() != "" {
 		return ext.GetText(), "", true
 	}
+	// A photo, video or document carries the sender's caption, which is the
+	// text of the message; it rides the media line as its text.
 	switch {
 	case msg.GetImageMessage() != nil:
-		return "", "image", true
+		return msg.GetImageMessage().GetCaption(), "image", true
 	case msg.GetVideoMessage() != nil:
-		return "", "video", true
+		return msg.GetVideoMessage().GetCaption(), "video", true
 	case msg.GetPtvMessage() != nil:
-		return "", "video_note", true
+		return msg.GetPtvMessage().GetCaption(), "video_note", true
 	case msg.GetAudioMessage() != nil:
 		return "", "audio", true
 	case msg.GetDocumentMessage() != nil:
-		return "", "document", true
+		return msg.GetDocumentMessage().GetCaption(), "document", true
+	case captionedDocument(msg) != nil:
+		// A document sent with a caption arrives wrapped; it used to be taken
+		// for protocol noise and never reached the spool.
+		return captionedDocument(msg).GetCaption(), "document", true
 	case msg.GetStickerMessage() != nil:
 		return "", "sticker", true
 	case msg.GetContactMessage() != nil, msg.GetContactsArrayMessage() != nil:
@@ -1109,7 +1121,26 @@ func mentionedJIDsFromMessage(msg *waE2E.Message) []string {
 	if ext := msg.GetExtendedTextMessage(); ext != nil {
 		return ext.GetContextInfo().GetMentionedJID()
 	}
+	// A caption mentions people the same way a text message does.
+	switch {
+	case msg.GetImageMessage() != nil:
+		return msg.GetImageMessage().GetContextInfo().GetMentionedJID()
+	case msg.GetVideoMessage() != nil:
+		return msg.GetVideoMessage().GetContextInfo().GetMentionedJID()
+	case msg.GetPtvMessage() != nil:
+		return msg.GetPtvMessage().GetContextInfo().GetMentionedJID()
+	case msg.GetDocumentMessage() != nil:
+		return msg.GetDocumentMessage().GetContextInfo().GetMentionedJID()
+	case captionedDocument(msg) != nil:
+		return captionedDocument(msg).GetContextInfo().GetMentionedJID()
+	}
 	return nil
+}
+
+// captionedDocument is the document inside the wrapper WhatsApp uses for a
+// document sent with a caption, or nil.
+func captionedDocument(msg *waE2E.Message) *waE2E.DocumentMessage {
+	return msg.GetDocumentWithCaptionMessage().GetMessage().GetDocumentMessage()
 }
 
 func resolveMentionsInText(text string, mentionedJIDs []string, resolve mentionResolver) (string, map[string]string) {
@@ -1529,6 +1560,7 @@ type spoolWriter struct {
 	spoolDir string
 	records  chan spoolRecord
 	done     chan struct{}
+	status   *captureStatus
 
 	file     *os.File
 	fileDate string
@@ -1539,6 +1571,7 @@ func newSpoolWriter(spoolDir string) *spoolWriter {
 		spoolDir: spoolDir,
 		records:  make(chan spoolRecord, spoolQueueSize),
 		done:     make(chan struct{}),
+		status:   newCaptureStatus(spoolDir),
 	}
 }
 
@@ -1548,13 +1581,25 @@ func (w *spoolWriter) enqueue(rec spoolRecord) {
 	default:
 		// Queue full means the disk has been failing writes for thousands of
 		// messages; losing this line is the lesser evil vs. blocking the
-		// whatsmeow event loop.
+		// whatsmeow event loop. The loss is counted in the capture status
+		// receipt, which Olympus reports, not only logged.
+		w.status.recordDrop()
 		log.Print("olympus-whatsapp-bridge: spool queue full, dropping one message")
 	}
 }
 
 func (w *spoolWriter) run() {
 	defer close(w.done)
+	stopStatus := make(chan struct{})
+	statusDone := make(chan struct{})
+	go func() {
+		defer close(statusDone)
+		w.status.run(stopStatus)
+	}()
+	defer func() {
+		close(stopStatus)
+		<-statusDone
+	}()
 	for rec := range w.records {
 		batch := []spoolRecord{rec}
 	drain:
@@ -1578,6 +1623,15 @@ func (w *spoolWriter) run() {
 	if w.file != nil {
 		w.file.Close()
 	}
+}
+
+// markConnected records whether the session is connected, for the capture
+// status receipt.
+func (w *spoolWriter) markConnected(connected bool) {
+	if w == nil {
+		return
+	}
+	w.status.setConnected(connected)
 }
 
 func (w *spoolWriter) close() {

@@ -244,7 +244,7 @@ its own.
 | Stage | Kept | From | Why |
 |---|---|---|---|
 | Reading | chunked streaming, a bound per record and per pass, damage reported as a finding | archive | live Telegram re-reads whole spool files from its cursor each page and fails once the files one read visits pass 768 MB; live WhatsApp scans its whole spool for freshness each pull, with no byte bound; neither prunes |
-| Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file vanished silently skips the rest |
+| Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file was replaced by a shorter one silently skipped that file's first lines, and one whose file vanished went on with no count (corrected 2026-10-25: the draft said the vanished case skips the rest; it resumes at the next file) |
 | Identity and versions | account, chat and message ids; a version that tracks edits and reactions, with explicit clears | live | archive Telegram ids hash file positions, WhatsApp's hash time, sender, text and occurrence, mbox's the raw message, and versions hash text, so a second export of the same chat would not match |
 | Item text | service messages as items, sender names, reply and forward names, captions | archive (Telegram), new (WhatsApp) | live Telegram keeps a sender id without a name and a forward as a bare flag; the WhatsApp bridge drops captions |
 | Privacy signals | chat id as the folder key, priors, protected floors, owner chat rules | live | archive copies today carry file positions as folder keys, so an owner rule on a chat never reached its imported history |
@@ -283,7 +283,8 @@ ownership and the delete paths do not change.
    fixture source that has a live and an archive input (see "Built, step 2").
 3. Live capture fixes from "Best of both", each with its own tests:
    streaming spool reads with bounds, cursor recovery, counted bridge
-   drops, WhatsApp captions, freshness told apart from quiet.
+   drops, WhatsApp captions, freshness told apart from quiet. WhatsApp part
+   built (see "Built, step 3: WhatsApp").
 4. Telegram: the export becomes an input of the Telegram connector (exact
    ids, account hash), with folder media as children; reusable builder and
    new record kinds. After storage's account-identity step.
@@ -359,6 +360,53 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts
   each item once.
+
+## Built, step 3: WhatsApp
+
+Live WhatsApp capture, with no change to identities, cursors' format or
+stores (`src/workers/whatsapp/spool-reader.ts`, `live-connector.ts`,
+`store-sync.ts`, `tools/whatsapp-bridge/capture_status.go`; tests in
+`test/whatsapp-live-capture-fixes.test.ts` and
+`tools/whatsapp-bridge/capture_status_test.go`).
+
+- **Streaming reads with bounds.** A spool file is read in 256 KiB chunks
+  from the resume point, never whole. A record over 1 MiB is skipped unread
+  and counted (`oversized_spool_records`). One pull reads at most 64 MiB and
+  ends with a cursor for the next (`spool_pass_budget_reached`). The pull no
+  longer scans the whole spool for its receipt: the newest message time is
+  read back from the end of the spool (4 MiB at most), and malformed lines
+  and unresolved reactions are counted for the lines this pull read, not the
+  whole spool again. Left as is: a page that carries a reaction still builds
+  the reaction aggregate over the whole spool (streamed, so memory-bounded),
+  and `fetchItem` still scans the spool; neither runs on a pull of plain
+  messages.
+- **Cursor recovery.** The cursor stays `<file>:<lines>`, so a rollback
+  reads it as before. A cursor's file only grows, so one holding fewer lines
+  than its cursor was replaced (the spool folder removed and capture started
+  again the same day): it is read again from its start, which the store
+  collapses, and counted (`spool_cursor_recovered`); before, its first lines
+  were skipped silently. A cursor whose file has gone is counted
+  (`spool_cursor_file_missing`) and listing goes on at the next file. Not
+  covered: a replaced file that has grown past the old cursor before the
+  next pull, and a file named earlier than the cursor's (a clock set back).
+- **Counted bridge drops.** The bridge writes `spool/capture-status.json`
+  every minute and on connect and disconnect: connected, the last time it
+  knew it was connected, and the messages a full queue dropped, carried
+  across restarts. The pull reports the count (`capture_dropped_messages`)
+  and warns while the last drop is within the stale threshold.
+- **Captions.** The bridge keeps the caption of a photo, video, video note
+  or document as the line's text, and spools a document sent with a caption
+  (before, it was taken for protocol noise and not spooled at all). The
+  connector reads a captioned media line as a text item with its media type
+  kept; Secrets are judged and cleared on the caption like any text.
+- **Freshness told apart from quiet.** `captureLiveness` in
+  `connector-store/capture-freshness.ts` ages a feed by the newer of its
+  newest message and the bridge's last connected time, and reports
+  `capture_quiet` when the bridge is connected and no message arrived
+  within the threshold. A bridge that writes no receipt is judged by its
+  newest message, as before. The Telegram lane adopts the same rule.
+  Open: the dashboard's stale wording says "newest message" for an age that
+  can now be the bridge's last connected time.
 
 ## To verify before step 4
 

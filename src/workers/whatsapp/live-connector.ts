@@ -18,14 +18,25 @@
 // - The cursor is "<fileName>:<lineCount>": the number of terminated lines
 //   already consumed in that file. Resuming re-reads the directory, so lines
 //   appended after a cursor was taken (the live file growing) and entirely
-//   new files are both picked up. If the cursor's file has vanished, listing
-//   resumes at the next file by name.
+//   new files are both picked up.
+// - Recovery: a cursor's file only ever grows, so a file holding fewer lines
+//   than its cursor was replaced (the spool folder deleted and capture
+//   started again the same day). It is read again from its start, since the
+//   store collapses what it already holds, and counted as a recovered cursor
+//   instead of silently skipping the new file's first lines. A cursor whose
+//   file has vanished resumes at the next file by name, and is counted too:
+//   whatever that file held past the cursor is gone.
+// - Reads are streamed (spool-reader.ts): a file is read in chunks from the
+//   resume point, never whole; a record over WHATSAPP_SPOOL_MAX_RECORD_BYTES
+//   is skipped and counted, and one listing reads at most passByteBudget
+//   bytes before it ends with a cursor for the next pass.
 // - Only lines terminated by '\n' are consumed. A final unterminated
 //   fragment is treated as a write in progress and left for a later page.
 // - Malformed lines (broken JSON, missing/mistyped required fields) are
 //   SKIPPED — they still advance the cursor so capture never wedges — and
-//   surfaced as a count through readWhatsAppLiveSpoolStatus(), which ingest
-//   wiring can log as a gap. They are not silently invisible.
+//   counted in the listing's findings, which the pull reports as a gap.
+//   They are not silently invisible.
+// - A media line's text is its caption (bridges before captions wrote none).
 // - WhatsApp Status broadcasts (status@broadcast) are SKIPPED: they are not
 //   conversations and should not enter secure chat evidence.
 // - Lines with a media_type note carry no text by daemon design; they map to
@@ -48,7 +59,7 @@
 //   reads back as a metadata_only item with a Secrets floor, so a replay or a
 //   reaction re-emit judges it Secrets again.
 
-import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 import { compactClassificationSignals, signalText, trustDomainPrior } from '../../core/classification-signals.ts';
 import type {
@@ -76,6 +87,15 @@ import {
   normalizeWhatsAppJid,
   type WhatsAppReactionIndex,
 } from './reaction-index.ts';
+import {
+  WHATSAPP_SPOOL_MAX_RECORD_BYTES,
+  newestSpoolRecord,
+  offsetAfterLines,
+  readWhatsAppCaptureStatus,
+  spoolFileLines,
+  spoolRecords,
+  type WhatsAppCaptureStatusReceipt,
+} from './spool-reader.ts';
 
 export const WHATSAPP_LIVE_CONNECTOR_ID = 'whatsapp-live';
 const CONNECTOR_ID = WHATSAPP_LIVE_CONNECTOR_ID;
@@ -92,7 +112,42 @@ export interface WhatsAppLiveSourceConnectorOptions {
   spoolDir: string;
   /** Account scope for identities; defaults to "personal". */
   account?: string;
+  /** Where each listing counts what it skipped or recovered; the pull reports it. */
+  findings?: WhatsAppSpoolPassFindings;
+  /** Bytes one listing reads before it stops with a cursor (default 64 MiB). */
+  passByteBudget?: number;
+  /** A record longer than this is skipped and counted (default 1 MiB). */
+  maxRecordBytes?: number;
 }
+
+/** What one or more listings skipped or recovered, as counts only. */
+export interface WhatsAppSpoolPassFindings {
+  /** Non-blank lines that could not be parsed, skipped. */
+  malformedLines: number;
+  /** Records over the per-record bound, skipped unread. */
+  oversizedRecords: number;
+  /** Reacted-to messages a page could not attach reactions to. */
+  unresolvedReactionTargets: number;
+  /** A cursor whose file was replaced since; the file was read again from its start. */
+  cursorsRecovered: number;
+  /** A cursor whose file has gone; listing went on at the next file. */
+  cursorFilesMissing: number;
+  /** A listing that stopped at its byte budget, to go on next pass. */
+  passBudgetReached: number;
+}
+
+export function emptyWhatsAppSpoolPassFindings(): WhatsAppSpoolPassFindings {
+  return {
+    malformedLines: 0,
+    oversizedRecords: 0,
+    unresolvedReactionTargets: 0,
+    cursorsRecovered: 0,
+    cursorFilesMissing: 0,
+    passBudgetReached: 0,
+  };
+}
+
+const DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
 
 export interface WhatsAppLiveSpoolStatus {
   files: number;
@@ -152,6 +207,11 @@ interface SpoolMessage {
 interface SpoolPosition {
   file: string;
   line: number;
+  /**
+   * The byte offset of `line` in `file`, when this listing already knows it.
+   * Never part of the cursor: a cursor is resolved by counting lines once.
+   */
+  offset?: number;
 }
 
 export function createWhatsAppLiveSourceConnector(
@@ -159,6 +219,9 @@ export function createWhatsAppLiveSourceConnector(
 ): SourceConnector {
   const spoolDir = requireNonEmpty(options.spoolDir, 'WhatsApp live connector spoolDir');
   const account = options.account === undefined ? DEFAULT_ACCOUNT : requireNonEmpty(options.account, 'WhatsApp live connector account');
+  const findings = options.findings ?? emptyWhatsAppSpoolPassFindings();
+  const passByteBudget = normalizePositiveInteger(options.passByteBudget, DEFAULT_PASS_BYTE_BUDGET, Number.MAX_SAFE_INTEGER);
+  const maxRecordBytes = normalizePositiveInteger(options.maxRecordBytes, WHATSAPP_SPOOL_MAX_RECORD_BYTES, Number.MAX_SAFE_INTEGER);
 
   return {
     id: CONNECTOR_ID,
@@ -179,16 +242,23 @@ export function createWhatsAppLiveSourceConnector(
       return (async function* (): AsyncGenerator<SourceConnectorListPage> {
         let position = positionFromCursor(initialCursor);
         const reactionSnapshot = createReactionSnapshotReader(spoolDir);
+        const pass = { bytesLeft: passByteBudget, maxRecordBytes, findings };
         for (;;) {
-          const page = readSpoolPage(spoolDir, position, limit);
+          const page = readSpoolPage(spoolDir, position, limit, pass);
           position = page.position;
           const fetchedAt = nowIso();
           yield {
-            items: pageItems(page, account, fetchedAt, reactionSnapshot),
+            items: pageItems(page, account, fetchedAt, reactionSnapshot, findings),
             ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position) }),
             done: page.exhausted,
           };
           if (page.exhausted) return;
+          // The pass has read its share of the spool: it ends here, with a
+          // cursor the next pass resumes from.
+          if (page.budgetReached) {
+            findings.passBudgetReached += 1;
+            return;
+          }
         }
       })();
     },
@@ -204,7 +274,7 @@ export function createWhatsAppLiveSourceConnector(
       // media message, so a second pass here would cost a spool scan each.
       const reactionIndex = createWhatsAppReactionIndexBuilder();
       for (const file of listSpoolFiles(spoolDir)) {
-        for (const line of terminatedLines(join(spoolDir, file))) {
+        for (const line of spoolFileLines(join(spoolDir, file))) {
           const message = parseSpoolLine(line);
           if (message === undefined || isWhatsAppStatusBroadcast(message.chatJid)) continue;
           if (message.reactionTargetId === providerItemId) reactionIndex.add(message);
@@ -259,7 +329,7 @@ export function readWhatsAppLiveSpoolStatus(spoolDir: string): WhatsAppLiveSpool
   // targets costs a second pass, and only when reactions actually exist.
   const reactionIndex = createWhatsAppReactionIndexBuilder();
   for (const file of files) {
-    for (const line of terminatedLines(join(spoolDir, file))) {
+    for (const line of spoolFileLines(join(spoolDir, file))) {
       lines += 1;
       if (line.trim() === '') continue;
       const message = parseSpoolLine(line);
@@ -281,6 +351,27 @@ export function readWhatsAppLiveSpoolStatus(spoolDir: string): WhatsAppLiveSpool
     reactionLines: index.reactionLines,
     unresolvedReactionTargets: countUnresolvedReactionTargets(spoolDir, index),
     ...(newestMessageTimestamp === undefined ? {} : { newestMessageTimestamp }),
+  };
+}
+
+/**
+ * What the pull reads about capture on every run, bounded: the newest valid
+ * message time, read back from the end of the spool (a few megabytes at
+ * most, never the whole spool), and the bridge's capture status receipt.
+ */
+export function readWhatsAppLiveCaptureState(spoolDir: string): {
+  newestMessageTimestamp?: string;
+  status?: WhatsAppCaptureStatusReceipt;
+} {
+  const newestMessageTimestamp = newestSpoolRecord(
+    spoolDir,
+    listSpoolFiles(spoolDir),
+    (line) => parseSpoolLine(line)?.timestamp,
+  );
+  const status = readWhatsAppCaptureStatus(spoolDir);
+  return {
+    ...(newestMessageTimestamp === undefined ? {} : { newestMessageTimestamp }),
+    ...(status === undefined ? {} : { status }),
   };
 }
 
@@ -309,16 +400,45 @@ interface SpoolPageReadResult {
   position: SpoolPosition | undefined;
   /** True when every terminated line currently on disk has been consumed. */
   exhausted: boolean;
+  /** True when the page stopped because the listing's byte budget ran out. */
+  budgetReached?: boolean;
+}
+
+interface SpoolPassState {
+  bytesLeft: number;
+  maxRecordBytes: number;
+  findings: WhatsAppSpoolPassFindings;
+}
+
+/**
+ * Where reading `file` starts: the start position's byte offset when this
+ * listing knows it, else the offset its line count resolves to. A file holding
+ * fewer lines than its cursor was replaced, so it is read from its start.
+ */
+function resumeOffset(spoolDir: string, start: SpoolPosition, pass: SpoolPassState): { offset: number; line: number } {
+  if (start.offset !== undefined) return { offset: start.offset, line: start.line };
+  const offset = offsetAfterLines(join(spoolDir, start.file), start.line);
+  if (offset === undefined) {
+    pass.findings.cursorsRecovered += 1;
+    return { offset: 0, line: 0 };
+  }
+  return { offset, line: start.line };
 }
 
 function readSpoolPage(
   spoolDir: string,
   start: SpoolPosition | undefined,
   limit: number,
+  pass: SpoolPassState,
 ): SpoolPageReadResult {
   const files = listSpoolFiles(spoolDir);
   if (files.length === 0) {
     return { messages: [], reactions: [], position: start, exhausted: true };
+  }
+  // The cursor's file is gone: what it held past the cursor cannot be read,
+  // and listing goes on at the next file by name. Counted once per listing.
+  if (start !== undefined && start.offset === undefined && !files.includes(start.file)) {
+    pass.findings.cursorFilesMissing += 1;
   }
 
   const messages: SpoolMessage[] = [];
@@ -335,24 +455,41 @@ function readSpoolPage(
   const pageMessages = new Set<string>();
   const projectedItems = (): number => messages.length + reEmitTargets.size;
   let position = start;
+  let readAny = false;
   for (const file of files) {
     if (start !== undefined && file < start.file) continue;
-    const lines = terminatedLines(join(spoolDir, file));
-    // A cursor pointing past the current end of its file means everything
-    // present is consumed; later appends to that file resume from here.
-    let lineIndex = start !== undefined && file === start.file ? Math.min(start.line, lines.length) : 0;
-    while (lineIndex < lines.length) {
+    const resumed = start !== undefined && file === start.file
+      ? resumeOffset(spoolDir, start, pass)
+      : { offset: 0, line: 0 };
+    let lineIndex = resumed.line;
+    let offset = resumed.offset;
+    position = { file, line: lineIndex, offset };
+    for (const record of spoolRecords(join(spoolDir, file), offset, pass.maxRecordBytes)) {
       if (projectedItems() >= limit) {
         return { messages, reactions, position, exhausted: false };
       }
-      const line = lines[lineIndex];
+      // At least one record per page, so a pass always moves.
+      if (readAny && pass.bytesLeft <= 0) {
+        return { messages, reactions, position, exhausted: false, budgetReached: true };
+      }
+      readAny = true;
+      pass.bytesLeft -= record.endOffset - offset;
+      offset = record.endOffset;
       lineIndex += 1;
-      position = { file, line: lineIndex };
-      if (line === undefined || line.trim() === '') continue;
+      position = { file, line: lineIndex, offset };
+      if (record.kind === 'oversized') {
+        pass.findings.oversizedRecords += 1;
+        continue;
+      }
+      const line = record.text;
+      if (line.trim() === '') continue;
       const message = parseSpoolLine(line);
-      // Malformed line: skipped, cursor still advances (documented gap; see
-      // readWhatsAppLiveSpoolStatus for the surfaced count).
-      if (message === undefined) continue;
+      // Malformed line: skipped, cursor still advances (documented gap,
+      // counted in the listing's findings).
+      if (message === undefined) {
+        pass.findings.malformedLines += 1;
+        continue;
+      }
       if (isWhatsAppStatusBroadcast(message.chatJid)) continue;
       if (isWhatsAppReactionLine(message)) {
         reactions.push(message);
@@ -367,9 +504,6 @@ function readSpoolPage(
       pageMessages.add(chatScopedKey(message.chatJid, message.id));
       reEmitTargets.delete(chatScopedKey(message.chatJid, message.id));
     }
-    // Fully scanned this file; record the resume point even if it had no
-    // consumable lines.
-    position = { file, line: lines.length };
   }
   return { messages, reactions, position, exhausted: true };
 }
@@ -389,6 +523,7 @@ function pageItems(
   account: string,
   fetchedAt: string,
   readSnapshot: () => WhatsAppReactionSnapshot,
+  findings: WhatsAppSpoolPassFindings,
 ): RawItem[] {
   const targetIds = distinctReactionTargetIds(page.reactions);
   if (targetIds.length === 0) {
@@ -401,10 +536,14 @@ function pageItems(
     const target = snapshot.targets.get(targetId);
     // Unresolvable target: no message with that id is in the spool, or the
     // only one that is belongs to another chat. Skipped and counted as a gap
-    // (readWhatsAppLiveSpoolStatus) — never emitted content-less.
-    if (target === undefined) continue;
-    const reactions = boundedReactionsForTarget(snapshot.index.entriesFor(targetId), target.chatJid);
-    if (reactions === undefined) continue;
+    // in the listing's findings — never emitted content-less.
+    const reactions = target === undefined
+      ? undefined
+      : boundedReactionsForTarget(snapshot.index.entriesFor(targetId), target.chatJid);
+    if (target === undefined || reactions === undefined) {
+      findings.unresolvedReactionTargets += 1;
+      continue;
+    }
     aggregates.set(targetId, { message: target, reactions });
   }
 
@@ -439,7 +578,7 @@ function resolveReactionTargets(spoolDir: string, targetIds: ReadonlySet<string>
   const targets = new Map<string, SpoolMessage>();
   if (targetIds.size === 0) return targets;
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of terminatedLines(join(spoolDir, file))) {
+    for (const line of spoolFileLines(join(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message === undefined) continue;
       if (!targetIds.has(message.id)) continue;
@@ -480,7 +619,7 @@ function createReactionSnapshotReader(spoolDir: string): () => WhatsAppReactionS
 function buildReactionSnapshot(spoolDir: string): WhatsAppReactionSnapshot {
   const builder = createWhatsAppReactionIndexBuilder();
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of terminatedLines(join(spoolDir, file))) {
+    for (const line of spoolFileLines(join(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message === undefined) continue;
       if (isWhatsAppStatusBroadcast(message.chatJid)) continue;
@@ -527,25 +666,6 @@ function listSpoolFiles(spoolDir: string): string[] {
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl'))
     .map((entry) => entry.name)
     .sort();
-}
-
-/**
- * Lines terminated by '\n'. A trailing fragment without a newline is a write
- * in progress (the daemon appends line+'\n' atomically, but reads can race)
- * and is left for a later page.
- */
-function terminatedLines(filePath: string): string[] {
-  let text: string;
-  try {
-    text = readFileSync(filePath, 'utf8');
-  } catch {
-    // The file vanished between readdir and read (rotation/cleanup): treat as
-    // empty; the cursor logic resumes at the next file.
-    return [];
-  }
-  const parts = text.split('\n');
-  parts.pop(); // either '' (trailing newline) or an unterminated fragment
-  return parts.map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line));
 }
 
 function parseSpoolLine(line: string): SpoolMessage | undefined {
@@ -656,7 +776,9 @@ function rawItemFromSpoolMessage(
     localItemId: `${account}:${normalizeWhatsAppJid(message.chatJid)}:${message.id}`,
     sourceVersion: message.timestamp,
   };
-  const isMedia = message.mediaType !== undefined;
+  // A captioned photo, video or document is read by its caption: that is
+  // what was said. The media itself stays described by its metadata.
+  const isMedia = message.mediaType !== undefined && message.text === '';
   const redacted = message.secretRedacted === true;
   const text = spoolMessageText(message);
   const hasPreviewEnrichment = text !== resolveMentionText(message.text, message.mentions);
@@ -761,7 +883,9 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
         providerConversationId: message.chatJid,
       };
       const alreadyRedacted = message.secretRedacted === true;
-      const text = alreadyRedacted || message.mediaType !== undefined ? undefined : spoolMessageText(message);
+      const text = alreadyRedacted || (message.mediaType !== undefined && message.text === '')
+        ? undefined
+        : spoolMessageText(message);
       const redaction = options.judge(identity, text);
       if (!redaction) return undefined;
       // Deleted before the line loses its path; a failure here fails the
@@ -804,7 +928,7 @@ export function redactWhatsAppLiveSpoolSecrets(options: {
 function mediaPathOwners(spoolDir: string, relocate: (path: string) => string): Map<string, Set<string>> {
   const owners = new Map<string, Set<string>>();
   for (const file of listSpoolFiles(spoolDir)) {
-    for (const line of terminatedLines(join(spoolDir, file))) {
+    for (const line of spoolFileLines(join(spoolDir, file))) {
       const message = parseSpoolLine(line);
       if (message?.mediaPath === undefined) continue;
       const path = existingRealPath(relocate(message.mediaPath));

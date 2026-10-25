@@ -35976,10 +35976,22 @@ var init_reaction_index = __esm(() => {
   init_reactions();
 });
 
+// src/workers/whatsapp/spool-reader.ts
+var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
+var init_spool_reader = __esm(() => {
+  WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
+  CHUNK_BYTES = 256 * 1024;
+  NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
+  CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
+});
+
 // src/workers/whatsapp/live-connector.ts
+var DEFAULT_PASS_BYTE_BUDGET;
 var init_live_connector = __esm(() => {
   init_capture_spool_secrets();
   init_reaction_index();
+  init_spool_reader();
+  DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
 });
 
 // src/workers/whatsapp/store-sync.ts

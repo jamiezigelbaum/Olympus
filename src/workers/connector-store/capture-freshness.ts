@@ -27,6 +27,7 @@ export const CAPTURE_COUNT_KEYS = {
   unavailable: 'capture_unavailable',
   thresholdSeconds: 'capture_stale_threshold_seconds',
   ageSeconds: 'capture_age_seconds',
+  quiet: 'capture_quiet',
 } as const;
 
 // A type alias, not an interface: scheduler counts are a Record<string, number>,
@@ -37,7 +38,18 @@ export type CaptureFreshnessCounts = {
   capture_unavailable: number;
   capture_stale_threshold_seconds: number;
   capture_age_seconds?: number;
+  /** Present only for a feed whose helper reports that it is running (see captureLiveness). */
+  capture_quiet?: number;
 };
+
+/**
+ * A verdict that also knows whether the helper is running: `quiet` is a feed
+ * whose helper says it is capturing while no message arrived within the
+ * threshold, which is an account with nothing to say, not a stalled capture.
+ */
+export interface CaptureLiveness extends CaptureFreshness {
+  quiet: boolean;
+}
 
 /**
  * The verdict for the newest captured message time. A missing or unreadable
@@ -61,14 +73,38 @@ export function captureFreshness(
   };
 }
 
+/**
+ * The verdict for a feed whose helper also writes a heartbeat (the last time
+ * it knew it was capturing). The feed's age is the age of the newer of its
+ * newest captured record and its heartbeat, so a quiet account whose helper
+ * is running reads fresh, and a helper that stopped reads stale one threshold
+ * after it stopped, whatever its last message said. Without a heartbeat this
+ * is exactly captureFreshness of the newest record.
+ */
+export function captureLiveness(
+  newestRecordAt: string | undefined,
+  heartbeatAt: string | undefined,
+  nowMs: number,
+  thresholdSeconds: number,
+): CaptureLiveness {
+  const record = captureFreshness(newestRecordAt, nowMs, thresholdSeconds);
+  const heartbeat = captureFreshness(heartbeatAt, nowMs, thresholdSeconds);
+  const newer = heartbeat.age_seconds !== undefined
+    && (record.age_seconds === undefined || heartbeat.age_seconds < record.age_seconds)
+    ? heartbeat
+    : record;
+  return { ...newer, quiet: heartbeat.status === 'fresh' && record.status !== 'fresh' };
+}
+
 /** The verdict as scheduler counts: non-negative whole numbers, no timestamp. */
-export function captureFreshnessCounts(capture: CaptureFreshness): CaptureFreshnessCounts {
+export function captureFreshnessCounts(capture: CaptureFreshness | CaptureLiveness): CaptureFreshnessCounts {
   return {
     capture_fresh: capture.status === 'fresh' ? 1 : 0,
     capture_stale: capture.status === 'stale' ? 1 : 0,
     capture_unavailable: capture.status === 'unavailable' ? 1 : 0,
     capture_stale_threshold_seconds: capture.threshold_seconds,
     ...(capture.age_seconds !== undefined ? { capture_age_seconds: capture.age_seconds } : {}),
+    ...('quiet' in capture ? { capture_quiet: capture.quiet ? 1 : 0 } : {}),
   };
 }
 

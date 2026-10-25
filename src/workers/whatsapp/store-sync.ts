@@ -29,16 +29,18 @@ import {
 } from '../connector-store/capture-spool-secrets.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
 import {
-  captureFreshness,
   captureFreshnessCounts,
+  captureLiveness,
   captureStaleThresholdSeconds,
-  type CaptureFreshness,
+  type CaptureLiveness,
 } from '../connector-store/capture-freshness.ts';
 import {
   WHATSAPP_LIVE_CONNECTOR_ID,
   createWhatsAppLiveSourceConnector,
-  readWhatsAppLiveSpoolStatus,
+  emptyWhatsAppSpoolPassFindings,
+  readWhatsAppLiveCaptureState,
   redactWhatsAppLiveSpoolSecrets,
+  type WhatsAppSpoolPassFindings,
 } from './live-connector.ts';
 
 export const WHATSAPP_PERSONAL_SOURCE_ID = 'whatsapp.personal.messages';
@@ -66,6 +68,12 @@ export const WHATSAPP_UNRESOLVED_REACTIONS_WARNING = 'whatsapp_unresolved_reacti
 export const WHATSAPP_CAPTURE_STALE_WARNING = 'whatsapp_capture_spool_stale';
 export const WHATSAPP_CAPTURE_UNAVAILABLE_WARNING = 'whatsapp_capture_freshness_unavailable';
 export const WHATSAPP_SPOOL_REDACTION_FAILED_WARNING = 'whatsapp_spool_secret_redaction_failed';
+/** A spool record over the per-record bound was skipped unread. */
+export const WHATSAPP_OVERSIZED_SPOOL_WARNING = 'whatsapp_oversized_spool_records';
+/** The resume point's file was replaced or has gone; see the counts. */
+export const WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING = 'whatsapp_spool_cursor_recovered';
+/** The bridge dropped messages from a full queue within the stale threshold. */
+export const WHATSAPP_CAPTURE_DROPPED_WARNING = 'whatsapp_capture_dropped_messages';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const WHATSAPP_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:whatsapp';
 
@@ -79,20 +87,34 @@ export interface WhatsAppConnectorStoreSyncReceipt {
     items_rejected: number;
     items_metadata_only: number;
     chunks_indexed: number;
+    /** Lines this pull skipped as unreadable. */
     malformed_spool_lines: number;
+    /** Records this pull skipped unread for being over the per-record bound. */
+    oversized_spool_records: number;
+    /** Reacted-to messages this pull could not attach reactions to. */
     unresolved_reaction_targets: number;
+    /** 1 when the resume point's file had been replaced and was read again from its start. */
+    spool_cursor_recovered: number;
+    /** 1 when the resume point's file had gone; what it held past the cursor could not be read. */
+    spool_cursor_file_missing: number;
+    /** 1 when this pull stopped at its byte budget; the next pull goes on. */
+    spool_pass_budget_reached: number;
+    /** Messages the bridge dropped from a full queue, over the life of its state folder. */
+    capture_dropped_messages: number;
     capture_fresh: number;
     capture_stale: number;
     capture_unavailable: number;
     capture_stale_threshold_seconds: number;
     capture_age_seconds?: number;
+    /** 1 when the bridge reports capture running and no message arrived within the threshold. */
+    capture_quiet?: number;
     /**
      * Spool lines whose message was judged Secrets and that this pull
      * rewrote without their text (blanked ones included).
      */
     spool_records_redacted: number;
   } & TieredLaneReceiptCounts;
-  capture: CaptureFreshness;
+  capture: CaptureLiveness;
   warnings?: string[];
   policy: {
     counts_only: true;
@@ -262,13 +284,14 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
   const spoolDir = options.spoolDir?.trim() || defaultWhatsAppSpoolDir(env);
   const account = options.account?.trim() || WHATSAPP_PERSONAL_ACCOUNT_SCOPE;
   const mediaDir = options.mediaDir?.trim() || defaultWhatsAppMediaDir(env);
-  const connector = {
-    ...createWhatsAppLiveSourceConnector({ spoolDir, account }),
+  // One connector per pull, so each receipt counts what that pull read.
+  const connectorFor = (findings: WhatsAppSpoolPassFindings) => ({
+    ...createWhatsAppLiveSourceConnector({ spoolDir, account, findings }),
     // The private drain retains WHATSAPP_LIVE_CONNECTOR_ID until it is retired
     // after observed qualification. A distinct product cursor prevents either
     // writer from advancing or regressing the other's traversal meanwhile.
     id: WHATSAPP_PRODUCT_CONNECTOR_ID,
-  };
+  });
   const staleThresholdSeconds = whatsappCaptureStaleThresholdSeconds(
     options.spoolStaleThresholdSeconds,
     env,
@@ -299,6 +322,8 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
         // observation must preserve the transcript that factory wrote.
         deferMetadataOnlyContent: true,
       };
+      const findings = emptyWhatsAppSpoolPassFindings();
+      const connector = connectorFor(findings);
       let run: ConnectorStoreSyncSummary;
       let tiered: TieredLaneReceiptCounts = {};
       let redacted: CaptureSpoolRedactionResult | undefined;
@@ -334,7 +359,8 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
       }
       return whatsappSyncReceipt(
         run,
-        readWhatsAppLiveSpoolStatus(spoolDir),
+        findings,
+        readWhatsAppLiveCaptureState(spoolDir),
         now().getTime(),
         staleThresholdSeconds,
         tiered,
@@ -381,17 +407,30 @@ export function clearWhatsAppSpoolSecrets(options: {
 
 function whatsappSyncReceipt(
   run: ConnectorStoreSyncSummary,
-  spool: ReturnType<typeof readWhatsAppLiveSpoolStatus>,
+  findings: WhatsAppSpoolPassFindings,
+  state: ReturnType<typeof readWhatsAppLiveCaptureState>,
   nowMs: number,
   staleThresholdSeconds: number,
   tiered: TieredLaneReceiptCounts = {},
   redacted?: CaptureSpoolRedactionResult,
   redactionFailed = false,
 ): WhatsAppConnectorStoreSyncReceipt {
-  const capture = captureFreshness(spool.newestMessageTimestamp, nowMs, staleThresholdSeconds);
+  // The bridge's heartbeat tells a quiet account from a stopped capture; a
+  // bridge that writes none is judged by its newest message, as before.
+  const capture = captureLiveness(
+    state.newestMessageTimestamp,
+    state.status?.connectedThrough,
+    nowMs,
+    staleThresholdSeconds,
+  );
+  const lastDroppedMs = Date.parse(state.status?.lastDroppedAt ?? '');
+  const recentDrop = Number.isFinite(lastDroppedMs) && nowMs - lastDroppedMs <= staleThresholdSeconds * 1_000;
   const warnings = [
-    ...(spool.malformedLines > 0 ? [WHATSAPP_MALFORMED_SPOOL_WARNING] : []),
-    ...(spool.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : []),
+    ...(findings.malformedLines > 0 ? [WHATSAPP_MALFORMED_SPOOL_WARNING] : []),
+    ...(findings.oversizedRecords > 0 ? [WHATSAPP_OVERSIZED_SPOOL_WARNING] : []),
+    ...(findings.unresolvedReactionTargets > 0 ? [WHATSAPP_UNRESOLVED_REACTIONS_WARNING] : []),
+    ...(findings.cursorsRecovered > 0 || findings.cursorFilesMissing > 0 ? [WHATSAPP_SPOOL_CURSOR_RECOVERED_WARNING] : []),
+    ...(recentDrop && (state.status?.droppedMessages ?? 0) > 0 ? [WHATSAPP_CAPTURE_DROPPED_WARNING] : []),
     ...(capture.status === 'stale' ? [WHATSAPP_CAPTURE_STALE_WARNING] : []),
     ...(capture.status === 'unavailable' ? [WHATSAPP_CAPTURE_UNAVAILABLE_WARNING] : []),
     ...(redactionFailed ? [WHATSAPP_SPOOL_REDACTION_FAILED_WARNING] : []),
@@ -407,8 +446,13 @@ function whatsappSyncReceipt(
       items_rejected: run.itemsRejected,
       items_metadata_only: run.itemsMetadataOnly,
       chunks_indexed: run.chunksIndexed,
-      malformed_spool_lines: spool.malformedLines,
-      unresolved_reaction_targets: spool.unresolvedReactionTargets,
+      malformed_spool_lines: findings.malformedLines,
+      oversized_spool_records: findings.oversizedRecords,
+      unresolved_reaction_targets: findings.unresolvedReactionTargets,
+      spool_cursor_recovered: findings.cursorsRecovered > 0 ? 1 : 0,
+      spool_cursor_file_missing: findings.cursorFilesMissing > 0 ? 1 : 0,
+      spool_pass_budget_reached: findings.passBudgetReached > 0 ? 1 : 0,
+      capture_dropped_messages: state.status?.droppedMessages ?? 0,
       ...captureFreshnessCounts(capture),
       spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
       ...tiered,

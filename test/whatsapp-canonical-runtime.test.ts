@@ -130,6 +130,7 @@ describe('WhatsApp canonical product runtime', () => {
         status: 'stale',
         threshold_seconds: 60,
         age_seconds: 7_200,
+        quiet: false,
       });
       expect(staleReceipt.warnings).toContain(WHATSAPP_CAPTURE_STALE_WARNING);
       expect(JSON.stringify(staleReceipt)).not.toContain('2026-08-26T10:00:00Z');
