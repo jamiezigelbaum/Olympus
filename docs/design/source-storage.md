@@ -536,9 +536,14 @@ order:
    because a plain rename would replace a file another process put at the
    destination. Not a Needs you row. Before each rename the destination's
    folders are checked for links again.
-   Every folder the move makes is fsynced with its parent as it is made, and after
-   the last rename the folders each file left (the unlinks) and went to are fsynced
-   again, before the registry records anything that depends on the renames.
+   Before any file moves, every folder from the data folder down to each
+   destination folder is fsynced, once per account, the ones that were there
+   already included: a run that died after making a folder and before syncing its
+   parent left an entry that is not on disk, and a folder being there says nothing
+   about that. Going back does the same for the folders the files return to,
+   before the first file goes. After the last rename the folders each file left
+   (the unlinks) and went to are fsynced again, before the registry records
+   anything that depends on the renames.
 5. **Verify.** Each destination has the planned `(dev, ino, size)`, then each
    database that opened before opens and its schema reads (read-only; a database
    with no `-wal` beside it, which macOS's SQLite will not open read-only, is
