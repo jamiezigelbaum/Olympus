@@ -80218,7 +80218,9 @@ function emptyAccountTrash(env, options) {
     } catch {}
   };
   if (options.background) {
-    Promise.allSettled(names.map((name) => rm3(join67(trash, name), { recursive: true, force: true }))).then(removeEmptyTrash);
+    const emptied = Promise.allSettled(names.map((name) => rm3(join67(trash, name), { recursive: true, force: true }))).then(removeEmptyTrash);
+    backgroundTrashRemovals.add(emptied);
+    emptied.finally(() => backgroundTrashRemovals.delete(emptied));
     return;
   }
   for (const name of names)
@@ -81125,7 +81127,7 @@ function uniqueTargets(values) {
   }
   return [...byPath.values()];
 }
-var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store", ACCOUNT_FOLDER_UNEXPORTED, DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA", DELETE_CONFIRMATION_2 = "DELETE EVERYTHING";
+var CONNECTOR_STORE_SQLITE_STORE_ID = "connector-store", ACCOUNT_FOLDER_UNEXPORTED, DELETE_CONFIRMATION_1 = "DELETE OLYMPUS DATA", DELETE_CONFIRMATION_2 = "DELETE EVERYTHING", backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -81149,6 +81151,7 @@ var init_data_lifecycle = __esm(() => {
   init_media_cache();
   init_store_identity();
   ACCOUNT_FOLDER_UNEXPORTED = ["raw", "session"];
+  backgroundTrashRemovals = new Set;
 });
 
 // src/core/delphi.ts

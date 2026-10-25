@@ -20813,6 +20813,7 @@ var init_source_forget_registry = __esm(() => {
 });
 
 // src/data-lifecycle.ts
+var backgroundTrashRemovals;
 var init_data_lifecycle = __esm(() => {
   init_olympus_layout();
   init_source_placement();
@@ -20835,6 +20836,7 @@ var init_data_lifecycle = __esm(() => {
   init_worker_service();
   init_media_cache();
   init_store_identity();
+  backgroundTrashRemovals = new Set;
 });
 
 // src/workers/readwise/tier-set.ts

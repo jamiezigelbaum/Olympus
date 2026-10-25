@@ -20,7 +20,7 @@ import {
   recordAccountPlacement,
   SourceStorageUnavailableError,
 } from '../src/core/source-storage.ts';
-import { deleteMarkedAccounts, deleteOlympusData, exportOlympusData, lifecycleAccountFiles } from '../src/data-lifecycle.ts';
+import { accountTrashRemovalsSettled, deleteMarkedAccounts, deleteOlympusData, exportOlympusData, lifecycleAccountFiles } from '../src/data-lifecycle.ts';
 import { createReadwiseConnectorStore, defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
 import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
 import { defaultXBookmarksApiUsageDbPath, LocalXBookmarksApiUsageStore } from '../src/workers/x-bookmarks/live-control.ts';
@@ -72,7 +72,7 @@ function put(path: string, text = 'x'): string {
 }
 
 describe('the running worker marks, the boot removes', () => {
-  test('a folder account: marked and closed, then renamed away at boot, its entry dropped', () => {
+  test('a folder account: marked and closed, then renamed away at boot, its entry dropped', async () => {
     const { homeDir, env } = fixture();
     const stores = connectReadwise(env);
     const folder = accountFolder({ source_id: 'readwise.library', slot: '1' }, env);
@@ -102,7 +102,9 @@ describe('the running worker marks, the boot removes', () => {
     expect(existsSync(folder)).toBe(false);
     expect(existsSync(otherAccount)).toBe(true);
     expect(findRegistryAccount(readSourceRegistry(env), 'readwise.library', '1')).toBeUndefined();
-    // The rename went into the trash, which is emptied (here at once, at boot in the background).
+    // The rename went into the trash, which the boot empties in the background: once that has
+    // finished, nothing of the account is left there.
+    await accountTrashRemovalsSettled();
     const trash = accountTrashRoot(env);
     expect(existsSync(trash) ? readdirSync(trash).filter((name) => existsSync(join(trash, name, 'stores'))) : []).toEqual([]);
     // A second boot has nothing to do.

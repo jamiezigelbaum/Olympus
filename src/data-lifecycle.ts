@@ -781,6 +781,18 @@ function moveAccountFolderToTrash(folder: string, env: LayoutEnv, options: { bac
   emptyAccountTrash(env, options);
 }
 
+/** The background trash removals a boot started and that have not finished yet. */
+const backgroundTrashRemovals = new Set<Promise<void>>();
+
+/**
+ * Resolves once every background trash removal started so far has finished
+ * (removed, or left for the next boot). The boot never waits for it; a caller
+ * that must see the trash empty (a test, a shutdown) awaits it.
+ */
+export async function accountTrashRemovalsSettled(): Promise<void> {
+  while (backgroundTrashRemovals.size > 0) await Promise.allSettled([...backgroundTrashRemovals]);
+}
+
 /** Empties `<data>/.trash`: what a delete renamed there, and leftovers of one a crash stopped. */
 function emptyAccountTrash(env: LayoutEnv, options: { background: boolean }): void {
   let trash: string;
@@ -801,7 +813,9 @@ function emptyAccountTrash(env: LayoutEnv, options: { background: boolean }): vo
     }
   };
   if (options.background) {
-    void Promise.allSettled(names.map((name) => rm(join(trash, name), { recursive: true, force: true }))).then(removeEmptyTrash);
+    const emptied = Promise.allSettled(names.map((name) => rm(join(trash, name), { recursive: true, force: true }))).then(removeEmptyTrash);
+    backgroundTrashRemovals.add(emptied);
+    void emptied.finally(() => backgroundTrashRemovals.delete(emptied));
     return;
   }
   for (const name of names) rmSync(join(trash, name), { recursive: true, force: true });
