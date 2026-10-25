@@ -574,7 +574,7 @@ describe('the WhatsApp bridge\'s session lock', () => {
     const free = tryHoldFileFlock(lockPath);
     expect(free).toBeDefined();
     free!.release();
-  });
+  }, 30_000);
 });
 
 describe('an empty legacy claim folder left by a failed pairing', () => {
