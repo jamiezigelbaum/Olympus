@@ -512,6 +512,15 @@ describe('exploring the Sources section', () => {
     expect(kindOf('x', 'Unpair Telegram')).toBe('unpair');
   });
 
+  test('an engine restarted before the other pages is reported: a warning when it came back, a failure when it did not', async () => {
+    const driver = new PanelDriver();
+    const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), ...quick() });
+    expect(exploreChecks(result).some((check) => check.id === 'explore.engine-restart')).toBe(false);
+    const back = exploreChecks({ ...result, engineRestart: { ok: true, ms: 41_000, detail: 'the engine was not ready (models included) within 30 s' } }).find((check) => check.id === 'explore.engine-restart');
+    expect(back).toMatchObject({ status: 'warn', detail: 'the engine had stopped answering after the Sources crawl (the engine was not ready (models included) within 30 s); it was restarted in 41 s so the other pages could be crawled' });
+    expect(exploreChecks({ ...result, engineRestart: { ok: false, ms: 300_000, detail: 'not ready' } }).find((check) => check.id === 'explore.engine-restart')?.status).toBe('fail');
+  });
+
   test('the press bound stops the exploration and says so', async () => {
     const driver = new PanelDriver();
     const result = await explore({ driver, seeds: [populated(driver)], inventory: inventory(), maxPresses: 2, ...quick() });
@@ -532,6 +541,22 @@ describe('what the page-side script reads', () => {
     evalIn(window, PROBE_SOURCE);
     const controls = evalIn(window, '__rc.controls()') as Array<{ key: string; reason: string }>;
     expect(controls.map((control) => [control.key, control.reason])).toEqual([['a', 'Not possible here'], ['b', 'Saving'], ['c', '']]);
+  });
+
+  test('the reasons on the lines right after a control\'s row are its reasons; a section is named by its heading without the heading\'s tag', () => {
+    const window = new Window({ url: 'http://127.0.0.1:8010/dashboard' });
+    (window.Element.prototype as unknown as { getBoundingClientRect(): unknown }).getBoundingClientRect = () => ({ left: 1, top: 1, width: 10, height: 10, right: 11, bottom: 11 });
+    window.document.body.innerHTML = '<section class="section"><h2>Always private <span class="tag">Only here</span></h2>'
+      + '<div class="actions"><button data-key="add:folder" disabled>Add a folder</button><button data-key="add:sender">Add a sender</button></div>'
+      + '<p class="reason">Connect a folder source first.</p><p class="reason">Connect Gmail first.</p>'
+      + '<div class="actions"><button data-key="save" disabled>Save</button></div></section>';
+    evalIn(window, PROBE_SOURCE);
+    const controls = evalIn(window, '__rc.controls()') as Array<{ key: string; reason: string; section: string }>;
+    expect(controls.map((control) => [control.key, control.reason, control.section])).toEqual([
+      ['add:folder', 'Connect a folder source first. Connect Gmail first.', 'Always private'],
+      ['add:sender', 'Connect a folder source first. Connect Gmail first.', 'Always private'],
+      ['save', '', 'Always private'],
+    ]);
   });
 });
 
