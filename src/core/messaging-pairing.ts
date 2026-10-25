@@ -1,7 +1,7 @@
 import { ensurePrivateRootDirectorySync, ensurePrivateDirectoryTreeSync } from './atomic-file.ts';
 import { telegramPythonExecutable, TELEGRAM_DEPENDENCY_HINT } from './messaging-runtime.ts';
 import { Database } from 'bun:sqlite';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { spawn as spawnChild } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
+import { FileLeaseBusyError, withFileLease } from './file-lease.ts';
 import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
 import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedLogins, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
 import {
@@ -169,156 +170,172 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     mkdirSync(options.source === 'telegram' ? dirname(sessionPath) : sessionPath, { recursive: true, mode: 0o700 });
   }
 
-  // A Telegram history that names its account (docs/design/source-storage.md,
-  // "One account, live and imported") takes a login from that account only. The
-  // pairing then signs in on a copy of the account's login made for it alone,
-  // which takes the login's name only once it proves the account: another
-  // account's login, or a half-made one, is never where capture reads it, and
-  // the login that was there stays as it was until then.
-  const historyAccount = options.source === 'telegram' ? telegramHistoryAccount(registryEnv) : undefined;
-  const sessionExisted = options.source === 'telegram' && existsSync(`${sessionPath}.session`);
-  const aside = historyAccount !== undefined ? prepareLoginAside(sessionPath) : undefined;
-  const pairingPath = aside?.base ?? sessionPath;
+  // One Telegram pairing at a time on a login: two at once would sign in on
+  // one login, or each put its own in its place (PR #530 review). The kernel
+  // drops the lock the moment its holder dies.
+  const pairing = async (): Promise<MessagingPairingResult> => {
+    // A Telegram history that names its account (docs/design/source-storage.md,
+    // "One account, live and imported") takes a login from that account only. The
+    // pairing then signs in on a copy of the account's login made for it alone,
+    // which takes the login's name only once it proves the account: another
+    // account's login, or a half-made one, is never where capture reads it, and
+    // the login that was there stays as it was until then.
+    const historyAccount = options.source === 'telegram' ? telegramHistoryAccount(registryEnv) : undefined;
+    const sessionExisted = options.source === 'telegram' && existsSync(`${sessionPath}.session`);
+    // Before any login is copied: a helper that is not there stops the pairing with nothing made.
+    const helper = await resolveHelper(options, packageRoot);
+    const aside = historyAccount !== undefined ? prepareLoginAside(sessionPath) : undefined;
+    const pairingPath = aside?.base ?? sessionPath;
+    const stdoutEvents: Record<string, unknown>[] = [];
+    let qrPngPath: string | undefined;
+    // The helper is handed the path whichever the layout: it is the one that writes the session.
+    const commandEnv: Record<string, string | undefined> = {
+      ...env,
+      ...(options.source === 'telegram'
+        ? { OLYMPUS_TELEGRAM_SESSION_PATH: pairingPath }
+        : {
+          OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
+          OLYMPUS_WHATSAPP_QR_STDOUT: 'false',
+          OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === 'artifact' ? 'false' : 'true',
+        }),
+    };
+    const command = options.source === 'telegram'
+      ? [helper, options.telegramHelperPath ?? join(packageRoot, 'scripts', 'telegram-pair.py')]
+      : [helper, '--pair-only'];
 
-  const helper = await resolveHelper(options, packageRoot);
-  const stdoutEvents: Record<string, unknown>[] = [];
-  let qrPngPath: string | undefined;
-  // The helper is handed the path whichever the layout: it is the one that writes the session.
-  const commandEnv: Record<string, string | undefined> = {
-    ...env,
-    ...(options.source === 'telegram'
-      ? { OLYMPUS_TELEGRAM_SESSION_PATH: pairingPath }
-      : {
-        OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
-        OLYMPUS_WHATSAPP_QR_STDOUT: 'false',
-        OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === 'artifact' ? 'false' : 'true',
-      }),
-  };
-  const command = options.source === 'telegram'
-    ? [helper, options.telegramHelperPath ?? join(packageRoot, 'scripts', 'telegram-pair.py')]
-    : [helper, '--pair-only'];
-
-  let result: PairingCommandResult;
-  let receipt: PairingReceipt;
-  try {
-  result = await runner({
-    executable: command[0]!,
-    args: command.slice(1),
-    env: commandEnv,
-    ...(options.signal ? { signal: options.signal } : {}),
-    onStdoutLine: async (line) => {
+    let result: PairingCommandResult;
+    let receipt: PairingReceipt;
+    try {
+    result = await runner({
+      executable: command[0]!,
+      args: command.slice(1),
+      env: commandEnv,
+      ...(options.signal ? { signal: options.signal } : {}),
+      onStdoutLine: async (line) => {
+        const event = safeJsonObject(line);
+        if (!event) return;
+        stdoutEvents.push(event);
+        if (options.source === 'whatsapp' && event.event === 'qr' && typeof event.qr_png_path === 'string') {
+          qrPngPath = event.qr_png_path;
+          await options.onWhatsAppQr?.(qrPngPath);
+        }
+      },
+    });
+    // Injected runners may return completed output without invoking the streaming
+    // callback. Consume those lines too, deduplicating by object serialization.
+    for (const line of result.stdoutLines) {
       const event = safeJsonObject(line);
-      if (!event) return;
-      stdoutEvents.push(event);
+      if (!event) continue;
+      if (!stdoutEvents.some((candidate) => JSON.stringify(candidate) === JSON.stringify(event))) {
+        stdoutEvents.push(event);
+      }
       if (options.source === 'whatsapp' && event.event === 'qr' && typeof event.qr_png_path === 'string') {
         qrPngPath = event.qr_png_path;
-        await options.onWhatsAppQr?.(qrPngPath);
       }
-    },
-  });
-  // Injected runners may return completed output without invoking the streaming
-  // callback. Consume those lines too, deduplicating by object serialization.
-  for (const line of result.stdoutLines) {
-    const event = safeJsonObject(line);
-    if (!event) continue;
-    if (!stdoutEvents.some((candidate) => JSON.stringify(candidate) === JSON.stringify(event))) {
-      stdoutEvents.push(event);
     }
-    if (options.source === 'whatsapp' && event.event === 'qr' && typeof event.qr_png_path === 'string') {
-      qrPngPath = event.qr_png_path;
+    if (result.exitCode !== 0) {
+      throw pairingFailure(options.source, safeErrorCode(result.stderr));
     }
-  }
-  if (result.exitCode !== 0) {
-    throw pairingFailure(options.source, safeErrorCode(result.stderr));
-  }
 
-  receipt = parseReadyReceipt(stdoutEvents, options.source);
-  if (options.source === 'telegram' && (
-    typeof receipt.session_path !== 'string' || resolve(receipt.session_path) !== resolve(pairingPath)
-  )) {
-    throw new Error('Telegram pairing proved a different session path than the one Olympus requested.');
-  }
-  if (historyAccount !== undefined) assertTelegramHistoryAccount(proofForReceipt(options.source, receipt), registryEnv);
-  if (aside) keepLoginAside(aside, sessionPath);
-  } catch (error) {
-    // Whatever stopped it, the login made aside is no one's.
-    if (aside) removeTelegramLogin(aside.base);
-    throw error;
-  }
-  const chats = options.source === 'telegram' ? parseTelegramDialogs(receipt.dialogs) : [];
-  const accountProof = proofForReceipt(options.source, receipt);
-  // What a later refusal removes: a login this pairing made, never one that was there before it.
-  const madeSession = sessionExisted ? undefined : sessionPath;
-  const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
-    source: options.source,
-    accountProof,
-    chats,
-  });
-  if (!approval) {
-    return {
-      ok: true,
+    receipt = parseReadyReceipt(stdoutEvents, options.source);
+    if (options.source === 'telegram' && (
+      typeof receipt.session_path !== 'string' || resolve(receipt.session_path) !== resolve(pairingPath)
+    )) {
+      throw new Error('Telegram pairing proved a different session path than the one Olympus requested.');
+    }
+    if (historyAccount !== undefined) assertTelegramHistoryAccount(proofForReceipt(options.source, receipt), registryEnv);
+    if (aside) keepLoginAside(aside, sessionPath);
+    } catch (error) {
+      // Whatever stopped it, the login made aside is no one's.
+      if (aside) removeTelegramLogin(aside.base);
+      throw error;
+    }
+    const chats = options.source === 'telegram' ? parseTelegramDialogs(receipt.dialogs) : [];
+    const accountProof = proofForReceipt(options.source, receipt);
+    // What a later refusal removes: a login this pairing made, never one that was there before it.
+    const madeSession = sessionExisted ? undefined : sessionPath;
+    const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
-      status: 'scope_selection_required',
+      accountProof,
+      chats,
+    });
+    if (!approval) {
+      return {
+        ok: true,
+        source: options.source,
+        status: 'scope_selection_required',
+        sessionPath,
+        accountProof,
+        chats,
+        ...(qrPngPath ? { qrPngPath } : {}),
+        captureStarted: false,
+        registered: false,
+      };
+    }
+
+    if (options.source === 'telegram') {
+      // Decided under the entry's lease by whoever owns the data, so an account it
+      // was given since the read above decides. Not recorded (no worker answered)
+      // costs only the import that follows an owner's confirmation.
+      const recorded = historyAccount === accountProof
+        ? 'same'
+        : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => undefined);
+      if (recorded === 'different' || recorded === 'unproven') {
+        if (madeSession) removeTelegramLogin(madeSession);
+        throw telegramHistoryAccountError('different');
+      }
+    }
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
+    const rollbackCredentials = options.source === 'telegram'
+      ? await persistTelegramCredentials(secretStore, result.privatePayload)
+      : async () => {};
+    const register = options.registerSession ?? connectGuidedSession;
+    let connected: ConnectResult;
+    try {
+      connected = await register({
+        source: options.source,
+        sessionPath,
+        ...(options.accountRole ? { accountRole: options.accountRole } : {}),
+        ...(options.registryPath ? { registryPath: options.registryPath } : {}),
+        secretStore,
+        sessionReady: true,
+        ...(options.source === 'telegram' ? {
+          additionalTokenSecretRefs: [
+            `store:${TELEGRAM_API_ID_SECRET_KEY}`,
+            `store:${TELEGRAM_API_HASH_SECRET_KEY}`,
+          ],
+          provedAccount: accountProof,
+          historyEnv: registryEnv,
+        } : {}),
+      });
+    } catch (error) {
+      await rollbackCredentials();
+      throw error;
+    }
+    return {
+      ...connected,
+      status: 'connected',
       sessionPath,
+      sessionLayout: layout,
       accountProof,
       chats,
       ...(qrPngPath ? { qrPngPath } : {}),
       captureStarted: false,
-      registered: false,
+      registered: true,
+      producer,
     };
-  }
-
-  if (options.source === 'telegram') {
-    // Decided under the entry's lease by whoever owns the data, so an account it
-    // was given since the read above decides. Not recorded (no worker answered)
-    // costs only the import that follows an owner's confirmation.
-    const recorded = historyAccount === accountProof
-      ? 'same'
-      : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => undefined);
-    if (recorded === 'different' || recorded === 'unproven') {
-      if (madeSession) removeTelegramLogin(madeSession);
-      throw telegramHistoryAccountError('different');
-    }
-  }
-  const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
-  const rollbackCredentials = options.source === 'telegram'
-    ? await persistTelegramCredentials(secretStore, result.privatePayload)
-    : async () => {};
-  const register = options.registerSession ?? connectGuidedSession;
-  let connected: ConnectResult;
+  };
+  if (options.source !== 'telegram') return pairing();
+  const lock = `${sessionPath}.pairing`;
   try {
-    connected = await register({
-      source: options.source,
-      sessionPath,
-      ...(options.accountRole ? { accountRole: options.accountRole } : {}),
-      ...(options.registryPath ? { registryPath: options.registryPath } : {}),
-      secretStore,
-      sessionReady: true,
-      ...(options.source === 'telegram' ? {
-        additionalTokenSecretRefs: [
-          `store:${TELEGRAM_API_ID_SECRET_KEY}`,
-          `store:${TELEGRAM_API_HASH_SECRET_KEY}`,
-        ],
-        provedAccount: accountProof,
-        historyEnv: registryEnv,
-      } : {}),
-    });
+    // One try: a pairing waits on its owner at the terminal, for minutes.
+    return await withFileLease(lock, pairing, { acquireTimeoutMs: 1 });
   } catch (error) {
-    await rollbackCredentials();
+    if (error instanceof FileLeaseBusyError && error.targetPath === lock) {
+      throw new Error('Another Telegram pairing is running on this computer. Finish or cancel it, then re-run olympus connect telegram --pair in your private terminal.');
+    }
     throw error;
   }
-  return {
-    ...connected,
-    status: 'connected',
-    sessionPath,
-    sessionLayout: layout,
-    accountProof,
-    chats,
-    ...(qrPngPath ? { qrPngPath } : {}),
-    captureStarted: false,
-    registered: true,
-    producer,
-  };
 }
 
 async function resolveHelper(options: PairMessagingSourceOptions, packageRoot: string): Promise<string> {
@@ -569,18 +586,85 @@ function copyLogin(from: string, to: string): void {
   }
 }
 
-/** The login made aside proved the account: it becomes the account's login. */
+/**
+ * The login made aside proved the account: it becomes the account's login.
+ * With none there yet, by name, and never over one that appeared meanwhile.
+ * Over one there, by writing the aside's tables into it in one SQLite
+ * transaction, never by replacing the file: a capture reader holding it open
+ * keeps a consistent database, and its journal stays its own (PR #530 review).
+ */
 function keepLoginAside(aside: LoginAside, base: string): void {
-  if (existsSync(`${aside.base}.session-journal`)) {
+  const from = `${aside.base}.session`;
+  const to = `${base}.session`;
+  if (existsSync(`${from}-journal`)) {
     throw new Error('Telegram pairing did not finish writing its login. Re-run olympus connect telegram --pair in your private terminal.');
   }
-  // Another pairing put its login here since this one began: neither is chosen over the other.
-  if (loginIdentity(`${base}.session`) !== aside.admitted) {
-    throw new Error('Another Telegram pairing changed the login while this one ran, so this one was not kept. Re-run olympus connect telegram --pair in your private terminal.');
+  if (loginIdentity(to) !== aside.admitted) throw loginChangedMeanwhile();
+  if (aside.admitted === undefined) {
+    try {
+      linkSync(from, to);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw loginChangedMeanwhile();
+      throw error;
+    }
+    rmSync(from, { force: true });
+    return;
   }
-  // The journal of the login being replaced would be rolled into this one.
-  rmSync(`${base}.session-journal`, { force: true });
-  renameSync(`${aside.base}.session`, `${base}.session`);
+  if (writeLoginInto(from, to)) {
+    rmSync(from, { force: true });
+    return;
+  }
+  // What is there is no login (not a database with Telegram's session table), so nothing reads it.
+  rmSync(`${to}-journal`, { force: true });
+  renameSync(from, to);
+}
+
+function loginChangedMeanwhile(): Error {
+  return new Error('Another Telegram pairing changed the login while this one ran, so this one was not kept. Re-run olympus connect telegram --pair in your private terminal.');
+}
+
+/**
+ * Write the login at `from` into the one at `to`, every table in one
+ * transaction (tables `to` has that `from` lacks are emptied: they belong to
+ * the login replaced). False, writing nothing, when `to` is not a Telegram
+ * login: not a SQLite database, or one with no `sessions` table.
+ */
+function writeLoginInto(from: string, to: string): boolean {
+  const db = new Database(to);
+  try {
+    db.run('PRAGMA busy_timeout = 5000');
+    let tables: string[];
+    try {
+      tables = (db.query("SELECT name FROM main.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>)
+        .map((row) => row.name);
+    } catch (error) {
+      if ((error as { code?: string }).code === 'SQLITE_NOTADB') return false;
+      throw error;
+    }
+    if (!tables.includes('sessions')) return false;
+    db.run('ATTACH DATABASE ? AS pairing', [from]);
+    try {
+      const made = db.query("SELECT name, sql FROM pairing.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string; sql: string }>;
+      db.run('BEGIN IMMEDIATE');
+      try {
+        for (const name of tables) db.run(`DELETE FROM main."${name.replaceAll('"', '""')}"`);
+        for (const table of made) {
+          const name = table.name.replaceAll('"', '""');
+          if (!tables.includes(table.name)) db.run(table.sql);
+          db.run(`INSERT INTO main."${name}" SELECT * FROM pairing."${name}"`);
+        }
+        db.run('COMMIT');
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
+      }
+    } finally {
+      db.run('DETACH DATABASE pairing');
+    }
+    return true;
+  } finally {
+    db.close();
+  }
 }
 
 function loginIdentity(path: string): string | undefined {

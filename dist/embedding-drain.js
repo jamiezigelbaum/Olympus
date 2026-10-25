@@ -16636,7 +16636,9 @@ function readSourceRegistry(env = process.env) {
   return readSourceRegistryAt(sourceRegistryPath(env));
 }
 function updateSourceRegistry(env, mutate) {
-  const path = sourceRegistryPath(env);
+  return updateSourceRegistryAt(sourceRegistryPath(env), mutate);
+}
+function updateSourceRegistryAt(path, mutate) {
   return withFileLeaseSync(path, (lease) => {
     const current2 = readSourceRegistryAt(path);
     const next = mutate(current2) ?? current2;
@@ -43369,6 +43371,7 @@ function spawnCapture(input) {
 init_atomic_file();
 init_secret_store();
 init_connect();
+init_file_lease();
 init_olympus_layout();
 init_pairing_session_paths();
 init_pairing_placement();

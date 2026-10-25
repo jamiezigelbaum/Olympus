@@ -192,7 +192,13 @@ export function updateSourceRegistry(
   env: LayoutEnv,
   mutate: (registry: SourceRegistry) => SourceRegistry | void,
 ): SourceRegistry {
-  const path = sourceRegistryPath(env);
+  return updateSourceRegistryAt(sourceRegistryPath(env), mutate);
+}
+
+function updateSourceRegistryAt(
+  path: string,
+  mutate: (registry: SourceRegistry) => SourceRegistry | void,
+): SourceRegistry {
   return withFileLeaseSync(path, (lease) => {
     const current = readSourceRegistryAt(path);
     const next = mutate(current) ?? current;
@@ -239,11 +245,21 @@ export function dropMovePlans(env: LayoutEnv, sourceIds: Iterable<string>): stri
  * history that is no longer there. Writes nothing when no entry names one.
  */
 export function forgetProviderAccounts(env: LayoutEnv, sourceIds: Iterable<string>): string[] {
-  const own = new Set(sourceIds);
-  const named = (account: SourceRegistryAccount): boolean => own.has(account.source_id) && account.provider_account_hash !== undefined;
-  if (!readSourceRegistry(env).accounts.some(named)) return [];
+  return forgetProviderAccountsAt(sourceRegistryPath(env), sourceIds);
+}
+
+/**
+ * forgetProviderAccounts at a registry found before anything was deleted (all
+ * of them when `sourceIds` is absent): a Delete that removed what the data
+ * folder is found by would otherwise look in another folder.
+ */
+export function forgetProviderAccountsAt(path: string, sourceIds?: Iterable<string>): string[] {
+  const own = sourceIds === undefined ? undefined : new Set(sourceIds);
+  const named = (account: SourceRegistryAccount): boolean =>
+    (own === undefined || own.has(account.source_id)) && account.provider_account_hash !== undefined;
+  if (!readSourceRegistryAt(path).accounts.some(named)) return [];
   const forgotten: string[] = [];
-  updateSourceRegistry(env, (registry) => {
+  updateSourceRegistryAt(path, (registry) => {
     for (const account of registry.accounts) {
       if (!named(account)) continue;
       delete account.provider_account_hash;

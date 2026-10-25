@@ -13,6 +13,7 @@ import {
 import type { SecretStore } from '../src/core/secret-store.ts';
 import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
 import { connectGuidedSession } from '../src/core/connect.ts';
+import { isFileLeaseSidecarName } from '../src/core/file-lease.ts';
 
 function memorySecretStore(): SecretStore & { values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -436,7 +437,7 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
     secrets: SecretStore,
     onRegister: (input: Record<string, unknown>) => void,
     pairedAt: string[],
-    during: (base: string) => void = () => undefined,
+    during: (base: string) => void | Promise<void> = () => undefined,
   ) => pairMessagingSource({
     source: 'telegram',
     packageRoot: root,
@@ -450,7 +451,7 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
       const base = request.env.OLYMPUS_TELEGRAM_SESSION_PATH!;
       pairedAt.push(base);
       mkdirSync(join(base, '..'), { recursive: true });
-      during(base);
+      await during(base);
       if (!existsSync(`${base}.session`)) writeFileSync(`${base}.session`, 'login');
       return telegramReady(base);
     },
@@ -461,7 +462,9 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
   });
   const isAside = (root: string, base: string | undefined) => base !== undefined
     && base.startsWith(`${folderSession(root)}.pairing-${process.pid}-`) && /-[0-9a-f]{8}$/.test(base);
-  const sessionFolder = (root: string) => readdirSync(join(folderSession(root), '..')).sort();
+  // The pairing lock (`telegram.pairing.lock.db`) stays beside the login: it holds nothing.
+  const sessionFolder = (root: string) => readdirSync(join(folderSession(root), '..'))
+    .filter((name) => !isFileLeaseSidecarName('telegram.pairing', name)).sort();
   const hashOf = (root: string) => readSourceRegistry(registryEnv(root)).accounts
     .find((account) => account.source_id === 'telegram.messages')?.provider_account_hash;
 
@@ -547,6 +550,56 @@ describe('a Telegram history keeps its account (storage step 4e)', () => {
     expect(result.status).toBe('connected');
     expect(seen).toEqual(['signed in']);
     expect(markerOf(`${folderSession(root)}.session`)).toBe('signed in');
+    expect(sessionFolder(root)).toEqual(['telegram.session']);
+  });
+
+  test('a login capture holds open is written in place, never replaced under it (PR #530 review)', async () => {
+    const root = packageFixture();
+    history(root, PROVED);
+    const login = `${folderSession(root)}.session`;
+    sqliteLogin(login, 'expired');
+    const inode = statSync(login).ino;
+    const capture = new Database(login);
+    try {
+      const result = await pair(root, memorySecretStore(), () => undefined, [], (base) => {
+        const db = new Database(`${base}.session`);
+        db.run('UPDATE sessions SET marker = ?', ['signed in afresh']);
+        db.close();
+      });
+      expect(result.status).toBe('connected');
+      expect(statSync(login).ino).toBe(inode);
+      expect((capture.query('SELECT marker FROM sessions').get() as { marker: string }).marker).toBe('signed in afresh');
+    } finally {
+      capture.close();
+    }
+    expect(sessionFolder(root)).toEqual(['telegram.session']);
+  });
+
+  test('a second Telegram pairing while one runs is refused, and the first finishes', async () => {
+    const root = packageFixture();
+    let secondRan = false;
+    const result = await pair(root, memorySecretStore(), () => undefined, [], async () => {
+      await expect(pair(root, memorySecretStore(), () => undefined, [], () => { secondRan = true; }))
+        .rejects.toThrow('Another Telegram pairing is running');
+    });
+    expect(result.status).toBe('connected');
+    expect(secondRan).toBe(false);
+  });
+
+  test('a pairing whose helper is missing copies no login', async () => {
+    const root = packageFixture();
+    history(root, PROVED);
+    sqliteLogin(`${folderSession(root)}.session`, 'signed in');
+    await expect(pairMessagingSource({
+      source: 'telegram',
+      packageRoot: root,
+      homeDir: join(root, 'home'),
+      env: {},
+      pythonExecutable: '/usr/bin/python3',
+      telegramHelperPath: join(root, 'missing-helper.py'),
+      secretStore: memorySecretStore(),
+      runCommand: async () => { throw new Error('the helper ran'); },
+    })).rejects.toThrow('helper is missing');
     expect(sessionFolder(root)).toEqual(['telegram.session']);
   });
 

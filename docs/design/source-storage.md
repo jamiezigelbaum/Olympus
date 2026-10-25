@@ -99,7 +99,8 @@ Inside the data root:
                                  (archive imports: stores/<family>.<tier>.sqlite)
     raw/                         spools, watch snapshots, capture cursors,
                                  X's reconcile state (raw/x-reconcile.sqlite)
-    session/                     Telegram's pairing session (telegram.session and its -journal);
+    session/                     Telegram's pairing session (telegram.session and its -journal,
+                                 and the pairing lock telegram.pairing.lock.db);
                                  WhatsApp's session.db lives with its bridge state in raw/whatsapp/
     settings/                    reserved; unused (see below)
   shared/                        shared files (dashboard, scheduler, jobs, ledgers)
@@ -266,7 +267,8 @@ Storage's part (step 4e):
 
   The first value stays. A later one may only add labels
   (`mergeProviderAccountIds`). Delete forgets it, as it forgets the binding;
-  Delete-all forgets every entry's.
+  Delete-all forgets every entry's, in the registry found before anything was
+  removed.
   WhatsApp has no account id, live or archived. An entry from before this step
   names none until its next sync or pairing.
 - **An import finds its account through the storage service**
@@ -304,10 +306,15 @@ Storage's part (step 4e):
     copy of its own (`<session>.pairing-<pid>-<tag>`, made from any login
     already there with SQLite `VACUUM INTO`), so another account's login is
     never where capture reads it and the login already there is left exactly
-    as it was. The copy becomes the login only once it proves the account, and
-    only if no other pairing changed the login meanwhile. A pairing that fails
+    as it was. The copy becomes the login only once it proves the account: by
+    name when there is none, and otherwise by writing its tables into the
+    login in one SQLite transaction, never by replacing the file, so a capture
+    reader holding it open keeps a consistent database. A pairing that fails
     removes its copy; a copy a killed pairing left is removed by the next
-    pairing and by Unpair.
+    pairing and by Unpair (beside the registered path and the derived one).
+  - One Telegram pairing runs at a time on a login: a kernel lock beside it
+    (`<session>.pairing.lock.db`, empty, dropped when its holder dies) refuses
+    a second with "Another Telegram pairing is running".
   - `connect telegram --session-path` cannot prove an account, so over a
     history that names one it is refused the same way.
 

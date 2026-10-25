@@ -54,7 +54,7 @@ import {
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
 import { runForgetSteps, type ForgetAccount } from './core/source-forget-registry.ts';
-import { dropMovePlans, forgetProviderAccounts, readSourceRegistry, sourceAccountMovePending, SourceRegistryError } from './core/source-registry.ts';
+import { dropMovePlans, forgetProviderAccountsAt, readSourceRegistry, sourceAccountMovePending, sourceRegistryPath, SourceRegistryError } from './core/source-registry.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
@@ -785,6 +785,8 @@ export function deleteOlympusData(options: {
   // config folder can change what the data root resolves to (on standalone
   // Linux its receipt lives there), and the lock held is the one found now.
   const ownerLockPath = dataOwnerLockPath(envForContext(options));
+  // Found before anything goes: a Delete-all can remove what the data folder is found by (PR #530 review).
+  const registryPath = sourceRegistryPath(envForContext(options));
   const removed: string[] = [];
   const missing: string[] = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
@@ -841,7 +843,7 @@ export function deleteOlympusData(options: {
     try {
       const deleted = [selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])];
       dropMovePlans(envForContext(options), deleted);
-      forgetProviderAccounts(envForContext(options), deleted);
+      forgetProviderAccountsAt(registryPath, deleted);
     } catch (error) {
       // A registry that cannot be read must not undo a Delete that has taken the files.
       if (!(error instanceof SourceRegistryError)) throw error;
@@ -851,8 +853,7 @@ export function deleteOlympusData(options: {
   // still there: none of its accounts' histories names an account any more.
   if (options.all === true && options.dryRun !== true) {
     try {
-      const registry = readSourceRegistry(envForContext(options));
-      forgetProviderAccounts(envForContext(options), registry.accounts.map((account) => account.source_id));
+      forgetProviderAccountsAt(registryPath);
     } catch (error) {
       if (!(error instanceof SourceRegistryError)) throw error;
     }

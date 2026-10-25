@@ -158,6 +158,29 @@ describe('bounded dashboard Unpair', () => {
     expect(readConnectedHandleRegistry(registryPath).handles).toHaveLength(1);
   });
 
+  test('a login a killed pairing left beside the derived path goes too, when the source was registered at another path (PR #530 review)', async () => {
+    const home = fixtureHome();
+    const sessionPath = touch(join(home, '.local/share/olympus/telegram-custom/telegram.custom.session'));
+    const stagedLogin = touch(join(home, '.local/share/olympus/telegram/telegram.personal.pairing-99999-abcdef01.session'));
+    const registryPath = join(home, 'handles.json');
+    writeConnectedHandleRegistry(registryOf(telegramHandle()), registryPath);
+    const secrets = memorySecretStore({ 'telegram.personal.session_path': sessionPath });
+    const worker = trackWorker(createEmailSourceWorker({ sourceDashboard: {
+      sovereigntyEngine: fixtureSovereigntyEngine(), registryPath, secretStore: secrets,
+      pairingSessionPathContext: { homeDir: home },
+    } }));
+
+    const response = await worker.fetch(jsonRequest('/dashboard/unpair', { source_id: 'telegram.messages', acknowledge: true }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      removed_session_paths: [sessionPath, stagedLogin].sort(),
+    });
+    expect(existsSync(sessionPath)).toBe(false);
+    expect(existsSync(stagedLogin)).toBe(false);
+  });
+
   test('removes the local Telegram pairing session, parks the lane, and leaves the capture spool and indexed data alone', async () => {
     const home = fixtureHome();
     const sessionPath = touch(join(home, '.local/share/olympus/telegram/telegram.personal.session'));

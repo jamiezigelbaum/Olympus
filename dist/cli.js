@@ -14262,7 +14262,9 @@ function readSourceRegistryUnderLease(env = process.env) {
   return withFileLeaseSync(path, () => readSourceRegistryAt(path));
 }
 function updateSourceRegistry(env, mutate) {
-  const path = sourceRegistryPath(env);
+  return updateSourceRegistryAt(sourceRegistryPath(env), mutate);
+}
+function updateSourceRegistryAt(path, mutate) {
   return withFileLeaseSync(path, (lease) => {
     const current2 = readSourceRegistryAt(path);
     const next = mutate(current2) ?? current2;
@@ -14289,13 +14291,13 @@ function dropMovePlans(env, sourceIds) {
   });
   return dropped;
 }
-function forgetProviderAccounts(env, sourceIds) {
-  const own = new Set(sourceIds);
-  const named = (account) => own.has(account.source_id) && account.provider_account_hash !== undefined;
-  if (!readSourceRegistry(env).accounts.some(named))
+function forgetProviderAccountsAt(path, sourceIds) {
+  const own = sourceIds === undefined ? undefined : new Set(sourceIds);
+  const named = (account) => (own === undefined || own.has(account.source_id)) && account.provider_account_hash !== undefined;
+  if (!readSourceRegistryAt(path).accounts.some(named))
     return [];
   const forgotten = [];
-  updateSourceRegistry(env, (registry) => {
+  updateSourceRegistryAt(path, (registry) => {
     for (const account of registry.accounts) {
       if (!named(account))
         continue;
@@ -37051,7 +37053,7 @@ var init_pairing_session_paths = __esm(() => {
 
 // src/core/messaging-pairing.ts
 import { Database as Database7 } from "bun:sqlite";
-import { chmodSync as chmodSync8, existsSync as existsSync29, lstatSync as lstatSync16, mkdirSync as mkdirSync18, readFileSync as readFileSync27, renameSync as renameSync5, rmSync as rmSync8, statSync as statSync16 } from "node:fs";
+import { chmodSync as chmodSync8, existsSync as existsSync29, linkSync, lstatSync as lstatSync16, mkdirSync as mkdirSync18, readFileSync as readFileSync27, renameSync as renameSync5, rmSync as rmSync8, statSync as statSync16 } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { createHash as createHash16, randomBytes as randomBytes6 } from "node:crypto";
 import { homedir as homedir18 } from "node:os";
@@ -37075,136 +37077,149 @@ async function pairMessagingSource(options) {
   if (layout === "folder") {
     mkdirSync18(options.source === "telegram" ? dirname29(sessionPath) : sessionPath, { recursive: true, mode: 448 });
   }
-  const historyAccount = options.source === "telegram" ? telegramHistoryAccount(registryEnv) : undefined;
-  const sessionExisted = options.source === "telegram" && existsSync29(`${sessionPath}.session`);
-  const aside = historyAccount !== undefined ? prepareLoginAside(sessionPath) : undefined;
-  const pairingPath = aside?.base ?? sessionPath;
-  const helper = await resolveHelper(options, packageRoot);
-  const stdoutEvents = [];
-  let qrPngPath;
-  const commandEnv = {
-    ...env,
-    ...options.source === "telegram" ? { OLYMPUS_TELEGRAM_SESSION_PATH: pairingPath } : {
-      OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
-      OLYMPUS_WHATSAPP_QR_STDOUT: "false",
-      OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === "artifact" ? "false" : "true"
-    }
-  };
-  const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join32(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
-  let result;
-  let receipt;
-  try {
-    result = await runner({
-      executable: command[0],
-      args: command.slice(1),
-      env: commandEnv,
-      ...options.signal ? { signal: options.signal } : {},
-      onStdoutLine: async (line) => {
+  const pairing = async () => {
+    const historyAccount = options.source === "telegram" ? telegramHistoryAccount(registryEnv) : undefined;
+    const sessionExisted = options.source === "telegram" && existsSync29(`${sessionPath}.session`);
+    const helper = await resolveHelper(options, packageRoot);
+    const aside = historyAccount !== undefined ? prepareLoginAside(sessionPath) : undefined;
+    const pairingPath = aside?.base ?? sessionPath;
+    const stdoutEvents = [];
+    let qrPngPath;
+    const commandEnv = {
+      ...env,
+      ...options.source === "telegram" ? { OLYMPUS_TELEGRAM_SESSION_PATH: pairingPath } : {
+        OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
+        OLYMPUS_WHATSAPP_QR_STDOUT: "false",
+        OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === "artifact" ? "false" : "true"
+      }
+    };
+    const command = options.source === "telegram" ? [helper, options.telegramHelperPath ?? join32(packageRoot, "scripts", "telegram-pair.py")] : [helper, "--pair-only"];
+    let result;
+    let receipt;
+    try {
+      result = await runner({
+        executable: command[0],
+        args: command.slice(1),
+        env: commandEnv,
+        ...options.signal ? { signal: options.signal } : {},
+        onStdoutLine: async (line) => {
+          const event = safeJsonObject(line);
+          if (!event)
+            return;
+          stdoutEvents.push(event);
+          if (options.source === "whatsapp" && event.event === "qr" && typeof event.qr_png_path === "string") {
+            qrPngPath = event.qr_png_path;
+            await options.onWhatsAppQr?.(qrPngPath);
+          }
+        }
+      });
+      for (const line of result.stdoutLines) {
         const event = safeJsonObject(line);
         if (!event)
-          return;
-        stdoutEvents.push(event);
+          continue;
+        if (!stdoutEvents.some((candidate) => JSON.stringify(candidate) === JSON.stringify(event))) {
+          stdoutEvents.push(event);
+        }
         if (options.source === "whatsapp" && event.event === "qr" && typeof event.qr_png_path === "string") {
           qrPngPath = event.qr_png_path;
-          await options.onWhatsAppQr?.(qrPngPath);
         }
       }
-    });
-    for (const line of result.stdoutLines) {
-      const event = safeJsonObject(line);
-      if (!event)
-        continue;
-      if (!stdoutEvents.some((candidate) => JSON.stringify(candidate) === JSON.stringify(event))) {
-        stdoutEvents.push(event);
+      if (result.exitCode !== 0) {
+        throw pairingFailure(options.source, safeErrorCode(result.stderr));
       }
-      if (options.source === "whatsapp" && event.event === "qr" && typeof event.qr_png_path === "string") {
-        qrPngPath = event.qr_png_path;
+      receipt = parseReadyReceipt(stdoutEvents, options.source);
+      if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve13(receipt.session_path) !== resolve13(pairingPath))) {
+        throw new Error("Telegram pairing proved a different session path than the one Olympus requested.");
       }
+      if (historyAccount !== undefined)
+        assertTelegramHistoryAccount(proofForReceipt(options.source, receipt), registryEnv);
+      if (aside)
+        keepLoginAside(aside, sessionPath);
+    } catch (error) {
+      if (aside)
+        removeTelegramLogin(aside.base);
+      throw error;
     }
-    if (result.exitCode !== 0) {
-      throw pairingFailure(options.source, safeErrorCode(result.stderr));
-    }
-    receipt = parseReadyReceipt(stdoutEvents, options.source);
-    if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve13(receipt.session_path) !== resolve13(pairingPath))) {
-      throw new Error("Telegram pairing proved a different session path than the one Olympus requested.");
-    }
-    if (historyAccount !== undefined)
-      assertTelegramHistoryAccount(proofForReceipt(options.source, receipt), registryEnv);
-    if (aside)
-      keepLoginAside(aside, sessionPath);
-  } catch (error) {
-    if (aside)
-      removeTelegramLogin(aside.base);
-    throw error;
-  }
-  const chats = options.source === "telegram" ? parseTelegramDialogs(receipt.dialogs) : [];
-  const accountProof = proofForReceipt(options.source, receipt);
-  const madeSession = sessionExisted ? undefined : sessionPath;
-  const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
-    source: options.source,
-    accountProof,
-    chats
-  });
-  if (!approval) {
-    return {
-      ok: true,
+    const chats = options.source === "telegram" ? parseTelegramDialogs(receipt.dialogs) : [];
+    const accountProof = proofForReceipt(options.source, receipt);
+    const madeSession = sessionExisted ? undefined : sessionPath;
+    const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
       source: options.source,
-      status: "scope_selection_required",
+      accountProof,
+      chats
+    });
+    if (!approval) {
+      return {
+        ok: true,
+        source: options.source,
+        status: "scope_selection_required",
+        sessionPath,
+        accountProof,
+        chats,
+        ...qrPngPath ? { qrPngPath } : {},
+        captureStarted: false,
+        registered: false
+      };
+    }
+    if (options.source === "telegram") {
+      const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
+        return;
+      });
+      if (recorded === "different" || recorded === "unproven") {
+        if (madeSession)
+          removeTelegramLogin(madeSession);
+        throw telegramHistoryAccountError("different");
+      }
+    }
+    const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
+    const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
+    const register = options.registerSession ?? connectGuidedSession;
+    let connected;
+    try {
+      connected = await register({
+        source: options.source,
+        sessionPath,
+        ...options.accountRole ? { accountRole: options.accountRole } : {},
+        ...options.registryPath ? { registryPath: options.registryPath } : {},
+        secretStore,
+        sessionReady: true,
+        ...options.source === "telegram" ? {
+          additionalTokenSecretRefs: [
+            `store:${TELEGRAM_API_ID_SECRET_KEY}`,
+            `store:${TELEGRAM_API_HASH_SECRET_KEY}`
+          ],
+          provedAccount: accountProof,
+          historyEnv: registryEnv
+        } : {}
+      });
+    } catch (error) {
+      await rollbackCredentials();
+      throw error;
+    }
+    return {
+      ...connected,
+      status: "connected",
       sessionPath,
+      sessionLayout: layout,
       accountProof,
       chats,
       ...qrPngPath ? { qrPngPath } : {},
       captureStarted: false,
-      registered: false
+      registered: true,
+      producer
     };
-  }
-  if (options.source === "telegram") {
-    const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
-      return;
-    });
-    if (recorded === "different" || recorded === "unproven") {
-      if (madeSession)
-        removeTelegramLogin(madeSession);
-      throw telegramHistoryAccountError("different");
-    }
-  }
-  const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
-  const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
-  const register = options.registerSession ?? connectGuidedSession;
-  let connected;
+  };
+  if (options.source !== "telegram")
+    return pairing();
+  const lock = `${sessionPath}.pairing`;
   try {
-    connected = await register({
-      source: options.source,
-      sessionPath,
-      ...options.accountRole ? { accountRole: options.accountRole } : {},
-      ...options.registryPath ? { registryPath: options.registryPath } : {},
-      secretStore,
-      sessionReady: true,
-      ...options.source === "telegram" ? {
-        additionalTokenSecretRefs: [
-          `store:${TELEGRAM_API_ID_SECRET_KEY}`,
-          `store:${TELEGRAM_API_HASH_SECRET_KEY}`
-        ],
-        provedAccount: accountProof,
-        historyEnv: registryEnv
-      } : {}
-    });
+    return await withFileLease(lock, pairing, { acquireTimeoutMs: 1 });
   } catch (error) {
-    await rollbackCredentials();
+    if (error instanceof FileLeaseBusyError && error.targetPath === lock) {
+      throw new Error("Another Telegram pairing is running on this computer. Finish or cancel it, then re-run olympus connect telegram --pair in your private terminal.");
+    }
     throw error;
   }
-  return {
-    ...connected,
-    status: "connected",
-    sessionPath,
-    sessionLayout: layout,
-    accountProof,
-    chats,
-    ...qrPngPath ? { qrPngPath } : {},
-    captureStarted: false,
-    registered: true,
-    producer
-  };
 }
 async function resolveHelper(options, packageRoot) {
   if (options.source === "telegram") {
@@ -37431,14 +37446,73 @@ function copyLogin(from, to) {
   }
 }
 function keepLoginAside(aside, base) {
-  if (existsSync29(`${aside.base}.session-journal`)) {
+  const from = `${aside.base}.session`;
+  const to = `${base}.session`;
+  if (existsSync29(`${from}-journal`)) {
     throw new Error("Telegram pairing did not finish writing its login. Re-run olympus connect telegram --pair in your private terminal.");
   }
-  if (loginIdentity(`${base}.session`) !== aside.admitted) {
-    throw new Error("Another Telegram pairing changed the login while this one ran, so this one was not kept. Re-run olympus connect telegram --pair in your private terminal.");
+  if (loginIdentity(to) !== aside.admitted)
+    throw loginChangedMeanwhile();
+  if (aside.admitted === undefined) {
+    try {
+      linkSync(from, to);
+    } catch (error) {
+      if (error.code === "EEXIST")
+        throw loginChangedMeanwhile();
+      throw error;
+    }
+    rmSync8(from, { force: true });
+    return;
   }
-  rmSync8(`${base}.session-journal`, { force: true });
-  renameSync5(`${aside.base}.session`, `${base}.session`);
+  if (writeLoginInto(from, to)) {
+    rmSync8(from, { force: true });
+    return;
+  }
+  rmSync8(`${to}-journal`, { force: true });
+  renameSync5(from, to);
+}
+function loginChangedMeanwhile() {
+  return new Error("Another Telegram pairing changed the login while this one ran, so this one was not kept. Re-run olympus connect telegram --pair in your private terminal.");
+}
+function writeLoginInto(from, to) {
+  const db = new Database7(to);
+  try {
+    db.run("PRAGMA busy_timeout = 5000");
+    let tables;
+    try {
+      tables = db.query("SELECT name FROM main.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all().map((row) => row.name);
+    } catch (error) {
+      if (error.code === "SQLITE_NOTADB")
+        return false;
+      throw error;
+    }
+    if (!tables.includes("sessions"))
+      return false;
+    db.run("ATTACH DATABASE ? AS pairing", [from]);
+    try {
+      const made = db.query("SELECT name, sql FROM pairing.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all();
+      db.run("BEGIN IMMEDIATE");
+      try {
+        for (const name of tables)
+          db.run(`DELETE FROM main."${name.replaceAll('"', '""')}"`);
+        for (const table of made) {
+          const name = table.name.replaceAll('"', '""');
+          if (!tables.includes(table.name))
+            db.run(table.sql);
+          db.run(`INSERT INTO main."${name}" SELECT * FROM pairing."${name}"`);
+        }
+        db.run("COMMIT");
+      } catch (error) {
+        db.run("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      db.run("DETACH DATABASE pairing");
+    }
+    return true;
+  } finally {
+    db.close();
+  }
 }
 function loginIdentity(path) {
   try {
@@ -37615,6 +37689,7 @@ var init_messaging_pairing = __esm(() => {
   init_messaging_runtime();
   init_secret_store();
   init_connect();
+  init_file_lease();
   init_olympus_layout();
   init_pairing_session_paths();
   init_pairing_placement();
@@ -78092,6 +78167,7 @@ function deleteOlympusData(options) {
   const selectedSource = options.all === true ? undefined : requireSource(options.sourceId);
   const targets = options.all === true ? allDeleteTargets(options) : sourceDeleteTargets(selectedSource, options);
   const ownerLockPath = dataOwnerLockPath(envForContext(options));
+  const registryPath = sourceRegistryPath(envForContext(options));
   const removed = [];
   const missing = [];
   const uniqueDeleteTargets = uniqueTargets(targets);
@@ -78124,7 +78200,7 @@ function deleteOlympusData(options) {
     try {
       const deleted = [selectedSource.sourceId, ...selectedSource.sourceAliases ?? []];
       dropMovePlans(envForContext(options), deleted);
-      forgetProviderAccounts(envForContext(options), deleted);
+      forgetProviderAccountsAt(registryPath, deleted);
     } catch (error) {
       if (!(error instanceof SourceRegistryError))
         throw error;
@@ -78132,8 +78208,7 @@ function deleteOlympusData(options) {
   }
   if (options.all === true && options.dryRun !== true) {
     try {
-      const registry = readSourceRegistry(envForContext(options));
-      forgetProviderAccounts(envForContext(options), registry.accounts.map((account) => account.source_id));
+      forgetProviderAccountsAt(registryPath);
     } catch (error) {
       if (!(error instanceof SourceRegistryError))
         throw error;
@@ -86826,7 +86901,7 @@ var init_engine_service = __esm(() => {
 
 // src/core/linux-engine-service.ts
 import { spawnSync as spawnSync12 } from "node:child_process";
-import { chmodSync as chmodSync21, closeSync as closeSync18, constants as constants9, copyFileSync, existsSync as existsSync57, fstatSync as fstatSync4, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync29, linkSync, mkdirSync as mkdirSync40, openSync as openSync17, readFileSync as readFileSync50, readlinkSync as readlinkSync4, readdirSync as readdirSync14, realpathSync as realpathSync17, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync3, statSync as statSync27, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
+import { chmodSync as chmodSync21, closeSync as closeSync18, constants as constants9, copyFileSync, existsSync as existsSync57, fstatSync as fstatSync4, fsyncSync as fsyncSync5, ftruncateSync, lstatSync as lstatSync29, linkSync as linkSync2, mkdirSync as mkdirSync40, openSync as openSync17, readFileSync as readFileSync50, readlinkSync as readlinkSync4, readdirSync as readdirSync14, realpathSync as realpathSync17, renameSync as renameSync13, rmSync as rmSync17, rmdirSync as rmdirSync3, statSync as statSync27, symlinkSync as symlinkSync2, writeFileSync as writeFileSync14 } from "node:fs";
 import { createRequire as createRequire6 } from "node:module";
 import { basename as basename12, dirname as dirname60, join as join69, relative as relative9, resolve as resolve17, sep as sep12 } from "node:path";
 import { userInfo } from "node:os";
@@ -87638,7 +87713,7 @@ function migrateLegacySettings(layout, transaction, options) {
     } finally {
       closeSync18(fd2);
     }
-    linkSync(temporary, target);
+    linkSync2(temporary, target);
     syncDirectorySync(dirname60(target));
     lifecycleCheckpoint(options, "legacy_setting_published");
     removeFileDurablySync(temporary);
@@ -146932,13 +147007,13 @@ async function dashboardPairingSession(sourceId, handleCredentialKeys, secretSto
   if (pairingSessionPathOverridden(source, resolved) && !samePathList(fromStored, derived)) {
     throw new EmailSourceWorkerError(409, "unpair_session_path_conflict", "The registered session path and the configured environment override name different pairing sessions, so Unpair cannot tell which one this computer actually uses. Reconcile OLYMPUS_TELEGRAM_SESSION_PATH or OLYMPUS_WHATSAPP_STATE_DIR with the path this source was connected with, then retry.");
   }
-  return { paths: withStagedLogins(source, fromStored), credentialKeys };
+  return { paths: withStagedLogins(source, fromStored, derived), credentialKeys };
 }
-function withStagedLogins(source, paths) {
+function withStagedLogins(source, paths, alsoBeside = []) {
   if (source !== "telegram")
     return paths;
-  const bases = paths.filter((path) => path.endsWith(".session")).map((path) => path.slice(0, -".session".length));
-  return [...new Set([...paths, ...bases.flatMap((base) => telegramStagedLogins(base).map((left) => left.path))])];
+  const bases = [...paths, ...alsoBeside].filter((path) => path.endsWith(".session")).map((path) => path.slice(0, -".session".length));
+  return [...new Set([...paths, ...[...new Set(bases)].flatMap((base) => telegramStagedLogins(base).map((left) => left.path))])];
 }
 async function dashboardSessionPathSecretKeys(source, handleCredentialKeys, secretStore) {
   const prefix = `${source === "telegram" ? "telegram" : "whatsapp"}.`;
@@ -163936,7 +164011,7 @@ var init_tier_visibility = __esm(() => {
 });
 
 // src/core/source-account-migration.ts
-import { linkSync as linkSync3, lstatSync as lstatSync43, mkdirSync as mkdirSync55, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync4, statSync as statSync35, unlinkSync as unlinkSync4 } from "node:fs";
+import { linkSync as linkSync4, lstatSync as lstatSync43, mkdirSync as mkdirSync55, realpathSync as realpathSync24, renameSync as renameSync20, rmdirSync as rmdirSync4, statSync as statSync35, unlinkSync as unlinkSync4 } from "node:fs";
 import { basename as basename16, dirname as dirname84, isAbsolute as isAbsolute32, join as join108, relative as relative11, resolve as resolve21, sep as sep14 } from "node:path";
 function accountFolderMigrationEnabled(env = process.env) {
   return env[MIGRATE_ACCOUNT_FOLDERS_ENV]?.trim() === "1";
@@ -163988,7 +164063,7 @@ function moveWithoutReplacing(from, to, kind) {
     syncFolder(dirname84(from));
     return;
   }
-  (__accountMigrationTestHooks.link ?? linkSync3)(from, to);
+  (__accountMigrationTestHooks.link ?? linkSync4)(from, to);
   syncFolder(dirname84(to));
   unlinkSync4(from);
 }
@@ -191283,7 +191358,7 @@ init_atomic_file();
 init_file_lease();
 init_operation_error();
 import { randomUUID as randomUUID23 } from "node:crypto";
-import { existsSync as existsSync64, linkSync as linkSync2, lstatSync as lstatSync31, readFileSync as readFileSync56 } from "node:fs";
+import { existsSync as existsSync64, linkSync as linkSync3, lstatSync as lstatSync31, readFileSync as readFileSync56 } from "node:fs";
 import { join as join77 } from "node:path";
 function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
   const dir = join77(homeDir, ".local", "state", "olympus", "lifecycle");
@@ -191306,7 +191381,7 @@ function acquireLifecycleMutationLock(homeDir, action, now = () => new Date) {
     writePrivateFileAtomicSync(candidate, `${JSON.stringify(owner, null, 2)}
 `);
     try {
-      linkSync2(candidate, lockPath);
+      linkSync3(candidate, lockPath);
       syncDirectorySync(dir);
       removeFileDurablySync(candidate);
       return {

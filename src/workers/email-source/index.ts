@@ -5822,18 +5822,20 @@ async function dashboardPairingSession(
       'The registered session path and the configured environment override name different pairing sessions, so Unpair cannot tell which one this computer actually uses. Reconcile OLYMPUS_TELEGRAM_SESSION_PATH or OLYMPUS_WHATSAPP_STATE_DIR with the path this source was connected with, then retry.',
     );
   }
-  return { paths: withStagedLogins(source, fromStored), credentialKeys };
+  return { paths: withStagedLogins(source, fromStored, derived), credentialKeys };
 }
 
 /**
  * A Telegram pairing that was killed can leave the login it made aside
  * (telegramStagedSessionBase) beside the account's: it is a login too, so
- * Unpair removes it with the rest.
+ * Unpair removes it with the rest. Pairing uses the path this computer derives,
+ * so one is looked for there too when the source was registered elsewhere
+ * (PR #530 review).
  */
-function withStagedLogins(source: 'telegram' | 'whatsapp', paths: string[]): string[] {
+function withStagedLogins(source: 'telegram' | 'whatsapp', paths: string[], alsoBeside: readonly string[] = []): string[] {
   if (source !== 'telegram') return paths;
-  const bases = paths.filter((path) => path.endsWith('.session')).map((path) => path.slice(0, -'.session'.length));
-  return [...new Set([...paths, ...bases.flatMap((base) => telegramStagedLogins(base).map((left) => left.path))])];
+  const bases = [...paths, ...alsoBeside].filter((path) => path.endsWith('.session')).map((path) => path.slice(0, -'.session'.length));
+  return [...new Set([...paths, ...[...new Set(bases)].flatMap((base) => telegramStagedLogins(base).map((left) => left.path))])];
 }
 
 interface DashboardSessionPathKey {
