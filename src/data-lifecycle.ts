@@ -54,7 +54,7 @@ import {
   waitingPrivateQuestionsDbPath,
 } from './core/waiting-private-questions.ts';
 import { runForgetSteps, type ForgetAccount } from './core/source-forget-registry.ts';
-import { readSourceRegistry, SourceRegistryError } from './core/source-registry.ts';
+import { dropMovePlans, readSourceRegistry, SourceRegistryError } from './core/source-registry.ts';
 import { defaultDropboxIngestionPolicyPath } from './core/source-ingestion-policy.ts';
 import { dropboxTierConnectorStoreDbPaths } from './workers/dropbox-files/index.ts';
 import { localFilesTierConnectorStoreDbPaths, localFilesWatchDir } from './workers/local-files/store.ts';
@@ -831,6 +831,17 @@ export function deleteOlympusData(options: {
     }
   }
   removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
+  // A boot migration that was part way for this source has lost its files to this Delete, wherever it had put them. The plan
+  // goes last, after the files: a Delete that stops in between leaves a plan with files missing, which the next boot reports
+  // (and a second Delete clears), never an account that looks fine with nothing behind it.
+  if (selectedSource && options.dryRun !== true) {
+    try {
+      dropMovePlans(envForContext(options), [selectedSource.sourceId, ...(selectedSource.sourceAliases ?? [])]);
+    } catch (error) {
+      // A registry that cannot be read must not undo a Delete that has taken the files.
+      if (!(error instanceof SourceRegistryError)) throw error;
+    }
+  }
 
   return {
     ok: true,

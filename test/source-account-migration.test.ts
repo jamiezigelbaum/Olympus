@@ -43,6 +43,7 @@ import {
 import { resolvedRawPath, resolvedStorePath } from '../src/core/source-placement.ts';
 import {
   AccountMigrationKilled,
+  LOCK_WAIT_CAP_MS,
   MIGRATE_ACCOUNT_FOLDERS_ENV,
   MIGRATION_BUDGET_MS,
   __accountMigrationTestHooks,
@@ -1249,8 +1250,8 @@ describe('the logs are folded in first, or the account waits', () => {
     }
   });
 
-  const skippedAsUnfolded = (report: ReturnType<typeof migrateAccountFolders>): void => {
-    expect(report.skipped, JSON.stringify(report)).toEqual([{ sourceId: 'dropbox.files', reason: 'log_not_folded' }]);
+  const skippedAsUnfolded = (report: ReturnType<typeof migrateAccountFolders>, reason = 'log_not_folded'): void => {
+    expect(report.skipped, JSON.stringify(report)).toEqual([{ sourceId: 'dropbox.files', reason }]);
     expect(report.moved).toEqual([]);
     expect(report.stuck).toEqual([]);
   };
@@ -1263,12 +1264,12 @@ describe('the logs are folded in first, or the account waits', () => {
     reader.exec('PRAGMA wal_autocheckpoint = 0; BEGIN');
     expect((reader.query('SELECT count(*) AS n FROM t').get() as { n: number }).n).toBe(3);
 
-    skippedAsUnfolded(migrateAccountFolders(env));
+    skippedAsUnfolded(migrateAccountFolders(env), 'busy');
 
     expect(existsSync(join(root, 'sources'))).toBe(false);
     expect(existsSync(store!)).toBe(true);
     const entry = entryOf(env, 'dropbox.files')!;
-    expect(entry).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'log_not_folded' } });
+    expect(entry).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'busy' } });
     expect(entry.migration?.moves).toBeUndefined();
     expect(JSON.stringify(entry.migration)).not.toContain(env.HOME!);
     // The logs are folded in when the store is next closed; waiting costs the owner nothing, so there is no Needs you row.
@@ -1629,6 +1630,78 @@ describe('a file lost while the move is part way', () => {
   });
 });
 
+describe('every file of a plan lost, with no Delete: that is a loss, not a Delete', () => {
+  /** A plan written and nothing moved yet (killed at `plan`), then every file it names removed from both places. */
+  function loseEverything(env: Env, root: string, onlyTheStore: boolean): SourceRegistryMove[] {
+    __accountMigrationTestHooks.checkpoint = (at) => {
+      if (at === 'plan') throw new AccountMigrationKilled(at);
+    };
+    expect(() => migrateAccountFolders(env)).toThrow(AccountMigrationKilled);
+    __accountMigrationTestHooks.reset();
+    if (onlyTheStore) {
+      // The account with one database in its plan: the plan is read as data, and this one names the store alone.
+      updateSourceRegistry(env, (registry) => {
+        const migration = registry.accounts[0]!.migration!;
+        migration.moves = migration.moves!.filter((move) => move.role === 'store' && move.db === true && !isCompanionPath(move.from)).slice(0, 1);
+      });
+    }
+    const moves = entryOf(env, 'dropbox.files')!.migration!.moves!;
+    expect(moves.length).toBeGreaterThan(0);
+    for (const move of moves) {
+      for (const place of [move.from, move.to]) rmSync(join(root, ...place.split('/')), { recursive: true, force: true });
+    }
+    return moves;
+  }
+
+  test('the one database of a plan gone: the account stays closed with its plan, and the owner is told', () => {
+    const { env, root } = fixture();
+    install(env, 'dropbox.files', { walOn: 'none' });
+    const moves = loseEverything(env, root, true);
+    expect(moves).toHaveLength(1);
+
+    const report = migrateAccountFolders(env);
+
+    expect(report.stuck, JSON.stringify(report)).toEqual([{ sourceId: 'dropbox.files', detail: expect.stringContaining('neither place') }]);
+    expect(report.moved).toEqual([]);
+    const entry = entryOf(env, 'dropbox.files')!;
+    expect(sourceAccountMovePending(entry)).toBe(true);
+    expect(entry.migration?.moves).toHaveLength(moves.length);
+    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(false);
+    expect(sourceStorageNotices(env)).toEqual([{ source_id: 'dropbox.files', kind: 'stuck' }]);
+    // And so on at every boot: nothing is made in its place.
+    expect(migrateAccountFolders(env).stuck).toHaveLength(1);
+    for (const place of [moves[0]!.from, moves[0]!.to]) expect(existsSync(join(root, ...place.split('/'))), place).toBe(false);
+  });
+
+  test('every file of a whole plan gone from both places is the same: closed, with the row', () => {
+    const { env, root } = fixture();
+    install(env, 'dropbox.files', { walOn: 'none' });
+    const moves = loseEverything(env, root, false);
+    expect(moves.length).toBeGreaterThan(4);
+
+    const report = migrateAccountFolders(env);
+
+    expect(report.stuck).toEqual([{ sourceId: 'dropbox.files', detail: expect.stringContaining('neither place') }]);
+    expect(sourceAccountMovePending(entryOf(env, 'dropbox.files')!)).toBe(true);
+    expect(sourceStorageNotices(env)).toEqual([{ source_id: 'dropbox.files', kind: 'stuck' }]);
+    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(false);
+  });
+
+  test('a Delete is what ends it: the owner deletes the account, and the plan goes with its files', () => {
+    const { env, root } = fixture();
+    install(env, 'dropbox.files', { walOn: 'none' });
+    loseEverything(env, root, true);
+    expect(migrateAccountFolders(env).stuck).toHaveLength(1);
+
+    deleteOlympusData({ sourceId: 'dropbox.files', homeDir: env.HOME!, env });
+
+    expect(sourceAccountMovePending(entryOf(env, 'dropbox.files')!)).toBe(false);
+    expect(sourceStorageNotices(env)).toEqual([]);
+    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(true);
+    expect(migrateAccountFolders(env)).toMatchObject({ moved: [], stuck: [], movedBack: [], errors: [] });
+  });
+});
+
 describe('Delete, with the move', () => {
   const without = (all: Record<string, string>, ...prefixes: string[]): Record<string, string> => Object.fromEntries(
     Object.entries(all).filter(([name]) => !name.startsWith('registry.json') && !name.includes('.lock') && !prefixes.some((prefix) => name === prefix || name.startsWith(`${prefix}/`))),
@@ -1654,7 +1727,7 @@ describe('Delete, with the move', () => {
     expect(readdirSync(root).filter((name) => name.startsWith('readwise'))).toEqual([]);
   });
 
-  test('a Delete while the move is part way takes the files wherever they are, and the next boot drops the plan', () => {
+  test('a Delete while the move is part way takes the files wherever they are, and drops the plan itself: the next boot finds nothing to say', () => {
     const { env, root } = fixture();
     install(env, 'dropbox.files');
     __accountMigrationTestHooks.checkpoint = (at) => {
@@ -1669,6 +1742,11 @@ describe('Delete, with the move', () => {
 
     expect(readdirSync(root).filter((name) => name.startsWith('dropbox'))).toEqual([]);
     expect(existsSync(join(root, 'sources', 'dropbox.files', '1'))).toBe(false);
+    // The Delete is the evidence that the files are gone because the owner said so: the plan went with them, before any boot.
+    expect(sourceAccountMovePending(entryOf(env, 'dropbox.files')!)).toBe(false);
+    expect(entryOf(env, 'dropbox.files')!.migration?.moves).toBeUndefined();
+    expect(sourceStorageNotices(env)).toEqual([]);
+    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(true);
 
     const report = migrateAccountFolders(env);
     expect(report).toMatchObject({ moved: [], resumed: [], movedBack: [], stuck: [], deferred: [], errors: [] });
@@ -1677,6 +1755,40 @@ describe('Delete, with the move', () => {
     expect(sourceAccountMovePending(entry)).toBe(false);
     expect(sourceStorageNotices(env)).toEqual([]);
     expect(readSourceRegistry(env).schema).toBe(1);
+  });
+
+  test('a Delete of another source leaves the plan alone: only the account whose files it took loses its plan', () => {
+    const { env } = fixture();
+    install(env, 'dropbox.files');
+    install(env, 'readwise.library');
+    __accountMigrationTestHooks.checkpoint = (at) => {
+      if (at === 'rename:7') throw new AccountMigrationKilled(at);
+    };
+    expect(() => migrateAccountFolders(env)).toThrow(AccountMigrationKilled);
+    __accountMigrationTestHooks.reset();
+    const pending = readSourceRegistry(env).accounts.filter(sourceAccountMovePending).map((account) => account.source_id);
+    expect(pending).toHaveLength(1);
+    const other = ['dropbox.files', 'readwise.library'].find((id) => !pending.includes(id))!;
+
+    deleteOlympusData({ sourceId: other, homeDir: env.HOME!, env });
+
+    expect(readSourceRegistry(env).accounts.filter(sourceAccountMovePending).map((account) => account.source_id)).toEqual(pending);
+    expect(readSourceRegistry(env).schema).toBe(3);
+
+    deleteOlympusData({ sourceId: pending[0]!, homeDir: env.HOME!, env });
+
+    expect(readSourceRegistry(env).accounts.filter(sourceAccountMovePending)).toEqual([]);
+    expect(readSourceRegistry(env).schema).toBe(1);
+  });
+
+  test('a Delete that finds nothing pending writes nothing to the registry', () => {
+    const { env } = fixture();
+    install(env, 'dropbox.files');
+    const before = readFileSync(sourceRegistryPath(env), 'utf8');
+
+    deleteOlympusData({ sourceId: 'dropbox.files', homeDir: env.HOME!, env });
+
+    expect(readFileSync(sourceRegistryPath(env), 'utf8')).toBe(before);
   });
 });
 
@@ -1976,6 +2088,276 @@ describe('the renames and the new folders are on disk before the registry says s
     const unrenames = indexesOf(events, 'unrename:');
     expect(unrenames.length).toBeGreaterThan(5);
     expect(syncedBetween(events, unrenames.at(-1)! + 1, events.indexOf('reverted'))).toContain('.');
+  });
+});
+
+describe('a file always has a name that survives a power failure', () => {
+  /**
+   * Spies on every fsync of a folder. At each one it records where the pass is (how many moves it has recorded: the
+   * `rename:<n>` or `unrename:<n>` steps it passed), the folder, and for every planned file whether it is under both its
+   * names right now (`both`: linked, the old name not removed), under its new one only (`new`) or its old one only
+   * (`old`). That places a sync in the window of the one file it belongs to, and says whether the old name was still there.
+   */
+  function spy(env: Env, root: string) {
+    type Sync = { done: number; folder: string; states: Map<string, 'both' | 'new' | 'old' | 'none'> };
+    const syncs: Sync[] = [];
+    let moves: SourceRegistryMove[] = [];
+    let done = 0;
+    const at = (rel: string): string => join(root, ...rel.split('/'));
+    onCheckpoint((point) => {
+      if (point === 'plan') moves = entryOf(env, 'dropbox.files')?.migration?.moves ?? entryOf(env, 'local.files')?.migration?.moves ?? [];
+      if (point === 'revert') done = 0;
+      else if (point.startsWith('rename:') || point.startsWith('unrename:')) done += 1;
+    });
+    __accountMigrationTestHooks.syncDirectory = (folder) => {
+      const states = new Map<string, 'both' | 'new' | 'old' | 'none'>();
+      for (const move of moves) {
+        const from = existsSync(at(move.from));
+        const to = existsSync(at(move.to));
+        states.set(move.to, from && to ? 'both' : to ? 'new' : from ? 'old' : 'none');
+      }
+      syncs.push({ done, folder, states });
+    };
+    return { syncs, moves: () => moves, at };
+  }
+
+  const lieAboutLocalFilesSizes = (env: Env): void => lieAboutSizes(env, 'local.files');
+  const lieAboutLedgerSize = (env: Env): void => {
+    const folder = accountFolder({ source_id: 'dropbox.files', slot: '1' }, env);
+    __accountMigrationTestHooks.look = (path, actual): MigrationLook | undefined => (
+      path.startsWith(`${folder}/`) && path.endsWith('.tier-ledger.sqlite') && actual.kind === 'file'
+        ? { ...actual, size: actual.size + 1n }
+        : undefined
+    );
+  };
+
+  test('going forward: each file is linked, the folder holding its new name is synced, and only then is its old name removed', () => {
+    const { env, root } = fixture();
+    install(env, 'dropbox.files');
+    const watch = spy(env, root);
+
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+
+    const moves = watch.moves();
+    expect(moves.length).toBeGreaterThan(5);
+    moves.forEach((move, index) => {
+      const syncedWhileBothNames = watch.syncs.filter((sync) => sync.done === index && sync.folder === dirname(watch.at(move.to)) && sync.states.get(move.to) === 'both');
+      expect(syncedWhileBothNames.length, `${move.to}: its folder was not synced between the link and the unlink`).toBeGreaterThan(0);
+    });
+  });
+
+  test('going back, the same: the folder that gets the old name is synced before the new name is removed', () => {
+    const { env, root } = fixture();
+    install(env, 'dropbox.files');
+    lieAboutLedgerSize(env);
+    const watch = spy(env, root);
+
+    expect(migrateAccountFolders(env).movedBack).toHaveLength(1);
+
+    const moves = watch.moves();
+    expect(moves.length).toBeGreaterThan(5);
+    [...moves].reverse().forEach((move, index) => {
+      const syncedWhileBothNames = watch.syncs.filter((sync) => sync.done === index && sync.folder === dirname(watch.at(move.from)) && sync.states.get(move.to) === 'both');
+      expect(syncedWhileBothNames.length, `${move.from}: its folder was not synced between the link and the unlink`).toBeGreaterThan(0);
+    });
+  });
+
+  test('a folder moved by rename has both parents synced before the next thing is moved, forward and back', () => {
+    for (const direction of ['forward', 'back'] as const) {
+      const { env, root } = fixture();
+      install(env, 'local.files');
+      if (direction === 'back') lieAboutLocalFilesSizes(env);
+      const watch = spy(env, root);
+
+      const report = migrateAccountFolders(env);
+
+      expect(direction === 'forward' ? report.moved : report.movedBack.map((entry) => entry.sourceId), direction).toEqual(['local.files']);
+      const moves = watch.moves();
+      const dirIndex = moves.findIndex((move) => move.kind === 'dir');
+      expect(dirIndex, direction).toBeGreaterThanOrEqual(0);
+      const dir = moves[dirIndex]!;
+      const index = direction === 'forward' ? dirIndex : moves.length - 1 - dirIndex;
+      const parents = [dirname(watch.at(dir.to)), dirname(watch.at(dir.from))];
+      const state = direction === 'forward' ? 'new' : 'old';
+      for (const parent of parents) {
+        const synced = watch.syncs.filter((sync) => sync.done === index && sync.folder === parent && sync.states.get(dir.to) === state);
+        expect(synced.length, `${direction}: ${parent} was not synced after the folder moved`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test('killed between the link and the unlink, the next boot syncs the name that stays before it removes the other', () => {
+    for (const direction of ['forward', 'back'] as const) {
+      const { env } = fixture();
+      const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+      const store = legacy[0]!;
+      const target = destinationOf(env, store, 'dropbox.files');
+      if (direction === 'back') lieAboutLedgerSize(env);
+      __accountMigrationTestHooks.link = (from, to) => {
+        linkSync(from, to);
+        if (to === (direction === 'forward' ? target : store)) throw new AccountMigrationKilled('between the link and the unlink');
+      };
+      expect(() => migrateAccountFolders(env)).toThrow(AccountMigrationKilled);
+      __accountMigrationTestHooks.reset();
+      expect(existsSync(store) && existsSync(target), `${direction}: one file under two names`).toBe(true);
+
+      const stays = direction === 'forward' ? target : store;
+      let syncedWhileTwoNames = false;
+      __accountMigrationTestHooks.syncDirectory = (folder) => {
+        if (folder === dirname(stays) && existsSync(store) && existsSync(target)) syncedWhileTwoNames = true;
+      };
+      const report = migrateAccountFolders(withoutSwitch(env));
+
+      expect(report.stuck, direction).toEqual([]);
+      expect(syncedWhileTwoNames, `${direction}: the folder of the name that stays was not synced before the other name went`).toBe(true);
+      expect(existsSync(direction === 'forward' ? store : target), direction).toBe(false);
+    }
+  });
+});
+
+describe('another program holding a database does not hold the boot', () => {
+  const opened: Database[] = [];
+  afterEach(() => {
+    for (const db of opened.splice(0)) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // No transaction open.
+      }
+      db.close();
+    }
+  });
+
+  /** Another program takes the whole database for itself, as an exclusive writer does: nothing else reads it until it lets go. */
+  function holdExclusively(path: string): Database {
+    const holder = new Database(path, { readwrite: true });
+    opened.push(holder);
+    holder.exec('PRAGMA locking_mode = EXCLUSIVE');
+    holder.exec('BEGIN EXCLUSIVE');
+    holder.query('INSERT INTO t VALUES (?)').run('held');
+    return holder;
+  }
+  const release = (holder: Database): void => {
+    holder.exec('ROLLBACK');
+    holder.close();
+    opened.length = 0;
+  };
+
+  test('taken after the logs were folded: the account stays where it is, said as busy, within the cap of one wait', () => {
+    const { env, root } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'none' });
+    let holder: Database | undefined;
+    onCheckpoint((at) => {
+      if (at === 'folded') holder = holdExclusively(store!);
+    });
+
+    const started = Date.now();
+    const report = migrateAccountFolders(env);
+    const spent = Date.now() - started;
+
+    expect(report.skipped, JSON.stringify(report)).toEqual([{ sourceId: 'dropbox.files', reason: 'busy' }]);
+    expect(report.moved).toEqual([]);
+    // One wait, not one per way of looking at one database, and not one per database.
+    expect(spent).toBeLessThan(LOCK_WAIT_CAP_MS + 1_500);
+    expect(existsSync(join(root, 'sources'))).toBe(false);
+    expect(entryOf(env, 'dropbox.files')).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'busy' } });
+    expect(sourceStorageNotices(env)).toEqual([]);
+    expect(isSourceAccountOpenable({ sourceId: 'dropbox.files' }, env)).toBe(true);
+
+    // When the other program lets go, the next boot moves it.
+    release(holder!);
+    __accountMigrationTestHooks.reset();
+    expect(migrateAccountFolders(env).moved).toEqual(['dropbox.files']);
+  }, 60_000);
+
+  test('every database of an account held: still one wait, not one for each', () => {
+    const { env } = fixture();
+    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+    const databases = legacy.filter((path) => path.endsWith('.sqlite'));
+    expect(databases.length).toBeGreaterThan(3);
+    const holders: Database[] = [];
+    onCheckpoint((at) => {
+      if (at === 'folded') for (const path of databases) holders.push(holdExclusively(path));
+    });
+
+    const started = Date.now();
+    const report = migrateAccountFolders(env);
+    const spent = Date.now() - started;
+
+    expect(report.skipped).toEqual([{ sourceId: 'dropbox.files', reason: 'busy' }]);
+    expect(spent).toBeLessThan(LOCK_WAIT_CAP_MS + 1_500);
+    for (const holder of holders) release(holder);
+  }, 60_000);
+
+  test('a wait is no longer than what is left of the boot\'s deadline', () => {
+    const { env } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'none' });
+    // A clock that stands still, and a deadline 300 ms away: that is all the waiting there is.
+    __accountMigrationTestHooks.now = () => 1_000_000;
+    __accountMigrationTestHooks.budgetMs = 300;
+    onCheckpoint((at) => {
+      if (at === 'folded') holdExclusively(store!);
+    });
+
+    const started = Date.now();
+    const report = migrateAccountFolders(env);
+    const spent = Date.now() - started;
+
+    expect(report.skipped).toEqual([{ sourceId: 'dropbox.files', reason: 'busy' }]);
+    expect(spent).toBeLessThan(LOCK_WAIT_CAP_MS - 500);
+  }, 60_000);
+
+  test('already held when the pass starts: the fold waits no longer than the deadline leaves either', () => {
+    const { env } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'first' });
+    __accountMigrationTestHooks.now = () => 1_000_000;
+    __accountMigrationTestHooks.budgetMs = 300;
+    holdExclusively(store!);
+
+    const started = Date.now();
+    const report = migrateAccountFolders(env);
+    const spent = Date.now() - started;
+
+    expect(report.skipped).toEqual([{ sourceId: 'dropbox.files', reason: 'busy' }]);
+    expect(spent).toBeLessThan(LOCK_WAIT_CAP_MS - 500);
+  }, 60_000);
+
+  test('taken once the files have moved, before the check that they open: everything goes back, as a skip, with no Needs you row', () => {
+    const { env, root } = fixture();
+    const legacy = install(env, 'dropbox.files', { walOn: 'none' });
+    const store = legacy[0]!;
+    const target = destinationOf(env, store, 'dropbox.files');
+    const original = identity(store);
+    let holder: Database | undefined;
+    onCheckpoint((at) => {
+      const last = (entryOf(env, 'dropbox.files')?.migration?.moves?.length ?? 1) - 1;
+      if (at === `rename:${last}` && !holder) holder = holdExclusively(target);
+    });
+
+    const started = Date.now();
+    const report = migrateAccountFolders(env);
+    const spent = Date.now() - started;
+
+    expect(report.skipped, JSON.stringify(report)).toEqual([{ sourceId: 'dropbox.files', reason: 'busy' }]);
+    expect(report.movedBack).toEqual([]);
+    expect(spent).toBeLessThan(LOCK_WAIT_CAP_MS + 2_500);
+    expect(identity(store)).toBe(original);
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(join(root, 'sources', 'dropbox.files', '1', 'stores', basename(target)))).toBe(false);
+    expect(entryOf(env, 'dropbox.files')).toMatchObject({ layout: 'legacy', migration: { state: 'skipped', reason: 'busy' } });
+    expect(sourceStorageNotices(env)).toEqual([]);
+    release(holder!);
+  }, 60_000);
+
+  test('a database that is only unreadable is damaged, not busy: the account still moves', () => {
+    const { env } = fixture();
+    const [store] = install(env, 'dropbox.files', { walOn: 'none' });
+    writeFileSync(store!, Buffer.alloc(64, 7));
+
+    const report = migrateAccountFolders(env);
+
+    expect(report.moved).toEqual(['dropbox.files']);
+    expect(entryOf(env, 'dropbox.files')!.migration?.checked?.some((checked) => checked.result === 'damaged')).toBe(true);
   });
 });
 

@@ -202,6 +202,29 @@ export function updateSourceRegistry(
   });
 }
 
+/**
+ * Drops the move plan of the accounts of these sources: what a Delete does once
+ * it has taken their files, wherever a move that was part way had put them. It
+ * is the evidence that the files are gone because the owner said so; without it,
+ * a plan whose files are all in neither place is a loss the boot pass reports
+ * (core/source-account-migration.ts). Writes nothing when no account has a plan
+ * pending. Run under the data owner lock, as every Delete is.
+ */
+export function dropMovePlans(env: LayoutEnv, sourceIds: Iterable<string>): string[] {
+  const own = new Set(sourceIds);
+  const pending = (account: SourceRegistryAccount): boolean => own.has(account.source_id) && sourceAccountMovePending(account);
+  if (!readSourceRegistry(env).accounts.some(pending)) return [];
+  const dropped: string[] = [];
+  updateSourceRegistry(env, (registry) => {
+    for (const account of registry.accounts) {
+      if (!pending(account)) continue;
+      delete account.migration;
+      dropped.push(account.source_id);
+    }
+  });
+  return dropped;
+}
+
 export function findRegistryAccount(
   registry: SourceRegistry,
   sourceId: string,
