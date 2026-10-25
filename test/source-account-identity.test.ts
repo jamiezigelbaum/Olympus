@@ -87,6 +87,13 @@ describe('recording the account a history belongs to', () => {
     expect(hashOf('gmail.email')).toBe(GMAIL);
   });
 
+  test('a history its owner saw empty takes the new account (the account guard over empty stores)', () => {
+    entry('gmail.email', GMAIL);
+    const other = composeProviderAccountId([OTHER_SUB, ADDRESS])!;
+    expect(recordProviderAccount({ sourceId: 'gmail.email' }, other, env, { historyEmpty: true })).toBe('recorded');
+    expect(hashOf('gmail.email')).toBe(other);
+  });
+
   test('no entry is created, and an account being deleted is refused', () => {
     expect(recordProviderAccount({ sourceId: 'gmail.email' }, GMAIL, env)).toBe('no_entry');
     expect(readSourceRegistry(env).accounts).toEqual([]);

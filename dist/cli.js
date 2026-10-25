@@ -36710,7 +36710,7 @@ function recordedProviderAccount(account, env = process.env) {
   const entry = findRegistryAccount(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
   return entry?.state === "active" ? entry.provider_account_hash : undefined;
 }
-function recordProviderAccount(account, providerAccountId, env = process.env) {
+function recordProviderAccount(account, providerAccountId, env = process.env, options = {}) {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
   const decide = (registry) => {
     assertOpenable(registry, account.sourceId, slot);
@@ -36721,6 +36721,8 @@ function recordProviderAccount(account, providerAccountId, env = process.env) {
     if (recorded === undefined)
       return { result: "recorded", write: providerAccountId };
     const match = compareProviderAccounts(recorded, providerAccountId);
+    if (match !== "same" && options.historyEmpty === true)
+      return { result: "recorded", write: providerAccountId };
     if (match !== "same")
       return { result: match };
     const merged = mergeProviderAccountIds(recorded, providerAccountId);
@@ -164992,24 +164994,31 @@ ${folderIds.join(",")}`).digest("hex");
   };
   let evidenceRecordAttempted = false;
   let historyRecorded;
+  const unreadableHistory = (error2) => new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not read which account its stored items belong to (${error2 instanceof Error ? error2.message : String(error2)}); nothing was synced this run.`);
   const historyAccountId = () => {
     try {
       return options.historyAccount?.read();
     } catch (error2) {
-      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not read which account its stored items belong to (${error2 instanceof Error ? error2.message : String(error2)}); nothing was synced this run.`);
+      throw unreadableHistory(error2);
     }
   };
-  const recordHistoryAccount = () => {
+  const agreeWithHistory = () => {
     if (!options.historyAccount)
       return;
     const read = readSourceAccountBindings(bindingsPath);
     const bound = read.kind === "ok" ? read.bindings.sources[options.sourceId] : undefined;
     if (!bound?.provider_account_id || bound.purge_required || bound.provider_account_id === historyRecorded)
       return;
+    let recorded;
     try {
-      options.historyAccount.record(bound.provider_account_id);
-      historyRecorded = bound.provider_account_id;
-    } catch {}
+      recorded = options.historyAccount.record(bound.provider_account_id, { historyEmpty: !options.laneHoldsItems() });
+    } catch (error2) {
+      throw unreadableHistory(error2);
+    }
+    if (recorded === "different" || recorded === "unproven") {
+      throw new SourceAccountChangedError("source_account_changed", `${options.sourceId}'s stored items belong to another account than the connected one, so nothing syncs: one source never holds two accounts. ` + "To keep them, reconnect the account they came from. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
+    }
+    historyRecorded = bound.provider_account_id;
   };
   const tokenAccountId = async () => {
     const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
@@ -165056,7 +165065,7 @@ ${folderIds.join(",")}`).digest("hex");
     },
     async assertAccount() {
       await verifyAccount();
-      recordHistoryAccount();
+      agreeWithHistory();
     }
   };
   async function verifyAccount() {
@@ -187789,9 +187798,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         requestStoreReopen: () => requestModelReload(),
         historyAccount: {
           read: () => recordedProviderAccount({ sourceId: lane.sourceId }),
-          record: (providerAccountId) => {
-            recordProviderAccount({ sourceId: lane.sourceId }, providerAccountId);
-          }
+          record: (providerAccountId, { historyEmpty }) => recordProviderAccount({ sourceId: lane.sourceId }, providerAccountId, process.env, { historyEmpty })
         },
         ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {},
         ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}

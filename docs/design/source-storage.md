@@ -286,6 +286,14 @@ Storage's part (step 4e):
     account then holds the sync as any account change does (`purge_required`,
     and the guard's message: reconnect the previous account, or Disconnect,
     delete and connect again). Nothing is deleted on its own.
+  - A sync runs only once the entry and the binding name one account. A binding
+    moved to another account over stores that hold nothing (which the guard
+    allows) moves the entry with it; one that disagrees with an entry over
+    stored items is refused the same way.
+  - An import into an account-bound source (Dropbox, Drive, Gmail, X) resolves
+    its account and writes inside the source's exclusive runner
+    (`runExclusiveForSource`), so the guard cannot bind another account between
+    the two.
   - A Telegram pairing checks the account it proved before anything is
     registered or any credential stored, and refuses with "delete that history
     first". In a `folder` account with no login of its own, the new login is
@@ -907,11 +915,12 @@ touch the store path (`eval/`).
    - **4d, the messaging migration**, including the Go bridge's session
      lock, which 4b leaves as it is. An archive-only Telegram or WhatsApp
      account (history, no session) is a `folder` account from the start.
-   - **4e, account identity**, before archive ingestion's Telegram and mail
-     steps (#524). The registry's `provider_account_hash` is written by connect
-     (from the account binding) and by Telegram pairing. The storage service
-     resolves an import's account as "One account, live and imported" says.
-     Connect and pairing refuse an entry that holds a different account. Proof:
+   - **4e, account identity** (done, #530), before archive ingestion's
+     Telegram and mail steps (#524). The registry's `provider_account_hash` is
+     written by connect (from the account binding) and by Telegram pairing. The
+     storage service resolves an import's account as "One account, live and
+     imported" says. Connect and pairing refuse an entry that holds a different
+     account. Proof:
      an import joins its live account, creates one when there is none and is
      joined by the next connect, waits for the owner when unproven, and stays
      under `archive.imports` when different. A pairing onto another account's

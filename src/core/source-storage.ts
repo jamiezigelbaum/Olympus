@@ -245,8 +245,8 @@ export function recordedProviderAccount(account: StorageAccount, env: LayoutEnv 
 }
 
 /**
- * What recordProviderAccount found: `recorded` (the entry named no account and
- * now names this one), `same` (it names this one, perhaps by fewer labels, which
+ * What recordProviderAccount found: `recorded` (the entry named no account, or
+ * named one for a history the caller saw empty, and now names this one), `same` (it names this one, perhaps by fewer labels, which
  * it now carries too), `different` or `unproven` (it names another, or one this
  * id cannot be matched to, and stays as it was), `no_entry` (nothing to record
  * on).
@@ -263,7 +263,19 @@ export type ProviderAccountRecord = 'recorded' | 'same' | 'different' | 'unprove
  * that owns the data (the worker, or the CLI under the owner lock), as
  * placeOwnedAccount is. An account being deleted or moved fails the call.
  */
-export function recordProviderAccount(account: StorageAccount, providerAccountId: string, env: LayoutEnv = process.env): ProviderAccountRecord {
+export function recordProviderAccount(
+  account: StorageAccount,
+  providerAccountId: string,
+  env: LayoutEnv = process.env,
+  options: {
+    /**
+     * The caller saw the account hold no item (the account guard, about to let
+     * a sync run): the account the entry names has no history here, so it takes
+     * this one instead of staying.
+     */
+    historyEmpty?: boolean;
+  } = {},
+): ProviderAccountRecord {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
   const decide = (registry: SourceRegistry): { result: ProviderAccountRecord; write?: string } => {
     assertOpenable(registry, account.sourceId, slot);
@@ -272,6 +284,7 @@ export function recordProviderAccount(account: StorageAccount, providerAccountId
     const recorded = entry.provider_account_hash;
     if (recorded === undefined) return { result: 'recorded', write: providerAccountId };
     const match = compareProviderAccounts(recorded, providerAccountId);
+    if (match !== 'same' && options.historyEmpty === true) return { result: 'recorded', write: providerAccountId };
     if (match !== 'same') return { result: match };
     const merged = mergeProviderAccountIds(recorded, providerAccountId);
     return merged === recorded ? { result: 'same' } : { result: 'same', write: merged };

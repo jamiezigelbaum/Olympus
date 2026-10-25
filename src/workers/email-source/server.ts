@@ -4225,9 +4225,8 @@ export async function main(): Promise<void> {
         // The registry entry's account: what an import established, and what imports are matched against.
         historyAccount: {
           read: () => recordedProviderAccount({ sourceId: lane.sourceId }),
-          record: (providerAccountId) => {
-            recordProviderAccount({ sourceId: lane.sourceId }, providerAccountId);
-          },
+          record: (providerAccountId, { historyEmpty }) =>
+            recordProviderAccount({ sourceId: lane.sourceId }, providerAccountId, process.env, { historyEmpty }),
         },
         ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
         // Every guard of a source runs its tasks one at a time (scheduler

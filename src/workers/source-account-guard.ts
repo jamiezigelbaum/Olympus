@@ -5,6 +5,7 @@ import {
   type AccountBoundProvider,
   type ProviderIdentityEndpoints,
 } from '../core/provider-account-identity.ts';
+import type { ProviderAccountRecord } from '../core/source-storage.ts';
 import {
   decideSourceAccountAction,
   readSourceAccountBindings,
@@ -80,14 +81,15 @@ export interface SourceAccountGuardOptions {
    * The account the source's history belongs to, as the account registry names
    * it (docs/design/source-storage.md, "One account, live and imported"). `read`
    * stands in for a binding that names no account, so a connect of another
-   * account over an imported history is held as any account change is; `record`
-   * is told the bound account each time a run is let through, so the history
-   * names it for the imports that follow. A registry that cannot be read holds
-   * the run.
+   * account over an imported history is held as any account change is. `record`
+   * is told the bound account before a run is let through, so the history names
+   * it for the imports that follow; a run is let through only when the history
+   * names that account, names none, or holds no item (it then takes the bound
+   * one). A registry that cannot be read holds the run.
    */
   historyAccount?: {
     read: () => string | undefined;
-    record: (providerAccountId: string) => void;
+    record: (providerAccountId: string, options: { historyEmpty: boolean }) => ProviderAccountRecord;
   };
   /**
    * Runs each guarded task alone among the source's tasks. Defaults to one
@@ -130,6 +132,16 @@ export function createExclusiveRunner(): ExclusiveRunner {
 // source's tasks on its corpus key), so none holds the runner indefinitely.
 const sourceExclusiveRunners = new Map<string, ExclusiveRunner>();
 
+/**
+ * Run `task` alone among the source's guarded tasks: for an import into an
+ * account-bound source, which resolves its account and writes inside it, so the
+ * guard cannot bind another account over the stores in between
+ * (docs/design/source-storage.md, "One account, live and imported").
+ */
+export function runExclusiveForSource<T>(registryPath: string, sourceId: AccountBoundSourceId, task: () => Promise<T>): Promise<T> {
+  return sourceExclusiveRunner(sourceAccountBindingsPath(registryPath), sourceId)(task);
+}
+
 function sourceExclusiveRunner(bindingsPath: string, sourceId: AccountBoundSourceId): ExclusiveRunner {
   const key = `${bindingsPath}\n${sourceId}`;
   let runner = sourceExclusiveRunners.get(key);
@@ -168,29 +180,43 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
     return answer;
   };
   let evidenceRecordAttempted = false;
-  // The bound account the history was last told about, so a steady run asks the registry nothing.
+  // The bound account the history last agreed to, so a steady run asks the registry nothing.
   let historyRecorded: string | undefined;
+  const unreadableHistory = (error: unknown): SourceAccountChangedError => new SourceAccountChangedError(
+    'source_account_unverified',
+    `${options.sourceId}: could not read which account its stored items belong to (${error instanceof Error ? error.message : String(error)}); nothing was synced this run.`,
+  );
   const historyAccountId = (): string | undefined => {
     try {
       return options.historyAccount?.read();
     } catch (error) {
-      throw new SourceAccountChangedError(
-        'source_account_unverified',
-        `${options.sourceId}: could not read which account its stored items belong to (${error instanceof Error ? error.message : String(error)}); nothing was synced this run.`,
-      );
+      throw unreadableHistory(error);
     }
   };
-  const recordHistoryAccount = (): void => {
+  // The binding and the history must name one account before anything syncs: a
+  // binding moved to another account over empty stores (the decision allows it)
+  // would otherwise fill a history that still names the first, and an import of
+  // that account would join it (PR #530 review).
+  const agreeWithHistory = (): void => {
     if (!options.historyAccount) return;
     const read = readSourceAccountBindings(bindingsPath);
     const bound = read.kind === 'ok' ? read.bindings.sources[options.sourceId] : undefined;
     if (!bound?.provider_account_id || bound.purge_required || bound.provider_account_id === historyRecorded) return;
+    let recorded: ProviderAccountRecord;
     try {
-      options.historyAccount.record(bound.provider_account_id);
-      historyRecorded = bound.provider_account_id;
-    } catch {
-      // Told again on the next run; the binding still holds the account meanwhile.
+      recorded = options.historyAccount.record(bound.provider_account_id, { historyEmpty: !options.laneHoldsItems() });
+    } catch (error) {
+      throw unreadableHistory(error);
     }
+    if (recorded === 'different' || recorded === 'unproven') {
+      throw new SourceAccountChangedError(
+        'source_account_changed',
+        `${options.sourceId}'s stored items belong to another account than the connected one, so nothing syncs: one source never holds two accounts. `
+          + 'To keep them, reconnect the account they came from. '
+          + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`,
+      );
+    }
+    historyRecorded = bound.provider_account_id;
   };
 
   const tokenAccountId = async (): Promise<string | undefined> => {
@@ -241,7 +267,7 @@ export function createSourceAccountGuard(options: SourceAccountGuardOptions): So
     },
     async assertAccount(): Promise<void> {
       await verifyAccount();
-      recordHistoryAccount();
+      agreeWithHistory();
     },
   };
 
