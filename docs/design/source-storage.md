@@ -251,19 +251,26 @@ Storage's part (step 4e):
   existing is folded in. Reading `<tier>.archive.<family>` corpora for formats
   that feed a live source ends once ingestion's per-source steps land.
 - **An entry names its provider account.** `provider_account_hash` holds the
-  opaque id `provider-account-identity.ts` defines: labels joined with `.`, so
-  no address or provider id is written to the registry. Whoever first
-  establishes the account writes it:
-  - a live connect, from the account the worker binds in
-    `source-account-bindings.json` (which keeps its own role of stopping a sync
-    on a different account);
-  - a Telegram pairing, from the pairing proof's `account_ref`;
+  id `provider-account-identity.ts` defines, the same one the account binding
+  holds: labels joined with `.`, Google's and Telegram's as digests, so no
+  address is written to the registry (Dropbox's and X's are their own account
+  ids). Whoever first establishes the account writes it
+  (`recordProviderAccount`):
+  - the worker, once a live source's sync is let through on an account it binds
+    in `source-account-bindings.json` (which keeps its own role of stopping a
+    sync on a different account);
+  - a Telegram pairing, `telegram:<account_ref>` from the pairing proof,
+    decided by the worker (`pairing-account`) or under the owner lock, as the
+    placement is;
   - an import that carries the id.
 
   The first value stays. A later one may only add labels
-  (`mergeProviderAccountIds`). WhatsApp has no account id, live or archived.
-- **An import finds its account through the storage service**, under the
-  registry lease, by `compareProviderAccounts` against the source's entry:
+  (`mergeProviderAccountIds`). Delete forgets it, as it forgets the binding.
+  WhatsApp has no account id, live or archived. An entry from before this step
+  names none until its next sync or pairing.
+- **An import finds its account through the storage service**
+  (`resolveImportAccount`), under the registry lease, by
+  `compareProviderAccounts` against the source's entry:
   - `same`: that account;
   - no entry for the source: a new `folder` entry, with the import's id or
     none, which a later connect or pairing joins;
@@ -272,9 +279,23 @@ Storage's part (step 4e):
     import sheet;
   - `different`: not this account; the import stays under `archive.imports` (a
     second slot once slots exist).
-- **Connect and pairing check the entry.** One whose entry holds a different
-  account is refused with "delete that history first". 4b's "an account with an
-  entry follows it" compares the id, not only the source.
+- **Connect and pairing check the entry.** A different account over a history
+  that names its account is refused until the owner deletes that history:
+  - A file source's account guard reads the entry's account as the binding's
+    when the binding names none (an imported history). A connect of another
+    account then holds the sync as any account change does (`purge_required`,
+    and the guard's message: reconnect the previous account, or Disconnect,
+    delete and connect again). Nothing is deleted on its own.
+  - A Telegram pairing checks the account it proved before anything is
+    registered or any credential stored, and refuses with "delete that history
+    first". In a `folder` account with no login of its own, the new login is
+    made aside (`<session>.pairing`) and takes the account's name only once it
+    proves the account, so another account's login is never where capture reads
+    it. A login already there is used where it is and never removed by a
+    refusal.
+
+  4b's "an account with an entry follows it" compares the id, not only the
+  source.
 
 ## Storage service
 

@@ -1714,11 +1714,18 @@ describe('Delete, with the move', () => {
     for (const path of bystanders) writeFileSync(path, `bytes of ${basename(path)}`);
     expect(migrateAccountFolders(env).moved).toEqual(expect.arrayContaining(['readwise.library', 'x.bookmarks', 'dropbox.files']));
     const folder = accountFolder({ source_id: 'readwise.library', slot: '1' }, env);
+    // Each history names its provider account (storage step 4e).
+    updateSourceRegistry(env, (registry) => {
+      for (const account of registry.accounts) account.provider_account_hash = `${account.source_id}:owner`;
+    });
     const before = tree(root);
     expect(Object.keys(without(before)).filter((name) => name.startsWith('sources/readwise.library/1/')).length).toBeGreaterThan(8);
 
     const result = deleteOlympusData({ sourceId: 'readwise.library', homeDir: env.HOME!, env });
 
+    // The deleted history no longer names an account, so another may connect; the others keep theirs.
+    expect(entryOf(env, 'readwise.library')!.provider_account_hash).toBeUndefined();
+    expect(entryOf(env, 'dropbox.files')!.provider_account_hash).toBe('dropbox.files:owner');
     expect(result.removed).toContain(folder);
     expect(existsSync(folder)).toBe(false);
     // Exactly its folder: every other file, the other accounts' and the shared ones, is where it was, byte for byte.

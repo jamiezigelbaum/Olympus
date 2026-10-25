@@ -59,6 +59,7 @@ const WORK: Record<string, Record<string, unknown>> = {
   'data-delete': { source_id: 'dropbox.files', dry_run: true },
   tier: { args: ['migrate', 'status'] },
   'pairing-placement': { source_id: 'telegram.messages' },
+  'pairing-account': { source_id: 'telegram.messages', account_id: 'telegram:0123456789abcdef' },
 };
 
 describe('who can reach the CLI routes', () => {

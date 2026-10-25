@@ -318,6 +318,8 @@ import {
   openConnectorStore,
   openSecretLocations,
   recordAccountPlacement,
+  recordedProviderAccount,
+  recordProviderAccount,
   replaceEmptyLegacyAccounts,
   sourceAccountUnavailableReason,
   storageAccountForCorpus,
@@ -4220,6 +4222,13 @@ export async function main(): Promise<void> {
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
+        // The registry entry's account: what an import established, and what imports are matched against.
+        historyAccount: {
+          read: () => recordedProviderAccount({ sourceId: lane.sourceId }),
+          record: (providerAccountId) => {
+            recordProviderAccount({ sourceId: lane.sourceId }, providerAccountId);
+          },
+        },
         ...(lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {}),
         // Every guard of a source runs its tasks one at a time (scheduler
         // tasks, the Dropbox dashboard hook and the X operator routes alike):

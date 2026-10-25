@@ -17641,6 +17641,7 @@ var init_source_storage = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_source_placement();
+  init_provider_account_identity();
   init_store_identity();
   init_source_registry();
 });

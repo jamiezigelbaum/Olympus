@@ -24,7 +24,13 @@ import { callWorkerCli, runLocallyOrThroughWorker } from './cli-via-worker.ts';
 import { legacyCaptureClaimDir, type LayoutAccountLayout, type LayoutEnv } from './olympus-layout.ts';
 import { hasFolderLayout } from './source-placement.ts';
 import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, readSourceRegistryUnderLease, SourceRegistryError } from './source-registry.ts';
-import { SourceStorageUnavailableError, placeOwnedAccount, type StorageAccount } from './source-storage.ts';
+import {
+  SourceStorageUnavailableError,
+  placeOwnedAccount,
+  recordProviderAccount,
+  type ProviderAccountRecord,
+  type StorageAccount,
+} from './source-storage.ts';
 
 export interface SettlePairingPlacementOptions {
   /** Test seam: replaces the worker transport. */
@@ -79,4 +85,38 @@ export async function settlePairingPlacement(
     }
   }
   return settled;
+}
+
+const PROVIDER_ACCOUNT_RECORDS: readonly string[] = ['recorded', 'same', 'different', 'unproven', 'no_entry'];
+
+/**
+ * Record the account a pairing proved on the messaging account's registry entry
+ * (docs/design/source-storage.md, "One account, live and imported"), decided by
+ * whoever owns the data, as the placement is: this process under the owner lock,
+ * else the running worker (`pairing-account`). `different` and `unproven` mean
+ * the entry names another account and was left as it was.
+ */
+export async function recordPairingAccount(
+  account: StorageAccount,
+  providerAccountId: string,
+  env: LayoutEnv,
+  options: SettlePairingPlacementOptions = {},
+): Promise<ProviderAccountRecord> {
+  return runLocallyOrThroughWorker<ProviderAccountRecord>(
+    () => recordProviderAccount(account, providerAccountId, env),
+    async () => {
+      const answer = await callWorkerCli<{ result?: unknown }>('pairing-account', {
+        source_id: account.sourceId,
+        account_id: providerAccountId,
+      }, {
+        env,
+        ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+      });
+      if (typeof answer.result !== 'string' || !PROVIDER_ACCOUNT_RECORDS.includes(answer.result)) {
+        throw new Error('The Olympus worker gave no answer about the paired account.');
+      }
+      return answer.result as ProviderAccountRecord;
+    },
+    env,
+  );
 }

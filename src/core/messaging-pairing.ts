@@ -9,8 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { createDefaultSecretStore, type SecretStore } from './secret-store.ts';
 import { connectGuidedSession, type ConnectResult } from './connect.ts';
 import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID, type LayoutAccountLayout } from './olympus-layout.ts';
-import { pairingLayoutEnv, telegramSessionBasePath, whatsappStateDir } from './pairing-session-paths.ts';
-import { settlePairingPlacement } from './pairing-placement.ts';
+import { pairingLayoutEnv, telegramSessionBasePath, telegramStagedSessionBase, whatsappStateDir } from './pairing-session-paths.ts';
+import { recordPairingAccount, settlePairingPlacement } from './pairing-placement.ts';
+import { compareProviderAccounts } from './provider-account-identity.ts';
+import { SourceRegistryError } from './source-registry.ts';
+import { recordedProviderAccount } from './source-storage.ts';
 
 export type MessagingPairingSource = 'telegram' | 'whatsapp';
 export const TELEGRAM_API_ID_SECRET_KEY = 'telegram.personal.app.api_id';
@@ -144,12 +147,11 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
   const packageRoot = resolve(options.packageRoot ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
+  const account = { sourceId: options.source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID };
+  const registryEnv = pairingLayoutEnv({ env, ...(options.homeDir ? { homeDir: options.homeDir } : {}) });
+  const workerTransport = options.workerFetch ? { fetchImpl: options.workerFetch } : {};
   // The account is placed before a path is picked: pairing creates its first file.
-  const layout = await settlePairingPlacement(
-    { sourceId: options.source === 'telegram' ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID },
-    pairingLayoutEnv({ env, ...(options.homeDir ? { homeDir: options.homeDir } : {}) }),
-    options.workerFetch ? { fetchImpl: options.workerFetch } : {},
-  );
+  const layout = await settlePairingPlacement(account, registryEnv, workerTransport);
   const pathContext = {
     env,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
@@ -163,6 +165,18 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     mkdirSync(options.source === 'telegram' ? dirname(sessionPath) : sessionPath, { recursive: true, mode: 0o700 });
   }
 
+  // A Telegram history that names its account (docs/design/source-storage.md,
+  // "One account, live and imported") takes a login from that account only. In
+  // a folder account with no login of its own, the new one is made aside and
+  // takes the account's name once it proves the account; a login already there
+  // is used as it is, and checked the same way.
+  const historyAccount = options.source === 'telegram' ? historyAccountOf(account, registryEnv) : undefined;
+  const sessionExisted = options.source === 'telegram' && existsSync(`${sessionPath}.session`);
+  const staged = historyAccount !== undefined && !sessionExisted && layout === 'folder';
+  const pairingPath = staged ? telegramStagedSessionBase(sessionPath) : sessionPath;
+  // One left by a pairing that stopped part way is no one's login.
+  if (options.source === 'telegram' && layout === 'folder' && !staged) removeTelegramLogin(telegramStagedSessionBase(sessionPath));
+
   const helper = await resolveHelper(options, packageRoot);
   const stdoutEvents: Record<string, unknown>[] = [];
   let qrPngPath: string | undefined;
@@ -170,7 +184,7 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
   const commandEnv: Record<string, string | undefined> = {
     ...env,
     ...(options.source === 'telegram'
-      ? { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath }
+      ? { OLYMPUS_TELEGRAM_SESSION_PATH: pairingPath }
       : {
         OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
         OLYMPUS_WHATSAPP_QR_STDOUT: 'false',
@@ -214,12 +228,18 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
 
   const receipt = parseReadyReceipt(stdoutEvents, options.source);
   if (options.source === 'telegram' && (
-    typeof receipt.session_path !== 'string' || resolve(receipt.session_path) !== resolve(sessionPath)
+    typeof receipt.session_path !== 'string' || resolve(receipt.session_path) !== resolve(pairingPath)
   )) {
     throw new Error('Telegram pairing proved a different session path than the one Olympus requested.');
   }
   const chats = options.source === 'telegram' ? parseTelegramDialogs(receipt.dialogs) : [];
   const accountProof = proofForReceipt(options.source, receipt);
+  if (historyAccount !== undefined && compareProviderAccounts(historyAccount, accountProof) !== 'same') {
+    // What a refusal removes: the login this pairing made, never one that was there before it.
+    refuseOtherTelegramAccount(staged ? pairingPath : sessionExisted ? undefined : sessionPath);
+  }
+  if (staged) keepStagedTelegramSession(pairingPath, sessionPath);
+  const madeSession = sessionExisted ? undefined : sessionPath;
   const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
     source: options.source,
     accountProof,
@@ -239,6 +259,15 @@ export async function pairMessagingSource(options: PairMessagingSourceOptions): 
     };
   }
 
+  if (options.source === 'telegram') {
+    // Decided under the entry's lease by whoever owns the data, so an account it
+    // was given since the read above decides. Not recorded (no worker answered)
+    // costs only the import that follows an owner's confirmation.
+    const recorded = historyAccount === accountProof
+      ? 'same'
+      : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => undefined);
+    if (recorded === 'different' || recorded === 'unproven') refuseOtherTelegramAccount(madeSession);
+  }
   const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
   const rollbackCredentials = options.source === 'telegram'
     ? await persistTelegramCredentials(secretStore, result.privatePayload)
@@ -488,6 +517,39 @@ function proofForReceipt(source: MessagingPairingSource, receipt: PairingReceipt
   return source === 'telegram'
     ? `telegram:${String(receipt.proof.account_ref)}`
     : 'whatsapp:authenticated-linked-device';
+}
+
+function historyAccountOf(account: { sourceId: string }, env: ReturnType<typeof pairingLayoutEnv>): string | undefined {
+  try {
+    return recordedProviderAccount(account, env);
+  } catch (error) {
+    if (error instanceof SourceRegistryError) throw error;
+    // The data folder cannot be worked out (a Linux layout that refuses this environment): placement recorded nothing either.
+    return undefined;
+  }
+}
+
+function removeTelegramLogin(base: string): void {
+  for (const suffix of ['.session', '.session-journal']) rmSync(`${base}${suffix}`, { force: true });
+}
+
+function refuseOtherTelegramAccount(madeSession: string | undefined): never {
+  if (madeSession) removeTelegramLogin(madeSession);
+  throw new Error(
+    'This Telegram account is not the one whose messages Olympus already holds, so it was not paired: one source never holds two accounts. '
+      + 'To keep that history, pair the Telegram account it came from. To pair this one instead, delete that history first: '
+      + 'Unpair Telegram, run `olympus data delete --source telegram.messages` (preview with --dry-run), then pair again.',
+  );
+}
+
+/** The login made aside proved the account: it becomes the account's login. */
+function keepStagedTelegramSession(stagedBase: string, base: string): void {
+  if (existsSync(`${stagedBase}.session-journal`)) {
+    throw new Error('Telegram pairing did not finish writing its login. Re-run olympus connect telegram --pair in your private terminal.');
+  }
+  // No login was there, so a journal left beside its name belongs to none, and SQLite would roll it into this one.
+  rmSync(`${base}.session-journal`, { force: true });
+  renameSync(`${stagedBase}.session`, `${base}.session`);
 }
 
 function pairingFailure(source: MessagingPairingSource, code: string | undefined): Error {

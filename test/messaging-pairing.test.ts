@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,7 @@ import {
   type PairingCommandResult,
 } from '../src/core/messaging-pairing.ts';
 import type { SecretStore } from '../src/core/secret-store.ts';
+import { readSourceRegistry, updateSourceRegistry } from '../src/core/source-registry.ts';
 
 function memorySecretStore(): SecretStore & { values: Map<string, string> } {
   const values = new Map<string, string>();
@@ -410,5 +411,104 @@ describe('packaged messaging pairing', () => {
         stderr: '{"error":"telethon_not_installed"}\nprivate provider detail',
       }),
     })).rejects.toThrow('python3 -m venv ~/.cache/olympus/telegram-python');
+  });
+});
+
+describe('a Telegram history keeps its account (storage step 4e)', () => {
+  const PROVED = 'telegram:abcdef0123456789';
+  const folderSession = (root: string) => join(root, 'home', '.local/share/openclaw/olympus/sources/telegram.messages/1/session/telegram');
+  const registryEnv = (root: string) => ({ HOME: join(root, 'home') });
+  const history = (root: string, providerAccountHash?: string) => updateSourceRegistry(registryEnv(root), (registry) => {
+    registry.accounts.push({
+      source_id: 'telegram.messages',
+      slot: '1',
+      state: 'active',
+      layout: 'folder',
+      corpus_ids: ['secure_local.telegram.messages'],
+      ...(providerAccountHash ? { provider_account_hash: providerAccountHash } : {}),
+      created_at: '2026-10-25T00:00:00.000Z',
+    });
+  });
+  const pair = (root: string, secrets: SecretStore, onRegister: (input: Record<string, unknown>) => void, pairedAt: string[]) => pairMessagingSource({
+    source: 'telegram',
+    packageRoot: root,
+    homeDir: join(root, 'home'),
+    env: {},
+    pythonExecutable: '/usr/bin/python3',
+    secretStore: secrets,
+    captureScopeApproval: { source: 'telegram', explicitApproval: true, chatScopes: ['telegram.personal:chat:101'] },
+    runCommand: async (request) => {
+      // The helper writes the login where it is told.
+      const base = request.env.OLYMPUS_TELEGRAM_SESSION_PATH!;
+      pairedAt.push(base);
+      mkdirSync(join(base, '..'), { recursive: true });
+      writeFileSync(`${base}.session`, 'login');
+      return telegramReady(base);
+    },
+    registerSession: async (input) => {
+      onRegister(input as unknown as Record<string, unknown>);
+      return { ok: true, source: 'telegram', handles: ['telegram.personal'], secretRefs: [] };
+    },
+  });
+  const hashOf = (root: string) => readSourceRegistry(registryEnv(root)).accounts
+    .find((account) => account.source_id === 'telegram.messages')?.provider_account_hash;
+
+  test('a first pairing records the account it proved', async () => {
+    const root = packageFixture();
+    const pairedAt: string[] = [];
+    const result = await pair(root, memorySecretStore(), () => undefined, pairedAt);
+    expect(result.status).toBe('connected');
+    expect(pairedAt).toEqual([folderSession(root)]);
+    expect(hashOf(root)).toBe(PROVED);
+  });
+
+  test('another account\'s login is refused before anything is registered, and the login it made is removed', async () => {
+    const root = packageFixture();
+    history(root, 'telegram:0000000000000000');
+    const secrets = memorySecretStore();
+    let registered = false;
+    const pairedAt: string[] = [];
+    await expect(pair(root, secrets, () => { registered = true; }, pairedAt))
+      .rejects.toThrow('not the one whose messages Olympus already holds');
+    // Made aside, as the history has no login of its own, and gone again.
+    expect(pairedAt).toEqual([`${folderSession(root)}.pairing`]);
+    expect(existsSync(`${folderSession(root)}.pairing.session`)).toBe(false);
+    expect(existsSync(`${folderSession(root)}.session`)).toBe(false);
+    expect(registered).toBe(false);
+    expect(secrets.values.size).toBe(0);
+    expect(hashOf(root)).toBe('telegram:0000000000000000');
+  });
+
+  test('the account\'s own login, made aside, becomes the account\'s login', async () => {
+    const root = packageFixture();
+    history(root, PROVED);
+    let registration: Record<string, unknown> | undefined;
+    const pairedAt: string[] = [];
+    const result = await pair(root, memorySecretStore(), (input) => { registration = input; }, pairedAt);
+    expect(result.status).toBe('connected');
+    expect(pairedAt).toEqual([`${folderSession(root)}.pairing`]);
+    expect(existsSync(`${folderSession(root)}.session`)).toBe(true);
+    expect(existsSync(`${folderSession(root)}.pairing.session`)).toBe(false);
+    expect(registration?.sessionPath).toBe(folderSession(root));
+  });
+
+  test('a login already there is used where it is, and is never removed by a refusal', async () => {
+    const root = packageFixture();
+    history(root, 'telegram:0000000000000000');
+    mkdirSync(join(folderSession(root), '..'), { recursive: true });
+    writeFileSync(`${folderSession(root)}.session`, 'login');
+    const pairedAt: string[] = [];
+    await expect(pair(root, memorySecretStore(), () => undefined, pairedAt)).rejects.toThrow('delete that history first');
+    expect(pairedAt).toEqual([folderSession(root)]);
+    expect(existsSync(`${folderSession(root)}.session`)).toBe(true);
+  });
+
+  test('a history that names no account takes the pairing\'s', async () => {
+    const root = packageFixture();
+    history(root);
+    const pairedAt: string[] = [];
+    expect((await pair(root, memorySecretStore(), () => undefined, pairedAt)).status).toBe('connected');
+    expect(pairedAt).toEqual([folderSession(root)]);
+    expect(hashOf(root)).toBe(PROVED);
   });
 });

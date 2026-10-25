@@ -173,6 +173,17 @@ export function telegramPairingSessionPaths(context: OlympusPathContext = {}): s
 }
 
 /**
+ * Where a pairing makes a Telegram login aside, in a folder account whose
+ * history names its Telegram account and has no login of its own: the new
+ * login takes the account's name only once it proves that account, within the
+ * same pairing (core/messaging-pairing.ts). A pairing that stopped part way
+ * leaves it inside the account's folder, for the next pairing to reuse or remove.
+ */
+export function telegramStagedSessionBase(base: string): string {
+  return `${base}.pairing`;
+}
+
+/**
  * The session artifacts derived from a session path the owner actually
  * registered, which is the authority whenever one exists.
  *

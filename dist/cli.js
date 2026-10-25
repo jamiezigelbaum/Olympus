@@ -11985,6 +11985,22 @@ function dropMovePlans(env, sourceIds) {
   });
   return dropped;
 }
+function forgetProviderAccounts(env, sourceIds) {
+  const own = new Set(sourceIds);
+  const named = (account) => own.has(account.source_id) && account.provider_account_hash !== undefined;
+  if (!readSourceRegistry(env).accounts.some(named))
+    return [];
+  const forgotten = [];
+  updateSourceRegistry(env, (registry) => {
+    for (const account of registry.accounts) {
+      if (!named(account))
+        continue;
+      delete account.provider_account_hash;
+      forgotten.push(account.source_id);
+    }
+  });
+  return forgotten;
+}
 function findRegistryAccount(registry, sourceId, slot) {
   return registry.accounts.find((account) => account.source_id === sourceId && account.slot === slot);
 }
@@ -12310,6 +12326,9 @@ function telegramSessionBasePath(context = {}) {
 function telegramPairingSessionPaths(context = {}) {
   const base = telegramSessionBasePath(context);
   return [`${base}.session`, `${base}.session-journal`];
+}
+function telegramStagedSessionBase(base) {
+  return `${base}.pairing`;
 }
 function pairingSessionPathsFromStoredValue(source, storedValue) {
   const value = storedValue.trim();
@@ -16217,7 +16236,7 @@ var init_cli_via_worker = __esm(() => {
   init_operation_error();
   init_worker_auth();
   init_worker_transport();
-  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier", "pairing-placement"];
+  WORKER_CLI_OPERATIONS = ["ingestion-status", "data-export", "data-delete", "tier", "pairing-placement", "pairing-account"];
   WorkerUnreachableError = class WorkerUnreachableError extends Error {
     constructor(detail) {
       super(`No Olympus worker answered (${detail}).`);
@@ -36687,6 +36706,37 @@ function replaceEmptyLegacyAccounts(env = process.env) {
   });
   return replaced;
 }
+function recordedProviderAccount(account, env = process.env) {
+  const entry = findRegistryAccount(readSourceRegistry(env), account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  return entry?.state === "active" ? entry.provider_account_hash : undefined;
+}
+function recordProviderAccount(account, providerAccountId, env = process.env) {
+  const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
+  const decide = (registry) => {
+    assertOpenable(registry, account.sourceId, slot);
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (!entry)
+      return { result: "no_entry" };
+    const recorded = entry.provider_account_hash;
+    if (recorded === undefined)
+      return { result: "recorded", write: providerAccountId };
+    const match = compareProviderAccounts(recorded, providerAccountId);
+    if (match !== "same")
+      return { result: match };
+    const merged = mergeProviderAccountIds(recorded, providerAccountId);
+    return merged === recorded ? { result: "same" } : { result: "same", write: merged };
+  };
+  let decided = decide(readSourceRegistry(env));
+  if (decided.write === undefined)
+    return decided.result;
+  updateSourceRegistry(env, (registry) => {
+    decided = decide(registry);
+    const entry = findRegistryAccount(registry, account.sourceId, slot);
+    if (entry && decided.write !== undefined)
+      entry.provider_account_hash = decided.write;
+  });
+  return decided.result;
+}
 function placeSidecar(env, account, path, readOnly) {
   const registry = readSourceRegistry(env);
   assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
@@ -36851,6 +36901,7 @@ var init_source_storage = __esm(() => {
   init_tier_ledger();
   init_local_index();
   init_source_placement();
+  init_provider_account_identity();
   init_store_identity();
   init_source_registry();
   DEFAULT_STORAGE_SLOT = DEFAULT_ACCOUNT_SLOT;
@@ -36911,12 +36962,29 @@ async function settlePairingPlacement(account, env, options = {}) {
   }
   return settled;
 }
+async function recordPairingAccount(account, providerAccountId, env, options = {}) {
+  return runLocallyOrThroughWorker(() => recordProviderAccount(account, providerAccountId, env), async () => {
+    const answer = await callWorkerCli("pairing-account", {
+      source_id: account.sourceId,
+      account_id: providerAccountId
+    }, {
+      env,
+      ...options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}
+    });
+    if (typeof answer.result !== "string" || !PROVIDER_ACCOUNT_RECORDS.includes(answer.result)) {
+      throw new Error("The Olympus worker gave no answer about the paired account.");
+    }
+    return answer.result;
+  }, env);
+}
+var PROVIDER_ACCOUNT_RECORDS;
 var init_pairing_placement = __esm(() => {
   init_cli_via_worker();
   init_olympus_layout();
   init_source_placement();
   init_source_registry();
   init_source_storage();
+  PROVIDER_ACCOUNT_RECORDS = ["recorded", "same", "different", "unproven", "no_entry"];
 });
 
 // src/core/messaging-pairing.ts
@@ -36931,7 +36999,10 @@ async function pairMessagingSource(options) {
   const packageRoot = resolve13(options.packageRoot ?? join32(dirname29(fileURLToPath3(import.meta.url)), "..", ".."));
   const runner = options.runCommand ?? runPairingCommand;
   const secretStore = options.secretStore ?? createDefaultSecretStore();
-  const layout = await settlePairingPlacement({ sourceId: options.source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID }, pairingLayoutEnv({ env, ...options.homeDir ? { homeDir: options.homeDir } : {} }), options.workerFetch ? { fetchImpl: options.workerFetch } : {});
+  const account = { sourceId: options.source === "telegram" ? TELEGRAM_SOURCE_ID : WHATSAPP_SOURCE_ID };
+  const registryEnv = pairingLayoutEnv({ env, ...options.homeDir ? { homeDir: options.homeDir } : {} });
+  const workerTransport = options.workerFetch ? { fetchImpl: options.workerFetch } : {};
+  const layout = await settlePairingPlacement(account, registryEnv, workerTransport);
   const pathContext = {
     env,
     ...options.homeDir ? { homeDir: options.homeDir } : {},
@@ -36941,12 +37012,18 @@ async function pairMessagingSource(options) {
   if (layout === "folder") {
     mkdirSync18(options.source === "telegram" ? dirname29(sessionPath) : sessionPath, { recursive: true, mode: 448 });
   }
+  const historyAccount = options.source === "telegram" ? historyAccountOf(account, registryEnv) : undefined;
+  const sessionExisted = options.source === "telegram" && existsSync29(`${sessionPath}.session`);
+  const staged = historyAccount !== undefined && !sessionExisted && layout === "folder";
+  const pairingPath = staged ? telegramStagedSessionBase(sessionPath) : sessionPath;
+  if (options.source === "telegram" && layout === "folder" && !staged)
+    removeTelegramLogin(telegramStagedSessionBase(sessionPath));
   const helper = await resolveHelper(options, packageRoot);
   const stdoutEvents = [];
   let qrPngPath;
   const commandEnv = {
     ...env,
-    ...options.source === "telegram" ? { OLYMPUS_TELEGRAM_SESSION_PATH: sessionPath } : {
+    ...options.source === "telegram" ? { OLYMPUS_TELEGRAM_SESSION_PATH: pairingPath } : {
       OLYMPUS_WHATSAPP_STATE_DIR: sessionPath,
       OLYMPUS_WHATSAPP_QR_STDOUT: "false",
       OLYMPUS_WHATSAPP_PAIR_TTY_QR: options.whatsappQrMode === "artifact" ? "false" : "true"
@@ -36984,11 +37061,17 @@ async function pairMessagingSource(options) {
     throw pairingFailure(options.source, safeErrorCode(result.stderr));
   }
   const receipt = parseReadyReceipt(stdoutEvents, options.source);
-  if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve13(receipt.session_path) !== resolve13(sessionPath))) {
+  if (options.source === "telegram" && (typeof receipt.session_path !== "string" || resolve13(receipt.session_path) !== resolve13(pairingPath))) {
     throw new Error("Telegram pairing proved a different session path than the one Olympus requested.");
   }
   const chats = options.source === "telegram" ? parseTelegramDialogs(receipt.dialogs) : [];
   const accountProof = proofForReceipt(options.source, receipt);
+  if (historyAccount !== undefined && compareProviderAccounts(historyAccount, accountProof) !== "same") {
+    refuseOtherTelegramAccount(staged ? pairingPath : sessionExisted ? undefined : sessionPath);
+  }
+  if (staged)
+    keepStagedTelegramSession(pairingPath, sessionPath);
+  const madeSession = sessionExisted ? undefined : sessionPath;
   const approval = options.captureScopeApproval ?? await options.requestCaptureScope?.({
     source: options.source,
     accountProof,
@@ -37006,6 +37089,13 @@ async function pairMessagingSource(options) {
       captureStarted: false,
       registered: false
     };
+  }
+  if (options.source === "telegram") {
+    const recorded = historyAccount === accountProof ? "same" : await recordPairingAccount(account, accountProof, registryEnv, workerTransport).catch(() => {
+      return;
+    });
+    if (recorded === "different" || recorded === "unproven")
+      refuseOtherTelegramAccount(madeSession);
   }
   const producer = producerLaunch(options.source, approval, helper, packageRoot, sessionPath, chats, layout);
   const rollbackCredentials = options.source === "telegram" ? await persistTelegramCredentials(secretStore, result.privatePayload) : async () => {};
@@ -37244,6 +37334,31 @@ function parseTelegramDialogs(value) {
 function proofForReceipt(source, receipt) {
   return source === "telegram" ? `telegram:${String(receipt.proof.account_ref)}` : "whatsapp:authenticated-linked-device";
 }
+function historyAccountOf(account, env) {
+  try {
+    return recordedProviderAccount(account, env);
+  } catch (error) {
+    if (error instanceof SourceRegistryError)
+      throw error;
+    return;
+  }
+}
+function removeTelegramLogin(base) {
+  for (const suffix of [".session", ".session-journal"])
+    rmSync8(`${base}${suffix}`, { force: true });
+}
+function refuseOtherTelegramAccount(madeSession) {
+  if (madeSession)
+    removeTelegramLogin(madeSession);
+  throw new Error("This Telegram account is not the one whose messages Olympus already holds, so it was not paired: one source never holds two accounts. " + "To keep that history, pair the Telegram account it came from. To pair this one instead, delete that history first: " + "Unpair Telegram, run `olympus data delete --source telegram.messages` (preview with --dry-run), then pair again.");
+}
+function keepStagedTelegramSession(stagedBase, base) {
+  if (existsSync29(`${stagedBase}.session-journal`)) {
+    throw new Error("Telegram pairing did not finish writing its login. Re-run olympus connect telegram --pair in your private terminal.");
+  }
+  rmSync8(`${base}.session-journal`, { force: true });
+  renameSync5(`${stagedBase}.session`, `${base}.session`);
+}
 function pairingFailure(source, code) {
   if (source === "whatsapp" && code?.startsWith("unsupported_")) {
     return new Error(`WhatsApp requested a linking step this bridge does not support (${code}). No account was connected or capture started. Ask your agent to check compatibility before another scan.`);
@@ -37402,6 +37517,9 @@ var init_messaging_pairing = __esm(() => {
   init_olympus_layout();
   init_pairing_session_paths();
   init_pairing_placement();
+  init_provider_account_identity();
+  init_source_registry();
+  init_source_storage();
 });
 
 // src/core/whatsapp-notice.ts
@@ -77906,7 +78024,9 @@ function deleteOlympusData(options) {
   removed.push(...releaseSourceMedia(sourceMedia, options.dryRun === true));
   if (selectedSource && options.dryRun !== true) {
     try {
-      dropMovePlans(envForContext(options), [selectedSource.sourceId, ...selectedSource.sourceAliases ?? []]);
+      const deleted = [selectedSource.sourceId, ...selectedSource.sourceAliases ?? []];
+      dropMovePlans(envForContext(options), deleted);
+      forgetProviderAccounts(envForContext(options), deleted);
     } catch (error) {
       if (!(error instanceof SourceRegistryError))
         throw error;
@@ -143223,6 +143343,13 @@ function pairingPlacementForCli(body, env = process.env) {
   }
   return { layout: placeOwnedAccount({ sourceId }, env) };
 }
+function pairingAccountForCli(body, env = process.env) {
+  const accountId = typeof body.account_id === "string" ? body.account_id : "";
+  if (body.source_id !== TELEGRAM_SOURCE_ID || !/^telegram:[0-9a-f]{16}$/.test(accountId)) {
+    throw new OperationError("invalid_params", "A paired account can be recorded only for Telegram, by its account reference.");
+  }
+  return { result: recordProviderAccount({ sourceId: TELEGRAM_SOURCE_ID }, accountId, env) };
+}
 function ingestionStatusForCli() {
   return collectLocalSourceIngestionLedger({ config: loadConfig() });
 }
@@ -143635,6 +143762,8 @@ function createEmailSourceWorker(options = {}) {
                 return json(await tierForCli(body));
               case "pairing-placement":
                 return json(pairingPlacementForCli(body));
+              case "pairing-account":
+                return json(pairingAccountForCli(body));
             }
           }
         }
@@ -164862,6 +164991,26 @@ ${folderIds.join(",")}`).digest("hex");
     return answer;
   };
   let evidenceRecordAttempted = false;
+  let historyRecorded;
+  const historyAccountId = () => {
+    try {
+      return options.historyAccount?.read();
+    } catch (error2) {
+      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not read which account its stored items belong to (${error2 instanceof Error ? error2.message : String(error2)}); nothing was synced this run.`);
+    }
+  };
+  const recordHistoryAccount = () => {
+    if (!options.historyAccount)
+      return;
+    const read = readSourceAccountBindings(bindingsPath);
+    const bound = read.kind === "ok" ? read.bindings.sources[options.sourceId] : undefined;
+    if (!bound?.provider_account_id || bound.purge_required || bound.provider_account_id === historyRecorded)
+      return;
+    try {
+      options.historyAccount.record(bound.provider_account_id);
+      historyRecorded = bound.provider_account_id;
+    } catch {}
+  };
   const tokenAccountId = async () => {
     const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
     if (options.readAccountId) {
@@ -164906,81 +165055,86 @@ ${folderIds.join(",")}`).digest("hex");
       return exclusive(checked);
     },
     async assertAccount() {
-      const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
-      if (!handle) {
-        throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} is not connected.`);
-      }
-      if (options.laneStoresStale?.()) {
-        const restarting2 = options.requestStoreReopen?.() ?? false;
-        throw new SourceAccountChangedError("source_stores_reopen_required", restarting2 ? `${options.sourceId}'s stored data was deleted while the worker was running; the worker is restarting to reopen it.` : `${options.sourceId}'s stored data was deleted while the worker was running. Restart the Olympus worker so it reopens the source's stores before syncing.`);
-      }
-      const token = await tokenAccountId();
-      const decide2 = (binding) => decideSourceAccountAction({
-        binding,
-        grantAccountId: handle.providerAccountId,
-        grantConnectedAt: handle.connectedAt,
-        tokenAccountId: token,
-        laneHoldsItems: options.laneHoldsItems(),
-        now: now()
-      });
-      const read = readSourceAccountBindings(bindingsPath);
-      if (read.kind === "malformed")
-        throw new SourceAccountBindingsUnreadableError(bindingsPath);
-      let decision = decide2(read.bindings.sources[options.sourceId]);
-      const current2 = read.bindings.sources[options.sourceId];
-      if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current2?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current2.previous_account_folders) === true) {
-        let bound = false;
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
-          const grantNow = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
-          if (JSON.stringify(latest ?? null) !== JSON.stringify(current2 ?? null) || grantNow?.connectedAt !== handle.connectedAt || grantNow?.providerAccountId !== handle.providerAccountId)
-            return latest;
-          bound = true;
-          return { provider_account_id: token, bound_at: now().toISOString(), bound_grant: handle.connectedAt };
-        });
-        if (bound)
-          return;
-        throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} was reconnected while its account was being confirmed; it is checked again on the next run.`);
-      }
-      if (decision.action === "proceed" && decision.write === undefined && !token && lastAccessToken && options.ownAccountEvidence && !evidenceRecordAttempted && !current2?.provider_account_id && !current2?.reconnected_at && !current2?.previous_account_folders?.length) {
-        const folders = await options.ownAccountEvidence.record(lastAccessToken).catch(() => {
-          return;
-        });
-        if (folders !== undefined)
-          evidenceRecordAttempted = true;
-        if (folders?.length) {
-          updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => latest?.provider_account_id || latest?.reconnected_at || latest?.purge_required ? latest : { ...latest, previous_account_folders: folders.slice(0, 5) });
-        }
-      }
-      if (decision.action === "proceed" && decision.write === undefined)
-        return;
-      if (decision.action !== "refuse") {
-        updateSourceAccountBinding(bindingsPath, options.sourceId, (current3) => {
-          decision = decide2(current3);
-          if (decision.action === "proceed") {
-            return decision.write === undefined ? current3 : decision.write ?? undefined;
-          }
-          if (decision.action === "purge") {
-            return current3?.purge_required ? current3 : { ...current3, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
-          }
-          return current3;
-        });
-      }
-      if (decision.action === "proceed")
-        return;
-      if (decision.action === "refuse" && decision.reason === "token_account_mismatch" && options.readAccountId) {
-        throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: this source is set to read a different account than the connected credential's, so nothing was synced. This clears once the worker picks up a reconnect; if it stays, remove the account override from the worker's environment.`);
-      }
-      if (decision.action === "refuse" && decision.reason === "token_account_mismatch") {
-        invalidateMintedCredentialSessions(options.handle);
-        verified.clear();
-        throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced. If a Connect for this source just failed, connect it again.`);
-      }
-      if (decision.action === "refuse") {
-        throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`);
-      }
-      throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
+      await verifyAccount();
+      recordHistoryAccount();
     }
   };
+  async function verifyAccount() {
+    const handle = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+    if (!handle) {
+      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} is not connected.`);
+    }
+    if (options.laneStoresStale?.()) {
+      const restarting2 = options.requestStoreReopen?.() ?? false;
+      throw new SourceAccountChangedError("source_stores_reopen_required", restarting2 ? `${options.sourceId}'s stored data was deleted while the worker was running; the worker is restarting to reopen it.` : `${options.sourceId}'s stored data was deleted while the worker was running. Restart the Olympus worker so it reopens the source's stores before syncing.`);
+    }
+    const token = await tokenAccountId();
+    const history = historyAccountId();
+    const decide2 = (binding) => decideSourceAccountAction({
+      binding: binding?.provider_account_id || !history ? binding : { ...binding, provider_account_id: history },
+      grantAccountId: handle.providerAccountId,
+      grantConnectedAt: handle.connectedAt,
+      tokenAccountId: token,
+      laneHoldsItems: options.laneHoldsItems(),
+      now: now()
+    });
+    const read = readSourceAccountBindings(bindingsPath);
+    if (read.kind === "malformed")
+      throw new SourceAccountBindingsUnreadableError(bindingsPath);
+    let decision = decide2(read.bindings.sources[options.sourceId]);
+    const current2 = read.bindings.sources[options.sourceId];
+    if (decision.action === "purge" && decision.reason === "previous_account_unknown" && token && lastAccessToken && current2?.previous_account_folders?.length && await evidenceOpens(lastAccessToken, current2.previous_account_folders) === true) {
+      let bound = false;
+      updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => {
+        const grantNow = readConnectedHandleRegistry(options.registryPath).handles.find((entry) => entry.handle === options.handle);
+        if (JSON.stringify(latest ?? null) !== JSON.stringify(current2 ?? null) || grantNow?.connectedAt !== handle.connectedAt || grantNow?.providerAccountId !== handle.providerAccountId)
+          return latest;
+        bound = true;
+        return { provider_account_id: token, bound_at: now().toISOString(), bound_grant: handle.connectedAt };
+      });
+      if (bound)
+        return;
+      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId} was reconnected while its account was being confirmed; it is checked again on the next run.`);
+    }
+    if (decision.action === "proceed" && decision.write === undefined && !token && lastAccessToken && options.ownAccountEvidence && !evidenceRecordAttempted && !current2?.provider_account_id && !current2?.reconnected_at && !current2?.previous_account_folders?.length) {
+      const folders = await options.ownAccountEvidence.record(lastAccessToken).catch(() => {
+        return;
+      });
+      if (folders !== undefined)
+        evidenceRecordAttempted = true;
+      if (folders?.length) {
+        updateSourceAccountBinding(bindingsPath, options.sourceId, (latest) => latest?.provider_account_id || latest?.reconnected_at || latest?.purge_required ? latest : { ...latest, previous_account_folders: folders.slice(0, 5) });
+      }
+    }
+    if (decision.action === "proceed" && decision.write === undefined)
+      return;
+    if (decision.action !== "refuse") {
+      updateSourceAccountBinding(bindingsPath, options.sourceId, (current3) => {
+        decision = decide2(current3);
+        if (decision.action === "proceed") {
+          return decision.write === undefined ? current3 : decision.write ?? undefined;
+        }
+        if (decision.action === "purge") {
+          return current3?.purge_required ? current3 : { ...current3, purge_required: { reason: decision.reason, detected_at: now().toISOString() } };
+        }
+        return current3;
+      });
+    }
+    if (decision.action === "proceed")
+      return;
+    if (decision.action === "refuse" && decision.reason === "token_account_mismatch" && options.readAccountId) {
+      throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: this source is set to read a different account than the connected credential's, so nothing was synced. This clears once the worker picks up a reconnect; if it stays, remove the account override from the worker's environment.`);
+    }
+    if (decision.action === "refuse" && decision.reason === "token_account_mismatch") {
+      invalidateMintedCredentialSessions(options.handle);
+      verified.clear();
+      throw new SourceAccountChangedError("source_account_token_mismatch", `${options.sourceId}: the access token in use belongs to a different account than the connected credential; it was discarded and nothing was synced. If a Connect for this source just failed, connect it again.`);
+    }
+    if (decision.action === "refuse") {
+      throw new SourceAccountChangedError("source_account_unverified", `${options.sourceId}: could not confirm which account the credential belongs to; nothing was synced this run.`);
+    }
+    throw new SourceAccountChangedError("source_account_changed", `${options.sourceId} is now connected to ${decision.reason === "account_changed" ? "a different account" : "an account that could not be matched to the one its items came from"}, ` + "so nothing syncs: one source never holds two accounts. To keep the items already stored, reconnect the previous account. " + `To replace them, Disconnect the source, run \`olympus data delete --source ${options.sourceId}\` (preview with --dry-run), then connect again.`);
+  }
   return guard;
 }
 function guardAccountBoundLanes(sources, guards) {
@@ -187633,6 +187787,12 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
         laneHoldsItems: lane.laneHoldsItems,
         laneStoresStale: lane.laneStoresStale,
         requestStoreReopen: () => requestModelReload(),
+        historyAccount: {
+          read: () => recordedProviderAccount({ sourceId: lane.sourceId }),
+          record: (providerAccountId) => {
+            recordProviderAccount({ sourceId: lane.sourceId }, providerAccountId);
+          }
+        },
         ...lane.ownAccountEvidence ? { ownAccountEvidence: lane.ownAccountEvidence } : {},
         ...lane.readsAs ? { readAccountId: () => lane.readsAs?.accountId } : {}
       });

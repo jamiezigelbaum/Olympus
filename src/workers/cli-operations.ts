@@ -15,7 +15,7 @@ import { loadConfig } from '../core/config.ts';
 import { STOP_OLYMPUS_HINT } from '../core/data-owner-lock.ts';
 import { TELEGRAM_SOURCE_ID, WHATSAPP_SOURCE_ID } from '../core/olympus-layout.ts';
 import { OperationError } from '../core/operation-error.ts';
-import { placeOwnedAccount } from '../core/source-storage.ts';
+import { placeOwnedAccount, recordProviderAccount, type ProviderAccountRecord } from '../core/source-storage.ts';
 import { exportOlympusData, lifecycleDataRoot, type DataExportResult, type LifecyclePathContext } from '../data-lifecycle.ts';
 import {
   runTierCommand,
@@ -67,6 +67,22 @@ export function pairingPlacementForCli(
     throw new OperationError('invalid_params', 'Placement can be asked only for a Telegram or WhatsApp account.');
   }
   return { layout: placeOwnedAccount({ sourceId }, env) };
+}
+
+/**
+ * `olympus connect telegram --pair`, recording the Telegram account a pairing
+ * proved on the account's registry entry: this worker owns the data, so it
+ * decides (core/pairing-placement.ts, recordPairingAccount).
+ */
+export function pairingAccountForCli(
+  body: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): { result: ProviderAccountRecord } {
+  const accountId = typeof body.account_id === 'string' ? body.account_id : '';
+  if (body.source_id !== TELEGRAM_SOURCE_ID || !/^telegram:[0-9a-f]{16}$/.test(accountId)) {
+    throw new OperationError('invalid_params', 'A paired account can be recorded only for Telegram, by its account reference.');
+  }
+  return { result: recordProviderAccount({ sourceId: TELEGRAM_SOURCE_ID }, accountId, env) };
 }
 
 /** `olympus ingestion status`: the ledger, collected in this process. */
