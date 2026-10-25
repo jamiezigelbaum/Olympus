@@ -372,7 +372,19 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   brought. A record without a version is accepted as the version the store
   holds and keeps it. The page's provisional state records deletions and
   carries content a names-only record did not remove. Children that only a
-  superseded parent listed stay (they are items of their own).
+  superseded parent listed stay (they are items of their own). Names alone
+  never bring a deletion or a Secret back, within a page or across pages: a
+  names-only record after a deletion stays a deletion at the newer version, and
+  only content from after the item's last deletion is carried forward. A merged
+  item resumes from the record that brought its content, so a pass cut between
+  the two does not lose it. The routing plan is keyed by the item's identity,
+  its version and a digest of the text and names judged, so two bodies of one
+  version are each judged. Known residual: a deletion of an item no pass ever
+  stored leaves no row, so a later tie or unversioned body can still be stored.
+- **A refused item is told (2026-10-26).** When placement refuses an item (for
+  example a trust domain that does not match), the import still completes but
+  shows it as a gap, "Not imported" (`item_refused`), with the count, as the
+  other fail-closed skips do.
 - **Counting.** An import counts its own run ("N items from this archive, of
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts
