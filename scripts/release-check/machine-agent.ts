@@ -41,7 +41,7 @@ import { capturePlants, captureScreens, CdpJourneyDriver, type CapturedScreen } 
 import type { PlantedPicture } from './reviewer-plants.ts';
 import { runJourney, type JourneyTrace } from './journey.ts';
 import { selectJourneys } from './journeys.ts';
-import { explore, pagesAccessibilityAudit, withPageAudits, type Seed } from './explore.ts';
+import { explore, pagesAccessibilityAudit, withPageAudits, type Accessibility, type Seed } from './explore.ts';
 import { composeSeeds, localFilesDriver, type SeedContext } from './explore-seeds.ts';
 import { explorePages, inboxAnswers } from './explore-pages.ts';
 import type { PageInventory } from './explore-pages-inventory.ts';
@@ -1391,6 +1391,9 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
   let opened: OpenedBrowser | undefined;
   let failure: string | undefined;
   let result: Awaited<ReturnType<typeof explore>> | undefined;
+  let pages: Awaited<ReturnType<typeof explorePages>> | undefined;
+  let pageAudit: ReturnType<typeof pagesAccessibilityAudit> | undefined;
+  let engineRestart: { ok: boolean; ms: number; detail: string } | undefined;
   try {
     opened = await openBrowser(browser!, 'chrome-profile-explore', EXPLORE_DEBUG_PORT, true);
     const driver = new CdpJourneyDriver({
@@ -1416,8 +1419,6 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     // The computer's other pages come first, on the install as the earlier phases left it. The Sources states that follow disconnect and
     // delete, and a product failure there (an engine that stops answering) must not hide these pages. Each page is audited as it loads,
     // in the same accessibility check. Lock ends the session, so the Sources crawl signs in again.
-    let pages: Awaited<ReturnType<typeof explorePages>> | undefined;
-    let pageAudit: ReturnType<typeof pagesAccessibilityAudit> | undefined;
     if (pagesInventoryPath && existsSync(pagesInventoryPath)) {
       const pagesInventory = JSON.parse(readFileSync(pagesInventoryPath, 'utf8')) as PageInventory;
       pageAudit = axeSource ? pagesAccessibilityAudit(axeSource) : undefined;
@@ -1427,7 +1428,6 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
     }
     // An engine that stopped answering in the pages crawl has already failed there. It is restarted the owner's way so the Sources
     // section is still crawled, and the restart is reported: one failure must not hide the rest.
-    let engineRestart: { ok: boolean; ms: number; detail: string } | undefined;
     try { await waitForEngine(30_000); } catch (error) {
       const stopped = error instanceof Error ? error.message : String(error);
       const restarted = await restartEngine(300_000);
@@ -1446,6 +1446,14 @@ async function exploreCommand(outDir: string, inventoryPath: string, pagesInvent
   } finally {
     opened?.close();
     stopBridge();
+  }
+  // A failure in the Sources crawl (signing in again on an engine that is gone) keeps what the pages crawl found.
+  if (!result && pages) {
+    const skipped: Accessibility = { status: 'skipped', reason: `the Sources section was not crawled: ${failure ?? 'it did not run'}` };
+    result = {
+      seeds: [], traces: [], coverage: [], unlisted: [], summary: { listed: 0, found: 0, pressed: 0, missed: 0, unlisted: 0, presses: 0 },
+      accessibility: pageAudit ? withPageAudits(skipped, pageAudit) : skipped, pages, ...(engineRestart ? { engineRestart } : {}),
+    };
   }
   writeFileSync(join(outDir, 'explore.json'), JSON.stringify(result ?? null));
   const archive = join(WORKDIR, 'explore.tgz');
