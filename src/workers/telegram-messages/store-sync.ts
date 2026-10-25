@@ -39,7 +39,9 @@ import {
   defaultTelegramCaptureSpoolDir,
   readTelegramCaptureSpool,
   readTelegramCaptureSpoolNewestCapturedAt,
+  readTelegramCaptureHeartbeat,
   redactTelegramCaptureSpoolSecrets,
+  telegramCaptureSpoolCursorState,
   type TelegramCaptureSpoolRecord,
 } from './capture-spool-connector.ts';
 
@@ -48,6 +50,10 @@ export const TELEGRAM_PERSONAL_ACCOUNT_SCOPE = 'telegram.personal';
 export const TELEGRAM_MALFORMED_SPOOL_WARNING = 'telegram_malformed_spool_records';
 export const TELEGRAM_TRUST_CONFLICT_WARNING = 'telegram_trust_conflict_items';
 export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_redaction_failed';
+// A lane's cursor no longer named a place in the spool (its file was removed
+// while older ones stayed, or the file is shorter than the cursor says), so
+// the lane reads the spool again from its start instead of stopping for good.
+export const TELEGRAM_SPOOL_CURSOR_RESET_WARNING = 'telegram_spool_cursor_reset';
 // Where the full-spool Secrets pass stands, kept in the set's tier ledger.
 export const TELEGRAM_SPOOL_REDACTION_STATE_KEY = 'capture_spool_secret_redaction:telegram';
 export const DEFAULT_TELEGRAM_PULL_MAX_ITEMS = 500;
@@ -88,13 +94,22 @@ export interface TelegramConnectorStoreSyncReceipt {
      * rewrote without their text (blanked ones included).
      */
     spool_records_redacted: number;
+    /** Lanes whose cursor named no place in the spool and were read again from its start. */
+    spool_cursor_resets: number;
+    /**
+     * 1 when the capture helper is running (its last cycle is recent) but no
+     * message arrived within the threshold: a quiet account, not a stopped
+     * capture. The freshness verdict is then fresh.
+     */
+    capture_quiet: 0 | 1;
   } & CaptureFreshnessCounts;
   /**
-   * What the newest captured message says about the live feed: a pull can
-   * succeed on schedule while the helper has captured nothing for days. The
-   * same verdict WhatsApp reports, from the spool's newest `captured_at` (the
-   * helper's own gateway report reads the same field). The time itself is not
-   * returned.
+   * Whether the live feed is running: a pull can succeed on schedule while
+   * the helper has captured nothing for days. The age is from the newer of the
+   * spool's newest `captured_at` and the helper's last finished cycle (its
+   * heartbeat beside the spool), so a quiet account with a running helper
+   * reads fresh and only a stopped capture reads stale. The time itself is
+   * not returned.
    */
   capture: CaptureFreshness;
   warnings?: string[];
@@ -211,13 +226,22 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         options.reconciliation ?? {},
       );
 
+      // A cursor that names no place in the spool any more is dropped here,
+      // so both the preflight and its lane read from the start (idempotent)
+      // instead of every later pull failing on it.
+      let cursorResets = 0;
+      const placed = (cursor: string | undefined): string | undefined => {
+        if (!cursor || telegramCaptureSpoolCursorState(spoolDir, cursor) === 'ok') return cursor;
+        cursorResets += 1;
+        return undefined;
+      };
       const cursors = {
-        internal: sanitizeTelegramCaptureCursor(
+        internal: placed(sanitizeTelegramCaptureCursor(
           options.stores.internal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.internal)?.cursor,
-        ),
-        secureLocal: sanitizeTelegramCaptureCursor(
+        )),
+        secureLocal: placed(sanitizeTelegramCaptureCursor(
           options.stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor,
-        ),
+        )),
       };
 
       // Validate the next bounded unread window before either trust lane writes.
@@ -354,8 +378,10 @@ export function createTelegramConnectorStoreSyncHandler(options: {
         eviction.counts.itemsRelinquished + reconciliation.itemsRelinquished,
         redacted,
         redactionFailed,
-        captureFreshness(
+        cursorResets,
+        telegramCaptureLiveness(
           readTelegramCaptureSpoolNewestCapturedAt(spoolDir),
+          readTelegramCaptureHeartbeat(spoolDir),
           now().getTime(),
           staleThresholdSeconds,
         ),
@@ -407,6 +433,28 @@ function lanesReadThrough(stores: TelegramConnectorStores): string | undefined {
     stores.secureLocal.lastCompletedSyncRun(TELEGRAM_CAPTURE_CONNECTOR_IDS.secure_local)?.cursor,
   );
   return internal && secureLocal ? earlierCursor(internal, secureLocal) : undefined;
+}
+
+/**
+ * The live feed's verdict from its newest record and the helper's heartbeat:
+ * the age is from the newer of the two, and the feed is quiet when the
+ * heartbeat is fresh but no record is (or there is none). A heartbeat from
+ * the future (a clock moved back) is not believed.
+ */
+export function telegramCaptureLiveness(
+  newestRecordAt: string | undefined,
+  heartbeatAt: string | undefined,
+  nowMs: number,
+  thresholdSeconds: number,
+): CaptureFreshness & { quiet: boolean } {
+  const heartbeatMs = heartbeatAt ? Date.parse(heartbeatAt) : Number.NaN;
+  const believable = Number.isFinite(heartbeatMs) && heartbeatMs <= nowMs + 60_000 ? heartbeatAt : undefined;
+  const record = captureFreshness(newestRecordAt, nowMs, thresholdSeconds);
+  const heartbeat = captureFreshness(believable, nowMs, thresholdSeconds);
+  const newest = [record, heartbeat]
+    .filter((verdict) => verdict.age_seconds !== undefined)
+    .sort((a, b) => a.age_seconds! - b.age_seconds!)[0] ?? record;
+  return { ...newest, quiet: heartbeat.status === 'fresh' && record.status !== 'fresh' };
 }
 
 export function telegramPullMaxItems(value: number | undefined): number {
@@ -481,8 +529,10 @@ function telegramSyncReceipt(
   trustConflictEvictions: number,
   redacted: CaptureSpoolRedactionResult | undefined,
   redactionFailed: boolean,
-  capture: CaptureFreshness,
+  cursorResets: number,
+  liveness: CaptureFreshness & { quiet: boolean },
 ): TelegramConnectorStoreSyncReceipt {
+  const { quiet, ...capture } = liveness;
   const runs = [internal, secureLocal];
   const counts = {
     items_seen: sum(runs, 'itemsSeen'),
@@ -499,12 +549,15 @@ function telegramSyncReceipt(
     trust_conflict_items: trustConflictItems,
     trust_conflict_evictions: trustConflictEvictions,
     spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
+    spool_cursor_resets: cursorResets,
+    capture_quiet: quiet ? 1 as const : 0 as const,
     ...captureFreshnessCounts(capture),
   };
   const warnings = [
     ...(malformedRecords > 0 ? [TELEGRAM_MALFORMED_SPOOL_WARNING] : []),
     ...(trustConflictItems > 0 ? [TELEGRAM_TRUST_CONFLICT_WARNING] : []),
     ...(redactionFailed ? [TELEGRAM_SPOOL_REDACTION_FAILED_WARNING] : []),
+    ...(cursorResets > 0 ? [TELEGRAM_SPOOL_CURSOR_RESET_WARNING] : []),
   ];
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? 'progress' : 'idle',
