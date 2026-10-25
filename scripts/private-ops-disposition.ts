@@ -40,6 +40,7 @@ const ALLOWED_DOCS = new Set([
   'docs/design/categorization-precision.md',
   'docs/design/chatgpt-plugin.md',
   'docs/design/child-items.md',
+  'docs/design/archive-live-one-dataset.md',
   'docs/design/consult-gate-false-refusals.md',
   'docs/design/consult-m1-measurement.md',
   'docs/design/consult-pii-bakeoff.md',
