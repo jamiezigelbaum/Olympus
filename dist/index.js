@@ -5899,6 +5899,9 @@ var init_messaging_capture_grant_file = () => {};
 
 // src/core/source-registry.ts
 import { readFileSync as readFileSync15 } from "node:fs";
+function sourceAccountMovePending(account) {
+  return account.migration?.state === "moving" || account.migration?.state === "reverting";
+}
 function sourceRegistryPath(env = process.env) {
   return olympusDataPath(env, "registry.json");
 }
@@ -6019,6 +6022,14 @@ function placedAccount(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT)
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
 }
+function accountMovePending(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT) {
+  try {
+    const entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
+    return entry !== undefined && sourceAccountMovePending(entry);
+  } catch {
+    return false;
+  }
+}
 function hasAccountFolderOnDisk(sourceId, slot, env) {
   try {
     lstatSync8(accountFolder({ source_id: sourceId, slot }, env));
@@ -6064,7 +6075,7 @@ function declaredConnectorStoreMounts(env = process.env) {
   }
   return found;
 }
-function pinnedLegacyBy(sourceId, env) {
+function pinnedLegacyBy(sourceId, env, withGrant = true) {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim())
       return name;
@@ -6072,7 +6083,7 @@ function pinnedLegacyBy(sourceId, env) {
   const native = nativeCaptureOwnerPin(sourceId, env);
   if (native)
     return native;
-  const grant = captureGrantPin(sourceId, env);
+  const grant = withGrant ? captureGrantPin(sourceId, env) : undefined;
   if (grant)
     return grant;
   const mounts = declaredConnectorStoreMounts(env);
@@ -17687,16 +17698,30 @@ var init_local_index = __esm(() => {
   ]);
 });
 
+// src/core/data-owner-lock.ts
+import { createRequire as createRequire4 } from "node:module";
+var runtimeRequire3, O_CLOEXEC;
+var init_data_owner_lock = __esm(() => {
+  init_olympus_layout();
+  runtimeRequire3 = createRequire4(import.meta.url);
+  O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
+});
+
 // src/core/source-storage.ts
+var CAPTURE_CLAIM_RECLAIM_AGE_MS;
 var init_source_storage = __esm(() => {
   init_secret_locations();
   init_sniffer_store();
   init_tier_ledger();
   init_local_index();
+  init_olympus_layout();
+  init_data_owner_lock();
+  init_file_lease();
   init_source_placement();
   init_provider_account_identity();
   init_store_identity();
   init_source_registry();
+  CAPTURE_CLAIM_RECLAIM_AGE_MS = 60 * 60000;
 });
 
 // src/workers/readwise/connector.ts
@@ -19268,15 +19293,6 @@ var init_dropbox_files = __esm(() => {
   init_qualification2();
   init_tier_set();
   init_connector_store2();
-});
-
-// src/core/data-owner-lock.ts
-import { createRequire as createRequire4 } from "node:module";
-var runtimeRequire3, O_CLOEXEC;
-var init_data_owner_lock = __esm(() => {
-  init_olympus_layout();
-  runtimeRequire3 = createRequire4(import.meta.url);
-  O_CLOEXEC = process.platform === "darwin" ? 16777216 : 524288;
 });
 
 // src/workers/local-files/paths.ts
@@ -26106,6 +26122,9 @@ function applyConfiguredPaths(config, env) {
     env.OLYMPUS_TELEGRAM_GATEWAY_REPORT_PATH = capture.reportPath;
 }
 function applyFolderPaths(config, layoutEnv, env) {
+  if (accountMovePending(TELEGRAM_SOURCE_ID, layoutEnv)) {
+    throw new NativeProcessConfigurationError("Olympus Telegram capture service: this account is part way through a move into its account folder that Olympus could not finish, so capture waits; its row in Needs you says why.");
+  }
   const account = placedAccount(TELEGRAM_SOURCE_ID, layoutEnv);
   if (account.layout !== "folder")
     return;
@@ -26233,6 +26252,9 @@ function baseEnvironment2() {
   return Object.fromEntries(["HOME", "PATH", "TMPDIR", "LANG"].map((name) => [name, process.env[name]]).filter((entry) => typeof entry[1] === "string" && entry[1].length > 0));
 }
 function captureStateDir(configured, env, layoutEnv) {
+  if (accountMovePending(WHATSAPP_SOURCE_ID, layoutEnv)) {
+    throw new NativeProcessConfigurationError("Olympus WhatsApp capture service: this account is part way through a move into its account folder that Olympus could not finish, so capture waits; its row in Needs you says why.");
+  }
   const account = placedAccount(WHATSAPP_SOURCE_ID, layoutEnv);
   if (account.layout !== "folder")
     return configured ?? legacyWhatsAppServiceStateDir(env);

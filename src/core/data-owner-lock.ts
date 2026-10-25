@@ -129,7 +129,7 @@ function tryFlock(lockPath: string): number | undefined {
   // Closing this descriptor leaves the holder's lock alone: flock is per descriptor.
   closeSync(fd);
   if (failure === osConstants.errno.EWOULDBLOCK || failure === osConstants.errno.EAGAIN) return undefined;
-  throw new Error(`The data owner lock ${lockPath} could not be taken (flock errno ${failure}).`);
+  throw new Error(`The lock ${lockPath} could not be taken (flock errno ${failure}).`);
 }
 
 interface FlockLibrary {
@@ -160,6 +160,46 @@ function flockLibrary(): FlockLibrary {
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * A `flock(2)` exclusive lock on a file other than the owner lock, taken the
+ * same way: a capture helper's lock (Telegram's `gateway.lock`, WhatsApp's
+ * `bridge.lock`), which the boot migration holds while it moves the folder the
+ * lock sits in, and which a spawner hands to the helper it starts.
+ */
+export interface HeldFileFlock {
+  /** The descriptor that holds the lock (close-on-exec: a child gets it only when it is passed on). */
+  readonly fd: number;
+  /** Let go of the lock and close the descriptor. */
+  release(): void;
+  /**
+   * Close this descriptor and keep the lock: for a spawner that passed it to a
+   * child, which now holds the lock alone, until it exits. (`LOCK_UN` would
+   * release it for the child too: they share one open file.)
+   */
+  handOff(): void;
+}
+
+/** The lock on `path` (made if it is not there, mode 0600), or `undefined` when another holder has it. Other failures throw. */
+export function tryHoldFileFlock(path: string): HeldFileFlock | undefined {
+  const fd = tryFlock(path);
+  if (fd === undefined) return undefined;
+  let open = true;
+  return {
+    fd,
+    release() {
+      if (!open) return;
+      open = false;
+      flockLibrary().flock(fd, LOCK_UN);
+      closeSync(fd);
+    },
+    handOff() {
+      if (!open) return;
+      open = false;
+      closeSync(fd);
+    },
+  };
 }
 
 /** The lock, or `undefined` when its owner is running. Other failures throw. */

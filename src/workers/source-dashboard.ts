@@ -829,7 +829,11 @@ export type DashboardCaptureSupervisorReason =
   /** The helper keeps exiting on its own shortly after it starts. */
   | 'helper_exited'
   /** The helper exited and has not been started again yet. Not a fault by itself. */
-  | 'restarting';
+  | 'restarting'
+  /** Another helper already holds the session's lock (one left running, or a pairing). */
+  | 'helper_running'
+  /** The account's files are part way through a move into its folder. */
+  | 'account_moving';
 
 /** What this worker's capture supervisor last reported for one source. */
 export interface DashboardCaptureSupervisor {

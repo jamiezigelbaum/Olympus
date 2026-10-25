@@ -29,7 +29,7 @@
  * Deliberately light, like the registry: no SQLite and no workers.
  */
 import { accessSync, constants, lstatSync, statSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   secretLocationsPathForStore,
   tierLedgerPathForStore,
@@ -43,6 +43,7 @@ import {
   accountRawPath,
   accountStorePath,
   legacyAccountPaths,
+  legacyWhatsAppDefaultStateDir,
   legacyOverrideEnvNames,
   extractionSpoolRoot,
   nativeCaptureOwnerPin,
@@ -56,7 +57,7 @@ import {
 } from './olympus-layout.ts';
 import { captureGrantPathFromEnv, captureGrantSessionEvidence } from './messaging-capture-grant-file.ts';
 import { defaultSourceCorpusRegistryConfig } from './source-corpus-registry.ts';
-import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, SourceRegistryError } from './source-registry.ts';
+import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, sourceAccountMovePending, SourceRegistryError } from './source-registry.ts';
 
 const ARCHIVE_IMPORTS_SOURCE_ID = 'archive.imports';
 const MOUNTS_ENV = 'OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON';
@@ -114,6 +115,48 @@ export function placedAccount(
     return { source_id: sourceId, slot, layout: 'legacy' };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
+}
+
+/**
+ * Whether the account's entry holds a move plan part way (core/source-account-migration.ts):
+ * its files are in two places, so no capture helper may start on them. A
+ * registry that cannot be read says nothing here; the storage service refuses
+ * to open anything until it is repaired.
+ */
+export function accountMovePending(sourceId: string, env: LayoutEnv = process.env, slot: string = DEFAULT_ACCOUNT_SLOT): boolean {
+  try {
+    const entry = findRegistryAccount(readSourceRegistry(env), sourceId, slot);
+    return entry !== undefined && sourceAccountMovePending(entry);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The bridge records each saved file's absolute path (a spool line's
+ * `media_path`, and the item's locator the store keeps), so a WhatsApp account
+ * the boot migration moved still has lines and items that name its old state
+ * folder. This maps such a path to the same file in the account folder's
+ * `raw/whatsapp` (the folder moved whole, so the rest of the path is the same),
+ * for an account whose move is done; every other path, and every path of an
+ * account that did not move, is returned as it is. Nothing is rewritten.
+ */
+export function whatsappMovedPathMapper(env: LayoutEnv = process.env): (path: string) => string {
+  const same = (path: string): string => path;
+  let entry;
+  try {
+    entry = findRegistryAccount(readSourceRegistry(env), WHATSAPP_SOURCE_ID, DEFAULT_ACCOUNT_SLOT);
+  } catch {
+    return same;
+  }
+  if (!entry || entry.layout !== 'folder' || entry.migration?.state !== 'done') return same;
+  const from = resolve(legacyWhatsAppDefaultStateDir(env));
+  const to = accountRawPath({ source_id: WHATSAPP_SOURCE_ID, slot: DEFAULT_ACCOUNT_SLOT, layout: 'folder' }, 'whatsapp', env);
+  return (path) => {
+    const below = relative(from, resolve(path));
+    if (below === '' || below === '..' || below.startsWith(`..${sep}`) || isAbsolute(below)) return path;
+    return join(to, below);
+  };
 }
 
 /**
@@ -252,20 +295,23 @@ export function declaredConnectorStoreMounts(env: LayoutEnv = process.env): Decl
  * What pins this source's files to their legacy paths, in words, when
  * something does: an env override, a connector-store mount (and, for
  * messaging, native capture ownership or a capture grant that names its
- * session). The boot migration leaves such an account where it is.
+ * session). The boot migration leaves such an account where it is. It weighs
+ * a messaging account's capture grant itself (`captureGrant: false`): a grant
+ * that names the default legacy session is what every legacy pairing wrote, and
+ * the move rewrites it (core/messaging-account-move.ts).
  */
-export function legacyPinFor(sourceId: string, env: LayoutEnv = process.env): string | undefined {
-  return pinnedLegacyBy(sourceId, env);
+export function legacyPinFor(sourceId: string, env: LayoutEnv = process.env, options: { captureGrant?: boolean } = {}): string | undefined {
+  return pinnedLegacyBy(sourceId, env, options.captureGrant !== false);
 }
 
 /** The override or mount that pins this source to the legacy layout, if any. */
-function pinnedLegacyBy(sourceId: string, env: LayoutEnv): string | undefined {
+function pinnedLegacyBy(sourceId: string, env: LayoutEnv, withGrant = true): string | undefined {
   for (const name of legacyOverrideEnvNames(sourceId)) {
     if (env[name]?.trim()) return name;
   }
   const native = nativeCaptureOwnerPin(sourceId, env);
   if (native) return native;
-  const grant = captureGrantPin(sourceId, env);
+  const grant = withGrant ? captureGrantPin(sourceId, env) : undefined;
   if (grant) return grant;
   const mounts = declaredConnectorStoreMounts(env);
   // The worker refuses a list it cannot read; until it is fixed nothing may move.

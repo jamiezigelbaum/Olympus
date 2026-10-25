@@ -331,7 +331,8 @@ import {
   type StoreFileOwner,
 } from '../../core/source-storage.ts';
 import { recordedProviderAccount } from '../../core/provider-account-history.ts';
-import { migrateAccountFolders, type AccountMigrationReport } from '../../core/source-account-migration.ts';
+import { accountFolderMigrationEnabled, migrateAccountFolders, type AccountMigrationOptions, type AccountMigrationReport } from '../../core/source-account-migration.ts';
+import { messagingMoveFacts, repointMovedMessagingAccounts } from '../../core/messaging-account-move.ts';
 import { takeWorkerDataOwnerLock, type HeldDataOwnerLock } from '../../core/data-owner-lock.ts';
 import { deleteMarkedAccounts, lifecycleStoreFileOwner, type DeleteMarkedAccountsReport } from '../../data-lifecycle.ts';
 import type { TierLedger } from '../classification/tier-ledger.ts';
@@ -348,7 +349,7 @@ import {
   type SourceFamily,
   type SourceTrustDomain,
 } from '../../core/source-index/types.ts';
-import { resolveSecretRefValueSync } from '../../core/secret-store.ts';
+import { createDefaultSecretStore, resolveSecretRefValueSync, type SecretStore } from '../../core/secret-store.ts';
 import {
   credentialConfigFingerprint,
   WorkerBootSecretResolver,
@@ -2130,9 +2131,9 @@ export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefine
  * boot left part way whatever the switch says. A registry that cannot be read
  * leaves every account where it is and the worker boots as it always did.
  */
-export function migrateAccountFoldersAtBoot(env: Record<string, string | undefined>): AccountMigrationReport | undefined {
+export function migrateAccountFoldersAtBoot(env: Record<string, string | undefined>, options: AccountMigrationOptions = {}): AccountMigrationReport | undefined {
   try {
-    const report = migrateAccountFolders(env);
+    const report = migrateAccountFolders(env, options);
     for (const sourceId of report.moved) console.log(`[storage] ${sourceId} moved into its account folder.`);
     for (const { sourceId, reason } of report.movedBack) console.warn(`[storage] ${sourceId} could not be moved (${reason}); its files were put back where they were.`);
     for (const { sourceId, reason } of report.skipped) console.log(`[storage] ${sourceId} stays where it is (${reason}).`);
@@ -2146,6 +2147,38 @@ export function migrateAccountFoldersAtBoot(env: Record<string, string | undefin
   }
 }
 
+/**
+ * The boot's whole account-folder step for the messaging sources too
+ * (core/messaging-account-move.ts): with the switch on, what each Telegram and
+ * WhatsApp account's records outside the data folder say is gathered first, so
+ * the pass can weigh them; after it, every record that still names the old
+ * place of an account a move finished is rewritten (switch or no switch, like
+ * a plan left part way). Before any capture child or service starts: the
+ * worker's capture supervisors are made after this, and the Gateway-run
+ * services wait for the worker's readiness.
+ */
+export async function moveAccountsAtBoot(env: Record<string, string | undefined>, secretStore: SecretStore = lazySecretStore(env)): Promise<AccountMigrationReport | undefined> {
+  const messaging = accountFolderMigrationEnabled(env) ? await messagingMoveFacts(env, secretStore) : undefined;
+  const report = migrateAccountFoldersAtBoot(env, messaging ? { messaging } : {});
+  const repointed = await repointMovedMessagingAccounts(env, secretStore);
+  for (const record of repointed.rewritten) console.log(`[storage] ${record} now names the account folder.`);
+  for (const { sourceId, message } of repointed.errors) console.warn(`[storage] ${sourceId} still has a record that names its old place (${message}); the next start tries again.`);
+  return report;
+}
+
+/** The secret store, made only if a boot step reads it (most boots do not). */
+function lazySecretStore(env: Record<string, string | undefined>): SecretStore {
+  let store: SecretStore | undefined;
+  const real = (): SecretStore => (store ??= createDefaultSecretStore({ env }));
+  return {
+    get label() { return real().label; },
+    get: (key) => real().get(key),
+    set: (key, value) => real().set(key, value),
+    delete: (key) => real().delete(key),
+    list: () => real().list(),
+  };
+}
+
 export async function main(): Promise<void> {
   // First, before anything mounts or opens a store: this worker owns the data
   // root. A second worker on it waits a short while (restarts overlap), then
@@ -2156,7 +2189,7 @@ export async function main(): Promise<void> {
   // An account recorded as legacy that holds nothing is placed in a folder instead.
   replaceEmptyAccountsAtBoot(process.env);
   // With the switch on, existing accounts move into their folders; a move under way is finished or undone.
-  migrateAccountFoldersAtBoot(process.env);
+  await moveAccountsAtBoot(process.env);
   // From here on, a writable store open records its account in the registry
   // (core/source-storage.ts). Before any lane mounts.
   enableSourceRegistryAdoption();

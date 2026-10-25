@@ -60,6 +60,7 @@ import {
   type UnpairedSourcesRead,
 } from '../credential-broker/unpaired-sources.ts';
 import {
+  pairingLayoutEnv,
   pairingSessionPathOverridden,
   pairingSessionPathsFromStoredValue,
   planPairingSessionRemoval,
@@ -70,6 +71,7 @@ import {
   type OlympusPathContext,
   type PairingPathRefusal,
 } from '../../core/pairing-session-paths.ts';
+import { movedSessionValue } from '../../core/messaging-account-move.ts';
 import type { V04PublicSourceId } from '../../core/public-source-capabilities.ts';
 import { TEXT_EXTRACTOR_KIND } from '../file-extraction/extractors/text.ts';
 import { TRANSCRIPTION_EXTRACTOR_KIND } from '../file-extraction/extractors/transcription.ts';
@@ -5808,7 +5810,7 @@ async function dashboardPairingSession(
     ? telegramPairingSessionPaths(resolved)
     : whatsappPairingSessionPaths(resolved);
   const sessionKeys = await dashboardSessionPathSecretKeys(source, handleCredentialKeys, secretStore);
-  const fromStored = await dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore);
+  const fromStored = await dashboardStoredSessionPaths(sourceId, source, sessionKeys, secretStore, pairingLayoutEnv(resolved));
   const credentialKeys = [...new Set([
     ...handleCredentialKeys,
     ...sessionKeys.filter((candidate) => candidate.stored).map((candidate) => candidate.key),
@@ -5894,13 +5896,16 @@ async function dashboardStoredSessionPaths(
   source: 'telegram' | 'whatsapp',
   sessionKeys: readonly DashboardSessionPathKey[],
   secretStore: SecretStore,
+  env: Record<string, string | undefined>,
 ): Promise<string[] | undefined> {
   const bySession = new Map<string, string[]>();
   for (const candidate of sessionKeys) {
     if (!candidate.stored) continue;
     const value = (await secretStore.get(candidate.key))?.trim();
     if (!value) continue;
-    const paths = pairingSessionPathsFromStoredValue(source, value);
+    // An account the boot migration moved may still have a stored path that names its old place, until the boot rewrites it:
+    // its login is in its folder now, and that is what Unpair removes.
+    const paths = pairingSessionPathsFromStoredValue(source, movedSessionValue(source, value, env));
     if (paths.length === 0) continue;
     bySession.set(sessionPathListKey(paths), paths);
   }

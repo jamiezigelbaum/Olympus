@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ConnectorStorePlacementRule } from '../connector-store/tier-placement.ts';
 import { WHATSAPP_SOURCE_ID, legacyWhatsAppLiveSyncStateDir } from '../../core/olympus-layout.ts';
-import { placedAccount, resolvedRawPath, resolvedStorePath } from '../../core/source-placement.ts';
+import { placedAccount, resolvedRawPath, resolvedStorePath, whatsappMovedPathMapper } from '../../core/source-placement.ts';
 import type {
   LocalConnectorStore,
   ConnectorStoreSyncSummary,
@@ -316,6 +316,7 @@ export function createWhatsAppConnectorStoreSyncHandler(options: {
             spoolDir,
             account,
             mediaDir,
+            relocateMediaPath: whatsappMovedPathMapper(env),
             ledger: tierSet.ledger,
             ...(cursor ? { from: cursor } : {}),
             through: sanitizeWhatsAppLiveCursor(
@@ -359,6 +360,8 @@ export function clearWhatsAppSpoolSecrets(options: {
   ledger: TierLedger;
   from?: string;
   through: string | undefined;
+  /** Maps a media path a spool line names at the account's old place to the account folder (`whatsappMovedPathMapper`). */
+  relocateMediaPath?: (path: string) => string;
 }): CaptureSpoolRedactionResult {
   return clearCaptureSpoolSecrets({
     ledger: options.ledger,
@@ -369,6 +372,7 @@ export function clearWhatsAppSpoolSecrets(options: {
       spoolDir: options.spoolDir,
       account: options.account,
       ...(options.mediaDir ? { mediaDir: options.mediaDir } : {}),
+      ...(options.relocateMediaPath ? { relocateMediaPath: options.relocateMediaPath } : {}),
       ...window,
       judge,
     }),

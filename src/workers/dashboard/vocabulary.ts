@@ -610,6 +610,8 @@ export const DASHBOARD_CAPTURE_COPY = {
     helper_exited: 'capture keeps stopping: its helper exits soon after it starts',
     grant_missing: 'capture stopped: its approval is missing',
     handle_unavailable: 'capture stopped: its sign-in is no longer available',
+    helper_running: 'capture cannot start: another capture helper is using its linked session',
+    account_moving: 'capture paused: its files are part way through a move',
   } satisfies Record<Exclude<DashboardCaptureSupervisorReason, 'restarting'>, string>,
   /** A helper fault with no reason the page knows. */
   helperUnknown: 'capture cannot start',

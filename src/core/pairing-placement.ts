@@ -23,7 +23,7 @@ import { mkdirSync, rmdirSync } from 'node:fs';
 import { callWorkerCli, runLocallyOrThroughWorker } from './cli-via-worker.ts';
 import { legacyCaptureClaimDir, type LayoutAccountLayout, type LayoutEnv } from './olympus-layout.ts';
 import { hasFolderLayout } from './source-placement.ts';
-import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, readSourceRegistryUnderLease, SourceRegistryError } from './source-registry.ts';
+import { DEFAULT_ACCOUNT_SLOT, findRegistryAccount, readSourceRegistry, readSourceRegistryUnderLease, sourceAccountMovePending, SourceRegistryError } from './source-registry.ts';
 import {
   SourceStorageUnavailableError,
   placeOwnedAccount,
@@ -46,6 +46,8 @@ export async function settlePairingPlacement(
   const entryLayout = (read: typeof readSourceRegistry): LayoutAccountLayout | undefined => {
     const entry = findRegistryAccount(read(env), account.sourceId, slot);
     if (entry !== undefined && entry.state !== 'active') throw new SourceStorageUnavailableError(account.sourceId, slot, entry.state);
+    // Part way through a move into its folder (core/source-account-migration.ts): its session is in neither place for sure.
+    if (entry !== undefined && sourceAccountMovePending(entry)) throw new SourceStorageUnavailableError(account.sourceId, slot, 'moving');
     return entry?.layout;
   };
 
