@@ -1759,6 +1759,12 @@ export const DASHBOARD_CHATGPT_PAGE_COPY = {
   sourcesCloud: 'Accounts',
   notConnected: 'Not connected',
   noSources: 'No sources yet.',
+  /**
+   * The Archives card, in its own section below Sources (owner, 2026-10-25):
+   * exports that are not from one of the sources above. A source's own
+   * exports are imported from its card's ⋯ menu (Import an archive).
+   */
+  otherArchives: { title: 'Other archives', line: "For an export that isn't from one of your sources above." },
   progress: 'Progress',
   progressInitial: 'First index',
   progressRefresh: 'Catching up',
@@ -2057,12 +2063,19 @@ export function dashboardArchiveNouns(family: unknown): DashboardArchiveNouns {
 }
 
 export const DASHBOARD_ARCHIVE_COPY = {
-  importAction: 'Import an archive',
+  /** The Other archives section's button: any export, routed to its source when one reads it. */
+  importAction: 'Import another archive',
+  /**
+   * A source's own ⋯ menu entry: the picker for that source's exports only
+   * (`ComputerArchiveSourceMeta`). {source} is the source's name.
+   */
+  sourceImport: { action: 'Import an archive', title: 'Import a {source} archive' },
   /** The picker in archive mode: one file or folder, no save step. */
   pick: {
     back: 'Back to Olympus',
-    title: 'Import an archive',
-    intro: ARCHIVE_PICK_INTRO,
+    title: 'Import another archive',
+    /** Any export: one of a source's own still joins that source (start.ts), so the line says where each goes. */
+    intro: `${ARCHIVE_PICK_INTRO} An export from one of your sources joins that source; any other is kept under Other archives.`,
     source: 'This computer',
     makePrivate: 'Import',
     makePrivateFor: 'Import {name}',
@@ -2360,7 +2373,7 @@ export const DASHBOARD_ARCHIVE_COPY = {
       permission: 'Your user account is not allowed to open {file}.',
       other: 'Olympus could not open {file}.',
     },
-    kept: 'Nothing Olympus imported is deleted. Until it can read this list, Import an archive is not offered, so nothing overwrites it.',
+    kept: 'Nothing Olympus imported is deleted. Until it can read this list, no archive can be imported, so nothing overwrites it.',
     fix: {
       damaged: 'Restore that file from a backup, or ask for help at olympusplugin.ai/support.',
       unknown_form: 'Update Olympus, then open this page again.',

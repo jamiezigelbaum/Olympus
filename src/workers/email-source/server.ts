@@ -6113,6 +6113,7 @@ export async function main(): Promise<void> {
     waitingPrivateQuestions: () => localPrivateAnswers?.waitingCount() ?? 0,
     archives: () => archiveImportDashboard.view(),
     sourceImports: () => archiveImportDashboard.sourceImports(),
+    archiveSources: () => archiveImportDashboard.archiveSources(),
   });
 
   const socketPath = prepareWorkerSocket();

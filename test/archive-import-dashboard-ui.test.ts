@@ -284,6 +284,125 @@ describe('Import an archive on the computer', () => {
   });
 });
 
+describe('a source\'s own Import an archive, and Other archives (owner, 2026-10-25)', () => {
+  const TELEGRAM = { sourceId: 'telegram.messages', label: 'Telegram', intro: 'Choose a file or folder on this computer: a Telegram export. Olympus reads it where it is and never changes it.' };
+
+  /** A state's answer with these cards importing their own exports. */
+  function withSources(state: string, sources: unknown[] | undefined, archives = meta([])) {
+    const result = dashboard(state, archives);
+    const computer = { ...result._meta[COMPUTER_META_KEY] };
+    if (sources) computer.archiveSources = sources;
+    else delete computer.archiveSources;
+    return { ...result, _meta: { ...result._meta, [COMPUTER_META_KEY]: computer } };
+  }
+
+  function sourceRow(page: Page, label: string): Element {
+    const row = Array.from(page.doc.querySelectorAll('li.row.source')).find((node) => node.querySelector('.source-name')?.textContent === label);
+    if (!row) throw new Error(`no ${label} row in: ${page.text()}`);
+    return row;
+  }
+
+  function menuLabels(row: Element): string[] {
+    return Array.from(row.querySelectorAll('.menu-panel button')).map((node) => node.textContent ?? '');
+  }
+
+  test('the Archives card is its own section after Sources, saying which exports it is for, with Import another archive', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]) });
+    const headings = Array.from(page.doc.querySelectorAll('section > h2')).map((node) => node.textContent);
+    const sources = headings.indexOf(DASHBOARD_CHATGPT_PAGE_COPY.sources);
+    expect(sources).toBeGreaterThanOrEqual(0);
+    expect(headings[sources + 1]).toBe(DASHBOARD_CHATGPT_PAGE_COPY.otherArchives.title);
+    const section = page.doc.querySelector('section.other-archives')!;
+    expect(section.textContent).toContain("For an export that isn't from one of your sources above.");
+    expect(Array.from(section.querySelectorAll('button')).map((node) => node.textContent)).toContain('Import another archive');
+    // Not in the Sources list too.
+    const list = Array.from(page.doc.querySelectorAll('section')).find((node) => node.querySelector('h2')?.textContent === DASHBOARD_CHATGPT_PAGE_COPY.sources)!;
+    expect(list.textContent).not.toContain('Import another archive');
+    expect(list.textContent).not.toContain('No archives imported yet');
+  });
+
+  test('a source that reads its own exports has Import an archive in its ⋯ menu; one that does not, has none', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]) });
+    expect(menuLabels(sourceRow(page, 'Telegram'))).toEqual(['Import an archive']);
+    expect(menuLabels(sourceRow(page, 'WhatsApp'))).not.toContain('Import an archive');
+    expect(menuLabels(sourceRow(page, 'Gmail'))).not.toContain('Import an archive');
+  });
+
+  test('with no card importing (none registered, or a list that cannot be read), no ⋯ menu offers it', async () => {
+    const page = await mount({ [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', undefined) });
+    expect(page.buttons().map((node) => node.textContent)).not.toContain('Import an archive');
+    expect(page.hasButton('Import another archive')).toBe(true);
+  });
+
+  test('it opens the picker titled for the source, with its own exports, and every approval names the source', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      [ARCHIVE_APPROVE_TOOL_NAME]: () => ({ content: [{ type: 'text', text: 'Importing.' }], structuredContent: { status: 'started', name: 'result.json' } }),
+    });
+    const row = sourceRow(page, 'Telegram');
+    (row.querySelector('summary') as HTMLElement).click();
+    await settle();
+    (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
+    await settle();
+    expect(page.text()).toContain('Import a Telegram archive');
+    expect(page.text()).toContain(TELEGRAM.intro);
+    expect(page.text()).not.toContain(A.pick.intro);
+    (page.doc.querySelector('[data-key="picker:open:/Users/you/Telegram exports"]') as HTMLButtonElement).click();
+    await settle();
+    page.button(fill(A.pick.makePrivateFor, { name: 'result.json' })).click();
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0 && page.text().includes(fill(A.started, { name: 'result.json' })));
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)).toEqual([
+      { name: ARCHIVE_APPROVE_TOOL_NAME, arguments: { key: '/Users/you/Telegram exports/result.json', source_id: 'telegram.messages' } },
+    ]);
+  });
+
+  test('another kind of export is refused in the picker with the route to Import another archive', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => previewState('sources-import-imported'),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    });
+    const row = sourceRow(page, 'Telegram');
+    (row.querySelector('summary') as HTMLElement).click();
+    await settle();
+    (Array.from(row.querySelectorAll('.menu-panel button')).find((node) => node.textContent === 'Import an archive') as HTMLButtonElement).click();
+    await settle();
+    (page.doc.querySelector('[data-key="picker:open:/Users/you/Telegram exports"]') as HTMLButtonElement).click();
+    await settle();
+    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    await until(() => page.doc.querySelector('[role="alert"]') !== null);
+    const alert = page.doc.querySelector('[role="alert"]')!.textContent ?? '';
+    expect(alert).toContain("This isn't a Telegram export.");
+    expect(alert).toContain('Import another archive');
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ key: '/Users/you/Telegram exports/Takeout-2026-10.mbox', source_id: 'telegram.messages' });
+  });
+
+  test('Import another archive names no source: its approval routes the export by what it is', async () => {
+    const page = await mount({
+      [DASHBOARD_TOOL_NAME]: () => withSources('archives-none', [TELEGRAM]),
+      [ARCHIVE_BROWSE_TOOL_NAME]: (args) => previewArchiveBrowse(args),
+      [ARCHIVE_APPROVE_TOOL_NAME]: (args) => previewArchiveApprove(args),
+    });
+    page.button(A.importAction).click();
+    await settle();
+    expect(page.text()).toContain(A.pick.title);
+    (page.doc.querySelector('[data-key="picker:open:/Users/you/Mail exports"]') as HTMLButtonElement).click();
+    await settle();
+    page.button(fill(A.pick.makePrivateFor, { name: 'Takeout-2026-10.mbox' })).click();
+    await until(() => page.calls(ARCHIVE_APPROVE_TOOL_NAME).length > 0);
+    expect(page.calls(ARCHIVE_APPROVE_TOOL_NAME)[0]!.arguments).toEqual({ key: '/Users/you/Mail exports/Takeout-2026-10.mbox' });
+  });
+
+  test('in ChatGPT the section is there too, and its button opens the computer\'s dashboard', async () => {
+    const page = await mount({}, { computer: false, dashboard: () => dashboard('archives-none', meta([])) });
+    const section = page.doc.querySelector('section.other-archives');
+    expect(section).not.toBeNull();
+    expect(section!.textContent).toContain('Import another archive');
+    expect(page.buttons().map((node) => node.textContent)).not.toContain('Import an archive');
+  });
+});
+
 describe('each archive under the Archives row', () => {
   test('importing: how far, how many so far, and what still waits for the private model', async () => {
     const page = await mount({
@@ -578,7 +697,9 @@ describe('each archive under the Archives row', () => {
   test('the picker names the formats the engine registers, from the registry', async () => {
     expect(A.pick.intro).toContain('an .mbox file from Google Takeout or Thunderbird');
     expect(A.pick.intro.startsWith('Choose a file or folder on this computer: ')).toBe(true);
-    expect(A.pick.intro.endsWith('Olympus reads it where it is and never changes it.')).toBe(true);
+    expect(A.pick.intro).toContain('Olympus reads it where it is and never changes it.');
+    // Import another archive takes any export, and says where one of a source's own goes.
+    expect(A.pick.intro.endsWith('An export from one of your sources joins that source; any other is kept under Other archives.')).toBe(true);
   });
 
   test('stopped: which file, what happened, and what to do', async () => {
@@ -706,7 +827,8 @@ describe('Needs you for imports', () => {
 
   /** The Archives row, and whether its dot is the Needs you one. */
   function archivesRow(page: Page): Element {
-    const row = Array.from(page.doc.querySelectorAll('li.row.source')).find((node) => node.querySelector('.source-name')?.textContent === 'Archives');
+    // Its own section below Sources (Other archives): the one row there.
+    const row = page.doc.querySelector('section.other-archives li.row.source');
     if (!row) throw new Error(`no Archives row in: ${page.text()}`);
     return row;
   }

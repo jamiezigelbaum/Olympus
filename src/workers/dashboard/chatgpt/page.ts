@@ -344,6 +344,9 @@ textarea.text{resize:vertical;min-height:4.5rem}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.landed{animation:none}}
 `;
 
+/** The Archives card's source id (source-dashboard.ts), shown in its own section below Sources. */
+export const CHATGPT_ARCHIVES_SOURCE_ID = 'archive.imports';
+
 /** How long the place an open link landed on stays outlined (as on Keys, control-ui LANDED_HIGHLIGHT_MS). */
 const CHATGPT_DASHBOARD_LANDED_MS = 4000;
 
@@ -354,6 +357,7 @@ export function chatgptDashboardPageHtml(options: ChatGptDashboardPageOptions = 
     syncTool: SYNC_SOURCE_TOOL_NAME,
     deleteDataTool: DELETE_SOURCE_DATA_TOOL_NAME,
     disconnectTool: DISCONNECT_SOURCE_TOOL_NAME,
+    archivesSourceId: CHATGPT_ARCHIVES_SOURCE_ID,
     connection: DASHBOARD_CHATGPT_CONNECTION_COPY,
     page: DASHBOARD_CHATGPT_PAGE_COPY,
     statusTone: STATUS_TONE,
