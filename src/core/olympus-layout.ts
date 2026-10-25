@@ -13,7 +13,7 @@
  * lifecycle module both resolve through it.
  */
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { standaloneLinuxDataDir } from './linux-engine-layout.ts';
 
 export type LayoutEnv = Record<string, string | undefined>;
@@ -302,6 +302,32 @@ export function accountStorePath(account: LayoutAccount, name: string, env: Layo
   if (!STORE_NAME.test(name)) throw new TypeError(`A store name is a tier or <family>.<tier>; got ${JSON.stringify(name)}.`);
   if (account.layout === 'folder') return join(accountFolder(account, env), 'stores', `${name}.sqlite`);
   return legacyFilePath(env, legacyStoreFile(account.source_id, name));
+}
+
+/**
+ * The store of another tier beside a store that sits in an account folder
+ * (`.../sources/<source_id>/<slot>/stores/<name>.sqlite`), named as
+ * `accountStorePath` names it: the tier is swapped and a family prefix
+ * (`<family>.<tier>`) kept. Undefined for a path that is not a store of an
+ * account folder. It reads no file and does not look for the data root, so it
+ * holds wherever the data folder sits and whatever the store was called
+ * before it moved there: a tier set's ledger is found from any of its stores
+ * (`classification/tier-set-binding.ts`).
+ */
+export function accountSiblingStorePath(storeDbPath: string, tier: (typeof TIERS)[number]): string | undefined {
+  const file = basename(storeDbPath);
+  if (!file.endsWith('.sqlite')) return undefined;
+  const name = file.slice(0, -'.sqlite'.length);
+  if (!STORE_NAME.test(name)) return undefined;
+  const dot = name.lastIndexOf('.');
+  const ownTier = name.slice(dot + 1);
+  if (!(TIERS as readonly string[]).includes(ownTier)) return undefined;
+  const stores = dirname(storeDbPath);
+  const slot = dirname(stores);
+  const source = dirname(slot);
+  if (basename(stores) !== 'stores' || basename(dirname(source)) !== ACCOUNT_FOLDERS_DIR) return undefined;
+  if (!FOLDER_SEGMENT.test(basename(slot)) || !FOLDER_SEGMENT.test(basename(source))) return undefined;
+  return join(stores, `${name.slice(0, dot + 1)}${tier}.sqlite`);
 }
 
 /** The env overrides that relocate a source's files today. A `folder` account never honors one. */
