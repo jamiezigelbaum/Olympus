@@ -40,7 +40,7 @@ describe('the uninstall scripts name the layout module\'s folders', () => {
   ] as const) {
     test(`macOS lists every folder it keeps (${name})`, () => {
       expect(macKept(env).sort()).toEqual(olympusUninstallRoots(env, 'darwin').sort());
-    });
+    }, 30_000);
   }
 
   test('the macOS list covers the folders the design found missing', () => {

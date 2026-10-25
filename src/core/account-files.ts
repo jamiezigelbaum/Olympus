@@ -264,6 +264,8 @@ export function accountFilesPresent(files: AccountFiles): boolean {
     ...(files.preCutoverIndex ? [files.preCutoverIndex.path] : []),
     ...files.raw,
     ...files.rawDatabases.map((database) => database.path),
+    ...files.settings,
+    ...files.preserved,
   ].some((path) => path !== ':memory:' && existsOnDisk(path));
 }
 

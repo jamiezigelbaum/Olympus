@@ -37528,7 +37528,9 @@ function openTierSniffer(account, options, env = process.env) {
 function recordAccountPlacement(account, path, env = process.env) {
   if (!adoptionEnabled)
     return;
-  placeBeforeFirstFile(env, readSourceRegistry(env), account, path);
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeBeforeFirstFile(env, registry, account, path);
 }
 function placeOwnedAccount(account, env = process.env) {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
@@ -42957,7 +42959,9 @@ function accountFilesPresent(files) {
     ...files.stores,
     ...files.preCutoverIndex ? [files.preCutoverIndex.path] : [],
     ...files.raw,
-    ...files.rawDatabases.map((database) => database.path)
+    ...files.rawDatabases.map((database) => database.path),
+    ...files.settings,
+    ...files.preserved
   ].some((path) => path !== ":memory:" && existsOnDisk(path));
 }
 function retainedCaptureGrants(handleRegistryPath) {
@@ -79583,10 +79587,10 @@ import { basename as basename9, dirname as dirname56, join as join65, relative a
 import { rm as rm3 } from "node:fs/promises";
 import { Database as Database18 } from "bun:sqlite";
 function lifecycleStoreFileOwner(env) {
-  return storeFileOwnerLookup(knownAccounts({ env }).flatMap((account) => account.files.stores.map((path) => [path, account.sourceId])));
+  return storeFileOwnerLookup(knownAccounts({ env }).filter((account) => account.entry?.state !== "deleting").flatMap((account) => account.files.stores.map((path) => [path, account.sourceId])));
 }
 function lifecycleStorePaths(context2 = {}) {
-  return knownAccounts(context2).flatMap((account) => account.files.stores);
+  return knownAccounts(context2).filter((account) => account.entry?.state !== "deleting").flatMap((account) => account.files.stores);
 }
 function lifecycleAccountOf(sourceId, context2, registry) {
   const env = envForContext(context2);
@@ -79608,6 +79612,18 @@ function knownAccounts(context2) {
 }
 function existingAccounts(context2) {
   return knownAccounts(context2).filter((account) => account.entry ? account.entry.state === "active" : accountFilesPresent(account.files));
+}
+function deletingAccounts(context2) {
+  return knownAccounts(context2).filter((account) => account.entry !== undefined && account.entry.state !== "active");
+}
+function assertRegistryWritable(env) {
+  try {
+    readSourceRegistry(env);
+  } catch (error) {
+    if (!(error instanceof SourceRegistryError))
+      throw error;
+    throw new OperationError("source_index_error", `${error.message} The account cannot be marked for deletion, so nothing was deleted or forgotten.`, "Repair or restore that file, then delete again.");
+  }
 }
 function readRegistryOrUnreadable(env) {
   try {
@@ -79674,6 +79690,14 @@ function exportOlympusData(options) {
       for (const name of ACCOUNT_FOLDER_UNEXPORTED) {
         const path = join65(folder, name);
         if (existsSync56(path) && !skipped.includes(path))
+          skipped.push(path);
+      }
+    }
+  }
+  if (options.sourceId === undefined) {
+    for (const account of deletingAccounts(options)) {
+      for (const path of [account.files.folder, ...account.files.stores].filter((path2) => path2 !== undefined)) {
+        if (existsSync56(path))
           skipped.push(path);
       }
     }
@@ -79757,6 +79781,8 @@ function deleteOlympusData(options) {
       ...optionalList("forgotten", forgetSharedRows(account, { ...options, dryRun: true }))
     };
   }
+  if (options.applyAtRestart === true)
+    assertRegistryWritable(env);
   const forgotten = forgetSharedRows(account, options);
   if (options.applyAtRestart === true) {
     markAccountDeleting(account, env);
@@ -79797,9 +79823,9 @@ function deleteMarkedAccounts(context2 = {}) {
         throw new Error("Olympus does not know where this account's files are");
       }
       const account = lifecycleAccountOf(sourceId, context2, registry);
-      const plan = planAccountRemoval(account, context2);
+      const plan = planAccountRemoval(account, context2, { atBoot: true });
       forgetSharedRows(account, context2, { repeatableOnly: true });
-      const { removed } = removeAccount(account, plan, context2, { background: true });
+      const { removed } = removeAccount(account, plan, context2, { background: true, atBoot: true });
       finishAccountDelete(account, env, plan.registryPath, true);
       report.deleted.push({ sourceId, removed: removed.length });
     } catch (error) {
@@ -79840,7 +79866,7 @@ function deleteAllOlympusData(options) {
   }
   return { ok: true, mode: "all", dryRun: options.dryRun === true, removed, missing };
 }
-function planAccountRemoval(account, context2) {
+function planAccountRemoval(account, context2, options = {}) {
   const targets = uniqueTargets(sourceDeleteTargets(account, context2));
   assertRawStateTargetsContained(targets, context2, account);
   assertSourcesFolderTargetsUnlinked(targets, context2);
@@ -79848,6 +79874,8 @@ function planAccountRemoval(account, context2) {
     if (existsSync56(target.path))
       assertDeleteTargetSafe(target);
   }
+  if (options.atBoot !== true)
+    readSourceMedia(account.sourceId, account.files.stores, envForContext(context2));
   return {
     targets,
     present: targets.filter((target) => existsSync56(target.path)).map((target) => target.path),
@@ -79858,7 +79886,7 @@ function planAccountRemoval(account, context2) {
 function removeAccount(account, plan, context2, options) {
   const env = envForContext(context2);
   const ownerLockPath = dataOwnerLockPath(env);
-  const media = readSourceMedia(account.sourceId, account.files.stores, env);
+  const media = readSourceMedia(account.sourceId, account.files.stores, env, { skipUnreadable: options.atBoot === true });
   assertSourcesFolderTargetsUnlinked(plan.targets, context2);
   for (const target of plan.targets) {
     if (target.kind === "account_folder" && existsSync56(target.path))
@@ -80204,7 +80232,7 @@ function mediaCacheDeleteTargets(context2) {
     return [];
   }
 }
-function readSourceMedia(sourceId, storePaths, env) {
+function readSourceMedia(sourceId, storePaths, env, options = {}) {
   const held = [];
   for (const storePath of storePaths) {
     if (storePath === ":memory:" || !existsSync56(storePath))
@@ -80218,6 +80246,8 @@ function readSourceMedia(sourceId, storePaths, env) {
       db = new Database18(storePath, { readonly: true });
       db.exec("PRAGMA busy_timeout = 10000;");
     } catch {
+      if (options.skipUnreadable === true)
+        continue;
       throw unreadable();
     }
     try {
@@ -80229,6 +80259,8 @@ function readSourceMedia(sourceId, storePaths, env) {
         `).all();
       }
     } catch {
+      if (options.skipUnreadable === true)
+        continue;
       throw unreadable();
     } finally {
       closeSqliteStore(db);

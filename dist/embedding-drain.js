@@ -30442,7 +30442,9 @@ function openConnectorStore(account, options, env = process.env) {
 function recordAccountPlacement(account, path, env = process.env) {
   if (!adoptionEnabled)
     return;
-  placeBeforeFirstFile(env, readSourceRegistry(env), account, path);
+  const registry = readSourceRegistry(env);
+  assertOpenable(registry, account.sourceId, account.slot ?? DEFAULT_STORAGE_SLOT);
+  placeBeforeFirstFile(env, registry, account, path);
 }
 function placeBeforeFirstFile(env, registry, account, path) {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;

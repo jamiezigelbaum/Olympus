@@ -411,13 +411,6 @@ export function xBookmarksReconcileEvidenceCounts(evidence: {
 }
 
 /**
- * Restart-safe X request/cost guard. Ordinary callers count a request at
- * reservation time, preserving the conservative crash behavior for an
- * in-flight provider call. Callers that must do fallible local setup first can
- * reserve an expiring undispatched lease; the durable request count then moves
- * atomically only when markRequestDispatched commits immediately before I/O.
- */
-/**
  * The forget step of X's sync positions in the usage ledger
  * (core/source-forget-registry.ts): the ledger is the quota ledger and stays
  * when X is deleted, but its checkpoints are the deleted account's, and a
@@ -449,6 +442,13 @@ export function forgetXBookmarksSyncState(
   }
 }
 
+/**
+ * Restart-safe X request/cost guard. Ordinary callers count a request at
+ * reservation time, preserving the conservative crash behavior for an
+ * in-flight provider call. Callers that must do fallible local setup first can
+ * reserve an expiring undispatched lease; the durable request count then moves
+ * atomically only when markRequestDispatched commits immediately before I/O.
+ */
 export class LocalXBookmarksApiUsageStore {
   readonly dbPath: string;
   private readonly db: Database;

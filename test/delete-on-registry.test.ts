@@ -17,6 +17,7 @@ import {
   __sourceStorageTestHooks,
   enableSourceRegistryAdoption,
   openConnectorStore,
+  recordAccountPlacement,
   SourceStorageUnavailableError,
 } from '../src/core/source-storage.ts';
 import { deleteMarkedAccounts, deleteOlympusData, exportOlympusData, lifecycleAccountFiles } from '../src/data-lifecycle.ts';
@@ -186,6 +187,54 @@ describe('the running worker marks, the boot removes', () => {
     const envWithOverride = { ...env, OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_CONNECTOR_STORE_DB_PATH: intruder };
     expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env: envWithOverride, applyAtRestart: true })).toThrow('overlaps');
     expect(findRegistryAccount(readSourceRegistry(env), 'readwise.library', '1')?.state).toBe('active');
+  });
+
+  test('a store whose picture references cannot be read refuses before anything is forgotten or marked; at boot it does not block', () => {
+    const { homeDir, env } = fixture();
+    const stores = connectReadwise(env);
+    // A SQLite header over garbage: it looks like a store and cannot be read.
+    writeFileSync(stores[0]!, Buffer.concat([Buffer.from('SQLite format 3\u0000'), Buffer.alloc(4096, 7)]));
+    for (const applyAtRestart of [true, false]) {
+      expect(() => deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, applyAtRestart })).toThrow('picture references');
+      expect(findRegistryAccount(readSourceRegistry(env), 'readwise.library', '1')?.state).toBe('active');
+    }
+    // Marked some other way (the store went bad after the mark): the boot removes it anyway.
+    updateSourceRegistry(env, (registry) => {
+      for (const account of registry.accounts) account.state = 'deleting';
+    });
+    expect(deleteMarkedAccounts({ homeDir, env })).toMatchObject({ failed: [] });
+    expect(existsSync(stores[0]!)).toBe(false);
+    expect(readSourceRegistry(env).accounts).toEqual([]);
+  });
+
+  test('the worker\'s delete with an unreadable registry forgets nothing', () => {
+    const { homeDir, env } = fixture();
+    connectReadwise(env);
+    const usagePath = defaultXBookmarksApiUsageDbPath(env);
+    const usage = new LocalXBookmarksApiUsageStore(usagePath);
+    usage.recordHeadCheckpoint('personal', '777');
+    usage.close();
+    writeFileSync(sourceRegistryPath(env), 'not json');
+    expect(() => deleteOlympusData({ sourceId: 'x.bookmarks', homeDir, env, applyAtRestart: true })).toThrow('nothing was deleted or forgotten');
+    const kept = new LocalXBookmarksApiUsageStore(usagePath);
+    expect(kept.headCheckpoint('personal')).toBe('777');
+    kept.close();
+  });
+
+  test('raw state of an account being deleted is not written between the mark and the restart', () => {
+    const { homeDir, env } = fixture();
+    connectReadwise(env);
+    deleteOlympusData({ sourceId: 'readwise.library', homeDir, env, applyAtRestart: true });
+    enableSourceRegistryAdoption();
+    expect(() => recordAccountPlacement({ sourceId: 'readwise.library' }, join(homeDir, 'anything'), env)).toThrow(SourceStorageUnavailableError);
+  });
+
+  test('a source whose only file is its own settings is still exported', () => {
+    const { homeDir, env } = fixture();
+    const [policy] = lifecycleAccountFiles('dropbox.files', { homeDir, env }).settings;
+    put(policy!, '{}');
+    const result = exportOlympusData({ destination: join(homeDir, 'out'), homeDir, env });
+    expect(result.sourceIds).toContain('dropbox.files');
   });
 
   test('the CLI, with nothing open, marks and removes at once', () => {

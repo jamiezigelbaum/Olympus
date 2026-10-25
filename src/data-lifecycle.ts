@@ -205,7 +205,7 @@ const DELETE_CONFIRMATION_2 = 'DELETE EVERYTHING';
 
 /** The source each store file in the lifecycle's inventory belongs to, by the file itself. */
 export function lifecycleStoreFileOwner(env: Record<string, string | undefined>): StoreFileOwner {
-  return storeFileOwnerLookup(knownAccounts({ env }).flatMap((account) =>
+  return storeFileOwnerLookup(knownAccounts({ env }).filter((account) => account.entry?.state !== 'deleting').flatMap((account) =>
     account.files.stores.map((path) => [path, account.sourceId] as const)));
 }
 
@@ -216,7 +216,7 @@ export function lifecycleAccountFiles(sourceId: string, context: LifecyclePathCo
 
 /** Every store of every account the lifecycle knows: the tier CLI's lookup. */
 export function lifecycleStorePaths(context: LifecyclePathContext = {}): string[] {
-  return knownAccounts(context).flatMap((account) => account.files.stores);
+  return knownAccounts(context).filter((account) => account.entry?.state !== 'deleting').flatMap((account) => account.files.stores);
 }
 
 /**
@@ -258,6 +258,25 @@ function knownAccounts(context: LifecyclePathContext): LifecycleAccount[] {
 function existingAccounts(context: LifecyclePathContext): LifecycleAccount[] {
   return knownAccounts(context).filter((account) =>
     account.entry ? account.entry.state === 'active' : accountFilesPresent(account.files));
+}
+
+/** Accounts marked `deleting`: never exported, and never opened by the tier commands. */
+function deletingAccounts(context: LifecyclePathContext): LifecycleAccount[] {
+  return knownAccounts(context).filter((account) => account.entry !== undefined && account.entry.state !== 'active');
+}
+
+/** Refuses, with nothing changed, when the registry cannot be read (so cannot take a mark). */
+function assertRegistryWritable(env: LayoutEnv): void {
+  try {
+    readSourceRegistry(env);
+  } catch (error) {
+    if (!(error instanceof SourceRegistryError)) throw error;
+    throw new OperationError(
+      'source_index_error',
+      `${error.message} The account cannot be marked for deletion, so nothing was deleted or forgotten.`,
+      'Repair or restore that file, then delete again.',
+    );
+  }
 }
 
 /**
@@ -346,6 +365,16 @@ export function exportOlympusData(options: {
       for (const name of ACCOUNT_FOLDER_UNEXPORTED) {
         const path = join(folder, name);
         if (existsSync(path) && !skipped.includes(path)) skipped.push(path);
+      }
+    }
+  }
+
+  // An account being deleted is not exported, and the manifest says so: its files
+  // are still on disk until the worker's next start removes them.
+  if (options.sourceId === undefined) {
+    for (const account of deletingAccounts(options)) {
+      for (const path of [account.files.folder, ...account.files.stores].filter((path): path is string => path !== undefined)) {
+        if (existsSync(path)) skipped.push(path);
       }
     }
   }
@@ -462,6 +491,9 @@ export function deleteOlympusData(options: {
   // starting with the dependent private answers, before it is marked and any
   // of its bytes go. A failing step fails the delete here, with every store in
   // place and the account still open.
+  // The running worker can keep the account closed only with a mark, so a
+  // registry it cannot write refuses here, before anything is forgotten.
+  if (options.applyAtRestart === true) assertRegistryWritable(env);
   const forgotten = forgetSharedRows(account, options);
   if (options.applyAtRestart === true) {
     // From here the storage service opens none of its files, and the worker's
@@ -529,9 +561,9 @@ export function deleteMarkedAccounts(context: LifecyclePathContext = {}): Delete
         throw new Error('Olympus does not know where this account\'s files are');
       }
       const account = lifecycleAccountOf(sourceId, context, registry);
-      const plan = planAccountRemoval(account, context);
+      const plan = planAccountRemoval(account, context, { atBoot: true });
       forgetSharedRows(account, context, { repeatableOnly: true });
-      const { removed } = removeAccount(account, plan, context, { background: true });
+      const { removed } = removeAccount(account, plan, context, { background: true, atBoot: true });
       finishAccountDelete(account, env, plan.registryPath, true);
       report.deleted.push({ sourceId, removed: removed.length });
     } catch (error) {
@@ -590,7 +622,11 @@ interface AccountRemovalPlan {
   registryPath: string;
 }
 
-function planAccountRemoval(account: LifecycleAccount, context: LifecyclePathContext): AccountRemovalPlan {
+function planAccountRemoval(
+  account: LifecycleAccount,
+  context: LifecyclePathContext,
+  options: { atBoot?: boolean } = {},
+): AccountRemovalPlan {
   const targets = uniqueTargets(sourceDeleteTargets(account, context));
   // A recursive raw-state target must be provably Olympus's own and nobody
   // else's (see assertRawStateTargetsContained), and everything under the
@@ -601,6 +637,11 @@ function planAccountRemoval(account: LifecycleAccount, context: LifecyclePathCon
   for (const target of targets) {
     if (existsSync(target.path)) assertDeleteTargetSafe(target);
   }
+  // Every store's picture references must read before anything is forgotten
+  // or marked: one that cannot (busy, damaged) refuses here, with the account
+  // as it was. At boot the account is already marked and nothing else holds
+  // the store, so one that still cannot be read is not waited for (below).
+  if (options.atBoot !== true) readSourceMedia(account.sourceId, account.files.stores, envForContext(context));
   return {
     targets,
     present: targets.filter((target) => existsSync(target.path)).map((target) => target.path),
@@ -621,11 +662,15 @@ function removeAccount(
   account: LifecycleAccount,
   plan: AccountRemovalPlan,
   context: LifecyclePathContext,
-  options: { background: boolean },
+  options: { background: boolean; atBoot?: boolean },
 ): { removed: string[]; missing: string[] } {
   const env = envForContext(context);
   const ownerLockPath = dataOwnerLockPath(env);
-  const media = readSourceMedia(account.sourceId, account.files.stores, env);
+  // At boot a store whose references still cannot be read is removed with the
+  // rest rather than keep the account closed for good: its pictures' holds name
+  // the account (or the store's path), and the media-cache sweep drops them once
+  // the entry is gone and the store with it.
+  const media = readSourceMedia(account.sourceId, account.files.stores, env, { skipUnreadable: options.atBoot === true });
   // The media reads and the shared-file work before them can wait on SQLite
   // locks, so the link checks run again right before the first removal: a
   // folder swapped for a link meanwhile is refused, not followed.
@@ -1173,7 +1218,12 @@ type SourceMediaHolds = Array<{
   rows: Array<{ media_path: string; media_sha256: string }>;
 }>;
 
-function readSourceMedia(sourceId: string, storePaths: readonly string[], env: LayoutEnv): SourceMediaHolds {
+function readSourceMedia(
+  sourceId: string,
+  storePaths: readonly string[],
+  env: LayoutEnv,
+  options: { skipUnreadable?: boolean } = {},
+): SourceMediaHolds {
   const held: SourceMediaHolds = [];
   for (const storePath of storePaths) {
     if (storePath === ':memory:' || !existsSync(storePath)) continue;
@@ -1193,6 +1243,7 @@ function readSourceMedia(sourceId: string, storePaths: readonly string[], env: L
       db = new Database(storePath, { readonly: true });
       db.exec('PRAGMA busy_timeout = 10000;');
     } catch {
+      if (options.skipUnreadable === true) continue;
       throw unreadable();
     }
     try {
@@ -1204,6 +1255,7 @@ function readSourceMedia(sourceId: string, storePaths: readonly string[], env: L
         `).all() as Array<{ media_path: string; media_sha256: string }>;
       }
     } catch {
+      if (options.skipUnreadable === true) continue;
       throw unreadable();
     } finally {
       closeSqliteStore(db);
