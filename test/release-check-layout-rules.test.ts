@@ -1,4 +1,4 @@
-// The layout rules: what the page measures about its own look, how a screen's findings become a check (advisory until the rules
+// The layout rules: what the page measures about its own look, how a screen's findings become a check (blocking since the rules
 // qualify), and how a qualification run scores them against the bugs planted for them. The rules themselves need a browser's layout;
 // a qualification run in the real test browser is their proof. Here the page script must at least run and return findings.
 
@@ -29,14 +29,14 @@ describe('layout rules', () => {
     expect(kept[1]!.what.length).toBe(300);
   });
 
-  test('a screen with a finding warns while the rules are advisory and fails once they block; a clean one passes', () => {
-    expect(LAYOUT_RULES_BLOCKING).toBe(false);
+  test('a screen with a finding fails now the rules block, and only warns when advisory; a clean one passes', () => {
+    expect(LAYOUT_RULES_BLOCKING).toBe(true);
     const screens = [{ name: 'keys-1280-dark', layout: [finding('misaligned-controls')] }, { name: 'ask-390-light', layout: [] }, { name: 'not-measured' }];
-    const advisory = layoutChecks(screens);
+    expect(layoutChecks(screens).map((check) => [check.id, check.status])).toEqual([['layout.keys-1280-dark', 'fail'], ['layout.ask-390-light', 'pass']]);
+    const advisory = layoutChecks(screens, false);
     expect(advisory.map((check) => [check.id, check.status])).toEqual([['layout.keys-1280-dark', 'warn'], ['layout.ask-390-light', 'pass']]);
     expect(advisory[0]!.title).toContain('advisory');
     expect(advisory[0]!.detail).toContain('misaligned-controls: a misaligned-controls problem — button "Connect" at 10,20');
-    expect(layoutChecks(screens, true).map((check) => check.status)).toEqual(['fail', 'pass']);
   });
 
   test('every look bug a qualification plants is a layout rule\'s', () => {

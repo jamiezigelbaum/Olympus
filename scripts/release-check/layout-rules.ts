@@ -16,8 +16,9 @@
  * (journey-driver.ts), and a qualification run runs them on the planted pictures too (reviewer-plants.ts), so every rule is held to
  * the bug planted for it and to the screens with nothing planted.
  *
- * Advisory until a qualification run catches every planted bug and finds nothing on the pictures with nothing planted: until then a
- * finding is a warning, never a failed release.
+ * Blocking since 2026-10-25: a finding fails the run. Earned by Linux qualification run 20261025t130646-d27f (every planted bug caught,
+ * 23 of 23, nothing on the 20 screens with nothing planted) and full runs with nothing found on all 20 screens on Linux
+ * (20261025t130925-32c3) and the Mac (20261025t130313-a558). A rule changed later is qualified again before it ships.
  */
 import type { CheckResult } from './report.ts';
 
@@ -25,7 +26,7 @@ export const LAYOUT_RULES = ['monospace-text', 'clipped-text', 'overlapping-text
 export type LayoutRule = typeof LAYOUT_RULES[number];
 
 /** Whether a finding fails the run. Turned on in a reviewed change, with the qualification run that earned it. */
-export const LAYOUT_RULES_BLOCKING = false;
+export const LAYOUT_RULES_BLOCKING = true;
 
 export const isLayoutRule = (kind: unknown): kind is LayoutRule => (LAYOUT_RULES as readonly unknown[]).includes(kind);
 
@@ -113,14 +114,13 @@ export function layoutRulesScript(): string {
     }
   }
 
-  // misaligned-controls: buttons of one repeated structure (rows of a list, the same label) stacked in one column that line up by
-  // nothing, off by a few pixels. Buttons of unrelated parts of the page may sit a few pixels apart on purpose, so they are not compared.
+  // misaligned-controls: buttons of one repeated structure (rows of a list) stacked in one column that line up by nothing, off by a few
+  // pixels. Buttons of unrelated parts of the page may sit a few pixels apart on purpose, so they are not compared, whatever their
+  // label (2026-10-25: an "Open" inside a padded notice was compared with the "Open" buttons of the list below it).
   const controls = Array.from(document.body.querySelectorAll('button, [role="button"], a.button, input[type="submit"], input[type="button"]')).filter(shown);
   const shape = (el) => { const parts = []; for (let node = el.parentElement, depth = 0; node && depth < 3; node = node.parentElement, depth += 1) parts.push(node.tagName + '.' + Array.from(node.classList).sort().join('.')); return parts.join('<'); };
   const groups = new Map();
-  for (const el of controls) {
-    for (const key of ['shape:' + shape(el), 'label:' + words(el)]) groups.set(key, [...(groups.get(key) || []), { el, r: el.getBoundingClientRect() }]);
-  }
+  for (const el of controls) groups.set(shape(el), [...(groups.get(shape(el)) || []), { el, r: el.getBoundingClientRect() }]);
   const misaligned = new Set();
   for (const group of groups.values()) {
     if (group.length < 2) continue;
