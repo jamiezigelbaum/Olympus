@@ -290,6 +290,19 @@ describe('inputs through a real store set', () => {
     // The second record found the first already there (it was applied earlier in the same pass).
     expect(outcomes.map((outcome) => outcome.alreadyThere)).toEqual([false, true]);
   });
+  test('two versions of one item in a batch never go to the store together: only the newest does, and its older version is told as older', async () => {
+    const outcomes: SourceIntakeOutcome[] = [];
+    const rising = input('archive', 'archive.rising', [
+      { id: 'a', version: 1, name: 'A', text: 'first' },
+      { id: 'b', version: 1, name: 'B', text: 'other' },
+      { id: 'a', version: 2, name: 'A', text: 'second' },
+      { id: 'a', version: 3, name: 'A', text: 'third' },
+    ], { observeIntake: (page) => { outcomes.push(...page); } });
+    const pages: string[][] = [];
+    for await (const page of inputConnector(builder, rising).listItems({})) pages.push(page.items.map((item) => `${item.identity.providerItemId}@${item.identity.sourceVersion}`));
+    expect(pages).toEqual([['b@1', 'a@3']]);
+    expect(outcomes.map((outcome) => outcome.decision)).toEqual(['skip_older', 'apply', 'skip_older', 'apply']);
+  });
 });
 
 describe('the hold travels with the item', () => {

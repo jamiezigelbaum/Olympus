@@ -214,8 +214,10 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
           ...(options.limit !== undefined ? { limit: options.limit } : {}),
         });
         for await (const page of pages) {
-          const units: PageUnit[] = [];
+          let units: PageUnit[] = [];
           const outcomes: SourceIntakeOutcome[] = [];
+          /** Where in `outcomes` each record's own item is told, by record. */
+          const outcomeOf = new Map<number, number>();
           for (const [position, record] of page.records.entries()) {
             const skipped = (): void => { outcomes.push({ localItemId: '', decision: 'skip_same', alreadyThere: false }); };
             // Records an earlier pass handled before it was cut: they were counted then.
@@ -245,6 +247,7 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
               });
               if (decision === 'apply') wanted.add(entry.identity.localItemId);
               if (index === 0) {
+                outcomeOf.set(offset + position, outcomes.length);
                 outcomes.push({
                   localItemId: entry.identity.localItemId,
                   decision,
@@ -269,6 +272,23 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
               });
               units.push({ record: offset + position, entry: index, item });
             });
+          }
+          // Two versions of one item never share a batch: only the newest accepted one of each item goes on, so
+          // classification, placement and removals see one plan per item. A superseded record goes whole: its
+          // children are the ones its newer version no longer lists (those it still lists come with that version).
+          // Versions in different batches take the ordinary sequential path.
+          const lastOf = new Map<string, number>();
+          units.forEach((unit, at) => lastOf.set(unit.item.identity.localItemId, at));
+          const superseded = new Set<number>();
+          units.forEach((unit, at) => {
+            if (unit.entry === 0 && lastOf.get(unit.item.identity.localItemId) !== at) superseded.add(unit.record);
+          });
+          if (superseded.size > 0 || lastOf.size !== units.length) {
+            for (const record of superseded) {
+              const at = outcomeOf.get(record);
+              if (at !== undefined) outcomes[at] = { ...outcomes[at]!, decision: 'skip_older' };
+            }
+            units = units.filter((unit, at) => !superseded.has(unit.record) && lastOf.get(unit.item.identity.localItemId) === at);
           }
           input.observeIntake?.(outcomes);
           const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;

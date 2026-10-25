@@ -56,22 +56,47 @@ describe('every accepted version is classified and routed on its own', () => {
     expect(h.set.ledger.itemIsSecret({ provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' })).toBe(true);
   });
 
-  test('a Secret version followed by a newer ordinary one in the same listing keeps the newer version\'s copy rows; the reverse order still removes them', async () => {
-    const key = { provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' };
-    const forward = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
-    forward.connectLive();
-    const idForward = await forward.startImport('forward.mbox', [rec('a', 1, `key\n${KEY_MARKER}`), rec('a', 2, 'ordinary words now')]);
-    await forward.importAll(idForward);
-    expect(forward.textOf('a')).toContain('ordinary words now');
-    expect(forward.set.ledger.copies(key).filter((copy) => copy.state === 'current').length).toBeGreaterThan(0);
-
-    const reverse = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
-    reverse.connectLive();
-    const idReverse = await reverse.startImport('reverse.mbox', [rec('a', 1, 'ordinary words first'), rec('a', 2, `key\n${KEY_MARKER}`)]);
-    await reverse.importAll(idReverse);
-    expect(everyStoredText(reverse)).not.toContain('PRIVATE KEY');
-    expect(reverse.set.ledger.copies(key).filter((copy) => copy.state === 'current')).toEqual([]);
-  });
+  // Versions of one item in a listing: only the newest accepted one of a batch is classified and placed, so two
+  // versions never share a plan. The same listing is run whole (one batch) and one record at a time (a batch each,
+  // with a crash in the cleanup between two of them).
+  const kindsList: Array<Array<'ordinary' | 'secret'>> = [
+    ['secret', 'ordinary'], ['ordinary', 'secret'], ['ordinary', 'secret', 'ordinary'], ['secret', 'ordinary', 'secret'],
+  ];
+  for (const kinds of kindsList) {
+    for (const mode of ['one batch', 'a batch each, with a crash between'] as const) {
+      test(`versions ${kinds.join(' -> ')} in one listing, ${mode}: the newest decides the stored body, the copy rows and what is readable`, async () => {
+        const key = { provider: 'fixture-source', accountScope: FIXTURE_ACCOUNT_SCOPE, providerItemId: 'a' };
+        const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary, ...(mode === 'one batch' ? {} : { pageSize: 1 }) });
+        h.connectLive();
+        const records = kinds.map((kind, at) => rec('a', at + 1, kind === 'secret' ? `key ${at}\n${KEY_MARKER}` : `ordinary words ${at + 1}`));
+        const id = await h.startImport('versions.mbox', records);
+        if (mode === 'one batch') {
+          await h.importAll(id);
+        } else {
+          // One record per pass; the cleanup after the first Secret is cut off once.
+          const original = h.set.ledger.removeCopies.bind(h.set.ledger);
+          let crashed = false;
+          h.set.ledger.removeCopies = ((...args: Parameters<typeof original>) => {
+            if (!crashed) { crashed = true; throw new Error('injected crash'); }
+            return original(...args);
+          }) as typeof original;
+          for (let pass = 0; pass < 12 && h.runtime.state.get(id)?.status !== 'imported'; pass += 1) {
+            await h.pull(id, { maxItems: 1 }).catch(() => undefined);
+          }
+        }
+        expect(h.runtime.state.get(id)?.status).toBe('imported');
+        expect(everyStoredText(h)).not.toContain('PRIVATE KEY');
+        const current = h.set.ledger.copies(key).filter((copy) => copy.state === 'current');
+        if (kinds[kinds.length - 1] === 'ordinary') {
+          expect(h.textOf('a')).toContain(`ordinary words ${kinds.length}`);
+          expect(current.length).toBeGreaterThan(0);
+        } else {
+          expect(h.textOf('a')).not.toContain('ordinary words');
+          expect(current).toEqual([]);
+        }
+      });
+    }
+  }
 
   test('the two versions of an item that are both ordinary end as the later one, routed by its own verdict', async () => {
     const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });

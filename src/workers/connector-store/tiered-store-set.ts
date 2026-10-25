@@ -945,7 +945,9 @@ export class TieredStoreSet {
     // move. A fresh placement is safe; staged/hidden move copies are not.
     if (copies.length === 0) return this.routedWithoutAnyCopy(identity);
     const current = copies.filter((copy) => copy.state === 'current');
-    if (current.length === 0) return false;
+    // Nothing current, and no store still holds a row that serves (a Secret whose stores were tombstoned but whose
+    // copy rows a crash left behind): there is nothing visible to move, so a new placement may replace them.
+    if (current.length === 0) return this.routedWithoutAnyCopyRow(identity);
     return current.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);
       const store = domain ? this.store(domain) : undefined;
@@ -973,6 +975,11 @@ export class TieredStoreSet {
    */
   routedWithoutAnyCopy(identity: TierLedgerIdentity): boolean {
     if (this.ledger.copies(identity).length > 0) return false;
+    return this.routedWithoutAnyCopyRow(identity);
+  }
+
+  /** @internal No store of the set holds an active row of the item. */
+  routedWithoutAnyCopyRow(identity: TierLedgerIdentity): boolean {
     return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity).active !== true);
   }
 
@@ -1579,6 +1586,14 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     const { item, connector } = input;
     const identity = item.identity;
     const ledger = this.set.ledger;
+    // An earlier version of this item in the run was a Secret or a deletion, whose copy rows are forgotten when
+    // the run ends. A later version is planned on what the item is after that, so they go now (its plan is
+    // cached for the later legs, which tombstone what that earlier plan named).
+    const earlier = identityKey(identity);
+    if (item.metadata['deleted'] !== true && this.copyRemovals.has(earlier)) {
+      ledger.removeCopies(identity);
+      this.copyRemovals.delete(earlier);
+    }
     // Legacy first: an item any store already holds a row for, that this
     // set's ledger never routed, is the lane's — whatever else the ledger
     // says about other items.
@@ -1679,12 +1694,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
     });
     // Left Secrets in this write (the owner's restore): its extraction jobs
     // keep their names again from this listing's enqueue on.
-    if (recorded.outcome !== 'secrets') {
-      retireSecretRedactions(ledger, { identity });
-      // The newest accepted version's plan wins: an earlier version of this listing that was a Secret (or a
-      // deletion) left its copy rows to be forgotten at the end of the run; this version keeps its own.
-      this.copyRemovals.delete(identityKey(identity));
-    }
+    if (recorded.outcome !== 'secrets') retireSecretRedactions(ledger, { identity });
     switch (recorded.outcome) {
       case 'secrets':
         this.counts.itemsSecrets += 1;

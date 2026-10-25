@@ -53444,7 +53444,7 @@ class TieredStoreSet {
       return this.routedWithoutAnyCopy(identity2);
     const current2 = copies.filter((copy) => copy.state === "current");
     if (current2.length === 0)
-      return false;
+      return this.routedWithoutAnyCopyRow(identity2);
     return current2.every((copy) => {
       const domain = this.domainForCorpus(copy.corpusId);
       const store = domain ? this.store(domain) : undefined;
@@ -53460,6 +53460,9 @@ class TieredStoreSet {
   routedWithoutAnyCopy(identity2) {
     if (this.ledger.copies(identity2).length > 0)
       return false;
+    return this.routedWithoutAnyCopyRow(identity2);
+  }
+  routedWithoutAnyCopyRow(identity2) {
     return TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity2).active !== true);
   }
   anyLegHasRow(identity2) {
@@ -53816,6 +53819,11 @@ class TieredRoutingRun {
     const { item, connector } = input;
     const identity2 = item.identity;
     const ledger = this.set.ledger;
+    const earlier = identityKey(identity2);
+    if (item.metadata["deleted"] !== true && this.copyRemovals.has(earlier)) {
+      ledger.removeCopies(identity2);
+      this.copyRemovals.delete(earlier);
+    }
     const hasRow = this.set.anyLegHasRow(identity2);
     const routed = ledger.isRouted(identity2);
     if (item.metadata["deleted"] === true) {
@@ -53871,10 +53879,8 @@ class TieredRoutingRun {
       staleCopiesGone: replacesInPlace || routed && this.set.routedCopiesGone(identity2),
       ...deferred ? { stagedLandingAllowed: true } : {}
     });
-    if (recorded.outcome !== "secrets") {
+    if (recorded.outcome !== "secrets")
       retireSecretRedactions(ledger, { identity: identity2 });
-      this.copyRemovals.delete(identityKey(identity2));
-    }
     switch (recorded.outcome) {
       case "secrets":
         this.counts.itemsSecrets += 1;
