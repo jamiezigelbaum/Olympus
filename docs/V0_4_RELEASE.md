@@ -75,6 +75,13 @@ factory. Each child is judged on its own and takes no tier from its parent.
 This is a contract change (2.1.0), designed first because Gmail and Evernote
 need it too: [child items](design/child-items.md).
 
+An archive and the live connector of the same account are one dataset with
+nothing stored twice, for every source (owner, 2026-10-25): the export is a
+second input to the source's own pipeline, and removing it removes only what
+it alone supplied. Contract 2.2.0, after child items:
+[one dataset, one pipeline](design/archive-live-one-dataset.md). It comes
+before archive media, whose children hang off the same ids.
+
 ## Source storage (approved 2026-10-24, in delivery)
 
 Every connected account's data moves into one folder owned by the shared

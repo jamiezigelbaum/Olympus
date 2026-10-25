@@ -479,10 +479,11 @@ Both are in scope. They come after mail because they reuse the same spine
   - *Limits of the finding shape.* A finding has no name or path field, so
     a media gap cannot name the file (the item text does), and the one
     account entry that can be too large to build is counted, not named.
-- Both import as snapshots alongside any live capture of the same account.
-  The dashboard keeps "imported archive" and "live capture" apart, as the
-  release plan requires. Overlap between an export and live capture is the
-  same open question as Takeout mail versus live Gmail.
+- Both import today as snapshots alongside any live capture of the same
+  account, and the overlap is stored twice. Since 2026-10-25 the owner
+  requires one dataset: an export is a second input to the source's own
+  pipeline, merged with live capture, as designed in
+  [one dataset, one pipeline](archive-live-one-dataset.md).
 
 ## Order
 
@@ -502,10 +503,10 @@ exports), plus the held-out eval where the step changes the source pipeline.
 
 ## Open questions
 
-- **Imported mail that overlaps live Gmail.** A Takeout export of the same
-  account duplicates mail that live Gmail already indexed. Matching on
-  `Message-ID` across sources is a spine question; the first version may
-  accept duplicates and show both.
+- **Imported mail that overlaps live Gmail.** Answered 2026-10-25 (owner):
+  no duplicates. Mail of the connected account feeds the Gmail pipeline and
+  matches by Gmail id or `Message-ID`
+  ([one dataset, one pipeline](archive-live-one-dataset.md)).
 - **Copy or reference.** The first version reads the file in place. If the
   user moves or deletes it, the import is already finished and stays; a
   re-import needs the file again.
