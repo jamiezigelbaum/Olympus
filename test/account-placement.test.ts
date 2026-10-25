@@ -32,7 +32,7 @@ import {
   recordAccountPlacement,
 } from '../src/core/source-storage.ts';
 import { runXReconcileRecovery } from '../src/cli.ts';
-import { lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleSourceIds } from '../src/core/account-files.ts';
 import { secretLocationsPathForStore, tierLedgerPathForStore, tierSnifferPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 import { archiveConnectorStoreDbPath } from '../src/workers/archive-import/store.ts';
 import { ArchiveImportRequestStore, archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
@@ -87,7 +87,7 @@ describe('placement: a new account', () => {
       expect(placedAccount(sourceId, env)).toEqual({ source_id: sourceId, slot: '1', layout: 'folder' });
     }
     // Reflect and Roam stay where they are, whatever the disk looks like.
-    const others = lifecycleSourceSpecs().map((spec) => spec.sourceId).filter((id) => !FOLDER_LAYOUT_SOURCES.includes(id));
+    const others = lifecycleSourceIds().filter((id) => !FOLDER_LAYOUT_SOURCES.includes(id));
     expect(others).toEqual(['reflect.notes', 'roam.notes']);
     for (const sourceId of others) {
       expect(hasFolderLayout(sourceId)).toBe(false);

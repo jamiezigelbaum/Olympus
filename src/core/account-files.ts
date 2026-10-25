@@ -126,6 +126,15 @@ const PRE_CUTOVER_INDEXES: Readonly<Record<string, { file: string; override: str
   },
 };
 
+/**
+ * The order a source's stores are listed in, where it is not the layout's: as
+ * its connector listed them (WhatsApp's protected store first), so the
+ * manifest and the messaging resolution golden keep their order.
+ */
+const STORE_ORDER: Readonly<Record<string, readonly string[]>> = {
+  [WHATSAPP_SOURCE_ID]: ['secure_local', 'internal'],
+};
+
 /** Ids a source used to answer to, which still name its rows in shared files. */
 const SOURCE_ALIASES: Readonly<Record<string, readonly string[]>> = {
   [WHATSAPP_SOURCE_ID]: ['whatsapp.messages'],
@@ -168,7 +177,7 @@ export function accountFiles(account: AccountFilesAccount, context: AccountFiles
   const folderPath = hasLayout ? accountFolder(account, env) : undefined;
   const folder = folderPath !== undefined && (account.layout === 'folder' || existsOnDisk(folderPath)) ? folderPath : undefined;
   const stores = hasLayout
-    ? accountStoreNames(sourceId, archiveImportFamilies()).map((name) => accountStorePath(account, name, env))
+    ? (STORE_ORDER[sourceId] ?? accountStoreNames(sourceId, archiveImportFamilies())).map((name) => accountStorePath(account, name, env))
     : (MOUNTED_STORES[sourceId] ?? []).map((file) => olympusDataPath(env, file));
   const preCutover = PRE_CUTOVER_INDEXES[sourceId];
   const files: AccountFiles = {

@@ -208,6 +208,11 @@ export function lifecycleStoreFileOwner(env: Record<string, string | undefined>)
     account.files.stores.map((path) => [path, account.sourceId] as const)));
 }
 
+/** What one source's account owns on disk, as Export and Delete see it now. */
+export function lifecycleAccountFiles(sourceId: string, context: LifecyclePathContext = {}): AccountFiles {
+  return requireAccount(sourceId, context).files;
+}
+
 /** Every store of every account the lifecycle knows: the tier CLI's lookup. */
 export function lifecycleStorePaths(context: LifecyclePathContext = {}): string[] {
   return knownAccounts(context).flatMap((account) => account.files.stores);

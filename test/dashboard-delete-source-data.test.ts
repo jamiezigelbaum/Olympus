@@ -1,10 +1,11 @@
+import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { buildEnvBridgeSovereigntyConfig, createSovereigntyEngine } from '../src/core/sovereignty.ts';
 import { connectThisComputerSource, disconnectThisComputerSource } from '../src/core/this-computer.ts';
-import { lifecycleDataRoot, lifecycleSourceSpecs } from '../src/data-lifecycle.ts';
+import { lifecycleAccountFiles, lifecycleDataRoot } from '../src/data-lifecycle.ts';
 import type { ModelKeyReloadRequest } from '../src/core/model-key-reload.ts';
 import { defaultSourceDashboardHistoryDbPath } from '../src/workers/source-dashboard.ts';
 import {
@@ -43,7 +44,7 @@ describe('dashboard Delete indexed data route', () => {
       : { version: 1, handles: [] };
     writeConnectedHandleRegistry(registry, registryPath);
     const context = { homeDir, env: {} };
-    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!.connectorStorePaths!(context)[0]!;
+    const store = lifecycleAccountFiles('dropbox.files', context).stores[0]!;
     mkdirSync(dirname(store), { recursive: true });
     writeFileSync(store, 'indexed');
     const restarts = { asked: 0, requested: 0 };
@@ -197,7 +198,7 @@ describe('dashboard Delete indexed data route: the shared files', () => {
         }
       : { version: 1, handles: [] }, layout.handleRegistryPath);
     const context = { homeDir, env: {} };
-    const store = lifecycleSourceSpecs().find((entry) => entry.sourceId === 'dropbox.files')!.connectorStorePaths!(context)[0]!;
+    const store = lifecycleAccountFiles('dropbox.files', context).stores[0]!;
     mkdirSync(dirname(store), { recursive: true });
     writeFileSync(store, 'indexed');
     seedTierLedgerBeside(store, MINE);
@@ -393,7 +394,7 @@ describe('dashboard Delete indexed data route: paired-session sources', () => {
     const context = { homeDir, env: {} };
     // These accounts predate folders: the registry lists them as legacy, so Delete reaches the paths they always had.
     pinMessagingLegacy({ HOME: homeDir });
-    const specs = lifecycleSourceSpecs();
+    const specs = lifecycleViews();
     const tg = specs.find((entry) => entry.sourceId === 'telegram.messages')!;
     const wa = specs.find((entry) => entry.sourceId === 'whatsapp.personal.messages')!;
     const files = {

@@ -7,6 +7,7 @@
 // while omitting the live corpora, and X bookmarks, which has no legacy index
 // at all, could not be exported by any command.
 
+import { lifecycleViews } from './helpers/lifecycle-view.ts';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -15,7 +16,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   deleteOlympusData,
   exportOlympusData,
-  lifecycleSourceSpecs,
 } from '../src/data-lifecycle.ts';
 import { defaultDropboxConnectorStoreDbPath } from '../src/workers/dropbox-files/index.ts';
 import {
@@ -142,7 +142,7 @@ describe('lifecycle inventory covers the connector stores', () => {
       new LocalXBookmarksReconcileStateStore(reconcilePath).close();
 
       // A preview changes nothing.
-      expect(deleteOlympusData({ sourceId: 'x.bookmarks', homeDir, dryRun: true }).reset).toEqual([usagePath]);
+      expect(deleteOlympusData({ sourceId: 'x.bookmarks', homeDir, dryRun: true }).forgotten).toContain(`${usagePath} (sync positions: 1)`);
       const previewed = new LocalXBookmarksApiUsageStore(usagePath);
       expect(previewed.headCheckpoint('personal')).toBe('777');
       previewed.close();
@@ -156,7 +156,7 @@ describe('lifecycle inventory covers the connector stores', () => {
       // left, a head beginning with that post would stop the next account's
       // sync before its own bookmarks (PR #264 review, Astra).
       expect(existsSync(usagePath)).toBe(true);
-      expect(result.reset).toEqual([usagePath]);
+      expect(result.forgotten).toContain(`${usagePath} (sync positions: 1)`);
       const kept = new LocalXBookmarksApiUsageStore(usagePath);
       expect(kept.headCheckpoint('personal')).toBeUndefined();
       kept.close();
@@ -188,7 +188,7 @@ describe('lifecycle inventory covers the connector stores', () => {
   // cannot land without an inventory entry.
   test('every product connector store belongs to a lifecycle spec', () => {
     const homeDir = join(tmpdir(), 'olympus-lifecycle-mount-inventory');
-    const inventory = new Set(lifecycleSourceSpecs().flatMap((spec) => spec.connectorStorePaths?.({ homeDir }) ?? []));
+    const inventory = new Set(lifecycleViews().flatMap((spec) => spec.connectorStorePaths?.({ homeDir }) ?? []));
     const mounted = Object.values(connectorStorePaths(homeDir));
 
     expect(mounted).toHaveLength(11);
@@ -198,7 +198,7 @@ describe('lifecycle inventory covers the connector stores', () => {
   });
 
   test('every spec declares either a legacy index or a connector store', () => {
-    for (const spec of lifecycleSourceSpecs()) {
+    for (const spec of lifecycleViews()) {
       const hasLegacyIndex = spec.sqlitePath !== undefined;
       const hasConnectorStore = (spec.connectorStorePaths?.({ homeDir: '/tmp/olympus-lifecycle-shape' }) ?? []).length > 0;
       expect(`${spec.sourceId}:${hasLegacyIndex || hasConnectorStore}`).toBe(`${spec.sourceId}:true`);
