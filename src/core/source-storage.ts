@@ -44,6 +44,7 @@ import {
 } from '../workers/connector-store/local-index.ts';
 import type { LayoutAccountLayout, LayoutEnv } from './olympus-layout.ts';
 import { decideAccountLayout, hasFolderLayout, isInsideAccountFolder, storageAccountForCorpus } from './source-placement.ts';
+import { placedStoreHolder } from './store-identity.ts';
 import {
   DEFAULT_ACCOUNT_SLOT,
   findRegistryAccount,
@@ -97,13 +98,19 @@ export function openConnectorStore(
   env: LayoutEnv = process.env,
 ): LocalConnectorStore {
   const slot = account.slot ?? DEFAULT_STORAGE_SLOT;
-  const registry = readSourceRegistry(env);
+  let registry = readSourceRegistry(env);
   assertOpenable(registry, account.sourceId, slot);
   if (adoptionEnabled && options.readOnly !== true) {
     const entry = findRegistryAccount(registry, account.sourceId, slot);
-    if (!entry?.corpus_ids.includes(options.corpusId)) adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
+    if (!entry?.corpus_ids.includes(options.corpusId)) {
+      adopt(env, account.sourceId, slot, options.dbPath, options.corpusId);
+      registry = readSourceRegistry(env);
+    }
   }
-  return new LocalConnectorStore(options);
+  // A store the registry places holds its pictures by who it is, not where its
+  // file sits, so renaming it into its account folder needs no media-cache call.
+  const mediaHolder = placedStoreHolder({ sourceId: account.sourceId, slot }, options, env, registry);
+  return new LocalConnectorStore(mediaHolder ? { ...options, mediaHolder } : options);
 }
 
 // A sidecar can be the first file of an account: a tiered set opens its ledger

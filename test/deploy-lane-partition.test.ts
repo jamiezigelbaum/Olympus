@@ -91,17 +91,17 @@ describe('test lane partition', () => {
       lane: 'deploy',
       shard: { index: 2, total: 6 },
     });
+    // Process-spawning lanes stay serial; the fast lane runs one process per
+    // file (test/test-lane-pool.test.ts).
     expect(buildTestLaneCommand(['one.test.ts', 'two.test.ts'])).toEqual([
       'bun',
       'test',
-      '--parallel',
-      '--timeout=15000',
       join('test', 'one.test.ts'),
       join('test', 'two.test.ts'),
     ]);
-    // Process-spawning lanes stay serial.
-    expect(buildTestLaneCommand(['one.test.ts'], undefined, 'deploy')).toEqual(['bun', 'test', join('test', 'one.test.ts')]);
-    expect(buildTestLaneCommand(['one.test.ts'], undefined, 'go')).toEqual(['bun', 'test', join('test', 'one.test.ts')]);
+    expect(buildTestLaneCommand(['one.test.ts'], 'out.xml')).toEqual([
+      'bun', 'test', join('test', 'one.test.ts'), '--reporter=junit', '--reporter-outfile=out.xml',
+    ]);
     expect(parseTestLaneArgs(['go'])).toEqual({ lane: 'go' });
   });
 

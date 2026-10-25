@@ -236,6 +236,7 @@ import {
   localFilesIngestionExclusionMatcher,
   localFilesWatchDir,
 } from '../local-files/store.ts';
+import { createLocalFilesOwnRootsCleanup } from '../local-files/own-roots-cleanup.ts';
 import { createLocalFilesProviderStoreSyncHandler } from '../local-files/provider-store-sync.ts';
 import { createLocalFilesSchedulerSource } from '../local-files/scheduler-source.ts';
 import { createArchiveImportRuntime } from '../archive-import/runtime.ts';
@@ -2911,6 +2912,17 @@ export async function main(): Promise<void> {
     volumeIgnoresCase: (volumeId: string | undefined, path?: string) => localFilesVolumes.ignoresCase(volumeId, path),
   };
   const localFilesWatchIgnore = watchIgnoreGlobs(localFilesExclusionContext);
+  // Olympus's own folders are never indexed, and what an earlier version indexed
+  // inside one (a folder the person had chosen by name) is removed here: before
+  // the worker answers anything, and again with each pass until none is left.
+  const localFilesOwnRootsCleanup = localFilesConnectorStore
+    ? createLocalFilesOwnRootsCleanup({
+        store: localFilesConnectorStore,
+        ...(localFilesTierLane ? { tierSet: localFilesTierLane.set } : {}),
+        context: localFilesExclusionContext,
+        log: (message) => console.warn(`[local-files] ${message}`),
+      })
+    : undefined;
   let localFilesSyncCache: { key: string; handler: ReturnType<typeof createLocalFilesProviderStoreSyncHandler> } | undefined;
   const localFilesSyncFor = (ref: SourceScopePolicyRef) => {
     if (!localFilesConnectorStore || !fileSourceScopeAuthority) return undefined;
@@ -2927,6 +2939,10 @@ export async function main(): Promise<void> {
       hub: localFilesWatchHub,
       snapshotDir: localFilesWatchDir(process.env),
       ignore: localFilesWatchIgnore,
+      // A pass writes the same stores: it starts only once no clean-up batch is still in flight.
+      ...(localFilesOwnRootsCleanup
+        ? { beforePull: async () => { await localFilesOwnRootsCleanup.run(); await localFilesOwnRootsCleanup.idle(); } }
+        : {}),
       ...(localFilesEmbeddingProvider && isApprovedSecureSourceEmbeddingProvider(localFilesEmbeddingProvider)
         ? { embeddingProvider: scopeBoundEmbeddingProvider(localFilesEmbeddingProvider, fileSourceScopeAuthority, ref) }
         : {}),
@@ -2936,7 +2952,7 @@ export async function main(): Promise<void> {
   };
   const localFilesApprovedScopePaths = (): string[] => {
     const approval = fileSourceScopeAuthority?.snapshot(LOCAL_FILES_SOURCE_ID);
-    return approval && approval.status === 'approved' ? localFilesRoots(approval).map((root) => root.scopePath) : [];
+    return approval && approval.status === 'approved' ? localFilesRoots(approval, localFilesExclusionContext).map((root) => root.scopePath) : [];
   };
   const localFilesOpenTarget = createLocalFilesOpenTargets({
     volumes: localFilesVolumes,
@@ -3147,6 +3163,7 @@ export async function main(): Promise<void> {
               return fileSourceScopeLocalFilesPolicy(
                 localFilesIngestionPolicy,
                 fileSourceScopeAuthority.assertCurrent(ref),
+                localFilesExclusionContext,
               ).roots.filter((root) => root.default_action === 'full_extract').map((root) => root.approved_scope_key);
             },
             resolveCandidateFilters: () => {
@@ -4005,7 +4022,7 @@ export async function main(): Promise<void> {
           if (corpusId === LOCAL_FILES_CORPUS_ID) {
             const ref = fileSourceScopeAuthority?.policyRef(LOCAL_FILES_SOURCE_ID);
             if (!ref || !fileSourceScopeAuthority) return [];
-            return fileSourceScopeLocalFilesPolicy(localFilesIngestionPolicy, fileSourceScopeAuthority.assertCurrent(ref))
+            return fileSourceScopeLocalFilesPolicy(localFilesIngestionPolicy, fileSourceScopeAuthority.assertCurrent(ref), localFilesExclusionContext)
               .roots.filter((root) => root.default_action === 'full_extract').map((root) => ({
                 corpusId,
                 provider: LOCAL_FILES_PROVIDER,
@@ -4359,6 +4376,7 @@ export async function main(): Promise<void> {
       ? fileSourceScopeLocalFilesPolicy(
           localFilesIngestionPolicy,
           fileSourceScopeAuthority.assertCurrent(currentLocalFilesScopeRef),
+          localFilesExclusionContext,
         )
       : undefined;
     const currentXBookmarksConnectorStoreRuntime = refreshableXBookmarksRuntime
@@ -6062,6 +6080,9 @@ export async function main(): Promise<void> {
       )),
     )))), !!socketPath),
   };
+  // Nothing is answered from the local files index before what an earlier version
+  // indexed inside Olympus's own folders is gone (own-roots-cleanup.ts).
+  await localFilesOwnRootsCleanup?.run();
   const startServer = () => socketPath
     ? Bun.serve({ unix: socketPath, fetch(request, server) {
         server.timeout(request, 0);

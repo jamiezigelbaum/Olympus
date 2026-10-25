@@ -4,6 +4,7 @@ import { isAbsolute as isAbsolutePath, join, resolve } from 'node:path';
 import { OperationError } from './operation-error.ts';
 import { readOpenClawPluginRemote } from './openclaw-plugin-remote.ts';
 import { resolveLinuxEngineLayout, readLinuxEngineReceipt } from './linux-engine-layout.ts';
+import type { OlympusCaptureConfig } from './olympus-layout.ts';
 import {
   defaultSourceCorpusRegistryConfig,
   parsePublicSourceCorpusRegistryConfig,
@@ -377,6 +378,26 @@ export function loadConfig(
 
   validateConfig(config);
   return config;
+}
+
+/**
+ * Where the plugin config puts the capture services' state: what the Telegram
+ * reader and the WhatsApp bridge are told to write to, which the worker's own
+ * environment may not repeat. Read as `loadConfig` reads the config (the
+ * engine's `engine.json`, else the legacy config file); nothing when there is
+ * none or it cannot be read.
+ */
+export function configuredCaptureLocations(env: Record<string, string | undefined> = process.env): OlympusCaptureConfig {
+  try {
+    const { telegramCapture, whatsappCapture } = loadConfig(env).worker;
+    return {
+      ...(telegramCapture.stateDir ? { telegramStateDir: telegramCapture.stateDir } : {}),
+      ...(telegramCapture.spoolDir ? { telegramSpoolDir: telegramCapture.spoolDir } : {}),
+      ...(whatsappCapture.stateDir ? { whatsappStateDir: whatsappCapture.stateDir } : {}),
+    };
+  } catch {
+    return {};
+  }
 }
 
 /**

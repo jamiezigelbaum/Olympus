@@ -21,7 +21,7 @@ import { kindOf, type ControlKind, type SeedId } from './explore-kinds.ts';
 import type { InventoryControl } from './explore-inventory.ts';
 import type { ElementInfo, JourneyDriver, JourneyTrace, StepTrace } from './journey.ts';
 import type { CheckResult } from './report.ts';
-import { pagesChecks, type PagesResult } from './explore-pages.ts';
+import { pagesChecks, type PagesOptions, type PagesResult } from './explore-pages.ts';
 import { BLANK_WINDOW } from './probe.ts';
 
 export interface PanelControl {
@@ -275,6 +275,33 @@ export async function auditAccessibility(driver: JourneyDriver, axeSource: strin
     }
   }
   return { version, states };
+}
+
+/**
+ * The audit the pages crawl runs on each page as it loads (`explorePages`' `audit`): the page is checked with axe-core like a seeded
+ * state of the Sources section, and its states are kept here to join those in the one accessibility check (`withPageAudits`). It adds
+ * no finding to the page's own step, so a violation is reported once.
+ */
+export function pagesAccessibilityAudit(axeSource: string): { audit: NonNullable<PagesOptions['audit']>; states: AccessibilityState[]; version: () => string } {
+  const states: AccessibilityState[] = [];
+  let version = '';
+  return {
+    states,
+    version: () => version,
+    audit: async (driver, page) => {
+      const audited = await auditAccessibility(driver, axeSource, `${page.id} page`);
+      version = audited.version || version;
+      states.push(...audited.states);
+      return [];
+    },
+  };
+}
+
+/** The Sources section's audit with the other pages' states added. */
+export function withPageAudits(accessibility: Accessibility, pages: { states: AccessibilityState[]; version: () => string }): Accessibility {
+  if (pages.states.length === 0) return accessibility;
+  if (accessibility.status === 'ran') return { ...accessibility, version: accessibility.version || pages.version(), states: [...accessibility.states, ...pages.states] };
+  return { status: 'ran', version: pages.version(), states: [...pages.states] };
 }
 
 /** The violations that block, across every audited state, with where each is. */

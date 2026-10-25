@@ -29,6 +29,7 @@ import {
   DEFAULT_EXCLUSION_LABELS,
   defaultExclusionContext,
   defaultExclusionForFolder,
+  isInsideOwnRoot,
   normalizeScopePath,
   scopePathFor,
   splitScopePath,
@@ -97,15 +98,18 @@ function localFilesListing(options: LocalFilesFolderScopeBrowserOptions, mode: '
     access?: OlympusFolderAccess,
   ): OlympusFolderScopeNode => {
     // Off-by-default folders are about what is indexed; choosing an export to import is not.
-    const reason = mode === 'folders' ? defaultExclusionForFolder(scopePath, context) : undefined;
+    // Olympus's own folders (and what is inside them) cannot be chosen at all: they are
+    // never indexed, so the picker shows the reason and offers no way in.
+    const own = mode === 'folders' && isInsideOwnRoot(scopePath, context);
+    const reason = own ? 'olympus_data' as const : mode === 'folders' ? defaultExclusionForFolder(scopePath, context) : undefined;
     return {
       key: scopePath,
       ...(parentKey !== undefined ? { parent_key: parentKey } : {}),
       name: name.normalize('NFC'),
       kind: 'folder',
       // Counting a folder's children would read it; an empty page is the answer.
-      has_children: true,
-      selectable: true,
+      has_children: !own,
+      selectable: !own,
       ...(reason ? { excluded_by_default: true, default_exclusion_reason: DEFAULT_EXCLUSION_LABELS[reason] } : {}),
       ...(access ? { access } : {}),
     };
@@ -234,7 +238,7 @@ function localFilesListing(options: LocalFilesFolderScopeBrowserOptions, mode: '
     return stat?.isFile() ? { ...entry, size_bytes: stat.size } : entry;
   };
 
-  return { volumes, permissions, browse };
+  return { volumes, permissions, context, browse };
 }
 
 /** The cursor scope of the archive picker's pages (never a source's). */
@@ -243,7 +247,7 @@ const ARCHIVE_CURSOR_SCOPE = 'archive.imports';
 export function createLocalFilesFolderScopeBrowser(
   options: LocalFilesFolderScopeBrowserOptions = {},
 ): SourceFolderScopeBrowser {
-  const { volumes, permissions, browse } = localFilesListing(options, 'folders');
+  const { volumes, permissions, context, browse } = localFilesListing(options, 'folders');
   return {
     sourceId: LOCAL_FILES_SOURCE_ID,
     browse,
@@ -281,6 +285,11 @@ export function createLocalFilesFolderScopeBrowser(
             throw new Error('A selected folder is reached through a link. Choose the folder itself.');
           }
           selection.key = scopePathOfRealPath(volumes, canonical);
+        }
+        // Olympus's own folders are never indexed, so a choice of one (or of a folder inside it)
+        // is refused rather than saved to do nothing. Skipping one is harmless and still saved.
+        if (selection.state !== 'exclude' && isInsideOwnRoot(selection.key, context)) {
+          throw new Error(`${DEFAULT_EXCLUSION_LABELS.olympus_data} is never indexed. Choose a different folder.`);
         }
       }
       return effectiveSelections(normalized, (key) => ancestorScopePaths(key));

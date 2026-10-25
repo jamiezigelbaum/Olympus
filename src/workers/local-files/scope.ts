@@ -6,6 +6,9 @@
  * a connector asks: may this path be listed, and may its content be read.
  *
  * Rules, in order:
+ *  0. Olympus's own folders (paths.ts `ownRoots`) are denied, and so is
+ *     everything inside them, whatever else was selected: not even a folder the
+ *     person chose by name turns them on.
  *  1. A folder that is off by default (`paths.ts`) is denied unless the person
  *     selected that folder, or one below it, explicitly. A selection above it
  *     does not turn it on.
@@ -23,6 +26,7 @@ import type { FileSourceScopeApprovalSnapshot } from '../../core/source-scope-ap
 import type { FileSourceScopeAuthority, FileSourceScopePolicyRef } from '../source-scope-runtime.ts';
 import {
   deepestDefaultExclusion,
+  isInsideOwnRoot,
   normalizeScopePath,
   scopePathDepth,
   scopePathIsWithin,
@@ -71,6 +75,9 @@ export function decideLocalFilesPath(
   // Reading it is harmless to the lock (flock is per descriptor), but it is
   // Olympus's own file, not the person's, so it is never indexed.
   if (isDataOwnerLockName(path.slice(path.lastIndexOf('/') + 1))) return 'denied';
+  // Olympus's own stores, credential references and session secrets: never
+  // listed or read, under a whole-computer pass or a folder chosen by name.
+  if (isInsideOwnRoot(path, context)) return 'denied';
   const selected = approval.selections
     .map((selection) => ({ key: safeKey(selection.key), state: selection.state }))
     .filter((selection): selection is { key: string; state: typeof approval.selections[number]['state'] } =>
@@ -95,6 +102,7 @@ function safeKey(key: string): string | undefined {
 
 export function localFilesRoots(
   approval: Pick<FileSourceScopeApprovalSnapshot, 'selections' | 'wholeAccount'>,
+  context?: DefaultExclusionContext,
 ): Array<{ scopePath: string; state: 'ingest' | 'metadata_only' }> {
   // Whole computer: the one root is the top of the primary disk, read in
   // full except what is excluded or off by default. (Other disks are chosen
@@ -104,7 +112,9 @@ export function localFilesRoots(
   for (const selection of approval.selections) {
     if (selection.state === 'exclude') continue;
     const scopePath = safeKey(selection.key);
-    if (scopePath) roots.push({ scopePath, state: selection.state });
+    // A folder inside Olympus's own is never read, so it is no root: nothing
+    // would be listed, watched or scheduled for it (a choice saved before it was refused).
+    if (scopePath && !(context && isInsideOwnRoot(scopePath, context))) roots.push({ scopePath, state: selection.state });
   }
   return roots;
 }
@@ -125,7 +135,7 @@ export function createScopeBoundLocalFilesContentScope(input: {
       const approval = current();
       return (scopePath) => decideLocalFilesPath(approval, scopePath, input.context);
     },
-    roots: () => localFilesRoots(current()),
+    roots: () => localFilesRoots(current(), input.context),
   };
 }
 
@@ -133,11 +143,12 @@ export function createScopeBoundLocalFilesContentScope(input: {
 export function fileSourceScopeLocalFilesPolicy(
   base: SourceIngestionPolicy,
   approval: FileSourceScopeApprovalSnapshot,
+  context?: DefaultExclusionContext,
 ): SourceIngestionPolicy {
   if (approval.sourceId !== LOCAL_FILES_SOURCE_ID || approval.status !== 'approved') return { ...base, roots: [] };
   return {
     ...base,
-    roots: localFilesRoots(approval).map(({ scopePath, state }) => ({
+    roots: localFilesRoots(approval, context).map(({ scopePath, state }) => ({
       path: scopePath,
       approved_scope_key: `${LOCAL_FILES_POLICY_SOURCE}:${scopePath}`,
       default_action: state === 'ingest' ? 'full_extract' as const : 'metadata_only' as const,

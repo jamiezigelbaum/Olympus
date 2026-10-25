@@ -77,7 +77,9 @@ Nothing below names a source. Every step is shared and keyed by media type.
      file; the runner releases it after the sink stored or refused the
      result, so a refused or failed result leaves nothing behind and a twin
      photo deleted meanwhile cannot take the file;
-   - a store takes its own marker after its write commits;
+   - a store takes its own marker after its write commits (named by the
+     account and store when the account registry places it, by the store's
+     path otherwise: `docs/design/source-storage.md`, "Shared files");
    - a delete trigger queues media no chunk references any more, drained
      after every write and delete path (restore, import, sync, strip,
      relinquish, purge, metadata-only strip, embed passes, close), using a

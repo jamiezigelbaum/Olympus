@@ -35,6 +35,7 @@ import {
   legacyTelegramGatewayStateDir,
   olympusDataPath,
   olympusDataRoot,
+  type LayoutEnv,
 } from './core/olympus-layout.ts';
 import { declaredConnectorStoreMounts, hasFolderLayout, placedAccount } from './core/source-placement.ts';
 import { dataOwnerLockPath, isDataOwnerLockName } from './core/data-owner-lock.ts';
@@ -105,6 +106,7 @@ import { V0_4_PUBLIC_SOURCE_CAPABILITIES } from './core/public-source-capabiliti
 import { workerServicePaths, type WorkerServiceState } from './core/worker-service.ts';
 import { closeSqliteStore } from './core/sqlite-store.ts';
 import { isMediaCachePath, mediaCacheDir, mediaHolderName, releaseMediaCacheFile } from './core/media-cache.ts';
+import { storeHolderAtPath, type StoreHolder } from './core/store-identity.ts';
 import type { ConnectedHandleRegistry } from './workers/credential-broker/connected-handles.ts';
 
 export interface LifecyclePathContext {
@@ -802,7 +804,7 @@ export function deleteOlympusData(options: {
   // one interrupted after deletion leaves markers the cache sweep drops,
   // because their holder is gone.
   const sourceMedia = selectedSource
-    ? readSourceMedia(selectedSource.connectorStorePaths?.(options) ?? [])
+    ? readSourceMedia(selectedSource.sourceId, selectedSource.connectorStorePaths?.(options) ?? [], envForContext(options))
     : [];
   // Before anything is removed: a database that will not open fails the
   // delete with every store still in place.
@@ -1241,7 +1243,8 @@ function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] 
 /**
  * Releases the media-cache copies the given connector stores reference (the
  * store's own reference marker, as LocalConnectorStore holds it: named by the
- * store's real path, whatever spelling of it this process was given) and
+ * account and store the registry places it as, else by the store's real path,
+ * whatever spelling of it this process was given) and
  * returns the copies removed, or those a dry run would release. A path is
  * checked to be a media-cache file by its shape, not against this process's
  * configured cache directory, which may differ from the worker's.
@@ -1252,10 +1255,12 @@ function mediaCacheDeleteTargets(context: LifecyclePathContext): DeleteTarget[] 
 type SourceMediaHolds = Array<{
   storePath: string;
   holder: string;
+  /** The store as the registry places it, when it does: its pictures are held under that too. */
+  storeHolder: StoreHolder | undefined;
   rows: Array<{ media_path: string; media_sha256: string }>;
 }>;
 
-function readSourceMedia(storePaths: readonly string[]): SourceMediaHolds {
+function readSourceMedia(sourceId: string, storePaths: readonly string[], env: LayoutEnv): SourceMediaHolds {
   const held: SourceMediaHolds = [];
   for (const storePath of storePaths) {
     if (storePath === ':memory:' || !existsSync(storePath)) continue;
@@ -1292,25 +1297,27 @@ function readSourceMedia(storePaths: readonly string[]): SourceMediaHolds {
     }
     // Named now, while the store exists: its real path is its marker's name,
     // and a deleted file has none.
-    held.push({ storePath, holder: mediaHolderName(storePath), rows });
+    held.push({ storePath, holder: mediaHolderName(storePath), storeHolder: storeHolderAtPath(sourceId, storePath, env), rows });
   }
   return held;
 }
 
 function releaseSourceMedia(held: SourceMediaHolds, dryRun: boolean): string[] {
   const released: string[] = [];
-  for (const { storePath, holder, rows } of held) {
+  for (const { storePath, holder, storeHolder, rows } of held) {
     for (const row of rows) {
       if (!isMediaCachePath(row.media_path, row.media_sha256)) continue;
       if (dryRun) {
         if (existsSync(row.media_path)) released.push(row.media_path);
       } else {
-        // Under its real path, and under the path as given for a marker an
-        // earlier build named by its spelling.
+        // Under the account and store it is, under its real path, and under
+        // the path as given for a marker an earlier build named by its spelling.
+        const removedByIdentity = storeHolder !== undefined
+          && releaseMediaCacheFile(row.media_path, row.media_sha256, storeHolder);
         const removedByHolder = releaseMediaCacheFile(row.media_path, row.media_sha256, holder);
         const removedBySpelling = holder !== storePath
           && releaseMediaCacheFile(row.media_path, row.media_sha256, storePath);
-        if (removedByHolder || removedBySpelling) released.push(row.media_path);
+        if (removedByIdentity || removedByHolder || removedBySpelling) released.push(row.media_path);
       }
     }
   }
