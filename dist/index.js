@@ -17311,6 +17311,11 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/workers/connector-store/child-visibility.ts
+var init_child_visibility = __esm(() => {
+  init_tier_ledger();
+});
+
 // src/core/source-index/chunk-selection.ts
 var CHUNK_WINDOW_PROSE_TERMS;
 var init_chunk_selection = __esm(() => {
@@ -17490,6 +17495,7 @@ var init_local_index = __esm(() => {
   init_tier_set_binding();
   init_tier_placement();
   init_secrets_disposition();
+  init_child_visibility();
   init_source_ingestion_exclusions();
   init_fts();
   init_chunk_selection();
@@ -18174,7 +18180,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, CHILD_CASCADE_RECONCILE_INTERVAL_MS;
+var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -18184,6 +18190,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_placement();
   init_secrets_disposition();
   init_parent_context();
+  init_child_visibility();
   init_tier_names_only_settle();
   init_tier_content_purge();
   init_tier_move();
@@ -18193,7 +18200,6 @@ var init_tiered_store_set = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
-  CHILD_CASCADE_RECONCILE_INTERVAL_MS = 5 * 60000;
 });
 
 // src/workers/readwise/live-sync.ts
@@ -19795,6 +19801,7 @@ var init_source_forget_registry = __esm(() => {
   init_job_names();
   init_spool();
   init_olympus_layout();
+  init_source_placement();
   init_tier_migration_reports();
 });
 

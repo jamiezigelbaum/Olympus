@@ -10135,6 +10135,9 @@ function mediaCacheRoot(env = process.env) {
 function extractionSpoolRoot(env = process.env) {
   return olympusDataPath(env, "extraction-spool");
 }
+function accountExtractionSpoolRoot(account, env = process.env) {
+  return account.layout === "folder" ? join19(accountFolder(account, env), "raw", "extraction-spool") : extractionSpoolRoot(env);
+}
 function whatsappStateDirFromValue(value) {
   const trimmed = value.trim();
   return basename2(trimmed) === "session.db" ? dirname16(trimmed) : trimmed;
@@ -12104,6 +12107,11 @@ function placedAccount(sourceId, env = process.env, slot = DEFAULT_ACCOUNT_SLOT)
     return { source_id: sourceId, slot, layout: "legacy" };
   }
   return { source_id: sourceId, slot, layout: entry ? entry.layout : decideAccountLayout(sourceId, env).layout };
+}
+function extractionSpoolRootForCorpus(corpus, env = process.env, registered = []) {
+  const account = placedAccount(storageAccountForCorpus(corpus, registered).sourceId, env);
+  const inFolder = account.layout === "folder" && (corpus.storePath === undefined || isInsideAccountFolder(corpus.storePath, account, env));
+  return inFolder ? accountExtractionSpoolRoot(account, env) : extractionSpoolRoot(env);
 }
 function resolvedStorePath(sourceId, name, env = process.env) {
   return accountStorePath(placedAccount(sourceId, env), name, env);
@@ -20297,7 +20305,6 @@ class TierLedger {
       unique.set(tierLedgerIdentityKey(identity2), identity2);
     const list = [...unique.values()];
     this.db.transaction(() => {
-      const holds = this.holdsExist();
       for (let offset = 0;offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const rows = this.db.query(`
@@ -20313,30 +20320,9 @@ class TierLedger {
           else
             result.set(key, [copyFromRow(row)]);
         }
-        if (holds) {
-          for (const key of this.heldKeys(batch)) {
-            const copies = result.get(key) ?? [];
-            result.set(key, copies.length > 0 ? copies.map(hiddenByHold) : [heldPlaceholderCopy()]);
-          }
-        }
       }
     })();
     return result;
-  }
-  holdsExist() {
-    return this.db.query("SELECT 1 AS present FROM tier_deletion_hold LIMIT 1").get() !== null;
-  }
-  heldKeys(batch) {
-    const held = new Set;
-    if (batch.length === 0)
-      return held;
-    const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
-      WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-    `).all(...batch.flatMap((identity2) => [...idParams(identity2)]));
-    for (const row of rows)
-      held.add(tierLedgerIdentityKey(identityOfRow(row)));
-    return held;
   }
   recordRoutedPlacement(identity2, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
@@ -20532,7 +20518,7 @@ class TierLedger {
     })();
     return result;
   }
-  itemStatesForMany(identities, options = {}) {
+  itemStatesForMany(identities) {
     const result = new Map;
     if (identities.length === 0)
       return result;
@@ -20541,7 +20527,6 @@ class TierLedger {
       unique.set(tierLedgerIdentityKey(identity2), identity2);
     const list = [...unique.values()];
     this.db.transaction(() => {
-      const holds = options.raw !== true && this.holdsExist();
       for (let offset = 0;offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
@@ -20560,13 +20545,6 @@ class TierLedger {
         `).all(...params);
         for (const row of copies)
           result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
-        if (holds) {
-          for (const key of this.heldKeys(batch)) {
-            const state = result.get(key);
-            if (state)
-              state.copies = state.copies.length > 0 ? state.copies.map(hiddenByHold) : [heldPlaceholderCopy()];
-          }
-        }
       }
     })();
     return result;
@@ -20631,7 +20609,7 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity2);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving" || this.childCascadePending(identity2)) {
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving") {
         throw new TierLedgerGenerationConflictError;
       }
       if (!existing.routed || existing.contentRead) {
@@ -20657,7 +20635,7 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity2);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving" || this.childCascadePending(identity2)) {
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving") {
         throw new TierLedgerGenerationConflictError;
       }
       if (!existing.routed)
@@ -21144,7 +21122,7 @@ class TierLedger {
     `).run(update.status, update.batchId ?? null, update.movedGeneration ?? null, update.outcome ? JSON.stringify(update.outcome) : null, this.now().toISOString(), planId, ...idParams(identity2));
   }
   corpusHasCopies(corpusId) {
-    return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null || this.holdsExist();
+    return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
   corpusCopyIdentities(corpusId, filter) {
     const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" ? `copy_state = 'current' AND layers = 'metadata'
@@ -21167,14 +21145,9 @@ class TierLedger {
                 AND other.corpus_id <> tier_copies.corpus_id
                 AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
             )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
-    const hiddenKind = filter === "superseded" || filter === "staged";
-    const unheld = hiddenKind ? "" : `AND NOT EXISTS (
-        SELECT 1 FROM tier_deletion_hold hold
-        WHERE hold.provider = tier_copies.provider AND hold.account_scope = tier_copies.account_scope
-          AND hold.conversation_key = tier_copies.conversation_key AND hold.provider_item_id = tier_copies.provider_item_id)`;
     const page2 = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where} ${unheld}
+      WHERE corpus_id = ? AND ${where}
         AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT 5000
@@ -21189,18 +21162,6 @@ class TierLedger {
         break;
       const last = rows[rows.length - 1];
       after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
-    }
-    if (filter === "superseded") {
-      const seen = new Set(identities.map((identity2) => tierLedgerIdentityKey(identity2)));
-      const held = this.db.query(`
-        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
-        ORDER BY provider, account_scope, conversation_key, provider_item_id
-      `).all();
-      for (const row of held) {
-        const identity2 = identityFromRow(row);
-        if (!seen.has(tierLedgerIdentityKey(identity2)))
-          identities.push(identity2);
-      }
     }
     return identities;
   }
@@ -21268,171 +21229,11 @@ class TierLedger {
         "tier_migration_proposals",
         "secret_side_store_debt",
         "secret_side_store_scrubs",
-        "secret_redaction_retirement",
-        "tier_child_cascade",
-        "tier_parent_deletion_intent",
-        "tier_deletion_hold"
+        "secret_redaction_retirement"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
       return { items, copies };
-    })();
-  }
-  holdParentDeletion(parent, children, observedAfter) {
-    this.db.transaction(() => {
-      const now = this.now().toISOString();
-      this.db.query(`
-        INSERT INTO tier_parent_deletion_intent (
-          provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at, observed_after
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
-        DO UPDATE SET observed_after = MAX(observed_after, excluded.observed_after)
-      `).run(...idParams(parent), parent.family, parent.localItemId, now, observedAfter);
-      const hold = this.db.query(`
-        INSERT OR IGNORE INTO tier_deletion_hold (
-          provider, account_scope, conversation_key, provider_item_id,
-          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const item of [parent, ...children])
-        hold.run(...idParams(item), ...idParams(parent), now);
-    })();
-  }
-  holdChildOfPendingDeletion(child, parentLocalItemId) {
-    return this.db.query(`
-      INSERT OR IGNORE INTO tier_deletion_hold (
-        provider, account_scope, conversation_key, provider_item_id,
-        owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
-      )
-      SELECT ?, ?, ?, ?, provider, account_scope, conversation_key, provider_item_id, ?
-      FROM tier_parent_deletion_intent WHERE local_item_id = ?
-    `).run(...idParams(child), this.now().toISOString(), parentLocalItemId).changes > 0;
-  }
-  heldForDeletion(identity2) {
-    return this.db.query(`
-      SELECT 1 AS present FROM tier_deletion_hold
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity2)) !== null;
-  }
-  pendingParentDeletions(options = {}) {
-    const rows = this.db.query(`
-      SELECT rowid AS seq, provider, account_scope, conversation_key, provider_item_id, family, local_item_id, observed_after
-      FROM tier_parent_deletion_intent WHERE rowid > ? ORDER BY rowid LIMIT ?
-    `).all(Math.max(0, Math.floor(options.after ?? 0)), Math.max(1, Math.floor(options.limit ?? 100)));
-    return rows.map((row) => ({
-      seq: row.seq,
-      observedAfter: row.observed_after,
-      parent: {
-        family: row.family,
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        localItemId: row.local_item_id,
-        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-      }
-    }));
-  }
-  liftParentDeletion(parent) {
-    this.db.transaction(() => {
-      this.db.query(`
-        DELETE FROM tier_deletion_hold
-        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
-      `).run(...idParams(parent));
-      this.db.query(`
-        DELETE FROM tier_parent_deletion_intent
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(parent));
-    })();
-  }
-  hideAndQueueChildren(parent, children) {
-    return this.db.transaction(() => {
-      const now = this.now().toISOString();
-      let hidden = 0;
-      const hide = (identity2) => {
-        const row = this.readRow(identity2);
-        if (!row)
-          return;
-        const changed = this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded',
-            superseded_by_generation = COALESCE(superseded_by_generation, ?), updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-            AND copy_state <> 'superseded'
-        `).run(row.generation + 1, now, ...idParams(identity2)).changes;
-        if (changed > 0)
-          hidden += 1;
-      };
-      hide(parent);
-      this.db.query(`
-        DELETE FROM tier_deletion_hold
-        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
-      `).run(...idParams(parent));
-      this.db.query(`
-        DELETE FROM tier_parent_deletion_intent
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(parent));
-      const queue = this.db.query(`
-        INSERT OR IGNORE INTO tier_child_cascade (
-          provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
-          parent_provider_item_id, queued_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const hold = this.db.query(`
-        INSERT OR IGNORE INTO tier_deletion_hold (
-          provider, account_scope, conversation_key, provider_item_id,
-          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      let queued = 0;
-      for (const child of children) {
-        hide(child);
-        hold.run(...idParams(child), ...idParams(parent), now);
-        queued += queue.run(...idParams(child), child.family, child.localItemId, parent.providerItemId, now).changes;
-      }
-      return { hidden, queued };
-    })();
-  }
-  childCascadePending(identity2) {
-    return this.db.query(`
-      SELECT 1 AS present FROM tier_child_cascade
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity2)) !== null;
-  }
-  pendingChildCascades(limit = 100) {
-    const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
-        parent_provider_item_id, attempts
-      FROM tier_child_cascade ORDER BY queued_at, rowid LIMIT ?
-    `).all(Math.max(1, Math.floor(limit)));
-    return rows.map((row) => ({
-      child: {
-        family: row.family,
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        localItemId: row.local_item_id,
-        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-      },
-      parentProviderItemId: row.parent_provider_item_id,
-      attempts: row.attempts
-    }));
-  }
-  noteChildCascadeAttempt(identity2) {
-    this.db.query(`
-      UPDATE tier_child_cascade SET attempts = attempts + 1, last_attempt_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(this.now().toISOString(), ...idParams(identity2));
-  }
-  completeChildCascade(identity2) {
-    this.db.transaction(() => {
-      this.deleteCopies(identity2);
-      this.db.query(`
-        DELETE FROM tier_child_cascade
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(identity2));
-      this.db.query(`
-        DELETE FROM tier_deletion_hold
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(identity2));
     })();
   }
   deleteAccountScopeCopies(provider, accountScope) {
@@ -21528,22 +21329,6 @@ function identityFromRow(row) {
     accountScope: row.account_scope,
     providerItemId: row.provider_item_id,
     ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-  };
-}
-function hiddenByHold(copy) {
-  return { ...copy, state: "superseded", supersededByGeneration: copy.supersededByGeneration ?? copy.generation + 1 };
-}
-function heldPlaceholderCopy() {
-  return {
-    corpusId: "",
-    trustDomain: "secure_local",
-    layers: "both",
-    state: "superseded",
-    embedHold: false,
-    generation: 0,
-    supersededByGeneration: 1,
-    previousLayers: null,
-    updatedAt: ""
   };
 }
 function copyFromRow(row) {
@@ -22063,7 +21848,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: 9,
+      version: TIER_LEDGER_SCHEMA_VERSION,
       name: "secret_redaction_retirement",
       up(db) {
         const item = `provider = NEW.provider AND account_scope = NEW.account_scope
@@ -22108,76 +21893,10 @@ function tierLedgerMigrations() {
           END;
         `);
       }
-    },
-    {
-      version: 10,
-      name: "tier_child_cascade",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS tier_child_cascade (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            family TEXT NOT NULL DEFAULT '',
-            local_item_id TEXT NOT NULL DEFAULT '',
-            parent_provider_item_id TEXT NOT NULL,
-            queued_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            last_attempt_at TEXT,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-        `);
-      }
-    },
-    {
-      version: 11,
-      name: "tier_parent_deletion_intent",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS tier_parent_deletion_intent (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            family TEXT NOT NULL DEFAULT '',
-            local_item_id TEXT NOT NULL DEFAULT '',
-            noted_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-        `);
-      }
-    },
-    {
-      version: 12,
-      name: "tier_deletion_hold",
-      up(db) {
-        const columns = db.query("PRAGMA table_info(tier_parent_deletion_intent)").all();
-        if (!columns.some((column) => column.name === "observed_after")) {
-          db.exec("ALTER TABLE tier_parent_deletion_intent ADD COLUMN observed_after TEXT NOT NULL DEFAULT ''");
-        }
-        db.exec(`
-          UPDATE tier_parent_deletion_intent SET observed_after = noted_at WHERE observed_after = '';
-          CREATE TABLE IF NOT EXISTS tier_deletion_hold (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            owner_provider TEXT NOT NULL,
-            owner_account_scope TEXT NOT NULL,
-            owner_conversation_key TEXT NOT NULL DEFAULT '',
-            owner_provider_item_id TEXT NOT NULL,
-            held_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-          CREATE INDEX IF NOT EXISTS tier_deletion_hold_owner
-            ON tier_deletion_hold (owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id);
-        `);
-      }
     }
   ];
 }
-var DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -26815,6 +26534,173 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/workers/connector-store/child-visibility.ts
+function parentIdentityOf(child) {
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
+  if (cut <= 0)
+    return;
+  return {
+    provider: child.provider,
+    accountScope: child.accountScope,
+    providerItemId: child.providerItemId.slice(0, cut),
+    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
+  };
+}
+function parentIdentityField(child) {
+  const identity2 = parentIdentityOf(child);
+  return identity2 ? { identity: identity2 } : {};
+}
+function parentKey(parent) {
+  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
+}
+function parentVerdicts(lane, parents) {
+  const unique = new Map;
+  for (const parent of parents)
+    unique.set(parentKey(parent), parent);
+  try {
+    return judge(lane, [...unique.values()], 0);
+  } catch {
+    return new Map([...unique.keys()].map((key2) => [key2, HIDDEN]));
+  }
+}
+function judge(lane, parents, depth) {
+  const verdicts = new Map;
+  if (parents.length === 0)
+    return verdicts;
+  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
+    for (const parent of parents)
+      verdicts.set(parentKey(parent), HIDDEN);
+    return verdicts;
+  }
+  const rows = new Map;
+  for (const store of lane.stores()) {
+    for (const row of store.parentStandings(parents)) {
+      const key2 = parentKey(row);
+      const list = rows.get(key2) ?? [];
+      list.push({ ...row, corpusId: store.corpusId });
+      rows.set(key2, list);
+    }
+  }
+  const ledger = lane.ledger();
+  const identities = new Map;
+  for (const list of rows.values()) {
+    for (const row of list)
+      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
+  }
+  const states = ledger && identities.size > 0 ? ledger.itemStatesForMany([...identities.values()]) : undefined;
+  const climbing = new Map;
+  for (const parent of parents) {
+    const key2 = parentKey(parent);
+    const list = rows.get(key2) ?? [];
+    const identity2 = list[0]?.identity;
+    const active = list.filter((row) => row.active);
+    if (list.some((row) => row.secret)) {
+      verdicts.set(key2, { visible: true, gone: false });
+      continue;
+    }
+    if (!identity2) {
+      if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
+        verdicts.set(key2, { visible: true, gone: false });
+      } else {
+        verdicts.set(key2, { visible: false, gone: true });
+      }
+      continue;
+    }
+    let visible;
+    if (!ledger) {
+      visible = active.length > 0;
+    } else {
+      const state = states?.get(tierLedgerIdentityKey(identity2));
+      const copies = state?.copies ?? [];
+      visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      if (!visible && ledger.itemIsSecret(identity2)) {
+        verdicts.set(key2, { visible: true, gone: false });
+        continue;
+      }
+    }
+    if (visible) {
+      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key2, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key2, { visible: true, gone: false });
+    } else {
+      verdicts.set(key2, { visible: false, gone: active.length === 0 });
+    }
+  }
+  if (climbing.size > 0) {
+    const above = judge(lane, [...climbing.values()], depth + 1);
+    for (const [key2, grandparent] of climbing) {
+      if (above.get(parentKey(grandparent))?.visible !== true)
+        verdicts.set(key2, HIDDEN);
+    }
+  }
+  return verdicts;
+}
+function goneParents(lane, parents) {
+  const gone = new Set;
+  try {
+    const unique = new Map;
+    for (const parent of parents)
+      unique.set(parentKey(parent), parent);
+    const present = new Set;
+    for (const store of lane.stores()) {
+      for (const row of store.parentStandings([...unique.values()])) {
+        if (row.active || row.secret)
+          present.add(parentKey(row));
+      }
+    }
+    const candidates = [...unique].filter(([key2]) => !present.has(key2)).map(([, parent]) => parent);
+    if (candidates.length === 0)
+      return gone;
+    const verdicts = parentVerdicts(lane, candidates);
+    for (const parent of candidates) {
+      const key2 = parentKey(parent);
+      if (verdicts.get(key2)?.gone === true)
+        gone.add(key2);
+    }
+  } catch {}
+  return gone;
+}
+function childrenWithHiddenParents(lane, children) {
+  const hidden = new Set;
+  if (children.length === 0)
+    return hidden;
+  const verdicts = parentVerdicts(lane, children.map((child) => child.parent));
+  for (const child of children) {
+    if (verdicts.get(parentKey(child.parent))?.visible !== true)
+      hidden.add(child.key);
+  }
+  return hidden;
+}
+function childLinks(lane, probes) {
+  const found = new Map;
+  let remaining = probes;
+  for (const store of lane.stores()) {
+    if (remaining.length === 0)
+      break;
+    for (const [key2, parent] of store.parentLinksOf(remaining))
+      found.set(key2, parent);
+    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
+  }
+  return [...found].map(([key2, parent]) => ({ key: key2, parent }));
+}
+function hiddenChildKeys(lane, probes) {
+  if (probes.length === 0)
+    return new Set;
+  let links;
+  try {
+    links = childLinks(lane, probes);
+  } catch {
+    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
+  }
+  return childrenWithHiddenParents(lane, links);
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var init_child_visibility = __esm(() => {
+  init_tier_ledger();
+  HIDDEN = { visible: false, gone: false };
+});
+
 // src/core/source-index/chunk-selection.ts
 function sourceIndexChunkQueryTerms(query) {
   return sourceIndexFtsTermGroups(query, {
@@ -31273,6 +31159,7 @@ var init_local_index = __esm(() => {
   init_tier_set_binding();
   init_tier_placement();
   init_secrets_disposition();
+  init_child_visibility();
   init_source_ingestion_exclusions();
   init_fts();
   init_chunk_selection();
@@ -31372,6 +31259,7 @@ var init_local_index = __esm(() => {
     exclusions;
     reactionsColumnPresent = false;
     childItemColumnsPresent = false;
+    childLane;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
     itemTextVersionsPresent = false;
@@ -31382,9 +31270,6 @@ var init_local_index = __esm(() => {
     tierLedgerOwned;
     tierLedgerDisabled;
     boundLedgerHandle;
-    parentTombstoneObserver;
-    parentDeletionOwed;
-    tombstonedParents;
     embeddingQueueState;
     embeddingFailureState;
     embeddingDeferral;
@@ -31623,17 +31508,28 @@ var init_local_index = __esm(() => {
       let copies;
       try {
         const ledger = this.visibilityLedger();
-        if (!ledger || !ledger.corpusHasCopies(this.corpusId))
-          return [...rows];
-        copies = ledger.copiesForMany(rows.map(identityOf));
+        if (ledger && ledger.corpusHasCopies(this.corpusId))
+          copies = ledger.copiesForMany(rows.map(identityOf));
       } catch (error) {
         if (throwOnUnavailable)
           throw error;
         return [];
       }
-      return rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row)));
+      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row))) : [...rows];
+      return this.withoutChildrenOfHiddenParents(served, identityOf);
+    }
+    withoutChildrenOfHiddenParents(rows, identityOf) {
+      if (rows.length === 0)
+        return rows;
+      const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
+      return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
     }
     tierHiddenItemPks() {
+      const base = this.tierLedgerHiddenItemPks();
+      const children = this.hiddenChildItemPks();
+      return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    }
+    tierLedgerHiddenItemPks() {
       const ledger = this.visibilityLedger();
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
@@ -31694,7 +31590,7 @@ var init_local_index = __esm(() => {
     activeLocalItemRow(localItemId) {
       const row = this.db.query(`
       SELECT provider, account_scope, provider_item_id, provider_conversation_id, locator_uri, trust_tier,
-        source_scope_generation, source_scope_revision, source_scope_folder_keys_json, indexed_at
+        source_scope_generation, source_scope_revision, source_scope_folder_keys_json
       FROM items WHERE local_item_id = ? AND tombstoned = 0
       LIMIT 1
     `).get(localItemId);
@@ -31723,8 +31619,7 @@ var init_local_index = __esm(() => {
             scopeRevision: row.source_scope_revision,
             folderKeys
           }
-        } : {},
-        ...row.indexed_at ? { observedAt: row.indexed_at } : {}
+        } : {}
       };
     }
     conversationIdsForProviderItem(identity2) {
@@ -31806,66 +31701,157 @@ var init_local_index = __esm(() => {
         ...row.authored_at ? { authoredAt: row.authored_at } : {}
       };
     }
-    observeParentTombstones(observer, owed) {
-      this.parentTombstoneObserver = observer;
-      this.parentDeletionOwed = owed;
+    useChildVisibility(lane) {
+      this.childLane = lane;
     }
-    noteTombstonedParent(itemPk) {
-      if (!this.parentTombstoneObserver || !this.childItemColumnsPresent)
-        return;
-      const row = this.db.query(`
-      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
-        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier,
-        indexed_at
-      FROM items WHERE item_pk = ? AND tombstoned = 1
-    `).get(itemPk);
-      if (!row || row.trust_tier === "S5")
-        return;
-      const { indexed_at: tombstonedAt, ...fields } = row;
-      const parent = sourceItemFromRow({ ...fields, rank: 0 });
-      this.parentDeletionOwed?.(parent, tombstonedAt);
-      (this.tombstonedParents ??= new Map).set(row.local_item_id, parent);
-    }
-    flushTombstonedParents() {
-      const noted = this.tombstonedParents;
-      if (!noted || noted.size === 0)
-        return;
-      const parents = [...noted.values()];
-      noted.clear();
-      const observer = this.parentTombstoneObserver;
-      if (!observer)
-        return;
-      try {
-        const confirmed = parents.filter((parent) => this.db.query(`
-        SELECT 1 AS tombstoned FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 1
-      `).get(parent.provider, parent.accountScope, normalizeConversationId(parent.providerConversationId), parent.providerItemId) !== null);
-        if (confirmed.length > 0)
-          observer(confirmed);
-      } catch {}
+    childVisibilityLane() {
+      return this.childLane ?? {
+        ledger: () => this.visibilityLedger(),
+        stores: () => [this]
+      };
     }
     hasChildItems() {
       if (!this.childItemColumnsPresent)
         return false;
       return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1").get() !== null;
     }
-    activeChildParentLocalIds(after, limit) {
+    parentLinksOf(identities) {
+      const links = new Map;
+      if (identities.length === 0 || !this.hasChildItems())
+        return links;
+      for (let offset = 0;offset < identities.length; offset += 200) {
+        const batch = identities.slice(offset, offset + 200);
+        const rows = this.db.query(`
+        SELECT provider, account_scope, provider_conversation_id, provider_item_id, parent_local_item_id FROM items
+        WHERE parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+      `).all(...batch.flatMap((identity2) => [
+          identity2.provider,
+          identity2.accountScope,
+          normalizeConversationId(identity2.providerConversationId),
+          identity2.providerItemId
+        ]));
+        for (const row of rows) {
+          links.set(tierLedgerIdentityKey({
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          }), {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            parentLocalItemId: row.parent_local_item_id,
+            ...parentIdentityField({
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            })
+          });
+        }
+      }
+      return links;
+    }
+    parentStandings(parents) {
+      if (parents.length === 0)
+        return [];
+      const wanted = new Set(parents.map((parent) => parentKey(parent)));
+      const ids = [...new Set(parents.map((parent) => parent.parentLocalItemId))];
+      const out = [];
+      for (let offset = 0;offset < ids.length; offset += 20000) {
+        const rows = this.db.query(`
+        SELECT provider, account_scope, provider_item_id, provider_conversation_id, local_item_id, tombstoned, trust_tier,
+          ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
+        FROM items WHERE local_item_id IN (SELECT value FROM json_each(?))
+      `).all(JSON.stringify(ids.slice(offset, offset + 20000)));
+        for (const row of rows) {
+          const ref = { provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.local_item_id };
+          if (!wanted.has(parentKey(ref)))
+            continue;
+          out.push({
+            ...ref,
+            identity: {
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            },
+            active: row.tombstoned === 0,
+            secret: row.trust_tier === "S5",
+            ...row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}
+          });
+        }
+      }
+      return out;
+    }
+    hiddenChildItemPks() {
+      if (!this.hasChildItems())
+        return [];
+      const groups = this.db.query(`
+      SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+      GROUP BY provider, account_scope, parent_local_item_id
+    `).all();
+      const parents = groups.map((group) => ({
+        provider: group.provider,
+        accountScope: group.account_scope,
+        parentLocalItemId: group.parent_local_item_id,
+        ...parentIdentityField({
+          provider: group.provider,
+          accountScope: group.account_scope,
+          providerItemId: group.child_item_id,
+          ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
+        })
+      }));
+      const verdicts = parentVerdicts(this.childVisibilityLane(), parents);
+      const hiddenParents = parents.filter((parent) => verdicts.get(parentKey(parent))?.visible !== true);
+      const pks = [];
+      for (let offset = 0;offset < hiddenParents.length; offset += 20000) {
+        const rows = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, parent_local_item_id) IN (
+            SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)
+          )
+      `).all(JSON.stringify(hiddenParents.slice(offset, offset + 20000).map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId])));
+        for (const row of rows)
+          pks.push(row.item_pk);
+      }
+      return pks;
+    }
+    activeChildParents(after, limit) {
       if (!this.childItemColumnsPresent)
         return [];
       const rows = this.db.query(`
-      SELECT DISTINCT parent_local_item_id AS id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0 AND parent_local_item_id > ?
-      ORDER BY parent_local_item_id LIMIT ?
-    `).all(after ?? "", Math.max(1, Math.floor(limit)));
-      return rows.map((row) => row.id);
+      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+      GROUP BY parent_local_item_id, provider, account_scope
+      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+    `).all(after?.parentLocalItemId ?? "", after?.provider ?? "", after?.accountScope ?? "", Math.max(1, Math.floor(limit)));
+      return rows.map((row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        parentLocalItemId: row.parent_local_item_id,
+        ...parentIdentityField({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.child_item_id,
+          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+        })
+      }));
     }
-    tombstonedItemByLocalId(localItemId) {
-      const row = this.db.query(`
+    activeChildrenOf(parent) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
       SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
         provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
-      FROM items WHERE local_item_id = ? AND tombstoned = 1 AND trust_tier <> 'S5' ORDER BY item_pk LIMIT 1
-    `).get(localItemId);
-      return row ? sourceItemFromRow({ ...row, rank: 0 }) : undefined;
+      FROM items
+      WHERE parent_local_item_id = ? AND provider = ? AND account_scope = ? AND tombstoned = 0
+      ORDER BY item_pk
+    `).all(parent.parentLocalItemId, parent.provider, parent.accountScope);
+      return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 }));
     }
     observeStoredItemOwner(identity2, connectorId) {
       this.db.transaction(() => {
@@ -31907,10 +31893,8 @@ var init_local_index = __esm(() => {
           }, options.connectorId, "observed", syncRunId, options.trustTier, true);
         })();
       } finally {
-        if (!this.db.inTransaction) {
+        if (!this.db.inTransaction)
           this.releaseUnreferencedChunkMedia();
-          this.flushTombstonedParents();
-        }
       }
     }
     tombstoneSecretsExtraction(identity2, options) {
@@ -34565,7 +34549,6 @@ var init_local_index = __esm(() => {
         return await this.syncFromConnectorHeld(connector, options);
       } finally {
         this.releaseUnreferencedChunkMedia();
-        this.flushTombstonedParents();
       }
     }
     async syncFromConnectorHeld(connector, options) {
@@ -34990,7 +34973,7 @@ var init_local_index = __esm(() => {
           return false;
         if (!ledger)
           return true;
-        const state = ledger.itemStatesForMany([identity2], { raw: true }).get(tierLedgerIdentityKey(identity2));
+        const state = ledger.itemStatesForMany([identity2]).get(tierLedgerIdentityKey(identity2));
         if (!state || !state.record.routed)
           return true;
         const { record, copies } = state;
@@ -35067,7 +35050,6 @@ var init_local_index = __esm(() => {
           `).run(now, now, syncRunId, row.item_pk);
             this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
             this.deleteFtsForItem(row.item_pk);
-            this.noteTombstonedParent(row.item_pk);
             this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
             count += 1;
             break;
@@ -35129,7 +35111,6 @@ var init_local_index = __esm(() => {
           `).run(now, now, syncRunId, row.item_pk);
             this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
             this.deleteFtsForItem(row.item_pk);
-            this.noteTombstonedParent(row.item_pk);
           }
           count += rows.length;
         }
@@ -35162,8 +35143,6 @@ var init_local_index = __esm(() => {
           this.deleteFtsForItem(existing.item_pk);
           if (tombstoneTrustTier === "S5")
             this.keepSecretsLocationOnly(existing.item_pk);
-          else
-            this.noteTombstonedParent(existing.item_pk);
           this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
           return true;
         }
@@ -42545,15 +42524,15 @@ function escapeOne(char) {
   return `⟨U+${code.toString(16).toUpperCase().padStart(4, "0")}⟩`;
 }
 function visibleText(text2) {
-  return text2.replace(HIDDEN, escapeOne);
+  return text2.replace(HIDDEN2, escapeOne);
 }
 function displayText(text2) {
   const shown = visibleText(text2);
   return /^[\x20-\x7e]*$/.test(shown) ? shown : `${FIRST_STRONG_ISOLATE}${shown}${POP_DIRECTIONAL_ISOLATE}`;
 }
-var FIRST_STRONG_ISOLATE = "⁨", POP_DIRECTIONAL_ISOLATE = "⁩", HIDDEN;
+var FIRST_STRONG_ISOLATE = "⁨", POP_DIRECTIONAL_ISOLATE = "⁩", HIDDEN2;
 var init_display_text = __esm(() => {
-  HIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}͏ᅟᅠ឴឵⠀ㅤﾠ⟨⟩]/gu;
+  HIDDEN2 = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}͏ᅟᅠ឴឵⠀ㅤﾠ⟨⟩]/gu;
 });
 
 // src/workers/dashboard/vocabulary.ts
@@ -51294,11 +51273,9 @@ class TieredStoreSet {
   privateEmbedWith;
   lastRowRehome;
   lastLowerContentRepairAt;
-  lastChildReconcileAt;
   lowerContentRepair;
   constructor(options) {
     this.lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
-    this.lastChildReconcileAt = Number.NEGATIVE_INFINITY;
     if (!options.setId.trim())
       throw new Error("A tiered store set needs a stable id.");
     this.setId = options.setId;
@@ -51320,7 +51297,7 @@ class TieredStoreSet {
         throw new Error("A tiered store leg's store must match its declared trust domain and corpus.");
       }
       spec.store?.useTierLedger(this.ledger);
-      spec.store?.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent, tombstonedAt) => this.oweParentDeletion(parent, tombstonedAt));
+      spec.store?.useChildVisibility(this.childLane);
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     if (!this.legs.has("secure_local"))
@@ -51329,178 +51306,135 @@ class TieredStoreSet {
       registerTierSetPlanner(this.ledger.dbPath, (decision) => this.placementFor(decision));
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
-    this.recoverParentDeletions();
     this.repairLowerContent();
+    this.sweepOrphanedChildren();
   }
-  childrenStillHeld(parent) {
-    const stores = this.openStores();
-    const found = new Map;
-    for (const store of stores) {
-      for (const child of store.childItemsOf(parent.localItemId)) {
-        const key2 = tierLedgerIdentityKey(child);
-        if (found.has(key2))
-          continue;
-        const held = this.ledger.copies(child).length > 0 || stores.some((other) => other.activeLocalItemRow(child.localItemId) !== undefined);
-        if (held)
-          found.set(key2, child);
-      }
-    }
-    return [...found.values()];
-  }
-  parentStanding(parent) {
-    let active = false;
-    let tombstoned = false;
-    let observedAt;
-    for (const store of this.openStores()) {
-      const row = store.activeLocalItemRow(parent.localItemId);
-      if (row) {
-        active = true;
-        if (row.observedAt !== undefined && (observedAt === undefined || row.observedAt > observedAt))
-          observedAt = row.observedAt;
-      } else if (store.tombstonedItemByLocalId(parent.localItemId) !== undefined) {
-        tombstoned = true;
-      }
-    }
-    return { active, observedAt, tombstoned };
-  }
-  parentVerdict(parent, observedAfter) {
-    if (this.ledger.itemIsSecret(parent))
-      return "kept";
-    const standing = this.parentStanding(parent);
-    if (standing.active) {
-      return observedAfter !== undefined && standing.observedAt !== undefined && standing.observedAt > observedAfter ? "kept" : "wait";
-    }
-    return standing.tombstoned ? "deleted" : "wait";
-  }
-  cascadeConfirmedDeletion(parent) {
-    const children = this.childrenStillHeld(parent);
-    if (children.length === 0) {
-      this.ledger.liftParentDeletion(parent);
-      return 0;
-    }
-    return this.ledger.hideAndQueueChildren(parent, children).queued;
-  }
-  cascadeParentDeletion(parent) {
-    return this.parentVerdict(parent) === "deleted" ? this.cascadeConfirmedDeletion(parent) : 0;
-  }
-  oweParentDeletion(parent, tombstonedAt) {
-    const stores = this.openStores();
-    if (!stores.some((store) => store.hasChildItems()))
-      return;
-    if (this.ledger.itemIsSecret(parent))
-      return;
-    if (stores.some((store) => store.activeLocalItemRow(parent.localItemId) !== undefined))
-      return;
-    this.holdParentDeletion(parent, tombstonedAt);
-  }
-  holdParentDeletion(parent, deletedAt = new Date().toISOString()) {
-    if (this.ledger.itemIsSecret(parent))
-      return;
-    const children = this.childrenStillHeld(parent);
-    if (children.length === 0)
-      return;
-    this.ledger.holdParentDeletion(parent, children, deletedAt);
-  }
-  holdChildOfPendingDeletion(child) {
-    const parent = child.parent;
-    if (parent)
-      this.ledger.holdChildOfPendingDeletion(child, parent.localItemId);
-  }
-  settleParentDeletion(parent, observedAfter) {
-    switch (this.parentVerdict(parent, observedAfter)) {
-      case "deleted":
-        return this.cascadeConfirmedDeletion(parent);
-      case "kept":
-        this.ledger.liftParentDeletion(parent);
-        return 0;
-      case "wait":
-        return 0;
-    }
-  }
-  recoverParentDeletions() {
-    let queued = 0;
+  static CHILD_SWEEP_PAGE = 200;
+  childLane = {
+    ledger: () => this.ledger,
+    stores: () => this.openStores()
+  };
+  syncsRunning = 0;
+  syncsIdle = [];
+  childSweep;
+  childSweepAgain = false;
+  async whileSyncing(task) {
+    this.syncsRunning += 1;
     try {
-      let after = 0;
-      for (let page2 = 0;page2 < 1000; page2 += 1) {
-        const pending = this.ledger.pendingParentDeletions({ after, limit: CHILD_CASCADE_BATCH });
-        if (pending.length === 0)
+      return await task();
+    } finally {
+      this.syncsRunning -= 1;
+      if (this.syncsRunning === 0)
+        for (const wake of this.syncsIdle.splice(0))
+          wake();
+    }
+  }
+  whenNoSyncRuns() {
+    return this.syncsRunning === 0 ? Promise.resolve() : new Promise((resolve14) => {
+      this.syncsIdle.push(resolve14);
+    });
+  }
+  async sweepAfterSync() {
+    if (this.syncsRunning > 0)
+      this.sweepOrphanedChildren();
+    else
+      await this.sweepOrphanedChildren();
+  }
+  sweepOrphanedChildren() {
+    if (this.childSweep) {
+      this.childSweepAgain = true;
+      return this.childSweep;
+    }
+    const run = (async () => {
+      const total = { removed: 0, retry: 0 };
+      do {
+        this.childSweepAgain = false;
+        const pass = await this.sweepPass();
+        total.removed += pass.removed;
+        total.retry += pass.retry;
+      } while (this.childSweepAgain);
+      return total;
+    })().finally(() => {
+      this.childSweep = undefined;
+    });
+    this.childSweep = run;
+    return run;
+  }
+  async sweepPass() {
+    const result = { removed: 0, retry: 0 };
+    const failed = new Set;
+    try {
+      await this.whenNoSyncRuns();
+      for (let round = 0;round < CHILD_PARENT_CHAIN_LIMIT; round += 1) {
+        const before = result.removed;
+        let after;
+        for (;; ) {
+          if (this.syncsRunning > 0)
+            return result;
+          const stores = this.openStores().filter((store) => store.hasChildItems());
+          if (stores.length === 0)
+            return result;
+          const page2 = this.sweepPage(stores, after);
+          if (page2.length === 0)
+            break;
+          after = page2[page2.length - 1];
+          this.removeChildrenOfGoneParents(stores, page2, result, failed);
+          await new Promise((resolve14) => {
+            setImmediate(resolve14);
+          });
+        }
+        if (result.removed === before)
           break;
-        after = pending[pending.length - 1].seq;
-        for (const entry of pending) {
-          try {
-            queued += this.settleParentDeletion(entry.parent, entry.observedAfter);
-          } catch {}
-        }
       }
-    } catch {}
-    return queued;
-  }
-  parentsTombstoned(parents) {
-    try {
-      const stores = this.openStores();
-      if (!stores.some((store) => store.hasChildItems()))
-        return;
     } catch {
+      result.retry += 1;
+    }
+    return result;
+  }
+  sweepPage(stores, after) {
+    const merged = new Map;
+    for (const store of stores) {
+      for (const parent of store.activeChildParents(after, TieredStoreSet.CHILD_SWEEP_PAGE))
+        merged.set(parentKey(parent), parent);
+    }
+    return [...merged.values()].sort((a, b) => a.parentLocalItemId < b.parentLocalItemId ? -1 : a.parentLocalItemId > b.parentLocalItemId ? 1 : a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : a.accountScope < b.accountScope ? -1 : a.accountScope > b.accountScope ? 1 : 0).slice(0, TieredStoreSet.CHILD_SWEEP_PAGE);
+  }
+  removeChildrenOfGoneParents(stores, parents, result, failed) {
+    const gone = goneParents(this.childLane, parents);
+    if (gone.size === 0)
       return;
-    }
+    const removing = new Map;
     for (const parent of parents) {
-      try {
-        this.settleParentDeletion(parent);
-      } catch {}
-    }
-  }
-  reconcileOrphanedChildren(nowMs = Date.now()) {
-    if (nowMs - this.lastChildReconcileAt < CHILD_CASCADE_RECONCILE_INTERVAL_MS)
-      return 0;
-    this.lastChildReconcileAt = nowMs;
-    try {
-      const stores = this.openStores().filter((store) => store.hasChildItems());
-      if (stores.length === 0)
-        return 0;
-      const after = this.ledger.setCursor(this.setId, CHILD_CASCADE_RECONCILE_CURSOR)?.cursor ?? undefined;
-      const page2 = [...new Set(stores.flatMap((store) => store.activeChildParentLocalIds(after, CHILD_CASCADE_RECONCILE_PAGE)))].sort().slice(0, CHILD_CASCADE_RECONCILE_PAGE);
-      let queued = 0;
-      for (const localItemId of page2) {
-        const all = this.openStores();
-        if (all.some((store) => store.activeLocalItemRow(localItemId) !== undefined))
-          continue;
-        const gone = all.map((store) => store.tombstonedItemByLocalId(localItemId)).find((found) => found !== undefined);
-        if (!gone || this.ledger.itemIsSecret(gone))
-          continue;
-        queued += this.cascadeParentDeletion(gone);
-      }
-      this.ledger.commitSetCursor(this.setId, CHILD_CASCADE_RECONCILE_CURSOR, page2.length < CHILD_CASCADE_RECONCILE_PAGE ? null : page2[page2.length - 1]);
-      return queued;
-    } catch {
-      return 0;
-    }
-  }
-  runChildCascade(limit = CHILD_CASCADE_BATCH) {
-    let removed = 0;
-    let retry = 0;
-    this.recoverParentDeletions();
-    let owed = [];
-    try {
-      owed = this.ledger.pendingChildCascades(limit);
-    } catch {
-      return { removed, retry };
-    }
-    for (const { child } of owed) {
-      try {
-        for (const store of this.openStores()) {
-          store.tombstoneCopy(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+      if (!gone.has(parentKey(parent)))
+        continue;
+      for (const store of stores) {
+        for (const child of store.activeChildrenOf(parent)) {
+          const key2 = tierLedgerIdentityKey(child);
+          if (!failed.has(key2))
+            removing.set(key2, child);
         }
-        this.secrets()?.remove(child);
-        this.ledger.completeChildCascade(child);
-        removed += 1;
-      } catch {
-        retry += 1;
-        try {
-          this.ledger.noteChildCascadeAttempt(child);
-        } catch {}
       }
     }
-    return { removed, retry };
+    for (const [key2, child] of removing) {
+      if (this.removeChild(child)) {
+        result.removed += 1;
+      } else {
+        failed.add(key2);
+        result.retry += 1;
+      }
+    }
+  }
+  removeChild(child) {
+    try {
+      for (const store of this.openStores()) {
+        store.tombstoneCopy(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+      }
+      this.secrets()?.remove(child);
+      this.ledger.removeCopies(child);
+      return true;
+    } catch {
+      return false;
+    }
   }
   store(trustDomain, options = {}) {
     const leg = this.legs.get(trustDomain);
@@ -51516,7 +51450,7 @@ class TieredStoreSet {
       throw new Error("A lazily opened tiered store does not match its declared leg.");
     }
     store.useTierLedger(this.ledger);
-    store.observeParentTombstones((parents) => this.parentsTombstoned(parents), (parent, tombstonedAt) => this.oweParentDeletion(parent, tombstonedAt));
+    store.useChildVisibility(this.childLane);
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
@@ -51641,11 +51575,17 @@ class TieredStoreSet {
     }
     return floor.trustDomain;
   }
-  async sync(connector, sync = {}, options = {}) {
+  async sync(...args) {
+    try {
+      return await this.whileSyncing(() => this.runSync(...args));
+    } finally {
+      await this.sweepAfterSync();
+    }
+  }
+  async runSync(connector, sync = {}, options = {}) {
     this.assertLedgerGovernsLegs();
     if (options.settle !== false)
       await this.settleStoredItems();
-    this.runChildCascade();
     const run = new TieredRoutingRun(this, "shared");
     const traversal = recordedTraversal(connector);
     const legRuns = [];
@@ -51665,17 +51605,21 @@ class TieredStoreSet {
       legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
     }
     run.finalize();
-    this.reconcileOrphanedChildren();
-    this.runChildCascade();
     const cursor = legRuns[0]?.sync.cursor;
     if (options.commitCursor !== false)
       this.ledger.commitSetCursor(this.setId, connector.id, cursor ?? null);
     return tieredRun(legRuns, run.counts, cursor);
   }
-  async syncLegs(entries) {
+  async syncLegs(...args) {
+    try {
+      return await this.whileSyncing(() => this.runSyncLegs(...args));
+    } finally {
+      await this.sweepAfterSync();
+    }
+  }
+  async runSyncLegs(entries) {
     this.assertLedgerGovernsLegs();
     await this.settleStoredItems();
-    this.runChildCascade();
     const run = new TieredRoutingRun(this, "per_leg");
     const legRuns = [];
     for (const entry of entries) {
@@ -51686,8 +51630,6 @@ class TieredStoreSet {
       legRuns.push(await this.runLeg(entry.trustDomain, store, entry.connector, { ...entry.sync, tierRouting: run }));
       run.finalize();
     }
-    this.reconcileOrphanedChildren();
-    this.runChildCascade();
     return tieredRun(legRuns, run.counts, undefined);
   }
   async settleStoredItems() {
@@ -52070,13 +52012,6 @@ class TieredRoutingRun {
       }
       this.counts.routedDeletions += 1;
       this.copyRemovals.set(identityKey(identity2), identity2);
-      const corpora = new Set(ledger.copies(identity2).map((copy) => copy.corpusId));
-      this.set.holdParentDeletion(identity2);
-      return { kind: "delete", corpora, reason: "provider_deleted" };
-    }
-    this.set.holdChildOfPendingDeletion(identity2);
-    if (routed && ledger.childCascadePending(identity2)) {
-      this.copyRemovals.set(identityKey(identity2), identity2);
       return { kind: "delete", corpora: new Set(ledger.copies(identity2).map((copy) => copy.corpusId)), reason: "provider_deleted" };
     }
     const deferred = this.set.readsContentLater(item);
@@ -52318,7 +52253,7 @@ function handoffConnector(source, item) {
     }
   };
 }
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, CHILD_CASCADE_RECONCILE_INTERVAL_MS, CHILD_CASCADE_RECONCILE_CURSOR = "tiered-store-set:child-cascade-reconcile", CHILD_CASCADE_RECONCILE_PAGE = 500, CHILD_CASCADE_BATCH = 200, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, TIER_DOMAIN_ORDER, TIER_KEY_TRUST_DOMAIN, TIERED_STORE_SET_HANDOFF_CONNECTOR_ID = "tiered_store_set_handoff";
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -52328,6 +52263,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_placement();
   init_secrets_disposition();
   init_parent_context();
+  init_child_visibility();
   init_tier_names_only_settle();
   init_tier_content_purge();
   init_tier_move();
@@ -52337,7 +52273,6 @@ var init_tiered_store_set = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
-  CHILD_CASCADE_RECONCILE_INTERVAL_MS = 5 * 60000;
   TIER_DOMAIN_ORDER = ["public_safe", "internal", "secure_local"];
   TIER_KEY_TRUST_DOMAIN = {
     public: "public_safe",
@@ -66294,7 +66229,7 @@ function clearCaptureSpoolSecrets(options) {
   const sweep = sweepCaptureSpoolWhenSecretsChange({
     ledger: options.ledger,
     stateKey: options.stateKey,
-    sweep: (judge) => options.redact({ through }, judge)
+    sweep: (judge2) => options.redact({ through }, judge2)
   });
   return addCaptureSpoolRedactions(window2, sweep);
 }
@@ -66586,7 +66521,7 @@ function redactTelegramCaptureSpoolSecrets(options) {
     redact: (line) => redactTelegramSpoolLine(line, options.judge)
   });
 }
-function redactTelegramSpoolLine(line, judge) {
+function redactTelegramSpoolLine(line, judge2) {
   let record;
   let raw;
   try {
@@ -66599,7 +66534,7 @@ function redactTelegramSpoolLine(line, judge) {
   const item = record.capturedItem.item;
   const alreadyRedacted = message2.secretRedacted === true;
   const text2 = alreadyRedacted || typeof item.metadata["searchText"] !== "string" ? undefined : item.metadata["searchText"];
-  const redaction = judge(item.identity, text2);
+  const redaction = judge2(item.identity, text2);
   if (!redaction)
     return;
   if (alreadyRedacted && (redaction !== "names" || message2.chatTitle === undefined && message2.senderDisplayName === undefined)) {
@@ -67027,7 +66962,7 @@ function clearTelegramSpoolSecrets(options) {
     stateKey: TELEGRAM_SPOOL_REDACTION_STATE_KEY,
     ...options.from ? { from: options.from } : {},
     through: options.through,
-    redact: (window2, judge) => redactTelegramCaptureSpoolSecrets({ spoolDir: options.spoolDir, ...window2, judge })
+    redact: (window2, judge2) => redactTelegramCaptureSpoolSecrets({ spoolDir: options.spoolDir, ...window2, judge: judge2 })
   });
 }
 function lanesReadThrough(stores) {
@@ -68873,12 +68808,12 @@ function clearWhatsAppSpoolSecrets(options) {
     stateKey: WHATSAPP_SPOOL_REDACTION_STATE_KEY,
     ...options.from ? { from: options.from } : {},
     through: options.through,
-    redact: (window2, judge) => redactWhatsAppLiveSpoolSecrets({
+    redact: (window2, judge2) => redactWhatsAppLiveSpoolSecrets({
       spoolDir: options.spoolDir,
       account: options.account,
       ...options.mediaDir ? { mediaDir: options.mediaDir } : {},
       ...window2,
-      judge
+      judge: judge2
     })
   });
 }
@@ -74151,7 +74086,10 @@ var init_tier_migration_reports = __esm(() => {
 
 // src/core/source-forget-registry.ts
 function spoolLines(account, context2, { dryRun }, accountScopes) {
-  const root = extractionSpoolRoot(context2.env);
+  const placed = placedAccount(account.source_id, context2.env, account.slot);
+  if (placed.layout === "folder" && accountScopes === undefined)
+    return [];
+  const root = accountExtractionSpoolRoot(placed, context2.env);
   return line(root, "scratch files", forgetExtractionSpool(root, { corpusIds: account.corpus_ids, ...accountScopes ? { accountScopes } : {} }, { dryRun }));
 }
 function runForgetSteps(account, context2, options) {
@@ -74196,6 +74134,7 @@ var init_source_forget_registry = __esm(() => {
   init_job_names();
   init_spool();
   init_olympus_layout();
+  init_source_placement();
   init_tier_migration_reports();
   ForgetStepError = class ForgetStepError extends OperationError {
     stepId;
@@ -89982,8 +89921,8 @@ function consultWriterContextFromPack(pack, options = {}) {
         walk(item, `${path}[]`, itemGroup, depth2 + 1);
       });
     } else {
-      const parentKey = path.slice(path.lastIndexOf(".") + 1);
-      const isMap = MAP_KEYS.has(parentKey);
+      const parentKey2 = path.slice(path.lastIndexOf(".") + 1);
+      const isMap = MAP_KEYS.has(parentKey2);
       for (const [key2, child] of Object.entries(value2)) {
         const segment = isMap ? "*" : pathSegment(key2);
         const childPath = path ? `${path}.${segment}` : segment;
@@ -129462,6 +129401,7 @@ function createFileExtractionRunner(options) {
         ...request.extractorVersion !== undefined ? { extractorVersion: request.extractorVersion } : {},
         ...request.providerItemIds !== undefined ? { providerItemIds: request.providerItemIds } : {}
       });
+      const spoolDir = corpus.spoolDir ?? options.spoolDir;
       const records = [];
       let consecutiveRetryableFailures = 0;
       let paused = false;
@@ -129484,7 +129424,7 @@ function createFileExtractionRunner(options) {
             source ??= await resolveSource(corpus);
             return source;
           },
-          ...options.spoolDir !== undefined ? { spoolDir: options.spoolDir } : {},
+          ...spoolDir !== undefined ? { spoolDir } : {},
           now
         });
         const record5 = await recordOutcome(jobs, job, workerId, outcome);
@@ -130307,7 +130247,12 @@ function createTieredStoreExtractionSink(options) {
       }
       const anchorScope = anchorStore.activeLocalItemRow(ref.localItemId)?.sourceScope;
       if (contentStore !== anchorStore && !contentStore.activeLocalItemRow(ref.localItemId)) {
-        await contentStore.syncFromConnector(singleItemConnector(contentStore, { ...plan.item, content: { kind: "metadata_only" } }), {
+        const parent = parentOf(set2, anchorStore, identity2);
+        await contentStore.syncFromConnector(singleItemConnector(contentStore, {
+          ...plan.item,
+          ...parent ? { identity: { ...plan.item.identity, parent } } : {},
+          content: { kind: "metadata_only" }
+        }), {
           fetchContent: false,
           ...anchorScope ? { sourceScopeObservation: () => anchorScope } : {},
           tierRouting: {
@@ -130401,6 +130346,17 @@ function singleItemConnector(store, item) {
       }();
     }
   };
+}
+function parentOf(set2, anchorStore, child) {
+  const localItemId = anchorStore.parentLocalItemIdOf(child);
+  if (!localItemId)
+    return;
+  for (const domain of TIER_DOMAIN_ORDER) {
+    const row = set2.store(domain)?.activeLocalItemRow(localItemId);
+    if (row)
+      return { providerItemId: row.identity.providerItemId, localItemId };
+  }
+  return;
 }
 var init_tiered_store_sink = __esm(() => {
   init_types();
@@ -130631,6 +130587,7 @@ var init_tiered_extraction = __esm(() => {
 });
 
 // src/workers/email-source/file-extraction-runtime.ts
+import { existsSync as existsSync77 } from "node:fs";
 function createFileExtractionRuntime(options) {
   const env = options.env ?? process.env;
   if (options.enabled !== true && (env[FILE_EXTRACTION_ENABLED_ENV] ?? "").trim().toLowerCase() !== "true")
@@ -130645,6 +130602,15 @@ function createFileExtractionRuntime(options) {
     ...options.extraSourceFactories ?? []
   ]);
   const jobs = new LocalFileExtractionJobStore(options.jobsDbPath ?? defaultFileExtractionJobsDbPath(env));
+  const preparedSpools = new Map;
+  const prepareSpool = (root) => {
+    if (!preparedSpools.has(root)) {
+      preparedSpools.set(root, prepareExtractionSpool(root, {
+        ownersWithJobs: () => new Set(jobs.jobOwners().map(extractionSpoolOwnerKey))
+      }));
+    }
+    return preparedSpools.get(root);
+  };
   const corpora = [];
   const itemStores = new Map;
   for (const config2 of roster) {
@@ -130685,9 +130651,15 @@ function createFileExtractionRuntime(options) {
         throw new FileExtractionSourceError("source_item_not_found");
       }
     };
+    const spoolDir = prepareSpool(extractionSpoolRootForCorpus({
+      corpusId: config2.corpusId,
+      trustDomain: store.trustDomain,
+      storePath: store.dbPath
+    }, env));
     corpora.push({
       corpusId: config2.corpusId,
       trustDomain: store.trustDomain,
+      ...spoolDir ? { spoolDir } : {},
       source: async () => {
         options.scopeGuard?.assertAuthorized({ config: config2, store });
         const source = await buildSource({ config: config2, store, ...view3 ? { view: view3 } : {} });
@@ -130774,14 +130746,13 @@ function createFileExtractionRuntime(options) {
   const registry2 = createDefaultExtractorRegistry(extractorConfig);
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
   const reclassificationRules = defaultTerminalReclassificationRules(registry2);
-  const spoolDir = prepareExtractionSpool(extractionSpoolRoot(env), {
-    ownersWithJobs: () => new Set(jobs.jobOwners().map(extractionSpoolOwnerKey))
-  });
+  const sharedSpool = extractionSpoolRoot(env);
+  if (existsSync77(sharedSpool))
+    prepareSpool(sharedSpool);
   const runner = createFileExtractionRunner({
     jobs,
     registry: registry2,
     corpora,
-    ...spoolDir ? { spoolDir } : {},
     healthProbes: extractorHealthProbes(extractorConfig),
     reclassificationRules,
     ...workerId ? { workerId } : {}
@@ -131019,6 +130990,7 @@ var init_file_extraction_runtime = __esm(() => {
   init_file_extraction_source();
   init_media_cache();
   init_olympus_layout();
+  init_source_placement();
   init_spool();
   init_connector_store2();
   init_extraction_source2();
@@ -131222,7 +131194,7 @@ function createUnreadableFiles(options) {
     }
     return UNNAMED;
   }
-  function parentOf(item) {
+  function parentOf2(item) {
     let parent;
     try {
       parent = options.parentOf?.(item.ref);
@@ -131321,7 +131293,7 @@ function createUnreadableFiles(options) {
       const opener = list.opener;
       const files = shown.map((item) => {
         const name = displayName(item);
-        const parent = parentOf(item);
+        const parent = parentOf2(item);
         const base = opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
         return parent ? { ...base, parent } : base;
       });
@@ -131503,7 +131475,7 @@ var init_analyst_openai = __esm(() => {
 
 // src/core/venice-model-catalog.ts
 import {
-  existsSync as existsSync77,
+  existsSync as existsSync78,
   mkdirSync as mkdirSync54,
   readFileSync as readFileSync69,
   renameSync as renameSync19,
@@ -131686,7 +131658,7 @@ function parseCatalogModels(payload2) {
   return Object.keys(models).length > 0 ? Object.freeze(models) : undefined;
 }
 function readCatalogCache(path, type) {
-  if (!existsSync77(path))
+  if (!existsSync78(path))
     return;
   let payload2;
   try {
@@ -138850,19 +138822,19 @@ function chatgptPickerProgram(kit) {
     p.retry = retry;
     kit.render(focus);
   }
-  function list(parentKey, append, after) {
-    const cursor = append ? parentKey ? p.cursors.get(parentKey) : p.rootCursor : "";
+  function list(parentKey2, append, after) {
+    const cursor = append ? parentKey2 ? p.cursors.get(parentKey2) : p.rootCursor : "";
     const archive = archiveMode();
     const args = archive ? {} : { source_id: p.id };
-    if (parentKey)
-      args.parent_key = parentKey;
-    if (!archive && parentKey && (p.ancestors.get(parentKey) || []).length)
-      args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
+    if (parentKey2)
+      args.parent_key = parentKey2;
+    if (!archive && parentKey2 && (p.ancestors.get(parentKey2) || []).length)
+      args.ancestor_keys = p.ancestors.get(parentKey2).slice(0, 64);
     if (cursor)
       args.cursor = cursor;
-    p.loading = parentKey || "root";
+    p.loading = parentKey2 || "root";
     p.error = "";
-    const focus = append ? "picker:more:" + parentKey : p.loaded ? "" : "picker:back";
+    const focus = append ? "picker:more:" + parentKey2 : p.loaded ? "" : "picker:back";
     kit.render(focus);
     const mine = session;
     kit.call(archive ? T.archiveBrowse : T.scopeList, args).then((result) => {
@@ -138870,21 +138842,21 @@ function chatgptPickerProgram(kit) {
         return;
       const page2 = scopeData(result);
       if (!(archive ? validArchiveBrowse(page2) : validBrowse(page2))) {
-        failLoad(() => list(parentKey, append, after), "picker:retry");
+        failLoad(() => list(parentKey2, append, after), "picker:retry");
         return;
       }
       if (p.loaded && !p.pick && (page2.account_generation !== p.generation || page2.scope_revision !== p.revision)) {
-        reload(Q.conflict, parentKey || append ? null : page2);
+        reload(Q.conflict, parentKey2 || append ? null : page2);
         return;
       }
-      takeFolders(page2, parentKey, append, focus, after);
+      takeFolders(page2, parentKey2, append, focus, after);
     }, () => {
       if (mine !== session || !p)
         return;
-      failLoad(() => list(parentKey, append, after), "picker:retry");
+      failLoad(() => list(parentKey2, append, after), "picker:retry");
     });
   }
-  function takeFolders(page2, parentKey, append, focus, after) {
+  function takeFolders(page2, parentKey2, append, focus, after) {
     if (!p.loaded) {
       p.generation = page2.account_generation;
       p.revision = page2.scope_revision;
@@ -138900,8 +138872,8 @@ function chatgptPickerProgram(kit) {
       }
       p.loaded = true;
     }
-    const trail = parentKey ? trailOf(parentKey) : [];
-    const previous = append ? parentKey ? p.branches.get(parentKey) || [] : p.roots : [];
+    const trail = parentKey2 ? trailOf(parentKey2) : [];
+    const previous = append ? parentKey2 ? p.branches.get(parentKey2) || [] : p.roots : [];
     const seen = {};
     for (const node of previous)
       seen[node.key] = true;
@@ -138913,25 +138885,25 @@ function chatgptPickerProgram(kit) {
     const nodes = previous.concat(fresh2).sort((a, b) => (a.is_disk === true ? 1 : 0) - (b.is_disk === true ? 1 : 0) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const levelAccess = page2.access && typeof page2.access.message === "string" && page2.access.message ? page2.access : null;
     if (levelAccess)
-      p.access.set(parentKey, levelAccess);
+      p.access.set(parentKey2, levelAccess);
     else
-      p.access.delete(parentKey);
+      p.access.delete(parentKey2);
     const next = typeof page2.next_cursor === "string" && page2.next_cursor ? page2.next_cursor : "";
     const more = typeof page2.remaining === "number" && isFinite(page2.remaining) && page2.remaining > 0 ? Math.round(page2.remaining) : 0;
     if (next && more)
-      p.remaining.set(parentKey, more);
+      p.remaining.set(parentKey2, more);
     else
-      p.remaining.delete(parentKey);
+      p.remaining.delete(parentKey2);
     if (page2.truncated === true)
-      p.truncated.add(parentKey);
-    if (parentKey && blockedByComputer(levelAccess)) {
-      p.branches.delete(parentKey);
-    } else if (parentKey) {
-      p.branches.set(parentKey, nodes);
+      p.truncated.add(parentKey2);
+    if (parentKey2 && blockedByComputer(levelAccess)) {
+      p.branches.delete(parentKey2);
+    } else if (parentKey2) {
+      p.branches.set(parentKey2, nodes);
       if (next)
-        p.cursors.set(parentKey, next);
+        p.cursors.set(parentKey2, next);
       else
-        p.cursors.delete(parentKey);
+        p.cursors.delete(parentKey2);
     } else {
       p.roots = nodes;
       p.rootCursor = next;
@@ -139480,21 +139452,21 @@ function chatgptPickerProgram(kit) {
     add(li, label, folderControl(key2, node.name, node));
     return li;
   }
-  function loadMore(parentKey) {
-    const busy = p.loading === (parentKey || "root");
-    const more = p.remaining.get(parentKey) || 0;
+  function loadMore(parentKey2) {
+    const busy = p.loading === (parentKey2 || "root");
+    const more = p.remaining.get(parentKey2) || 0;
     const label = more ? fill2(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
-    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
+    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey2, busy || p.loading ? null : () => list(parentKey2, true), "plain");
   }
-  function levelList(parentKey, nodes, hasMore) {
+  function levelList(parentKey2, nodes, hasMore) {
     const listNode = el("ul", "flist");
     for (const node of nodes)
       add(listNode, folderRow(node));
     if (!nodes.length)
       add(listNode, el("li", "muted fempty", Q.noFolders));
     if (hasMore)
-      add(listNode, add(el("li", "fmore"), loadMore(parentKey)));
-    if (p.truncated.has(parentKey))
+      add(listNode, add(el("li", "fmore"), loadMore(parentKey2)));
+    if (p.truncated.has(parentKey2))
       add(listNode, el("li", "muted fmore", Q.truncated));
     return listNode;
   }
@@ -144496,13 +144468,13 @@ var init_source_disposition_tree = __esm(() => {
 });
 
 // src/workers/source-dispositions.ts
-import { chmodSync as chmodSync30, copyFileSync as copyFileSync2, existsSync as existsSync78, lstatSync as lstatSync39, mkdirSync as mkdirSync55, readFileSync as readFileSync71 } from "node:fs";
+import { chmodSync as chmodSync30, copyFileSync as copyFileSync2, existsSync as existsSync79, lstatSync as lstatSync39, mkdirSync as mkdirSync55, readFileSync as readFileSync71 } from "node:fs";
 import { dirname as dirname82 } from "node:path";
 function resolveSourceIngestionExclusionsPath(env = process.env, explicitPath) {
   return explicitPath?.trim() || env[SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]?.trim() || defaultSourceIngestionExclusionsPath(env);
 }
 function readSourceIngestionExclusionsFile(path) {
-  if (!existsSync78(path)) {
+  if (!existsSync79(path)) {
     return {
       path,
       present: false,
@@ -144551,7 +144523,7 @@ function writeSourceIngestionExclusionsFile(options) {
   }
   const stamp = (options.now ?? new Date).toISOString().split(":").join("").split(".").join("");
   let backupPath;
-  if (existsSync78(path)) {
+  if (existsSync79(path)) {
     const stat6 = lstatSync39(path);
     if (stat6.isSymbolicLink() || !stat6.isFile()) {
       throw new OperationError("config_error", "The ingestion dispositions path is not a regular file; refusing to write through it.");
@@ -145258,11 +145230,11 @@ function createEmailSourceWorker(options = {}) {
             }
             const input = postBody;
             const sourceId = parseFolderScopeSourceId(input.source_id);
-            const parentKey = asOptionalString(input.parent_key);
+            const parentKey2 = asOptionalString(input.parent_key);
             const cursor = asOptionalString(input.cursor);
             const scopeBrowser = await sourceDashboard.fileSourceScopes.browse({
               sourceId,
-              ...parentKey ? { parentKey } : {},
+              ...parentKey2 ? { parentKey: parentKey2 } : {},
               ...cursor ? { cursor } : {}
             });
             return json({
@@ -146253,11 +146225,11 @@ function createEmailSourceWorker(options = {}) {
           }
           const record5 = await parseObjectBody(request);
           if (url.pathname === "/dashboard/archive-import/browse") {
-            const parentKey = asOptionalString(record5.parent_key);
+            const parentKey2 = asOptionalString(record5.parent_key);
             const cursor = asOptionalString(record5.cursor);
             return json({
               ok: true,
-              ...await archiveImports.browse({ ...parentKey ? { parentKey } : {}, ...cursor ? { cursor } : {} })
+              ...await archiveImports.browse({ ...parentKey2 ? { parentKey: parentKey2 } : {}, ...cursor ? { cursor } : {} })
             });
           }
           if (url.pathname === "/dashboard/archive-import/approve") {
@@ -149600,7 +149572,7 @@ var init_locations = __esm(() => {
 
 // src/workers/local-files/watch-hub.ts
 import { createRequire as createRequire7 } from "node:module";
-import { existsSync as existsSync79, readFileSync as readFileSync73 } from "node:fs";
+import { existsSync as existsSync80, readFileSync as readFileSync73 } from "node:fs";
 import { dirname as dirname83, join as join105 } from "node:path";
 function watchIgnoreGlobs(context2, extra = []) {
   const home2 = context2.home;
@@ -149687,7 +149659,7 @@ class WatchHub {
   }
   async eventsSince(root, snapshotPath, ignore = []) {
     const watcher = await this.watcherOrHistoryError();
-    if (!existsSync79(snapshotPath))
+    if (!existsSync80(snapshotPath))
       throw new WatchHistoryUnavailableError("the snapshot is gone");
     try {
       return await watcher.getEventsSince(root, snapshotPath, { ignore: [...ignore] });
@@ -149817,7 +149789,7 @@ async function loadParcelWatcher(extraDirs = []) {
   const dirs = [...extraDirs, ...process.env.OLYMPUS_NATIVE_MODULES_DIR ? [process.env.OLYMPUS_NATIVE_MODULES_DIR] : []];
   for (const dir of dirs) {
     const candidate = join105(dir, "node_modules");
-    if (!existsSync79(join105(candidate, "@parcel", "watcher")))
+    if (!existsSync80(join105(candidate, "@parcel", "watcher")))
       continue;
     try {
       const requireFrom = createRequire7(join105(dirname83(candidate), "package.json"));
@@ -150051,7 +150023,7 @@ function createLocalFilesSourceConnector(options) {
       return [];
     const bases = root === "/" ? [...new Set([...topLevel, ...options.scope.roots().map((entry) => entry.scopePath).filter((path) => path !== "/")])] : [root];
     const absent = [];
-    const judge = (stored, base) => {
+    const judge2 = (stored, base) => {
       if (base !== undefined && !pathIsAtOrBelow(stored.locatorUri, base))
         return;
       if (seenIds.has(stored.identity.providerItemId) || deletedSeen.has(stored.identity.providerItemId))
@@ -150067,7 +150039,7 @@ function createLocalFilesSourceConnector(options) {
         accountScope: LOCAL_FILES_ACCOUNT_SCOPE,
         limit: ABSENCE_SCAN_LIMIT
       }))
-        judge(stored);
+        judge2(stored);
     }
     for (const base of bases) {
       for (const stored of store.activeItemsUnderLocatorIfIndexed({
@@ -150076,7 +150048,7 @@ function createLocalFilesSourceConnector(options) {
         locatorUri: base,
         limit: ABSENCE_SCAN_LIMIT
       })) {
-        judge(stored, base);
+        judge2(stored, base);
       }
     }
     return absent;
@@ -152656,7 +152628,7 @@ var init_source_scheduler = __esm(() => {
 });
 
 // src/workers/local-files/mac-permissions.ts
-import { existsSync as existsSync80, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync74 } from "node:fs";
+import { existsSync as existsSync81, mkdirSync as mkdirSync56, opendirSync, readFileSync as readFileSync74 } from "node:fs";
 import { opendir } from "node:fs/promises";
 import { dirname as dirname84, join as join107 } from "node:path";
 function permissionHostKind(env) {
@@ -152860,7 +152832,7 @@ class MacPermissions {
     if (this.memory)
       return this.memory;
     let loaded = {};
-    if (this.memoryPath && existsSync80(this.memoryPath)) {
+    if (this.memoryPath && existsSync81(this.memoryPath)) {
       try {
         const parsed = JSON.parse(readFileSync74(this.memoryPath, "utf8"));
         if (parsed && typeof parsed === "object")
@@ -162505,7 +162477,7 @@ var init_start = __esm(() => {
 });
 
 // src/workers/archive-import/runtime.ts
-import { existsSync as existsSync81 } from "node:fs";
+import { existsSync as existsSync82 } from "node:fs";
 function createArchiveImportRuntime(options = {}) {
   registerArchiveFormatConnectors();
   const env = options.env ?? process.env;
@@ -162551,7 +162523,7 @@ function createArchiveImportRuntime(options = {}) {
     }
   };
   const hasData = (family) => {
-    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync81(path)))
+    if (archiveConnectorStoreDbPaths([family], env).some((path) => existsSync82(path)))
       return true;
     try {
       return state.list().some((record5) => record5.family === family);
@@ -162567,7 +162539,7 @@ function createArchiveImportRuntime(options = {}) {
     existingLanes: () => families.filter(hasData).map((family) => lane(family)),
     openWaitingQuestions: () => {
       const path = options.waitingQuestionsDbPath ?? waitingPrivateQuestionsDbPath(resolveRemoteConnectionsDbPath(env));
-      return existsSync81(path) ? openWaitingPrivateQuestionStore(path) : undefined;
+      return existsSync82(path) ? openWaitingPrivateQuestionStore(path) : undefined;
     },
     start: (path) => startArchiveImport({ state, path }),
     subscribeWork: (wake) => {
@@ -162915,7 +162887,7 @@ var init_agent = __esm(() => {
 });
 
 // src/workers/archive-import/removal.ts
-import { existsSync as existsSync82 } from "node:fs";
+import { existsSync as existsSync83 } from "node:fs";
 function requestArchiveRemoval(state, archiveId, now = () => new Date) {
   return state.update(archiveId, (record5) => {
     if (record5.status === "removing")
@@ -162949,7 +162921,7 @@ function deleteWaitingAnswers(options, input) {
 }
 function deleteJudgeQuestions(lane, provider, accountScope) {
   const path = tierSnifferPathForLedger(lane.ledger.dbPath);
-  if (path !== ":memory:" && !existsSync82(path))
+  if (path !== ":memory:" && !existsSync83(path))
     return 0;
   const sniffer = openTierSniffer({ sourceId: ARCHIVE_IMPORTS_SOURCE_ID2 }, { dbPath: path });
   try {
@@ -163600,7 +163572,7 @@ var init_dashboard2 = __esm(() => {
 });
 
 // src/workers/file-extraction/connector-source.ts
-import { mkdirSync as mkdirSync57, rmSync as rmSync26, writeFileSync as writeFileSync22 } from "node:fs";
+import { existsSync as existsSync84, mkdirSync as mkdirSync57, rmSync as rmSync26, writeFileSync as writeFileSync22 } from "node:fs";
 import { basename as basename15, join as join108, resolve as resolve21, sep as sep14 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
@@ -163633,6 +163605,9 @@ async function readItemToFile(connector, localItemId, options) {
   const path = join108(options.spoolDir, extractionSpoolFileName());
   for (let attempt = 0;; attempt += 1) {
     try {
+      if (options.spoolRoot !== undefined && !existsSync84(options.spoolRoot)) {
+        throw new Error("The extraction spool folder is gone.");
+      }
       mkdirSync57(options.spoolDir, { recursive: true, mode: 448 });
       writeFileSync22(path, bytes, { mode: 384 });
       break;
@@ -163755,7 +163730,8 @@ function createConnectorFileExtractionSource(options) {
           ...fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {},
           ...ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {},
           ...deferred2 ? { deferredBytes: { locator: deferred2.locator } } : {},
-          spoolDir
+          spoolDir,
+          spoolRoot: fileOptions.spoolDir
         });
       } catch (error2) {
         throw asSourceError(error2);
@@ -164570,7 +164546,7 @@ var init_open_target2 = __esm(() => {
 // src/workers/local-files/volume-identity.ts
 import { createHash as createHash84 } from "node:crypto";
 import { execFileSync as execFileSync4 } from "node:child_process";
-import { existsSync as existsSync83, lstatSync as lstatSync41, readFileSync as readFileSync75, readdirSync as readdirSync18, realpathSync as realpathSync22 } from "node:fs";
+import { existsSync as existsSync85, lstatSync as lstatSync41, readFileSync as readFileSync75, readdirSync as readdirSync18, realpathSync as realpathSync22 } from "node:fs";
 import { homedir as homedir44 } from "node:os";
 
 class VolumeResolver {
@@ -164757,7 +164733,7 @@ function defaultUuidsByDevice() {
   const result = new Map;
   const dir = "/dev/disk/by-uuid";
   try {
-    if (!existsSync83(dir))
+    if (!existsSync85(dir))
       return result;
     for (const name of readdirSync18(dir)) {
       try {
@@ -165084,7 +165060,7 @@ var init_source_scope_browser = __esm(() => {
 
 // src/workers/local-files/mac-settings.ts
 import { spawn as spawn9 } from "node:child_process";
-import { existsSync as existsSync84 } from "node:fs";
+import { existsSync as existsSync86 } from "node:fs";
 import { homedir as homedir45 } from "node:os";
 import { join as join109 } from "node:path";
 function helperAppPathForHome(home2 = homedir45()) {
@@ -165095,7 +165071,7 @@ function revealHelperAndOpenFullDiskAccess(deps = {}) {
     spawn9(command, args, { stdio: "ignore", detached: true }).unref();
   });
   const helper = deps.helperApp ?? helperAppPathForHome();
-  if ((deps.exists ?? existsSync84)(helper))
+  if ((deps.exists ?? existsSync86)(helper))
     run2("/usr/bin/open", ["-R", helper]);
   run2("/usr/bin/open", [FULL_DISK_ACCESS_URL]);
 }
@@ -165138,12 +165114,12 @@ function localFilesListing(options, mode) {
     home: home2,
     memoryPath: join110(olympusDataDir(), "local-files", "folder-access.json")
   });
-  const node = (scopePath, name, parentKey, access) => {
+  const node = (scopePath, name, parentKey2, access) => {
     const own3 = mode === "folders" && isInsideOwnRoot(scopePath, context2);
     const reason = own3 ? "olympus_data" : mode === "folders" ? defaultExclusionForFolder(scopePath, context2) : undefined;
     return {
       key: scopePath,
-      ...parentKey !== undefined ? { parent_key: parentKey } : {},
+      ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
       name: name.normalize("NFC"),
       kind: "folder",
       has_children: !own3,
@@ -165152,15 +165128,15 @@ function localFilesListing(options, mode) {
       ...access ? { access } : {}
     };
   };
-  const fileNode = (scopePath, name, parentKey) => ({
+  const fileNode = (scopePath, name, parentKey2) => ({
     key: scopePath,
-    ...parentKey !== undefined ? { parent_key: parentKey } : {},
+    ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
     name: name.normalize("NFC"),
     kind: "file",
     has_children: false,
     selectable: true
   });
-  const childFolders = (realPath, parentKey) => {
+  const childFolders = (realPath, parentKey2) => {
     let entries;
     try {
       entries = readDirectory(realPath);
@@ -165183,10 +165159,10 @@ function localFilesListing(options, mode) {
     return entries.filter(offered).map((entry) => {
       const childReal = join110(realPath, entry.name);
       if (!entry.isDirectory())
-        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey);
+        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
-      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
+      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
     }).sort((a, b) => {
       const aHidden = a.name.startsWith(".");
       const bHidden = b.name.startsWith(".");
@@ -165677,6 +165653,10 @@ var init_unreadable_locators = __esm(() => {
 });
 
 // src/workers/connector-store/tier-visibility.ts
+function childLane(scope) {
+  const stores = scope.stores;
+  return stores ? { ledger: () => scope.ledger, stores } : undefined;
+}
 function createTierVisibilityGate(scopes) {
   return (hits) => {
     const current2 = scopes();
@@ -165713,6 +165693,15 @@ function createTierVisibilityGate(scopes) {
         const currentHere = itemCopies.some((copy) => copy.corpusId === hit.corpusId && copy.state === "current" && (!hit.servingLayer || copy.layers === "both" || copy.layers === hit.servingLayer));
         if (!currentHere)
           hidden.add(hit);
+      }
+      const lane = childLane(scope);
+      if (lane) {
+        const orphaned = hiddenChildKeys(lane, governed.filter((hit) => !hidden.has(hit)).map((hit) => hit.sourceItem));
+        if (orphaned.size > 0) {
+          for (const hit of governed)
+            if (orphaned.has(tierLedgerIdentityKey(hit.sourceItem)))
+              hidden.add(hit);
+        }
       }
     }
     return hidden.size === 0 ? hits : hits.filter((hit) => !hidden.has(hit));
@@ -165759,6 +165748,16 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
             gone: record5.routed && !copies.some((copy) => copy.state === "current" && (!namesOnly || copy.layers === "both" || copy.layers === "metadata"))
           };
         }
+        const lane = childLane(scope);
+        if (lane) {
+          const orphaned = hiddenChildKeys(lane, governed.map(({ identity: identity2 }) => identity2));
+          if (orphaned.size > 0) {
+            for (const { index, identity: identity2 } of governed) {
+              if (orphaned.has(tierLedgerIdentityKey(identity2)))
+                verdicts[index] = { ...verdicts[index], gone: true };
+            }
+          }
+        }
       }
       return verdicts;
     }
@@ -165766,6 +165765,7 @@ function createReleaseTierCheck(scopes, secureDerivativeDefault) {
 }
 var init_tier_visibility = __esm(() => {
   init_tier_ledger();
+  init_child_visibility();
 });
 
 // src/core/source-account-migration.ts
@@ -167545,7 +167545,7 @@ var init_sniffer_resolver = __esm(() => {
 
 // src/workers/classification/sniffer-service.ts
 import { Database as Database20 } from "bun:sqlite";
-import { existsSync as existsSync85 } from "node:fs";
+import { existsSync as existsSync87 } from "node:fs";
 
 class TierSnifferService {
   options;
@@ -167630,7 +167630,7 @@ class TierSnifferService {
             continue;
         }
         const path = tierSnifferPathForLedger(ledgerPath);
-        const hasQueue = existsSync85(path);
+        const hasQueue = existsSync87(path);
         if (hasQueue)
           db.query("ATTACH DATABASE ? AS queue").run(path);
         const queued = hasQueue ? `EXISTS (SELECT 1 FROM queue.sniffer_questions q
@@ -167832,14 +167832,14 @@ class TierSnifferService {
       try {
         const binding = store.tierSetBinding?.();
         const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : binding?.ledgerPath;
-        if (bound && bound !== ":memory:" && existsSync85(bound)) {
+        if (bound && bound !== ":memory:" && existsSync87(bound)) {
           paths.add(bound);
           if (binding?.ledgerId)
             this.boundLedgerIds.set(bound, binding.ledgerId);
         }
       } catch {}
       const own3 = tierLedgerPathForStore(store.dbPath);
-      if (existsSync85(own3))
+      if (existsSync87(own3))
         paths.add(own3);
     }
     return [...paths];
@@ -173705,21 +173705,21 @@ async function scopeList(backend, args) {
     const draft = args.draft === undefined ? undefined : parseDraft(args.draft);
     return mailList(await backend.browseMail(draft), secrets);
   }
-  const parentKey = optionalString11(args.parent_key);
+  const parentKey2 = optionalString11(args.parent_key);
   const ancestorKeys = optionalKeys2(args.ancestor_keys);
-  const after = args.cursor === undefined ? undefined : decodeSortedCursor(requiredString6(args.cursor), parentKey);
-  if (parentKey && isSecretFolder(secrets, parentKey, ancestorKeys))
+  const after = args.cursor === undefined ? undefined : decodeSortedCursor(requiredString6(args.cursor), parentKey2);
+  if (parentKey2 && isSecretFolder(secrets, parentKey2, ancestorKeys))
     throw new ChatGptSurfaceError("invalid_params");
-  return sortedFolderPage(await browseWholeLevel(backend, sourceId, parentKey), secrets, parentKey, after, ancestorKeys);
+  return sortedFolderPage(await browseWholeLevel(backend, sourceId, parentKey2), secrets, parentKey2, after, ancestorKeys);
 }
-async function browseWholeLevel(backend, sourceId, parentKey) {
-  const first = await backend.browseFolders({ sourceId, ...parentKey ? { parentKey } : {} });
+async function browseWholeLevel(backend, sourceId, parentKey2) {
+  const first = await backend.browseFolders({ sourceId, ...parentKey2 ? { parentKey: parentKey2 } : {} });
   const nodes = [...first.nodes];
   const seen = new Set;
   let cursor = first.next_cursor;
   for (let page2 = 1;cursor && !seen.has(cursor) && page2 < MAX_PROVIDER_PAGES; page2++) {
     seen.add(cursor);
-    const next = await backend.browseFolders({ sourceId, ...parentKey ? { parentKey } : {}, cursor });
+    const next = await backend.browseFolders({ sourceId, ...parentKey2 ? { parentKey: parentKey2 } : {}, cursor });
     if (next.account_generation !== first.account_generation || next.scope_revision !== first.scope_revision) {
       throw new ChatGptSurfaceError("picker_unavailable");
     }
@@ -173734,7 +173734,7 @@ async function browseWholeLevel(backend, sourceId, parentKey) {
 function compareFolders(a, b) {
   return FOLDER_COLLATOR.compare(a.name, b.name) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 }
-function sortedFolderPage(level, secrets, parentKey, after, ancestorKeys = []) {
+function sortedFolderPage(level, secrets, parentKey2, after, ancestorKeys = []) {
   const list = folderList(level.browse, secrets, ancestorKeys);
   const sorted = [...list.nodes].sort(compareFolders);
   const rest = after ? sorted.filter((node) => compareFolders(node, after) > 0) : sorted;
@@ -173744,20 +173744,20 @@ function sortedFolderPage(level, secrets, parentKey, after, ancestorKeys = []) {
   return {
     ...withoutCursor,
     nodes: page2,
-    ...rest.length > page2.length && last ? { next_cursor: encodeSortedCursor(parentKey, last), remaining: rest.length - page2.length } : {},
+    ...rest.length > page2.length && last ? { next_cursor: encodeSortedCursor(parentKey2, last), remaining: rest.length - page2.length } : {},
     ...level.truncated ? { truncated: true } : {}
   };
 }
-function encodeSortedCursor(parentKey, last) {
-  const body = Buffer.from(JSON.stringify({ p: parentKey ?? "", n: last.name, k: last.key }), "utf8").toString("base64url");
+function encodeSortedCursor(parentKey2, last) {
+  const body = Buffer.from(JSON.stringify({ p: parentKey2 ?? "", n: last.name, k: last.key }), "utf8").toString("base64url");
   return `${SORTED_CURSOR_PREFIX}${body}`;
 }
-function decodeSortedCursor(value2, parentKey) {
+function decodeSortedCursor(value2, parentKey2) {
   if (!value2.startsWith(SORTED_CURSOR_PREFIX))
     throw new ChatGptSurfaceError("invalid_params");
   try {
     const parsed = JSON.parse(Buffer.from(value2.slice(SORTED_CURSOR_PREFIX.length), "base64url").toString("utf8"));
-    if (parsed.p !== (parentKey ?? "") || typeof parsed.n !== "string" || typeof parsed.k !== "string" || !parsed.k) {
+    if (parsed.p !== (parentKey2 ?? "") || typeof parsed.n !== "string" || typeof parsed.k !== "string" || !parsed.k) {
       throw new Error("cursor");
     }
     return { name: parsed.n, key: parsed.k };
@@ -182313,7 +182313,7 @@ __export(exports_remote_mcp, {
   REMOTE_DIRECTORY_MCP_PATH: () => REMOTE_DIRECTORY_MCP_PATH,
   DEMO_GRANT_REMOTE_TOOLS: () => DEMO_GRANT_REMOTE_TOOLS
 });
-import { existsSync as existsSync86 } from "node:fs";
+import { existsSync as existsSync88 } from "node:fs";
 function isRemoteMcpRequest(request) {
   return remoteMcpSurface(request) !== undefined;
 }
@@ -182478,7 +182478,7 @@ function lazyRemoteConnectionStore(resolvePath4, open6) {
     if (store)
       return store;
     const dbPath = resolvePath4();
-    if (!options.create && !existsSync86(dbPath))
+    if (!options.create && !existsSync88(dbPath))
       return;
     store = open6(dbPath);
     return store;
@@ -187348,7 +187348,7 @@ __export(exports_server2, {
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
 });
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync87 } from "node:fs";
+import { existsSync as existsSync89 } from "node:fs";
 import { dirname as dirname90, isAbsolute as isAbsolute34, join as join113 } from "node:path";
 function createWorkerMessagingCaptureOwnership(options) {
   const env = options.env ?? process.env;
@@ -187781,7 +187781,7 @@ function openIngestionDispositionsRuntime(env = process.env) {
       stores = definition.stores(env);
       const matcher = definition.matcher(env);
       for (const store of stores) {
-        if (!existsSync87(store.dbPath))
+        if (!existsSync89(store.dbPath))
           continue;
         const handle = openConnectorStore(definition.account, {
           dbPath: store.dbPath,
@@ -188658,13 +188658,15 @@ async function main() {
       return [];
     }
   });
-  const tierVisibilityGate = createTierVisibilityGate(() => tierLanes.map((lane) => ({
+  const tierScopes = () => tierLanes.map((lane) => ({
     ledger: lane.ledger,
-    corpusIds: lane.corpusIds
-  })));
+    corpusIds: lane.corpusIds,
+    stores: () => connectorStores.filter((store) => lane.corpusIds.has(store.corpusId))
+  }));
+  const tierVisibilityGate = createTierVisibilityGate(tierScopes);
   const parentLabelResolver = createParentLabelResolver({
     stores: () => connectorStores,
-    scopes: () => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds }))
+    scopes: tierScopes
   });
   const onDemandCorpusAbsent = (corpusId) => {
     for (const lane of tierLanes) {
@@ -189490,7 +189492,7 @@ async function main() {
     return createAnalystSourceIndexAnswerHandler({
       inferenceGuard: (pack, request, corpusIds) => guardSourceAnswerEvidence({ lanes: sourceAnswerLanes, pack, request, corpusIds }),
       analyst: defaultLocalAnalyst,
-      releaseCheck: createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow"),
+      releaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
       queryPlanner: createAnalystQueryPlanner(localSourceAnswerModel),
       ...cloudAnalyst ? { cloudAnalyst } : {},
       veniceAnalyst: (request) => {
@@ -190320,7 +190322,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...connector ? { connector } : {},
     ...sourceAnswer ? { sourceAnswer } : {},
-    sourceAnswerReleaseCheck: createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow"),
+    sourceAnswerReleaseCheck: createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow"),
     archiveImportAgent: archiveImportDashboard.agent,
     consultAsk: async ({ caller, ...input }, signal) => askAnonymouslyNow ? askWithAnonymousInbox({ ...input, ...caller?.provider ? { callerProvider: caller.provider } : {}, signal }, {
       store: waitingQuestionStore,
@@ -190619,7 +190621,7 @@ ${lane.readsAs.accountId ?? ""}` : ""}`;
     },
     ...openCitedFile ? { openFile: openCitedFile } : {}
   });
-  const remoteReleaseCheck = createReleaseTierCheck(() => tierLanes.map((lane) => ({ ledger: lane.ledger, corpusIds: lane.corpusIds })), () => secureDerivativeDefault ?? "allow");
+  const remoteReleaseCheck = createReleaseTierCheck(tierScopes, () => secureDerivativeDefault ?? "allow");
   if (sourceAnswerLanes) {
     const { createLocalAnswerPath: createLocalAnswerPath2, createLocalPrivateAnswers: createLocalPrivateAnswers2 } = await Promise.resolve().then(() => (init_local_private_answers(), exports_local_private_answers));
     const { privateVeniceMembers: privateVeniceMembers2, createVeniceInboxAnswer: createVeniceInboxAnswer2 } = await Promise.resolve().then(() => (init_venice_inbox_answer(), exports_venice_inbox_answer));
@@ -192415,7 +192417,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes30 } from "node:crypto";
-import { existsSync as existsSync88, readFileSync as readFileSync77, openSync as openSync21, closeSync as closeSync22, writeSync as writeSync6 } from "node:fs";
+import { existsSync as existsSync90, readFileSync as readFileSync77, openSync as openSync21, closeSync as closeSync22, writeSync as writeSync6 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve23 } from "node:path";
@@ -196089,7 +196091,7 @@ function parseXReconcileRecoveryArgs(args) {
 }
 function runXReconcileRecovery(options) {
   const stateDbPath = options.stateDbPath ?? defaultXBookmarksReconcileStateDbPath();
-  if (stateDbPath !== ":memory:" && !existsSync88(stateDbPath)) {
+  if (stateDbPath !== ":memory:" && !existsSync90(stateDbPath)) {
     if (!options.execute)
       return xBookmarksRecoveryStatusWithoutState();
     throw new Error("X reconciliation has no staged run to recover.");

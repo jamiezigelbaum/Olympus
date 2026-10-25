@@ -13387,7 +13387,6 @@ class TierLedger {
       unique.set(tierLedgerIdentityKey(identity), identity);
     const list = [...unique.values()];
     this.db.transaction(() => {
-      const holds = this.holdsExist();
       for (let offset = 0;offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const rows = this.db.query(`
@@ -13403,30 +13402,9 @@ class TierLedger {
           else
             result.set(key, [copyFromRow(row)]);
         }
-        if (holds) {
-          for (const key of this.heldKeys(batch)) {
-            const copies = result.get(key) ?? [];
-            result.set(key, copies.length > 0 ? copies.map(hiddenByHold) : [heldPlaceholderCopy()]);
-          }
-        }
       }
     })();
     return result;
-  }
-  holdsExist() {
-    return this.db.query("SELECT 1 AS present FROM tier_deletion_hold LIMIT 1").get() !== null;
-  }
-  heldKeys(batch) {
-    const held = new Set;
-    if (batch.length === 0)
-      return held;
-    const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
-      WHERE (provider, account_scope, conversation_key, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
-    `).all(...batch.flatMap((identity) => [...idParams(identity)]));
-    for (const row of rows)
-      held.add(tierLedgerIdentityKey(identityOfRow(row)));
-    return held;
   }
   recordRoutedPlacement(identity, decision, plan, options = {}) {
     const decidedAt = this.now().toISOString();
@@ -13622,7 +13600,7 @@ class TierLedger {
     })();
     return result;
   }
-  itemStatesForMany(identities, options = {}) {
+  itemStatesForMany(identities) {
     const result = new Map;
     if (identities.length === 0)
       return result;
@@ -13631,7 +13609,6 @@ class TierLedger {
       unique.set(tierLedgerIdentityKey(identity), identity);
     const list = [...unique.values()];
     this.db.transaction(() => {
-      const holds = options.raw !== true && this.holdsExist();
       for (let offset = 0;offset < list.length; offset += 200) {
         const batch = list.slice(offset, offset + 200);
         const values = batch.map(() => "(?, ?, ?, ?)").join(", ");
@@ -13650,13 +13627,6 @@ class TierLedger {
         `).all(...params);
         for (const row of copies)
           result.get(tierLedgerIdentityKey(identityFromRow(row)))?.copies.push(copyFromRow(row));
-        if (holds) {
-          for (const key of this.heldKeys(batch)) {
-            const state = result.get(key);
-            if (state)
-              state.copies = state.copies.length > 0 ? state.copies.map(hiddenByHold) : [heldPlaceholderCopy()];
-          }
-        }
       }
     })();
     return result;
@@ -13721,7 +13691,7 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving" || this.childCascadePending(identity)) {
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving") {
         throw new TierLedgerGenerationConflictError;
       }
       if (!existing.routed || existing.contentRead) {
@@ -13747,7 +13717,7 @@ class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving" || this.childCascadePending(identity)) {
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === "moving") {
         throw new TierLedgerGenerationConflictError;
       }
       if (!existing.routed)
@@ -14234,7 +14204,7 @@ class TierLedger {
     `).run(update.status, update.batchId ?? null, update.movedGeneration ?? null, update.outcome ? JSON.stringify(update.outcome) : null, this.now().toISOString(), planId, ...idParams(identity));
   }
   corpusHasCopies(corpusId) {
-    return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null || this.holdsExist();
+    return this.db.query("SELECT 1 FROM tier_copies WHERE corpus_id = ? LIMIT 1").get(corpusId) !== null;
   }
   corpusCopyIdentities(corpusId, filter) {
     const where = filter === "held" ? `copy_state = 'current' AND embed_hold = 1` : filter === "metadata_layer" ? `copy_state = 'current' AND layers = 'metadata'` : filter === "metadata_layer_settled_unreadable" ? `copy_state = 'current' AND layers = 'metadata'
@@ -14257,14 +14227,9 @@ class TierLedger {
                 AND other.corpus_id <> tier_copies.corpus_id
                 AND other.copy_state = 'current' AND other.layers IN ('content', 'both')
             )` : `copy_state = '${filter === "superseded" ? "superseded" : "staged"}'`;
-    const hiddenKind = filter === "superseded" || filter === "staged";
-    const unheld = hiddenKind ? "" : `AND NOT EXISTS (
-        SELECT 1 FROM tier_deletion_hold hold
-        WHERE hold.provider = tier_copies.provider AND hold.account_scope = tier_copies.account_scope
-          AND hold.conversation_key = tier_copies.conversation_key AND hold.provider_item_id = tier_copies.provider_item_id)`;
     const page = this.db.query(`
       SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_copies
-      WHERE corpus_id = ? AND ${where} ${unheld}
+      WHERE corpus_id = ? AND ${where}
         AND (provider, account_scope, conversation_key, provider_item_id) > (?, ?, ?, ?)
       ORDER BY provider, account_scope, conversation_key, provider_item_id
       LIMIT 5000
@@ -14279,18 +14244,6 @@ class TierLedger {
         break;
       const last = rows[rows.length - 1];
       after = [last.provider, last.account_scope, last.conversation_key, last.provider_item_id];
-    }
-    if (filter === "superseded") {
-      const seen = new Set(identities.map((identity) => tierLedgerIdentityKey(identity)));
-      const held = this.db.query(`
-        SELECT provider, account_scope, conversation_key, provider_item_id FROM tier_deletion_hold
-        ORDER BY provider, account_scope, conversation_key, provider_item_id
-      `).all();
-      for (const row of held) {
-        const identity = identityFromRow(row);
-        if (!seen.has(tierLedgerIdentityKey(identity)))
-          identities.push(identity);
-      }
     }
     return identities;
   }
@@ -14358,171 +14311,11 @@ class TierLedger {
         "tier_migration_proposals",
         "secret_side_store_debt",
         "secret_side_store_scrubs",
-        "secret_redaction_retirement",
-        "tier_child_cascade",
-        "tier_parent_deletion_intent",
-        "tier_deletion_hold"
+        "secret_redaction_retirement"
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
       return { items, copies };
-    })();
-  }
-  holdParentDeletion(parent, children, observedAfter) {
-    this.db.transaction(() => {
-      const now = this.now().toISOString();
-      this.db.query(`
-        INSERT INTO tier_parent_deletion_intent (
-          provider, account_scope, conversation_key, provider_item_id, family, local_item_id, noted_at, observed_after
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (provider, account_scope, conversation_key, provider_item_id)
-        DO UPDATE SET observed_after = MAX(observed_after, excluded.observed_after)
-      `).run(...idParams(parent), parent.family, parent.localItemId, now, observedAfter);
-      const hold = this.db.query(`
-        INSERT OR IGNORE INTO tier_deletion_hold (
-          provider, account_scope, conversation_key, provider_item_id,
-          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      for (const item of [parent, ...children])
-        hold.run(...idParams(item), ...idParams(parent), now);
-    })();
-  }
-  holdChildOfPendingDeletion(child, parentLocalItemId) {
-    return this.db.query(`
-      INSERT OR IGNORE INTO tier_deletion_hold (
-        provider, account_scope, conversation_key, provider_item_id,
-        owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
-      )
-      SELECT ?, ?, ?, ?, provider, account_scope, conversation_key, provider_item_id, ?
-      FROM tier_parent_deletion_intent WHERE local_item_id = ?
-    `).run(...idParams(child), this.now().toISOString(), parentLocalItemId).changes > 0;
-  }
-  heldForDeletion(identity) {
-    return this.db.query(`
-      SELECT 1 AS present FROM tier_deletion_hold
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity)) !== null;
-  }
-  pendingParentDeletions(options = {}) {
-    const rows = this.db.query(`
-      SELECT rowid AS seq, provider, account_scope, conversation_key, provider_item_id, family, local_item_id, observed_after
-      FROM tier_parent_deletion_intent WHERE rowid > ? ORDER BY rowid LIMIT ?
-    `).all(Math.max(0, Math.floor(options.after ?? 0)), Math.max(1, Math.floor(options.limit ?? 100)));
-    return rows.map((row) => ({
-      seq: row.seq,
-      observedAfter: row.observed_after,
-      parent: {
-        family: row.family,
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        localItemId: row.local_item_id,
-        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-      }
-    }));
-  }
-  liftParentDeletion(parent) {
-    this.db.transaction(() => {
-      this.db.query(`
-        DELETE FROM tier_deletion_hold
-        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
-      `).run(...idParams(parent));
-      this.db.query(`
-        DELETE FROM tier_parent_deletion_intent
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(parent));
-    })();
-  }
-  hideAndQueueChildren(parent, children) {
-    return this.db.transaction(() => {
-      const now = this.now().toISOString();
-      let hidden = 0;
-      const hide = (identity) => {
-        const row = this.readRow(identity);
-        if (!row)
-          return;
-        const changed = this.db.query(`
-          UPDATE tier_copies SET copy_state = 'superseded',
-            superseded_by_generation = COALESCE(superseded_by_generation, ?), updated_at = ?
-          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-            AND copy_state <> 'superseded'
-        `).run(row.generation + 1, now, ...idParams(identity)).changes;
-        if (changed > 0)
-          hidden += 1;
-      };
-      hide(parent);
-      this.db.query(`
-        DELETE FROM tier_deletion_hold
-        WHERE owner_provider = ? AND owner_account_scope = ? AND owner_conversation_key = ? AND owner_provider_item_id = ?
-      `).run(...idParams(parent));
-      this.db.query(`
-        DELETE FROM tier_parent_deletion_intent
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(parent));
-      const queue = this.db.query(`
-        INSERT OR IGNORE INTO tier_child_cascade (
-          provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
-          parent_provider_item_id, queued_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const hold = this.db.query(`
-        INSERT OR IGNORE INTO tier_deletion_hold (
-          provider, account_scope, conversation_key, provider_item_id,
-          owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id, held_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      let queued = 0;
-      for (const child of children) {
-        hide(child);
-        hold.run(...idParams(child), ...idParams(parent), now);
-        queued += queue.run(...idParams(child), child.family, child.localItemId, parent.providerItemId, now).changes;
-      }
-      return { hidden, queued };
-    })();
-  }
-  childCascadePending(identity) {
-    return this.db.query(`
-      SELECT 1 AS present FROM tier_child_cascade
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).get(...idParams(identity)) !== null;
-  }
-  pendingChildCascades(limit = 100) {
-    const rows = this.db.query(`
-      SELECT provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
-        parent_provider_item_id, attempts
-      FROM tier_child_cascade ORDER BY queued_at, rowid LIMIT ?
-    `).all(Math.max(1, Math.floor(limit)));
-    return rows.map((row) => ({
-      child: {
-        family: row.family,
-        provider: row.provider,
-        accountScope: row.account_scope,
-        providerItemId: row.provider_item_id,
-        localItemId: row.local_item_id,
-        ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-      },
-      parentProviderItemId: row.parent_provider_item_id,
-      attempts: row.attempts
-    }));
-  }
-  noteChildCascadeAttempt(identity) {
-    this.db.query(`
-      UPDATE tier_child_cascade SET attempts = attempts + 1, last_attempt_at = ?
-      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-    `).run(this.now().toISOString(), ...idParams(identity));
-  }
-  completeChildCascade(identity) {
-    this.db.transaction(() => {
-      this.deleteCopies(identity);
-      this.db.query(`
-        DELETE FROM tier_child_cascade
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(identity));
-      this.db.query(`
-        DELETE FROM tier_deletion_hold
-        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
-      `).run(...idParams(identity));
     })();
   }
   deleteAccountScopeCopies(provider, accountScope) {
@@ -14618,22 +14411,6 @@ function identityFromRow(row) {
     accountScope: row.account_scope,
     providerItemId: row.provider_item_id,
     ...row.conversation_key ? { providerConversationId: row.conversation_key } : {}
-  };
-}
-function hiddenByHold(copy) {
-  return { ...copy, state: "superseded", supersededByGeneration: copy.supersededByGeneration ?? copy.generation + 1 };
-}
-function heldPlaceholderCopy() {
-  return {
-    corpusId: "",
-    trustDomain: "secure_local",
-    layers: "both",
-    state: "superseded",
-    embedHold: false,
-    generation: 0,
-    supersededByGeneration: 1,
-    previousLayers: null,
-    updatedAt: ""
   };
 }
 function copyFromRow(row) {
@@ -15153,7 +14930,7 @@ function tierLedgerMigrations() {
       }
     },
     {
-      version: 9,
+      version: TIER_LEDGER_SCHEMA_VERSION,
       name: "secret_redaction_retirement",
       up(db) {
         const item = `provider = NEW.provider AND account_scope = NEW.account_scope
@@ -15198,76 +14975,10 @@ function tierLedgerMigrations() {
           END;
         `);
       }
-    },
-    {
-      version: 10,
-      name: "tier_child_cascade",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS tier_child_cascade (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            family TEXT NOT NULL DEFAULT '',
-            local_item_id TEXT NOT NULL DEFAULT '',
-            parent_provider_item_id TEXT NOT NULL,
-            queued_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            last_attempt_at TEXT,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-        `);
-      }
-    },
-    {
-      version: 11,
-      name: "tier_parent_deletion_intent",
-      up(db) {
-        db.exec(`
-          CREATE TABLE IF NOT EXISTS tier_parent_deletion_intent (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            family TEXT NOT NULL DEFAULT '',
-            local_item_id TEXT NOT NULL DEFAULT '',
-            noted_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-        `);
-      }
-    },
-    {
-      version: 12,
-      name: "tier_deletion_hold",
-      up(db) {
-        const columns = db.query("PRAGMA table_info(tier_parent_deletion_intent)").all();
-        if (!columns.some((column) => column.name === "observed_after")) {
-          db.exec("ALTER TABLE tier_parent_deletion_intent ADD COLUMN observed_after TEXT NOT NULL DEFAULT ''");
-        }
-        db.exec(`
-          UPDATE tier_parent_deletion_intent SET observed_after = noted_at WHERE observed_after = '';
-          CREATE TABLE IF NOT EXISTS tier_deletion_hold (
-            provider TEXT NOT NULL,
-            account_scope TEXT NOT NULL,
-            conversation_key TEXT NOT NULL DEFAULT '',
-            provider_item_id TEXT NOT NULL,
-            owner_provider TEXT NOT NULL,
-            owner_account_scope TEXT NOT NULL,
-            owner_conversation_key TEXT NOT NULL DEFAULT '',
-            owner_provider_item_id TEXT NOT NULL,
-            held_at TEXT NOT NULL,
-            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
-          );
-          CREATE INDEX IF NOT EXISTS tier_deletion_hold_owner
-            ON tier_deletion_hold (owner_provider, owner_account_scope, owner_conversation_key, owner_provider_item_id);
-        `);
-      }
     }
   ];
 }
-var DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
+var TIER_LEDGER_SCHEMA_VERSION = 9, DEFAULT_REJUDGE_SCAN_ROWS = 2000, TierLedgerGenerationConflictError, TierLedgerRaiseAbandonRefusedError, TierLedgerPurgedRollbackRefusedError, TierLedgerSecretsRollbackRefusedError, TIER_LEDGER_IDENTITY_FIELDS, TRUST_DOMAIN_RANK, TIER_CHECK = `IN ('public', 'private', 'secure', 'secrets')`;
 var init_tier_ledger = __esm(() => {
   init_sqlite_migrations();
   init_tier_classifier();
@@ -18950,6 +18661,148 @@ var init_secrets_disposition = __esm(() => {
   init_job_names();
 });
 
+// src/workers/connector-store/child-visibility.ts
+function parentIdentityOf(child) {
+  const cut = child.providerItemId.lastIndexOf(CHILD_ITEM_ID_SEPARATOR);
+  if (cut <= 0)
+    return;
+  return {
+    provider: child.provider,
+    accountScope: child.accountScope,
+    providerItemId: child.providerItemId.slice(0, cut),
+    ...child.providerConversationId ? { providerConversationId: child.providerConversationId } : {}
+  };
+}
+function parentIdentityField(child) {
+  const identity = parentIdentityOf(child);
+  return identity ? { identity } : {};
+}
+function parentKey(parent) {
+  return [parent.provider, parent.accountScope, parent.parentLocalItemId].join("\x00");
+}
+function parentVerdicts(lane, parents) {
+  const unique = new Map;
+  for (const parent of parents)
+    unique.set(parentKey(parent), parent);
+  try {
+    return judge(lane, [...unique.values()], 0);
+  } catch {
+    return new Map([...unique.keys()].map((key2) => [key2, HIDDEN]));
+  }
+}
+function judge(lane, parents, depth) {
+  const verdicts = new Map;
+  if (parents.length === 0)
+    return verdicts;
+  if (depth >= CHILD_PARENT_CHAIN_LIMIT) {
+    for (const parent of parents)
+      verdicts.set(parentKey(parent), HIDDEN);
+    return verdicts;
+  }
+  const rows = new Map;
+  for (const store of lane.stores()) {
+    for (const row of store.parentStandings(parents)) {
+      const key2 = parentKey(row);
+      const list = rows.get(key2) ?? [];
+      list.push({ ...row, corpusId: store.corpusId });
+      rows.set(key2, list);
+    }
+  }
+  const ledger = lane.ledger();
+  const identities = new Map;
+  for (const list of rows.values()) {
+    for (const row of list)
+      identities.set(tierLedgerIdentityKey(row.identity), row.identity);
+  }
+  const states = ledger && identities.size > 0 ? ledger.itemStatesForMany([...identities.values()]) : undefined;
+  const climbing = new Map;
+  for (const parent of parents) {
+    const key2 = parentKey(parent);
+    const list = rows.get(key2) ?? [];
+    const identity = list[0]?.identity;
+    const active = list.filter((row) => row.active);
+    if (list.some((row) => row.secret)) {
+      verdicts.set(key2, { visible: true, gone: false });
+      continue;
+    }
+    if (!identity) {
+      if (ledger && parent.identity && ledger.itemIsSecret(parent.identity)) {
+        verdicts.set(key2, { visible: true, gone: false });
+      } else {
+        verdicts.set(key2, { visible: false, gone: true });
+      }
+      continue;
+    }
+    let visible;
+    if (!ledger) {
+      visible = active.length > 0;
+    } else {
+      const state = states?.get(tierLedgerIdentityKey(identity));
+      const copies = state?.copies ?? [];
+      visible = copies.length === 0 ? state?.record.routed !== true && active.length > 0 : copies.some((copy) => copy.state === "current" && active.some((row) => row.corpusId === copy.corpusId));
+      if (!visible && ledger.itemIsSecret(identity)) {
+        verdicts.set(key2, { visible: true, gone: false });
+        continue;
+      }
+    }
+    if (visible) {
+      const above = active.find((row) => row.grandparentLocalItemId !== undefined);
+      if (above)
+        climbing.set(key2, { provider: parent.provider, accountScope: parent.accountScope, parentLocalItemId: above.grandparentLocalItemId });
+      verdicts.set(key2, { visible: true, gone: false });
+    } else {
+      verdicts.set(key2, { visible: false, gone: active.length === 0 });
+    }
+  }
+  if (climbing.size > 0) {
+    const above = judge(lane, [...climbing.values()], depth + 1);
+    for (const [key2, grandparent] of climbing) {
+      if (above.get(parentKey(grandparent))?.visible !== true)
+        verdicts.set(key2, HIDDEN);
+    }
+  }
+  return verdicts;
+}
+function childrenWithHiddenParents(lane, children) {
+  const hidden = new Set;
+  if (children.length === 0)
+    return hidden;
+  const verdicts = parentVerdicts(lane, children.map((child) => child.parent));
+  for (const child of children) {
+    if (verdicts.get(parentKey(child.parent))?.visible !== true)
+      hidden.add(child.key);
+  }
+  return hidden;
+}
+function childLinks(lane, probes) {
+  const found = new Map;
+  let remaining = probes;
+  for (const store of lane.stores()) {
+    if (remaining.length === 0)
+      break;
+    for (const [key2, parent] of store.parentLinksOf(remaining))
+      found.set(key2, parent);
+    remaining = remaining.filter((probe) => !found.has(tierLedgerIdentityKey(probe)));
+  }
+  return [...found].map(([key2, parent]) => ({ key: key2, parent }));
+}
+function hiddenChildKeys(lane, probes) {
+  if (probes.length === 0)
+    return new Set;
+  let links;
+  try {
+    links = childLinks(lane, probes);
+  } catch {
+    return new Set(probes.map((probe) => tierLedgerIdentityKey(probe)));
+  }
+  return childrenWithHiddenParents(lane, links);
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:", CHILD_PARENT_CHAIN_LIMIT = 8, HIDDEN;
+var init_child_visibility = __esm(() => {
+  init_tier_ledger();
+  HIDDEN = { visible: false, gone: false };
+});
+
 // src/core/source-index/chunk-selection.ts
 function sourceIndexChunkQueryTerms(query) {
   return sourceIndexFtsTermGroups(query, {
@@ -21505,6 +21358,7 @@ var init_local_index = __esm(() => {
   init_tier_set_binding();
   init_tier_placement();
   init_secrets_disposition();
+  init_child_visibility();
   init_source_ingestion_exclusions();
   init_fts();
   init_chunk_selection();
@@ -21604,6 +21458,7 @@ var init_local_index = __esm(() => {
     exclusions;
     reactionsColumnPresent = false;
     childItemColumnsPresent = false;
+    childLane;
     chunkMediaColumnsPresent = false;
     imageMediaReadsPresent = false;
     itemTextVersionsPresent = false;
@@ -21614,9 +21469,6 @@ var init_local_index = __esm(() => {
     tierLedgerOwned;
     tierLedgerDisabled;
     boundLedgerHandle;
-    parentTombstoneObserver;
-    parentDeletionOwed;
-    tombstonedParents;
     embeddingQueueState;
     embeddingFailureState;
     embeddingDeferral;
@@ -21855,17 +21707,28 @@ var init_local_index = __esm(() => {
       let copies;
       try {
         const ledger = this.visibilityLedger();
-        if (!ledger || !ledger.corpusHasCopies(this.corpusId))
-          return [...rows];
-        copies = ledger.copiesForMany(rows.map(identityOf));
+        if (ledger && ledger.corpusHasCopies(this.corpusId))
+          copies = ledger.copiesForMany(rows.map(identityOf));
       } catch (error) {
         if (throwOnUnavailable)
           throw error;
         return [];
       }
-      return rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row)));
+      const served = copies ? rows.filter((row) => tierRowVisible(copies.get(tierLedgerIdentityKey(identityOf(row))), this.corpusId, layerOf(row))) : [...rows];
+      return this.withoutChildrenOfHiddenParents(served, identityOf);
+    }
+    withoutChildrenOfHiddenParents(rows, identityOf) {
+      if (rows.length === 0)
+        return rows;
+      const hidden = hiddenChildKeys(this.childVisibilityLane(), rows.map(identityOf));
+      return hidden.size === 0 ? rows : rows.filter((row) => !hidden.has(tierLedgerIdentityKey(identityOf(row))));
     }
     tierHiddenItemPks() {
+      const base = this.tierLedgerHiddenItemPks();
+      const children = this.hiddenChildItemPks();
+      return children.length === 0 ? base : { ...base, hidden: [...new Set([...base.hidden, ...children])] };
+    }
+    tierLedgerHiddenItemPks() {
       const ledger = this.visibilityLedger();
       if (!ledger || !ledger.corpusHasCopies(this.corpusId)) {
         return { hidden: [], held: [], metadataLayer: [], metadataLayerContentUnread: [], moving: 0 };
@@ -21926,7 +21789,7 @@ var init_local_index = __esm(() => {
     activeLocalItemRow(localItemId) {
       const row = this.db.query(`
       SELECT provider, account_scope, provider_item_id, provider_conversation_id, locator_uri, trust_tier,
-        source_scope_generation, source_scope_revision, source_scope_folder_keys_json, indexed_at
+        source_scope_generation, source_scope_revision, source_scope_folder_keys_json
       FROM items WHERE local_item_id = ? AND tombstoned = 0
       LIMIT 1
     `).get(localItemId);
@@ -21955,8 +21818,7 @@ var init_local_index = __esm(() => {
             scopeRevision: row.source_scope_revision,
             folderKeys
           }
-        } : {},
-        ...row.indexed_at ? { observedAt: row.indexed_at } : {}
+        } : {}
       };
     }
     conversationIdsForProviderItem(identity) {
@@ -22038,66 +21900,157 @@ var init_local_index = __esm(() => {
         ...row.authored_at ? { authoredAt: row.authored_at } : {}
       };
     }
-    observeParentTombstones(observer, owed) {
-      this.parentTombstoneObserver = observer;
-      this.parentDeletionOwed = owed;
+    useChildVisibility(lane) {
+      this.childLane = lane;
     }
-    noteTombstonedParent(itemPk) {
-      if (!this.parentTombstoneObserver || !this.childItemColumnsPresent)
-        return;
-      const row = this.db.query(`
-      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
-        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier,
-        indexed_at
-      FROM items WHERE item_pk = ? AND tombstoned = 1
-    `).get(itemPk);
-      if (!row || row.trust_tier === "S5")
-        return;
-      const { indexed_at: tombstonedAt, ...fields } = row;
-      const parent = sourceItemFromRow({ ...fields, rank: 0 });
-      this.parentDeletionOwed?.(parent, tombstonedAt);
-      (this.tombstonedParents ??= new Map).set(row.local_item_id, parent);
-    }
-    flushTombstonedParents() {
-      const noted = this.tombstonedParents;
-      if (!noted || noted.size === 0)
-        return;
-      const parents = [...noted.values()];
-      noted.clear();
-      const observer = this.parentTombstoneObserver;
-      if (!observer)
-        return;
-      try {
-        const confirmed = parents.filter((parent) => this.db.query(`
-        SELECT 1 AS tombstoned FROM items
-        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 1
-      `).get(parent.provider, parent.accountScope, normalizeConversationId(parent.providerConversationId), parent.providerItemId) !== null);
-        if (confirmed.length > 0)
-          observer(confirmed);
-      } catch {}
+    childVisibilityLane() {
+      return this.childLane ?? {
+        ledger: () => this.visibilityLedger(),
+        stores: () => [this]
+      };
     }
     hasChildItems() {
       if (!this.childItemColumnsPresent)
         return false;
       return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1").get() !== null;
     }
-    activeChildParentLocalIds(after, limit) {
+    parentLinksOf(identities) {
+      const links = new Map;
+      if (identities.length === 0 || !this.hasChildItems())
+        return links;
+      for (let offset = 0;offset < identities.length; offset += 200) {
+        const batch = identities.slice(offset, offset + 200);
+        const rows = this.db.query(`
+        SELECT provider, account_scope, provider_conversation_id, provider_item_id, parent_local_item_id FROM items
+        WHERE parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, normalized_conversation, provider_item_id) IN (VALUES ${batch.map(() => "(?, ?, ?, ?)").join(", ")})
+      `).all(...batch.flatMap((identity) => [
+          identity.provider,
+          identity.accountScope,
+          normalizeConversationId(identity.providerConversationId),
+          identity.providerItemId
+        ]));
+        for (const row of rows) {
+          links.set(tierLedgerIdentityKey({
+            provider: row.provider,
+            accountScope: row.account_scope,
+            providerItemId: row.provider_item_id,
+            ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+          }), {
+            provider: row.provider,
+            accountScope: row.account_scope,
+            parentLocalItemId: row.parent_local_item_id,
+            ...parentIdentityField({
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            })
+          });
+        }
+      }
+      return links;
+    }
+    parentStandings(parents) {
+      if (parents.length === 0)
+        return [];
+      const wanted = new Set(parents.map((parent) => parentKey(parent)));
+      const ids = [...new Set(parents.map((parent) => parent.parentLocalItemId))];
+      const out = [];
+      for (let offset = 0;offset < ids.length; offset += 20000) {
+        const rows = this.db.query(`
+        SELECT provider, account_scope, provider_item_id, provider_conversation_id, local_item_id, tombstoned, trust_tier,
+          ${this.childItemColumnsPresent ? "parent_local_item_id" : "NULL AS parent_local_item_id"}
+        FROM items WHERE local_item_id IN (SELECT value FROM json_each(?))
+      `).all(JSON.stringify(ids.slice(offset, offset + 20000)));
+        for (const row of rows) {
+          const ref = { provider: row.provider, accountScope: row.account_scope, parentLocalItemId: row.local_item_id };
+          if (!wanted.has(parentKey(ref)))
+            continue;
+          out.push({
+            ...ref,
+            identity: {
+              provider: row.provider,
+              accountScope: row.account_scope,
+              providerItemId: row.provider_item_id,
+              ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+            },
+            active: row.tombstoned === 0,
+            secret: row.trust_tier === "S5",
+            ...row.parent_local_item_id ? { grandparentLocalItemId: row.parent_local_item_id } : {}
+          });
+        }
+      }
+      return out;
+    }
+    hiddenChildItemPks() {
+      if (!this.hasChildItems())
+        return [];
+      const groups = this.db.query(`
+      SELECT provider, account_scope, parent_local_item_id, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+      GROUP BY provider, account_scope, parent_local_item_id
+    `).all();
+      const parents = groups.map((group) => ({
+        provider: group.provider,
+        accountScope: group.account_scope,
+        parentLocalItemId: group.parent_local_item_id,
+        ...parentIdentityField({
+          provider: group.provider,
+          accountScope: group.account_scope,
+          providerItemId: group.child_item_id,
+          ...group.provider_conversation_id ? { providerConversationId: group.provider_conversation_id } : {}
+        })
+      }));
+      const verdicts = parentVerdicts(this.childVisibilityLane(), parents);
+      const hiddenParents = parents.filter((parent) => verdicts.get(parentKey(parent))?.visible !== true);
+      const pks = [];
+      for (let offset = 0;offset < hiddenParents.length; offset += 20000) {
+        const rows = this.db.query(`
+        SELECT item_pk FROM items
+        WHERE tombstoned = 0 AND parent_local_item_id IS NOT NULL
+          AND (provider, account_scope, parent_local_item_id) IN (
+            SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?)
+          )
+      `).all(JSON.stringify(hiddenParents.slice(offset, offset + 20000).map((parent) => [parent.provider, parent.accountScope, parent.parentLocalItemId])));
+        for (const row of rows)
+          pks.push(row.item_pk);
+      }
+      return pks;
+    }
+    activeChildParents(after, limit) {
       if (!this.childItemColumnsPresent)
         return [];
       const rows = this.db.query(`
-      SELECT DISTINCT parent_local_item_id AS id FROM items
-      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0 AND parent_local_item_id > ?
-      ORDER BY parent_local_item_id LIMIT ?
-    `).all(after ?? "", Math.max(1, Math.floor(limit)));
-      return rows.map((row) => row.id);
+      SELECT parent_local_item_id, provider, account_scope, MIN(provider_item_id) AS child_item_id, provider_conversation_id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0
+        AND (parent_local_item_id, provider, account_scope) > (?, ?, ?)
+      GROUP BY parent_local_item_id, provider, account_scope
+      ORDER BY parent_local_item_id, provider, account_scope LIMIT ?
+    `).all(after?.parentLocalItemId ?? "", after?.provider ?? "", after?.accountScope ?? "", Math.max(1, Math.floor(limit)));
+      return rows.map((row) => ({
+        provider: row.provider,
+        accountScope: row.account_scope,
+        parentLocalItemId: row.parent_local_item_id,
+        ...parentIdentityField({
+          provider: row.provider,
+          accountScope: row.account_scope,
+          providerItemId: row.child_item_id,
+          ...row.provider_conversation_id ? { providerConversationId: row.provider_conversation_id } : {}
+        })
+      }));
     }
-    tombstonedItemByLocalId(localItemId) {
-      const row = this.db.query(`
+    activeChildrenOf(parent) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
       SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
         provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
-      FROM items WHERE local_item_id = ? AND tombstoned = 1 AND trust_tier <> 'S5' ORDER BY item_pk LIMIT 1
-    `).get(localItemId);
-      return row ? sourceItemFromRow({ ...row, rank: 0 }) : undefined;
+      FROM items
+      WHERE parent_local_item_id = ? AND provider = ? AND account_scope = ? AND tombstoned = 0
+      ORDER BY item_pk
+    `).all(parent.parentLocalItemId, parent.provider, parent.accountScope);
+      return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 }));
     }
     observeStoredItemOwner(identity, connectorId) {
       this.db.transaction(() => {
@@ -22139,10 +22092,8 @@ var init_local_index = __esm(() => {
           }, options.connectorId, "observed", syncRunId, options.trustTier, true);
         })();
       } finally {
-        if (!this.db.inTransaction) {
+        if (!this.db.inTransaction)
           this.releaseUnreferencedChunkMedia();
-          this.flushTombstonedParents();
-        }
       }
     }
     tombstoneSecretsExtraction(identity, options) {
@@ -24797,7 +24748,6 @@ var init_local_index = __esm(() => {
         return await this.syncFromConnectorHeld(connector, options);
       } finally {
         this.releaseUnreferencedChunkMedia();
-        this.flushTombstonedParents();
       }
     }
     async syncFromConnectorHeld(connector, options) {
@@ -25222,7 +25172,7 @@ var init_local_index = __esm(() => {
           return false;
         if (!ledger)
           return true;
-        const state = ledger.itemStatesForMany([identity], { raw: true }).get(tierLedgerIdentityKey(identity));
+        const state = ledger.itemStatesForMany([identity]).get(tierLedgerIdentityKey(identity));
         if (!state || !state.record.routed)
           return true;
         const { record, copies } = state;
@@ -25299,7 +25249,6 @@ var init_local_index = __esm(() => {
           `).run(now, now, syncRunId, row.item_pk);
             this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
             this.deleteFtsForItem(row.item_pk);
-            this.noteTombstonedParent(row.item_pk);
             this.rememberItemOwner(row.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
             count += 1;
             break;
@@ -25361,7 +25310,6 @@ var init_local_index = __esm(() => {
           `).run(now, now, syncRunId, row.item_pk);
             this.db.query("DELETE FROM chunks WHERE item_pk = ?").run(row.item_pk);
             this.deleteFtsForItem(row.item_pk);
-            this.noteTombstonedParent(row.item_pk);
           }
           count += rows.length;
         }
@@ -25394,8 +25342,6 @@ var init_local_index = __esm(() => {
           this.deleteFtsForItem(existing.item_pk);
           if (tombstoneTrustTier === "S5")
             this.keepSecretsLocationOnly(existing.item_pk);
-          else
-            this.noteTombstonedParent(existing.item_pk);
           this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, "local_write");
           return true;
         }
@@ -30060,7 +30006,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-var LOWER_CONTENT_REPAIR_INTERVAL_MS, CHILD_CASCADE_RECONCILE_INTERVAL_MS;
+var LOWER_CONTENT_REPAIR_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -30070,6 +30016,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_placement();
   init_secrets_disposition();
   init_parent_context();
+  init_child_visibility();
   init_tier_names_only_settle();
   init_tier_content_purge();
   init_tier_move();
@@ -30079,7 +30026,6 @@ var init_tiered_store_set = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
-  CHILD_CASCADE_RECONCILE_INTERVAL_MS = 5 * 60000;
 });
 
 // src/core/messaging-capture-grant-file.ts
@@ -38925,19 +38871,19 @@ function chatgptPickerProgram(kit) {
     p.retry = retry;
     kit.render(focus);
   }
-  function list(parentKey, append, after) {
-    const cursor = append ? parentKey ? p.cursors.get(parentKey) : p.rootCursor : "";
+  function list(parentKey2, append, after) {
+    const cursor = append ? parentKey2 ? p.cursors.get(parentKey2) : p.rootCursor : "";
     const archive = archiveMode();
     const args = archive ? {} : { source_id: p.id };
-    if (parentKey)
-      args.parent_key = parentKey;
-    if (!archive && parentKey && (p.ancestors.get(parentKey) || []).length)
-      args.ancestor_keys = p.ancestors.get(parentKey).slice(0, 64);
+    if (parentKey2)
+      args.parent_key = parentKey2;
+    if (!archive && parentKey2 && (p.ancestors.get(parentKey2) || []).length)
+      args.ancestor_keys = p.ancestors.get(parentKey2).slice(0, 64);
     if (cursor)
       args.cursor = cursor;
-    p.loading = parentKey || "root";
+    p.loading = parentKey2 || "root";
     p.error = "";
-    const focus = append ? "picker:more:" + parentKey : p.loaded ? "" : "picker:back";
+    const focus = append ? "picker:more:" + parentKey2 : p.loaded ? "" : "picker:back";
     kit.render(focus);
     const mine = session;
     kit.call(archive ? T.archiveBrowse : T.scopeList, args).then((result) => {
@@ -38945,21 +38891,21 @@ function chatgptPickerProgram(kit) {
         return;
       const page2 = scopeData(result);
       if (!(archive ? validArchiveBrowse(page2) : validBrowse(page2))) {
-        failLoad(() => list(parentKey, append, after), "picker:retry");
+        failLoad(() => list(parentKey2, append, after), "picker:retry");
         return;
       }
       if (p.loaded && !p.pick && (page2.account_generation !== p.generation || page2.scope_revision !== p.revision)) {
-        reload(Q.conflict, parentKey || append ? null : page2);
+        reload(Q.conflict, parentKey2 || append ? null : page2);
         return;
       }
-      takeFolders(page2, parentKey, append, focus, after);
+      takeFolders(page2, parentKey2, append, focus, after);
     }, () => {
       if (mine !== session || !p)
         return;
-      failLoad(() => list(parentKey, append, after), "picker:retry");
+      failLoad(() => list(parentKey2, append, after), "picker:retry");
     });
   }
-  function takeFolders(page2, parentKey, append, focus, after) {
+  function takeFolders(page2, parentKey2, append, focus, after) {
     if (!p.loaded) {
       p.generation = page2.account_generation;
       p.revision = page2.scope_revision;
@@ -38975,8 +38921,8 @@ function chatgptPickerProgram(kit) {
       }
       p.loaded = true;
     }
-    const trail = parentKey ? trailOf(parentKey) : [];
-    const previous = append ? parentKey ? p.branches.get(parentKey) || [] : p.roots : [];
+    const trail = parentKey2 ? trailOf(parentKey2) : [];
+    const previous = append ? parentKey2 ? p.branches.get(parentKey2) || [] : p.roots : [];
     const seen = {};
     for (const node of previous)
       seen[node.key] = true;
@@ -38988,25 +38934,25 @@ function chatgptPickerProgram(kit) {
     const nodes = previous.concat(fresh).sort((a, b) => (a.is_disk === true ? 1 : 0) - (b.is_disk === true ? 1 : 0) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: "base" }));
     const levelAccess = page2.access && typeof page2.access.message === "string" && page2.access.message ? page2.access : null;
     if (levelAccess)
-      p.access.set(parentKey, levelAccess);
+      p.access.set(parentKey2, levelAccess);
     else
-      p.access.delete(parentKey);
+      p.access.delete(parentKey2);
     const next = typeof page2.next_cursor === "string" && page2.next_cursor ? page2.next_cursor : "";
     const more = typeof page2.remaining === "number" && isFinite(page2.remaining) && page2.remaining > 0 ? Math.round(page2.remaining) : 0;
     if (next && more)
-      p.remaining.set(parentKey, more);
+      p.remaining.set(parentKey2, more);
     else
-      p.remaining.delete(parentKey);
+      p.remaining.delete(parentKey2);
     if (page2.truncated === true)
-      p.truncated.add(parentKey);
-    if (parentKey && blockedByComputer(levelAccess)) {
-      p.branches.delete(parentKey);
-    } else if (parentKey) {
-      p.branches.set(parentKey, nodes);
+      p.truncated.add(parentKey2);
+    if (parentKey2 && blockedByComputer(levelAccess)) {
+      p.branches.delete(parentKey2);
+    } else if (parentKey2) {
+      p.branches.set(parentKey2, nodes);
       if (next)
-        p.cursors.set(parentKey, next);
+        p.cursors.set(parentKey2, next);
       else
-        p.cursors.delete(parentKey);
+        p.cursors.delete(parentKey2);
     } else {
       p.roots = nodes;
       p.rootCursor = next;
@@ -39555,21 +39501,21 @@ function chatgptPickerProgram(kit) {
     add(li, label, folderControl(key2, node.name, node));
     return li;
   }
-  function loadMore(parentKey) {
-    const busy = p.loading === (parentKey || "root");
-    const more = p.remaining.get(parentKey) || 0;
+  function loadMore(parentKey2) {
+    const busy = p.loading === (parentKey2 || "root");
+    const more = p.remaining.get(parentKey2) || 0;
     const label = more ? fill2(more === 1 ? Q.loadMoreCount.one : Q.loadMoreCount.many, { n: kit.count(more) }) : Q.loadMore;
-    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey, busy || p.loading ? null : () => list(parentKey, true), "plain");
+    return kit.button(busy ? Q.loadingFolders : label, "picker:more:" + parentKey2, busy || p.loading ? null : () => list(parentKey2, true), "plain");
   }
-  function levelList(parentKey, nodes, hasMore) {
+  function levelList(parentKey2, nodes, hasMore) {
     const listNode = el("ul", "flist");
     for (const node of nodes)
       add(listNode, folderRow(node));
     if (!nodes.length)
       add(listNode, el("li", "muted fempty", Q.noFolders));
     if (hasMore)
-      add(listNode, add(el("li", "fmore"), loadMore(parentKey)));
-    if (p.truncated.has(parentKey))
+      add(listNode, add(el("li", "fmore"), loadMore(parentKey2)));
+    if (p.truncated.has(parentKey2))
       add(listNode, el("li", "muted fmore", Q.truncated));
     return listNode;
   }
@@ -41360,6 +41306,7 @@ var init_source_forget_registry = __esm(() => {
   init_job_names();
   init_spool();
   init_olympus_layout();
+  init_source_placement();
   init_tier_migration_reports();
 });
 
@@ -44005,6 +43952,7 @@ init_types();
 init_file_extraction_source();
 init_media_cache();
 init_olympus_layout();
+init_source_placement();
 init_spool();
 init_connector_store();
 
@@ -48550,12 +48498,12 @@ function localFilesListing(options, mode) {
     home,
     memoryPath: join34(olympusDataDir(), "local-files", "folder-access.json")
   });
-  const node = (scopePath, name, parentKey, access) => {
+  const node = (scopePath, name, parentKey2, access) => {
     const own3 = mode === "folders" && isInsideOwnRoot(scopePath, context2);
     const reason = own3 ? "olympus_data" : mode === "folders" ? defaultExclusionForFolder(scopePath, context2) : undefined;
     return {
       key: scopePath,
-      ...parentKey !== undefined ? { parent_key: parentKey } : {},
+      ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
       name: name.normalize("NFC"),
       kind: "folder",
       has_children: !own3,
@@ -48564,15 +48512,15 @@ function localFilesListing(options, mode) {
       ...access ? { access } : {}
     };
   };
-  const fileNode = (scopePath, name, parentKey) => ({
+  const fileNode = (scopePath, name, parentKey2) => ({
     key: scopePath,
-    ...parentKey !== undefined ? { parent_key: parentKey } : {},
+    ...parentKey2 !== undefined ? { parent_key: parentKey2 } : {},
     name: name.normalize("NFC"),
     kind: "file",
     has_children: false,
     selectable: true
   });
-  const childFolders = (realPath, parentKey) => {
+  const childFolders = (realPath, parentKey2) => {
     let entries;
     try {
       entries = readDirectory(realPath);
@@ -48595,10 +48543,10 @@ function localFilesListing(options, mode) {
     return entries.filter(offered).map((entry) => {
       const childReal = join34(realPath, entry.name);
       if (!entry.isDirectory())
-        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey);
+        return fileNode(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2);
       const guard = permissions.guardOf(childReal, volumes.volumeOf(childReal));
       const access = guard && guard.root === childReal ? permissions.nodeAccess(guard) : undefined;
-      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey, access);
+      return node(scopePathOfRealPath(volumes, childReal), entry.name, parentKey2, access);
     }).sort((a, b) => {
       const aHidden = a.name.startsWith(".");
       const bHidden = b.name.startsWith(".");
@@ -48757,6 +48705,7 @@ init_tier_ledger();
 
 // src/workers/connector-store/tier-visibility.ts
 init_tier_ledger();
+init_child_visibility();
 
 // src/workers/email-source/server.ts
 init_secret_locations();
