@@ -1018,6 +1018,21 @@ describe('telegram connector: what is left out', () => {
     expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.sectionNotImported]: 1, [ARCHIVE_COMMON_FINDINGS.mediaNotImported]: 1 });
   });
 
+  test('other data whose fields together pass the bound of one message is one gap, and the profile and chats around it are kept', async () => {
+    const full = telegramFullExport({ omit: ['profile_pictures', 'contacts', 'frequent_contacts', 'sessions'], chats: [telegramChat({ messages: telegramTexts(2) })] }) as Record<string, any>;
+    // Each field is within the bound; together they are not.
+    const field = 'y'.repeat(1024 * 1024);
+    for (let index = 0; index < 18; index++) full.other_data[`field_${index}`] = field;
+    const file = exportFile(telegramJson(full));
+    const { connector, findings } = connectorFor(file.dir, file.name);
+    const { items, done } = await listAll(connector);
+    expect(done).toBe(true);
+    expect(items.some((item) => item.identity.providerThreadId === 'account:other_data')).toBe(false);
+    expect(items.filter((item) => item.identity.providerThreadId === 'account:personal_information')).toHaveLength(1);
+    expect(items.filter((item) => item.identity.providerThreadId === 'chats:0')).toHaveLength(2);
+    expect(counts(findings, 'gap')).toEqual({ [ARCHIVE_COMMON_FINDINGS.sectionNotImported]: 1 });
+  });
+
   test('a file cut inside the other data keeps what was read of it, and the file is counted as damaged', async () => {
     const text = telegramJson(telegramFullExport({ omit: ['profile_pictures', 'contacts', 'frequent_contacts', 'sessions'], chats: [] }));
     // After the first field of the other data, before the second.
