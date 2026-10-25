@@ -99,11 +99,20 @@ import {
 import { registerTierSetPlanner } from '../classification/installed-tier-classification-registry.ts';
 import { registerTierSetForLedger } from './tier-set-registry.ts';
 import { forgetSecretInSideStores, retireSecretRedactions, secretsDisposition } from './secrets-disposition.ts';
+import { parentNamesContext } from './parent-context.ts';
 import { settleNamesOnlyItems } from './tier-names-only-settle.ts';
 import { purgeLowerTierContent } from './tier-content-purge.ts';
 import { flushTierMoveNotes, type TierMoveOptions } from './tier-move.ts';
 
 export const LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60_000;
+/** How often a set looks for children left behind by a parent tombstone it was not told of. */
+export const CHILD_CASCADE_RECONCILE_INTERVAL_MS = 5 * 60_000;
+/** The ledger's resume point of the walk that finds children a lost parent report left behind. */
+export const CHILD_CASCADE_RECONCILE_CURSOR = 'tiered-store-set:child-cascade-reconcile';
+/** How many parents one reconcile pass looks at. */
+export const CHILD_CASCADE_RECONCILE_PAGE = 500;
+/** How many owed child removals one worker pass takes. */
+export const CHILD_CASCADE_BATCH = 200;
 import { rehomePrivateTierRows, type TierRowRehomeReport } from './tier-row-rehome.ts';
 import { sweepOwnerRuleRaises } from './tier-rules-sweep.ts';
 import { applyOwnerOverrides } from './tier-override-settle.ts';
@@ -268,10 +277,12 @@ export class TieredStoreSet {
   private lastRowRehome: TierRowRehomeReport | undefined;
 
   private lastLowerContentRepairAt: number;
+  private lastChildReconcileAt: number;
   private lowerContentRepair: Promise<void> | undefined;
 
   constructor(options: TieredStoreSetOptions) {
     this.lastLowerContentRepairAt = Number.NEGATIVE_INFINITY;
+    this.lastChildReconcileAt = Number.NEGATIVE_INFINITY;
     if (!options.setId.trim()) throw new Error('A tiered store set needs a stable id.');
     this.setId = options.setId;
     this.ledger = options.ledger;
@@ -290,6 +301,7 @@ export class TieredStoreSet {
         throw new Error('A tiered store leg\'s store must match its declared trust domain and corpus.');
       }
       spec.store?.useTierLedger(this.ledger);
+      spec.store?.observeParentTombstones((parents) => this.parentsTombstoned(parents));
       this.legs.set(spec.trustDomain, { spec, store: spec.store });
     }
     // Private and pending items must always have somewhere to go.
@@ -301,6 +313,133 @@ export class TieredStoreSet {
       registerTierSetForLedger(this.ledger.dbPath, this);
     }
     void this.repairLowerContent();
+  }
+
+  // ---- A parent was tombstoned: its children go with it ----------------------
+  // docs/design/child-items.md, "Removal". The parent and its children are
+  // hidden together in ONE ledger transaction, which also writes a durable
+  // cascade row per child (tier-ledger.ts `hideAndQueueChildren`). The worker
+  // (`runChildCascade`) then deletes each child's copy in every store that
+  // holds one, with retry. A crash anywhere after the transaction leaves the
+  // children hidden with their removal still owed, never visible; one before
+  // it leaves the parent not yet deleted, and the next listing delivers the
+  // deletion again.
+
+  /** The parent's children that a store or the ledger still holds, across every store of the set. */
+  private childrenStillHeld(parent: SourceItemIdentity): SourceItemIdentity[] {
+    const stores = this.openStores();
+    const found = new Map<string, SourceItemIdentity>();
+    for (const store of stores) {
+      for (const child of store.childItemsOf(parent.localItemId)) {
+        const key = tierLedgerIdentityKey(child);
+        if (found.has(key)) continue;
+        const held = this.ledger.copies(child).length > 0
+          || stores.some((other) => other.activeLocalItemRow(child.localItemId) !== undefined);
+        if (held) found.set(key, child);
+      }
+    }
+    return [...found.values()];
+  }
+
+  /**
+   * The parent is being deleted: hide it and its children together and owe
+   * each child's removal. A parent with no child here changes nothing. Returns
+   * the number of removals newly owed.
+   */
+  cascadeParentDeletion(parent: SourceItemIdentity): number {
+    const children = this.childrenStillHeld(parent);
+    if (children.length === 0) return 0;
+    return this.ledger.hideAndQueueChildren(parent, children).queued;
+  }
+
+  /**
+   * A store reports items it tombstoned. One that has children in any store
+   * of the set is a parent that was deleted, unless it is still held in any
+   * store (it moved tiers) or is a Secret (judged on its own words): then its
+   * children stay.
+   */
+  private parentsTombstoned(parents: readonly SourceItemIdentity[]): void {
+    try {
+      const stores = this.openStores();
+      if (!stores.some((store) => store.hasChildItems())) return;
+      for (const parent of parents) {
+        if (stores.some((store) => store.activeLocalItemRow(parent.localItemId) !== undefined)) continue;
+        if (this.ledger.itemIsSecret(parent)) continue;
+        this.cascadeParentDeletion(parent);
+      }
+    } catch {
+      // The reconcile walks the parents of live children and finds them again.
+    }
+  }
+
+  /**
+   * Walks, a page at a time, the parents of children still held, and removes
+   * the children of a parent that is gone from every store and was not a
+   * Secret: what a report lost to a crash leaves behind. Rate-limited; the
+   * walk resumes where the last page ended (kept in the ledger). Never fails
+   * the caller. Returns the removals newly owed.
+   */
+  reconcileOrphanedChildren(nowMs: number = Date.now()): number {
+    if (nowMs - this.lastChildReconcileAt < CHILD_CASCADE_RECONCILE_INTERVAL_MS) return 0;
+    this.lastChildReconcileAt = nowMs;
+    try {
+      const stores = this.openStores().filter((store) => store.hasChildItems());
+      if (stores.length === 0) return 0;
+      const after = this.ledger.setCursor(this.setId, CHILD_CASCADE_RECONCILE_CURSOR)?.cursor ?? undefined;
+      const page = [...new Set(stores.flatMap((store) => store.activeChildParentLocalIds(after, CHILD_CASCADE_RECONCILE_PAGE)))]
+        .sort()
+        .slice(0, CHILD_CASCADE_RECONCILE_PAGE);
+      let queued = 0;
+      for (const localItemId of page) {
+        const all = this.openStores();
+        if (all.some((store) => store.activeLocalItemRow(localItemId) !== undefined)) continue;
+        const gone = all.map((store) => store.tombstonedItemByLocalId(localItemId)).find((found) => found !== undefined);
+        // A parent no store has heard of is not yet listed, not deleted.
+        if (!gone || this.ledger.itemIsSecret(gone)) continue;
+        queued += this.cascadeParentDeletion(gone);
+      }
+      this.ledger.commitSetCursor(this.setId, CHILD_CASCADE_RECONCILE_CURSOR, page.length < CHILD_CASCADE_RECONCILE_PAGE ? null : page[page.length - 1]!);
+      return queued;
+    } catch {
+      // The next pass tries again.
+      return 0;
+    }
+  }
+
+  /**
+   * The worker: for each child whose removal is owed, tombstone its copy in
+   * every store of the set, forget the secret location it may have kept, then
+   * forget its copy rows and its cascade row together. A child that fails is
+   * counted and tried again by the next pass. Safe to run at any time and to
+   * repeat.
+   */
+  runChildCascade(limit: number = CHILD_CASCADE_BATCH): { removed: number; retry: number } {
+    let removed = 0;
+    let retry = 0;
+    let owed: ReturnType<TierLedger['pendingChildCascades']> = [];
+    try {
+      owed = this.ledger.pendingChildCascades(limit);
+    } catch {
+      return { removed, retry };
+    }
+    for (const { child } of owed) {
+      try {
+        for (const store of this.openStores()) {
+          store.tombstoneCopy(child, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
+        }
+        this.secrets()?.remove(child);
+        this.ledger.completeChildCascade(child);
+        removed += 1;
+      } catch {
+        retry += 1;
+        try {
+          this.ledger.noteChildCascadeAttempt(child);
+        } catch {
+          // Still owed; the next pass tries again.
+        }
+      }
+    }
+    return { removed, retry };
   }
 
   /** The leg's store, opening it when it is open, exists, or `create` is set. */
@@ -315,6 +454,7 @@ export class TieredStoreSet {
       throw new Error('A lazily opened tiered store does not match its declared leg.');
     }
     store.useTierLedger(this.ledger);
+    store.observeParentTombstones((parents) => this.parentsTombstoned(parents));
     leg.store = store;
     this.onLegOpened?.(store, leg.spec);
     return store;
@@ -543,6 +683,8 @@ export class TieredStoreSet {
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
     if (options.settle !== false) await this.settleStoredItems();
+    // Removals a crash left owed finish before this run lists anything.
+    this.runChildCascade();
     const run = new TieredRoutingRun(this, 'shared');
     const traversal = recordedTraversal(connector);
     const legRuns: TieredStoreLegRun[] = [];
@@ -560,6 +702,8 @@ export class TieredStoreSet {
       legRuns.push(await this.runLeg(domain, store, traversal, { ...sync, tierRouting: run }, embed));
     }
     run.finalize();
+    this.reconcileOrphanedChildren();
+    this.runChildCascade();
     const cursor = legRuns[0]?.sync.cursor;
     // A pass that is not a resume point (a reconcile from the start of the
     // listing) must not overwrite the incremental lane's committed position.
@@ -578,6 +722,7 @@ export class TieredStoreSet {
   ): Promise<TieredStoreSetRun> {
     this.assertLedgerGovernsLegs();
     await this.settleStoredItems();
+    this.runChildCascade();
     const run = new TieredRoutingRun(this, 'per_leg');
     const legRuns: TieredStoreLegRun[] = [];
     for (const entry of entries) {
@@ -587,6 +732,8 @@ export class TieredStoreSet {
       legRuns.push(await this.runLeg(entry.trustDomain, store, entry.connector, { ...entry.sync, tierRouting: run }));
       run.finalize();
     }
+    this.reconcileOrphanedChildren();
+    this.runChildCascade();
     return tieredRun(legRuns, run.counts, undefined);
   }
 
@@ -717,7 +864,12 @@ export class TieredStoreSet {
     // and rules file re-read when edited, the sniffer), keyed by the set
     // ledger the sniffer's queue sits beside. Resolved per call, so an edited
     // map or rules file applies at the next pass.
-    return resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+    const resolved = resolveStoreTierClassification(this.tierClassification, this.ledger.dbPath);
+    // A child item is judged with its parent's names as context: only this
+    // set can see the parent's stored names (parent-context.ts).
+    return resolved
+      ? { ...resolved, parentNamesContext: (child, parentLink) => parentNamesContext(this, child, parentLink) }
+      : resolved;
   }
 
   /**
@@ -850,6 +1002,8 @@ export interface TieredLaneSetOptions {
   onLegOpened?: (store: LocalConnectorStore, leg: TieredStoreLegSpec) => void;
   laneFloor?: TieredLaneFloor;
   contentArrivesLater?: boolean;
+  /** See TieredStoreSetOptions.contentArrivesLaterFor. */
+  contentArrivesLaterFor?: (item: RawItem) => boolean;
 }
 
 /**
@@ -892,6 +1046,7 @@ export function createTieredLaneSet(options: TieredLaneSetOptions): TieredStoreS
     ...(options.onLegOpened ? { onLegOpened: options.onLegOpened } : {}),
     ...(options.laneFloor ? { laneFloor: options.laneFloor } : {}),
     ...(options.contentArrivesLater === true ? { contentArrivesLater: true } : {}),
+    ...(options.contentArrivesLaterFor ? { contentArrivesLaterFor: options.contentArrivesLaterFor } : {}),
   });
 }
 
@@ -1230,6 +1385,15 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
         return { kind: 'legacy' };
       }
       this.counts.routedDeletions += 1;
+      this.copyRemovals.set(identityKey(identity), identity);
+      const corpora = new Set(ledger.copies(identity).map((copy) => copy.corpusId));
+      // Items that came inside this one go with it: hidden now, removed by the cascade worker.
+      this.set.cascadeParentDeletion(identity);
+      return { kind: 'delete', corpora, reason: 'provider_deleted' };
+    }
+    // A child whose parent was tombstoned is listed again before its removal
+    // finished: it is removed, never placed.
+    if (routed && ledger.childCascadePending(identity)) {
       this.copyRemovals.set(identityKey(identity), identity);
       return { kind: 'delete', corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: 'provider_deleted' };
     }

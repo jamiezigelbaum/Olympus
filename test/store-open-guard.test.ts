@@ -31,6 +31,9 @@ const ALLOWED: Record<string, string> = {
     'X\'s API usage ledger: the quota ledger, shared across accounts and kept when X is deleted, so it stays in the data folder and outside the account folder; not a tier store',
   'src/workers/x-bookmarks/reconcile-state.ts':
     'X\'s reconcile state: per-account state, not a tier store; it sits in the account\'s raw/ folder (beside the usage ledger for a legacy account) and goes with the account\'s folder on Delete',
+  // Imported archives' state outside the stores.
+  'src/workers/archive-import/media-bindings.ts':
+    'the archives\' media bindings: per-archive state, not a tier store; it sits in the account\'s raw/ folder (beside the record for a legacy account), each archive\'s rows are forgotten when it is removed, and the file goes with the account\'s folder (accountStateSqlite) on Delete',
   'src/data-lifecycle.ts': 'the deleter and exporter, which step 5 rebuilds on the registry',
   // Generic code that reopens sidecars of stores already opened through the
   // service, found by path: no source is in scope there.

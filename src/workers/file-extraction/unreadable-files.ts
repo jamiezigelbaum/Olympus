@@ -21,9 +21,31 @@
  * on this computer) is the composition root's to resolve.
  */
 import { createHash, randomBytes } from 'node:crypto';
+import { archiveFormatForProvider } from '../../core/archive-formats.ts';
 import type { ExtractionItemRef } from './types.ts';
 import type { ExtractionUnreadableItem, ExtractionUnreadableVerdict } from './job-store.ts';
 import type { TierLedgerIdentity } from '../classification/tier-ledger.ts';
+
+/**
+ * A child item's parent, named for the file that could not be read
+ * (docs/design/child-items.md, "Citations"): the parent's label and where the
+ * parent lives. Names only; Secrets and a parent that is not there give none.
+ */
+export interface UnreadableParent {
+  /**
+   * The parent's subject or chat, sender and date, as a citation shows them.
+   */
+  label?: string;
+  /**
+   * The provider the parent came through, for the route (an imported
+   * archive's items carry its format's provider).
+   */
+  provider: string;
+  /**
+   * The parent's account scope: an imported archive's id.
+   */
+  accountScope: string;
+}
 
 export interface UnreadableFileLocation {
   locatorUri?: string;
@@ -98,6 +120,12 @@ export interface UnreadableFilesOptions {
    */
   locate(ref: ExtractionItemRef): UnreadableFileLocation | undefined;
   /**
+   * The parent of an item that came inside another (its label and where it
+   * lives), for the computer's list only: the counts and the names never ask.
+   * Undefined for an item that is not a child.
+   */
+  parentOf?(ref: ExtractionItemRef): UnreadableParent | undefined;
+  /**
    * The provider's open target for a locator: its web page (https) and, when synced here, a local path.
    */
   openTarget(provider: string, locator: string): { url?: string; localPath?: string } | undefined;
@@ -120,12 +148,26 @@ export type UnreadableOpenResult =
   | { status: 'rate_limited' }
   | { status: 'failed' };
 
+/**
+ * Where a child's parent is, for the person who has to act on it (every
+ * problem has a route to exactly what): the imported archive it came in, else
+ * the source the file's list already belongs to.
+ */
+export type UnreadableParentRoute =
+  | { kind: 'archive'; archiveId: string }
+  | { kind: 'source' };
+
 export interface UnreadableFileEntry {
   name: string;
   /**
    * Present when the file has a place to open: the one-time capability the open tool takes.
    */
   token?: string;
+  /**
+   * Present for a file that came inside another item: the parent's label and
+   * the route to its archive or source. Never the parent's content.
+   */
+  parent?: { label?: string; route: UnreadableParentRoute };
 }
 
 /**
@@ -316,6 +358,25 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
     return UNNAMED;
   }
 
+  /**
+   * The parent a child file came inside, asked again now: its label and the
+   * route to its archive or source. Undefined for a file that is not a child.
+   */
+  function parentOf(item: ExtractionUnreadableItem): UnreadableFileEntry['parent'] | undefined {
+    let parent: UnreadableParent | undefined;
+    try {
+      parent = options.parentOf?.(item.ref);
+    } catch {
+      return undefined;
+    }
+    if (!parent) return undefined;
+    const archive = archiveFormatForProvider(parent.provider);
+    return {
+      ...(parent.label ? { label: parent.label } : {}),
+      route: archive ? { kind: 'archive', archiveId: parent.accountScope } : { kind: 'source' },
+    };
+  }
+
   function target(item: ExtractionUnreadableItem): { url?: string; localPath?: string } | undefined {
     const found = locator(item);
     if (!found) return undefined;
@@ -404,7 +465,9 @@ export function createUnreadableFiles(options: UnreadableFilesOptions): Unreadab
       const opener = list.opener;
       const files = shown.map((item): UnreadableFileEntry => {
         const name = displayName(item);
-        return opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
+        const parent = parentOf(item);
+        const base: UnreadableFileEntry = opener && target(item) ? { name, token: mint(item, opener, at) } : { name };
+        return parent ? { ...base, parent } : base;
       });
       const last = shown.at(-1);
       return { files, more, ...(last ? { after: cursorOf(last) } : {}) };

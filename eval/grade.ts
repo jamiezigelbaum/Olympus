@@ -431,6 +431,12 @@ export function expectedEvidenceMatches(
     return false;
   }
   if (want.uri !== undefined && provenance.citation?.uri !== want.uri) return false;
+  if (
+    want.parentLabel !== undefined
+    && !(provenance.citation?.parentLabel ?? '').toLowerCase().includes(want.parentLabel.toLowerCase())
+  ) {
+    return false;
+  }
   const wantCorpusId = want.corpusId.trim();
   if (wantCorpusId && corpusId !== wantCorpusId) return false;
   return true;

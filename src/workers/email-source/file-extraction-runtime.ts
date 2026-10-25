@@ -37,6 +37,8 @@ import {
 } from '../../core/file-extraction-source.ts';
 import type { RawItem } from '../../core/contracts.ts';
 import { mediaCacheDir, sweepMediaCache } from '../../core/media-cache.ts';
+import { extractionSpoolRoot } from '../../core/olympus-layout.ts';
+import { prepareExtractionSpool } from '../file-extraction/spool.ts';
 import type { LocalConnectorStore } from '../connector-store/index.ts';
 import { DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID } from '../dropbox-files/connector-store.ts';
 import {
@@ -83,6 +85,7 @@ import {
 } from '../file-extraction/runner.ts';
 import { createConnectorStoreExtractionSink } from '../file-extraction/store-sink.ts';
 import { createTieredStoreExtractionSink } from '../file-extraction/tiered-store-sink.ts';
+import { connectorStoreExtractionCandidateReader } from '../connector-store/extraction-candidate-reader.ts';
 import { tieredExtractionView, type TieredExtractionView } from '../connector-store/tiered-extraction.ts';
 import { TIER_DOMAIN_ORDER, type TieredStoreSet } from '../connector-store/tiered-store-set.ts';
 import type {
@@ -90,6 +93,8 @@ import type {
   ExtractorRegistryConfig,
   FileExtractionSource,
 } from '../file-extraction/types.ts';
+
+export { connectorStoreExtractionCandidateReader };
 
 export const FILE_EXTRACTION_ENABLED_ENV = 'OLYMPUS_FILE_EXTRACTION_ENABLED';
 export const FILE_EXTRACTION_CORPORA_ENV = 'OLYMPUS_FILE_EXTRACTION_CORPORA_JSON';
@@ -131,6 +136,15 @@ export interface FileExtractionCorpusConfig {
   resolveAccountScope?: () => string;
   maxTrustTierForRemote?: 'S3' | 'S4';
   allowDefaultDeferred?: boolean;
+  /**
+   * For a corpus whose store holds the items of several accounts that come
+   * and go (each imported archive is one): whether an account is still
+   * served. Asked fresh before a candidate is listed, before its bytes are
+   * fetched or sent anywhere, and before anything lands. An account that is
+   * not served is as good as gone: its candidates are not offered, a read
+   * settles as not found, and no result is stored.
+   */
+  accountScopeCurrent?: (accountScope: string) => boolean;
 }
 
 export interface FileExtractionRuntimeOptions {
@@ -274,7 +288,8 @@ export function createFileExtractionRuntime(
       continue;
     }
     const tierSet = options.tierSets?.get(config.corpusId);
-    if (tierSet && tierSet.legSpec(store.trustDomain)?.store !== store) {
+    // The set's own store for the domain: a leg opened on demand has no store in its spec.
+    if (tierSet && tierSet.store(store.trustDomain) !== store) {
       throw new Error(`[file-extraction] corpus=${config.corpusId} tier set does not hold its store.`);
     }
     const view = tierSet ? tieredExtractionView(tierSet, { home: store.trustDomain }) : undefined;
@@ -295,33 +310,60 @@ export function createFileExtractionRuntime(
         // Tried again at the next start.
       }
     }
+    const guardsRefs = options.scopeGuard !== undefined || config.accountScopeCurrent !== undefined;
+    // The refusal a source gives for a ref it may not read or land now: its
+    // scope is no longer approved, or its account is no longer served.
+    const assertRefCurrent = (ref: ExtractionItemRef): void => {
+      options.scopeGuard?.assertAuthorized({ config, store });
+      if (options.scopeGuard && !options.scopeGuard.allowsRef({ config, store, reader: view ?? store, ref })) {
+        throw new FileExtractionSourceError('source_permission_denied');
+      }
+      if (config.accountScopeCurrent && !config.accountScopeCurrent(ref.accountScope)) {
+        throw new FileExtractionSourceError('source_item_not_found');
+      }
+    };
     corpora.push({
       corpusId: config.corpusId,
       trustDomain: store.trustDomain,
       source: async () => {
         options.scopeGuard?.assertAuthorized({ config, store });
         const source = await buildSource({ config, store, ...(view ? { view } : {}) });
-        if (!options.scopeGuard) return source;
-        const guard = options.scopeGuard;
+        if (!guardsRefs) return source;
         return {
           id: source.id,
           corpusId: source.corpusId,
           provider: source.provider,
           async listCandidates(listOptions) {
-            guard.assertAuthorized({ config, store });
+            options.scopeGuard?.assertAuthorized({ config, store });
             const page = await source.listCandidates(listOptions);
+            // One answer per account for the page: the check may read a file.
+            const current = new Map<string, boolean>();
             return {
               ...page,
-              candidates: page.candidates.filter((ref) => guard.allowsRef({ config, store, reader: view ?? store, ref })),
+              candidates: page.candidates.filter((ref) => {
+                if (options.scopeGuard && !options.scopeGuard.allowsRef({ config, store, reader: view ?? store, ref })) return false;
+                if (!config.accountScopeCurrent) return true;
+                let served = current.get(ref.accountScope);
+                if (served === undefined) {
+                  served = config.accountScopeCurrent(ref.accountScope);
+                  current.set(ref.accountScope, served);
+                }
+                return served;
+              }),
             };
           },
           async fetch(ref, fetchOptions) {
-            guard.assertAuthorized({ config, store });
-            if (!guard.allowsRef({ config, store, reader: view ?? store, ref })) {
-              throw new FileExtractionSourceError('source_permission_denied');
-            }
+            assertRefCurrent(ref);
             return source.fetch(ref, fetchOptions);
           },
+          ...(source.fetchFile
+            ? {
+                async fetchFile(ref, fileOptions) {
+                  assertRefCurrent(ref);
+                  return source.fetchFile!(ref, fileOptions);
+                },
+              }
+            : {}),
           ...(source.verifyBytes
             ? { verifyBytes: (ref, bytes) => source.verifyBytes!(ref, bytes) }
             : {}),
@@ -370,18 +412,7 @@ export function createFileExtractionRuntime(
           ? view.itemTrustTier(ref.localItemId)
           : store.localContent(ref.localItemId, 1)?.trustTier,
       },
-      ...(options.scopeGuard
-        ? {
-            authorization: {
-              assertCurrent(ref) {
-                options.scopeGuard!.assertAuthorized({ config, store });
-                if (!options.scopeGuard!.allowsRef({ config, store, reader: view ?? store, ref })) {
-                  throw new FileExtractionSourceError('source_permission_denied');
-                }
-              },
-            },
-          }
-        : {}),
+      ...(guardsRefs ? { authorization: { assertCurrent: assertRefCurrent } } : {}),
     });
   }
   if (corpora.length === 0) {
@@ -402,10 +433,14 @@ export function createFileExtractionRuntime(
   const workerId = env[FILE_EXTRACTION_WORKER_ID_ENV]?.trim();
 
   const reclassificationRules = defaultTerminalReclassificationRules(registry);
+  // File readers (transcription) are handed a path: a source that has to write the item
+  // does it in this private folder, and the runner removes each file after the read.
+  const spoolDir = prepareExtractionSpool(extractionSpoolRoot(env));
   const runner = createFileExtractionRunner({
     jobs,
     registry,
     corpora,
+    ...(spoolDir ? { spoolDir } : {}),
     healthProbes: extractorHealthProbes(extractorConfig),
     reclassificationRules,
     ...(workerId ? { workerId } : {}),
@@ -466,6 +501,11 @@ export function fileExtractionCorporaRoster(input: {
   };
   /** True when the WhatsApp connector store exists. */
   whatsapp?: boolean;
+  /**
+   * The imported-archive corpora, built by the archive module
+   * (`archiveFileExtractionCorpora`); present when archives can be imported.
+   */
+  archive?: readonly FileExtractionCorpusConfig[];
   /** Present when the Drive connector stores exist: their PDFs are catalogued by name only. */
   googleDrive?: {
     corpusIds: readonly string[];
@@ -525,6 +565,10 @@ export function fileExtractionCorporaRoster(input: {
       scopes: [WHATSAPP_EXTRACTION_SCOPE_KEY],
       ownerConnectorId: WHATSAPP_PRODUCT_CONNECTOR_ID,
     });
+  }
+  for (const corpus of input.archive ?? []) {
+    canonicalIds.add(corpus.corpusId);
+    canonical.push(corpus);
   }
   for (const corpusId of input.googleDrive?.corpusIds ?? []) {
     canonicalIds.add(corpusId);
@@ -704,43 +748,6 @@ function defaultSourceFactories(
     }],
   ]);
   return factories;
-}
-
-/**
- * The store, as a source reads candidates.
- *
- * An adapter is needed and the design implied one would not be: the store
- * returns a nested `identity` while the shared reader port wants the join key
- * and its parts flat. The shapes are otherwise identical, options included, so
- * this is the whole of the distance between them — and it belongs here, in the
- * wiring, rather than in either of the two modules it joins.
- */
-export function connectorStoreExtractionCandidateReader(
-  store: Pick<LocalConnectorStore, 'extractionCandidates'>,
-  filters?: import('../connector-store/index.ts').ConnectorStoreSearchFilters,
-): ExtractionCandidateReader {
-  return {
-    extractionCandidates(options) {
-      const page = store.extractionCandidates({ ...options, ...(filters ? { filters } : {}) });
-      return {
-        candidates: page.candidates.map((candidate) => ({
-          localItemId: candidate.identity.localItemId,
-          providerItemId: candidate.identity.providerItemId,
-          accountScope: candidate.identity.accountScope,
-          provider: candidate.identity.provider,
-          ...(candidate.identity.sourceVersion !== undefined
-            ? { sourceVersion: candidate.identity.sourceVersion }
-            : {}),
-          ...(candidate.mimeType !== undefined ? { mimeType: candidate.mimeType } : {}),
-          ...(candidate.locatorUri !== undefined ? { locatorUri: candidate.locatorUri } : {}),
-          ...(candidate.contentHash !== undefined ? { contentHash: candidate.contentHash } : {}),
-          ...(candidate.name !== undefined ? { name: candidate.name } : {}),
-        })),
-        ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
-        done: page.done,
-      };
-    },
-  };
 }
 
 /**

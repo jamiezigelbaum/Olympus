@@ -1,7 +1,9 @@
 # Child items: attachments and media
 
 Status: owner direction 2026-10-25 ("we also need child handling … should
-that be designed before we finish this"). Design only; nothing built.
+that be designed before we finish this"). The spine (step 1 of "Order") is
+built and tested with a fixture connector; no format connector reads a child
+yet.
 Reviewed by Astra (Codex, high) in two rounds on 2026-10-25. Every finding
 is folded in or settled by the owner's tier decision (see "Review"). Where
 this page and the code differ, the code is current.
@@ -182,11 +184,17 @@ account scope. Repeated items between archives are counted as they are today.
     **media binding**: its path under the chosen folder, its file identity,
     size and modification time. Choosing the folder approved them.
     - Bindings live in an append-only table beside the manifest, in the
-      archive's record.
+      archive's record. As built: the record is one JSON file rewritten whole
+      on every update, so the table is a SQLite file beside it
+      (`raw/archive-media-bindings.sqlite`, reached through the layout
+      resolvers), keyed by archive. A resume point does not hash it.
     - A binding is written before the child row and the checkpoint that
       follows it. The child's locator names the binding.
     - Checking that an import is whole covers the manifest and the bindings
-      together.
+      together. The bindings are checked by version (identity, size and
+      modification time, from metadata alone) when the listing reaches its
+      end and again as the import is marked complete. A pass does not check
+      them at its start, which would cost every pass the whole table.
   - For a chosen single file (a lone `result.json` or `_chat.txt`), media
     beside it is not read. It is listed under "Not imported" as "choose the
     export folder to include its media". The choice of one file is never
@@ -366,7 +374,9 @@ floor from its parent.
   - The store's `items` table gains four nullable columns and an index on
     the parent: `parent_local_item_id`, `deferred_locator`,
     `bytes_available` and `size_bytes`.
-  - The archive record gains the append-only media-binding table.
+  - The archive record gains the append-only media-binding table (a SQLite
+    file beside the record, forgotten with each archive on removal and taken
+    with the source on Delete).
   - The tier ledger gains the parent key and the cascade queue.
 
 ## Later: identical files read once

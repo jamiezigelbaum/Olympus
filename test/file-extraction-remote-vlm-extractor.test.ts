@@ -129,7 +129,7 @@ describe('remote vlm extractor: registry surface', () => {
       expect(extractor.kind).toBe(kind);
       expect(extractor.version).toBe(REMOTE_VLM_EXTRACTOR_VERSION);
       expect(extractor.version).toBe('venice-v1');
-      expect(extractor.needsBytes).toBe(true);
+      expect(extractor.input.kind).toBe('bytes');
       expect(extractor.egress).toBe('approved_remote');
     }
   });

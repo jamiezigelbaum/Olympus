@@ -12,6 +12,8 @@
  * Nothing here names a source family.
  */
 
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve, sep } from 'node:path';
 import type { RawItem, SourceConnector } from '../../core/contracts.ts';
 import {
   FileExtractionSourceError,
@@ -24,9 +26,11 @@ import {
 import type {
   ExtractionCandidateListOptions,
   ExtractionCandidatePage,
+  ExtractionFetchFileOptions,
   ExtractionFetchOptions,
   ExtractionItemRef,
   FetchedBytes,
+  FetchedFile,
   FileExtractionSource,
 } from './types.ts';
 
@@ -36,14 +40,119 @@ import type {
  * after the read.
  */
 export interface BoundedFetchConnector extends SourceConnector {
+  /**
+   * A read that takes at most `maxBytes` plus one byte of the item, so a size the
+   * source stated wrongly cannot overrun memory and the caller can still tell
+   * "over the limit" from "exactly the limit". For a child item, `deferredBytes`
+   * is the persisted locator the store kept.
+   */
   fetchItemWithin(
     localItemId: string,
-    options: { maxBytes?: number; expectedVersion?: string },
+    options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string } },
   ): Promise<RawItem>;
 }
 
 function isBoundedFetchConnector(connector: SourceConnector): connector is BoundedFetchConnector {
   return typeof (connector as Partial<BoundedFetchConnector>).fetchItemWithin === 'function';
+}
+
+/**
+ * A connector that can hand a file reader the item as a file: the path of the
+ * original when it is a plain file under an approved folder (no copy), or a
+ * private file it streams the bytes to, in bounded chunks, inside `spoolDir`
+ * (a member of an archive, a part of a message). `spooled` says which, so only
+ * a file the connector wrote is ever removed.
+ */
+export interface FileFetchConnector extends SourceConnector {
+  fetchItemToFile(
+    localItemId: string,
+    options: {
+      maxBytes?: number;
+      expectedVersion?: string;
+      deferredBytes?: { locator: string };
+      spoolDir: string;
+    },
+  ): Promise<{ item: RawItem; path: string; spooled: boolean }>;
+}
+
+function isFileFetchConnector(connector: SourceConnector): connector is FileFetchConnector {
+  return typeof (connector as Partial<FileFetchConnector>).fetchItemToFile === 'function';
+}
+
+/**
+ * One item read within a byte ceiling: the connector's bounded read when it
+ * has one, else its plain read (the bytes are then in memory already, and a
+ * result over the ceiling is refused as too large). The one place a bounded
+ * read is chosen, for this adapter and for a connector that opens its source
+ * per read and delegates.
+ */
+export async function readItemWithin(
+  connector: SourceConnector,
+  localItemId: string,
+  options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string } },
+): Promise<RawItem> {
+  const deferred = options.deferredBytes ? { deferredBytes: options.deferredBytes } : {};
+  if (isBoundedFetchConnector(connector)) {
+    return connector.fetchItemWithin(localItemId, {
+      ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+      ...(options.expectedVersion ? { expectedVersion: options.expectedVersion } : {}),
+      ...deferred,
+    });
+  }
+  return connector.fetchItem(localItemId, options.deferredBytes ? deferred : undefined);
+}
+
+/**
+ * An item handed to a file reader as a file: the connector's own hand-over
+ * when it has one, else its bytes written to a private file inside `spoolDir`.
+ */
+export async function readItemToFile(
+  connector: SourceConnector,
+  localItemId: string,
+  options: { maxBytes?: number; expectedVersion?: string; deferredBytes?: { locator: string }; spoolDir: string },
+): Promise<{ item: RawItem; path: string; spooled: boolean }> {
+  if (isFileFetchConnector(connector)) return connector.fetchItemToFile(localItemId, options);
+  const item = await readItemWithin(connector, localItemId, options);
+  const content = item.content;
+  if (content.kind === 'metadata_only') throw refusalFor(item);
+  const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
+  if (options.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
+    throw new FileExtractionSourceError('source_too_large');
+  }
+  mkdirSync(options.spoolDir, { recursive: true, mode: 0o700 });
+  const path = join(options.spoolDir, `spool-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(path, bytes, { mode: 0o600 });
+  return { item, path, spooled: true };
+}
+
+/**
+ * What the store kept for reading a child's bytes later. Read fresh on every
+ * fetch: a job row keeps only the item's identity, so a restart, a replaced
+ * source version or a removed archive is always seen as it is now.
+ *
+ * `undefined`: this item is not a child, so it is read like any other item.
+ */
+export type DeferredBytesAnswer =
+  | { locator: string; sizeBytes?: number }
+  | { refusal: 'source_version_gone' | 'source_content_unavailable' | 'source_item_not_found' }
+  | undefined;
+
+/**
+ * A store's account of a child's deferred bytes (`none`: not a child), as the
+ * answer a fetch acts on. Written structurally so this module names no store.
+ */
+export type DeferredBytesStoreState =
+  | { state: 'none' | 'gone' | 'unavailable' | 'version_changed' }
+  | { state: 'ready'; locator: string; sizeBytes?: number };
+
+export function deferredBytesAnswerFor(stored: DeferredBytesStoreState): DeferredBytesAnswer {
+  switch (stored.state) {
+    case 'none': return undefined;
+    case 'gone': return { refusal: 'source_item_not_found' };
+    case 'unavailable': return { refusal: 'source_content_unavailable' };
+    case 'version_changed': return { refusal: 'source_version_gone' };
+    case 'ready': return { locator: stored.locator, ...(stored.sizeBytes !== undefined ? { sizeBytes: stored.sizeBytes } : {}) };
+  }
 }
 
 /**
@@ -58,8 +167,22 @@ export interface ConnectorSourceLane {
 export interface ConnectorFileExtractionSourceOptions {
   id: string;
   corpusId: string;
+  /**
+   * The provider a ref is stamped with when its row names none. A row's own
+   * provider always wins: one corpus can hold several formats' items (an
+   * archive family's stores), each read by its own connector.
+   */
   provider: string;
-  connector: SourceConnector;
+  /**
+   * The connector, or a way to find the one for an account scope (each
+   * imported archive has its own). `undefined` means the account is gone: its
+   * items are settled as not found and nothing is read.
+   */
+  connector: SourceConnector | ((accountScope: string) => SourceConnector | undefined);
+  /**
+   * For a source whose items can be children; see `DeferredBytesAnswer`.
+   */
+  deferredBytes?: (ref: ExtractionItemRef) => DeferredBytesAnswer;
   candidates: ExtractionCandidateReader;
   lanes: readonly ConnectorSourceLane[];
   mimeTypes?: readonly string[];
@@ -78,7 +201,9 @@ function refusalFor(item: RawItem): FileExtractionSourceError {
 export function createConnectorFileExtractionSource(
   options: ConnectorFileExtractionSourceOptions,
 ): FileExtractionSource {
-  const { connector, lanes } = options;
+  const { lanes } = options;
+  const connectorFor = (accountScope: string): SourceConnector | undefined =>
+    typeof options.connector === 'function' ? options.connector(accountScope) : options.connector;
   const requireText = (value: string, label: string): string => {
     const text = value?.trim();
     if (!text) throw new Error(`${label} is required.`);
@@ -99,7 +224,7 @@ export function createConnectorFileExtractionSource(
     const name = row.name ?? row.title;
     return {
       corpusId,
-      provider,
+      provider: row.provider ?? provider,
       accountScope,
       approvedScopeKey: lane.approvedScopeKey,
       providerItemId,
@@ -147,18 +272,7 @@ export function createConnectorFileExtractionSource(
     },
 
     async fetch(ref: ExtractionItemRef, fetchOptions: ExtractionFetchOptions): Promise<FetchedBytes> {
-      let item: RawItem;
-      try {
-        item = isBoundedFetchConnector(connector)
-          ? await connector.fetchItemWithin(ref.localItemId, {
-              ...(fetchOptions.maxBytes !== undefined ? { maxBytes: fetchOptions.maxBytes } : {}),
-              ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
-            })
-          : await connector.fetchItem(ref.localItemId);
-      } catch (error) {
-        if (isFileExtractionSourceError(error)) throw error;
-        throw new FileExtractionSourceError('source_unavailable');
-      }
+      const item = await readItem(ref, fetchOptions);
       const content = item.content;
       if (content.kind === 'metadata_only') throw refusalFor(item);
       const bytes = content.kind === 'bytes' ? content.bytes : new TextEncoder().encode(content.text);
@@ -167,6 +281,84 @@ export function createConnectorFileExtractionSource(
         throw new FileExtractionSourceError('source_too_large');
       }
       return { bytes, ...(mimeType ? { mimeType } : {}), sizeBytes: bytes.byteLength };
+    },
+
+    async fetchFile(ref: ExtractionItemRef, fileOptions: ExtractionFetchFileOptions): Promise<FetchedFile> {
+      const { connector, deferred } = resolve_(ref, fileOptions.maxBytes);
+      let handed: { item: RawItem; path: string; spooled: boolean };
+      try {
+        handed = await readItemToFile(connector, ref.localItemId, {
+          ...(fileOptions.maxBytes !== undefined ? { maxBytes: fileOptions.maxBytes } : {}),
+          ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
+          ...(deferred ? { deferredBytes: { locator: deferred.locator } } : {}),
+          spoolDir: fileOptions.spoolDir,
+        });
+      } catch (error) {
+        throw asSourceError(error);
+      }
+      const content = handed.item.content;
+      const mimeType = content.kind === 'bytes' ? content.mimeType : handed.item.mimeType;
+      return {
+        path: handed.path,
+        ...(mimeType ? { mimeType } : {}),
+        ...(deferred?.sizeBytes !== undefined ? { sizeBytes: deferred.sizeBytes } : {}),
+        dispose: fileHandOver(handed.path, handed.spooled, fileOptions.spoolDir).dispose,
+      };
+    },
+  };
+
+  /**
+   * The connector for this ref's account and, for a child, the locator the store keeps now.
+   */
+  function resolve_(ref: ExtractionItemRef, maxBytes: number | undefined): {
+    connector: SourceConnector;
+    deferred?: { locator: string; sizeBytes?: number };
+  } {
+    const connector = connectorFor(ref.accountScope);
+    if (!connector) throw new FileExtractionSourceError('source_item_not_found');
+    const answer = options.deferredBytes?.(ref);
+    if (answer && 'refusal' in answer) throw new FileExtractionSourceError(answer.refusal);
+    // A size the source stated that is already over the bound is never read.
+    const stated = answer?.sizeBytes ?? ref.sizeBytes;
+    if (maxBytes !== undefined && stated !== undefined && stated > maxBytes) {
+      throw new FileExtractionSourceError('source_too_large');
+    }
+    return { connector, ...(answer ? { deferred: answer } : {}) };
+  }
+
+  async function readItem(
+    ref: ExtractionItemRef,
+    fetchOptions: { maxBytes?: number },
+  ): Promise<RawItem> {
+    const { connector, deferred } = resolve_(ref, fetchOptions.maxBytes);
+    try {
+      return await readItemWithin(connector, ref.localItemId, {
+        ...(fetchOptions.maxBytes !== undefined ? { maxBytes: fetchOptions.maxBytes } : {}),
+        ...(ref.sourceVersion ? { expectedVersion: ref.sourceVersion } : {}),
+        ...(deferred ? { deferredBytes: { locator: deferred.locator } } : {}),
+      });
+    } catch (error) {
+      throw asSourceError(error);
+    }
+  }
+}
+
+function asSourceError(error: unknown): FileExtractionSourceError {
+  return isFileExtractionSourceError(error) ? error : new FileExtractionSourceError('source_unavailable');
+}
+
+/**
+ * Removes a file only when the connector wrote it, and only inside the spool
+ * folder: a path to an original under an approved folder is never touched.
+ */
+function fileHandOver(path: string, spooled: boolean, spoolDir: string): { dispose(): Promise<void> } {
+  return {
+    async dispose() {
+      if (!spooled) return;
+      const root = resolve(spoolDir) + sep;
+      const target = resolve(path);
+      if (!target.startsWith(root) || basename(target) === '') return;
+      rmSync(target, { force: true });
     },
   };
 }

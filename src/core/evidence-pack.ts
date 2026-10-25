@@ -21,6 +21,11 @@ import type {
   EvidenceTableBlock,
 } from './contracts.ts';
 import type { StructuredEvidenceFact } from './opsec.ts';
+import {
+  applyParentLabels,
+  type ParentLabelDependency,
+  type ParentLabelResolver,
+} from './parent-label.ts';
 import type { SourceIndexCorpusRegistry } from './source-index/corpus.ts';
 import {
   assertEvidenceCandidateModelEligible,
@@ -180,6 +185,13 @@ export interface BuildEvidencePackInput {
   secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   // Counts of items still pending classification in the searched corpora.
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
+  /**
+   * A child item's parent, found for the labels its citation carries
+   * (core/parent-label.ts). A label is attached only when the parent's names
+   * may go wherever the candidate goes, under this request's scope; an
+   * unauthorized label never enters the pack. Absent: no candidate has one.
+   */
+  parentLabels?: ParentLabelResolver;
   // Leave out every candidate that is secure by isSecureSensitivity (an S4
   // item in an ordinary corpus included), with its extraction gap: the
   // ordinary-route rebuild after the private route was unavailable.
@@ -251,6 +263,11 @@ export interface EvidencePackBuildDetail {
   // owner's Names only choice: no provider, nothing returned, or no text.
   // Truncated and policy-denied candidates are not counted here.
   unreadCandidates?: number;
+  // The parents whose names a candidate's citation carries as its parent
+  // label, beside the pack by the same precedent: each is a release input of
+  // the answer written from this pack (ReleaseInput.layer = 'names'). Absent
+  // when no candidate carries a label.
+  parentLabelDependencies?: readonly ParentLabelDependency[];
   // Four-tier classification (P1b), beside the pack by the same precedent:
   // Secrets that matched the question, by location only, and counts of
   // searched items whose tier is not final yet. Neither enters the pack, so
@@ -424,6 +441,16 @@ async function buildPreparedEvidencePackDetailed(
   const classificationCoverage = (input.classificationCoverage?.(routed.searchedCorpora) ?? [])
     .filter((note) => note.pendingClassificationItems > 0);
 
+  // The parent labels come last, from the final candidates: the labels are
+  // authorized per candidate against the request's own scope, so an
+  // unauthorized one is never in the pack any leg is dispatched with.
+  const labelled = applyParentLabels(candidates, candidateCorpusIds, input.parentLabels, {
+    allowedTrustDomains: input.searchContext.allowedTrustDomains,
+    ...(input.searchContext.allowedCorpusIds ? { allowedCorpusIds: input.searchContext.allowedCorpusIds } : {}),
+    // A corpus without an adapter is one this request leaves out (owner's read scope, request scope).
+    domainOf: (corpusId) => (Object.hasOwn(input.adapters, corpusId) ? input.registry.get(corpusId)?.trustDomain : undefined),
+  });
+
   const builtAt = (input.now ?? (() => new Date()))().toISOString();
   const laneAudits = policyDeniedCandidates > 0
     ? contentFreePolicyLaneAudits(routed.laneAudits)
@@ -433,7 +460,7 @@ async function buildPreparedEvidencePackDetailed(
   const secureRouted = new Set(routed.secureLaneAudits);
   const secureLaneAudits = laneAudits.filter((_, index) => secureRouted.has(routed.laneAudits[index]!));
   return {
-    pack: { question: input.question, candidates, coverage, builtAt },
+    pack: { question: input.question, candidates: labelled.candidates, coverage, builtAt },
     candidateCorpusIds,
     laneAudits,
     secureLaneAudits,
@@ -449,6 +476,7 @@ async function buildPreparedEvidencePackDetailed(
     contentPrivateCandidateIndexes,
     unreadCandidates,
     encounteredSecureLocal,
+    ...(labelled.dependencies.length > 0 ? { parentLabelDependencies: labelled.dependencies } : {}),
     ...(secretLocations.length > 0 ? { secretLocations } : {}),
     ...(classificationCoverage.length > 0 ? { classificationCoverage } : {}),
   };

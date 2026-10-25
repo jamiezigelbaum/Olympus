@@ -82,6 +82,12 @@ export interface ConnectorStoreTierClassification {
    * module may set it (test/tier-hold-until-judged-guard.test.ts).
    */
   holdContentUntilJudged?: true;
+  /**
+   * For a lane whose items can be children: the permitted context for judging
+   * one, its parent's names, authorized and screened (parent-context.ts).
+   * Supplied by the tiered store set, which can see the parent's stored names.
+   */
+  parentNamesContext?: (child: TierLedgerIdentity, parentLink?: string) => string | undefined;
 }
 
 /**
@@ -198,6 +204,9 @@ export function decideItemTiers(
   // recording did not bring the lane's option still holds the same way).
   const holdUntilJudged = options?.holdContentUntilJudged === true
     || heldUntilJudged(ledger?.getCurrent(item.identity)?.reasons);
+  const parentContext = item.identity.parent
+    ? options?.parentNamesContext?.(item.identity, item.identity.parent.localItemId)
+    : undefined;
   return classifyItemTiers(
     {
       signals: connector.classificationSignals(item),
@@ -207,6 +216,7 @@ export function decideItemTiers(
       ...(text !== undefined ? { text } : {}),
       ...(extra.namesOnly ? { namesOnly: true } : {}),
       ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
+      ...(parentContext ? { parentContext } : {}),
       mimeType: item.mimeType,
       subject: item.identity,
     },

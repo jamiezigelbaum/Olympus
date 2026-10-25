@@ -38,6 +38,7 @@
 // - Runs only with a sniffer configured (the sniffer service calls it): with
 //   no private lane, recorded decisions stand exactly as before.
 
+import { parentNamesContext } from './parent-context.ts';
 import {
   classifyContentTier,
   classifyItemTiers,
@@ -48,6 +49,7 @@ import {
   tierSnifferInputHash,
   maxTier,
   hasCredentialUrl,
+  namesWithParentContext,
   namesDecidedByOwner,
   TIER_CLASSIFIER_VERSION,
   type TierDecision,
@@ -206,7 +208,9 @@ export function rejudgeStoredContent(
   // The lane's hold, or the one the stored decision carries: a held item is
   // judged again exactly as it was held at landing.
   const holdUntilJudged = set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
-  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged);
+  // A child is judged again with its parent's names as context, as it was at listing and landing.
+  const parentContext = sniffer ? parentNamesContext(set, identity) : undefined;
+  const metadata = rejudgeMetadata(record, sniffer, { title, path, sender, folderKeys }, identity, holdUntilJudged, parentContext);
   const content = classifyContentTier(
     {
       text,
@@ -220,6 +224,7 @@ export function rejudgeStoredContent(
       ...(mimeType ? { mimeType } : {}),
       ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
       ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
+      ...(parentContext ? { parentContext } : {}),
       subject: identity,
     },
     {
@@ -307,6 +312,7 @@ function rejudgeMetadata(
   names: { title: string | undefined; path: string | undefined; sender: string | undefined; folderKeys: string[] },
   subject: TierLedgerIdentity,
   holdUntilJudged = false,
+  parentContext?: string,
 ): Pick<TierDecision, 'metadataTier' | 'metadataForced' | 'metadataFlagged' | 'metadataPending' | 'reasons'> {
   const previous = { ...record, reasons: record.reasons.filter(reason => !reason.startsWith('content:')) };
   if (!sniffer || record.state !== 'current' || record.metadataForced || namesDecidedByOwner(record.reasons)
@@ -326,8 +332,8 @@ function rejudgeMetadata(
   const baseline = maxTier(fresh.metadataTier, record.metadataTier);
   if (baseline === 'secrets') return { ...previous, metadataTier: baseline, metadataPending: false, reasons: fresh.reasons };
   const material = [names.title, names.path, ...names.folderKeys, names.sender].filter(Boolean).join(' | ').slice(0, SNIFFER_NAMES_MAX_CHARS);
-  const verdict = sniffer.judge({ pass: 'metadata', material, flags: ['names:rejudge'], subject,
-    materialHash: tierSnifferInputHash('metadata', signals),
+  const verdict = sniffer.judge({ pass: 'metadata', material: namesWithParentContext(material, parentContext), flags: ['names:rejudge'], subject,
+    materialHash: tierSnifferInputHash('metadata', signals, undefined, parentContext),
     mapRevision: fresh.mapRevision, priority: holdUntilJudged ? HELD_UNTIL_JUDGED_PRIORITY : HELD_RECORD_PRIORITY });
   const pending = verdict.verdict === 'undecided';
   return {

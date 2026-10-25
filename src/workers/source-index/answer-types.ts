@@ -189,6 +189,11 @@ export interface SourceIndexAnswerEvidence {
   source_label?: string;
   conversation_label?: string;
   author_label?: string;
+  // A child's parent as a citation shows it ("'Flat' from Alice, 3 March
+  // 2024"). Present only when the parent's names may go wherever this item
+  // goes (core/parent-label.ts); the parent's names are then a release
+  // dependency of the answer.
+  parent_label?: string;
   uri?: string;
   authored_at?: string;
   updated_at?: string;

@@ -39,7 +39,7 @@ import {
 import { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore } from './tier-ledger-path.ts';
 
 export { TIER_LEDGER_SQLITE_STORE_ID, tierLedgerPathForStore };
-export const TIER_LEDGER_SCHEMA_VERSION = 9;
+export const TIER_LEDGER_SCHEMA_VERSION = 10;
 
 /** A scrub's start: the revision it took and the item's generation then. */
 export interface SecretScrubMark {
@@ -2240,7 +2240,8 @@ export class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving') {
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving'
+        || this.childCascadePending(identity)) {
         throw new TierLedgerGenerationConflictError();
       }
       if (!existing.routed || existing.contentRead) {
@@ -2286,7 +2287,9 @@ export class TierLedger {
     const now = this.now().toISOString();
     this.db.transaction(() => {
       const existing = this.readRow(identity);
-      if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving') {
+      // A child whose parent was tombstoned lands nothing: its removal is owed.
+      if (!existing || existing.generation !== options.expectedGeneration || existing.state === 'moving'
+        || this.childCascadePending(identity)) {
         throw new TierLedgerGenerationConflictError();
       }
       if (!existing.routed) throw new Error('Only a routed item lands content through the tier set.');
@@ -3198,10 +3201,110 @@ export class TierLedger {
         'secret_side_store_debt',
         'secret_side_store_scrubs',
         'secret_redaction_retirement',
+        'tier_child_cascade',
       ]) {
         this.db.query(`DELETE FROM ${table} WHERE provider = ? AND account_scope = ?`).run(provider, accountScope);
       }
       return { items, copies };
+    })();
+  }
+
+  // ---- A parent was tombstoned: its children go with it ----------------------
+
+  /**
+   * A tombstoned parent and its children, hidden together. In ONE transaction
+   * every current or staged copy of the parent and of each child is
+   * superseded (no store serves any of them from here on) and a cascade row
+   * is written per child, so a crash at any later point leaves the children
+   * hidden with their removal still owed (`pendingChildCascades`), never
+   * visible. An item the ledger never routed has no copy to hide; it still
+   * gets its cascade row, so the worker removes whatever a store holds.
+   */
+  hideAndQueueChildren(
+    parent: TierLedgerIdentity,
+    children: readonly SourceItemIdentity[],
+  ): { hidden: number; queued: number } {
+    return this.db.transaction(() => {
+      const now = this.now().toISOString();
+      let hidden = 0;
+      const hide = (identity: TierLedgerIdentity): void => {
+        const row = this.readRow(identity);
+        if (!row) return;
+        const changed = this.db.query(`
+          UPDATE tier_copies SET copy_state = 'superseded',
+            superseded_by_generation = COALESCE(superseded_by_generation, ?), updated_at = ?
+          WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+            AND copy_state <> 'superseded'
+        `).run(row.generation + 1, now, ...idParams(identity)).changes;
+        if (changed > 0) hidden += 1;
+      };
+      hide(parent);
+      const queue = this.db.query(`
+        INSERT OR IGNORE INTO tier_child_cascade (
+          provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
+          parent_provider_item_id, queued_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      let queued = 0;
+      for (const child of children) {
+        hide(child);
+        queued += queue.run(...idParams(child), child.family, child.localItemId, parent.providerItemId, now).changes;
+      }
+      return { hidden, queued };
+    })();
+  }
+
+  /** Whether this item's removal is owed because its parent was tombstoned. */
+  childCascadePending(identity: TierLedgerIdentity): boolean {
+    return this.db.query(`
+      SELECT 1 AS present FROM tier_child_cascade
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).get(...idParams(identity)) !== null;
+  }
+
+  /** The children whose removal is still owed, oldest first. */
+  pendingChildCascades(limit = 100): Array<{ child: SourceItemIdentity; parentProviderItemId: string; attempts: number }> {
+    const rows = this.db.query(`
+      SELECT provider, account_scope, conversation_key, provider_item_id, family, local_item_id,
+        parent_provider_item_id, attempts
+      FROM tier_child_cascade ORDER BY queued_at, rowid LIMIT ?
+    `).all(Math.max(1, Math.floor(limit))) as Array<{
+      provider: string; account_scope: string; conversation_key: string; provider_item_id: string;
+      family: string; local_item_id: string; parent_provider_item_id: string; attempts: number;
+    }>;
+    return rows.map((row) => ({
+      child: {
+        family: row.family as SourceItemIdentity['family'],
+        provider: row.provider,
+        accountScope: row.account_scope,
+        providerItemId: row.provider_item_id,
+        localItemId: row.local_item_id,
+        ...(row.conversation_key ? { providerConversationId: row.conversation_key } : {}),
+      },
+      parentProviderItemId: row.parent_provider_item_id,
+      attempts: row.attempts,
+    }));
+  }
+
+  /** A removal attempt that did not finish: counted, and tried again by the next pass. */
+  noteChildCascadeAttempt(identity: TierLedgerIdentity): void {
+    this.db.query(`
+      UPDATE tier_child_cascade SET attempts = attempts + 1, last_attempt_at = ?
+      WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+    `).run(this.now().toISOString(), ...idParams(identity));
+  }
+
+  /**
+   * Every store's copy of the child is gone: its copy rows are forgotten and
+   * its cascade row is done, together.
+   */
+  completeChildCascade(identity: TierLedgerIdentity): void {
+    this.db.transaction(() => {
+      this.deleteCopies(identity);
+      this.db.query(`
+        DELETE FROM tier_child_cascade
+        WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?
+      `).run(...idParams(identity));
     })();
   }
 
@@ -4128,7 +4231,7 @@ function tierLedgerMigrations(): SqliteMigration[] {
       // item's tiers (a listing, an override, a move landing, a legacy
       // decision, another process) is caught in its own transaction. Becoming
       // Secrets again cancels a retirement not yet carried out.
-      version: TIER_LEDGER_SCHEMA_VERSION,
+      version: 9,
       name: 'secret_redaction_retirement',
       up(db) {
         const item = `provider = NEW.provider AND account_scope = NEW.account_scope
@@ -4171,6 +4274,32 @@ function tierLedgerMigrations(): SqliteMigration[] {
           BEGIN
             DELETE FROM secret_redaction_retirement WHERE ${item};
           END;
+        `);
+      },
+    },
+    {
+      // A parent item was tombstoned: one row per child still to be removed
+      // from every store (docs/design/child-items.md, "Removal"). Written in
+      // the transaction that hides the parent and its children, so a crash
+      // leaves the children hidden with their removal still owed, never
+      // visible. The row goes when the last store's copy is gone.
+      version: TIER_LEDGER_SCHEMA_VERSION,
+      name: 'tier_child_cascade',
+      up(db) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS tier_child_cascade (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
+            family TEXT NOT NULL DEFAULT '',
+            local_item_id TEXT NOT NULL DEFAULT '',
+            parent_provider_item_id TEXT NOT NULL,
+            queued_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
         `);
       },
     },

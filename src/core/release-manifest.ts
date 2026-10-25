@@ -33,6 +33,13 @@ export interface ReleaseInput {
   providerConversationId?: string;
   /** Private (secure_local, or an S4 item) when the answer was written. */
   privateAtAnswer: boolean;
+  /**
+   * Absent: the item itself was read. `names`: only the item's NAMES were in
+   * front of a model, as a child citation's parent label (core/parent-label.ts).
+   * Such an input is judged on the item's names tier alone, its content never
+   * limits the answer, and it never stands for a cited item.
+   */
+  layer?: 'names';
 }
 
 /** The release rules in force when the answer was written. */
@@ -115,6 +122,10 @@ export function privateInputReleaseAllowed(
   postureNow: 'allow' | 'approval',
 ): boolean {
   const privateNow = verdict.tier === 'private' || (verdict.tier === 'legacy' && input.privateAtAnswer);
+  // A parent label was cleared for the names tier of its time. Names that became Private since
+  // are covered by neither the posture nor a request for Private content: the answer carried
+  // them at a tier they no longer have.
+  if (input.layer === 'names') return !privateNow || input.privateAtAnswer;
   return !privateNow || constraints.includeSecureLocalContent || postureNow === 'allow';
 }
 

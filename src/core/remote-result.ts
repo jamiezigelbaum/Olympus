@@ -33,6 +33,7 @@
 import { boundedLogErrorMessage } from './log-redaction.ts';
 import { OperationError, type OperationErrorCode } from './operation-error.ts';
 import { secretLabelsInText } from './opsec.ts';
+import { citationTitleWithParent, PARENT_LABEL_MAX_CHARS } from './parent-label.ts';
 import { privateInputReleaseAllowed, type ReleaseCheck, type ReleaseInput, type ReleaseInputVerdict, type ReleaseManifest } from './release-manifest.ts';
 import { withoutSecretLocationCoverageNotes } from './secret-location-note.ts';
 
@@ -399,7 +400,9 @@ function recheckRelease(
 
 /** A citation names its corpus, provider, conversation and item, never its account. */
 function citesInput(entry: Record<string, unknown>, input: ReleaseInput): boolean {
-  return entry.corpus_id === input.corpusId
+  // A parent label's names-layer input is a dependency of the answer, never the item a citation names.
+  return input.layer !== 'names'
+    && entry.corpus_id === input.corpusId
     && entry.provider === input.provider
     && entry.provider_item_id === input.providerItemId
     && (typeof entry.provider_conversation_id === 'string' && entry.provider_conversation_id ? entry.provider_conversation_id : undefined)
@@ -410,9 +413,15 @@ function citesInput(entry: Record<string, unknown>, input: ReleaseInput): boolea
 function citationOutput(entry: Record<string, unknown>): Record<string, unknown> {
   const title = scannedText(entry.title, MAX_TITLE, 'line');
   const date = dateOnly(entry.authored_at) ?? dateOnly(entry.updated_at);
+  // A child's parent rides in the title text ("lease.pdf, in 'Flat' from Alice"), scanned and capped
+  // like the title, so the output schema and the tool lists are unchanged.
+  const parent = keptText(entry.parent_label, PARENT_LABEL_MAX_CHARS, 'line');
+  const composed: { text?: string; secret: boolean } = title.secret
+    ? { secret: true }
+    : scannedText(citationTitleWithParent(title.text, parent), MAX_TITLE, 'line');
   return {
     label: sourceLabel(entry.provider, entry.family),
-    ...(title.text && !title.secret ? { title: title.text } : {}),
+    ...(composed.text && !composed.secret ? { title: composed.text } : {}),
     ...(date ? { date } : {}),
   };
 }

@@ -2416,7 +2416,7 @@ function accountRawPath(account, name, env = process.env, options = {}) {
     if (name === "watch")
       return olympusDataPath(env, "local-files-watch");
     const state = legacyArchiveStatePath(env);
-    return name === "archive-imports.json" ? state : join10(dirname7(state), "archive-import-requests.json");
+    return name === "archive-imports.json" ? state : join10(dirname7(state), name);
   }
   return join10(accountFolder(account, env), "raw", name);
 }
@@ -2434,8 +2434,9 @@ function legacyAccountPaths(sourceId, env = process.env, archiveFamilies = []) {
     raw.push(olympusDataPath(env, "local-files-watch"));
   if (sourceId === "x.bookmarks")
     raw.push(`${olympusDataPath(env, "x-bookmarks-api-usage.sqlite")}.reconcile`);
-  if (sourceId === ARCHIVE_IMPORTS)
-    raw.push(olympusDataPath(env, "archive-imports.json"), olympusDataPath(env, "archive-import-requests.json"));
+  if (sourceId === ARCHIVE_IMPORTS) {
+    raw.push(olympusDataPath(env, "archive-imports.json"), olympusDataPath(env, "archive-import-requests.json"), olympusDataPath(env, "archive-media-bindings.sqlite"));
+  }
   const messaging = legacyMessagingPaths(sourceId, env);
   return { stores: [...stores, ...messaging.stores], raw: [...raw, ...messaging.raw] };
 }
@@ -2651,6 +2652,7 @@ var init_olympus_layout = __esm(() => {
     "x-reconcile.sqlite": "x.bookmarks",
     "archive-imports.json": ARCHIVE_IMPORTS,
     "archive-import-requests.json": ARCHIVE_IMPORTS,
+    "archive-media-bindings.sqlite": ARCHIVE_IMPORTS,
     ...messagingRawOwners()
   };
   LEGACY_RAW_OVERRIDES = {
@@ -17470,7 +17472,7 @@ var init_media_judge = __esm(() => {
 function connectorStoreContentPreference(vettedVectorItemIds) {
   return (candidate) => candidate.item.chunk?.lane === "keyword" || candidate.laneRanks.has("recency") || candidate.laneRanks.has("vector") && vettedVectorItemIds.has(candidate.item.sourceItem.localItemId);
 }
-var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
+var READ_RESULT_PROJECTION_LOCATOR_URI, DEFAULT_SEMANTIC_RELEVANCE_BAR = 0.62, CALIBRATED_CONTENT_PREFERENCE_BARS, CALIBRATED_SEMANTIC_RELEVANCE_BARS, CONTAINER_MIME_TYPES, CONTAINER_MIME_TYPES_SQL, CHUNK_MEDIA_RETRY_BASE_MS, CONNECTOR_STORE_FTS_MIGRATION, lexicalContentPreference, CONNECTOR_STORE_V4_ITEM_COLUMNS, CONNECTOR_STORE_V5_ITEM_COLUMNS, CONNECTOR_STORE_V7_ITEM_COLUMNS, CONNECTOR_STORE_V9_ITEM_COLUMNS, CONNECTOR_STORE_V12_ITEM_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS, LOCAL_RELAXED_STOPWORDS;
 var init_local_index = __esm(() => {
   init_keyword_context();
   init_keyword_languages();
@@ -17588,6 +17590,13 @@ var init_local_index = __esm(() => {
     "source_scope_generation",
     "source_scope_revision",
     "source_scope_folder_keys_json"
+  ];
+  CONNECTOR_STORE_V15_ITEM_COLUMNS = [
+    ...CONNECTOR_STORE_V12_ITEM_COLUMNS,
+    "parent_local_item_id",
+    "deferred_locator",
+    "bytes_available",
+    "size_bytes"
   ];
   LOCAL_RELAXED_STOPWORDS = new Set([
     "do",
@@ -17716,6 +17725,18 @@ var init_connector_store = __esm(() => {
   init_local_index();
   init_filter_capabilities();
 });
+// src/workers/connector-store/stored-names.ts
+var init_stored_names = __esm(() => {
+  init_tier_ledger();
+});
+
+// src/workers/connector-store/parent-context.ts
+var init_parent_context = __esm(() => {
+  init_sniffer();
+  init_tier_classifier();
+  init_stored_names();
+});
+
 // src/workers/connector-store/tier-names-only-settle.ts
 var init_tier_names_only_settle = __esm(() => {
   init_tier_ledger();
@@ -18118,6 +18139,7 @@ var init_tier_row_rehome = __esm(() => {
 
 // src/workers/connector-store/tier-rejudge.ts
 var init_tier_rejudge = __esm(() => {
+  init_parent_context();
   init_tier_classifier();
   init_tier_ledger();
   init_secrets_disposition();
@@ -18135,7 +18157,7 @@ var init_tier_override_settle = __esm(() => {
 // src/workers/connector-store/tier-rules-sweep.ts
 var init_tier_rules_sweep = __esm(() => {
   init_tier_classifier();
-  init_tier_ledger();
+  init_stored_names();
   init_tier_override_settle();
   init_tier_rejudge();
 });
@@ -18152,7 +18174,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-var LOWER_CONTENT_REPAIR_INTERVAL_MS;
+var LOWER_CONTENT_REPAIR_INTERVAL_MS, CHILD_CASCADE_RECONCILE_INTERVAL_MS;
 var init_tiered_store_set = __esm(() => {
   init_types();
   init_engine();
@@ -18161,6 +18183,7 @@ var init_tiered_store_set = __esm(() => {
   init_local_index();
   init_tier_placement();
   init_secrets_disposition();
+  init_parent_context();
   init_tier_names_only_settle();
   init_tier_content_purge();
   init_tier_move();
@@ -18170,6 +18193,7 @@ var init_tiered_store_set = __esm(() => {
   init_tier_image_content_sweep();
   init_tier_media_judgment_sweep();
   LOWER_CONTENT_REPAIR_INTERVAL_MS = 5 * 60000;
+  CHILD_CASCADE_RECONCILE_INTERVAL_MS = 5 * 60000;
 });
 
 // src/workers/readwise/live-sync.ts
@@ -18471,10 +18495,16 @@ var init_analyst_openclaw_infer = __esm(() => {
   OPENCLAW_INFER_MAX_PROMPT_BYTES = MAX_PROMPT_BYTES;
 });
 
+// src/core/parent-label.ts
+var init_parent_label = __esm(() => {
+  init_types();
+});
+
 // src/core/evidence-pack.ts
 var utf8;
 var init_evidence_pack = __esm(() => {
   init_keyword_context();
+  init_parent_label();
   init_source_model_policy();
   init_router();
   init_types();
@@ -18585,6 +18615,7 @@ var init_analyst_answer = __esm(() => {
   init_analyst_openclaw_infer();
   init_evidence_pack();
   init_opsec();
+  init_parent_label();
   init_release_manifest();
   init_secret_location_note();
   init_source_corpus_registry();
@@ -19791,6 +19822,15 @@ var init_scope_safe_fs = __esm(() => {
   SCOPE_FILE_MAX_RANGE_BYTES = 64 * 1024 * 1024;
 });
 
+// src/workers/archive-import/media-bindings.ts
+var init_media_bindings = __esm(() => {
+  init_sqlite_migrations();
+  init_scope_safe_fs();
+  init_source_placement();
+  init_source_storage();
+  init_state();
+});
+
 // src/workers/archive-import/byte-source.ts
 import * as zlib from "node:zlib";
 function tableCrc32(data, value) {
@@ -20804,6 +20844,7 @@ var init_data_lifecycle = __esm(() => {
   init_archive_formats();
   init_store2();
   init_state();
+  init_media_bindings();
   init_requests();
   init_google_connectors();
   init_telegram_messages();
@@ -27717,6 +27758,8 @@ var SCHEMA_FIELD_NAMES = new Set([
   "conversationLabel",
   "authorLabel",
   "uri",
+  "parent",
+  "parentLabel",
   "authoredAt",
   "updatedAt",
   "searchedCorpora",

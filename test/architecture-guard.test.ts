@@ -169,6 +169,12 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   // the seam, in the family's own module, where this guard does not reach.
   'src/core/file-extraction-source.ts',
   'src/core/evidence-pack.ts',
+  // A child item's parent label (docs/design/child-items.md, "Citations"):
+  // the rule that decides where a parent's names may travel, and the finder
+  // that reads them. Every source's children get the identical rule, so a
+  // format name here would be a rule the next format silently does not get.
+  'src/core/parent-label.ts',
+  'src/workers/connector-store/parent-label.ts',
   // The consult outbound gate (docs/design/frontier-consult-lane.md, A.4). It
   // judges a question that may leave the machine against everything the writer
   // saw. A rule that learned one provider's or one domain's shapes would be a
@@ -198,6 +204,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/extractors/document-formats.ts',
   'src/workers/file-extraction/extractors/image-prepare.ts',
   'src/workers/file-extraction/extractors/image-preparers.ts',
+  'src/workers/file-extraction/extractors/input-limits.ts',
   'src/workers/file-extraction/extractors/jpeg-metadata.ts',
   'src/workers/file-extraction/extractors/ocr-capability.ts',
   'src/workers/file-extraction/extractors/ocr-probe-fixture.ts',
@@ -221,6 +228,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/file-extraction/readiness-ledger.ts',
   'src/workers/file-extraction/registry.ts',
   'src/workers/file-extraction/runner.ts',
+  'src/workers/file-extraction/spool.ts',
   'src/workers/file-extraction/store-sink.ts',
   'src/workers/file-extraction/tiered-store-sink.ts',
   'src/workers/file-extraction/types.ts',
@@ -241,6 +249,7 @@ const SOURCE_AGNOSTIC_SHARED_FILES = [
   'src/workers/archive-import/byte-source.ts',
   'src/workers/archive-import/continuation-cache.ts',
   'src/workers/archive-import/dashboard.ts',
+  'src/workers/archive-import/extraction-source.ts',
   'src/workers/archive-import/json-stream.ts',
   'src/workers/archive-import/lane.ts',
   'src/workers/archive-import/manifest.ts',

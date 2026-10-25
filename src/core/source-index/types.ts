@@ -32,6 +32,14 @@ export interface SourceItemIdentity {
   providerEventId?: string;
   localItemId: string;
   sourceVersion?: string;
+  /**
+   * The item this one came inside, when it is a child (an attachment, a
+   * piece of media: docs/design/child-items.md). A child has the same
+   * `family`, `provider`, `accountScope` and conversation as its parent, and
+   * its own identity; this only records the parent. Absent on every item
+   * that is not a child.
+   */
+  parent?: { providerItemId: string; localItemId: string };
 }
 
 /**
@@ -134,6 +142,12 @@ export interface SourceCitationMetadata {
   uri?: string;
   authoredAt?: string;
   updatedAt?: string;
+  /**
+   * A child's parent as a citation shows it ("'Flat' from Alice, 3 March
+   * 2024"). Built at pack time, and only when the parent's names may go
+   * wherever the cited child goes (docs/design/child-items.md, "Citations").
+   */
+  parentLabel?: string;
 }
 
 export type RetrievalLaneType = 'keyword' | 'semantic' | 'metadata' | 'structured' | 'hybrid' | SourceIndexExtensionId;

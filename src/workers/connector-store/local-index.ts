@@ -277,7 +277,7 @@ export const CONTAINER_MIME_TYPES: readonly string[] = Object.freeze([
 const CONTAINER_MIME_TYPES_SQL = CONTAINER_MIME_TYPES.map((type) => `'${type}'`).join(', ');
 const VECTOR_BACKEND = 'exact_scan';
 const SQLITE_STORE_ID = 'connector-store';
-const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 14;
+const CONNECTOR_STORE_SQLITE_SCHEMA_VERSION = 15;
 /** The `sync_runs` connector id of a strip of picture content outside Private stores. */
 export const IMAGE_CONTENT_PRIVATE_ONLY_CONNECTOR_ID = 'olympus_image_content_private_only';
 /** A picture the image encoder fails on is retried after 1 h, 2 h, ... */
@@ -435,7 +435,7 @@ export function connectorStoreMigrations() {
       },
     },
     {
-      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      version: 14,
       name: 'connector_store_media_judgments',
       up(db: Database) {
         // Additive and inert: a new table only. A picture with no judgment
@@ -444,7 +444,36 @@ export function connectorStoreMigrations() {
         createConnectorStoreMediaJudgments(db);
       },
     },
+    {
+      version: CONNECTOR_STORE_SQLITE_SCHEMA_VERSION,
+      name: 'connector_store_child_items',
+      up(db: Database) {
+        // Additive and inert: nullable columns and a partial index. An
+        // existing row has no parent and no deferred bytes, and is not
+        // rewritten (docs/design/child-items.md, "Storage").
+        addConnectorStoreChildItemColumns(db);
+      },
+    },
   ];
+}
+
+/**
+ * The child-item columns (docs/design/child-items.md, "Storage"). A child is
+ * an item whose bytes came inside another item: `parent_local_item_id` names
+ * that item, `deferred_locator` is the connector's opaque way to read the
+ * child's bytes later, `bytes_available` says whether the source says they are
+ * there (0 never a candidate), and `size_bytes` is the size the source states.
+ * All four are NULL on every item that is not a child.
+ */
+function addConnectorStoreChildItemColumns(db: Database): void {
+  addColumnIfMissing(db, 'items', 'parent_local_item_id', 'TEXT');
+  addColumnIfMissing(db, 'items', 'deferred_locator', 'TEXT');
+  addColumnIfMissing(db, 'items', 'bytes_available', 'INTEGER');
+  addColumnIfMissing(db, 'items', 'size_bytes', 'INTEGER');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_connector_store_items_parent
+      ON items(parent_local_item_id) WHERE parent_local_item_id IS NOT NULL;
+  `);
 }
 
 /**
@@ -1981,7 +2010,25 @@ export interface ConnectorStoreExtractionCandidate {
   name?: string;
   locatorUri?: string;
   contentHash?: string;
+  /**
+   * A child (docs/design/child-items.md): the item it came inside, the
+   * connector's opaque locator for its bytes, the size the source states, and
+   * whether the source says the bytes are there. A child whose bytes are not
+   * there is never listed, so `bytesAvailable` is only ever true here.
+   */
+  parentLocalItemId?: string;
+  deferredLocator?: string;
+  bytesAvailable?: true;
+  sizeBytes?: number;
 }
+
+/** What a store kept for reading one child's bytes later; see `deferredBytesStateOfLocalItem`. */
+export type StoredDeferredBytes =
+  | { state: 'none' }
+  | { state: 'gone' }
+  | { state: 'unavailable' }
+  | { state: 'version_changed' }
+  | { state: 'ready'; locator: string; sizeBytes?: number };
 
 export interface ConnectorStoreExtractionCandidateOptions {
   limit: number;
@@ -2520,6 +2567,8 @@ export class LocalConnectorStore {
   // not opened it yet). Such a store has no reactions, and saying so is
   // cheaper and more honest than refusing to serve it.
   private reactionsColumnPresent = false;
+  /** Whether the v15 child-item columns are here (a read-only open of an older store has none). */
+  private childItemColumnsPresent = false;
   /** Whether `chunks` carries the v13 media columns (a read-only open of an older store does not). */
   private chunkMediaColumnsPresent = false;
   /** Whether the v13 `image_media_reads` table is here (a read-only open of an older store has none). */
@@ -2537,6 +2586,11 @@ export class LocalConnectorStore {
   private tierLedgerOwned: boolean | undefined;
   private tierLedgerDisabled: boolean | undefined;
   private boundLedgerHandle: TierLedger | undefined;
+  // Parents this store tombstoned that other items came inside, told to the
+  // tiered store set (if any) once the writing transaction has committed, so it
+  // can hide and remove their children (docs/design/child-items.md, "Removal").
+  private parentTombstoneObserver: ((parents: SourceItemIdentity[]) => void) | undefined;
+  private tombstonedParents: Map<string, SourceItemIdentity> | undefined;
   /**
    * Items a sync handed to this store's embedding sweep instead of embedding
    * them itself, each with the exact provider (and so the scope binding) the
@@ -2613,6 +2667,7 @@ export class LocalConnectorStore {
         validateConnectorStoreSchema(this.db);
       }
       this.reactionsColumnPresent = tableColumns(this.db, 'items', false).includes('reactions_json');
+      this.childItemColumnsPresent = tableColumns(this.db, 'items', false).includes('parent_local_item_id');
       this.chunkMediaColumnsPresent = tableColumns(this.db, 'chunks', false).includes('media_sha256');
       this.imageMediaReadsPresent = this.db.query(
         "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'image_media_reads'",
@@ -3081,6 +3136,217 @@ export class LocalConnectorStore {
     ) !== null;
   }
 
+  /**
+   * What the store persisted for reading a child's bytes later: the connector's
+   * opaque locator and the size the source stated. Read fresh from the row on
+   * each call (a job row keeps only the identity), and only for the version
+   * the caller expects: a child the source has since replaced, one that is
+   * tombstoned, and one whose source says the bytes are not there return
+   * nothing, so a stale locator is never handed to a connector.
+   */
+  deferredBytesOf(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+    expectedVersion?: string,
+  ): { locator: string; sizeBytes?: number } | undefined {
+    const state = this.deferredBytesStateWhere(
+      'provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?',
+      [identity.provider, identity.accountScope, normalizeConversationId(identity.providerConversationId), identity.providerItemId],
+      expectedVersion,
+    );
+    return state.state === 'ready' ? { locator: state.locator, ...(state.sizeBytes !== undefined ? { sizeBytes: state.sizeBytes } : {}) } : undefined;
+  }
+
+  /**
+   * The same, for the extraction factory's join key (an item's local id), and
+   * saying why there is no locator: the item is not a child (`none`), the
+   * source says its bytes are not there (`unavailable`), the locator was
+   * written for another version (`version_changed`), or the row is gone.
+   */
+  deferredBytesStateOfLocalItem(localItemId: string, expectedVersion?: string): StoredDeferredBytes {
+    return this.deferredBytesStateWhere('local_item_id = ?', [localItemId], expectedVersion);
+  }
+
+  private deferredBytesStateWhere(where: string, params: Array<string | number>, expectedVersion?: string): StoredDeferredBytes {
+    if (!this.childItemColumnsPresent) return { state: 'none' };
+    const row = this.db.query(`
+      SELECT deferred_locator, bytes_available, size_bytes, source_version, tombstoned FROM items
+      WHERE ${where} ORDER BY tombstoned, item_pk LIMIT 1
+    `).get(...params) as {
+      deferred_locator: string | null;
+      bytes_available: number | null;
+      size_bytes: number | null;
+      source_version: string | null;
+      tombstoned: number;
+    } | null;
+    if (!row) return { state: 'gone' };
+    if (row.tombstoned === 1) return { state: 'gone' };
+    if (!row.deferred_locator) return { state: 'none' };
+    if (row.bytes_available === 0) return { state: 'unavailable' };
+    if (expectedVersion !== undefined && row.source_version !== expectedVersion) return { state: 'version_changed' };
+    return {
+      state: 'ready',
+      locator: row.deferred_locator,
+      ...(row.size_bytes !== null ? { sizeBytes: row.size_bytes } : {}),
+    };
+  }
+
+  /**
+   * The items that came inside this one, by their stored parent link, active
+   * or tombstoned (a cascade has to find the ones already hidden too). Empty
+   * for an item that is not a parent, and for a store from before the link.
+   */
+  childItemsOf(parentLocalItemId: string): SourceItemIdentity[] {
+    if (!this.childItemColumnsPresent) return [];
+    const rows = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+      FROM items
+      WHERE parent_local_item_id = ?
+      ORDER BY item_pk
+    `).all(parentLocalItemId) as Array<Pick<ItemRow,
+      'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
+      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'>>;
+    return rows.map((row) => sourceItemFromRow({ ...row, rank: 0 } as ItemRow));
+  }
+
+  /**
+   * The parent link a child row stores: the local id of the item it came
+   * inside. Undefined for an item that is not a child.
+   */
+  parentLocalItemIdOf(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): string | undefined {
+    if (!this.childItemColumnsPresent) return undefined;
+    const row = this.db.query(`
+      SELECT parent_local_item_id FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { parent_local_item_id: string | null } | null;
+    return row?.parent_local_item_id ?? undefined;
+  }
+
+  /**
+   * What the store keeps of an active item's names, for the parent label a
+   * child's citation carries (core/parent-label.ts): its subject or chat, its
+   * sender and its time. Never its text; undefined when the store holds no
+   * active row for it.
+   */
+  itemNames(
+    identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
+  ): { title?: string; sender?: string; authoredAt?: string } | undefined {
+    const row = this.db.query(`
+      SELECT title, sender_label, sender_id, authored_at FROM items
+      WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
+        AND tombstoned = 0
+    `).get(
+      identity.provider,
+      identity.accountScope,
+      normalizeConversationId(identity.providerConversationId),
+      identity.providerItemId,
+    ) as { title: string | null; sender_label: string | null; sender_id: string | null; authored_at: string | null } | null;
+    if (!row) return undefined;
+    const sender = row.sender_label?.trim() || row.sender_id?.trim();
+    return {
+      ...(row.title?.trim() ? { title: row.title.trim() } : {}),
+      ...(sender ? { sender } : {}),
+      ...(row.authored_at ? { authoredAt: row.authored_at } : {}),
+    };
+  }
+
+  /**
+   * Be told, after the writing transaction commits, of each parent this store
+   * tombstoned (a provider deletion, or absence from a full snapshot) that
+   * other items came inside. A Secret is not a deletion: its children are
+   * judged on their own and are not reported.
+   */
+  observeParentTombstones(observer: ((parents: SourceItemIdentity[]) => void) | undefined): void {
+    this.parentTombstoneObserver = observer;
+  }
+
+  /**
+   * Remembers a just-tombstoned row (a Secret excepted) for `flushTombstonedParents`.
+   * Whether other items came inside it is the set's question: its children's
+   * names may sit in another tier's store than the parent's.
+   */
+  private noteTombstonedParent(itemPk: number): void {
+    if (!this.parentTombstoneObserver || !this.childItemColumnsPresent) return;
+    const row = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version, trust_tier
+      FROM items WHERE item_pk = ? AND tombstoned = 1
+    `).get(itemPk) as (Pick<ItemRow,
+      'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
+      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'>
+      & { trust_tier: string }) | null;
+    if (!row || row.trust_tier === 'S5') return;
+    (this.tombstonedParents ??= new Map()).set(row.local_item_id, sourceItemFromRow({ ...row, rank: 0 } as ItemRow));
+  }
+
+  /**
+   * Reports the parents tombstoned since the last report, each re-read first
+   * (a rolled-back tombstone is not one). A failing observer never fails the
+   * write: the set walks the parents of active children and finds them again.
+   */
+  private flushTombstonedParents(): void {
+    const noted = this.tombstonedParents;
+    if (!noted || noted.size === 0) return;
+    const parents = [...noted.values()];
+    noted.clear();
+    const observer = this.parentTombstoneObserver;
+    if (!observer) return;
+    try {
+      const confirmed = parents.filter((parent) => this.db.query(`
+        SELECT 1 AS tombstoned FROM items
+        WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ? AND tombstoned = 1
+      `).get(
+        parent.provider,
+        parent.accountScope,
+        normalizeConversationId(parent.providerConversationId),
+        parent.providerItemId,
+      ) !== null);
+      if (confirmed.length > 0) observer(confirmed);
+    } catch {
+      // Found again by the set's next reconcile.
+    }
+  }
+
+  /** Whether any item here came inside another. */
+  hasChildItems(): boolean {
+    if (!this.childItemColumnsPresent) return false;
+    return this.db.query('SELECT 1 AS present FROM items WHERE parent_local_item_id IS NOT NULL LIMIT 1').get() !== null;
+  }
+
+  /**
+   * The local ids of the parents of active children here, in id order after
+   * `after`: what a set walks, a page at a time, to find a parent that was
+   * tombstoned without the set being told.
+   */
+  activeChildParentLocalIds(after: string | undefined, limit: number): string[] {
+    if (!this.childItemColumnsPresent) return [];
+    const rows = this.db.query(`
+      SELECT DISTINCT parent_local_item_id AS id FROM items
+      WHERE parent_local_item_id IS NOT NULL AND tombstoned = 0 AND parent_local_item_id > ?
+      ORDER BY parent_local_item_id LIMIT ?
+    `).all(after ?? '', Math.max(1, Math.floor(limit))) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
+  /** This store's tombstoned row for an item (not a Secret's), if it holds one. */
+  tombstonedItemByLocalId(localItemId: string): SourceItemIdentity | undefined {
+    const row = this.db.query(`
+      SELECT family, provider, account_scope, provider_item_id, provider_thread_id,
+        provider_conversation_id, provider_file_id, provider_event_id, local_item_id, source_version
+      FROM items WHERE local_item_id = ? AND tombstoned = 1 AND trust_tier <> 'S5' ORDER BY item_pk LIMIT 1
+    `).get(localItemId) as Pick<ItemRow,
+      'family' | 'provider' | 'account_scope' | 'provider_item_id' | 'provider_thread_id'
+      | 'provider_conversation_id' | 'provider_file_id' | 'provider_event_id' | 'local_item_id' | 'source_version'> | null;
+    return row ? sourceItemFromRow({ ...row, rank: 0 } as ItemRow) : undefined;
+  }
+
   /** Confirm an immutable stored item's current provider scope without rewriting its body or vectors. */
   observeStoredItemOwner(identity: SourceItemIdentity, connectorId: string): void {
     this.db.transaction(() => {
@@ -3154,7 +3420,10 @@ export class LocalConnectorStore {
     } finally {
       // The pictures its chunks carried (and their judgments) go when no
       // other chunk here carries them; inside a caller's transaction, after it.
-      if (!this.db.inTransaction) this.releaseUnreferencedChunkMedia();
+      if (!this.db.inTransaction) {
+        this.releaseUnreferencedChunkMedia();
+        this.flushTombstonedParents();
+      }
     }
   }
 
@@ -3263,7 +3532,11 @@ export class LocalConnectorStore {
     identity: Pick<SourceItemIdentity, 'provider' | 'accountScope' | 'providerItemId' | 'providerConversationId'>,
   ): ConnectorStoreItemCopy | undefined {
     const row = this.db.query(`
-      SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS.join(', ')}
+      SELECT item_pk, trust_tier, ${CONNECTOR_STORE_COPY_ITEM_COLUMNS
+        .map((column) => (this.childItemColumnsPresent || !CONNECTOR_STORE_CHILD_ITEM_COLUMNS.includes(column)
+          ? column
+          : `NULL AS ${column}`))
+        .join(', ')}
       FROM items
       WHERE provider = ? AND account_scope = ? AND normalized_conversation = ? AND provider_item_id = ?
         AND tombstoned = 0
@@ -5046,10 +5319,14 @@ export class LocalConnectorStore {
         i.provider_thread_id, i.provider_conversation_id, i.provider_file_id,
         i.provider_event_id, i.local_item_id, i.source_version, i.title,
         i.mime_type, i.locator_uri, i.content_hash, i.trust_tier,
+        ${this.childItemColumnsPresent
+          ? 'i.parent_local_item_id, i.deferred_locator, i.bytes_available, i.size_bytes,'
+          : 'NULL AS parent_local_item_id, NULL AS deferred_locator, NULL AS bytes_available, NULL AS size_bytes,'}
         (SELECT COUNT(*) FROM chunks c WHERE c.item_pk = i.item_pk) AS stored_chunks
       FROM items i
       WHERE i.tombstoned = 0
         AND LOWER(i.mime_type) <> 'inode/directory'
+        ${this.childItemColumnsPresent ? 'AND (i.bytes_available IS NULL OR i.bytes_available <> 0)' : ''}
         AND i.item_pk > ?
         AND (? IS NULL OR i.account_scope = ?)
         AND (? = 0 OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
@@ -7229,6 +7506,7 @@ export class LocalConnectorStore {
       return await this.syncFromConnectorHeld(connector, options);
     } finally {
       this.releaseUnreferencedChunkMedia();
+      this.flushTombstonedParents();
     }
   }
 
@@ -7911,11 +8189,12 @@ export class LocalConnectorStore {
         provider, family, account_scope, provider_item_id, provider_thread_id, provider_conversation_id,
         provider_file_id, provider_event_id, local_item_id, source_version, title, search_text,
         reactions_json, source_scope_generation, source_scope_revision, source_scope_folder_keys_json,
+        parent_local_item_id, deferred_locator, bytes_available, size_bytes,
         sender_id, sender_label, sender_is_owner, locator_uri, mime_type,
         authored_at, updated_at,
         fetched_at, indexed_at, content_hash, trust_tier, tombstoned, deleted_at, sync_run_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(provider, account_scope, normalized_conversation, provider_item_id) DO UPDATE SET
         provider_thread_id = excluded.provider_thread_id,
         provider_conversation_id = excluded.provider_conversation_id,
@@ -7929,6 +8208,16 @@ export class LocalConnectorStore {
         source_scope_generation = COALESCE(excluded.source_scope_generation, items.source_scope_generation),
         source_scope_revision = COALESCE(excluded.source_scope_revision, items.source_scope_revision),
         source_scope_folder_keys_json = COALESCE(excluded.source_scope_folder_keys_json, items.source_scope_folder_keys_json),
+        parent_local_item_id = COALESCE(excluded.parent_local_item_id, items.parent_local_item_id),
+        -- A locator is bound to the version it was written for: a listing of a new
+        -- version without one clears it, while a fetch of the same version (which
+        -- carries none) leaves it alone.
+        deferred_locator = CASE WHEN excluded.deferred_locator IS NULL AND excluded.source_version IS NOT items.source_version
+          THEN NULL ELSE COALESCE(excluded.deferred_locator, items.deferred_locator) END,
+        bytes_available = CASE WHEN excluded.deferred_locator IS NULL AND excluded.source_version IS NOT items.source_version
+          THEN NULL ELSE COALESCE(excluded.bytes_available, items.bytes_available) END,
+        size_bytes = CASE WHEN excluded.size_bytes IS NULL AND excluded.source_version IS NOT items.source_version
+          THEN NULL ELSE COALESCE(excluded.size_bytes, items.size_bytes) END,
         sender_id = excluded.sender_id,
         sender_label = excluded.sender_label,
         sender_is_owner = excluded.sender_is_owner,
@@ -7960,6 +8249,10 @@ export class LocalConnectorStore {
       sourceScopeGeneration ?? null,
       sourceScopeRevision ?? null,
       sourceScopeFolderKeysJson ?? null,
+      identity.parent?.localItemId ?? null,
+      item.deferredBytes?.locator ?? null,
+      item.deferredBytes === undefined ? null : Number(item.deferredBytes.available),
+      item.deferredBytes?.sizeBytes ?? null,
       sender.senderId ?? null,
       sender.senderLabel ?? null,
       sender.senderIsOwner === undefined ? null : Number(sender.senderIsOwner),
@@ -8153,6 +8446,7 @@ export class LocalConnectorStore {
           `).run(now, now, syncRunId, row.item_pk);
           this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
           this.deleteFtsForItem(row.item_pk);
+          this.noteTombstonedParent(row.item_pk);
           this.rememberItemOwner(
             row.item_pk,
             connectorId,
@@ -8236,6 +8530,7 @@ export class LocalConnectorStore {
           `).run(now, now, syncRunId, row.item_pk);
           this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(row.item_pk);
           this.deleteFtsForItem(row.item_pk);
+          this.noteTombstonedParent(row.item_pk);
         }
         count += rows.length;
       }
@@ -8296,6 +8591,7 @@ export class LocalConnectorStore {
         this.db.query('DELETE FROM chunks WHERE item_pk = ?').run(existing.item_pk);
         this.deleteFtsForItem(existing.item_pk);
         if (tombstoneTrustTier === 'S5') this.keepSecretsLocationOnly(existing.item_pk);
+        else this.noteTombstonedParent(existing.item_pk);
         this.rememberItemOwner(existing.item_pk, connectorId, ownershipKind, syncRunId, now, 'local_write');
         return true;
       }
@@ -13243,8 +13539,12 @@ const CONNECTOR_STORE_COPY_ITEM_COLUMNS = [
   'source_version', 'title', 'search_text', 'reactions_json', 'source_scope_generation',
   'source_scope_revision', 'source_scope_folder_keys_json', 'sender_id', 'sender_label',
   'sender_is_owner', 'locator_uri', 'mime_type', 'authored_at', 'updated_at', 'fetched_at',
-  'content_hash',
+  'content_hash', 'parent_local_item_id', 'deferred_locator', 'bytes_available', 'size_bytes',
 ] as const;
+
+const CONNECTOR_STORE_CHILD_ITEM_COLUMNS: readonly string[] = [
+  'parent_local_item_id', 'deferred_locator', 'bytes_available', 'size_bytes',
+];
 
 /**
  * One row's visibility under the tier ledger. No copy rows at all means a
@@ -14530,6 +14830,7 @@ const CONNECTOR_STORE_OWNED_SCHEMA_OBJECTS = [
   'idx_connector_store_media_judgments_unapplied',
   'item_text_versions',
   'connector_store_item_text_version_capture',
+  'idx_connector_store_items_parent',
 ] as const;
 
 const CONNECTOR_STORE_V13_CHUNK_COLUMNS = [
@@ -14602,6 +14903,14 @@ const CONNECTOR_STORE_V12_ITEM_COLUMNS = [
   'source_scope_folder_keys_json',
 ] as const;
 
+const CONNECTOR_STORE_V15_ITEM_COLUMNS = [
+  ...CONNECTOR_STORE_V12_ITEM_COLUMNS,
+  'parent_local_item_id',
+  'deferred_locator',
+  'bytes_available',
+  'size_bytes',
+] as const;
+
 const CONNECTOR_STORE_ITEM_WRITE_CLAIM_COLUMNS = [
   'item_pk', 'claim_scope', 'claim_authority', 'claim_ordinal', 'claim_holder',
   'claim_generation', 'accepted_at',
@@ -14639,8 +14948,12 @@ function validateCurrentConnectorStoreSchemaBeforeMigration(db: Database): void 
   if (version === 13) {
     validateConnectorStoreV12Schema(db, 'v13', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
   }
-  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+  if (version === 14) {
     validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  }
+  if (version === CONNECTOR_STORE_SQLITE_SCHEMA_VERSION) {
+    validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+    assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   }
 }
 
@@ -14650,7 +14963,8 @@ function validateConnectorStoreV6Schema(db: Database): void {
 }
 
 function validateConnectorStoreSchema(db: Database): void {
-  validateConnectorStoreV12Schema(db, 'v14', CONNECTOR_STORE_V13_CHUNK_COLUMNS);
+  validateConnectorStoreV12Schema(db, 'v15', CONNECTOR_STORE_V13_CHUNK_COLUMNS, CONNECTOR_STORE_V15_ITEM_COLUMNS);
+  assertIndexColumns(db, 'idx_connector_store_items_parent', ['parent_local_item_id'], 'v15');
   assertExactTableColumns(db, 'chunk_media_releases', ['media_sha256', 'media_path'], false, 'v13');
   assertExactTableColumns(db, 'chunk_media_failures', ['media_sha256', 'reason', 'failed_at', 'attempts'], false, 'v13');
   assertExactTableColumns(db, 'image_media_reads', ['item_pk', 'read_at'], false, 'v13');
@@ -14671,8 +14985,9 @@ function validateConnectorStoreV12Schema(
   db: Database,
   versionLabel = 'v12',
   chunkColumns: readonly string[] = CONNECTOR_STORE_REQUIRED_COLUMNS.chunks,
+  itemColumns: readonly string[] = CONNECTOR_STORE_V12_ITEM_COLUMNS,
 ): void {
-  validateConnectorStoreItemSchema(db, CONNECTOR_STORE_V12_ITEM_COLUMNS, versionLabel, chunkColumns);
+  validateConnectorStoreItemSchema(db, itemColumns, versionLabel, chunkColumns);
   assertExactTableColumns(
     db,
     'embedding_models',
@@ -15217,6 +15532,10 @@ interface ConnectorStoreExtractionCandidateRow {
   locator_uri: string | null;
   content_hash: string | null;
   trust_tier: SourceTrustTier;
+  parent_local_item_id: string | null;
+  deferred_locator: string | null;
+  bytes_available: number | null;
+  size_bytes: number | null;
   stored_chunks: number;
 }
 
@@ -15242,6 +15561,10 @@ function extractionCandidateFromRow(
     ...(row.title ? { name: row.title } : {}),
     ...(row.locator_uri ? { locatorUri: row.locator_uri } : {}),
     ...(row.content_hash ? { contentHash: row.content_hash } : {}),
+    ...(row.parent_local_item_id ? { parentLocalItemId: row.parent_local_item_id } : {}),
+    ...(row.deferred_locator ? { deferredLocator: row.deferred_locator } : {}),
+    ...(row.bytes_available === 1 ? { bytesAvailable: true as const } : {}),
+    ...(row.size_bytes !== null && row.size_bytes !== undefined ? { sizeBytes: row.size_bytes } : {}),
   };
 }
 

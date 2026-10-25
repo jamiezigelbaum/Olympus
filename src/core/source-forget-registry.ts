@@ -75,6 +75,9 @@ export interface ForgetContext {
   unreadableTierLedgers?: readonly string[] | undefined;
 }
 
+/** What an account-scope forget needs: where the data root is. */
+export type AccountScopeForgetContext = Pick<ForgetContext, 'env'>;
+
 export interface ForgetOptions {
   dryRun: boolean;
   /**
@@ -103,6 +106,18 @@ export interface ForgetStep {
   repeatBeforeRestart?: true;
   /** Report lines in the style `<path> (private answers: N)`, one per file with something to forget. */
   forget(account: ForgetAccount, context: ForgetContext, options: ForgetOptions): string[];
+  /**
+   * The same step for the rows of named account scopes only, inside corpora
+   * that other accounts share (an archive family's stores hold every archive
+   * of the family). Only a file keyed by account scope has one; a step
+   * without it is not part of an account-scope forget.
+   */
+  forgetAccountScopes?(
+    account: ForgetAccount,
+    accountScopes: readonly string[],
+    context: AccountScopeForgetContext,
+    options: ForgetOptions,
+  ): string[];
 }
 
 export interface KeptSharedFile {
@@ -193,6 +208,15 @@ export const FORGET_STEPS: readonly ForgetStep[] = [
     id: 'file-extraction-jobs',
     file: 'file-extraction-jobs.sqlite',
     modules: ['src/workers/file-extraction/job-store.ts', 'src/workers/file-extraction/job-names.ts'],
+    forgetAccountScopes(account, accountScopes, context, { dryRun }) {
+      // The Secrets claims of a tier ledger stay: the ledger is shared by the other accounts of the corpora.
+      return extractionJobsDbPaths(context.env).flatMap((path) =>
+        line(path, 'extraction rows', forgetExtractionJobs(
+          path,
+          { corpusIds: account.corpus_ids, accountScopes },
+          { dryRun },
+        )));
+    },
     forget(account, context, { dryRun }) {
       // Every ledger this process opened, as the Secrets clearing does.
       const paths = extractionJobsDbPaths(context.env);
@@ -374,6 +398,29 @@ export function runForgetSteps(account: ForgetAccount, context: ForgetContext, o
     if (options.repeatableOnly === true && step.repeatBeforeRestart !== true) continue;
     try {
       lines.push(...step.forget(account, context, options));
+    } catch (error) {
+      throw new ForgetStepError(step, account, error);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Runs the steps that key their rows by account scope, for the named account
+ * scopes only, inside the account's corpora. Same order, failure and retry
+ * behavior as `runForgetSteps`.
+ */
+export function runForgetAccountScopeSteps(
+  account: ForgetAccount,
+  accountScopes: readonly string[],
+  context: AccountScopeForgetContext,
+  options: ForgetOptions,
+): string[] {
+  const lines: string[] = [];
+  for (const step of FORGET_STEPS) {
+    if (step.forgetAccountScopes === undefined) continue;
+    try {
+      lines.push(...step.forgetAccountScopes(account, accountScopes, context, options));
     } catch (error) {
       throw new ForgetStepError(step, account, error);
     }

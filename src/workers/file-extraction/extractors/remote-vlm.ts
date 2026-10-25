@@ -54,6 +54,7 @@ import {
   renderPdfFirstPageForVision,
 } from './pdf-render.ts';
 import { missingBytesFailure } from './text.ts';
+import { DOCUMENT_READER_MAX_INPUT_BYTES } from './input-limits.ts';
 import { assertNotZkapiDaemonEndpoint } from '../../../core/zkapi-consult-settings.ts';
 import { detectSecretFindingKinds } from '../../classification/engine.ts';
 
@@ -125,7 +126,7 @@ export function createRemoteVlmExtractor(options: RemoteVlmExtractorOptions = {}
   return {
     kind,
     version,
-    needsBytes: true,
+    input: { kind: 'bytes', maxInputBytes: DOCUMENT_READER_MAX_INPUT_BYTES },
     egress: 'approved_remote',
     ...(options.client?.approvedRemoteDestination
       ? { approvedRemoteDestination: options.client.approvedRemoteDestination }

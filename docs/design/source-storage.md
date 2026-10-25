@@ -98,7 +98,9 @@ Inside the data root:
     stores/<tier>.sqlite         one per trust tier, sidecars beside it
                                  (archive imports: stores/<family>.<tier>.sqlite)
     raw/                         spools, watch snapshots, capture cursors,
-                                 X's reconcile state (raw/x-reconcile.sqlite)
+                                 X's reconcile state (raw/x-reconcile.sqlite),
+                                 imported archives' media bindings
+                                 (raw/archive-media-bindings.sqlite)
     session/                     Telegram's pairing session (telegram.session and its -journal);
                                  WhatsApp's session.db lives with its bridge state in raw/whatsapp/
     settings/                    reserved; unused (see below)

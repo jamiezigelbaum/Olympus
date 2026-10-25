@@ -2183,7 +2183,7 @@ describe('LocalConnectorStore reactions', () => {
     await store.syncFromConnector(createChatConnector([reactedChatItem(THUMBS_UP_BY_TWO)]), { fetchContent: true });
     store.close();
 
-    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(14);
+    expect(connectorStoreQualificationFingerprint(dbPath).schemaVersion).toBe(15);
 
     const db = new Database(dbPath, { readonly: true });
     try {
@@ -2217,6 +2217,11 @@ describe('LocalConnectorStore reactions', () => {
     // serve would take the answer path down for a purely additive column.
     const rewind = new Database(dbPath);
     try {
+      rewind.exec('DROP INDEX IF EXISTS idx_connector_store_items_parent;');
+      rewind.exec('ALTER TABLE items DROP COLUMN parent_local_item_id;');
+      rewind.exec('ALTER TABLE items DROP COLUMN deferred_locator;');
+      rewind.exec('ALTER TABLE items DROP COLUMN bytes_available;');
+      rewind.exec('ALTER TABLE items DROP COLUMN size_bytes;');
       rewind.exec('ALTER TABLE items DROP COLUMN source_scope_folder_keys_json;');
       rewind.exec('ALTER TABLE items DROP COLUMN source_scope_revision;');
       rewind.exec('ALTER TABLE items DROP COLUMN source_scope_generation;');

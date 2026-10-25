@@ -113,10 +113,17 @@ export function createReleaseTierCheck(
           const state = states.get(tierLedgerIdentityKey(identity));
           if (!state) continue;
           const { record, copies } = state;
-          const tiers = [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
+          // An input of the names layer (a child citation's parent label) is
+          // judged on the item's names alone: its content tier never limits an
+          // answer that carries only its names.
+          const namesOnly = inputs[index]!.layer === 'names';
+          const tiers = namesOnly
+            ? [record.metadataTier, record.targetMetadataTier]
+            : [record.metadataTier, record.contentTier, record.targetMetadataTier, record.targetContentTier];
           verdicts[index] = {
             tier: tiers.includes('secrets') ? 'secret' : tiers.includes('secure') ? 'private' : 'public_or_personal',
-            gone: record.routed && !copies.some((copy) => copy.state === 'current'),
+            gone: record.routed && !copies.some((copy) => copy.state === 'current'
+              && (!namesOnly || copy.layers === 'both' || copy.layers === 'metadata')),
           };
         }
       }

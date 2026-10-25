@@ -54,6 +54,7 @@ import {
   type ReleaseDecision,
   type StructuredEvidenceFact,
 } from '../../core/opsec.ts';
+import { parentLabelReleaseInputs, type ParentLabelResolver } from '../../core/parent-label.ts';
 import { answerReleaseWithheldReason, recordReleaseManifest, type ReleaseCheck, type ReleaseConstraints, type ReleaseInput } from '../../core/release-manifest.ts';
 import { secretLocationCoverageNote } from '../../core/secret-location-note.ts';
 import { canonicalSourceCorpusId } from '../../core/source-corpus-registry.ts';
@@ -129,6 +130,12 @@ export interface AnalystAnswerLanes {
   visibilityGate?: SourceIndexVisibilityGate;
   secretLocations?: (query: string, searchedCorpora: readonly string[]) => readonly SecretLocationNote[];
   classificationCoverage?: (searchedCorpora: readonly string[]) => readonly ClassificationCoverageNote[];
+  /**
+   * A child item's parent, for the label its citation carries. Names only,
+   * judged per candidate at pack time; the parent's names become a release
+   * dependency of the answer (core/parent-label.ts).
+   */
+  parentLabels?: ParentLabelResolver;
   /**
    * Registered corpora this request leaves without an adapter on purpose: the
    * owner's read scope is off for them, or the request's own scope excludes
@@ -435,6 +442,7 @@ export function createAnalystSourceIndexAnswerHandler(
           ...(activeLanes.visibilityGate ? { visibilityGate: activeLanes.visibilityGate } : {}),
           ...(activeLanes.secretLocations ? { secretLocations: activeLanes.secretLocations } : {}),
           ...(activeLanes.classificationCoverage ? { classificationCoverage: activeLanes.classificationCoverage } : {}),
+          ...(activeLanes.parentLabels ? { parentLabels: activeLanes.parentLabels } : {}),
         }));
       const initialAttempt = request.selected_items?.length
         ? 'selected'
@@ -780,7 +788,7 @@ export function createAnalystSourceIndexAnswerHandler(
  * The analysed pack's items, each with its account and whether it was Private.
  */
 function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
-  return detail.pack.candidates.map((candidate, index) => {
+  const items = detail.pack.candidates.map((candidate, index): ReleaseInput => {
     const item = candidate.provenance.sourceItem;
     return {
       corpusId: detail.candidateCorpusIds[index] ?? '',
@@ -791,6 +799,10 @@ function releaseInputs(detail: EvidencePackBuildDetail): ReleaseInput[] {
       privateAtAnswer: isSecureSensitivity(candidate),
     };
   });
+  // A parent label put the parent's names in front of the model: they are as
+  // much a part of what the answer read as the items themselves. If they stop
+  // being authorized, the whole answer goes, not just the label.
+  return [...items, ...parentLabelReleaseInputs(detail.parentLabelDependencies ?? [])];
 }
 
 /**
@@ -2408,6 +2420,7 @@ function evidenceFromCitations(
       ...(cite?.sourceLabel ? { source_label: cite.sourceLabel } : {}),
       ...(cite?.conversationLabel ? { conversation_label: cite.conversationLabel } : {}),
       ...(cite?.authorLabel ? { author_label: cite.authorLabel } : {}),
+      ...(cite?.parentLabel ? { parent_label: cite.parentLabel } : {}),
       ...(cite?.uri ? { uri: cite.uri } : {}),
       ...(cite?.authoredAt ? { authored_at: cite.authoredAt } : {}),
       ...(cite?.updatedAt ? { updated_at: cite.updatedAt } : {}),
@@ -2462,6 +2475,7 @@ const RELEASED_EVIDENCE_LABEL_FIELDS = [
   'source_label',
   'conversation_label',
   'author_label',
+  'parent_label',
   'uri',
 ] as const;
 
@@ -2509,6 +2523,9 @@ function appendUnreadableMatchedEvidence(
         : {}),
       ...(candidate.provenance.citation?.authorLabel
         ? { author_label: candidate.provenance.citation.authorLabel }
+        : {}),
+      ...(candidate.provenance.citation?.parentLabel
+        ? { parent_label: candidate.provenance.citation.parentLabel }
         : {}),
       ...(candidate.provenance.citation?.uri ? { uri: candidate.provenance.citation.uri } : {}),
       ...(candidate.provenance.citation?.authoredAt ? { authored_at: candidate.provenance.citation.authoredAt } : {}),

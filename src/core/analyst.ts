@@ -499,6 +499,8 @@ function formatCompactCandidate(candidate: EvidenceCandidate, number: number, ve
   if (author) details.push(`from: ${compactSourceText(author)}`);
   const conversation = citation?.conversationLabel?.trim();
   if (conversation) details.push(`conversation: ${compactSourceText(conversation)}`);
+  const parent = citation?.parentLabel?.trim();
+  if (parent) details.push(`part of: ${compactSourceText(parent)}`);
   const lines = [`[${number}] ${title}`];
   if (details.length > 0) lines.push(details.join(' · '));
   if (versionNote) lines.push(versionNote);
@@ -568,6 +570,7 @@ export const ANALYST_EVIDENCE_SCAFFOLDING_LABELS: readonly string[] = [
   '"source_label":',
   '"conversation_label":',
   '"author_label":',
+  '"parent_label":',
   '"authored_at":',
   '"updated_at":',
   '"locator":',
@@ -745,14 +748,16 @@ function versionDateLabels(dates: readonly string[]): Map<string, string> {
 
 function candidateCitationMetadata(
   candidate: EvidenceCandidate,
-): { conversation?: string; author?: string } | undefined {
+): { conversation?: string; author?: string; parent?: string } | undefined {
   const citation = candidate.provenance.citation;
   const conversation = citation?.conversationLabel?.trim();
   const author = citation?.authorLabel?.trim();
-  if (!conversation && !author) return undefined;
+  const parent = citation?.parentLabel?.trim();
+  if (!conversation && !author && !parent) return undefined;
   return {
     ...(conversation ? { conversation } : {}),
     ...(author ? { author } : {}),
+    ...(parent ? { parent } : {}),
   };
 }
 
@@ -766,6 +771,7 @@ function candidateLocalPrivateProvenance(
     ['source_label', citation.sourceLabel],
     ['conversation_label', citation.conversationLabel],
     ['author_label', citation.authorLabel],
+    ['parent_label', citation.parentLabel],
     ['locator', citation.uri],
     ['authored_at', citation.authoredAt],
     ['updated_at', citation.updatedAt],

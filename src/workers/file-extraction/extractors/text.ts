@@ -95,6 +95,7 @@ import { stillImageFormatForMimeType } from '../../../core/still-image-formats.t
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { DOCUMENT_READER_MAX_INPUT_BYTES } from './input-limits.ts';
 
 export const TEXT_EXTRACTOR_KIND = 'local_text';
 export const TEXT_EXTRACTOR_VERSION = '2026-05-22';
@@ -204,7 +205,7 @@ export function createTextExtractor(options: TextExtractorOptions = {}): Extract
   return {
     kind,
     version,
-    needsBytes: true,
+    input: { kind: 'bytes', maxInputBytes: DOCUMENT_READER_MAX_INPUT_BYTES },
     // Pictures read for media search are a new reading of an image: an image
     // read before (names only, or OCR text) is queued once more under this.
     // Only for a format this machine can prepare: one it cannot keeps the
@@ -451,7 +452,7 @@ export function textLaneAccepts(mimeType: string | undefined): boolean {
 }
 
 /**
- * The runner promises bytes to any extractor declaring `needsBytes`. This is
+ * The runner promises bytes to any extractor declaring a bytes input. This is
  * the invariant-violation branch, which the production input type could not
  * even express because its `bytes` field was required.
  */

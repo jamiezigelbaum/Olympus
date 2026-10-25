@@ -32,6 +32,7 @@ import { detectSecretFindingKinds } from '../classification/engine.ts';
 import { classifyContentTier, heldUntilJudged, maxTier, namesDecidedByOwner, type TierDecision } from '../classification/tier-classifier.ts';
 import { copyServingLayer, placementIsRaise, trustDomainRank, type TierCopy, type TierPlacementPlan } from '../classification/tier-ledger.ts';
 import type { ConnectorStoreOwnershipKind, LocalConnectorStore } from '../connector-store/index.ts';
+import { parentNamesContext } from '../connector-store/parent-context.ts';
 import { secretFencedSniffer, type ConnectorStoreTierClassification } from '../connector-store/tier-placement.ts';
 import type { MediaJudgment } from '../source-index/media-judge.ts';
 import { settleSecretsCopies, settleUntrackedSecretsCopy } from '../connector-store/secrets-disposition.ts';
@@ -179,6 +180,7 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
       // The lane's hold, or the one the listing-time decision recorded.
       const holdUntilJudged = tierClassification?.holdContentUntilJudged === true
         || set.holdsContentUntilJudged() || heldUntilJudged(record.reasons);
+      const parentContext = tierClassification?.sniffer ? parentNamesContext(set, identity) : undefined;
       const content = classifyContentTier(
         {
           text: request.text,
@@ -191,6 +193,8 @@ export function createTieredStoreExtractionSink(options: TieredStoreExtractionSi
           mimeType: plan.item.mimeType,
           ...(imageJudgment ? { imageJudgment: { verdict: imageJudgment.verdict, ...(imageJudgment.category ? { category: imageJudgment.category } : {}) } } : {}),
           ...(holdUntilJudged ? { holdUntilJudged: true } : {}),
+          // A child is judged on its own text, with its parent's names as context for the model.
+          ...(parentContext ? { parentContext } : {}),
           subject: identity,
         },
         {

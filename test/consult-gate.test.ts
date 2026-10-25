@@ -47,6 +47,7 @@ const FULL_PROVENANCE = {
     providerEventId: 'leaf-provider-event-id',
     localItemId: 'leaf-local-item-id',
     sourceVersion: 'leaf-source-version',
+    parent: { providerItemId: 'leaf-parent-provider-item-id', localItemId: 'leaf-parent-local-item-id' },
   },
   chunk: {
     sourceItem: {
@@ -60,6 +61,7 @@ const FULL_PROVENANCE = {
       providerEventId: 'leaf-chunk-event-id',
       localItemId: 'leaf-chunk-local-item-id',
       sourceVersion: 'leaf-chunk-source-version',
+      parent: { providerItemId: 'leaf-chunk-parent-provider-item-id', localItemId: 'leaf-chunk-parent-local-item-id' },
     },
     chunkId: 'leaf-chunk-id',
     chunkIndex: 7001,
@@ -78,6 +80,7 @@ const FULL_PROVENANCE = {
     uri: 'leaf-citation-uri',
     authoredAt: 'leaf-authored-at',
     updatedAt: 'leaf-updated-at',
+    parentLabel: 'leaf-parent-label',
   },
 } as const;
 

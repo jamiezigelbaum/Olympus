@@ -116,7 +116,7 @@ function textExtractor(overrides: Partial<Extractor> = {}): Extractor {
   return {
     kind: FAKE_KIND,
     version: FAKE_VERSION,
-    needsBytes: true,
+    input: { kind: 'bytes', maxInputBytes: Number.MAX_SAFE_INTEGER },
     egress: 'local',
     accepts: () => true,
     async extract(): Promise<ExtractorOutput> {

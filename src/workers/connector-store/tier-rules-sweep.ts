@@ -41,7 +41,7 @@ import {
   type TierLedgerRecord,
 } from '../classification/tier-ledger.ts';
 import type { SourceClassificationSignals } from '../../core/contracts.ts';
-import type { ConnectorStoreItemCopy } from './local-index.ts';
+import { storedCopyOf, storedSignals } from './stored-names.ts';
 import { leastPrivateDomain } from './tier-override-settle.ts';
 import { settleRoutedSecrets } from './tier-rejudge.ts';
 import type { TieredStoreSet } from './tiered-store-set.ts';
@@ -251,28 +251,6 @@ function raiseRoutedItem(
   }
   set.ledger.recordRoutedPlacement(identity, decision, set.placementFor(decision));
   return 'raised';
-}
-
-/**
- * The item's stored copy for its names: the copy serving them, else any other
- * (a raise in flight hides its sources but leaves them in their stores).
- */
-function storedCopyOf(
-  set: TieredStoreSet,
-  identity: TierLedgerIdentity,
-  copies: readonly TierCopy[],
-): ConnectorStoreItemCopy | undefined {
-  const names = copyServingLayer(copies.filter((copy) => copy.state === 'current'), 'metadata');
-  const ordered = [
-    ...(names ? [names] : []),
-    ...copies.filter((copy) => copy !== names).sort((left, right) => Number(right.state === 'current') - Number(left.state === 'current')),
-  ];
-  for (const copy of ordered) {
-    const domain = set.domainForCorpus(copy.corpusId);
-    const exported = domain ? set.store(domain)?.exportItemCopy(identity) : undefined;
-    if (exported) return exported;
-  }
-  return undefined;
 }
 
 /** A provider's answer to "which of your items carry this label". */
@@ -510,32 +488,6 @@ function ruleKey(rule: OwnerTierRule): string {
     .update(JSON.stringify([rule.id, rule.source ?? '', rule.match.kind, rule.match.value, rule.tier, rule.strength]))
     .digest('hex')
     .slice(0, 24);
-}
-
-/** The classifier's input from a stored copy: what the store keeps of the item's names. */
-function storedSignals(copy: ConnectorStoreItemCopy): SourceClassificationSignals {
-  const text = (value: string | number | null | undefined) => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
-  const title = text(copy.columns['title']);
-  const locator = text(copy.columns['locator_uri']);
-  const path = locator?.startsWith('/') ? locator : undefined;
-  const sender = text(copy.columns['sender_label']) ?? text(copy.columns['sender_id']);
-  let folderKeys: string[] = [];
-  const keysJson = text(copy.columns['source_scope_folder_keys_json']);
-  if (keysJson) {
-    try {
-      const parsed = JSON.parse(keysJson) as unknown;
-      if (Array.isArray(parsed)) folderKeys = parsed.filter((key): key is string => typeof key === 'string');
-    } catch {
-      folderKeys = [];
-    }
-  }
-  if (copy.identity.providerConversationId) folderKeys.push(copy.identity.providerConversationId);
-  return {
-    ...(title ? { title } : {}),
-    ...(path ? { path } : {}),
-    ...(folderKeys.length > 0 ? { folderKeys } : {}),
-    ...(sender ? { sender } : {}),
-  };
 }
 
 function readState(raw: string | undefined): SweepState {

@@ -35,7 +35,7 @@ import {
   type StoredSnifferVerdict,
   type TierSnifferStore,
 } from './sniffer-store.ts';
-import { hasCredentialUrl, type TierSniffer, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
+import { hasCredentialUrl, PARENT_CONTEXT_MARKER, splitParentContext, type TierSniffer, type TierSnifferRequest, type TierSnifferVerdict } from './tier-classifier.ts';
 
 /** The sniffer may resolve a flagged item to Personal only at or above this confidence. */
 export const SNIFFER_PERSONAL_MIN_CONFIDENCE = 0.9;
@@ -416,6 +416,38 @@ export function snifferMaterialCarriesSecret(material: string): boolean {
   return hasCredentialUrl(material) || detectSecretFindingKinds(material).length > 0;
 }
 
+/**
+ * Whether a parent's names may go to the model as context for judging a
+ * child: no secret finding and nothing shaped like an instruction. Screened on
+ * their own, so what they carry never decides the child's tier.
+ */
+export function snifferParentContextAllowed(context: string): boolean {
+  return !snifferMaterialCarriesSecret(context) && snifferInjectionRule(context) === undefined;
+}
+
+/**
+ * The item's own words of a question's material: what every screen that can
+ * decide the item's tier (a secret finding, an instruction) reads. The parent
+ * context line, if any, is judged separately (`snifferMaterialForModel`).
+ */
+export function snifferOwnMaterial(material: string): string {
+  return splitParentContext(material).own;
+}
+
+/**
+ * The material as the model may read it: the item's own words, and the parent
+ * context line only if it passes its own screen. A context that does not is
+ * left out, and the item is judged on itself.
+ */
+export function snifferMaterialForModel(material: string): string {
+  const { context } = splitParentContext(material);
+  if (context === undefined || snifferParentContextAllowed(context)) return material;
+  const at = material.indexOf(PARENT_CONTEXT_MARKER);
+  const from = at + PARENT_CONTEXT_MARKER.length;
+  const lineEnd = material.indexOf('\n', from);
+  return material.slice(0, at) + (lineEnd < 0 ? '' : material.slice(lineEnd));
+}
+
 // --- Synchronous, cache-backed sniffer ------------------------------------------------
 
 /**
@@ -438,14 +470,18 @@ export class CachedTierSniffer implements TierSniffer {
   }
 
   judge(request: TierSnifferRequest): TierSnifferVerdict {
-    const material = request.material?.trim();
-    if (!material) return { verdict: 'undecided' };
+    const asked = request.material?.trim();
+    if (!asked) return { verdict: 'undecided' };
+    // The item's own words decide: a parent's names carried as context are
+    // screened on their own and left out if they fail, never charged to the item.
+    const material = snifferMaterialForModel(asked);
+    const own = snifferOwnMaterial(material);
     // A deterministic refusal is terminal, using the existing Secrets disposition.
     // The model still returns Personal or Private only.
-    if (snifferMaterialCarriesSecret(material)) return { verdict: 'decided', tier: 'secrets', code: 'secret_refused' };
+    if (snifferMaterialCarriesSecret(own)) return { verdict: 'decided', tier: 'secrets', code: 'secret_refused' };
     // Material that tries to instruct the model is Private at once, and is
     // neither queued nor sent.
-    const injectionRule = snifferInjectionRule(material);
+    const injectionRule = snifferInjectionRule(own);
     if (injectionRule) {
       return { verdict: 'decided', tier: 'secure', code: `injection:${injectionRule}:0.00` };
     }
