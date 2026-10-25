@@ -1,7 +1,10 @@
 /**
  * The AI reviewer (layer 4 of the release-testing design, olympus-ops docs/ops/release-testing-design.md): a model that does not build
  * Olympus looks at the pictures a run took and says what a careful new user would trip over that no rule catches: words they would not
- * understand, two parts of a screen that disagree, a problem with no way to its fix, controls that do not line up, a stray font.
+ * understand, two parts of a screen that disagree, a problem with no way to its fix, a step that leaves them unsure what happened.
+ * How a screen looks (a stray font, controls out of line, clipped, overlapping or faded text) is the layout rules' (layout-rules.ts):
+ * the reviewer's first qualification (2026-10-25) found 0 of 15 fixed-width fonts and 6 of 39 layout bugs, which the page measures
+ * exactly.
  *
  * It reads a finished run's report folder: every screen as it was before the visual mask (review/), the dashboard screenshots, and
  * each journey's and crawl's pictures with the step that led to them. Every finding names the picture it is about and comes back with
@@ -23,12 +26,10 @@ export const REVIEW_KINDS = {
   words: 'Words a new user would not understand: developer terms, error codes, internal names, snake_case, placeholder text such as "undefined" or "NaN"',
   contradiction: 'Two parts of the picture disagree about the same thing (a state, a count, a status), or a number that cannot be right',
   'no-fix': 'A problem is shown with no button or link beside it that fixes it or says exactly what is wrong',
-  layout: 'Controls in one row that do not line up, text cut off or overlapping other text, something running off the edge',
-  font: 'Text in a typeface that does not match the rest of the page, such as a fixed-width or fallback font',
-  contrast: 'Text or a control too faint to read against its background',
   outcome: 'After a step, the page does not show what a person who took that step would expect, or leaves them unsure what happened',
 } as const;
 export type ReviewKind = keyof typeof REVIEW_KINDS;
+export const isReviewKind = (kind: unknown): kind is ReviewKind => typeof kind === 'string' && Object.hasOwn(REVIEW_KINDS, kind);
 const KINDS = Object.keys(REVIEW_KINDS) as ReviewKind[];
 
 /** The product's own words: a new user meets them on purpose, so they are never a "words" finding by themselves. */
@@ -278,6 +279,26 @@ export interface ReviewerConfig {
   minConfidence: Confidence;
   /** What a qualification (reviewer-qualify.ts) must show before `status` may say qualified. */
   qualification: QualificationThresholds;
+  /**
+   * Real problems in the product a person has already confirmed and handed off, each by a phrase a finding about it uses. A
+   * qualification counts a finding about one neither for nor against the reviewer (the pictures are of the real product, so a correct
+   * report of a real problem is not a false alarm); it lists them apart. Remove an entry once its fix is on main.
+   */
+  knownIssues?: KnownIssue[];
+}
+
+export interface KnownIssue {
+  /** Matched, ignoring case, against the finding's what and where. */
+  phrase: string;
+  kinds: ReviewKind[];
+  /** Where it is handed off, or why it stays. */
+  note: string;
+}
+
+/** The known issue a finding is about, if any. */
+export function knownIssueOf(finding: Pick<ReviewFinding, 'kind' | 'what' | 'where'>, known: readonly KnownIssue[] = []): KnownIssue | undefined {
+  const text = `${finding.what} ${finding.where ?? ''}`.toLowerCase();
+  return known.find((issue) => issue.kinds.includes(finding.kind) && text.includes(issue.phrase.toLowerCase()));
 }
 
 export interface QualificationThresholds {

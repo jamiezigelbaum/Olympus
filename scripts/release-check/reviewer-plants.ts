@@ -1,17 +1,26 @@
 /**
- * Planted bugs for qualifying the AI reviewer (reviewer.ts). A qualification run (`run.ts --reviewer-plants`) takes a few dashboard
+ * Planted bugs for qualifying the AI reviewer (reviewer.ts) and the layout rules (layout-rules.ts). A qualification run (`run.ts --reviewer-plants`) takes a few dashboard
  * screens as they are, then again with one bug planted in the page each time, in the test browser only: the product is never
  * changed, and a release candidate's own run never plants anything. reviewer-qualify.ts then asks the reviewer about every picture
  * and measures how often it finds each kind of bug and how often it reports one that is not there.
  *
- * `heldOut` bugs are never used while the reviewer's instructions are being written or tuned; they measure it. The first two are the
- * ones only a human caught in the first baselines (a fixed-width Linux font and misaligned buttons, 2026-10-23).
+ * `heldOut` bugs are never used while the reviewer's instructions are being written or tuned; they measure it. The first two plants
+ * are the bugs only a human caught in the first baselines (a fixed-width Linux font and misaligned buttons, 2026-10-23).
+ *
+ * A bug's kind says who must find it: a reviewer kind (words, contradiction, no-fix) the reviewer, a layout rule the page measurement.
+ * The look bugs moved to the layout rules after the reviewer's first qualification (2026-10-25); the rules were written after the
+ * plants, so for them every plant is a test, not a held-out one, and the pictures with nothing planted hold them to the real pages.
  */
+import type { LayoutFinding, LayoutRule } from './layout-rules.ts';
 import type { ReviewKind } from './reviewer.ts';
+
+export type PlantKind = ReviewKind | LayoutRule;
 
 export interface Plant {
   id: string;
-  kind: ReviewKind;
+  kind: PlantKind;
+  /** Other reviewer kinds a correct report of this bug may carry, where the bug is plainly both (an error code is also a problem with no fix). */
+  also?: ReviewKind[];
   heldOut: boolean;
   /** What the bug is, for the qualification record (never shown to the reviewer). */
   what: string;
@@ -36,7 +45,7 @@ const plant = (body: string): string => `(() => { ${HELPERS}\n${body}\n})()`;
 
 export const PLANTS: readonly Plant[] = [
   {
-    id: 'font-monospace', kind: 'font', heldOut: true,
+    id: 'font-monospace', kind: 'monospace-text', heldOut: false,
     what: 'every piece of text in a fixed-width font, as when the system font is missing',
     script: plant(String.raw`
       if (!hasContent()) return false;
@@ -46,7 +55,7 @@ export const PLANTS: readonly Plant[] = [
       return mark(style);`),
   },
   {
-    id: 'button-misaligned', kind: 'layout', heldOut: true,
+    id: 'button-misaligned', kind: 'misaligned-controls', heldOut: false,
     what: 'one button of a column of like buttons pushed off line',
     script: plant(String.raw`
       const buttons = Array.from(main.querySelectorAll('button')).filter(visible);
@@ -59,7 +68,7 @@ export const PLANTS: readonly Plant[] = [
       return mark(target);`),
   },
   {
-    id: 'text-overlap', kind: 'layout', heldOut: true,
+    id: 'text-overlap', kind: 'overlapping-text', heldOut: false,
     what: 'a status line moved up over the line above it',
     script: plant(String.raw`
       const line = statusLine();
@@ -82,7 +91,7 @@ export const PLANTS: readonly Plant[] = [
       return mark(other);`),
   },
   {
-    id: 'label-clipped', kind: 'layout', heldOut: false,
+    id: 'label-clipped', kind: 'clipped-text', heldOut: false,
     what: 'a heading cut off part-way through a word',
     script: plant(String.raw`
       const heading = leaves().find((el) => /^(H1|H2|H3|STRONG|B|SUMMARY)$/.test(el.tagName) && own(el).length >= 8);
@@ -92,7 +101,8 @@ export const PLANTS: readonly Plant[] = [
       return mark(heading);`),
   },
   {
-    id: 'developer-words', kind: 'words', heldOut: false,
+    // also no-fix: the code reads as an error shown with no way to fix it, and the first qualification reported it so (2026-10-25).
+    id: 'developer-words', kind: 'words', also: ['no-fix'], heldOut: false,
     what: 'a status line replaced by an internal error code',
     script: plant(String.raw`
       const line = statusLine();
@@ -123,7 +133,7 @@ export const PLANTS: readonly Plant[] = [
       return mark(card);`),
   },
   {
-    id: 'faint-text', kind: 'contrast', heldOut: false,
+    id: 'faint-text', kind: 'faint-text', heldOut: false,
     what: 'a block of text faded until it is hard to read',
     script: plant(String.raw`
       const line = statusLine() || leaves().find((el) => el.tagName === 'P');
@@ -151,6 +161,8 @@ export interface PlantedPicture {
   /** Relative to the plants folder. */
   picture: string;
   plant: string | null;
-  kind: ReviewKind | null;
+  kind: PlantKind | null;
   heldOut: boolean;
+  /** What the layout rules found on the page as it was pictured. */
+  layout?: LayoutFinding[];
 }
