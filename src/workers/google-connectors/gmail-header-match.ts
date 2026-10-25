@@ -43,12 +43,28 @@ function readable(value: string | undefined): string {
 
 const same = (a: string | undefined, b: string | undefined): boolean => readable(a) === readable(b);
 
-export function gmailHeaderMatch(client: () => Promise<GmailApiClient | undefined>): MboxGmailMatch {
+export interface GmailHeaderMatchOptions {
+  /**
+   * Whether the mailbox the token reads (its address) may be the account the
+   * import joined. Asked once per matcher, before the first search: a token of
+   * another account (a reconnect that landed since) is never searched, so a
+   * message delivered to both cannot take the other account's id.
+   */
+  sameAccount?: (address: string) => boolean;
+}
+
+export function gmailHeaderMatch(client: () => Promise<GmailApiClient | undefined>, options: GmailHeaderMatchOptions = {}): MboxGmailMatch {
+  let checked: boolean | undefined;
   return async (headers: MboxMessageHeaders) => {
     const wanted = bareMessageId(headers.messageId);
     if (!wanted || !SEARCHABLE.test(wanted)) return 'none';
     const api = await client();
     if (!api) return 'none';
+    if (options.sameAccount && checked === undefined) {
+      const address = api.getProfile ? (await api.getProfile()).emailAddress : '';
+      checked = address !== '' && options.sameAccount(address);
+    }
+    if (checked === false) return 'none';
     const listed = await api.listMessages({ maxResults: MAX_CANDIDATES + 1, query: `rfc822msgid:${wanted}` });
     const candidates = listed.messages.map((message) => message.id).filter(Boolean);
     // More than can be told apart: none is the message.

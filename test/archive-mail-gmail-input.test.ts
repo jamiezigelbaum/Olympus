@@ -169,6 +169,19 @@ describe('a message without Takeout\'s id is matched by asking Gmail', () => {
     expect(await gmailHeaderMatch(async () => undefined)(headersOf(live))).toBe('none');
   });
 
+  test('a token of another mailbox is never searched; the mailbox is asked once', async () => {
+    const requests: string[] = [];
+    const client = { ...api([apiMessage(live)], requests), async getProfile() { requests.push('profile'); return { emailAddress: 'other@example.test' }; } };
+    const match = gmailHeaderMatch(async () => client, { sameAccount: (address) => address === OWNER_ADDRESS });
+    expect(await match(headersOf(live))).toBe('none');
+    expect(await match(headersOf(live))).toBe('none');
+    expect(requests).toEqual(['profile']);
+    const owners: string[] = [];
+    const own = { ...api([apiMessage(live)], owners), async getProfile() { owners.push('profile'); return { emailAddress: OWNER_ADDRESS }; } };
+    expect(await gmailHeaderMatch(async () => own, { sameAccount: (address) => address === OWNER_ADDRESS })(headersOf(live))).toEqual({ id: live.id });
+    expect(owners[0]).toBe('profile');
+  });
+
   test('end to end: the export\'s copy joins the live message instead of standing beside it', async () => {
     const h = gmailArchiveHarness(cleanups);
     h.connectLive(OWNER_LABEL);

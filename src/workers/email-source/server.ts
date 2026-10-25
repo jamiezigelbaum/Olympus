@@ -453,6 +453,8 @@ import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.t
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import { gmailArchiveTarget } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
+import type { GmailApiClient } from '../google-connectors/gmail.ts';
+import { readSourceRegistry } from '../../core/source-registry.ts';
 import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
 import { archiveSourceTargets } from '../archive-import/source-targets.ts';
 import { createLaneTieredStoreSet } from '../connector-store/tiered-store-set.ts';
@@ -465,7 +467,7 @@ import {
   type SourceAccountGuard,
   type SourceAccountGuardOptions,
 } from '../source-account-guard.ts';
-import { dropboxOwnRootFolderIds, dropboxOwnsOneOfFolders, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
+import { compareProviderAccounts, dropboxOwnRootFolderIds, dropboxOwnsOneOfFolders, googleAccountIdFromAddress, type AccountBoundProvider } from '../../core/provider-account-identity.ts';
 import type { AccountBoundSourceId } from '../../core/source-account-binding.ts';
 import { GoogleRequestBudgetError } from '../google-connectors/request-budget.ts';
 import { defaultGmailRequestBudgetStatePath } from '../google-connectors/gmail.ts';
@@ -2835,6 +2837,7 @@ export async function main(): Promise<void> {
         } catch {
           // No current approval: no owner rules apply, as live reads nothing without one.
         }
+        let matchClient: Promise<GmailApiClient> | undefined;
         const key = JSON.stringify(ownerRules);
         if (gmailArchiveSet?.key !== key) {
           gmailArchiveSet = {
@@ -2859,11 +2862,19 @@ export async function main(): Promise<void> {
           match: gmailHeaderMatch(async () => {
             if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return undefined;
             fileSourceScopeAuthority.assertCurrentMail(scopeRef);
-            return new GoogleGmailSourceConnector({
+            // One client for the pass: one credential session, every request under the day budget.
+            matchClient ??= new GoogleGmailSourceConnector({
               credentialHandle: handle.handle,
               ...(handle.accountRole ? { account: handle.accountRole } : {}),
               requestBudget: gmailRequestBudget,
             }).apiClientForTooling();
+            return matchClient;
+          }, {
+            // The token's mailbox must not be another account than the one the registry names for Gmail.
+            sameAccount: (address) => {
+              const named = readSourceRegistry(process.env).accounts.find((entry) => entry.source_id === GMAIL_SOURCE_ID)?.provider_account_hash;
+              return named === undefined || compareProviderAccounts(named, googleAccountIdFromAddress(address)) !== 'different';
+            },
           }),
         };
       },

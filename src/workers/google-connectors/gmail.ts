@@ -225,6 +225,8 @@ export interface GmailApiClient {
   getMessage(id: string, options?: GmailGetMessageOptions): Promise<GmailMessage>;
   /** One attachment's bytes (base64url), by the part's attachment id. */
   getAttachment?(messageId: string, attachmentId: string): Promise<{ data: string; size?: number }>;
+  /** The mailbox the token reads: its address. */
+  getProfile?(): Promise<{ emailAddress: string }>;
   /** Scope-picker tooling only; the traversal never lists labels. */
   listLabels?(): Promise<GmailLabel[]>;
   getLabel?(id: string): Promise<GmailLabel>;
@@ -922,6 +924,14 @@ function budgetedGmailApiClient(
       budget.reserve(provenance);
       return inner.getMessage(id, options);
     },
+    ...(inner.getProfile
+      ? {
+        getProfile() {
+          budget.reserve(provenance);
+          return inner.getProfile!();
+        },
+      }
+      : {}),
     ...(inner.getAttachment
       ? {
         getAttachment(messageId: string, attachmentId: string) {
@@ -1115,6 +1125,11 @@ class RestGmailApiClient implements GmailApiClient {
     }
     const json = await this.getJson(`users/me/messages/${encodeURIComponent(id)}?${params.toString()}`);
     return json as GmailMessage;
+  }
+
+  async getProfile(): Promise<{ emailAddress: string }> {
+    const record = asRecord(await this.getJson('users/me/profile'), 'Gmail profile');
+    return { emailAddress: stringValue(record.emailAddress) };
   }
 
   async getAttachment(messageId: string, attachmentId: string): Promise<{ data: string; size?: number }> {
