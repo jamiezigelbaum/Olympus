@@ -37,6 +37,7 @@ import { TierSnifferStore } from './sniffer-store.ts';
 import { classifyItemTiers, type ItemTierOverride, type OwnerTierRule } from './tier-classifier.ts';
 import { TierLedger, tierLedgerIdentityKey, type TierLedgerIdentity } from './tier-ledger.ts';
 import { tierLedgerPathForStore, tierSnifferPathForLedger } from './tier-ledger-path.ts';
+import { findTierSetLedger } from './tier-set-binding.ts';
 import { TIER_SET_BINDING_CONNECTOR_ID, TIER_SET_BINDING_RUN_ID } from '../connector-store/local-index.ts';
 import { forgetSecretInSideStores } from '../connector-store/secrets-disposition.ts';
 import { TIER_KEY_TRUST_DOMAIN } from '../connector-store/tiered-store-set.ts';
@@ -159,8 +160,14 @@ function matchStore(dbPath: string, needle: string): StoreMatch[] {
     try {
       const binding = db.query('SELECT cursor FROM sync_runs WHERE sync_run_id = ? AND connector_id = ?')
         .get(TIER_SET_BINDING_RUN_ID, TIER_SET_BINDING_CONNECTOR_ID) as { cursor: string | null } | null;
-      const parsed = binding?.cursor ? JSON.parse(binding.cursor) as { ledgerPath?: unknown } : undefined;
-      if (typeof parsed?.ledgerPath === 'string') boundLedgerPath = parsed.ledgerPath;
+      const parsed = binding?.cursor ? JSON.parse(binding.cursor) as { ledgerId?: unknown; ledgerPath?: unknown } : undefined;
+      if (typeof parsed?.ledgerPath === 'string') {
+        // Where the bound ledger is now: found by its identity, since the
+        // recorded path is only where it was when the store was bound.
+        boundLedgerPath = (typeof parsed.ledgerId === 'string'
+          ? findTierSetLedger(dbPath, { ledgerId: parsed.ledgerId, ledgerPath: parsed.ledgerPath })
+          : undefined) ?? parsed.ledgerPath;
+      }
     } catch {
       // No readable binding: the store's own ledger is the candidate.
     }

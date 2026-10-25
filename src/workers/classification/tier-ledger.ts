@@ -1560,13 +1560,43 @@ export class TierLedger {
   /**
    * This ledger file's identity, minted once when it was created (schema 2).
    * A store that received routed copies records it (the tier-set binding),
-   * so a reader that finds a different ledger — or none — at that path knows
-   * the visibility authority was lost and fails closed.
+   * so a reader that finds a different ledger — or none — where it looks
+   * knows the visibility authority was lost and fails closed.
    */
   ledgerId(): string {
     const row = this.db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value: string } | null;
     if (!row) throw new Error('Tier ledger has no identity.');
     return row.value;
+  }
+
+  /**
+   * The identity of the ledger file at a path, read without opening it as a
+   * ledger: nothing is created, migrated or written there. Undefined when
+   * the file is not there, is no ledger yet (no identity minted) or cannot
+   * be read. A store bound to a set checks a candidate with this before it
+   * opens anything (classification/tier-set-binding.ts).
+   *
+   * The connection is writable but query-only: a read-only connection cannot
+   * open a WAL database that has no -wal file beside it (macOS's SQLite
+   * refuses), which is how a ledger looks after a clean close and a rename.
+   * A ledger that cannot be opened for writing is read read-only.
+   */
+  static readLedgerId(dbPath: string): string | undefined {
+    if (dbPath === ':memory:' || !existsSync(dbPath)) return undefined;
+    for (const mode of [{ readwrite: true, create: false }, { readonly: true, create: false }] as const) {
+      let db: Database | undefined;
+      try {
+        db = new Database(dbPath, mode);
+        db.exec('PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;');
+        const row = db.query(`SELECT value FROM tier_ledger_meta WHERE key = 'ledger_id'`).get() as { value?: unknown } | null;
+        return typeof row?.value === 'string' && row.value !== '' ? row.value : undefined;
+      } catch {
+        // Try the next way of opening it.
+      } finally {
+        if (db) closeSqliteStore(db, { checkpoint: false });
+      }
+    }
+    return undefined;
   }
 
   /** A small named value kept beside the ledger (a background pass's resume point); never item content. */

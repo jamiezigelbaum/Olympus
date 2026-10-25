@@ -71,6 +71,8 @@ export const DEFAULT_TIER_SNIFFER_INTERVAL_MS = 1_000;
 export interface TierSnifferServiceStore {
   readonly dbPath: string;
   tierSetBinding?(): { ledgerPath: string } | undefined;
+  /** Where the bound set ledger sits now (found by its identity); a store without it is read by the recorded path. */
+  tierSetLedgerPath?(): string | undefined;
   tierLedgerPathInUse?: LocalConnectorStore['tierLedgerPathInUse'];
   exportItemCopy?: LocalConnectorStore['exportItemCopy'];
   tombstoneCopy?: LocalConnectorStore['tombstoneCopy'];
@@ -547,8 +549,8 @@ export class TierSnifferService {
     for (const store of this.options.stores()) {
       if (store.dbPath === ':memory:') continue;
       try {
-        const bound = store.tierSetBinding?.();
-        if (bound && bound.ledgerPath !== ':memory:' && existsSync(bound.ledgerPath)) paths.add(bound.ledgerPath);
+        const bound = store.tierSetLedgerPath ? store.tierSetLedgerPath() : store.tierSetBinding?.()?.ledgerPath;
+        if (bound && bound !== ':memory:' && existsSync(bound)) paths.add(bound);
       } catch {
         // An unreadable binding fails closed elsewhere; the sniffer skips it.
       }

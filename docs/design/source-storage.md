@@ -612,6 +612,19 @@ with the 4b reader). A step-3 build refuses schema 2 and 3 alike, as designed.
 A build from before the registry (step 2) does not read it; that it would make
 empty stores at the old places has not been tried.
 
+A store bound to a tiered set finds the set ledger by its identity, so the
+move rewrites nothing inside a store. The binding row keeps the ledger's id
+and the absolute path it had when the store was bound; the id is what binds
+and the path is a hint. The store takes the first of these whose id matches
+and refuses the store, as before, when none does: the recorded path; the set
+ledger the layout keeps beside the account folder's `secure_local` store
+(`stores/secure_local.tier-ledger.sqlite`), where the renamed ledger now sits;
+and the recorded file name beside the store, for a set moved as a whole
+(`classification/tier-set-binding.ts`). Rows written before this change keep
+working before, during and after a move. The migration therefore renames the
+stores and the ledger and opens no store to repoint a row, which would write
+to a store that may be busy or damaged.
+
 No re-embed and no rescan: stores, cursors (`sync_runs.cursor`), tiers,
 embeddings and watch snapshots move as files. Embedding changes stay
 owner-gated and this plan makes none.

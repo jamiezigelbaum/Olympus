@@ -82,6 +82,7 @@ import {
 } from '../classification/tier-ledger.ts';
 import { classifyContentTier, heldUntilJudged, isImageMediaType, namesDecidedByOwner, ownerRuleMatches, type OwnerTierRule } from '../classification/tier-classifier.ts';
 import { screenedSecretLocator } from '../classification/secret-locations.ts';
+import { findTierSetLedger } from '../classification/tier-set-binding.ts';
 import {
   decideItemTiers,
   placeInExistingStore,
@@ -2752,21 +2753,7 @@ export class LocalConnectorStore {
     // ledger, and when it is missing or replaced, fail closed: a superseded
     // copy cannot be told apart from a legacy one without it.
     const binding = this.tierSetBinding();
-    if (binding) {
-      const ledger = this.tierLedgerHandle?.dbPath === binding.ledgerPath
-        ? this.tierLedgerHandle
-        : this.boundTierLedger(binding.ledgerPath);
-      let ledgerId: string | undefined;
-      try {
-        ledgerId = ledger.ledgerId();
-      } catch {
-        ledgerId = undefined;
-      }
-      if (ledgerId !== binding.ledgerId) {
-        throw new TierLedgerUnavailableError(this.corpusId);
-      }
-      return ledger;
-    }
+    if (binding) return this.boundTierLedger(binding);
     if (this.tierLedgerHandle) return this.tierLedgerHandle;
     if (this.tierLedgerDisabled === true) return undefined;
     const path = tierLedgerPathForStore(this.dbPath);
@@ -2774,18 +2761,50 @@ export class LocalConnectorStore {
     return this.tierLedger();
   }
 
-  /** The set ledger a bound store must use, opened by path; missing fails closed. */
-  private boundTierLedger(ledgerPath: string): TierLedger {
-    if (this.boundLedgerHandle?.dbPath === ledgerPath) return this.boundLedgerHandle;
-    if (ledgerPath !== ':memory:' && !existsSync(ledgerPath)) throw new TierLedgerUnavailableError(this.corpusId);
+  /**
+   * The set ledger a bound store must use, found by the identity it recorded
+   * (classification/tier-set-binding.ts), not by where that ledger was: the
+   * ledger the set handed this store when it is the bound one, else the
+   * ledger found for the binding. A different ledger, or none, fails closed.
+   */
+  private boundTierLedger(binding: { ledgerId: string; ledgerPath: string }): TierLedger {
+    const holdsBoundId = (ledger: TierLedger): boolean => {
+      try {
+        return ledger.ledgerId() === binding.ledgerId;
+      } catch {
+        return false;
+      }
+    };
+    if (this.tierLedgerHandle && holdsBoundId(this.tierLedgerHandle)) return this.tierLedgerHandle;
+    if (this.boundLedgerHandle && holdsBoundId(this.boundLedgerHandle)) return this.boundLedgerHandle;
+    const found = findTierSetLedger(this.dbPath, binding);
+    if (found === undefined) throw new TierLedgerUnavailableError(this.corpusId);
     this.boundLedgerHandle?.close();
-    this.boundLedgerHandle = new TierLedger({ dbPath: ledgerPath, now: this.now });
+    this.boundLedgerHandle = new TierLedger({ dbPath: found, now: this.now });
     return this.boundLedgerHandle;
   }
 
   /**
+   * Where the set ledger this store is bound to sits now, found by its
+   * identity; undefined when the store is bound to none or the ledger cannot
+   * be found. Creates nothing.
+   */
+  tierSetLedgerPath(): string | undefined {
+    const binding = this.tierSetBinding();
+    if (!binding) return undefined;
+    try {
+      if (this.tierLedgerHandle?.ledgerId() === binding.ledgerId) return this.tierLedgerHandle.dbPath;
+    } catch {
+      // A handle that cannot answer is not the bound ledger.
+    }
+    return findTierSetLedger(this.dbPath, binding);
+  }
+
+  /**
    * The tiered store set this store belongs to, once a set has routed a copy
-   * into it: the set ledger's identity and path. Absent: every row is legacy.
+   * into it: the set ledger's identity, and the path it had then (a hint to
+   * where to look first; the identity is what binds). Absent: every row is
+   * legacy.
    */
   tierSetBinding(): { ledgerId: string; ledgerPath: string } | undefined {
     const row = this.db.query(`
