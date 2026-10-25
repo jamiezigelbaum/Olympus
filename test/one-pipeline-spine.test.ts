@@ -299,6 +299,33 @@ describe('which account an import joins', () => {
     expect(h.ids()).toEqual(['a']);
   });
 
+  test('the owner\'s yes is about the account it was given for: bound to another account before the first pass, the import writes nothing, stops and asks again', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive('account-a');
+    h.evidence.current = { kind: 'none' };
+    const key = h.writeExport('none.mbox', [rec('a', 1, 'a'), rec('b', 1, 'b')]);
+    expect(await h.dashboard.approve({ key })).toMatchObject({ ok: true, status: 'confirm_account' });
+    const confirmed = await h.dashboard.approve({ key, confirmAccount: true });
+    if (!confirmed.ok || confirmed.status !== 'started') throw new Error('expected a start after the owner said yes');
+    expect(h.runtime.state.get(confirmed.archive_id)?.target?.confirmed_account).toBeDefined();
+
+    // The account guard binds the empty source to another account before the first pass.
+    expect(recordProviderAccount({ sourceId: FIXTURE_SOURCE_ID }, 'account-b', h.env, { historyEmpty: true })).toBe('recorded');
+    const stopped = await h.pull(confirmed.archive_id);
+    expect(stopped.record).toMatchObject({ status: 'stopped', stop: { code: 'account_changed' } });
+    expect(h.ids()).toEqual([]);
+    expect(h.rows()).toEqual([]);
+
+    // Choosing the same export again asks the question again; a yes binds it to the account that is there.
+    expect(await h.dashboard.approve({ key })).toMatchObject({ ok: true, status: 'confirm_account', source: { id: FIXTURE_SOURCE_ID } });
+    expect(h.runtime.state.get(confirmed.archive_id)?.status).toBe('stopped');
+    const again = await h.dashboard.approve({ key, confirmAccount: true });
+    expect(again).toMatchObject({ ok: true, status: 'started', archive_id: confirmed.archive_id });
+    const done = await h.importAll(confirmed.archive_id);
+    expect(done.record?.status).toBe('imported');
+    expect(h.ids()).toEqual(['a', 'b']);
+  });
+
   test('keeping an export apart, or one of a different account, stays under Archives with its own Remove', async () => {
     const h = onePipelineHarness(cleanups);
     h.connectLive('someone-elses-account');

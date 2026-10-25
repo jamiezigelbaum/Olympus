@@ -38,6 +38,7 @@ import type { ArchiveImportRuntime } from './runtime.ts';
 import {
   commitArchiveImport,
   prepareArchiveImport,
+  reconfirmArchiveTarget,
   resolveArchiveTarget,
   type ArchiveImportStart,
   type PreparedArchiveImport,
@@ -477,6 +478,33 @@ export function createArchiveImportDashboard(options: ArchiveImportDashboardOpti
       return refusal(code, ARCHIVE_APPROVE_COPY[code as keyof typeof ARCHIVE_APPROVE_COPY] ?? ARCHIVE_APPROVE_COPY.unreadable);
     }
     if (prepared.kind === 'already_imported') {
+      const archive = prepared.archive;
+      // An import stopped because the account the owner confirmed is not the one the source holds now asks
+      // again; the yes binds it to the account that is there, and it goes on from where it stopped.
+      if (archive.target?.owner_confirmed === true && archive.status === 'stopped' && archive.stop?.code === 'account_changed') {
+        if (answer.confirmAccount !== true) {
+          const source = options.runtime.targets.forSource(archive.target.source_id);
+          return {
+            ok: true,
+            status: 'confirm_account',
+            name,
+            source: { id: source?.cardId ?? archive.target.source_id, label: named(source?.label ?? archive.target.source_id) },
+          };
+        }
+        let again: ArchiveImportRecord | undefined;
+        try {
+          again = await reconfirmArchiveTarget(state, archive, { targets: options.runtime.targets });
+        } catch (error) {
+          if (error instanceof SourceStorageUnavailableError) return refusal('source_unavailable', ARCHIVE_APPROVE_COPY.source_unavailable);
+          throw error;
+        }
+        answered();
+        if (again) {
+          refresh();
+          return { ok: true, status: 'started', archive_id: again.archive_id, name };
+        }
+        return { ok: true, status: 'already_imported', archive_id: archive.archive_id, name, archive_name: named(archive.label) };
+      }
       answered();
       // An import of a source the owner stopped is picked up where it stopped.
       const resumed = resumeStopped(prepared.archive);

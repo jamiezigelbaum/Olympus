@@ -39,7 +39,7 @@ import {
   type ArchiveImportFinding,
 } from '../../core/archive-formats.ts';
 import { ScopeRoot, ScopeSafeError } from '../../core/scope-safe-fs.ts';
-import { SourceStorageUnavailableError, resolveImportAccount } from '../../core/source-storage.ts';
+import { SourceStorageUnavailableError, importAccountIdentity, resolveImportAccount, sameImportAccount } from '../../core/source-storage.ts';
 import type { ConnectorStoreSyncOptions, ConnectorStoreSyncSummary } from '../connector-store/index.ts';
 import {
   TIER_DOMAIN_ORDER,
@@ -356,6 +356,12 @@ export async function pullArchiveImport(options: ArchiveImportPullOptions): Prom
       sink: (): PassSink | ArchiveImportStop => {
         let account;
         try {
+          // The owner's yes was about one account. If the source holds another by now (the account guard may
+          // bind other stores over an empty slot), it does not carry over: the import stops, and asks again.
+          if (record.target!.owner_confirmed === true
+            && !sameImportAccount(record.target!.confirmed_account, importAccountIdentity(record.target!.source_id, options.state.env))) {
+            return { code: 'account_changed', message: 'The account this source holds now is not the one you said this export belongs to.', at: now().toISOString() };
+          }
           const resolved = resolveImportAccount(record.target!.source_id, record.target!.import_account_id, {
             env: options.state.env,
             ...(record.target!.owner_confirmed === true ? { ownerConfirmed: true } : {}),

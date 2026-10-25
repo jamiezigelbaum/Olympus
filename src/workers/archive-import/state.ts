@@ -103,6 +103,11 @@ export interface ArchiveImportTarget {
    * The owner confirmed that the export is the account's own, where it could not be proved.
    */
   owner_confirmed?: true;
+  /**
+   * Which account that confirmation was about (`importAccountIdentity`), checked at every pass:
+   * if the source holds another account by then, the import stops and the owner is asked again.
+   */
+  confirmed_account?: string;
 }
 
 /**

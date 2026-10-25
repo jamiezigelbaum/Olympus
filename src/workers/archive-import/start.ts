@@ -27,7 +27,7 @@ import {
 } from '../../core/archive-formats.ts';
 import type { LayoutEnv } from '../../core/olympus-layout.ts';
 import { ScopeRoot, ScopeSafeError, joinRelative } from '../../core/scope-safe-fs.ts';
-import { resolveImportAccount } from '../../core/source-storage.ts';
+import { importAccountIdentity, resolveImportAccount } from '../../core/source-storage.ts';
 import {
   archiveFileSha256,
   archiveManifestSha256,
@@ -212,11 +212,16 @@ export async function resolveArchiveTarget(
   if (options.keepApart === true) return { kind: 'apart', reason: 'owner_choice' };
   if (source.evidence.kind === 'archives') return { kind: 'apart', reason: 'not_this_source' };
   const importAccountId = source.evidence.kind === 'account' ? source.evidence.importAccountId : undefined;
-  const resolve = () => resolveImportAccount(source.sourceId, importAccountId, {
-    env: options.env,
-    ...(options.ownerConfirmed === true ? { ownerConfirmed: true } : {}),
-  });
-  const resolved = target.exclusive ? await target.exclusive(async () => resolve()) : resolve();
+  // The account the owner's yes is about is read in the same step that resolved it, under the same lock.
+  const resolve = () => {
+    const resolution = resolveImportAccount(source.sourceId, importAccountId, {
+      env: options.env,
+      ...(options.ownerConfirmed === true ? { ownerConfirmed: true } : {}),
+    });
+    const identity = options.ownerConfirmed === true && resolution.account ? importAccountIdentity(source.sourceId, options.env) : undefined;
+    return { resolution, identity };
+  };
+  const { resolution: resolved, identity } = target.exclusive ? await target.exclusive(async () => resolve()) : resolve();
   if (resolved.match === 'different') return { kind: 'apart', reason: 'different_account' };
   if (resolved.match === 'unproven' || !resolved.account) return { kind: 'unproven', sourceId: source.sourceId };
   const joined: ArchiveImportTarget = {
@@ -224,9 +229,44 @@ export async function resolveArchiveTarget(
     slot: resolved.account.slot,
     ...(importAccountId !== undefined ? { import_account_id: importAccountId } : {}),
     ...(options.ownerConfirmed === true ? { owner_confirmed: true as const } : {}),
+    ...(identity !== undefined ? { confirmed_account: identity } : {}),
   };
   prepared.record.target = joined;
   return { kind: 'joined', target: joined };
+}
+
+/**
+ * An import the owner confirmed stopped because the source holds another account
+ * now (`account_changed`): the owner is asked again, and a yes about the account
+ * the source holds today puts the import back to importing from where it stopped,
+ * bound to that account. Resolved inside the source's exclusive runner like the
+ * first answer. Returns the resumed record, or undefined when the export does not
+ * join the account that is there (the import stays stopped).
+ */
+export async function reconfirmArchiveTarget(
+  state: ArchiveImportStateStore,
+  archive: ArchiveImportRecord,
+  options: { targets: ArchiveSourceTargets },
+): Promise<ArchiveImportRecord | undefined> {
+  const joined = archive.target;
+  if (!joined) return undefined;
+  const target = options.targets.forSource(joined.source_id);
+  if (!target) return undefined;
+  const settle = (): string | undefined => {
+    const resolved = resolveImportAccount(joined.source_id, joined.import_account_id, { env: state.env, ownerConfirmed: true });
+    if ((resolved.match !== 'same' && resolved.match !== 'new') || !resolved.account) return undefined;
+    return importAccountIdentity(joined.source_id, state.env);
+  };
+  const identity = target.exclusive ? await target.exclusive(async () => settle()) : settle();
+  if (identity === undefined) return undefined;
+  const record = state.update(archive.archive_id, (entry) => {
+    if (entry.status !== 'stopped' || entry.stop?.code !== 'account_changed' || !entry.target) return false;
+    entry.target.owner_confirmed = true;
+    entry.target.confirmed_account = identity;
+    entry.status = 'importing';
+    delete entry.stop;
+  });
+  return record?.status === 'importing' ? record : undefined;
 }
 
 /**
