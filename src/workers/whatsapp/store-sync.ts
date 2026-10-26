@@ -213,7 +213,7 @@ function spoolPositionOf(cursor: string): string | undefined {
 /** The byte offset a committed cursor stands at, when it carries one (not inside an over-long record). */
 function byteOffsetOf(cursor: string | undefined): number | undefined {
   if (cursor === undefined) return undefined;
-  const found = /@(\d+)$/u.exec(spoolPositionOf(cursor) ?? '');
+  const found = /@(\d+)(?:~r\d+)?$/u.exec(spoolPositionOf(cursor) ?? '');
   return found ? Number(found[1]) : undefined;
 }
 
@@ -470,20 +470,23 @@ export function clearWhatsAppSpoolSecrets(options: {
       continue;
     }
     const start = same ? known.lines : 0;
+    // Where this scan stops is fixed before it starts: the lines the file holds now (a whole file) or the cursor's.
+    // A line appended while it runs is past that boundary, so it is owed to the next pull, never certified unread.
+    const scanned = end === ALL_LINES
+      ? terminatedLinesEnd(path)
+      : { lines: end, offset: options.throughOffset ?? offsetAfterLines(path, end) };
+    if (scanned === undefined || scanned.offset === undefined) continue;
     try {
-      const cleared = redact({
-        from: `${file}:${start}`,
-        through: `${file}:${end === ALL_LINES ? Number.MAX_SAFE_INTEGER : end}`,
-      }, judge);
+      const cleared = redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge);
       if (cleared.recordsRedacted + cleared.recordsBlanked > 0) rewritten.add(file);
       result = addCaptureSpoolRedactions(result, cleared);
     } catch (error) {
       failure = error;
       break;
     }
-    // Recorded as the file is now, after its own rewrite: the identity (its first line may have changed) and the
-    // digest of the bytes that end where clearing reached.
-    const entry = clearedFileNow(path, end, end === ALL_LINES ? undefined : options.throughOffset);
+    // Recorded at the boundary scanned, as the file is after its own rewrite (its first line may have changed): the
+    // size is the one before the scan, so anything written since is owed.
+    const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
     if (entry) next[file] = entry;
     else delete next[file];
   }
@@ -532,18 +535,17 @@ const ALL_LINES = -1;
 const CLEARED_FILES_KEY = `${WHATSAPP_SPOOL_REDACTION_STATE_KEY}:cleared_files`;
 
 /**
- * A file's cleared record as the file is now: through `lines` lines at
- * `offset` (`ALL_LINES`: every terminated line, counted now), never past what
- * was cleared.
+ * A file's cleared record at the boundary that was scanned (`lines` lines,
+ * ending at `offset`), with its identity and the digest there as the file is
+ * now. Never recounted: a boundary is what a scan reached, not what the file
+ * holds by the time it is recorded.
  */
-function clearedFileNow(path: string, lines: number, offset: number | undefined, size?: number): ClearedFile | undefined {
+function clearedFileNow(path: string, lines: number, offset: number, size: number): ClearedFile | undefined {
   const identity = spoolFileIdentity(path);
   if (!identity) return undefined;
-  const reached = lines === ALL_LINES ? terminatedLinesEnd(path) : { lines, offset: offset ?? offsetAfterLines(path, lines) };
-  if (reached === undefined || reached.offset === undefined) return undefined;
-  const boundary = spoolBoundaryDigest(path, reached.offset);
+  const boundary = spoolBoundaryDigest(path, offset);
   if (boundary === undefined) return undefined;
-  return { identity: identity.identity, lines: reached.lines, offset: reached.offset, boundary, size: size ?? identity.size };
+  return { identity: identity.identity, lines, offset, boundary, size };
 }
 
 function refreshIndex(spoolDir: string, files: ReadonlySet<string>): void {

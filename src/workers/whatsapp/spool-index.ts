@@ -175,16 +175,66 @@ export class WhatsAppSpoolIndex {
     const known = this.db.query('SELECT name, identity, indexed_to, boundary FROM files').all() as
       Array<{ name: string; identity: string; indexed_to: number; boundary: string }>;
     const replaced: string[] = [];
+    const gone: string[] = [];
     for (const { name, identity, indexed_to: indexedTo, boundary } of known) {
       const path = join(spoolDir, name);
       const now = spoolFileIdentity(path);
       // The same file, holding the same bytes up to where indexing reached: it was only appended to.
       if (now !== undefined && now.identity === identity && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary)) continue;
-      this.forgetFile(name);
       if (now !== undefined) replaced.push(name);
+      else gone.push(name);
     }
-    // The files that are there but no longer the ones indexed: a listing reads them again from their start.
-    return replaced.sort();
+    replaced.sort();
+    // Dropping a replaced file's records and owing the listing a read of it from its start are one write: the
+    // obligation outlives a pass that fails before its cursor commits, and is cleared only when a cursor that
+    // carries it comes back (`clearReplay`).
+    this.db.transaction(() => {
+      for (const name of gone) this.forgetFile(name);
+      for (const name of replaced) this.oweReplay(name);
+    })();
+    return replaced;
+  }
+
+  /**
+   * A file is no longer the one read: its records go, and the listing owes a
+   * read of it from its start, in one write (joining an enclosing transaction).
+   */
+  oweReplay(file: string): void {
+    this.db.transaction(() => {
+      this.forgetFile(file);
+      const owed = this.replayObligation();
+      const epoch = this.metaNumber('replay_epoch') + 1;
+      this.writeMeta('replay_epoch', String(epoch));
+      this.writeMeta('replay', JSON.stringify({ file: owed !== undefined && owed.file < file ? owed.file : file, epoch }));
+    })();
+  }
+
+  /** The read again a replaced file is owed: the listing goes back to `file`, and cursors it hands out carry `epoch`. */
+  replayObligation(): { file: string; epoch: number } | undefined {
+    const row = this.db.query("SELECT value FROM meta WHERE key = 'replay'").get() as { value: string } | null;
+    if (!row) return undefined;
+    try {
+      const parsed = JSON.parse(row.value) as { file: string; epoch: number };
+      return typeof parsed.file === 'string' && Number.isSafeInteger(parsed.epoch) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** A cursor carrying `epoch` came back: the read again it was owed is committed. */
+  clearReplay(epoch: number): void {
+    const owed = this.replayObligation();
+    if (owed !== undefined && epoch >= owed.epoch) this.db.query("DELETE FROM meta WHERE key = 'replay'").run();
+  }
+
+  private metaNumber(key: string): number {
+    const row = this.db.query('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | null;
+    const value = row ? Number(row.value) : 0;
+    return Number.isSafeInteger(value) ? value : 0;
+  }
+
+  private writeMeta(key: string, value: string): void {
+    this.db.query('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, value);
   }
 
   /** Where indexing reached in a file, with the file's identity and the digest that ends there. */
@@ -225,6 +275,7 @@ export class WhatsAppSpoolIndex {
 
   /** A file was replaced or is gone: what was indexed of it is dropped, and it is indexed again from its start. */
   forgetFile(file: string): void {
+    // Joins an enclosing transaction (reconcile's) when there is one.
     this.db.transaction(() => {
       this.db.query('DELETE FROM messages WHERE file = ?').run(file);
       this.db.query('DELETE FROM reactions WHERE file = ?').run(file);

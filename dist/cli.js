@@ -74676,16 +74676,58 @@ class WhatsAppSpoolIndex {
   reconcile(spoolDir) {
     const known = this.db.query("SELECT name, identity, indexed_to, boundary FROM files").all();
     const replaced = [];
+    const gone = [];
     for (const { name, identity: identity2, indexed_to: indexedTo, boundary } of known) {
       const path = join61(spoolDir, name);
       const now = spoolFileIdentity(path);
       if (now !== undefined && now.identity === identity2 && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary))
         continue;
-      this.forgetFile(name);
       if (now !== undefined)
         replaced.push(name);
+      else
+        gone.push(name);
     }
-    return replaced.sort();
+    replaced.sort();
+    this.db.transaction(() => {
+      for (const name of gone)
+        this.forgetFile(name);
+      for (const name of replaced)
+        this.oweReplay(name);
+    })();
+    return replaced;
+  }
+  oweReplay(file) {
+    this.db.transaction(() => {
+      this.forgetFile(file);
+      const owed = this.replayObligation();
+      const epoch = this.metaNumber("replay_epoch") + 1;
+      this.writeMeta("replay_epoch", String(epoch));
+      this.writeMeta("replay", JSON.stringify({ file: owed !== undefined && owed.file < file ? owed.file : file, epoch }));
+    })();
+  }
+  replayObligation() {
+    const row = this.db.query("SELECT value FROM meta WHERE key = 'replay'").get();
+    if (!row)
+      return;
+    try {
+      const parsed = JSON.parse(row.value);
+      return typeof parsed.file === "string" && Number.isSafeInteger(parsed.epoch) ? parsed : undefined;
+    } catch {
+      return;
+    }
+  }
+  clearReplay(epoch) {
+    const owed = this.replayObligation();
+    if (owed !== undefined && epoch >= owed.epoch)
+      this.db.query("DELETE FROM meta WHERE key = 'replay'").run();
+  }
+  metaNumber(key2) {
+    const row = this.db.query("SELECT value FROM meta WHERE key = ?").get(key2);
+    const value = row ? Number(row.value) : 0;
+    return Number.isSafeInteger(value) ? value : 0;
+  }
+  writeMeta(key2, value) {
+    this.db.query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key2, value);
   }
   noteFile(spoolDir, name, indexedTo) {
     const path = join61(spoolDir, name);
@@ -75390,16 +75432,27 @@ async function* liveRecords(spoolDir, options) {
   const ledger = WhatsAppMatchLedger.open(spoolDir);
   const pass = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index, ledger };
   try {
-    const replaced = index ? index.reconcile(spoolDir) : [];
-    const earliest = replaced[0];
-    if (position !== undefined && earliest !== undefined && earliest <= position.file) {
-      pass.findings.cursorsRecovered += 1;
-      position = { file: earliest, line: 0, offset: 0 };
+    if (index)
+      index.reconcile(spoolDir);
+    const owed = index?.replayObligation();
+    let epoch = position?.epoch;
+    if (owed !== undefined) {
+      if (epoch !== undefined && epoch >= owed.epoch) {
+        index.clearReplay(owed.epoch);
+      } else {
+        if (position !== undefined && owed.file <= position.file) {
+          pass.findings.cursorsRecovered += 1;
+          position = { file: owed.file, line: 0, offset: 0 };
+        }
+        epoch = owed.epoch;
+      }
     }
+    if (epoch !== undefined)
+      pass.epoch = epoch;
     position = resolveStart(spoolDir, position, pass);
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
-      yield { records: [], ...position ? { nextCursor: cursorFromPosition(position) } : {}, done: false };
+      yield { records: [], ...position ? { nextCursor: cursorFromPosition(position, pass.epoch) } : {}, done: false };
       return;
     }
     for (;; ) {
@@ -75407,7 +75460,7 @@ async function* liveRecords(spoolDir, options) {
       position = page2.position;
       yield {
         records: pageRecords(spoolDir, page2, pass).map((record) => aliased(record, ledger)),
-        ...position === undefined ? {} : { nextCursor: cursorFromPosition(position) },
+        ...position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.epoch) },
         done: page2.exhausted
       };
       if (page2.exhausted)
@@ -75433,7 +75486,12 @@ function resolveStart(spoolDir, start, pass) {
   }
   const recovered = () => {
     pass.findings.cursorsRecovered += 1;
-    pass.index?.forgetFile(start.file);
+    if (pass.index) {
+      pass.index.oweReplay(start.file);
+      const owed = pass.index.replayObligation();
+      if (owed)
+        pass.epoch = owed.epoch;
+    }
     return { file: start.file, line: 0, offset: 0 };
   };
   if (start.offset === undefined) {
@@ -75769,10 +75827,10 @@ function parseSpoolLine(line) {
     ...secretRedacted ? { secretRedacted } : {}
   };
 }
-function cursorFromPosition(position) {
+function cursorFromPosition(position, epoch = position.epoch) {
   if (position.offset === undefined)
     return `${position.file}:${position.line}`;
-  return `${position.file}:${position.line}@${position.offset}${position.skipping ? "s" : ""}`;
+  return `${position.file}:${position.line}@${position.offset}${position.skipping ? "s" : ""}${epoch !== undefined ? `~r${epoch}` : ""}`;
 }
 function positionFromCursor(cursor) {
   const text2 = cursor?.trim();
@@ -75780,7 +75838,13 @@ function positionFromCursor(cursor) {
     return;
   const found = CURSOR2.exec(text2);
   if (found) {
-    return { file: found[1], line: Number(found[2]), offset: Number(found[3]), ...found[4] === "s" ? { skipping: true } : {} };
+    return {
+      file: found[1],
+      line: Number(found[2]),
+      offset: Number(found[3]),
+      ...found[4] === "s" ? { skipping: true } : {},
+      ...found[5] !== undefined ? { epoch: Number(found[5]) } : {}
+    };
   }
   const legacy = LEGACY_CURSOR.exec(text2);
   if (legacy)
@@ -76098,7 +76162,7 @@ var init_live_connector = __esm(() => {
   CONNECTOR_ID2 = WHATSAPP_LIVE_CONNECTOR_ID;
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;
-  CURSOR2 = /^(.+):(\d+)@(\d+)(s?)$/u;
+  CURSOR2 = /^(.+):(\d+)@(\d+)(s?)(?:~r(\d+))?$/u;
   LEGACY_CURSOR = /^(.+):(\d+)$/u;
 });
 
@@ -76129,7 +76193,7 @@ function spoolPositionOf(cursor) {
 function byteOffsetOf(cursor) {
   if (cursor === undefined)
     return;
-  const found = /@(\d+)$/u.exec(spoolPositionOf(cursor) ?? "");
+  const found = /@(\d+)(?:~r\d+)?$/u.exec(spoolPositionOf(cursor) ?? "");
   return found ? Number(found[1]) : undefined;
 }
 function lineCursorOf(cursor) {
@@ -76276,11 +76340,11 @@ function clearWhatsAppSpoolSecrets(options) {
       continue;
     }
     const start = same ? known.lines : 0;
+    const scanned = end === ALL_LINES ? terminatedLinesEnd(path) : { lines: end, offset: options.throughOffset ?? offsetAfterLines(path, end) };
+    if (scanned === undefined || scanned.offset === undefined)
+      continue;
     try {
-      const cleared = redact({
-        from: `${file}:${start}`,
-        through: `${file}:${end === ALL_LINES ? Number.MAX_SAFE_INTEGER : end}`
-      }, judge2);
+      const cleared = redact({ from: `${file}:${start}`, through: `${file}:${scanned.lines}` }, judge2);
       if (cleared.recordsRedacted + cleared.recordsBlanked > 0)
         rewritten.add(file);
       result = addCaptureSpoolRedactions(result, cleared);
@@ -76288,7 +76352,7 @@ function clearWhatsAppSpoolSecrets(options) {
       failure = error;
       break;
     }
-    const entry = clearedFileNow(path, end, end === ALL_LINES ? undefined : options.throughOffset);
+    const entry = clearedFileNow(path, scanned.lines, scanned.offset, before.size);
     if (entry)
       next[file] = entry;
     else
@@ -76325,13 +76389,10 @@ function clearedFileNow(path, lines, offset, size) {
   const identity2 = spoolFileIdentity(path);
   if (!identity2)
     return;
-  const reached = lines === ALL_LINES ? terminatedLinesEnd(path) : { lines, offset: offset ?? offsetAfterLines(path, lines) };
-  if (reached === undefined || reached.offset === undefined)
-    return;
-  const boundary = spoolBoundaryDigest(path, reached.offset);
+  const boundary = spoolBoundaryDigest(path, offset);
   if (boundary === undefined)
     return;
-  return { identity: identity2.identity, lines: reached.lines, offset: reached.offset, boundary, size: size ?? identity2.size };
+  return { identity: identity2.identity, lines, offset, boundary, size };
 }
 function refreshIndex(spoolDir, files) {
   if (files.size === 0)
