@@ -20991,12 +20991,16 @@ var init_spool_index = __esm(() => {
   init_reaction_index();
 });
 
+// src/workers/whatsapp/spool-obligations.ts
+var init_spool_obligations = () => {};
+
 // src/workers/whatsapp/spool-reader.ts
-var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
+var WHATSAPP_SPOOL_MAX_RECORD_BYTES, CHUNK_BYTES, FINISH_STEP_BYTES, NEWEST_RECORD_SCAN_BYTES, CAPTURE_STATUS_MAX_BYTES;
 var init_spool_reader = __esm(() => {
   init_spool_file_identity();
   WHATSAPP_SPOOL_MAX_RECORD_BYTES = 1024 * 1024;
   CHUNK_BYTES = 256 * 1024;
+  FINISH_STEP_BYTES = 4 * 1024;
   NEWEST_RECORD_SCAN_BYTES = 4 * 1024 * 1024;
   CAPTURE_STATUS_MAX_BYTES = 64 * 1024;
 });
@@ -21008,6 +21012,7 @@ var init_live_connector = __esm(() => {
   init_capture_spool_secrets();
   init_reaction_index();
   init_spool_index();
+  init_spool_obligations();
   init_spool_reader();
   DEFAULT_PASS_BYTE_BUDGET = 64 * 1024 * 1024;
   TARGET_READ_CHUNK_BYTES = 4 * 1024;

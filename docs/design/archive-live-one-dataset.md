@@ -439,11 +439,15 @@ Live WhatsApp capture, with no change to identities or stores
   what a scan reached, fixed before the scan starts (the lines the file held
   then, or the cursor's), never recounted after: a line appended while
   clearing runs is owed to the next pull. A listing reset (a file replaced,
-  or a cursor recovered) is a durable obligation, written in the same step
-  as the invalidation that causes it (`oweReplay`), carried as `~r<epoch>`
-  on every cursor the listing hands out after it, and cleared only when such
-  a cursor comes back, so a pass that fails before its cursor commits still
-  owes the read again. Every other durable write that comes before the one
+  or a cursor recovered) is a durable obligation of every reader with its
+  own cursor (the product pull, sender repair; `spool-obligations.ts`, not
+  the disposable index), written before the index forgets the file, carried
+  as `~r<generation>.<epoch>` on the cursors a reader is handed after it,
+  and settled only by that reader's own cursor coming back from after it:
+  one reader never settles another's, and a pass that fails before its
+  cursor commits still owes the read again. The generation is a random id
+  per build of the index, so a cursor of an earlier build settles nothing
+  and its file is read again from its start. Every other durable write that comes before the one
   that depends on it is safe to repeat: a Secrets rewrite before its cleared
   record (redone, the same rewrite), the index's rows before the tier set's
   cursor (read again from the old cursor, the rows already there), the match

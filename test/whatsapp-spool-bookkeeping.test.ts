@@ -317,6 +317,53 @@ describe('review round 6', () => {
   });
 });
 
+describe('review round 7', () => {
+  const idsOf = (pages: readonly SourceConnectorListPage[]) => pages.flatMap((page) => page.items.map((item: RawItem) => item.identity.providerItemId));
+
+  test('another reader settling its own replay never erases the one ingestion owes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-consumers-'));
+    roots.push(dir);
+    const day = join(dir, '2026-10-24.jsonl');
+    writeFileSync(day, line('a') + line('b'));
+    const ingest = (cursor?: string) => drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, consumer: 'ingest' }).listItems(cursor ? { cursor } : {}));
+    const repair = (cursor?: string, limit?: number) => drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, consumer: 'sender-repair' })
+      .listItems({ ...(cursor ? { cursor } : {}), ...(limit ? { limit } : {}) }));
+    const committed = (await ingest()).at(-1)!.nextCursor!;
+    const repaired = (await repair()).at(-1)!.nextCursor!;
+    writeFileSync(day, line('a') + line('c'));
+    // Ingestion's replay fails after the invalidation committed.
+    const noteFile = WhatsAppSpoolIndex.prototype.noteFile;
+    WhatsAppSpoolIndex.prototype.noteFile = function failing() { throw new Error('crash during the replay'); };
+    try {
+      await expect(ingest(committed)).rejects.toThrow('crash during the replay');
+    } finally {
+      WhatsAppSpoolIndex.prototype.noteFile = noteFile;
+    }
+    // Sender repair reads its own replay, one item at a time, and resumes its cursor: it settles only its own.
+    const first = await repair(repaired, 1);
+    await repair(first.at(-1)!.nextCursor!, 1);
+    // Ingestion, retried from its committed cursor, still owes the read again: c is read.
+    expect(idsOf(await ingest(committed))).toContain('c');
+  });
+
+  test('a cursor of an earlier build of the index never settles a newer reset', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-generation-'));
+    roots.push(dir);
+    const day = join(dir, '2026-10-24.jsonl');
+    writeFileSync(day, line('a') + line('b'));
+    let cursor = (await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems())).at(-1)!.nextCursor!;
+    writeFileSync(day, line('a') + line('c'));
+    cursor = (await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor }))).at(-1)!.nextCursor!;
+    expect(cursor).toMatch(/~r[0-9a-f]+\.\d+$/u);
+    // The disposable index is deleted (its epochs start again), and the file is written again before any listing:
+    // the new build never held the file, so only the cursor's own generation can say it is stale.
+    rmSync(join(dir, WHATSAPP_SPOOL_INDEX_FILE), { force: true });
+    writeFileSync(day, line('a') + line('d'));
+    // The old cursor names another build: it settles nothing, and its file is read again.
+    expect(idsOf(await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor })))).toContain('d');
+  });
+});
+
 describe('a file keeps its identity across inode reuse', () => {
   test('a file rewritten in place (the same inode) with other lines of the same length is indexed again', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-inode-'));

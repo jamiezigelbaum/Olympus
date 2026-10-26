@@ -141,7 +141,7 @@ describe('the byte budget bounds every read', () => {
     // Every pass went on from inside the record, never from its start.
     const offsets = cursors.map((value) => Number(/@(\d+)/u.exec(value)?.[1]));
     for (let index = 1; index < offsets.length; index += 1) expect(offsets[index]!).toBeGreaterThan(offsets[index - 1]!);
-    expect(cursors.some((value) => value.endsWith('s'))).toBe(true);
+    expect(cursors.some((value) => /@\d+s(~r|$)/u.test(value))).toBe(true);
   });
 
   test('a resume seeks to its byte offset instead of counting lines from the start', async () => {
@@ -152,7 +152,7 @@ describe('the byte budget bounds every read', () => {
     // A cursor whose line count disagrees with its offset: the offset is where reading goes on.
     const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir }).listItems({ cursor: `2026-10-25.jsonl:7@${Buffer.byteLength(first)}` }));
     expect(pages.flatMap((page) => page.items.map((item: RawItem) => item.identity.providerItemId))).toEqual(['b']);
-    expect(pages.at(-1)?.nextCursor).toBe(`2026-10-25.jsonl:8@${Buffer.byteLength(first + line('b'))}`);
+    expect(pages.at(-1)?.nextCursor).toStartWith(`2026-10-25.jsonl:8@${Buffer.byteLength(first + line('b'))}`);
   });
 });
 
@@ -195,11 +195,12 @@ describe('reactions aggregate from a persistent index', () => {
     let resume = cursor;
     let reEmitted: RawItem | undefined;
     let budgetPasses = 0;
-    for (let pass = 0; pass < 40 && !reEmitted; pass += 1) {
+    // The index is rebuilt: the cursor of the old build reads its file again (a few lines a pass at this budget).
+    for (let pass = 0; pass < 400 && !reEmitted; pass += 1) {
       const findings = emptyWhatsAppSpoolPassFindings();
       const pages = await drain(createWhatsAppLiveSourceConnector({ spoolDir: dir, findings, passByteBudget: 2_000 }).listItems({ cursor: resume }));
       budgetPasses += findings.passBudgetReached;
-      reEmitted = pages.flatMap((page) => [...page.items]).find((item) => item.identity.providerItemId === 'h3');
+      reEmitted = pages.flatMap((page) => [...page.items]).find((item) => item.identity.providerItemId === 'h3' && item.metadata['reactions'] !== undefined);
       resume = pages.at(-1)?.nextCursor ?? resume;
     }
     expect(budgetPasses).toBeGreaterThan(1);

@@ -91,6 +91,7 @@ import {
   type WhatsAppReactionIndex,
 } from './reaction-index.ts';
 import { WhatsAppSpoolIndex, comparePlaces, type SpoolPlace } from './spool-index.ts';
+import { WhatsAppSpoolObligations } from './spool-obligations.ts';
 import {
   WHATSAPP_SPOOL_MAX_RECORD_BYTES,
   isRecordBoundary,
@@ -125,6 +126,8 @@ export interface WhatsAppLiveSourceConnectorOptions {
   passByteBudget?: number;
   /** A record longer than this is skipped and counted (default 1 MiB). */
   maxRecordBytes?: number;
+  /** Who reads with the cursors this connector hands out (default its id): each reader owes its own replays. */
+  consumer?: string;
 }
 
 /** What one or more listings skipped or recovered, as counts only. */
@@ -221,7 +224,8 @@ interface SpoolPosition {
   offset?: number;
   /** The place is inside an over-long record whose rest is still to be skipped (it was counted). */
   skipping?: true;
-  /** The read again of a replaced file this cursor was handed out after (spool-index.ts, `replayObligation`). */
+  /** The index generation and the replay epoch this cursor was handed out at (spool-obligations.ts). */
+  generation?: string;
   epoch?: number;
 }
 
@@ -308,6 +312,7 @@ export function createWhatsAppLiveSourceConnector(
       passByteBudget,
       maxRecordBytes,
       findings,
+      consumer: options.consumer ?? CONNECTOR_ID,
     }),
   };
   const connector = inputConnector(builder, input);
@@ -489,7 +494,11 @@ interface SpoolPassState {
   maxRecordBytes: number;
   findings: WhatsAppSpoolPassFindings;
   index: WhatsAppSpoolIndex | undefined;
-  /** The replay epoch the cursors this listing hands out carry. */
+  /** Who reads with this cursor: replays are owed to, and settled by, each reader on its own. */
+  consumer: string;
+  obligations: WhatsAppSpoolObligations | undefined;
+  /** The index generation and replay epoch the cursors this listing hands out carry. */
+  generation?: string;
   epoch?: number;
 }
 
@@ -500,37 +509,52 @@ interface SpoolPassState {
  */
 async function* liveRecords(
   spoolDir: string,
-  options: { cursor?: string; limit: number; passByteBudget: number; maxRecordBytes: number; findings: WhatsAppSpoolPassFindings },
+  options: { cursor?: string; limit: number; passByteBudget: number; maxRecordBytes: number; findings: WhatsAppSpoolPassFindings; consumer: string },
 ): AsyncGenerator<SourceRecordPage<WhatsAppRecord>> {
   let position = positionFromCursor(options.cursor);
   const index = WhatsAppSpoolIndex.open(spoolDir);
-  const pass: SpoolPassState = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index };
+  const obligations = WhatsAppSpoolObligations.open(spoolDir);
+  const pass: SpoolPassState = {
+    budget: { bytesLeft: options.passByteBudget },
+    maxRecordBytes: options.maxRecordBytes,
+    findings: options.findings,
+    index,
+    consumer: options.consumer,
+    obligations,
+  };
   try {
     // The index is trusted only for the files that are there, as they are.
     // A file that broke the spool contract (replaced, cut and written again) is read again from its start, with
     // everything after it: every boundary in it (the index's, the cursor's) is dropped.
-    // The reset is a durable obligation, written with the invalidation (reconcile), so a pass that fails before
-    // its cursor commits owes it still: it is cleared only when a cursor handed out after the reset comes back.
-    if (index) index.reconcile(spoolDir);
-    const owed = index?.replayObligation();
-    let epoch = position?.epoch;
-    if (owed !== undefined) {
-      if (epoch !== undefined && epoch >= owed.epoch) {
-        index!.clearReplay(owed.epoch);
+    // The reset is a durable obligation of each reader (spool-obligations.ts), written before the index forgets,
+    // and settled only by that reader's own cursor coming back from after it.
+    obligations?.register(options.consumer);
+    const generation = index?.generation();
+    if (index && generation !== undefined) {
+      index.reconcile(spoolDir, (replaced) => { obligations?.oweEveryone(replaced[0]!, generation); });
+      pass.generation = generation;
+      if (position !== undefined && position.generation !== undefined && position.generation !== generation) {
+        // Handed out by another build of the index: nothing it saw can be trusted, so its file is read again.
+        pass.findings.cursorsRecovered += 1;
+        position = { file: position.file, line: 0, offset: 0 };
       } else {
-        if (position !== undefined && owed.file <= position.file) {
-          pass.findings.cursorsRecovered += 1;
-          position = { file: owed.file, line: 0, offset: 0 };
+        const owed = obligations?.owed(options.consumer);
+        if (owed !== undefined) {
+          if (position !== undefined && position.generation === owed.generation && (position.epoch ?? -1) >= owed.epoch) {
+            obligations!.settle(options.consumer, owed.generation, position.epoch!);
+          } else if (position !== undefined && owed.file <= position.file) {
+            pass.findings.cursorsRecovered += 1;
+            position = { file: owed.file, line: 0, offset: 0 };
+          }
         }
-        epoch = owed.epoch;
       }
+      pass.epoch = obligations?.currentEpoch(generation) ?? 0;
     }
-    if (epoch !== undefined) pass.epoch = epoch;
     position = resolveStart(spoolDir, position, pass);
     // The index catches up to where this listing starts before any page is aggregated from it.
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
-      yield { records: [], ...(position ? { nextCursor: cursorFromPosition(position, pass.epoch) } : {}), done: false };
+      yield { records: [], ...(position ? { nextCursor: cursorFromPosition(position, pass.generation, pass.epoch) } : {}), done: false };
       return;
     }
     for (;;) {
@@ -538,7 +562,7 @@ async function* liveRecords(
       position = page.position;
       yield {
         records: pageRecords(spoolDir, page, pass),
-        ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.epoch) }),
+        ...(position === undefined ? {} : { nextCursor: cursorFromPosition(position, pass.generation, pass.epoch) }),
         done: page.exhausted,
       };
       if (page.exhausted) return;
@@ -551,6 +575,7 @@ async function* liveRecords(
     }
   } finally {
     index?.close();
+    obligations?.close();
   }
 }
 
@@ -572,13 +597,13 @@ function resolveStart(spoolDir: string, start: SpoolPosition | undefined, pass: 
   }
   const recovered = (): SpoolPosition => {
     pass.findings.cursorsRecovered += 1;
-    // Owed durably with the invalidation, as reconcile owes it: a pass that fails before its cursor commits
-    // reads the file again next time, even if by then the file has grown past the old cursor.
-    if (pass.index) {
-      pass.index.oweReplay(start.file);
-      const owed = pass.index.replayObligation();
-      if (owed) pass.epoch = owed.epoch;
+    // Owed durably to every reader before the index forgets, as reconcile owes it: a pass that fails before its
+    // cursor commits reads the file again next time, even if by then the file has grown past the old cursor.
+    if (pass.index && pass.generation !== undefined) {
+      const epoch = pass.obligations?.oweEveryone(start.file, pass.generation);
+      if (epoch !== undefined) pass.epoch = epoch;
     }
+    pass.index?.forgetFile(start.file);
     return { file: start.file, line: 0, offset: 0 };
   };
   if (start.offset === undefined) {
@@ -911,12 +936,13 @@ function parseSpoolLine(line: string): SpoolMessage | undefined {
  * (clearing Secrets) count by. `<file>:<lines>` alone is a cursor written
  * before offsets, still read.
  */
-const CURSOR = /^(.+):(\d+)@(\d+)(s?)(?:~r(\d+))?$/u;
+const CURSOR = /^(.+):(\d+)@(\d+)(s?)(?:~r([0-9a-f]+)\.(\d+))?$/u;
 const LEGACY_CURSOR = /^(.+):(\d+)$/u;
 
-function cursorFromPosition(position: SpoolPosition, epoch = position.epoch): string {
+function cursorFromPosition(position: SpoolPosition, generation = position.generation, epoch = position.epoch): string {
   if (position.offset === undefined) return `${position.file}:${position.line}`;
-  return `${position.file}:${position.line}@${position.offset}${position.skipping ? 's' : ''}${epoch !== undefined ? `~r${epoch}` : ''}`;
+  const replay = generation !== undefined && epoch !== undefined ? `~r${generation}.${epoch}` : '';
+  return `${position.file}:${position.line}@${position.offset}${position.skipping ? 's' : ''}${replay}`;
 }
 
 function positionFromCursor(cursor: string | undefined): SpoolPosition | undefined {
@@ -929,7 +955,7 @@ function positionFromCursor(cursor: string | undefined): SpoolPosition | undefin
       line: Number(found[2]),
       offset: Number(found[3]),
       ...(found[4] === 's' ? { skipping: true as const } : {}),
-      ...(found[5] !== undefined ? { epoch: Number(found[5]) } : {}),
+      ...(found[5] !== undefined && found[6] !== undefined ? { generation: found[5], epoch: Number(found[6]) } : {}),
     };
   }
   const legacy = LEGACY_CURSOR.exec(text);
