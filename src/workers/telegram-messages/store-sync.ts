@@ -3,7 +3,7 @@
 // advances two trust-separated stores through the shared connector spine.
 
 import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile } from './media-child.ts';
+import { readTelegramMediaState, sweepTelegramMediaTemporaries, TELEGRAM_MEDIA_CHILD_SUFFIX, telegramLiveMediaFile } from './media-child.ts';
 import { join } from 'node:path';
 import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
@@ -64,6 +64,8 @@ export const TELEGRAM_SPOOL_REDACTION_FAILED_WARNING = 'telegram_spool_secret_re
 // while older ones stayed, or the file is shorter than the cursor says), so
 // the lane reads the spool again from its start instead of stopping for good.
 export const TELEGRAM_SPOOL_CURSOR_RESET_WARNING = 'telegram_spool_cursor_reset';
+// The capture helper's media quota is full: new photos and files are named only, and nothing kept was evicted.
+export const TELEGRAM_MEDIA_STORAGE_FULL_WARNING = 'telegram_media_storage_full';
 // The identity of the day file a lane cursor stands in, kept in the set's ledger.
 const TELEGRAM_SPOOL_FILE_META_PREFIX = 'telegram:spool_file:';
 // Every boundary this source records in its spool (each lane's cursor, where the Secrets clearing has
@@ -125,6 +127,8 @@ export interface TelegramConnectorStoreSyncReceipt {
      * capture. The freshness verdict is then fresh.
      */
     capture_quiet: 0 | 1;
+    /** 1 when the helper's media quota is full: new media is named only until room is made or the quota is raised. */
+    media_storage_full: 0 | 1;
   } & CaptureFreshnessCounts;
   /**
    * Whether the live feed is running: a pull can succeed on schedule while
@@ -499,6 +503,7 @@ export function createTelegramConnectorStoreSyncHandler(options: {
           now().getTime(),
           staleThresholdSeconds,
         ),
+        readTelegramMediaState(spoolDir)?.storageFull === true,
       );
     },
 
@@ -534,6 +539,8 @@ export function createTelegramConnectorStoreSyncHandler(options: {
 
 /** Remove the kept file of every live media child the ledger holds as Secrets. */
 function removeSecretTelegramMedia(spoolDir: string, ledger: TierLedger): void {
+  // A stopped helper's half-written downloads first: no locator names them, so a Secret's could hide there.
+  sweepTelegramMediaTemporaries(spoolDir);
   for (const { identity } of ledger.secretsIdentities()) {
     if (identity.provider !== 'telegram' || !identity.providerItemId.endsWith(TELEGRAM_MEDIA_CHILD_SUFFIX) || !identity.providerConversationId) continue;
     const messageId = identity.providerItemId.slice(0, -TELEGRAM_MEDIA_CHILD_SUFFIX.length);
@@ -750,6 +757,7 @@ function telegramSyncReceipt(
   cursorResets: number,
   trustClaimsMoved: number,
   liveness: CaptureFreshness & { quiet: boolean },
+  mediaStorageFull = false,
 ): TelegramConnectorStoreSyncReceipt {
   const { quiet, ...capture } = liveness;
   const runs = [internal, secureLocal];
@@ -770,6 +778,7 @@ function telegramSyncReceipt(
     spool_records_redacted: (redacted?.recordsRedacted ?? 0) + (redacted?.recordsBlanked ?? 0),
     spool_cursor_resets: cursorResets,
     trust_claims_moved: trustClaimsMoved,
+    media_storage_full: mediaStorageFull ? 1 as const : 0 as const,
     // The shared counts state quiet and stopped; this feed's quiet comes from its heartbeat.
     ...captureFreshnessCounts({ ...capture, quiet }),
   };
@@ -778,6 +787,7 @@ function telegramSyncReceipt(
     ...(trustConflictItems > 0 ? [TELEGRAM_TRUST_CONFLICT_WARNING] : []),
     ...(redactionFailed ? [TELEGRAM_SPOOL_REDACTION_FAILED_WARNING] : []),
     ...(cursorResets > 0 ? [TELEGRAM_SPOOL_CURSOR_RESET_WARNING] : []),
+    ...(mediaStorageFull ? [TELEGRAM_MEDIA_STORAGE_FULL_WARNING] : []),
   ];
   return {
     status: counts.items_changed > 0 || counts.items_tombstoned > 0 ? 'progress' : 'idle',

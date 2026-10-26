@@ -159,7 +159,7 @@ describe('Telethon helper: a captured message\'s media is kept beside the spool'
       const out = await python(`
 import asyncio
 class Msg:
-    async def download_media(self, file):
+    async def download_media(self, file, progress_callback=None):
         with open(file, "wb") as output:
             output.write(b"synthetic jpeg bytes")
         return file
@@ -167,7 +167,8 @@ normalized = {"id": "5", "conversationId": "-1000001", "attachments": [{"attachm
 asyncio.run(reader.capture_message_media(Msg(), normalized))
 print(json.dumps(normalized["attachments"][0]))
 `, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: spoolDir, ...(limit !== undefined ? { OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES: limit } : {}) });
-      return { out, kept: existsSync(join(spoolDir, 'media', '-1000001', '5.jpg')), leftovers: existsSync(join(spoolDir, 'media', '-1000001')) ? readdirSync(join(spoolDir, 'media', '-1000001')).filter((name) => name.includes('.tmp.')) : [] };
+      const folder = join(spoolDir, 'media', '-1000001');
+      return { out, kept: existsSync(folder) && readdirSync(folder).some((name) => /^5\.[0-9a-f]{12}\.jpg$/.test(name)), leftovers: existsSync(join(spoolDir, 'media', '-1000001')) ? readdirSync(join(spoolDir, 'media', '-1000001')).filter((name) => name.includes('.tmp.')) : [] };
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -175,14 +176,14 @@ print(json.dumps(normalized["attachments"][0]))
 
   pythonTest('a photo under the limit is kept and named on its attachment', async () => {
     const { out, kept, leftovers } = await run(undefined);
-    expect(out).toEqual({ attachmentId: 'photo:1', type: 'image', mediaFile: 'media/-1000001/5.jpg', sizeBytes: 20 });
+    expect(out).toEqual({ attachmentId: 'photo:1', type: 'image', mediaFile: expect.stringMatching(/^media\/-1000001\/5\.[0-9a-f]{12}\.jpg$/), sizeBytes: 20 });
     expect(kept).toBe(true);
     expect(leftovers).toEqual([]);
   });
 
   pythonTest('a file over the limit, or with keeping turned off, stays named only', async () => {
     const over = await run('3');
-    expect(over.out).toEqual({ attachmentId: 'photo:1', type: 'image' });
+    expect(over.out).toEqual({ attachmentId: 'photo:1', type: 'image', mediaLeftOut: 'too_large' });
     expect(over.kept).toBe(false);
     expect(over.leftovers).toEqual([]);
     const off = await run('0');

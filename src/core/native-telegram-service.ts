@@ -47,6 +47,9 @@ const MANAGED_TELEGRAM_ENV_NAMES = new Set([
   'OLYMPUS_TELEGRAM_GATEWAY_MAX_MESSAGES',
   'OLYMPUS_TELEGRAM_GATEWAY_INTERVAL_SECONDS',
   'OLYMPUS_TELEGRAM_GATEWAY_SPOOL_STALE_THRESHOLD_SECONDS',
+  // The media the helper keeps beside the spool: the largest file, and the most in all (0 keeps none).
+  'OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES',
+  'OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES',
 ]);
 
 export interface NativeTelegramServiceOptions {
