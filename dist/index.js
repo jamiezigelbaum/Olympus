@@ -14621,6 +14621,7 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: { one: "1 attachment not read (its name is kept)", many: "{n} attachments not read (their names are kept)" },
       text_cut: { one: "1 message too long: the start of it is kept", many: "{n} messages too long: the start of each is kept" },
       spam_or_trash: { one: "1 message in Spam or Trash left out", many: "{n} messages in Spam or Trash left out" },
+      mail_for_another_account: { one: "1 message delivered to another address left out", many: "{n} messages delivered to another address left out" },
       system_message: { one: "1 notice from WhatsApp itself (such as someone joining) left out", many: "{n} notices from WhatsApp itself (such as people joining) left out" },
       message_empty: { one: "1 message with no text left out", many: "{n} messages with no text left out" },
       status_updates: { one: "1 status update left out: it is not a conversation", many: "{n} status updates left out: they are not a conversation" },
@@ -14641,6 +14642,7 @@ var init_vocabulary = __esm(() => {
       section_not_imported: { one: "1 part of the archive is not imported", many: "{n} parts of the archive are not imported" },
       file_damaged: { one: "1 file in the archive looks damaged, so what was read from it may be wrong", many: "{n} files in the archive look damaged, so what was read from them may be wrong" },
       item_repeated: { one: "1 message was in more than one export file and was imported once", many: "{n} messages were in more than one export file and were imported once" },
+      item_refused: { one: "1 item was not imported because the place it belongs in would not take it (nothing was stored in the wrong place)", many: "{n} items were not imported because the place they belong in would not take them (nothing was stored in the wrong place)" },
       files_not_looked_at: { one: "1 file in what you chose was not looked at, so it was not imported if it is an export", many: "{n} files in what you chose were not looked at, so any of them that are exports were not imported" },
       files_unconfirmed: { one: "1 file in the chosen folder looks like an export but is not named like one, so it was not imported (choose it by itself to import it)", many: "{n} files in the chosen folder look like exports but are not named like one, so they were not imported (choose them by themselves to import them)" },
       other: { one: "1 item not read fully", many: "{n} items not read fully" }
@@ -14656,6 +14658,7 @@ var init_vocabulary = __esm(() => {
       item_truncated: "not_imported",
       section_not_imported: "not_imported",
       file_damaged: "not_imported",
+      item_refused: "not_imported",
       files_not_looked_at: "not_imported",
       files_unconfirmed: "not_imported",
       time_zone_assumed: "how_read",
@@ -14670,6 +14673,7 @@ var init_vocabulary = __esm(() => {
       attachments_not_read: "not_imported",
       text_cut: "not_imported",
       spam_or_trash: "not_imported",
+      mail_for_another_account: "not_imported",
       message_content_unsupported: "not_imported",
       system_message: "how_read",
       message_empty: "how_read",
@@ -15696,6 +15700,7 @@ class GoogleGmailSourceConnector {
     const startedMs = this.scope ? !staleLeg && resume.startedMs !== undefined && (resume.pageToken || metadataLeg) ? resume.startedMs : nowMs : undefined;
     let pageToken = staleLeg ? undefined : resume.pageToken;
     let itemRoom = remaining;
+    let pageSkip = staleLeg ? 0 : resume.skip ?? 0;
     if (resume.childOf && !staleLeg) {
       const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
       this.providerRequests += 1;
@@ -15706,7 +15711,8 @@ class GoogleGmailSourceConnector {
         ...highWaterMs !== undefined ? { highWaterMs } : {},
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageSkip > 0 ? { skip: pageSkip } : {}
       };
       if (rest.next !== undefined) {
         const nextCursor2 = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
@@ -15731,11 +15737,13 @@ class GoogleGmailSourceConnector {
         ...query ? { query } : {}
       });
       const listed = page2.messages.filter((message) => message.id);
+      const baseSkip = pageSkip;
+      pageSkip = 0;
       const items = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
       let childOf;
-      for (const message of listed) {
+      for (const message of listed.slice(baseSkip)) {
         if (messagesFetched >= remaining || items.length >= itemRoom)
           break;
         messagesExamined += 1;
@@ -15822,12 +15830,14 @@ class GoogleGmailSourceConnector {
           ...pageToken ? { pageToken } : {},
           ...metadataLeg ? { phase: "metadata" } : {},
           ...startedMs !== undefined ? { startedMs } : {},
-          childOf
+          childOf,
+          skip: baseSkip + messagesExamined
         });
         yield { items, ...nextCursor2 ? { nextCursor: nextCursor2 } : {}, done: false, truncated: true };
         return;
       }
-      const pageTruncated = messagesExamined < listed.length;
+      const handled = baseSkip + messagesExamined;
+      const pageTruncated = handled < listed.length;
       if (!pageTruncated)
         pageToken = page2.nextPageToken;
       const legDone = !pageToken && !pageTruncated;
@@ -15849,7 +15859,8 @@ class GoogleGmailSourceConnector {
         ...highWaterMs !== undefined ? { highWaterMs } : {},
         ...pageToken ? { pageToken } : {},
         ...metadataLeg ? { phase: "metadata" } : {},
-        ...startedMs !== undefined ? { startedMs } : {}
+        ...startedMs !== undefined ? { startedMs } : {},
+        ...pageTruncated && handled > 0 ? { skip: handled } : {}
       });
       yield {
         items,
@@ -16027,7 +16038,7 @@ function promotedWatermark(input) {
   return Math.max(0, Math.min(Math.max(...candidates), input.nowMs));
 }
 function encodeGmailCursor(cursor) {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.skip) {
     return;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -16049,13 +16060,17 @@ function decodeGmailCursor(value) {
     if (parsed.phase !== undefined && parsed.phase !== "metadata")
       throw new Error("invalid");
     const childOf = decodeChildOf(parsed.childOf);
+    if (parsed.skip !== undefined && (typeof parsed.skip !== "number" || !Number.isSafeInteger(parsed.skip) || parsed.skip < 0 || parsed.skip > 1000)) {
+      throw new Error("invalid");
+    }
     return {
       ...watermarkMs !== undefined ? { watermarkMs } : {},
       ...highWaterMs !== undefined ? { highWaterMs } : {},
       ...typeof parsed.pageToken === "string" ? { pageToken: parsed.pageToken.trim() } : {},
       ...parsed.phase === "metadata" ? { phase: "metadata" } : {},
       ...startedMs !== undefined ? { startedMs } : {},
-      ...childOf ? { childOf } : {}
+      ...childOf ? { childOf } : {},
+      ...typeof parsed.skip === "number" && parsed.skip > 0 ? { skip: parsed.skip } : {}
     };
   } catch {
     throw new TypeError("Gmail connector cursor is invalid.");

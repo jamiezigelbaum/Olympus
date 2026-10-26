@@ -108,7 +108,7 @@ describe('a spent request budget keeps what was read and waits', () => {
     const share = Math.floor(100 * IMPORT_SHARE);
     expect(await gmailHeaderMatch(async () => api([apiMessage(live)]), { usage: () => ({ requests: share - 1, dailyRequestBudget: 100 }) })(headers)).toBe('later');
     expect(await gmailHeaderMatch(async () => api([apiMessage(live)]), { usage: () => ({ requests: 0, dailyRequestBudget: 100 }) })(headers)).toEqual({ id: live.id });
-    const spent: GmailApiClient = { ...api([]), async listMessages() { throw new GoogleRequestBudgetError({ provider: 'Gmail', retryAt: '2026-10-27T00:00:00.000Z', reason: 'daily_budget_exhausted' } as never); } };
+    const spent: GmailApiClient = { ...api([]), async listMessages() { throw new GoogleRequestBudgetError('Gmail', '2026-10-27T00:00:00.000Z'); } };
     expect(await gmailHeaderMatch(async () => spent)(headers)).toBe('later');
   });
 

@@ -375,7 +375,29 @@ input yet, so nothing changes for a real install until steps 4 to 7.
   brought. A record without a version is accepted as the version the store
   holds and keeps it. The page's provisional state records deletions and
   carries content a names-only record did not remove. Children that only a
-  superseded parent listed stay (they are items of their own).
+  superseded parent listed stay (they are items of their own). Names alone
+  never bring a deletion or a Secret back, within a page or across pages: a
+  names-only record after a deletion stays a deletion at the newer version, and
+  only content from after the item's last deletion is carried forward. A merged
+  item resumes from the record that brought its content, so a pass cut between
+  the two does not lose it. The routing plan is keyed by the item's identity,
+  its version and a digest of the text and names judged, so two bodies of one
+  version are each judged. Known residual: a deletion of an item no pass ever
+  stored leaves no row, so a later tie or unversioned body can still be stored.
+- **Order and resume (2026-10-26).** A page emits an item before its
+  children, and a page cut resumes at the earliest record any unyielded item
+  still depends on (a merged names-only item depends on the record that
+  brought its body), so a cut never loses a body or stores a child ahead of
+  its parent. A names-only version move (`content_unread`) waits for the end of
+  the run and happens only when every active row of the item holds one version,
+  so a body one leg has not written is never hidden behind a newer version. A
+  deletion of the version a half-finished deletion holds finishes it (content
+  never does), and an item the listing skipped whose stored state is incomplete
+  counts as unstored.
+- **A refused item is told (2026-10-26).** When placement refuses an item (for
+  example a trust domain that does not match), the import still completes but
+  shows it as a gap, "Not imported" (`item_refused`), with the count, as the
+  other fail-closed skips do.
 - **Counting.** An import counts its own run ("N items from this archive, of
   which M were already there"), advanced under the position of the record it
   last read so a replay after a crash counts each record once; the card counts

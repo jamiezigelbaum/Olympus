@@ -28,6 +28,7 @@
  * pass.
  */
 import { createHash } from 'node:crypto';
+import { ARCHIVE_COMMON_FINDINGS } from '../../core/archive-formats.ts';
 import type { RawItem, SourceConnector, SourceConnectorListOptions, SourceConnectorListPage } from '../../core/contracts.ts';
 import type { SourceIntakeOutcome } from '../../core/source-inputs.ts';
 import {
@@ -573,6 +574,13 @@ async function runPass(
         return stop(stopFrom(error, now().toISOString()));
       }
       throw error;
+    }
+    // An item a store refused (it fails closed rather than keep it in the wrong tier) is not imported: it is told as
+    // a gap, at the place the pass had read to, so the owner sees it and a replay counts it once.
+    const refused = TIER_DOMAIN_ORDER.reduce((sum, domain) => sum + (run.byDomain[domain]?.sync.itemsRejected ?? 0), 0);
+    if (refused > 0) {
+      const readTo = options.state.get(record.archive_id)?.read_position;
+      pending.push({ kind: ARCHIVE_COMMON_FINDINGS.itemRefused, class: 'gap', fileIndex: position?.fileIndex ?? readTo?.file_index ?? 0, offset: position?.offset ?? readTo?.offset ?? 0, count: refused });
     }
     flush();
 
