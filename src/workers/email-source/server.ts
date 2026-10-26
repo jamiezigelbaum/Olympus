@@ -2114,12 +2114,15 @@ export function replaceEmptyAccountsAtBoot(env: Record<string, string | undefine
 /**
  * Under the owner lock, after the empty accounts are placed and before
  * adoption is on and anything mounts (core/source-account-migration.ts): moves
- * each existing account's files into its folder when
- * `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=1`, and finishes or undoes a move an earlier
+ * each existing account's files into its folder unless
+ * `OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=0`, and finishes or undoes a move an earlier
  * boot left part way whatever the switch says. A registry that cannot be read
  * leaves every account where it is and the worker boots as it always did.
  */
 export function migrateAccountFoldersAtBoot(env: Record<string, string | undefined>, options: AccountMigrationOptions = {}): AccountMigrationReport | undefined {
+  if (!accountFolderMigrationEnabled(env)) {
+    console.log(`[storage] Moving accounts into their folders is off (OLYMPUS_MIGRATE_ACCOUNT_FOLDERS=${env.OLYMPUS_MIGRATE_ACCOUNT_FOLDERS?.trim()}); a move already under way is still finished or undone.`);
+  }
   try {
     const report = migrateAccountFolders(env, options);
     for (const sourceId of report.moved) console.log(`[storage] ${sourceId} moved into its account folder.`);
