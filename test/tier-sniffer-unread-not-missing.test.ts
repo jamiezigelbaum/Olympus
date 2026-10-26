@@ -92,7 +92,7 @@ async function connected() {
   return { installed, secure, lane, extract };
 }
 
-function serviceFor(f: Awaited<ReturnType<typeof connected>>, state: { ready: boolean; owed: boolean; prompts: AnalystModelRequest[] }) {
+function serviceFor(f: Awaited<ReturnType<typeof connected>>, state: { ready: boolean; extraction: 'active' | 'none' | 'settled'; prompts: AnalystModelRequest[] }) {
   const model: AnalystModel = {
     async complete(request) {
       state.prompts.push(request);
@@ -104,7 +104,7 @@ function serviceFor(f: Awaited<ReturnType<typeof connected>>, state: { ready: bo
     installed: f.installed, lane: BUILT_IN_SNIFFER_LANE, model,
     stores: () => f.lane.set.openStores(), classificationLedgerPath: ledgerPath,
     modelAvailable: () => state.ready,
-    extractionOwed: () => state.owed,
+    extractionState: () => state.extraction,
     rejudgePerPass: 0,
     autoMoves: { localEmbeddingsOnly: () => true, embeddingLedgerPath: join(root, 'embedding-ledger.jsonl') },
   });
@@ -120,7 +120,7 @@ function serviceFor(f: Awaited<ReturnType<typeof connected>>, state: { ready: bo
 
 test('unread content waiting for extraction is not a lost question: it stays pending, then the landed text is asked and judged', async () => {
   const f = await connected();
-  const state = { ready: false, owed: true, prompts: [] as AnalystModelRequest[] };
+  const state = { ready: false, extraction: 'active' as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
   const { service, approve } = serviceFor(f, state);
   // Make the item the observed one: names settled, content unread and pending.
   const before = f.lane.ledger.getCurrent(identity)!;
@@ -143,7 +143,7 @@ test('unread content waiting for extraction is not a lost question: it stays pen
   expect(f.lane.ledger.copies(identity).some((copy) => copy.layers !== 'metadata' && copy.state === 'current')).toBe(true);
 
   // The model arrives and judges the text.
-  state.ready = true; state.owed = false;
+  state.ready = true; state.extraction = 'settled';
   await approve();
   await service.runOnce();
   expect(state.prompts.some((request) => request.prompt.includes('pruning plan'))).toBe(true);
@@ -152,7 +152,7 @@ test('unread content waiting for extraction is not a lost question: it stays pen
 
 test('unread content that extraction no longer owes is still settled fail-safe Private', async () => {
   const f = await connected();
-  const state = { ready: false, owed: false, prompts: [] as AnalystModelRequest[] };
+  const state = { ready: false, extraction: 'settled' as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
   const { service } = serviceFor(f, state);
   const db = new Database(f.lane.ledger.dbPath);
   db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0,
@@ -166,7 +166,7 @@ test('unread content that extraction no longer owes is still settled fail-safe P
 
 test('an item an older build settled fail-safe with its text unread is judged when the text lands, not refused', async () => {
   const f = await connected();
-  const state = { ready: true, owed: false, prompts: [] as AnalystModelRequest[] };
+  const state = { ready: true, extraction: 'settled' as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
   const { service, approve } = serviceFor(f, state);
   const db = new Database(f.lane.ledger.dbPath);
   db.query(`UPDATE tier_items SET state = 'current', metadata_pending = 0, content_pending = 0, content_read = 0, content_tier = 'secure',
@@ -191,7 +191,7 @@ for (const shape of [
 ]) test(`unread content of ${shape.what} has no extraction lane, so it is settled fail-safe Private even with no job`, async () => {
   const f = await connected();
   // Owed says "no job yet", which for anything extraction does not serve is never going to change.
-  const state = { ready: false, owed: true, prompts: [] as AnalystModelRequest[] };
+  const state = { ready: false, extraction: 'active' as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
   const { service } = serviceFor(f, state);
   const db = new Database(f.lane.ledger.dbPath);
   db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0, ${shape.set},
@@ -203,3 +203,24 @@ for (const shape of [
   expect(settled).toMatchObject({ state: 'current', contentTier: 'secure', contentRead: false });
   expect(settled.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(true);
 });
+
+for (const { listedAgoMs, waits } of [{ listedAgoMs: 60_000, waits: true }, { listedAgoMs: 24 * 3_600_000, waits: false }]) {
+  test(`a file with no extraction job ${waits ? 'waits a short grace to be queued' : 'past the grace (names-only folder, deleted job) is settled fail-safe Private'}`, async () => {
+    const f = await connected();
+    const state = { ready: false, extraction: 'none' as 'active' | 'none' | 'settled', prompts: [] as AnalystModelRequest[] };
+    const { service } = serviceFor(f, state);
+    const db = new Database(f.lane.ledger.dbPath);
+    db.query(`UPDATE tier_items SET state = 'pending', metadata_pending = 0, content_pending = 1, content_read = 0,
+      decided_at = ?`).run(new Date(Date.now() - listedAgoMs).toISOString());
+    db.close();
+    await service.runOnce();
+    const row = f.lane.ledger.getCurrent(identity)!;
+    if (waits) {
+      expect(row).toMatchObject({ state: 'pending', contentPending: true, contentRead: false });
+      expect(row.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(false);
+    } else {
+      expect(row).toMatchObject({ state: 'current', contentTier: 'secure', contentRead: false });
+      expect(row.reasons.some((reason) => FAIL_SAFE.test(reason))).toBe(true);
+    }
+  });
+}

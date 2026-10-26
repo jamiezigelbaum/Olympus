@@ -157,15 +157,15 @@ describe('extraction job store: enqueue', () => {
   test('an item text is owed until a job reads it or settles without it', () => {
     const { store, dbPath } = newStore();
     const item = { provider: LANE.provider, accountScope: LANE.accountScope, providerItemId: 'item-owed' };
-    // Listed, not yet queued: owed.
-    expect(store.itemTextOwed(item)).toBe(true);
+    // Listed, not yet queued (or never to be): no job.
+    expect(store.itemExtractionState(item)).toBe('none');
     const jobId = enqueueOne(store, 'item-owed');
-    expect(store.itemTextOwed(item)).toBe(true);
+    expect(store.itemExtractionState(item)).toBe('active');
     backdate(dbPath, jobId, { status: 'failed_retryable' });
-    expect(store.itemTextOwed(item)).toBe(true);
+    expect(store.itemExtractionState(item)).toBe('active');
     for (const status of ['metadata_only', 'failed_terminal', 'skipped_unsupported', 'indexed']) {
       backdate(dbPath, jobId, { status });
-      expect(store.itemTextOwed(item)).toBe(false);
+      expect(store.itemExtractionState(item)).toBe('settled');
     }
     // Looked up by identity, not by scanning the whole job history.
     const db = new Database(dbPath, { readonly: true });

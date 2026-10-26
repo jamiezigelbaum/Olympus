@@ -1420,22 +1420,23 @@ export class LocalFileExtractionJobStore {
   }
 
   /**
-   * Whether an item's text is still owed by extraction: it has no job yet
-   * (listed, not yet queued) or a job that is queued, leased or waiting to
-   * retry, and no job already read it. Any other outcome (read, metadata
-   * only, unsupported, too large, blocked, failed for good) means no text is
-   * coming, so the privacy check does not wait for it. Scoped by the item's
+   * Where extraction stands for an item's text: `active` while a job is
+   * queued, leased or waiting to retry and none already read it; `none` when
+   * the item has no job at all (not yet queued, or never will be: a
+   * names-only folder, a job deleted when its scope changed); `settled` for
+   * any other outcome (read, metadata only, unsupported, too large, blocked,
+   * failed for good). Only `active` promises text. Scoped by the item's
    * identity alone: a set's stores share one provider item id.
    */
-  itemTextOwed(item: { provider: string; accountScope: string; providerItemId: string }): boolean {
+  itemExtractionState(item: { provider: string; accountScope: string; providerItemId: string }): 'active' | 'none' | 'settled' {
     const rows = this.db.query(`
       SELECT DISTINCT status FROM extraction_jobs
       WHERE provider = ? AND account_scope = ? AND provider_item_id = ?
     `).all(item.provider, item.accountScope, item.providerItemId) as Array<{ status: string }>;
-    if (rows.length === 0) return true;
+    if (rows.length === 0) return 'none';
     const statuses = new Set(rows.map((row) => row.status));
-    if (statuses.has('indexed')) return false;
-    return statuses.has('queued') || statuses.has('leased') || statuses.has('failed_retryable');
+    if (statuses.has('indexed')) return 'settled';
+    return statuses.has('queued') || statuses.has('leased') || statuses.has('failed_retryable') ? 'active' : 'settled';
   }
 
   private unreadJobsQuery(request: UnreadExtractionJobsRequest): { sql: string; params: string[] } {
@@ -2227,7 +2228,7 @@ function fileExtractionJobMigrations(): SqliteMigration[] {
     version: 6,
     name: 'add_extraction_jobs_identity_index',
     up(db) {
-      // itemTextOwed looks an item up by identity alone, once per pending
+      // itemExtractionState looks an item up by identity alone, once per pending
       // item on each privacy-check recovery pass: bounded by the page, not
       // by the size of the extraction history.
       db.exec(`
