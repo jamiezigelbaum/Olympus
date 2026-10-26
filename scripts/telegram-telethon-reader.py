@@ -279,6 +279,8 @@ async def run_gateway(run_once: bool = False) -> None:
     os.chmod(config.state_dir, 0o700)
     os.chmod(config.spool_dir, 0o700)
     with gateway_process_lock(config.state_dir / "gateway.lock"):
+        # Downloads a stopped gateway left half written: no locator names them, so only this sweep removes them.
+        sweep_media_temporaries(media_dir())
         state = read_gateway_state(config.state_path)
         state_lock = asyncio.Lock()
         sender_cache_lock = asyncio.Lock()
@@ -1460,11 +1462,22 @@ def display_name_from_entity(entity: Any) -> str | None:
 MEDIA_DIR_NAME = "media"
 MEDIA_MAX_BYTES_DEFAULT = 25 * 1024 * 1024
 MEDIA_MAX_BYTES_HARD_CAP = 512 * 1024 * 1024
+MEDIA_QUOTA_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024
+MEDIA_QUOTA_BYTES_HARD_CAP = 1024 * 1024 * 1024 * 1024
+# How long a measured total of the media folder is trusted before it is measured again (the plugin removes files too).
+MEDIA_USAGE_TTL_SECONDS = 300
+MEDIA_STATE_NAME = ".capture-media.json"
 MEDIA_EXTENSIONS = {
     "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
     "application/pdf": ".pdf", "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "video/mp4": ".mp4",
     "text/plain": ".txt",
 }
+# A download in progress: `.<final name>.tmp.<pid>`, in the folder of its final file.
+MEDIA_TEMPORARY_MARK = ".tmp."
+
+
+class MediaTooLarge(Exception):
+    """A download passed the size limit while its bytes arrived."""
 
 
 def media_dir() -> Path | None:
@@ -1473,40 +1486,153 @@ def media_dir() -> Path | None:
     return Path(spool) / MEDIA_DIR_NAME if spool else None
 
 
-def media_max_bytes() -> int:
-    """The largest file the gateway keeps; 0 keeps none. A setting that does not read keeps none, never stops capture."""
-    value = os.environ.get("OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES", "").strip()
+def media_byte_setting(name: str, default: int, hard_cap: int) -> int:
+    """A media byte setting; 0 keeps none. A setting that does not read keeps none, never stops capture."""
+    value = os.environ.get(name, "").strip()
     if value == "0":
         return 0
     try:
-        return positive_int_env("OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES", MEDIA_MAX_BYTES_DEFAULT, MEDIA_MAX_BYTES_HARD_CAP)
+        return positive_int_env(name, default, hard_cap)
     except SafeConfigError:
         return 0
+
+
+def media_max_bytes() -> int:
+    """The largest file the gateway keeps (25 MB by default)."""
+    return media_byte_setting("OLYMPUS_TELEGRAM_MEDIA_MAX_BYTES", MEDIA_MAX_BYTES_DEFAULT, MEDIA_MAX_BYTES_HARD_CAP)
+
+
+def media_quota_bytes() -> int:
+    """The most the gateway keeps in all (2 GB by default). Past it new media is named only, and nothing is evicted."""
+    return media_byte_setting("OLYMPUS_TELEGRAM_MEDIA_QUOTA_BYTES", MEDIA_QUOTA_BYTES_DEFAULT, MEDIA_QUOTA_BYTES_HARD_CAP)
+
+
+def pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def sweep_media_temporaries(folder: Path | None) -> int:
+    """Remove the downloads a stopped process left behind (its temporaries); a running process's own are kept."""
+    if not folder or not folder.is_dir():
+        return 0
+    removed = 0
+    for chat in folder.iterdir():
+        if not chat.is_dir() or chat.is_symlink():
+            continue
+        for entry in chat.iterdir():
+            name = entry.name
+            if not name.startswith(".") or MEDIA_TEMPORARY_MARK not in name:
+                continue
+            owner = name.rsplit(MEDIA_TEMPORARY_MARK, 1)[1]
+            if owner.isdigit() and int(owner) != os.getpid() and pid_is_running(int(owner)):
+                continue
+            try:
+                entry.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+    return removed
+
+
+media_usage: dict[str, Any] = {"bytes": None, "at": 0.0}
+
+
+def media_stored_bytes(folder: Path) -> int:
+    """The bytes the media folder holds, measured at most every few minutes and counted on between."""
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    if media_usage["bytes"] is None or now - float(media_usage["at"]) > MEDIA_USAGE_TTL_SECONDS:
+        total = 0
+        if folder.is_dir():
+            for chat in folder.iterdir():
+                if not chat.is_dir() or chat.is_symlink():
+                    continue
+                for entry in chat.iterdir():
+                    try:
+                        if entry.is_file() and not entry.is_symlink():
+                            total += entry.stat().st_size
+                    except OSError:
+                        pass
+        media_usage["bytes"] = total
+        media_usage["at"] = now
+    return int(media_usage["bytes"])
+
+
+def write_media_state(folder: Path, quota: int, storage_full: bool) -> None:
+    """What the plugin shows on the source card: how much is kept, of how much, and whether new media was left out."""
+    try:
+        write_json_atomic(folder.parent / MEDIA_STATE_NAME, {
+            "kind": "telegram_capture_media",
+            "schema_version": 1,
+            "stored_bytes": media_stored_bytes(folder),
+            "quota_bytes": quota,
+            "storage_full": storage_full,
+            "updated_at": gateway_now_iso(),
+        })
+    except Exception:
+        pass
+
+
+def media_identity_tag(message: Any, kind: str) -> str:
+    """Which file a message carries: Telegram's id, access hash, size and date for it. A changed file is a new name."""
+    media = getattr(message, "photo" if kind == "photo" else "document", None)
+    parts = [kind]
+    for attribute in ("id", "access_hash", "size", "date"):
+        value = getattr(media, attribute, None)
+        parts.append(value.isoformat() if isinstance(value, dt.datetime) else str(value))
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def remove_other_media_versions(target: Path, message_id: str) -> None:
+    """The message's files of an earlier attachment, once the current one is in place."""
+    for entry in target.parent.iterdir():
+        if entry.name != target.name and entry.name.startswith(f"{message_id}.") and entry.is_file():
+            try:
+                entry.unlink()
+            except OSError:
+                pass
 
 
 async def capture_message_media(message: Any, normalized: dict[str, Any]) -> None:
     """Keep a captured message's photo or file beside the spool, so its child item can be read.
 
     Only the gateway keeps media (it has a spool folder), only a photo or a
-    document, and only up to the configured size (25 MB by default; 0 turns
-    it off). The file is named by the chat and the message, written to a
-    temporary name and renamed, and named on the message's attachment as
-    `mediaFile` (relative to the spool). Anything that goes wrong leaves the
-    attachment named and unreadable, never the capture failed.
+    document, only up to the size limit (25 MB by default) and only while all
+    it keeps stays under the quota (2 GB by default); either set to 0 keeps
+    none. The file is named by the chat, the message and which file it is
+    (`<message>.<tag><ext>`, the tag from Telegram's id, access hash, size and
+    date), so a changed attachment is downloaded again and replaces the old
+    one. It is written to `.<name>.tmp.<pid>`, renamed into place, and removed
+    on any failure; a stopped process's temporaries are swept at start and
+    before every Secrets cleanup. The size limit holds while the bytes arrive.
+    A file left out names why on the attachment (`mediaLeftOut`: `too_large`
+    or `storage_full`); anything else that goes wrong leaves the attachment
+    named and unreadable, never the capture failed.
     """
     attachments = normalized.get("attachments")
     folder = media_dir()
     if not folder or not isinstance(attachments, list) or not attachments:
         return
     limit = media_max_bytes()
+    quota = media_quota_bytes()
     attachment = attachments[0]
-    if limit <= 0 or not isinstance(attachment, dict):
+    if limit <= 0 or quota <= 0 or not isinstance(attachment, dict):
         return
     kind = str(attachment.get("attachmentId", "")).split(":", 1)[0]
     if kind not in ("photo", "document"):
         return
     size = attachment.get("sizeBytes")
     if isinstance(size, int) and size > limit:
+        attachment["mediaLeftOut"] = "too_large"
         return
     chat = str(normalized.get("conversationId", ""))
     message_id = str(normalized.get("id", ""))
@@ -1515,26 +1641,55 @@ async def capture_message_media(message: Any, normalized: dict[str, Any]) -> Non
     if not message_id.lstrip("-").isdigit():
         return
     extension = ".jpg" if kind == "photo" else MEDIA_EXTENSIONS.get(str(attachment.get("mimeType", "")), ".bin")
-    relative = f"{MEDIA_DIR_NAME}/{chat}/{message_id}{extension}"
-    target = folder / chat / f"{message_id}{extension}"
+    name = f"{message_id}.{media_identity_tag(message, kind)}{extension}"
+    relative = f"{MEDIA_DIR_NAME}/{chat}/{name}"
+    target = folder / chat / name
+    temporary = target.with_name(f".{name}{MEDIA_TEMPORARY_MARK}{os.getpid()}")
+    written: Any = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(folder, 0o700)
         os.chmod(target.parent, 0o700)
         if not target.exists():
-            temporary = target.with_name(f".{target.name}.tmp.{os.getpid()}")
-            written = await message.download_media(file=str(temporary))
+            stored = media_stored_bytes(folder)
+            if stored + (size if isinstance(size, int) else 0) >= quota:
+                attachment["mediaLeftOut"] = "storage_full"
+                write_media_state(folder, quota, True)
+                return
+
+            def bounded(received: int, total: int) -> None:
+                if received > limit or (isinstance(total, int) and total > limit):
+                    raise MediaTooLarge()
+
+            written = await message.download_media(file=str(temporary), progress_callback=bounded)
             if not written:
                 return
-            if os.path.getsize(temporary) > limit:
-                os.unlink(temporary)
+            actual = os.path.getsize(temporary)
+            if actual > limit:
+                raise MediaTooLarge()
+            if stored + actual > quota:
+                attachment["mediaLeftOut"] = "storage_full"
+                write_media_state(folder, quota, True)
                 return
             os.chmod(temporary, 0o600)
             os.replace(temporary, target)
+            media_usage["bytes"] = stored + actual
+            remove_other_media_versions(target, message_id)
+            write_media_state(folder, quota, False)
         attachment["mediaFile"] = relative
         attachment["sizeBytes"] = os.path.getsize(target)
+    except MediaTooLarge:
+        attachment["mediaLeftOut"] = "too_large"
     except Exception:
         return
+    finally:
+        for leftover in {str(temporary), str(written) if isinstance(written, (str, Path)) else str(temporary)}:
+            try:
+                os.unlink(leftover)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
 
 def forward_origin_name(forward: Any) -> str | None:
