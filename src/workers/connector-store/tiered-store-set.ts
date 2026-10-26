@@ -510,17 +510,23 @@ export class TieredStoreSet {
    */
   private removeChild(child: SourceItemIdentity): boolean {
     try {
-      this.ledger.removeCopies(child);
-      // Nothing is owed to a child that is gone.
-      this.ledger.clearWriteIntent(child);
-      this.secrets()?.remove(child);
-      // A cascade is the parent's deletion, not an event of the child's: each leg's row keeps its own version
-      // (the identity here is whichever leg's row the sweep reached, and carries that leg's version alone).
+      // The removal is owed from here until it is whole, whatever becomes of the parent meanwhile (it may come back
+      // as a Secret, whose location counts as present): the intent hides the child at once, and every pass start
+      // finishes it. It carries no version: a cascade is not an event of the child, each leg keeps its own.
       const { sourceVersion: _own, ...bare } = child;
+      this.ledger.putWriteIntent({
+        identity: bare as TierWriteIntent['identity'],
+        kind: 'deletion',
+        connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID,
+        itemFamily: child.family,
+      });
+      this.ledger.removeCopies(child);
+      this.secrets()?.remove(child);
       for (const store of this.openStores()) {
         store.tombstoneCopy(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
         store.retireSecretLocation(bare, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
       }
+      this.ledger.clearWriteIntent(child);
       return true;
     } catch {
       return false;
@@ -1034,6 +1040,8 @@ export class TieredStoreSet {
           if (!store) continue;
           store.tombstoneCopy(identity, { connectorId: intent.connectorId || TIERED_STORE_SET_HANDOFF_CONNECTOR_ID, ...(intent.kind === 'secret' ? { trustTier: 'S5' as const } : {}) });
           store.advanceItemVersion(identity, { onlyTombstoned: true });
+          // A cascade (no version) also retires a Secret location the child kept.
+          if (intent.version === undefined) store.retireSecretLocation(identity, { connectorId: TIERED_STORE_SET_HANDOFF_CONNECTOR_ID });
         }
         this.ledger.removeCopies(intent.identity);
         removed = true;
@@ -1047,6 +1055,7 @@ export class TieredStoreSet {
           ...(intent.kind === 'secret' ? { trustTier: 'S5' as const } : {}),
           insert: true,
         });
+        if (intent.kind === 'deletion') this.ledger.markUnseenDeletion(intent.identity);
         // The item is present as a tombstone now: the children it had go with it.
         removed = true;
       }
@@ -1805,7 +1814,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       // A row that is already a tombstone takes the deletion's version too (a live row takes it with its own tombstone).
       for (const domain of TIER_DOMAIN_ORDER) this.set.store(domain)?.advanceItemVersion(identity, { onlyTombstoned: true });
       this.copyRemovals.set(identityKey(identity), identity);
-      if (location) this.routedDomains.add(SECRET_LOCATION_DOMAIN);
+      if (location) { this.routedDomains.add(SECRET_LOCATION_DOMAIN); ledger.markUnseenDeletion(identity); }
       return { kind: 'delete', corpora: new Set(ledger.copies(identity).map((copy) => copy.corpusId)), reason: 'provider_deleted', ...(location ? { location: true as const } : {}) };
     }
 
@@ -1838,7 +1847,7 @@ class TieredRoutingRun implements ConnectorStoreTierRouting {
       // item by its names now and its content when the text lands.
       // Rows that are all tombstones (a deletion recorded for an item no store held) are not a lane's item: a newer
       // record routes it afresh.
-      const laneRow = hasRow && TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity).active === true);
+      const laneRow = hasRow && (TIER_DOMAIN_ORDER.some((domain) => this.set.store(domain)?.itemPresence(identity).active === true) || !ledger.isUnseenDeletion(identity));
       if (laneRow || (!deferred && (!contentRead || input.metadataOnly))) {
         this.counts.itemsLegacy += 1;
         return { kind: 'legacy' };
