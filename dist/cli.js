@@ -73769,6 +73769,11 @@ function telegramMediaDiskFloor(total) {
 }
 function telegramMediaDiskLow(spoolDir, space = diskSpaceOf) {
   try {
+    const waiting = lstatSync26(join59(spoolDir, MEDIA_WAITING_FILE));
+    if (waiting.isFile() && waiting.size > 0)
+      return true;
+  } catch {}
+  try {
     const { free, total } = space(spoolDir);
     return free < telegramMediaDiskFloor(total);
   } catch {
@@ -73778,7 +73783,7 @@ function telegramMediaDiskLow(spoolDir, space = diskSpaceOf) {
 var TELEGRAM_CHILD_KEY = "media", TELEGRAM_MEDIA_CHILD_SUFFIX, TELEGRAM_LIVE_MEDIA_LOCATOR_PREFIX = "telegram-live-media:v1:", LIVE_MEDIA_MAX_READ_BYTES, CAPTURE_MARK2 = "~at:", MEDIA_DISK_FLOOR_BYTES, MEDIA_DISK_FLOOR_SHARE = 0.05, TEMPORARY_MARK = ".tmp.", diskSpaceOf = (path) => {
   const stat2 = statfsSync(path);
   return { free: Number(stat2.bavail) * Number(stat2.bsize), total: Number(stat2.blocks) * Number(stat2.bsize) };
-};
+}, MEDIA_WAITING_FILE = ".capture-media-waiting.jsonl";
 var init_media_child = __esm(() => {
   TELEGRAM_MEDIA_CHILD_SUFFIX = `${CHILD_ITEM_ID_SEPARATOR}${TELEGRAM_CHILD_KEY}`;
   LIVE_MEDIA_MAX_READ_BYTES = 64 * 1024 * 1024;

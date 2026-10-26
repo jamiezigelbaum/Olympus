@@ -644,19 +644,24 @@ Live Telegram media as children (`scripts/telegram-telethon-reader.py`,
   their stated sizes, under a lock) and again every few MB while the bytes
   arrive. A paused message is still captured and ingested; its attachment
   says `mediaLeftOut: waiting_for_disk`, so its child does too, and it is
-  listed in `.capture-media-waiting.json` beside the spool.
+  listed in `.capture-media-waiting.jsonl` beside the spool: appended to,
+  rewritten only as entries are done, never truncated.
 - **Filled in once space returns.** Each gateway cycle, once there is room,
   the helper fetches the waiting messages again, downloads their media and
   captures them again with it; the newer capture brings the readable child
-  over the waiting one. A message gone from Telegram, or out of the approved
-  chats, is let go; the disk filling again pauses the rest.
+  over the waiting one. An entry leaves the list only once its message was
+  captured again with its file, or the message is gone from Telegram or out
+  of the approved chats; a fetch, download or write that fails keeps it for
+  the next cycle. A file too large for the room left is skipped and the rest
+  goes on; only free space under the floor itself pauses the pass.
 - **Said on the card, with no counts.** Each pull reads the same floor on
-  the spool's volume and the receipt carries `media_disk_low` and the
-  `telegram_media_disk_low` warning while it lasts. The dashboard reads that
+  the spool's volume, and the waiting list: the receipt carries
+  `media_disk_low` and the `telegram_media_disk_low` warning while free space
+  is under the floor or any media still waits. The dashboard reads that
   count from any source's receipt, and the card reads Needs you with one
   line: "the computer's disk is nearly full; new media will download once
   space is freed", with Check again. It clears at the next pull once space
-  is freed.
+  is freed and the waiting media is filled in.
 - **No copy left behind.** A download is written to `.<name>.tmp.<pid>` and
   renamed into place, and the temporary is removed on any failure, the rename
   included. A stopped process's temporaries are swept when the gateway starts

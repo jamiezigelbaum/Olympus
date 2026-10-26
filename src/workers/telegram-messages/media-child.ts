@@ -212,13 +212,23 @@ export function telegramMediaDiskFloor(total: number): number {
   return Math.max(MEDIA_DISK_FLOOR_BYTES, Math.floor(total * MEDIA_DISK_FLOOR_SHARE));
 }
 
+// The media waiting for disk space, listed by the capture helper beside the spool (telegram-telethon-reader.py).
+const MEDIA_WAITING_FILE = '.capture-media-waiting.jsonl';
+
 /**
- * Whether the computer's disk is under the floor where the capture helper pauses new downloads (owner, 2026-10-26: every
- * message and every media file is ingested; the one safeguard is the computer's own). Read on the spool's volume at each
- * pull, so the card says so while it lasts and stops once space is freed; the media that waited downloads on its own then.
- * A volume that cannot be read says nothing.
+ * Whether new media waits for disk space (owner, 2026-10-26: every message and every media file is ingested; the one
+ * safeguard is the computer's own free-disk floor). True while the spool volume's free space is under the floor, and
+ * also while any media the helper paused is still waiting: a file larger than the room above the floor waits though
+ * free space alone reads above it. Read at each pull, so the card says so while it lasts and stops once the waiting
+ * media is filled in. A volume that cannot be read says nothing on its own.
  */
 export function telegramMediaDiskLow(spoolDir: string, space: DiskSpace = diskSpaceOf): boolean {
+  try {
+    const waiting = lstatSync(join(spoolDir, MEDIA_WAITING_FILE));
+    if (waiting.isFile() && waiting.size > 0) return true;
+  } catch {
+    // Nothing waiting.
+  }
   try {
     const { free, total } = space(spoolDir);
     return free < telegramMediaDiskFloor(total);

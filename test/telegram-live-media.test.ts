@@ -199,6 +199,19 @@ describe('the computer\'s disk floor (owner, 2026-10-26)', () => {
     expect(freed.warnings ?? []).not.toContain('telegram_media_disk_low');
   });
 
+  // Astra, round 4 (#556): a file larger than the room above the floor waits though free space alone reads above it.
+  test('the warning stays while any media is waiting for disk space, and goes once it is filled in', async () => {
+    const { spoolDir, sync } = setup({ free: 6 * GB, total: 100 * GB });
+    writeFileSync(join(spoolDir, '2026-10-20.jsonl'), liveSpoolLine({ chat: '-1000001', id: '1000', text: 'hello', sentAt: '2026-10-20T09:00:00Z' }));
+    writeFileSync(join(spoolDir, '.capture-media-waiting.jsonl'), '{"chat":"-1000001","message":"70"}\n');
+    const waiting = await sync.pull();
+    expect(waiting.counts.media_disk_low).toBe(1);
+    expect(waiting.warnings).toContain('telegram_media_disk_low');
+    rmSync(join(spoolDir, '.capture-media-waiting.jsonl'));
+    const filled = await sync.pull();
+    expect(filled.counts.media_disk_low).toBe(0);
+  });
+
   test('the message is ingested while its media waits, and the media child is filled in when the helper captures it again with its file', async () => {
     const { spoolDir, internal, sync } = setup({ free: 80 * GB, total: 100 * GB });
     const waiting = { attachments: [{ attachmentId: 'photo:77', type: 'image', mediaLeftOut: 'waiting_for_disk' }] };

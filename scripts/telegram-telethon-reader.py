@@ -1468,10 +1468,10 @@ MEDIA_DISK_FLOOR_BYTES = 5 * 1024 * 1024 * 1024
 MEDIA_DISK_FLOOR_SHARE = 0.05
 # While a download runs, free space is looked at again after at most this many new bytes.
 MEDIA_DISK_CHECK_BYTES = 4 * 1024 * 1024
-# Media waiting for disk space, by chat and message, beside the spool; filled in once space returns.
-MEDIA_WAITING_NAME = ".capture-media-waiting.json"
-# A bound on the bookkeeping only (never on media): past it the oldest waiting entries are let go, named only.
-MEDIA_WAITING_MAX = 100_000
+# Media waiting for disk space, one `{"chat", "message"}` line each, beside the spool; filled in once space returns.
+# Appended to as media pauses and rewritten only as entries are done: it is never truncated, so no paused media is
+# dropped however long the disk stays full (the plugin's card reads a non-empty file as media waiting).
+MEDIA_WAITING_NAME = ".capture-media-waiting.jsonl"
 # Messages fetched again per request when waiting media is filled in.
 MEDIA_RETRY_BATCH = 50
 MEDIA_WAITING = "waiting_for_disk"
@@ -1563,38 +1563,57 @@ def media_lock() -> asyncio.Lock:
 
 
 def read_media_waiting(spool_dir: Path) -> list[dict[str, str]]:
-    """The media waiting for disk space, oldest first: each a chat and a message."""
+    """The media waiting for disk space, oldest first, each once: a chat and a message."""
+    items: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     try:
-        value = json.loads((spool_dir / MEDIA_WAITING_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        with open(spool_dir / MEDIA_WAITING_NAME, "r", encoding="utf-8") as lines:
+            for line in lines:
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(item, dict) or not isinstance(item.get("chat"), str) or not isinstance(item.get("message"), str):
+                    continue
+                key = (item["chat"], item["message"])
+                if key not in seen:
+                    seen.add(key)
+                    items.append({"chat": key[0], "message": key[1]})
+    except OSError:
         return []
-    items = value.get("items") if isinstance(value, dict) and value.get("kind") == "telegram_capture_media_waiting" else None
-    if not isinstance(items, list):
-        return []
-    return [
-        {"chat": str(item["chat"]), "message": str(item["message"])}
-        for item in items
-        if isinstance(item, dict) and isinstance(item.get("chat"), str) and isinstance(item.get("message"), str)
-    ]
+    return items
 
 
 def write_media_waiting(spool_dir: Path, items: list[dict[str, str]]) -> None:
-    write_json_atomic(spool_dir / MEDIA_WAITING_NAME, {
-        "kind": "telegram_capture_media_waiting",
-        "schema_version": 1,
-        "items": items[-MEDIA_WAITING_MAX:],
-        "updated_at": gateway_now_iso(),
-    })
+    """The whole list again (after entries are done), atomically; an empty list leaves no file."""
+    path = spool_dir / MEDIA_WAITING_NAME
+    if not items:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with open(temporary, "w", encoding="utf-8") as out:
+        for item in items:
+            out.write(json.dumps({"chat": item["chat"], "message": item["message"]}, separators=(",", ":")) + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
 
 
 def media_waits(folder: Path, chat: str, message_id: str, attachment: dict[str, Any]) -> None:
     """New media paused for disk space: named on its message as waiting, and listed to be filled in once space returns."""
     attachment["mediaLeftOut"] = MEDIA_WAITING
     try:
-        items = read_media_waiting(folder.parent)
-        if not any(item["chat"] == chat and item["message"] == message_id for item in items):
-            items.append({"chat": chat, "message": message_id})
-            write_media_waiting(folder.parent, items)
+        path = folder.parent / MEDIA_WAITING_NAME
+        # Appended, never rewritten here: a line repeated is read once.
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(descriptor, (json.dumps({"chat": chat, "message": message_id}, separators=(",", ":")) + "\n").encode("utf-8"))
+        finally:
+            os.close(descriptor)
     except Exception:
         pass
 
@@ -1719,8 +1738,11 @@ async def capture_message_media(message: Any, normalized: dict[str, Any]) -> Non
 
 async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: asyncio.Lock) -> int:
     """Fill in media that waited for disk space, once there is room: the message is fetched again, its media kept, and
-    the message captured again with it (its newer capture brings the readable child). A message gone from Telegram, or out
-    of the approved chats now, is let go; one whose download failed otherwise stays named only, as it would have."""
+    the message captured again with it (its newer capture brings the readable child).
+
+    An entry leaves the list only when its message was captured again with its file, or when the message is gone from
+    Telegram or out of the approved chats. A fetch or download that fails keeps it for the next cycle. Media too large
+    for the room left is skipped and the rest goes on; only free space under the floor itself pauses the whole pass."""
     folder = media_dir()
     if not folder:
         return 0
@@ -1747,10 +1769,10 @@ async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: as
         for start in range(0, len(ids), MEDIA_RETRY_BATCH):
             batch = ids[start:start + MEDIA_RETRY_BATCH]
             try:
-                messages = await client.get_messages(chat_ref, ids=[int(message_id) for message_id in batch])
+                messages = list(await client.get_messages(chat_ref, ids=[int(message_id) for message_id in batch]) or [])
             except Exception:
-                break
-            for message_id, message in zip(batch, list(messages or [])):
+                continue
+            for message_id, message in zip(batch, messages):
                 if message is None:
                     done.add((chat, message_id))
                     continue
@@ -1764,11 +1786,12 @@ async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: as
                 )
                 await capture_message_media(message, normalized)
                 attachment = (normalized.get("attachments") or [{}])[0]
-                if isinstance(attachment, dict) and attachment.get("mediaLeftOut") == MEDIA_WAITING:
-                    paused = True
-                    break
-                done.add((chat, message_id))
                 if not isinstance(attachment, dict) or not attachment.get("mediaFile"):
+                    if isinstance(attachment, dict) and attachment.get("mediaLeftOut") == MEDIA_WAITING and disk_low(folder):
+                        # Free space itself is under the floor again: the rest waits for the next cycle.
+                        paused = True
+                        break
+                    # Too large for the room left, or a download that failed: it stays listed, and the rest goes on.
                     continue
                 sender_id = normalized.get("senderId")
                 if isinstance(sender_id, str):
@@ -1779,8 +1802,14 @@ async def retry_waiting_media(client: Any, config: GatewayConfig, state_lock: as
                     if display_name:
                         normalized["senderDisplayName"] = display_name
                         normalized["participantDisplayNames"] = {sender_id: display_name}
-                async with state_lock:
-                    appended += append_gateway_page(config, scope, {"messages": [normalized]}, "forward")
+                try:
+                    async with state_lock:
+                        stored = append_gateway_page(config, scope, {"messages": [normalized]}, "forward")
+                except Exception:
+                    continue
+                if stored:
+                    appended += stored
+                    done.add((chat, message_id))
             if paused:
                 break
     if done:

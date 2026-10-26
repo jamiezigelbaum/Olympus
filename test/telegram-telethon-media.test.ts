@@ -255,7 +255,7 @@ class Client:
         return [self.messages.get(i) for i in ids]
 appended = []
 reader.append_gateway_page = lambda config, scope, page, direction, request_id=None: appended.extend([(scope, m["id"], m["attachments"][0].get("mediaFile")) for m in page["messages"]]) or len(page["messages"])
-reader.normalize_message = lambda message, account, chat, title, kind: record(message.id, chat)
+reader.normalize_message = lambda message, account, chat, title, kind: record(message.id, chat, size=getattr(message, "stated", None))
 async def ask(client):
     return await reader.retry_waiting_media(client, Config(), asyncio.Lock())
 `;
@@ -315,4 +315,69 @@ print(json.dumps({"filled": filled, "after": waiting()}))
     expect(out.filled).toBe(1);
     expect(out.after).toEqual([{ chat: '-1000001', message: '51' }, { chat: '-1000001', message: '52' }]);
   });
+
+  // Astra, round 4 (#556): no paused media is ever lost.
+  pythonTest('a retry whose download or re-capture fails keeps its entry, and a later cycle fills it in', async () => {
+    const dir = spool();
+    const out = await python(`${retry}
+disk["free"], disk["total"] = 1 * GB, 100 * GB
+asyncio.run(reader.capture_message_media(Msg(60), record(60)))
+asyncio.run(reader.capture_message_media(Msg(61), record(61)))
+disk["free"] = 500 * GB
+broken = asyncio.run(ask(Client({60: Msg(60, fail="midway"), 61: Msg(61, fail="midway")})))
+after_broken = waiting()
+real_append = reader.append_gateway_page
+def refuse(*args, **kwargs):
+    raise OSError("spool")
+reader.append_gateway_page = refuse
+unwritten = asyncio.run(ask(Client({60: Msg(60, photo_id=60), 61: Msg(61, photo_id=61)})))
+after_unwritten = waiting()
+reader.append_gateway_page = real_append
+filled = asyncio.run(ask(Client({60: Msg(60, photo_id=70), 61: Msg(61, photo_id=71)})))
+print(json.dumps({"broken": broken, "afterBroken": after_broken, "unwritten": unwritten, "afterUnwritten": after_unwritten, "filled": filled, "after": waiting()}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    const both = [{ chat: '-1000001', message: '60' }, { chat: '-1000001', message: '61' }];
+    expect(out.broken).toBe(0);
+    expect(out.afterBroken).toEqual(both);
+    expect(out.unwritten).toBe(0);
+    expect(out.afterUnwritten).toEqual(both);
+    expect(out.filled).toBe(2);
+    expect(out.after).toEqual([]);
+  });
+
+  pythonTest('a file too large for the room left is skipped and the rest goes on: 6 GB free of 100, a 2 GB file first, then a small one', async () => {
+    const dir = spool();
+    const out = await python(`${retry}
+disk["free"], disk["total"] = 1 * GB, 100 * GB
+big = Msg(70, photo_id=70)
+big.stated = 2 * GB
+small = Msg(71, photo_id=71, payload=b"s" * 100)
+small.stated = 100
+asyncio.run(reader.capture_message_media(big, record(70, size=2 * GB)))
+asyncio.run(reader.capture_message_media(small, record(71, size=100)))
+disk["free"] = 6 * GB
+filled = asyncio.run(ask(Client({70: big, 71: small})))
+print(json.dumps({"filled": filled, "appended": [entry[1] for entry in appended], "after": waiting(), "bigDownloads": big.downloads}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.filled).toBe(1);
+    expect(out.appended).toEqual(['71']);
+    expect(out.bigDownloads).toBe(0);
+    expect(out.after).toEqual([{ chat: '-1000001', message: '70' }]);
+  });
+
+  pythonTest('the waiting list is never cut short: every paused message stays listed, however many', async () => {
+    const dir = spool();
+    const out = await python(`
+folder = reader.media_dir()
+folder.mkdir(parents=True)
+for n in range(150_001):
+    reader.media_waits(folder, "-1000001", str(n), {})
+listed = waiting()
+print(json.dumps({"count": len(listed), "first": listed[0], "last": listed[-1], "file": reader.MEDIA_WAITING_NAME}))
+`, { OLYMPUS_TELEGRAM_GATEWAY_SPOOL_DIR: dir });
+    expect(out.count).toBe(150_001);
+    expect(out.first).toEqual({ chat: '-1000001', message: '0' });
+    expect(out.last).toEqual({ chat: '-1000001', message: '150000' });
+    expect(out.file).toBe('.capture-media-waiting.jsonl');
+  }, 60_000);
 });
