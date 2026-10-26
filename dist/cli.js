@@ -188807,6 +188807,7 @@ __export(exports_server2, {
   connectorStoreAnswerScope: () => connectorStoreAnswerScope,
   commaSeparatedEnv: () => commaSeparatedEnv,
   applyBuiltInPrivateAnalyst: () => applyBuiltInPrivateAnalyst,
+  analystRouteTrustDomain: () => analystRouteTrustDomain,
   activeCredentialHandle: () => activeCredentialHandle,
   accountFromDropboxCredentialHandle: () => accountFromDropboxCredentialHandle,
   accountCheckedXBookmarksRuntime: () => accountCheckedXBookmarksRuntime
@@ -189617,10 +189618,10 @@ function analystRouteTrustDomain(pack, localOnly) {
   if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
     return "secure_local";
   }
-  if (pack.candidates.some((candidate) => candidate.trustDomain === "internal")) {
-    return "internal";
+  if (pack.candidates.some((candidate) => candidate.trustDomain === "public_safe") && !pack.candidates.some((candidate) => candidate.trustDomain === "internal")) {
+    return "public_safe";
   }
-  return "public_safe";
+  return "internal";
 }
 function parseRequiredTimeoutSeconds(value2, name) {
   return parseOptionalTimeoutSeconds(value2, name) ?? (() => {

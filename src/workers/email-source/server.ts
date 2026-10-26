@@ -1763,15 +1763,21 @@ function createTierSnifferModel(input: {
   return undefined;
 }
 
-function analystRouteTrustDomain(pack: { candidates: readonly SecureSensitivityInput[] }, localOnly: boolean): SourceTrustDomain {
+export function analystRouteTrustDomain(pack: { candidates: readonly SecureSensitivityInput[] }, localOnly: boolean): SourceTrustDomain {
   // Secure by domain or by tier selects the secure pool.
   if (localOnly || pack.candidates.some((candidate) => isSecureSensitivity(candidate))) {
     return 'secure_local';
   }
-  if (pack.candidates.some((candidate) => candidate.trustDomain === 'internal')) {
-    return 'internal';
+  // Public only when a Public candidate is actually in the pack. An empty pack
+  // (nothing matched, or every match was Private on a policy with no Private
+  // answer route) takes the Personal route: the Analyst answers it without a
+  // model call, and a policy with no Public tier (every shipped preset) has no
+  // public_safe route to resolve.
+  if (pack.candidates.some((candidate) => candidate.trustDomain === 'public_safe')
+    && !pack.candidates.some((candidate) => candidate.trustDomain === 'internal')) {
+    return 'public_safe';
   }
-  return 'public_safe';
+  return 'internal';
 }
 
 
