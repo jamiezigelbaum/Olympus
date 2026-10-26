@@ -25,7 +25,7 @@ import {
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
   TELEGRAM_CAPTURE_HEARTBEAT_FILE,
   TELEGRAM_SPOOL_CURSOR_RESET_WARNING,
-  TELEGRAM_TRUST_CLAIM_KEPT_NEWER_WARNING,
+  TELEGRAM_TRUST_CLAIM_HIDDEN_WARNING,
   createTelegramConnectorStoreSyncHandler,
   readTelegramCaptureSpool,
   telegramCaptureLiveness,
@@ -470,7 +470,8 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       // One lane holds it, the protected one, with its newest version.
       expect(contentOf(s.internal)).toBe('');
       expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
-      expect(receipt.counts.trust_claims_kept_newer).toBe(0);
+      expect(receipt.counts.trust_claims_moved).toBe(0);
+      expect(receipt.counts.trust_claims_hidden).toBe(0);
       await sync.pull();
       expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
     } finally {
@@ -478,7 +479,7 @@ describe('review fixes, round 2 (Astra, #545)', () => {
     }
   });
 
-  test('when the spool no longer has the newer version, the newer copy stays rather than give way to the older', async () => {
+  test('when the spool no longer has the newer version, the stored copy moves into the protected lane and never comes back', async () => {
     const dir = spool({ '2026-10-22.jsonl': versioned({ text: 'A as edited on the 22nd', at: '2026-10-22T09:00:00Z' }) });
     const s = stores(dir);
     try {
@@ -487,10 +488,18 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       unlinkSync(join(dir, '2026-10-22.jsonl'));
       writeFileSync(join(dir, '2026-10-23.jsonl'), versioned({ text: 'A as written on the 21st', at: '2026-10-21T09:00:00Z', trust: 'secure_local' }));
       const receipt = await sync.pull();
-      expect(contentOf(s.internal)).toBe('A as edited on the 22nd');
-      expect(contentOf(s.secureLocal)).toBe('');
-      expect(receipt.counts.trust_claims_kept_newer).toBe(1);
-      expect(receipt.warnings).toContain(TELEGRAM_TRUST_CLAIM_KEPT_NEWER_WARNING);
+      // Nothing of it is readable in the ordinary lane; the protected lane holds the newer copy.
+      expect(contentOf(s.internal)).toBe('');
+      expect(s.internal.searchItems('edited', 5)).toHaveLength(0);
+      expect(contentOf(s.secureLocal)).toBe('A as edited on the 22nd');
+      expect(receipt.counts.trust_claims_moved).toBe(1);
+      expect(receipt.counts.trust_claims_hidden).toBe(0);
+      // The claim is the item's: an ordinary record of it later does not bring it back.
+      writeFileSync(join(dir, '2026-10-24.jsonl'), versioned({ text: 'A edited again in the ordinary lane', at: '2026-10-24T09:00:00Z' }));
+      await sync.pull();
+      await sync.pull();
+      expect(contentOf(s.internal)).toBe('');
+      expect(s.internal.searchItems('ordinary', 5)).toHaveLength(0);
     } finally {
       s.close();
     }
@@ -509,6 +518,39 @@ describe('review fixes, round 2 (Astra, #545)', () => {
       writeFileSync(join(dir, '2026-10-21.jsonl'), versioned({ at: '2026-10-20T09:00:00Z', reactions: two, extra: photo }));
       await sync.pull();
       expect(s.internal.itemReactions(`${ACCOUNT}:chat-1:A`)).toEqual(two);
+    } finally {
+      s.close();
+    }
+  });
+
+  test('captures of one version read again after cursor resets never put back an older reaction count', async () => {
+    const photo = { attachments: [{ attachmentId: 'photo:1', type: 'image' }] };
+    const one = [{ key: '👍', count: 1 }];
+    const two = [{ key: '👍', count: 2 }];
+    const dir = spool({
+      '2026-10-20.jsonl': versioned({ at: '2026-10-20T09:00:00Z', reactions: one, extra: photo }),
+      '2026-10-21.jsonl': versioned({ at: '2026-10-20T09:00:00Z', reactions: two, extra: photo }),
+    });
+    const s = stores(dir);
+    try {
+      const sync = createTelegramConnectorStoreSyncHandler({ stores: s, spoolDir: dir, maxItems: 1 });
+      const counts: Array<number | undefined> = [];
+      const count = () => s.internal.itemReactions(`${ACCOUNT}:chat-1:A`)?.[0]?.count;
+      await sync.pull();
+      await sync.pull();
+      counts.push(count());
+      // The file the cursor stands in is pruned, more capture lands, and the lanes read from the start, again and again.
+      for (let day = 22; day <= 25; day += 1) {
+        for (const name of ['2026-10-21.jsonl', `2026-10-${day - 1}.jsonl`]) {
+          if (name !== '2026-10-20.jsonl') rmSync(join(dir, name), { force: true });
+        }
+        writeFileSync(join(dir, `2026-10-${day}.jsonl`), record(`B${day}`));
+        for (let pull = 0; pull < 3; pull += 1) {
+          await sync.pull();
+          counts.push(count());
+        }
+      }
+      expect(counts.every((value) => value === 2)).toBe(true);
     } finally {
       s.close();
     }

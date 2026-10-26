@@ -35,7 +35,7 @@ import {
 } from './corpus-adapter.ts';
 import { rememberSpoolOffset, spoolFileLines, spoolLineOffset } from './spool-lines.ts';
 import { telegramServiceContent } from '../archive-import/telegram/message.ts';
-import { telegramRecordBuilder, type TelegramRecordItems } from './record-builder.ts';
+import { telegramCaptureVersion, telegramRecordBuilder, type TelegramRecordItems } from './record-builder.ts';
 
 // Product capture and migration replay are independent writers with
 // independent cursors. Reusing the historical `telegram_spool_replay_*`
@@ -143,7 +143,6 @@ export function createTelegramCaptureSpoolConnector(options: {
     : { admitThroughCursor: options.admitThroughCursor };
   const builder = telegramRecordBuilder({
     trustDomain,
-    live: true,
     authenticate: async () => { assertTelegramCaptureSpoolDirectory(spoolDir); },
     async fetchItem(localItemId: string): Promise<RawItem> {
       // The newest record of the item wins, so the whole spool is read, a
@@ -327,7 +326,7 @@ export function readTelegramCaptureSpool(options: {
         }
         let record: TelegramCaptureSpoolRecord;
         try {
-          record = parseTelegramCaptureSpoolRecord(line.text);
+          record = markCapture(parseTelegramCaptureSpoolRecord(line.text), name, lineIndex);
         } catch {
           if (options.malformedPolicy !== 'skip') {
             throw new Error('Telegram capture spool found a malformed record.');
@@ -688,6 +687,20 @@ function parseTelegramCaptureSpoolRecord(line: string, asTrust?: TelegramMessage
   };
 }
 
+/** The record with its place in the spool in its version (`telegramCaptureVersion`): `line` counts from 1. */
+function markCapture(record: TelegramCaptureSpoolRecord, file: string, line: number): TelegramCaptureSpoolRecord {
+  const item = record.capturedItem.item;
+  const version = item.identity.sourceVersion;
+  if (version === undefined) return record;
+  return {
+    ...record,
+    capturedItem: {
+      ...record.capturedItem,
+      item: { ...item, identity: { ...item.identity, sourceVersion: telegramCaptureVersion(version, file, line) } },
+    },
+  };
+}
+
 /**
  * The newest record the spool holds of each item named, whatever lane its
  * chat was in when it was captured, built as `asTrust`'s: what moves an item
@@ -710,11 +723,13 @@ export function readTelegramCaptureSpoolNewest(options: {
     if (!stat.isFile() || stat.isSymbolicLink()) continue;
     const fd = openSync(path, 'r');
     try {
+      let lineNumber = 0;
       for (const line of spoolFileLines(fd, 0, stat.size, MAX_RECORD_BYTES)) {
+        lineNumber += 1;
         if (line.text === undefined || !line.text.trim()) continue;
         let record: TelegramCaptureSpoolRecord;
         try {
-          record = parseTelegramCaptureSpoolRecord(line.text, options.asTrust);
+          record = markCapture(parseTelegramCaptureSpoolRecord(line.text, options.asTrust), name, lineNumber);
         } catch {
           continue;
         }
