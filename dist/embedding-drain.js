@@ -49962,7 +49962,7 @@ class TierSnifferService {
               }
               continue;
             }
-            const waitingForText = missingContent && !row.contentRead && row.contentPending && this.waitingForExtraction(ledger, identity);
+            const waitingForText = missingContent && !row.contentRead && row.contentPending && this.waitingForExtraction(ledger, row, identity);
             if (waitingForText && !missingMetadata)
               continue;
             if (!missingMetadata && !missingContent)
@@ -49999,11 +49999,14 @@ class TierSnifferService {
       } catch {}
     }
   }
-  waitingForExtraction(ledger, identity) {
+  waitingForExtraction(ledger, row, identity) {
     try {
-      if (!this.options.extractionOwed)
+      if (!this.options.extractionOwed || row.family !== "file" || !row.routed)
         return false;
-      if (ledger.copies(identity).some((copy) => copy.state === "current" && copy.layers !== "metadata"))
+      const copies = ledger.copies(identity);
+      if (copies.length === 0)
+        return false;
+      if (copies.some((copy) => copy.state === "current" && copy.layers !== "metadata"))
         return false;
       return this.options.extractionOwed(identity);
     } catch {
