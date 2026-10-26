@@ -468,11 +468,11 @@ Evernote export is a new format whose attachments are child items.
   reports for Roam's Export All; Reflect's documentation does not say), and an
   import never fetches from the network. Evernote is the only one of the three
   whose export holds its files, so it is the only one with children.
-- **Evernote's recognition text.** The reader turns `<recognition>` into the
-  best candidate per word in reading order (`evernote/recognition.ts`), but the
-  contract has no `RawItem.providerText` yet (child-items.md, "Text the
-  provider supplies"), so only a count goes on the child for now. Needs the
-  contract field and the extractor's fallback.
+- **Evernote's recognition text is not used yet.** Each attachment's
+  `<recognition>` (Evernote's own reading, handwriting included) is left in the
+  file and never held. Using it needs `RawItem.providerText` (child-items.md,
+  "Text the provider supplies"), a contract change that lands on its own after
+  2.2.0 (branch `claude/provider-text-2-3-0`).
 
 ## To verify before step 4
 

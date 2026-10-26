@@ -12,10 +12,6 @@
 // invent parallel types or branch on a specific source/question downstream of
 // SourceConnector.
 //
-// Version 2.3.0 (docs/design/child-items.md, "Text the provider supplies") adds
-// the text a source supplies of its own reading of an item, which the shared
-// extractor uses when no reader produces any.
-//
 // Version 2.2.0 (docs/design/archive-live-one-dataset.md) lets a source's one
 // connector read more than one input: the live reader and each imported
 // archive, each with its own cursor, through the same record-to-item code, with
@@ -76,25 +72,6 @@ export interface RawItem {
   // to the item's later versions until it has been judged. An item built only
   // from live records never carries it.
   holdContentUntilJudged?: true;
-  // 2.3.0: text the source supplies of its own reading of this item
-  // (docs/design/child-items.md, "Text the provider supplies"): Evernote's
-  // recognition of an attachment, handwriting included. A generic input to the
-  // shared extractor, not a source branch: when no reader produces text, this
-  // becomes the item's content, judged by the same per-item tier rules and held
-  // like any content, and marked as the provider's in the extraction record and
-  // in the stored text. `form` says how to read it: `prose`, or
-  // `recognized_words` (word candidates, approximate wording, never a quote).
-  // `label` names the provider as an answer shows it ("Evernote"); `terms` are
-  // the other candidates, search terms only. Bounded by the text reader's limit.
-  providerText?: RawItemProviderText;
-}
-
-// 2.3.0: see RawItem.providerText.
-export interface RawItemProviderText {
-  text: string;
-  form: 'prose' | 'recognized_words';
-  label: string;
-  terms?: readonly string[];
 }
 
 // 2.2.0: what the store holds of one item, as the store lane tells the

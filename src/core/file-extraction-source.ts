@@ -22,7 +22,6 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { RawItemProviderText } from './contracts.ts';
 import type { ExtractionTerminalStatus } from '../workers/file-extraction/types.ts';
 
 /**
@@ -106,12 +105,6 @@ export interface FileExtractionSourceErrorOptions {
    * row by way of `message`.
    */
   detailForHash?: string;
-  /**
-   * With `source_too_large`: the source's own reading of the item it refused to
-   * hand over whole (RawItem.providerText), so the runner can still use it as
-   * the item's text without giving a reader the bytes over its limit.
-   */
-  providerText?: RawItemProviderText;
 }
 
 const ERROR_HASH_CHARS = 32;
@@ -128,7 +121,6 @@ export class FileExtractionSourceError extends Error {
   readonly settleAs: FileExtractionSourceSettlement;
   readonly retryable: boolean;
   readonly errorHash?: string;
-  readonly providerText?: RawItemProviderText;
 
   constructor(errorKind: FileExtractionSourceErrorKind, options: FileExtractionSourceErrorOptions = {}) {
     super(errorKind);
@@ -140,7 +132,6 @@ export class FileExtractionSourceError extends Error {
       ? undefined
       : createHash('sha256').update(options.detailForHash).digest('hex').slice(0, ERROR_HASH_CHARS);
     if (errorHash) this.errorHash = errorHash;
-    if (options.providerText) this.providerText = options.providerText;
   }
 }
 
