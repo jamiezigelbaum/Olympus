@@ -74654,13 +74654,17 @@ class WhatsAppSpoolIndex {
   }
   reconcile(spoolDir) {
     const known = this.db.query("SELECT name, identity, indexed_to, boundary FROM files").all();
+    const replaced = [];
     for (const { name, identity: identity2, indexed_to: indexedTo, boundary } of known) {
       const path = join61(spoolDir, name);
       const now = spoolFileIdentity(path);
       if (now !== undefined && now.identity === identity2 && now.size >= indexedTo && spoolBoundaryHolds(path, indexedTo, boundary))
         continue;
       this.forgetFile(name);
+      if (now !== undefined)
+        replaced.push(name);
     }
+    return replaced.sort();
   }
   noteFile(spoolDir, name, indexedTo) {
     const path = join61(spoolDir, name);
@@ -74842,6 +74846,37 @@ function offsetAfterLines(path, lines) {
         seen += 1;
         if (seen === lines)
           return position + found + 1;
+        cursor = found + 1;
+      }
+      position += read;
+    }
+  } finally {
+    closeSync17(fd2);
+  }
+}
+function terminatedLinesEnd(path) {
+  let fd2;
+  try {
+    fd2 = openSync17(path, "r");
+  } catch {
+    return;
+  }
+  try {
+    const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
+    let position = 0;
+    let lines = 0;
+    let offset = 0;
+    for (;; ) {
+      const read = readSync5(fd2, chunk, 0, CHUNK_BYTES, position);
+      if (read === 0)
+        return { lines, offset };
+      let cursor = 0;
+      for (;; ) {
+        const found = chunk.indexOf(NEWLINE2, cursor);
+        if (found === -1 || found >= read)
+          break;
+        lines += 1;
+        offset = position + found + 1;
         cursor = found + 1;
       }
       position += read;
@@ -75099,8 +75134,12 @@ async function* liveRecords(spoolDir, options) {
   const index = WhatsAppSpoolIndex.open(spoolDir);
   const pass = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index };
   try {
-    if (index)
-      index.reconcile(spoolDir);
+    const replaced = index ? index.reconcile(spoolDir) : [];
+    const earliest = replaced[0];
+    if (position !== undefined && earliest !== undefined && earliest <= position.file) {
+      pass.findings.cursorsRecovered += 1;
+      position = { file: earliest, line: 0, offset: 0 };
+    }
     position = resolveStart(spoolDir, position, pass);
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
       options.findings.passBudgetReached += 1;
@@ -75292,7 +75331,7 @@ function readSpoolPage(spoolDir, start, limit, pass) {
     }
     return { messages, reactions, position, exhausted: true, targets };
   };
-  return finish(index ? index.transaction(run) : run());
+  return index ? index.transaction(() => finish(run())) : run();
 }
 function pageRecords(spoolDir, page2, pass) {
   const targetIds = distinctReactionTargetIds(page2.reactions);
@@ -75874,14 +75913,14 @@ function clearWhatsAppSpoolSecrets(options) {
     const before = spoolFileIdentity(path);
     if (!before)
       continue;
-    const end = file === throughFile ? throughLine : ALL_LINES;
     const known = recorded[file];
     const same = known !== undefined && known.identity === before.identity && before.size >= known.offset && spoolBoundaryHolds(path, known.offset, known.boundary);
-    if (same && (end === ALL_LINES ? known.lines === ALL_LINES && before.size === known.offset : known.lines !== ALL_LINES && known.lines >= end)) {
+    const end = same && file === throughFile ? throughLine : ALL_LINES;
+    if (same && (end === ALL_LINES ? before.size === known.size : known.lines >= end)) {
       next[file] = known;
       continue;
     }
-    const start = same && known.lines !== ALL_LINES ? known.lines : 0;
+    const start = same ? known.lines : 0;
     try {
       const cleared = redact({
         from: `${file}:${start}`,
@@ -75897,6 +75936,8 @@ function clearWhatsAppSpoolSecrets(options) {
     const entry = clearedFileNow(path, end, end === ALL_LINES ? undefined : options.throughOffset);
     if (entry)
       next[file] = entry;
+    else
+      delete next[file];
   }
   const present = new Set(files);
   for (const [file, known] of Object.entries(recorded)) {
@@ -75914,7 +75955,7 @@ function clearWhatsAppSpoolSecrets(options) {
   });
   if (sweep && sweep.recordsRedacted + sweep.recordsBlanked > 0) {
     for (const [file, known] of Object.entries(next)) {
-      const entry = clearedFileNow(join64(options.spoolDir, file), known.lines, known.offset);
+      const entry = clearedFileNow(join64(options.spoolDir, file), known.lines, known.offset, known.size);
       if (entry)
         next[file] = entry;
       else
@@ -75925,17 +75966,17 @@ function clearWhatsAppSpoolSecrets(options) {
   }
   return addCaptureSpoolRedactions(result, sweep);
 }
-function clearedFileNow(path, lines, offset) {
+function clearedFileNow(path, lines, offset, size) {
   const identity2 = spoolFileIdentity(path);
   if (!identity2)
     return;
-  const at = lines === ALL_LINES ? identity2.size : offset ?? offsetAfterLines(path, lines);
-  if (at === undefined)
+  const reached = lines === ALL_LINES ? terminatedLinesEnd(path) : { lines, offset: offset ?? offsetAfterLines(path, lines) };
+  if (reached === undefined || reached.offset === undefined)
     return;
-  const boundary = spoolBoundaryDigest(path, at);
+  const boundary = spoolBoundaryDigest(path, reached.offset);
   if (boundary === undefined)
     return;
-  return { identity: identity2.identity, lines, offset: at, boundary };
+  return { identity: identity2.identity, lines: reached.lines, offset: reached.offset, boundary, size: size ?? identity2.size };
 }
 function refreshIndex(spoolDir, files) {
   if (files.size === 0)
@@ -75958,7 +75999,7 @@ function readClearedFiles(ledger) {
     const parsed = JSON.parse(raw);
     const valid = {};
     for (const [file, entry] of Object.entries(parsed)) {
-      if (entry && typeof entry.identity === "string" && typeof entry.boundary === "string" && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines))
+      if (entry && typeof entry.identity === "string" && typeof entry.boundary === "string" && Number.isSafeInteger(entry.offset) && Number.isSafeInteger(entry.lines) && entry.lines >= 0 && Number.isSafeInteger(entry.size))
         valid[file] = entry;
     }
     return valid;

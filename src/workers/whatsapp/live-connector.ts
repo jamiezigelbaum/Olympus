@@ -503,7 +503,14 @@ async function* liveRecords(
   const pass: SpoolPassState = { budget: { bytesLeft: options.passByteBudget }, maxRecordBytes: options.maxRecordBytes, findings: options.findings, index };
   try {
     // The index is trusted only for the files that are there, as they are.
-    if (index) index.reconcile(spoolDir);
+    // A file that broke the spool contract (replaced, cut and written again) is read again from its start, with
+    // everything after it: every boundary in it (the index's, the cursor's) is dropped.
+    const replaced = index ? index.reconcile(spoolDir) : [];
+    const earliest = replaced[0];
+    if (position !== undefined && earliest !== undefined && earliest <= position.file) {
+      pass.findings.cursorsRecovered += 1;
+      position = { file: earliest, line: 0, offset: 0 };
+    }
     position = resolveStart(spoolDir, position, pass);
     // The index catches up to where this listing starts before any page is aggregated from it.
     if (index && !catchUpIndex(spoolDir, index, position, pass)) {
@@ -707,7 +714,8 @@ function readSpoolPage(
     }
     return { messages, reactions, position, exhausted: true, targets };
   };
-  return finish(index ? index.transaction(run) : run());
+  // The page's rows, the files' records and the high-water mark commit together, or none of them do.
+  return index ? index.transaction(() => finish(run())) : run();
 }
 
 /**
