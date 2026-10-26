@@ -257,10 +257,10 @@ describe('inputs through a real store set', () => {
     // A run stops after one leg: the body it wrote is owed to the other, and the ledger holds the write's intent.
     const owed = { ...f.identity('a'), localItemId: `${ACCOUNT}:a` };
     f.set.ledger.putWriteIntent({ identity: owed, version: '1', kind: 'content', connectorId: 'test' });
-    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true });
+    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true, owedBodyVersion: '1' });
     // An older record does not apply to it: the version boundary holds although a leg is missing.
     await sync(f.set, holdingItems(inputConnector(builder, input('archive', 'archive.older', [{ id: 'a', version: 0, name: 'Old list', text: 'Nothing yet.' }]))));
-    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true });
+    expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true, incomplete: true, owedBodyVersion: '1' });
     // A record of its own version completes it, and the item is whole again.
     await sync(f.set, holdingItems(inputConnector(builder, input('archive', 'archive.held2', [{ id: 'a', version: 1, name: 'Orchard picnic list', text: 'We bring bananas.' }]))));
     expect(f.set.storedItem(f.identity('a'), numeric)).toEqual({ version: '1', hasContent: true });

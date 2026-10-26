@@ -199,6 +199,28 @@ describe('the version boundary does not depend on how completely an item was wri
     expect(h.set.ledger.writeIntents()).toEqual([]);
   });
 
+  test('the body a cut-off write owes is replayed when an ordinary write of its own version was cut off and a newer names-only record comes first', async () => {
+    const h = onePipelineHarness(cleanups);
+    h.connectLive();
+    // A names-only v9 after a v1 body is one item at v9 with that body; the run stops after the names leg.
+    const first = await h.startImport('first.mbox', [rec('a', 9, 'the ninth body')]);
+    const orig = h.stores.secure_local.syncFromConnector.bind(h.stores.secure_local);
+    let thrown = false;
+    h.stores.secure_local.syncFromConnector = (async (...args: Parameters<typeof orig>) => {
+      if (!thrown) { thrown = true; throw new Error('injected crash'); }
+      return orig(...args);
+    }) as typeof orig;
+    await h.pull(first).catch(() => undefined);
+    expect(h.textOf('a')).toBe('');
+    expect(stateOf(h, 'a')).toMatchObject({ version: '9', incomplete: true, owedBodyVersion: '9' });
+    // The replay lists the names-only v10 before the v1 record that carries the body.
+    const again = await h.startImport('again.mbox', [rec('a', 10, undefined), rec('a', 9, 'the ninth body')]);
+    await h.importAll(again);
+    expect(h.textOf('a')).toBe('the ninth body');
+    expect(stateOf(h, 'a')?.incomplete).toBeUndefined();
+    expect(h.set.ledger.writeIntents()).toEqual([]);
+  });
+
   test('an older ordinary archive record never restores an item that became a Secret in a later version', async () => {
     const h = onePipelineHarness(cleanups, { sniffer: judgedOrdinary });
     h.connectLive();
