@@ -400,6 +400,26 @@ describe('review fixes, round 3 (Astra, #553)', () => {
     expect(versions.every((version) => /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(version))).toBe(true);
   });
 
+  test('a frequent contact is keyed by its peer id, so a rename in a later export updates the one item', async () => {
+    const h = telegramOneDatasetHarness(cleanups);
+    h.pairLive('1001');
+    const snapshot = (name: string, unixtime: string) => {
+      const value = telegramFullExport({ chats: [], contacts: 0 });
+      (value.frequent_contacts as { list: Array<Record<string, unknown>> }).list = [{ id: 2002, category: 'people', type: 'personal_chat', name, rating: 0.5 }];
+      (value.profile_pictures as Array<Record<string, unknown>>)[0]!.date_unixtime = unixtime;
+      return value;
+    };
+    for (const [file, value] of [['First export', snapshot('Old Name', '1760000000')], ['Second export', snapshot('New Name', '1770000000')]] as const) {
+      const started = await h.startImport(h.writeExport(file, value));
+      if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
+      await h.importAll(started.archive_id);
+    }
+    const frequent = h.rows().filter((row) => row.conversation === 'account:frequent_contacts');
+    expect(frequent).toHaveLength(1);
+    expect(h.textOf('account:frequent_contacts', frequent[0]!.id)).toContain('New Name');
+    expect(h.textOf('account:frequent_contacts', frequent[0]!.id)).not.toContain('Old Name');
+  });
+
   test('the order: untimed is older than any timed version, and equal only to itself', () => {
     const timed = `${ACCOUNT}:account:contacts:k:text:abc:2026-06-01T12:00:00Z`;
     const untimed = `${ACCOUNT}:account:contacts:k:text:def`;

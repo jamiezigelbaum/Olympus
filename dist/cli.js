@@ -75253,6 +75253,9 @@ function telegramContactBaseKey(value) {
   const userId = telegramScalar(value.user_id);
   if (userId)
     return `user${userId}`;
+  const peerId = telegramScalar(value.id);
+  if (peerId)
+    return `peer${(telegramScalar(value.type) ?? "").replace(/[^a-z_]+/g, "")}:${peerId}`;
   const phone = telegramScalar(value.phone_number)?.replace(/\D+/g, "");
   if (phone)
     return `phone${createHash50("sha256").update(phone).digest("hex").slice(0, 24)}`;
