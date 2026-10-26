@@ -681,7 +681,11 @@ The WhatsApp chat export is an input of the WhatsApp connector
   the scheduler key keeps an import from running beside a live pull.
 - **Release check.** `ARCHIVE_FORMATS.whatsapp_chat` has an import beside a
   seeded live input (`archive-live-seed-whatsapp.ts`): the account question
-  is answered Add, and the Archives case answers Keep apart.
+  is answered Add, and the Archives case answers Keep apart. WhatsApp chats
+  rest Private by the source's own rule (no automatic signal lowers it), so
+  the beside case expects the imported word in the Private store only and
+  no search answer carrying it through the drain bound (`search:
+  'withheld'`), where Telegram's, judged like its own, is cited.
 
 ## Built, step 8: WhatsApp
 
