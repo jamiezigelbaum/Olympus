@@ -39,6 +39,7 @@ import { createServer, type Server } from 'node:net';
 import { tieredStoreSetLedgerPath } from '../src/workers/connector-store/tiered-store-set.ts';
 import { createTieredStoreExtractionSink } from '../src/workers/file-extraction/tiered-store-sink.ts';
 import { withFileLease } from '../src/core/file-lease.ts';
+import { SecretLocationsIndex } from '../src/workers/classification/secret-locations.ts';
 import { createHash } from 'node:crypto';
 import { whatsAppExtractionSourceFactory } from '../src/workers/whatsapp/extraction-factory.ts';
 import type { RawItem } from '../src/core/contracts.ts';
@@ -73,7 +74,7 @@ function spoolLine(fields: Record<string, unknown>): string {
   })}\n`;
 }
 
-function lane() {
+function lane(options: { secretLocations?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'whatsapp-media-children-'));
   roots.push(root);
   const spoolDir = join(root, 'spool');
@@ -82,11 +83,14 @@ function lane() {
   const audio = join(root, 'media', 'audio');
   for (const dir of [spoolDir, images, video, audio]) mkdirSync(dir, { recursive: true });
   const store = new LocalConnectorStore({ dbPath: join(root, 'whatsapp.db'), corpusId: WHATSAPP_LIVE_CORPUS_ID, family: 'chat', trustDomain: 'secure_local' });
+  const secretLocations = options.secretLocations ? new SecretLocationsIndex({ dbPath: join(root, 'secret-locations.db') }) : undefined;
   const tier = createWhatsAppTierLane({
     store,
     env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+    ...(secretLocations ? { secretLocations } : {}),
   });
   closers.push(() => {
+    secretLocations?.close();
     tier.newStores.internal?.current()?.close();
     store.close();
   });
@@ -1064,6 +1068,106 @@ describe('review round 9 on #558: Olympus asks the bridge for the exact version,
       expect((await pass(target, bridge().call, { set: logged })).filled).toBe(1);
       expect(order).toEqual(['finishWritesCutOff', 'sweepOrphanedChildren', 'hold', 'sync {"embed":false,"settle":false}', 'released']);
     });
+
+    // A member of the set, its methods bound to the set itself (so they read the set's own state, not a proxy's).
+    const bound = (set: ReturnType<typeof lane>['set'], key: string | symbol) => {
+      const value = Reflect.get(set, key, set) as unknown;
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(set) : value;
+    };
+    // A take-back owed from a pass that died right after it marked the row.
+    const owe = (target: ReturnType<typeof lane>, id: string) => {
+      const state = WhatsAppMediaFetchState.open(target.spoolDir);
+      try {
+        const row = state.all().find((each) => each.id === id)!;
+        state.markRevoking(row.key);
+      } finally {
+        state.close();
+      }
+    };
+    const rowsOf = (target: ReturnType<typeof lane>) => {
+      const state = WhatsAppMediaFetchState.open(target.spoolDir);
+      try {
+        return state.all().map((row) => ({ id: row.id, revoking: row.revoking }));
+      } finally {
+        state.close();
+      }
+    };
+
+    test('review round 12: an owed take-back whose Secret was cleared before it ran settles nothing and deletes nothing', async () => {
+      const target = lane();
+      append(target, waitingLine('A1', { text: 'see you at eight' }));
+      await target.pull();
+      await pass(target);
+      await extract(target, 'A1', 'Lighthousemarker on the quay');
+      // The pass that marked it died; the message's Secret was then restored to what it was.
+      owe(target, 'A1');
+      await pass(target);
+      expect(searchable(target, 'Lighthousemarker').length).toBeGreaterThan(0);
+      expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).not.toBe('secrets');
+      expect(existsSync(fetchedPath(target, 'A1'))).toBe(true);
+      expect(rowsOf(target)).toEqual([{ id: 'A1', revoking: false }]);
+    });
+
+    test('review round 12: an owed take-back never touches a newer version stored meanwhile; only its own file goes', async () => {
+      const target = lane();
+      append(target, waitingLine('A1', { text: 'see you at eight' }));
+      await target.pull();
+      await pass(target);
+      judgeSecret(target, 'A1');
+      owe(target, 'A1');
+      // A newer version, its picture saved by the bridge itself, is stored before the take-back runs again.
+      const photo = join(target.images, 'A1-new.jpg');
+      writeFileSync(photo, 'a newer picture');
+      append(target, spoolLine({ id: 'A1', media_type: 'image', media_mime: 'image/jpeg', media_path: photo, download_status: 'ok', text: 'see you at nine', timestamp: '2026-07-01T14:00:00Z' }));
+      await target.pull();
+      expect(childLocator(target, 'A1')).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`);
+      // The message is (still) Secret when the take-back runs again.
+      judgeSecret(target, 'A1');
+      await pass(target);
+      expect(childLocator(target, 'A1')).toBe(`${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${photo}`);
+      expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).not.toBe('secrets');
+      expect(existsSync(photo)).toBe(true);
+      expect(existsSync(fetchedPath(target, 'A1'))).toBe(false);
+      expect(rowsOf(target)).toEqual([]);
+    });
+
+    for (const [label, withLocations] of [['an older row resumes from the location it recorded first', true], ['without a location index, the decision goes first', false]] as const) {
+      test(`review round 12: a settlement cut off at its last write is finished by the next pass (${label})`, async () => {
+        const target = lane({ secretLocations: withLocations });
+        append(target, waitingLine('A1', { text: 'see you at eight' }));
+        await target.pull();
+        await pass(target);
+        await extract(target, 'A1', 'Lighthousemarker on the quay');
+        judgeSecret(target, 'A1');
+        // The settlement's last write, its decision, fails once.
+        let failures = 1;
+        const failing = new Proxy(target.set, {
+          get: (set, key) => (key === 'ledger'
+            ? new Proxy(set.ledger, {
+              get: (ledger, member) => (member === 'recordDecision' && failures > 0
+                ? () => {
+                  failures -= 1;
+                  throw new Error('disk I/O error');
+                }
+                : Reflect.get(ledger, member, ledger)),
+            })
+            : bound(set, key)),
+        });
+        await expect(pass(target, bridge().call, { set: failing })).rejects.toThrow('disk I/O error');
+        expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).not.toBe('secrets');
+        expect(existsSync(fetchedPath(target, 'A1'))).toBe(true);
+        if (withLocations) {
+          // Stranded as the review found it: every copy already tombstoned, the decision never written.
+          expect(target.set.secrets()?.get(childIdentity('A1'))).toBeDefined();
+          expect(target.set.storedItem(childIdentity('A1'), () => 0)?.tombstoned).toBe(true);
+        }
+        await pass(target);
+        expect(target.ledger.getCurrent(childIdentity('A1'))?.contentTier).toBe('secrets');
+        expect(searchable(target, 'Lighthousemarker')).toEqual([]);
+        expect(existsSync(fetchedPath(target, 'A1'))).toBe(false);
+        expect(rowsOf(target)).toEqual([]);
+      });
+    }
 
     test('a picture whose own names are still being judged waits', async () => {
       const target = lane();

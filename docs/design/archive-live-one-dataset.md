@@ -785,17 +785,26 @@ export's media are (section 5).
     only on a call that stalls, and never on one for its length.
   - **Take-back, every pass.** A row whose message is now Secret (the
     message or its media) is taken back, done rows included. The row is
-    marked first, so the take-back is owed until it is confirmed, whatever
-    is judged meanwhile. The picture's or video's child is made Secret
-    through the one Secrets path (`settleRoutedSecrets`, or
+    marked first, so a take-back of that version is owed until it is
+    confirmed. The picture's or video's child at that version is made
+    Secret through the one Secrets path (`settleRoutedSecrets`, or
     `settleLegacySecrets` for a row the set never routed), whether or not the
     file is still there. Its copies, chunks and embeddings go, and the side
     stores forget it. Only once the child is confirmed Secret, with no active
-    copy anywhere, is its file deleted and the folder fsynced; the row is
-    forgotten last. A take-back cut off anywhere is taken up again by the
-    next pass. A row stored at another version loses its file but is
-    kept, so a later Secret still takes its child back; one whose message
-    is gone is forgotten. A file no row names is deleted. The clearing
+    copy of that version anywhere, is its file deleted and the folder
+    fsynced; the row is forgotten last.
+
+    A take-back cut off anywhere is taken up again by the next pass, but only
+    for that version and only while a Secret still covers it. A Secret
+    cleared meanwhile drops the obligation with nothing settled or deleted. A
+    newer version stored meanwhile is never touched; only the old version's
+    file goes. A legacy settlement cut off after its tombstones resumes from
+    the Secret location it recorded first. Without a location index, the
+    decision is written before any tombstone, so leftover copies are
+    finished on retry.
+
+    A row stored at another version, or whose message is gone, loses its
+    file and is forgotten. A file no row names is deleted. The clearing
     deletes a fetched copy whose media is judged Secret too, and every
     Secret deletion fsyncs its folder. Fetched media is stricter than saved
     media: a Secret caption keeps a live-saved picture but takes a fetched

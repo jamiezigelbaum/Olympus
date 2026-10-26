@@ -101941,8 +101941,13 @@ async function runWhatsAppMediaFetch(options) {
   };
   const takeBack = (row) => {
     state.markRevoking(row.key);
-    if (!settleFetchedChild(options, row))
+    const outcome = revokeFetchedChild(options, row);
+    if (outcome === "owed")
       return;
+    if (outcome === "cleared") {
+      state.clearRevoking(row.key);
+      return;
+    }
     removeFiles(row);
     state.forget(row.key);
     result.dropped += 1;
@@ -101965,10 +101970,7 @@ async function runWhatsAppMediaFetch(options) {
       continue;
     }
     if (verdict === "gone") {
-      if (row.done && options.tierSet.storedItem(parentOf(options, row), compareWhatsAppVersions))
-        removeFiles(row);
-      else
-        forget(row);
+      forget(row);
       continue;
     }
     if (row.done)
@@ -102071,49 +102073,64 @@ function fillInput(record2) {
 function parentOf(options, row) {
   return { provider: "whatsapp", accountScope: options.account, providerItemId: row.id, providerConversationId: row.chatJid };
 }
-function settleFetchedChild(options, row) {
-  if (!isWhatsAppChildMediaType(row.media.mediaType))
-    return true;
+function revokeFetchedChild(options, row) {
   const { tierSet } = options;
-  const child = { ...parentOf(options, row), providerItemId: childProviderItemId(row.id, "media") };
+  const parent = parentOf(options, row);
+  const child = isWhatsAppChildMediaType(row.media.mediaType) ? { ...parent, providerItemId: childProviderItemId(row.id, "media") } : undefined;
+  const stored = tierSet.storedItem(child ?? parent, compareWhatsAppVersions);
+  if (stored?.version !== undefined && compareWhatsAppVersions(stored.version, row.version) !== 0)
+    return "superseded";
+  const covered = isSecret(tierSet.ledger.getCurrent(parent)) || child !== undefined && isSecret(tierSet.ledger.getCurrent(child));
+  if (!covered)
+    return "cleared";
+  if (!child)
+    return "settled";
   const copies = () => tierSet.openStores().flatMap((store) => {
+    const state = store.storedItemState(child);
+    if (!state || state.tombstoned || state.version === undefined || compareWhatsAppVersions(state.version, row.version) !== 0)
+      return [];
     const copy = store.exportItemCopy(child);
     return copy ? [{ store, copy }] : [];
   });
   const record2 = tierSet.ledger.getCurrent(child);
   const held = copies();
-  if (!record2 && held.length === 0)
-    return true;
-  const exported = held[0]?.copy;
-  if (record2 && !isSecret(record2) && exported) {
-    const decision = {
-      ...record2,
-      metadataTier: "secrets",
-      contentTier: "secrets",
-      decidedBy: "secret_detector",
-      reasons: ["content:secret:fetched_media_parent_secret"],
-      snifferId: "undecided",
-      state: "current",
-      contentRead: true,
-      metadataPending: false,
-      contentPending: false
-    };
-    const finding = { findingKinds: ["fetched_media_parent_secret"] };
-    const locations = tierSet.secrets();
-    if (record2.routed) {
-      settleRoutedSecrets(tierSet, child, decision, exported, finding);
-    } else if (locations) {
-      settleLegacySecrets({ ledger: tierSet.ledger, stores: tierSet.openStores(), locations, identity: child, decision });
+  const locations = tierSet.secrets();
+  const decision = (base) => ({
+    ...base,
+    metadataTier: "secrets",
+    contentTier: "secrets",
+    decidedBy: "secret_detector",
+    reasons: ["content:secret:fetched_media_parent_secret"],
+    snifferId: "undecided",
+    state: "current",
+    contentRead: true,
+    metadataPending: false,
+    contentPending: false
+  });
+  if (record2 && !isSecret(record2)) {
+    const exported = held[0]?.copy;
+    if (exported) {
+      const finding = { findingKinds: [FETCHED_MEDIA_SECRET_FINDING] };
+      if (record2.routed) {
+        settleRoutedSecrets(tierSet, child, decision(record2), exported, finding);
+      } else if (locations) {
+        settleLegacySecrets({ ledger: tierSet.ledger, stores: tierSet.openStores(), locations, identity: child, decision: decision(record2) });
+      } else {
+        tierSet.ledger.recordDecision(child, decision(record2));
+      }
+      forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: exported.identity.localItemId } });
+    } else if (locations?.get(child)) {
+      tierSet.ledger.recordDecision(child, decision(record2));
+      forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: whatsAppMediaChildLocalItemId(options.account, row.chatJid, row.id) } });
     } else {
-      for (const { store, copy } of held)
-        store.tombstoneCopy(copy.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: "S5" });
-      tierSet.ledger.recordDecision(child, decision);
+      return "settled";
     }
-    forgetSecretInSideStores({ ledger: tierSet.ledger, identity: { ...child, localItemId: exported.identity.localItemId } });
   }
   for (const { store, copy } of copies())
     store.tombstoneCopy(copy.identity, { connectorId: WHATSAPP_MEDIA_FETCH_INPUT_ID, trustTier: "S5" });
-  return isSecret(tierSet.ledger.getCurrent(child)) && copies().length === 0;
+  if (copies().length > 0)
+    return "owed";
+  return !record2 || isSecret(tierSet.ledger.getCurrent(child)) ? "settled" : "owed";
 }
 
 class WhatsAppMediaFetchState {
@@ -102153,6 +102170,9 @@ class WhatsAppMediaFetchState {
   }
   markRevoking(key2) {
     this.db.query("UPDATE media SET revoking = 1 WHERE key = ?").run(key2);
+  }
+  clearRevoking(key2) {
+    this.db.query("UPDATE media SET revoking = 0 WHERE key = ?").run(key2);
   }
   forget(key2) {
     this.db.query("DELETE FROM media WHERE key = ?").run(key2);
@@ -102409,7 +102429,7 @@ function removeDurably(path) {
   }
   fsyncFolder(dirname72(path));
 }
-var WHATSAPP_MEDIA_FETCH_STATE_FILE = "media-fetch.sqlite", WHATSAPP_MEDIA_FETCH_INPUT_ID = "whatsapp-media-fetch", WHATSAPP_MEDIA_SOCKET_POINTER = "media-download.json", PART_SUFFIX = ".part", DISK_FLOOR_MIN_BYTES, DISK_FLOOR_SHARE = 20, CALL_STALL_MS = 120000, ANSWER_HEAD_MAX_BYTES, EXTENSIONS2;
+var WHATSAPP_MEDIA_FETCH_STATE_FILE = "media-fetch.sqlite", WHATSAPP_MEDIA_FETCH_INPUT_ID = "whatsapp-media-fetch", WHATSAPP_MEDIA_SOCKET_POINTER = "media-download.json", PART_SUFFIX = ".part", DISK_FLOOR_MIN_BYTES, DISK_FLOOR_SHARE = 20, CALL_STALL_MS = 120000, ANSWER_HEAD_MAX_BYTES, FETCHED_MEDIA_SECRET_FINDING = "fetched_media_parent_secret", EXTENSIONS2;
 var init_media_fetch = __esm(() => {
   init_source_inputs();
   init_secrets_disposition();
