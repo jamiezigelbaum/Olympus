@@ -453,6 +453,7 @@ import { fileSourceScopeIdForProvider } from '../../core/source-scope-approval.t
 import { createGmailMailScopeBrowser, createGmailPickerRequestBudget } from '../google-connectors/gmail-scope-browser.ts';
 import { GMAIL_IMPORT_CONNECTOR_PREFIX, gmailArchiveTarget, gmailItemAccountScope } from '../google-connectors/gmail-archive-target.ts';
 import { gmailHeaderMatch } from '../google-connectors/gmail-header-match.ts';
+import { gmailImportAllowance } from '../google-connectors/gmail-import-allowance.ts';
 import type { GmailApiClient } from '../google-connectors/gmail.ts';
 import { readSourceRegistry } from '../../core/source-registry.ts';
 import { gmailLaneSyncOptions } from '../google-connectors/gmail-live-sync.ts';
@@ -2825,6 +2826,10 @@ export async function main(): Promise<void> {
   // Archives, as before.
   if (gmailInternalConnectorStore && gmailSecureConnectorStore) {
     let gmailArchiveSet: { key: string; set: ReturnType<typeof createLaneTieredStoreSet> } | undefined;
+    // Every Gmail request an import makes passes one gate: imports keep to their share of the day.
+    const gmailImportGate = gmailImportAllowance({ usage: () => gmailRequestBudget?.status() });
+    // The account's labels, read once a day while the owner's rules stay the same.
+    let gmailLabelCache: { key: string; map: ReadonlyMap<string, string> } | undefined;
     archiveSourceTargets.register(gmailArchiveTarget({
       concurrencyKey: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
       exclusive: (task) => connectedHandleRegistryPath
@@ -2870,16 +2875,22 @@ export async function main(): Promise<void> {
           account: gmailItemScopeFor(handle),
           // Takeout names user labels; the account's list gives their ids, so an owner rule on a label id applies.
           labelIds: async () => {
-            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return undefined;
+            const cacheKey = `${new Date().toISOString().slice(0, 10)}\n${key}`;
+            if (gmailLabelCache?.key === cacheKey) return gmailLabelCache.map;
+            if (!handle || !approved || !gmailRequestBudget || !scopeRef || !fileSourceScopeAuthority) return { unavailable: 'gmail_labels_unavailable' };
             fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            const room = gmailImportGate.take(1);
+            if (room !== true) return { unavailable: room };
             matchClient ??= new GoogleGmailSourceConnector({
               credentialHandle: handle.handle,
               ...(handle.accountRole ? { account: handle.accountRole } : {}),
               requestBudget: gmailRequestBudget,
             }).apiClientForTooling();
             const api = await matchClient;
-            if (!api.listLabels) return undefined;
-            return new Map((await api.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id] as const));
+            if (!api.listLabels) return { unavailable: 'gmail_labels_unavailable' };
+            const map = new Map((await api.listLabels()).map((label) => [label.name.trim().toLowerCase(), label.id] as const));
+            gmailLabelCache = { key: cacheKey, map };
+            return map;
           },
           // A message without Takeout's id is matched by asking Gmail, under the live lane's day budget, and only
           // while the owner's mail approval is current: nothing of the mailbox is read without one.
@@ -2894,7 +2905,7 @@ export async function main(): Promise<void> {
             }).apiClientForTooling();
             return matchClient;
           }, {
-            usage: () => gmailRequestBudget?.status(),
+            allowance: gmailImportGate,
             // The token's mailbox must not be another account than the one the registry names for Gmail.
             sameAccount: (address) => {
               const named = readSourceRegistry(process.env).accounts.find((entry) => entry.source_id === GMAIL_SOURCE_ID)?.provider_account_hash;

@@ -48,8 +48,8 @@ export interface GmailArchiveHarness {
   window: { contentAfterMs?: number };
   build: GmailMailBuild;
   match: { current?: MboxGmailMatch };
-  /** The account's labels as the lane reads them (lower-cased name to id); undefined: they cannot be read. */
-  labels: { current?: () => Promise<ReadonlyMap<string, string> | undefined> };
+  /** The account's labels as the lane reads them (lower-cased name to id), or why they cannot be read. */
+  labels: { current?: () => Promise<ReadonlyMap<string, string> | { unavailable: string }> };
   /** Gmail connected as the account named by `providerAccountId` (null: an entry that names none). */
   connectLive(providerAccountId: string | null): void;
   pullLive(): Promise<void>;

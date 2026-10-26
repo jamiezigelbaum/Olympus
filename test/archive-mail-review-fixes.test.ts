@@ -20,7 +20,8 @@ import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import type { CredentialBroker } from '../src/workers/credential-broker/index.ts';
 import { GoogleGmailSourceConnector, type GmailApiClient, type GmailMessage } from '../src/workers/google-connectors/gmail.ts';
 import { gmailItemAccountScope, gmailLabelLookup } from '../src/workers/google-connectors/gmail-archive-target.ts';
-import { gmailHeaderMatch, IMPORT_SHARE } from '../src/workers/google-connectors/gmail-header-match.ts';
+import { gmailHeaderMatch } from '../src/workers/google-connectors/gmail-header-match.ts';
+import { GMAIL_IMPORT_MESSAGE_COST, GMAIL_IMPORT_SHARE, gmailImportAllowance } from '../src/workers/google-connectors/gmail-import-allowance.ts';
 import { gmailPrivateStoreStatusScope } from '../src/workers/email-source/gmail-status-scope.ts';
 import { GoogleRequestBudgetError } from '../src/workers/google-connectors/request-budget.ts';
 import { ACCOUNT, gmailArchiveHarness } from './support/gmail-archive-harness.ts';
@@ -64,8 +65,8 @@ describe('Takeout label names reach owner rules on label ids', () => {
 
   test('with a label rule and no way to read the account\'s labels, the import waits and stores nothing', async () => {
     const h = gmailArchiveHarness(cleanups, { rules: [rule] });
-    h.labels.current = async () => undefined;
-    expect(await gmailLabelLookup({ set: h.set, labelIds: h.labels.current })).toEqual({ kind: 'unavailable' });
+    h.labels.current = async () => ({ unavailable: 'gmail_labels_unavailable' });
+    expect(await gmailLabelLookup({ set: h.set, labelIds: h.labels.current })).toEqual({ kind: 'unavailable', reason: 'gmail_labels_unavailable' });
     const id = await started(await h.approve('takeout.mbox', takeoutMbox([mail(5, { labels: ['Inbox', 'Payroll'] })])));
     const outcome = await h.importAll(id);
     expect(outcome.continueSoon).toBe(false);
@@ -86,7 +87,10 @@ describe('Takeout label names reach owner rules on label ids', () => {
 
   test('without a label rule, names alone are enough and nothing waits', async () => {
     const h = gmailArchiveHarness(cleanups);
-    expect(await gmailLabelLookup({ set: h.set })).toEqual({ kind: 'none' });
+    let asked = 0;
+    expect(await gmailLabelLookup({ set: h.set, labelIds: async () => { asked += 1; return new Map(); } })).toEqual({ kind: 'none' });
+    // Nothing is asked of Gmail when no rule names a label.
+    expect(asked).toBe(0);
   });
 });
 
@@ -102,25 +106,71 @@ describe('a spent request budget keeps what was read and waits', () => {
     },
   });
 
-  test('the import\'s share is capped, and a spent budget is "later", never an error', async () => {
-    const live = mail(7);
-    const headers = { messageId: live.messageId!, date: new Date(live.date).toUTCString(), from: live.from, subject: live.subject };
-    const share = Math.floor(100 * IMPORT_SHARE);
-    expect(await gmailHeaderMatch(async () => api([apiMessage(live)]), { usage: () => ({ requests: share - 1, dailyRequestBudget: 100 }) })(headers)).toBe('later');
-    expect(await gmailHeaderMatch(async () => api([apiMessage(live)]), { usage: () => ({ requests: 0, dailyRequestBudget: 100 }) })(headers)).toEqual({ id: live.id });
+  const live = mail(7);
+  const headers = { messageId: live.messageId!, date: new Date(live.date).toUTCString(), from: live.from, subject: live.subject };
+  /** A day counter the test drives: the lane's, which every request (live's and imports') moves. */
+  const counter = (dailyRequestBudget: number, start = 0) => {
+    const state = { requests: start };
+    return { state, usage: () => ({ utcDay: '2026-10-26', requests: state.requests, dailyRequestBudget }) };
+  };
+  const counted = (client: GmailApiClient, state: { requests: number }): GmailApiClient => ({
+    async listMessages(request) { state.requests += 1; return client.listMessages(request); },
+    async getMessage(id, options) { state.requests += 1; return client.getMessage(id, options); },
+  });
+
+  test('one gate holds every request an import makes: half the day, whole messages, nothing spent while waiting', async () => {
+    const day = counter(100);
+    const allowance = gmailImportAllowance({ usage: day.usage, now: () => new Date('2026-10-26T12:00:00Z') });
+    const match = gmailHeaderMatch(async () => counted(api([apiMessage(live)]), day.state), { allowance });
+    // Each match asks two requests (search, one candidate); the share is 50, a message is begun only with 7 left.
+    let matched = 0;
+    for (let at = 0; at < 40; at += 1) {
+      const answer = await match(headers);
+      if (answer !== 'none' && 'later' in answer) {
+        expect(answer.later).toBe('gmail_import_allowance_spent');
+        break;
+      }
+      matched += 1;
+    }
+    expect(day.state.requests).toBeLessThanOrEqual(Math.floor(100 * GMAIL_IMPORT_SHARE));
+    expect(matched).toBe(Math.floor((50 - GMAIL_IMPORT_MESSAGE_COST) / 2) + 1);
+    // A waiting retry spends nothing.
+    const before = day.state.requests;
+    expect(await match(headers)).toEqual({ later: 'gmail_import_allowance_spent' });
+    expect(day.state.requests).toBe(before);
+    // The lane's own budget spent by live Gmail: later, never an error.
     const spent: GmailApiClient = { ...api([]), async listMessages() { throw new GoogleRequestBudgetError('Gmail', '2026-10-27T00:00:00.000Z'); } };
-    expect(await gmailHeaderMatch(async () => spent)(headers)).toBe('later');
+    expect(await gmailHeaderMatch(async () => spent)(headers)).toEqual({ later: 'gmail_requests_spent' });
+  });
+
+  test('any budget the import accepts moves at least one message a day; one too small says so', async () => {
+    const tiny = counter(4);
+    expect(await gmailHeaderMatch(async () => api([apiMessage(live)]), { allowance: gmailImportAllowance({ usage: tiny.usage }) })(headers))
+      .toEqual({ later: 'gmail_budget_too_small' });
+    // The smallest accepted budget: its allowance holds one whole message.
+    const small = counter(GMAIL_IMPORT_MESSAGE_COST * 2);
+    const allowance = gmailImportAllowance({ usage: small.usage });
+    expect(await gmailHeaderMatch(async () => counted(api([apiMessage(live)]), small.state), { allowance })(headers)).toEqual({ id: live.id });
+  });
+
+  test('labels are asked through the same gate, so a waiting import charges nothing for them', () => {
+    const day = counter(100, 0);
+    const allowance = gmailImportAllowance({ usage: day.usage });
+    for (let at = 0; at < 50; at += 1) expect(allowance.take(1)).toBe(true);
+    expect(allowance.take(1)).toBe('gmail_import_allowance_spent');
+    expect(allowance.check(1)).toBe('gmail_import_allowance_spent');
   });
 
   test('end to end: messages matched before the budget ran out are stored, the rest wait for the next pass', async () => {
     const h = gmailArchiveHarness(cleanups);
     const loose = [mail(8), mail(9), mail(10)];
     let allowed = 2;
-    h.match.current = async () => (allowed-- > 0 ? 'none' : 'later');
+    h.match.current = async () => (allowed-- > 0 ? 'none' : { later: 'gmail_import_allowance_spent' });
     const text = takeoutMbox(loose, { separator: () => 'From someone@example.test Mon Jan  1 00:00:00 2024' });
     const id = await started(await h.approve('export.mbox', text));
     const first = await h.importAll(id);
     expect(first.continueSoon).toBe(false);
+    expect(first.receipt.warnings).toContain('archive_import_waiting_for_provider: gmail_import_allowance_spent');
     expect(first.record?.status).toBe('importing');
     expect(new Set(h.rows().map((row) => row.id)).size).toBe(2);
     allowed = 10;
@@ -193,6 +243,54 @@ describe('a cut-short Gmail page resumes after what it handled', () => {
     }
     expect(done).toBe(true);
     expect(ids).toEqual([message.id, `${message.id}#child:1`, `${message.id}#child:2`, `${message.id}#child:3`, other.id]);
+  });
+});
+
+describe('a cut-short Gmail page resumes by message, never by position', () => {
+  test('a message removed before the resume does not make the next one skipped', async () => {
+    const first = apiMessage(mail(16));
+    const base = apiMessage(mail(17));
+    const second: GmailMessage = {
+      ...base,
+      payload: {
+        partId: '', mimeType: 'multipart/mixed', headers: base.payload!.headers!,
+        parts: [
+          { partId: '0', mimeType: 'text/plain', filename: '', body: { data: Buffer.from('body').toString('base64url') } },
+          ...[1, 2].map((at) => ({ partId: String(at), mimeType: 'application/pdf', filename: `g${at}.pdf`, body: { attachmentId: `b${at}`, size: 3 } })),
+        ],
+      },
+    };
+    const third = apiMessage(mail(18));
+    let mailbox = [first, second, third];
+    const client: GmailApiClient = {
+      async listMessages(request) {
+        const offset = request.pageToken ? Number(request.pageToken) : 0;
+        const slice = mailbox.slice(offset, offset + request.maxResults);
+        return { messages: slice.map((entry) => ({ id: entry.id })), ...(offset + slice.length < mailbox.length ? { nextPageToken: String(offset + slice.length) } : {}) };
+      },
+      async getMessage(id) { return [first, second, third].find((entry) => entry.id === id)!; },
+    };
+    const connector = new GoogleGmailSourceConnector({ account: 'personal', credentialBroker: OFFLINE_BROKER, apiClient: client, build: { children: true } });
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    // First pass: the first message fits; the second (three items) does not beside it.
+    for await (const page of connector.listItems({ limit: 3 })) {
+      ids.push(...page.items.map((item) => item.identity.providerItemId));
+      cursor = page.nextCursor;
+    }
+    expect(ids).toEqual([first.id]);
+    // The first message is deleted in Gmail before the next pass.
+    mailbox = [second, third];
+    let done = false;
+    for (let pass = 0; pass < 10 && !done; pass += 1) {
+      for await (const page of connector.listItems({ limit: 3, ...(cursor ? { cursor } : {}) })) {
+        ids.push(...page.items.map((item) => item.identity.providerItemId));
+        cursor = page.nextCursor;
+        done = page.done;
+      }
+    }
+    expect(ids).toContain(second.id);
+    expect(ids).toContain(third.id);
   });
 });
 

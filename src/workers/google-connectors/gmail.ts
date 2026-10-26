@@ -201,11 +201,15 @@ interface GmailCursor {
    */
   childOf?: { id: string; from: number };
   /**
-   * How many of the listed messages at the start of `pageToken`'s page a pass
-   * already handled (a page the item budget cut short): the next pass resumes
-   * after them, whether or not the store would skip them.
+   * The last message of `pageToken`'s page a pass handled (a page the item
+   * budget cut short): the next pass resumes after that message, found by its
+   * id in the page as it is listed then, whether or not the store would skip
+   * it. Never a position: a message removed meanwhile would shift the rest of
+   * the page under it. When the message is no longer listed, the page is read
+   * from its start again (what is stored is skipped or written again
+   * unchanged).
    */
-  skip?: number;
+  after?: string;
 }
 
 export interface GmailSourceConnectorTraversalStatus {
@@ -392,8 +396,8 @@ export class GoogleGmailSourceConnector implements SourceConnector {
     // The listing's limit bounds the ITEMS it yields (the store stops at it), and a message is its own item
     // and its attachments: a message's items go on one page, or wait for the next pass.
     let itemRoom = remaining;
-    // Messages at the start of the first page a cut-short pass already handled.
-    let pageSkip = staleLeg ? 0 : resume.skip ?? 0;
+    // The last message of the first page a cut-short pass already handled.
+    let pageAfter = staleLeg ? undefined : resume.after;
     if (resume.childOf && !staleLeg) {
       // The last pass stopped inside a message's attachments (more than one pass may hold): the rest first.
       const rest = await this.attachmentsFrom(client, resume.childOf, itemRoom);
@@ -406,7 +410,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         ...(pageToken ? { pageToken } : {}),
         ...(metadataLeg ? { phase: 'metadata' as const } : {}),
         ...(startedMs !== undefined ? { startedMs } : {}),
-        ...(pageSkip > 0 ? { skip: pageSkip } : {}),
+        ...(pageAfter ? { after: pageAfter } : {}),
       };
       if (rest.next !== undefined) {
         const nextCursor = encodeGmailCursor({ ...cursorFields, childOf: { id: resume.childOf.id, from: rest.next } });
@@ -429,8 +433,11 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         ...(query ? { query } : {}),
       });
       const listed = page.messages.filter((message) => message.id);
-      const baseSkip = pageSkip;
-      pageSkip = 0;
+      const resumedAt = pageAfter ? listed.findIndex((message) => message.id === pageAfter) : -1;
+      const baseSkip = resumedAt + 1;
+      // The messages this pass handled on this page, in order: the cursor resumes after the last of them.
+      const examinedIds: string[] = resumedAt >= 0 ? [pageAfter!] : [];
+      pageAfter = undefined;
       const items: RawItem[] = [];
       let messagesExamined = 0;
       let messagesFetched = 0;
@@ -439,6 +446,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       for (const message of listed.slice(baseSkip)) {
         if (messagesFetched >= remaining || items.length >= itemRoom) break;
         messagesExamined += 1;
+        examinedIds.push(message.id);
         // Mail Olympus already holds is never observed again under a scope.
         // Gmail messages are immutable, so a re-read could only replace a
         // stored body with a body-less metadata row (the window moved) or
@@ -527,6 +535,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
         // goes with the attachments that fit, and the next pass resumes inside it.
         if (items.length + 1 + children.length > itemRoom && items.length > 0) {
           messagesExamined -= 1;
+          examinedIds.pop();
           break;
         }
         const unit = [item, ...children].slice(0, Math.max(1, itemRoom - items.length));
@@ -552,7 +561,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
           ...(startedMs !== undefined ? { startedMs } : {}),
           childOf,
           // The split message counts as handled: once its attachments are listed, the page goes on after it.
-          skip: baseSkip + messagesExamined,
+          after: childOf.id,
         });
         yield { items, ...(nextCursor ? { nextCursor } : {}), done: false, truncated: true };
         return;
@@ -564,7 +573,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
       const handled = baseSkip + messagesExamined;
       const pageTruncated = handled < listed.length;
       // A page the item budget cut short is read again from its own token, after the messages this pass handled
-      // (`skip`), never from the next page's, which would pass over the ones it did not reach.
+      // (`after`), never from the next page's, which would pass over the ones it did not reach.
       if (!pageTruncated) pageToken = page.nextPageToken;
       const legDone = !pageToken && !pageTruncated;
       // The content leg finishing hands over to the metadata leg instead of
@@ -597,7 +606,7 @@ export class GoogleGmailSourceConnector implements SourceConnector {
             ...(pageToken ? { pageToken } : {}),
             ...(metadataLeg ? { phase: 'metadata' as const } : {}),
             ...(startedMs !== undefined ? { startedMs } : {}),
-            ...(pageTruncated && handled > 0 ? { skip: handled } : {}),
+            ...(pageTruncated && examinedIds.length > 0 ? { after: examinedIds.at(-1)! } : {}),
           });
       yield {
         items,
@@ -997,7 +1006,7 @@ export function promotedWatermark(input: {
 }
 
 function encodeGmailCursor(cursor: GmailCursor): string | undefined {
-  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.skip) {
+  if (cursor.watermarkMs === undefined && cursor.highWaterMs === undefined && !cursor.pageToken && !cursor.phase && !cursor.childOf && !cursor.after) {
     return undefined;
   }
   return `${GMAIL_CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString('base64url')}`;
@@ -1011,7 +1020,7 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
   try {
     const parsed = JSON.parse(
       Buffer.from(value.slice(GMAIL_CURSOR_PREFIX.length), 'base64url').toString('utf8'),
-    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown; phase?: unknown; startedMs?: unknown; childOf?: unknown; skip?: unknown };
+    ) as { watermarkMs?: unknown; highWaterMs?: unknown; pageToken?: unknown; phase?: unknown; startedMs?: unknown; childOf?: unknown; after?: unknown };
     const watermarkMs = decodeCursorEpochMs(parsed.watermarkMs);
     const highWaterMs = decodeCursorEpochMs(parsed.highWaterMs);
     const startedMs = decodeCursorEpochMs(parsed.startedMs);
@@ -1027,7 +1036,7 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
     }
     if (parsed.phase !== undefined && parsed.phase !== 'metadata') throw new Error('invalid');
     const childOf = decodeChildOf(parsed.childOf);
-    if (parsed.skip !== undefined && (typeof parsed.skip !== 'number' || !Number.isSafeInteger(parsed.skip) || parsed.skip < 0 || parsed.skip > 1_000)) {
+    if (parsed.after !== undefined && (typeof parsed.after !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.after))) {
       throw new Error('invalid');
     }
     return {
@@ -1037,7 +1046,7 @@ function decodeGmailCursor(value: string | undefined): GmailCursor {
       ...(parsed.phase === 'metadata' ? { phase: 'metadata' as const } : {}),
       ...(startedMs !== undefined ? { startedMs } : {}),
       ...(childOf ? { childOf } : {}),
-      ...(typeof parsed.skip === 'number' && parsed.skip > 0 ? { skip: parsed.skip } : {}),
+      ...(typeof parsed.after === 'string' ? { after: parsed.after } : {}),
     };
   } catch {
     throw new TypeError('Gmail connector cursor is invalid.');

@@ -430,11 +430,20 @@ connector; any other mbox stays under Archives, as before.
   indexes `Message-ID` for every message, so the input asks it directly:
   one search, and one metadata read per candidate (at most five), only for
   such messages, under the day budget and only while the mail approval is
-  current. A Takeout import costs no request; no new store is kept. An import
-  may spend at most half of the day's requests, so live Gmail keeps the rest;
-  past that, or with the budget spent, what was read goes out with its resume
-  point and the import waits for its next scheduled pass
-  (`archive_import_waiting_for_provider` on the pass's receipt).
+  current. A Takeout import costs no request; no new store is kept.
+- **One allowance** (`google-connectors/gmail-import-allowance.ts`). Every
+  Gmail request an import makes (the label list, the mailbox check, the
+  search, the candidates' headers) passes one gate: half of the day's budget,
+  never less than one message's worst case (seven requests), so any accepted
+  budget moves at least one message a day. A message is begun only when the
+  allowance holds its worst case, and a refusal spends nothing. A day's
+  budget under fourteen cannot leave live Gmail its share, so the import
+  waits and says why. Waiting, what was read goes out with its resume point
+  and the import waits for its next scheduled pass; the pass's receipt names
+  the reason (`archive_import_waiting_for_provider: gmail_import_allowance_spent`,
+  `gmail_requests_spent`, `gmail_budget_too_small` or
+  `gmail_labels_unavailable`). The label list is asked only when an owner
+  rule names a label, and once a day while the rules stay the same.
 - **Account** (`archive-import/mbox/gmail-account.ts`). Headers of the first
   500 messages (or 64 MB) are read: every one must carry a Gmail marker, and
   the topmost `Delivered-To` of the received ones must name exactly one
@@ -467,8 +476,9 @@ connector; any other mbox stays under Archives, as before.
   both inputs as Gmail numbers `partId` (`archive-import/mbox/mime-parts.ts`;
   a `message/rfc822` part is one attachment). Live listing keeps a message
   and its attachments within the item budget, can resume inside one
-  message's attachments, and resumes a cut-short page after the messages it
-  handled (`skip`), whether or not the store would skip them; `fetchItem` with a locator reads a part's bytes
+  message's attachments, and resumes a cut-short page after the last message
+  it handled, found by its id (`after`), never by position, whether or not
+  the store would skip it; `fetchItem` with a locator reads a part's bytes
   (inline, or `attachments.get`). They stay off (`GmailMailBuild.children`)
   because nothing reads a Gmail child's bytes yet: the Gmail lane has no
   extraction roster entry, and an imported child's locator points into the

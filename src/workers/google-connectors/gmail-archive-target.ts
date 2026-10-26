@@ -93,8 +93,11 @@ export interface GmailArchiveLane {
   build?: GmailMailBuild;
   /** Finds stored mail by its headers, for messages without Takeout's id (section 4). */
   match?: MboxGmailMatch;
-  /** The account's labels, lower-cased name to id; undefined when they cannot be read now. */
-  labelIds?: () => Promise<ReadonlyMap<string, string> | undefined>;
+  /**
+   * The account's labels, lower-cased name to id, or why they cannot be read
+   * now. Asked only when an owner rule names a label.
+   */
+  labelIds?: () => Promise<ReadonlyMap<string, string> | { unavailable: string }>;
 }
 
 /**
@@ -104,15 +107,16 @@ export interface GmailArchiveLane {
  */
 export async function gmailLabelLookup(lane: Pick<GmailArchiveLane, 'set' | 'labelIds'>): Promise<GmailLabelLookup> {
   const rules = lane.set.classification()?.rules ?? [];
-  const needed = rules.some((rule) => rule.match.kind === 'label');
-  let byName: ReadonlyMap<string, string> | undefined;
+  // No rule names a label: names are enough, and nothing is asked of Gmail.
+  if (!rules.some((rule) => rule.match.kind === 'label')) return { kind: 'none' };
+  let found: ReadonlyMap<string, string> | { unavailable: string } | undefined;
   try {
-    byName = await lane.labelIds?.();
+    found = await lane.labelIds?.();
   } catch {
-    byName = undefined;
+    found = undefined;
   }
-  if (byName) return { kind: 'map', byName };
-  return needed ? { kind: 'unavailable' } : { kind: 'none' };
+  if (found instanceof Map) return { kind: 'map', byName: found };
+  return { kind: 'unavailable', reason: found && 'unavailable' in found ? found.unavailable : 'gmail_labels_unavailable' };
 }
 
 export interface GmailArchiveTargetOptions {

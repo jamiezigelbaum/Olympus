@@ -52,12 +52,13 @@ export interface MboxMessageHeaders {
 
 /**
  * The Gmail message a message is, by its headers (section 4): its id, `none`
- * (no Gmail message agrees, or several do), or `later` (Gmail cannot be asked
- * now: the import's share of the day's requests is spent). On `later` the
- * listing stops before the message, what came before it goes out with its
- * resume point, and the import waits for its next scheduled pass.
+ * (no Gmail message agrees, or several do), or `later` with a short reason
+ * (Gmail cannot be asked now: the import's share of the day's requests is
+ * spent, say). On `later` the listing stops before the message, what came
+ * before it goes out with its resume point, and the import waits for its next
+ * scheduled pass.
  */
-export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: string } | 'none' | 'later'>;
+export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: string } | 'none' | { later: string }>;
 
 /**
  * Takeout names user labels; live Gmail gives their ids (`Label_7`), which
@@ -69,7 +70,7 @@ export type MboxGmailMatch = (headers: MboxMessageHeaders) => Promise<{ id: stri
 export type GmailLabelLookup =
   | { kind: 'map'; byName: ReadonlyMap<string, string> }
   | { kind: 'none' }
-  | { kind: 'unavailable' };
+  | { kind: 'unavailable'; reason: string };
 
 export interface MboxGmailInputOptions {
   build?: GmailMailBuild;
@@ -220,7 +221,7 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
         // The account's label ids, read once per pass; a rule on a label that cannot be resolved makes the import wait.
         const labels = options.labels ? await options.labels() : { kind: 'none' as const };
         if (labels.kind === 'unavailable') {
-          archive.waitForProvider?.('gmail_labels_unavailable');
+          archive.waitForProvider?.(labels.reason);
           return;
         }
         const labelsByName = labels.kind === 'map' ? labels.byName : undefined;
@@ -292,11 +293,11 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                       from: parsed.from,
                       ...(parsed.subject ? { subject: parsed.subject } : {}),
                     });
-                    if (matched === 'later') {
+                    if (matched !== 'none' && 'later' in matched) {
                       // Gmail cannot be asked now: what came before goes out, and this message is read again on
                       // the next scheduled pass (its findings are reported then).
                       if (pending) yield out(before, false);
-                      archive.waitForProvider?.('gmail_requests_spent');
+                      archive.waitForProvider?.(matched.later);
                       return;
                     }
                     if (matched !== 'none') id = matched.id;
