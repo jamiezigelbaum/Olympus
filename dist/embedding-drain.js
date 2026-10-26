@@ -15874,6 +15874,12 @@ class TierLedger {
     `).get(...idParams(identity));
     return row ? writeIntentFromRow(row) : undefined;
   }
+  markUnseenDeletion(identity) {
+    this.db.query("INSERT OR IGNORE INTO tier_unseen_deletions (provider, account_scope, conversation_key, provider_item_id) VALUES (?, ?, ?, ?)").run(...idParams(identity));
+  }
+  isUnseenDeletion(identity) {
+    return this.db.query("SELECT 1 FROM tier_unseen_deletions WHERE provider = ? AND account_scope = ? AND conversation_key = ? AND provider_item_id = ?").get(...idParams(identity)) !== null;
+  }
   writeIntents() {
     return this.db.query("SELECT * FROM tier_write_intents ORDER BY written_at, provider_item_id").all().map(writeIntentFromRow);
   }
@@ -16745,6 +16751,13 @@ function tierLedgerMigrations() {
             written_at TEXT NOT NULL,
             body_version TEXT,
             item_family TEXT,
+            PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
+          );
+          CREATE TABLE IF NOT EXISTS tier_unseen_deletions (
+            provider TEXT NOT NULL,
+            account_scope TEXT NOT NULL,
+            conversation_key TEXT NOT NULL DEFAULT '',
+            provider_item_id TEXT NOT NULL,
             PRIMARY KEY (provider, account_scope, conversation_key, provider_item_id)
           );
         `);
