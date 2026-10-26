@@ -12,7 +12,7 @@ import {
 } from '../scripts/release-check/archive-leg.ts';
 import { liveSeedHook, registerLiveSeedHook } from '../scripts/release-check/archive-live-seeds.ts';
 import '../scripts/release-check/archive-live-seed-hooks.ts';
-import { searchWhenJudged } from '../scripts/release-check/archive-stages.ts';
+import { afterSourceDelete, searchWhenJudged, type ArchiveHost } from '../scripts/release-check/archive-stages.ts';
 
 const fx: LegFixture = {
   role: 'beside',
@@ -72,6 +72,8 @@ describe('an import beside a live input is judged', () => {
     expect(paired.filter((check) => check.status === 'fail').map((check) => check.id)).toEqual(['archive.beside.fixture_chat.deleted']);
     expect(paired.find((check) => check.id === 'archive.beside.fixture_chat.deleted')!.detail).toContain('the source was not unpaired before its Delete');
     expect(failing(good({ deleted: { ok: true, unpaired: false, stores: [], rowGone: true } }))).toEqual(['archive.beside.fixture_chat.deleted']);
+    // The engine did not come back from the restart the Delete asked for: whatever runs next would meet it restarting.
+    expect(failing(good({ deleted: { ok: true, unpaired: true, stores: [], rowGone: true, engineBack: false, detail: 'the engine was not ready after the Delete\'s restart: timeout' } }))).toEqual(['archive.beside.fixture_chat.deleted']);
     expect(failing(good({ start: { ok: true, code: 'started', hasOpenTarget: false, carriesContent: false } }))).toEqual(['archive.beside.fixture_chat.requested']);
   });
 
@@ -187,55 +189,48 @@ describe('the search beside a live input waits for the private model', () => {
   });
 });
 
-describe('a source that keeps its records Private: the word stays there, and no search returns it', () => {
-  const kept: LegFixture = { ...fx, beside: { ...fx.beside!, search: 'withheld' } };
-  const stores = (personal: number): StoreView[] => [
-    { tier: 'private', exists: true, live: 4, tokenRows: 2 },
-    { tier: 'personal', exists: true, live: personal, tokenRows: personal },
-  ];
-  const answer = (carries: boolean) => ({ ok: true, isError: false, evidence: [{ source: 'Fixture', hasToken: carries }, { source: 'Other', hasToken: false }] });
-  const failingKept = (obs: BesideLiveObservation) => besideLiveChecks(obs, kept).filter((c) => c.status === 'fail').map((c) => c.id);
-
-  test('the WhatsApp fixture keeps its records Private, as the source does', () => {
-    expect(legFixture('beside', 'seed', 'whatsapp_chat').beside?.search).toBe('withheld');
-    // Telegram's, where it is imported beside its live input, are judged like its own and cited.
-    const telegram = (() => {
-      try {
-        return legFixture('beside', 'seed', 'telegram_json');
-      } catch {
-        return undefined;
-      }
-    })();
-    if (telegram) expect(telegram.beside?.search ?? 'cited').toBe('cited');
-  });
-
-  test('all of it in the Private store and a search that carries none of it passes', () => {
-    expect(failingKept(good({ stores: stores(0), search: answer(false) }))).toEqual([]);
-  });
-
-  test('a search that returns the word, or a lower store that holds it, fails', () => {
-    expect(failingKept(good({ stores: stores(0), search: answer(true) }))).toEqual(['archive.beside.fixture_chat.search']);
-    expect(failingKept(good({ stores: stores(2), search: answer(false) }))).toEqual(['archive.beside.fixture_chat.stores']);
-  });
-
-  test('the search is asked through the whole bound, and an answer that leaks the word is the one judged', async () => {
+import '../scripts/release-check/archive-live-seed-hooks.ts';
+// Mac round 2 / Linux round 3, 2026-10-26: the stores were read right after the Delete returned, while the worker had only marked the
+// account and was about to restart; its files go at that boot. The next leg then met the engine restarting.
+describe('a source\'s Delete is judged once it has been applied', () => {
+  const host = (clearAfter: number, engine = true) => {
     let clock = 0;
-    let calls = 0;
-    const lines: string[] = [];
-    const host = {
+    let reads = 0;
+    const order: string[] = [];
+    const fake = {
       now: () => clock,
       sleep: async (ms: number) => { clock += ms; },
-      say: (line: string) => { lines.push(line); },
-      search: async () => {
-        calls += 1;
-        // A leak on the third answer, after the judge ran.
-        return { ok: true, isError: false, structured: { evidence: [{ source: 'Fixture', excerpt: calls === 3 ? `the word ${fx.token}` : 'another message' }] } };
+      readSourceStores: () => {
+        reads += 1;
+        order.push('read');
+        const left = reads <= clearAfter ? 2 : 0;
+        return [{ tier: 'private' as const, exists: left > 0, live: left, tokenRows: left }, { tier: 'personal' as const, exists: left > 0, live: left, tokenRows: left }];
       },
-    } as unknown as Parameters<typeof searchWhenJudged>[0];
-    const leaked = await searchWhenJudged(host, { ...kept, expect: { ...kept.expect, citationLabel: 'Fixture' } }, 900_000, 'withheld');
-    expect(calls).toBe(3);
-    expect(lines.at(-1)).toContain('LEAKED');
-    expect(failingKept(good({ stores: stores(0), search: leaked }))).toEqual(['archive.beside.fixture_chat.search']);
+      awaitEngine: async () => { order.push('engine'); return engine ? { ok: true, ms: 1 } : { ok: false, ms: 1, detail: 'not ready' }; },
+    };
+    return { fake: fake as unknown as ArchiveHost, order, reads: () => reads };
+  };
+
+  test('the stores are read again until the restart has removed them, then the engine is waited for', async () => {
+    const { fake, order, reads } = host(3);
+    const after = await afterSourceDelete(fake, 'telegram', fx.token, 420_000);
+    expect(after.stores.every((store) => store.tokenRows === 0)).toBe(true);
+    expect(after.engineBack).toBe(true);
+    expect(reads()).toBe(4);
+    expect(order.at(-1)).toBe('engine');
+  });
+
+  test('stores never cleared within the bound are the reading judged, and the engine is still waited for', async () => {
+    const { fake, order } = host(Number.MAX_SAFE_INTEGER);
+    const after = await afterSourceDelete(fake, 'telegram', fx.token, 10_000);
+    expect(after.stores.some((store) => store.tokenRows > 0)).toBe(true);
+    expect(order.at(-1)).toBe('engine');
+    expect(failing(good({ deleted: { ok: true, unpaired: true, stores: after.stores, rowGone: true, engineBack: after.engineBack } }))).toEqual(['archive.beside.fixture_chat.deleted']);
+  });
+
+  test('an engine that does not come back is said', async () => {
+    const after = await afterSourceDelete(host(0, false).fake, 'telegram', fx.token, 10_000);
+    expect(after.engineBack).toBe(false);
+    expect(after.detail).toBe('not ready');
   });
 });
-
