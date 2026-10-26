@@ -146,21 +146,24 @@ export function gmailLabelIds(names: readonly string[], byName?: ReadonlyMap<str
 
 /**
  * The locator of one MIME part of one message of an import: the import, the
- * file of its manifest, the message's byte offset there, and the part's path.
- * A reader opens the import's own approved files by it (mbox/part-reader.ts).
+ * file of its manifest, the message's byte offset there, the message's id (the
+ * child's parent) and the part's path. A reader opens the import's own
+ * approved files by it, and reads only for the child it names
+ * (mbox/part-reader.ts).
  */
-export function mboxPartLocator(archiveId: string, fileIndex: number, offset: number, partId: string): string {
-  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${partId}`;
+export function mboxPartLocator(archiveId: string, fileIndex: number, offset: number, parentId: string, partId: string): string {
+  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${parentId}:${partId}`;
 }
 
-export function parseMboxPartLocator(locator: string): { archiveId: string; fileIndex: number; offset: number; partId: string } | undefined {
+export function parseMboxPartLocator(locator: string): { archiveId: string; fileIndex: number; offset: number; parentId: string; partId: string } | undefined {
   if (!locator.startsWith(MBOX_PART_LOCATOR_PREFIX)) return undefined;
-  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
+  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
   if (!match) return undefined;
-  return { archiveId: match[1]!, fileIndex: Number(match[2]), offset: Number(match[3]), partId: match[4]! };
+  return { archiveId: match[1]!, fileIndex: Number(match[2]), offset: Number(match[3]), parentId: match[4]!, partId: match[5]! };
 }
 
 function recordOf(
+  children: boolean,
   archiveId: string,
   parsed: ParsedMboxMessage,
   span: MboxMessageSpan,
@@ -184,12 +187,12 @@ function recordOf(
     },
     body: parsed.body,
     metadataOnly: false,
-    attachments: mimeAttachments(span.raw!).map((part) => ({
+    attachments: mimeAttachments(span.raw!, { children }).map((part) => ({
       partId: part.partId,
       filename: part.filename,
       ...(part.mimeType ? { mimeType: part.mimeType } : {}),
       size: part.size,
-      locator: mboxPartLocator(archiveId, fileIndex, span.offset, part.partId),
+      locator: mboxPartLocator(archiveId, fileIndex, span.offset, id, part.partId),
       ...(part.nested ? { nested: true } : {}),
     })),
     sourceVersion: parsed.messageHash.slice(0, 32),
@@ -197,7 +200,7 @@ function recordOf(
 }
 
 /** The id of a message no Gmail id is known for: its Message-ID and its bytes, as the Archives reader names it. */
-function ownId(parsed: ParsedMboxMessage): string {
+export function ownId(parsed: ParsedMboxMessage): string {
   return `${GMAIL_OWN_ID_PREFIX}${sha256(`${parsed.messageId ?? ''}\u0000${parsed.messageHash}`).slice(0, 32)}`;
 }
 
@@ -290,7 +293,8 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
               if (span.tooLarge) {
                 report(MBOX_FINDINGS.tooLarge, 'gap');
               } else {
-                const parsed = await parseMboxMessage(span.raw!);
+                // With attachments as children, a forwarded message's text is its own child's, not the body's.
+                const parsed = await parseMboxMessage(span.raw!, { rfc822AsAttachments: children });
                 if (!parsed) report(MBOX_FINDINGS.unreadable, 'gap');
                 else if (parsed.spamOrTrash) report(MBOX_FINDINGS.spamOrTrash, 'skipped');
                 else if (parsed.deliveredTo !== undefined && bareAddress(parsed.deliveredTo) !== address) {
@@ -314,7 +318,7 @@ export function mboxGmailInput(archive: ArchiveConnectorInput, options: MboxGmai
                     }
                     if (matched !== 'none') id = matched.id;
                   }
-                  const record = recordOf(archive.archiveId, parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
+                  const record = recordOf(children, archive.archiveId, parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
                   page.push(record);
                   positions.push({ fileIndex, offset: span.offset });
                   pending = true;

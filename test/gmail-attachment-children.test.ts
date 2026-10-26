@@ -171,15 +171,26 @@ describe('attachments are children of their message, one dataset', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  test('a part is read from the import\'s own files, bounded before it is decoded, and only for the source it joined', async () => {
+  test('a part is read from the import\'s own files, bounded before it is decoded, only for the source it joined and only for its own child', async () => {
     const h = gmailArchiveHarness(cleanups, { build: { children: true } });
     const started = await h.approve('takeout.mbox', takeoutWithTwoAttachments());
     if (!started.ok || started.status !== 'started') throw new Error(JSON.stringify(started));
     await h.importAll(started.archive_id);
-    const locatorOf = (part: string) => `mbox-part1:${started.archive_id}:0:0:${part}`;
-    expect(Buffer.from(readMboxPart({ state: h.runtime.state, sourceId: 'gmail.email', locator: locatorOf('1') }).bytes).toString()).toBe(LEASE_TEXT);
-    expect(() => readMboxPart({ state: h.runtime.state, sourceId: 'gmail.email', locator: locatorOf('2'), maxBytes: 1_000 })).toThrow(FileExtractionSourceError);
-    expect(() => readMboxPart({ state: h.runtime.state, sourceId: 'telegram.messages', locator: locatorOf('1') })).toThrow(FileExtractionSourceError);
-    expect(() => readMboxPart({ state: h.runtime.state, sourceId: 'gmail.email', locator: locatorOf('9') })).toThrow(FileExtractionSourceError);
+    const locatorOf = (part: string, parent = message.id) => `mbox-part1:${started.archive_id}:0:0:${parent}:${part}`;
+    const read = (locator: string, child: string, more: { sourceId?: string; maxBytes?: number } = {}) => readMboxPart({
+      state: h.runtime.state,
+      sourceId: more.sourceId ?? 'gmail.email',
+      locator,
+      childProviderItemId: child,
+      ...(more.maxBytes !== undefined ? { maxBytes: more.maxBytes } : {}),
+    });
+    expect(Buffer.from((await read(locatorOf('1'), childOf('1'))).bytes).toString()).toBe(LEASE_TEXT);
+    await expect(read(locatorOf('2'), childOf('2'), { maxBytes: 1_000 })).rejects.toBeInstanceOf(FileExtractionSourceError);
+    await expect(read(locatorOf('1'), childOf('1'), { sourceId: 'telegram.messages' })).rejects.toBeInstanceOf(FileExtractionSourceError);
+    await expect(read(locatorOf('9'), childOf('9'))).rejects.toBeInstanceOf(FileExtractionSourceError);
+    // A locator is bound to its child: another child's locator, or one naming another message, fails closed.
+    await expect(read(locatorOf('2'), childOf('1'))).rejects.toBeInstanceOf(FileExtractionSourceError);
+    const other = mail(302).id;
+    await expect(read(locatorOf('1', other), `${other}#child:1`)).rejects.toBeInstanceOf(FileExtractionSourceError);
   });
 });

@@ -3885,16 +3885,21 @@ export async function main(): Promise<void> {
           const handle = currentHandle();
           const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
           if (!handle || !scopeRef || !fileSourceScopeAuthority || !gmailRequestBudget) return undefined;
+          let approval;
           try {
-            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            approval = fileSourceScopeAuthority.assertCurrentMail(scopeRef);
           } catch {
             return undefined;
           }
+          // The scope as it stands now: the parent is re-checked against it before a part is read, and the
+          // approval is asked again before every provider call.
           return new GoogleGmailSourceConnector({
             credentialHandle: handle.handle,
             account: accountScope,
             requestBudget: gmailRequestBudget,
             build: { children: true },
+            scope: gmailConnectorScopeFromApproval(approval),
+            beforeEachRequest: () => { fileSourceScopeAuthority.assertCurrentMail(scopeRef); },
           });
         },
       }),

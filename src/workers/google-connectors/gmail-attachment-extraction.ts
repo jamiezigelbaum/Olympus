@@ -7,7 +7,7 @@
  * - `gmail-part1:<message>:<part>`: live Gmail, through the Gmail lane's
  *   connector (the message once, then the part inline or by its attachment
  *   id), only while live Gmail is connected and its mail approval current;
- * - `mbox-part1:<import>:<file>:<offset>:<part>`: an imported mbox, from the
+ * - `mbox-part1:<import>:<file>:<offset>:<message>:<part>`: an imported mbox, from the
  *   import's own approved files (archive-import/mbox/part-reader.ts).
  *
  * A readable attachment brings its text through the shared extraction runner,
@@ -19,6 +19,7 @@
 import { CHILD_ITEM_ID_SEPARATOR } from '../../core/child-item-id.ts';
 import type { RawItem, SourceConnector, SourceConnectorFetchOptions, SourceConnectorListPage } from '../../core/contracts.ts';
 import { FileExtractionSourceError, type ExtractionCandidateReader } from '../../core/file-extraction-source.ts';
+import { parseMboxMessage } from '../archive-import/mbox/parse.ts';
 import { readMboxPart } from '../archive-import/mbox/part-reader.ts';
 import type { ArchiveImportStateStore } from '../archive-import/state.ts';
 import { connectorStoreExtractionCandidateReader } from '../connector-store/extraction-candidate-reader.ts';
@@ -61,8 +62,29 @@ export function gmailAttachmentLanes(accountScope: string): Array<{ corpusId: st
 }
 export const GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE = 10;
 
-/** What a read of one part's bytes needs from live Gmail: the lane's connector, which reads a part by its locator. */
-export type GmailLiveAttachmentReader = Pick<SourceConnector, 'fetchItem'>;
+/** What a read of one part's bytes needs from live Gmail: the lane's connector, which reads a part by its locator within a bound. */
+export type GmailLiveAttachmentReader = Pick<BoundedFetchConnector, 'fetchItemWithin'>;
+
+/**
+ * A forwarded message's child is read as the message it is: its own headers
+ * and text, without its attachments (each its own child), so the shared text
+ * extractor reads it. Anything not a forwarded message passes unchanged.
+ */
+export async function forwardedMessageAsText(item: RawItem): Promise<RawItem> {
+  if (item.content.kind !== 'bytes' || item.content.mimeType.trim().toLowerCase() !== 'message/rfc822') return item;
+  const parsed = await parseMboxMessage(item.content.bytes, { rfc822AsAttachments: true });
+  if (!parsed) throw new FileExtractionSourceError('source_content_unavailable');
+  const text = [
+    `From: ${parsed.from}`,
+    ...(parsed.to ? [`To: ${parsed.to}`] : []),
+    ...(parsed.subject ? [`Subject: ${parsed.subject}`] : []),
+    ...(parsed.dateHeader ? [`Date: ${parsed.dateHeader}`] : []),
+    '',
+    parsed.body,
+  ].join('\n');
+  const bytes = new TextEncoder().encode(text);
+  return { ...item, mimeType: 'text/plain', content: { kind: 'bytes', mimeType: 'text/plain', bytes } };
+}
 
 function childIdentity(account: string, localItemId: string) {
   const providerItemId = localItemId.startsWith(`${account}:`) ? localItemId.slice(account.length + 1) : localItemId;
@@ -86,27 +108,30 @@ export function gmailAttachmentConnector(input: {
     if (locator.startsWith(gmailPartLocatorPrefix())) {
       const live = input.live();
       if (!live) throw new FileExtractionSourceError('source_unavailable');
-      const item = await live.fetchItem(localItemId, { deferredBytes: { locator } });
+      // The connector binds the locator to the child, re-checks the scope and the approval, and bounds the size.
+      const item = await live.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}) });
       if (item.content.kind === 'bytes' && options.maxBytes !== undefined && item.content.bytes.byteLength > options.maxBytes) {
         throw new FileExtractionSourceError('source_too_large');
       }
-      return item;
+      return forwardedMessageAsText(item);
     }
     if (locator.startsWith(MBOX_PART_LOCATOR_PREFIX)) {
       if (!input.imports) throw new FileExtractionSourceError('source_item_not_found');
-      const part = readMboxPart({
+      const part = await readMboxPart({
         state: input.imports,
         sourceId: GMAIL_ARCHIVE_SOURCE_ID,
         locator,
+        // The locator must name the child it is read for: its message and its part key.
+        childProviderItemId: childIdentity(input.account, localItemId).providerItemId,
         ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
       });
-      return {
+      return forwardedMessageAsText({
         identity: childIdentity(input.account, localItemId),
         mimeType: part.mimeType,
         content: { kind: 'bytes', mimeType: part.mimeType, bytes: part.bytes },
         metadata: {},
         fetchedAt: new Date().toISOString(),
-      };
+      });
     }
     throw new FileExtractionSourceError('source_content_unavailable');
   };

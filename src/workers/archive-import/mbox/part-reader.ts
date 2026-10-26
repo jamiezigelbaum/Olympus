@@ -14,7 +14,9 @@ import { FileExtractionSourceError } from '../../../core/file-extraction-source.
 import { ScopeRoot, ScopeSafeError } from '../../../core/scope-safe-fs.ts';
 import { archiveFileEntries, verifyArchiveManifest } from '../manifest.ts';
 import type { ArchiveImportStateStore } from '../state.ts';
-import { parseMboxPartLocator } from './gmail-input.ts';
+import { gmailChildProviderId, GMAIL_OWN_ID_PREFIX } from '../../google-connectors/gmail-mail-record.ts';
+import { ownId, parseMboxPartLocator, takeoutMessageId } from './gmail-input.ts';
+import { parseMboxMessage } from './parse.ts';
 import { MimePartTooLargeError, mimePartBytes } from './mime-parts.ts';
 import { MBOX_DEFAULT_MAX_MESSAGE_BYTES, MboxFormatError, MboxSplitter } from './split.ts';
 
@@ -28,15 +30,22 @@ export function importServesSource(state: ArchiveImportStateStore, archiveId: st
   }
 }
 
-export function readMboxPart(input: {
+export async function readMboxPart(input: {
   state: ArchiveImportStateStore;
   /** The source the reading lane belongs to: only its imports are read. */
   sourceId: string;
   locator: string;
+  /**
+   * The child the read is for: the locator must name it (its parent and its
+   * part key), and the message at the locator's place must be that parent,
+   * or nothing is read.
+   */
+  childProviderItemId: string;
   maxBytes?: number;
-}): { bytes: Uint8Array; mimeType: string } {
+}): Promise<{ bytes: Uint8Array; mimeType: string }> {
   const where = parseMboxPartLocator(input.locator);
   if (!where) throw new FileExtractionSourceError('source_content_unavailable');
+  if (gmailChildProviderId(where.parentId, where.partId) !== input.childProviderItemId) throw new FileExtractionSourceError('source_content_unavailable');
   if (!importServesSource(input.state, where.archiveId, input.sourceId)) throw new FileExtractionSourceError('source_item_not_found');
   const record = input.state.get(where.archiveId)!;
   const file = archiveFileEntries(record.files)[where.fileIndex];
@@ -70,6 +79,13 @@ export function readMboxPart(input: {
       if (!span) throw new FileExtractionSourceError('source_version_gone');
       // A message over the splitter's bound is not held in memory: its parts keep their names only.
       if (!span.raw) throw new FileExtractionSourceError('source_too_large');
+      // The message at this place must be the child's parent: Takeout's id says so, or the id of its own.
+      const takeout = takeoutMessageId(span.separator);
+      if (takeout !== undefined && takeout !== where.parentId) throw new FileExtractionSourceError('source_content_unavailable');
+      if (takeout === undefined && where.parentId.startsWith(GMAIL_OWN_ID_PREFIX)) {
+        const parsed = await parseMboxMessage(span.raw);
+        if (!parsed || ownId(parsed) !== where.parentId) throw new FileExtractionSourceError('source_content_unavailable');
+      }
       let part;
       try {
         part = mimePartBytes(span.raw, where.partId, input.maxBytes);

@@ -22319,6 +22319,16 @@ var init_tier_ledger = __esm(() => {
   };
 });
 
+// src/core/child-item-id.ts
+function childProviderItemId(parentProviderItemId, key) {
+  if (!parentProviderItemId)
+    throw new TypeError("A child needs its parent's id.");
+  if (!key || key.includes(CHILD_ITEM_ID_SEPARATOR))
+    throw new TypeError("A child's key must be plain text.");
+  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key}`;
+}
+var CHILD_ITEM_ID_SEPARATOR = "#child:";
+
 // src/core/source-index/keyword-context.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 function withKeywordExpansionDisabled(run) {
@@ -26917,16 +26927,6 @@ var init_secrets_disposition = __esm(() => {
   init_sniffer_store();
   init_job_names();
 });
-
-// src/core/child-item-id.ts
-function childProviderItemId(parentProviderItemId, key2) {
-  if (!parentProviderItemId)
-    throw new TypeError("A child needs its parent's id.");
-  if (!key2 || key2.includes(CHILD_ITEM_ID_SEPARATOR))
-    throw new TypeError("A child's key must be plain text.");
-  return `${parentProviderItemId}${CHILD_ITEM_ID_SEPARATOR}${key2}`;
-}
-var CHILD_ITEM_ID_SEPARATOR = "#child:";
 
 // src/workers/connector-store/child-visibility.ts
 function parentIdentityOf(child) {
@@ -37267,6 +37267,27 @@ var init_local_index = __esm(() => {
     }
     holdsAnyItem() {
       return this.db.query("SELECT 1 AS present FROM items LIMIT 1").get() !== null;
+    }
+    parentsAwaitingChildren(provider, needle, afterPk, limit) {
+      if (!this.childItemColumnsPresent)
+        return [];
+      const rows = this.db.query(`
+      SELECT i.item_pk AS itemPk, i.provider_item_id AS providerItemId, i.account_scope AS accountScope, i.local_item_id AS localItemId
+      FROM items i
+      WHERE i.provider = ? AND i.tombstoned = 0 AND i.parent_local_item_id IS NULL AND i.item_pk > ?
+        AND instr(i.provider_item_id, ?) = 0
+        AND instr(COALESCE(i.search_text, ''), ?) > 0
+        AND EXISTS (SELECT 1 FROM chunks c WHERE c.item_pk = i.item_pk)
+        AND NOT EXISTS (SELECT 1 FROM items k WHERE k.parent_local_item_id = i.local_item_id)
+      ORDER BY i.item_pk
+      LIMIT ?
+    `).all(provider, afterPk, CHILD_ITEM_ID_SEPARATOR, needle, Math.max(1, Math.floor(limit)));
+      return rows;
+    }
+    hasChildRowsOf(localItemId) {
+      if (!this.childItemColumnsPresent)
+        return false;
+      return this.db.query("SELECT 1 AS present FROM items WHERE parent_local_item_id = ? LIMIT 1").get(localItemId) !== null;
     }
     holdsItemsMatching(filters) {
       const scoped = connectorStoreFilterSql(filters);
@@ -53818,6 +53839,57 @@ function sourceInvocationProvenance(value) {
   return value === "operator" ? "operator" : "scheduled";
 }
 
+// src/core/file-extraction-source.ts
+import { createHash as createHash31 } from "node:crypto";
+function isFileExtractionSourceError(value) {
+  if (!value || typeof value !== "object")
+    return false;
+  const candidate = value;
+  return typeof candidate.errorKind === "string" && typeof candidate.settleAs === "string" && typeof candidate.retryable === "boolean" && Object.hasOwn(FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, candidate.errorKind);
+}
+function splitScopedLocalItemId(localItemId) {
+  const separator = localItemId.indexOf(":");
+  if (separator <= 0 || separator === localItemId.length - 1)
+    return;
+  return {
+    accountScope: localItemId.slice(0, separator),
+    providerItemId: localItemId.slice(separator + 1)
+  };
+}
+var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
+var init_file_extraction_source = __esm(() => {
+  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
+    source_item_not_found: "failed_terminal",
+    source_permission_denied: "failed_terminal",
+    source_version_gone: "failed_terminal",
+    source_content_unavailable: "skipped_unsupported",
+    source_request_rejected: "failed_terminal",
+    source_too_large: "skipped_too_large",
+    source_rate_limited: "failed_retryable",
+    source_unavailable: "failed_retryable",
+    source_auth_expired: "failed_retryable",
+    source_budget_exhausted: "failed_retryable",
+    network_unreachable: "failed_retryable",
+    network_socket_closed: "failed_retryable"
+  });
+  FileExtractionSourceError = class FileExtractionSourceError extends Error {
+    errorKind;
+    settleAs;
+    retryable;
+    errorHash;
+    constructor(errorKind, options = {}) {
+      super(errorKind);
+      this.name = "FileExtractionSourceError";
+      this.errorKind = errorKind;
+      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
+      this.retryable = this.settleAs === "failed_retryable";
+      const errorHash = options.detailForHash === undefined ? undefined : createHash31("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
+      if (errorHash)
+        this.errorHash = errorHash;
+    }
+  };
+});
+
 // src/workers/email-source/ingest-filter.ts
 function classifyEmailIngestSkip(candidate, options = {}) {
   const skipOtp = options.skipOtp ?? true;
@@ -53890,12 +53962,36 @@ function metadataStringArray2(metadata, key2) {
 }
 
 // src/workers/google-connectors/gmail-mail-record.ts
-import { createHash as createHash31 } from "node:crypto";
+import { createHash as createHash32 } from "node:crypto";
+function isGmailAttachmentPart(part) {
+  const type = (part.mimeType ?? "").trim().toLowerCase();
+  if (type.startsWith("multipart/"))
+    return false;
+  if (part.filename?.trim())
+    return true;
+  if (type === "message/rfc822")
+    return true;
+  if ((type === "" || type === "text/plain" || type === "text/html") && part.disposition?.trim().toLowerCase() !== "attachment")
+    return false;
+  return true;
+}
+function gmailAttachmentPartName(part) {
+  const filename = part.filename?.trim();
+  if (filename)
+    return filename;
+  const type = (part.mimeType ?? "").trim().toLowerCase() || "application/octet-stream";
+  if (type === "message/rfc822")
+    return `forwarded-message-${part.partId || "root"}.eml`;
+  const contentId = part.contentId?.trim().replace(/^<|>$/g, "").replace(/[^A-Za-z0-9._@-]/g, "_").slice(0, 128);
+  if (contentId)
+    return `cid-${contentId}`;
+  return `${type.replace(/[^a-z0-9.+-]/g, "-")}-part-${part.partId || "root"}`;
+}
 function childrenOf(record, build) {
-  return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.nested !== true && attachment.filename.trim() !== "");
+  return record.metadataOnly || build.children !== true ? [] : record.attachments.filter((attachment) => attachment.filename.trim() !== "" && (attachment.partId === "" ? 0 : attachment.partId.split(".").length) <= GMAIL_CHILD_MAX_DEPTH);
 }
 function hashString3(value) {
-  return createHash31("sha256").update(value).digest("hex");
+  return createHash32("sha256").update(value).digest("hex");
 }
 function parsedDate(value) {
   if (!value)
@@ -54010,6 +54106,7 @@ function gmailChildItem(record, account, attachment, fetchedAt) {
       ...gmailId(record) ? { locatorUri: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(record.id)}` } : {}
     }),
     fetchedAt,
+    holdContentUntilJudged: true,
     deferredBytes: {
       locator: attachment.locator ?? "",
       available: attachment.locator !== undefined,
@@ -54047,7 +54144,7 @@ function gmailClassificationSignals(item) {
     ...labels.length > 0 ? { labels } : {}
   };
 }
-var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), compareGmailMailVersions = (_a3, _b2) => 0;
+var GMAIL_MAIL_PROVIDER = "gmail", MAX_ATTACHMENT_NAME_CHARS = 256, GMAIL_OWN_ID_PREFIX = "mbox-", gmailChildProviderId = (messageId, partId) => childProviderItemId(messageId, partId || "root"), gmailId = (record) => !record.id.startsWith(GMAIL_OWN_ID_PREFIX), GMAIL_CHILD_MAX_DEPTH = 8, compareGmailMailVersions = (_a3, _b2) => 0;
 var init_gmail_mail_record = __esm(() => {
   init_sender_rules();
 });
@@ -54403,7 +54500,7 @@ var init_request_budget = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail.ts
-import { createHash as createHash32 } from "node:crypto";
+import { createHash as createHash33 } from "node:crypto";
 
 class GoogleGmailSourceConnector {
   id = GMAIL_PROVIDER;
@@ -54434,6 +54531,7 @@ class GoogleGmailSourceConnector {
   ingestFilterOptions;
   itemsByLocalId = new Map;
   build;
+  beforeEachRequest;
   messagesById = new Map;
   constructor(options = {}) {
     const env = options.env ?? process.env;
@@ -54455,6 +54553,7 @@ class GoogleGmailSourceConnector {
     this.scope = options.scope;
     this.now = options.now ?? (() => Date.now());
     this.build = options.build ?? {};
+    this.beforeEachRequest = options.beforeEachRequest;
     const ingestFilterOptions = options.ingestFilterOptions ?? parseEmailIngestFilterOptionsFromEnv(env);
     this.ingestFilterOptions = this.scope && ingestFilterOptions.skipCategories === undefined ? { ...ingestFilterOptions, skipCategories: [...this.scope.skippedCategoryLabelIds ?? []] } : ingestFilterOptions;
     if (this.scope?.skippedLabelIds?.length) {
@@ -54567,7 +54666,7 @@ class GoogleGmailSourceConnector {
           this.itemsSkippedStored += 1;
           continue;
         }
-        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff });
+        const record = gmailMailRecordFromMessage(fetched, { metadataOnly: metadataLeg || beforeCutoff, children: this.build.children === true });
         const [item, ...children] = gmailMailItems(record, this.account, this.build);
         this.attachmentsDeclared += metadataCount(item.metadata, "attachmentCount");
         this.attachmentBytesDeclared += metadataCount(item.metadata, "attachmentBytesDeclared");
@@ -54677,38 +54776,57 @@ class GoogleGmailSourceConnector {
     this.fetchItemCacheHits += 1;
     return item;
   }
-  async fetchAttachment(localItemId, locator) {
+  async fetchItemWithin(localItemId, options) {
+    if (!options.deferredBytes)
+      return this.fetchItem(localItemId);
+    return this.fetchAttachment(localItemId, options.deferredBytes.locator, options.maxBytes);
+  }
+  async fetchAttachment(localItemId, locator, maxBytes) {
     const where = parseGmailPartLocator(locator);
     if (!where)
-      throw new Error("This Gmail attachment cannot be found from what Olympus kept.");
+      throw new FileExtractionSourceError("source_content_unavailable");
+    const wanted = `${this.account}:${gmailChildProviderId(where.messageId, where.partId)}`;
+    if (localItemId !== wanted && `${this.account}:${localItemId}` !== wanted)
+      throw new FileExtractionSourceError("source_content_unavailable");
     const client = await this.clientForRequest();
     let message2 = this.messagesById.get(where.messageId);
     if (!message2) {
+      this.beforeEachRequest?.();
       this.providerRequests += 1;
       message2 = await client.getMessage(where.messageId);
       this.messagesById.set(where.messageId, message2);
     }
+    if (this.scope && !gmailMessageInScope(message2, this.scope))
+      throw new FileExtractionSourceError("source_permission_denied");
     const part = gmailPartAt(message2.payload, where.partId);
-    const record = gmailMailRecordFromMessage(message2);
-    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === localItemId || item.identity.localItemId === `${this.account}:${localItemId}`);
+    const record = gmailMailRecordFromMessage(message2, { children: true });
+    const child = gmailMailItems(record, this.account, { children: true }).find((item) => item.identity.localItemId === wanted);
     if (!part || !child)
-      throw new Error("This Gmail attachment is no longer in its message.");
+      throw new FileExtractionSourceError("source_version_gone");
+    const declared = part.body?.size;
+    if (maxBytes !== undefined && typeof declared === "number" && declared > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
     let data2 = part.body?.data;
     if (!data2 && part.body?.attachmentId) {
       if (!client.getAttachment)
-        throw new Error("This Gmail client cannot read attachments.");
+        throw new FileExtractionSourceError("source_content_unavailable");
+      this.beforeEachRequest?.();
       this.providerRequests += 1;
       data2 = (await client.getAttachment(where.messageId, part.body.attachmentId)).data;
     }
     if (data2 === undefined)
-      throw new Error("Gmail returned no bytes for this attachment.");
+      throw new FileExtractionSourceError("source_content_unavailable");
+    if (maxBytes !== undefined && Math.floor(data2.length * 3 / 4) > maxBytes + 3)
+      throw new FileExtractionSourceError("source_too_large");
     const bytes = new Uint8Array(Buffer.from(data2.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+    if (maxBytes !== undefined && bytes.byteLength > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
     return { ...child, content: { kind: "bytes", mimeType: child.mimeType, bytes } };
   }
   async attachmentsFrom(client, at, room) {
     const message2 = await client.getMessage(at.id);
     this.messagesById.set(at.id, message2);
-    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message2), this.account, this.build);
+    const [, ...children] = gmailMailItems(gmailMailRecordFromMessage(message2, { children: this.build.children === true }), this.account, this.build);
     const items = children.slice(at.from, at.from + Math.max(1, room));
     for (const item of items)
       this.itemsByLocalId.set(item.identity.localItemId, item);
@@ -55098,10 +55216,11 @@ function gmailLabelFromJson(record) {
 function gmailMailRecordFromMessage(message2, options = {}) {
   const headers = headersFromPart(message2.payload);
   const metadataOnly = options.metadataOnly === true;
+  const children = options.children === true;
   const plain = [];
   const html2 = [];
   if (!metadataOnly)
-    collectPartText(message2.payload, plain, html2);
+    collectPartText(message2.payload, plain, html2, children);
   const messageId = bareMessageId(headers.get("message-id"));
   return {
     id: message2.id,
@@ -55123,7 +55242,7 @@ function gmailMailRecordFromMessage(message2, options = {}) {
 
 `),
     metadataOnly,
-    attachments: gmailAttachments(message2.id, message2.payload, false)
+    attachments: gmailAttachments(message2.id, message2.payload, false, children)
   };
 }
 function bareMessageId(value) {
@@ -55132,6 +55251,22 @@ function bareMessageId(value) {
     return;
   const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
   return inner || undefined;
+}
+function gmailMessageInScope(message2, scope) {
+  const labels = new Set((message2.labelIds ?? []).map((label) => label.toUpperCase()));
+  if (labels.has("SPAM") || labels.has("TRASH"))
+    return false;
+  for (const skipped of [...scope.skippedCategoryLabelIds ?? [], ...scope.skippedLabelIds ?? []]) {
+    if (labels.has(skipped.toUpperCase()))
+      return false;
+  }
+  const received = internalDateNumber({ internalDate: message2.internalDate });
+  if (scope.contentAfterMs !== undefined && (received === undefined || received < scope.contentAfterMs))
+    return false;
+  const from = headersFromPart(message2.payload).get("from");
+  if (scope.skipSenders?.some((rule) => senderMatchesRule(from, rule)))
+    return false;
+  return true;
 }
 function gmailPartLocatorPrefix() {
   return GMAIL_PART_LOCATOR_PREFIX;
@@ -55150,22 +55285,25 @@ function parseGmailPartLocator(locator) {
   const partId = rest.slice(split + 1);
   return /^[A-Za-z0-9_-]{1,128}$/.test(messageId) && /^[0-9.]{0,64}$/.test(partId) ? { messageId, partId } : undefined;
 }
-function gmailAttachments(messageId, part, inside) {
+function gmailAttachments(messageId, part, inside, children = false) {
   if (!part)
     return [];
+  const headers = headersFromPart(part);
+  const disposition = headers.get("content-disposition")?.split(";")[0]?.trim();
   const filename = part.filename?.trim();
-  const size = filename && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
   const partId = part.partId?.trim() ?? "";
-  const found = filename ? [{
+  const attachment = children ? isGmailAttachmentPart({ ...part.mimeType ? { mimeType: part.mimeType } : {}, ...filename ? { filename } : {}, ...disposition ? { disposition } : {} }) : Boolean(filename);
+  const size = attachment && Number.isSafeInteger(part.body?.size) && (part.body?.size ?? 0) >= 0 ? part.body.size : undefined;
+  const found = attachment ? [{
     partId,
-    filename,
+    filename: children ? gmailAttachmentPartName({ partId, ...filename ? { filename } : {}, ...headers.get("content-id") ? { contentId: headers.get("content-id") } : {}, ...part.mimeType ? { mimeType: part.mimeType } : {} }) : filename,
     ...part.mimeType?.trim() ? { mimeType: part.mimeType.trim() } : {},
     ...size !== undefined ? { size } : {},
     ...part.partId !== undefined ? { locator: gmailPartLocator(messageId, partId) } : {},
     ...inside ? { nested: true } : {}
   }] : [];
   for (const child of part.parts ?? [])
-    found.push(...gmailAttachments(messageId, child, inside || Boolean(filename)));
+    found.push(...gmailAttachments(messageId, child, inside || attachment, children));
   return found;
 }
 function gmailPartAt(part, partId) {
@@ -55180,9 +55318,14 @@ function gmailPartAt(part, partId) {
   }
   return;
 }
-function collectPartText(part, plain, html2) {
+function collectPartText(part, plain, html2, children = false) {
   if (!part)
     return;
+  if (children) {
+    const disposition = headersFromPart(part).get("content-disposition")?.split(";")[0]?.trim();
+    if (isGmailAttachmentPart({ ...part.mimeType ? { mimeType: part.mimeType } : {}, ...part.filename?.trim() ? { filename: part.filename } : {}, ...disposition ? { disposition } : {} }))
+      return;
+  }
   if (part.filename?.trim())
     return;
   const decoded = part.body?.data ? decodeBase64Url(part.body.data) : undefined;
@@ -55191,7 +55334,7 @@ function collectPartText(part, plain, html2) {
   if (decoded && part.mimeType === "text/html")
     html2.push(decoded);
   for (const child of part.parts ?? [])
-    collectPartText(child, plain, html2);
+    collectPartText(child, plain, html2, children);
 }
 function headersFromPart(part) {
   const headers = new Map;
@@ -55236,13 +55379,14 @@ function metadataCount(metadata, key2) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 function hashString4(value) {
-  return createHash32("sha256").update(value).digest("hex");
+  return createHash33("sha256").update(value).digest("hex");
 }
 var GMAIL_SOURCE_ID = "gmail.email", GMAIL_INTERNAL_CONNECTOR_CORPUS_ID = "internal.email", GMAIL_SECURE_CONNECTOR_CORPUS_ID = "secure_local.email.private", GMAIL_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.email", GMAIL_PROVIDER = "gmail", DEFAULT_GMAIL_SYNC_MAX_MESSAGES = 200, GMAIL_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET", GMAIL_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GMAIL_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GMAIL_DAILY_REQUEST_BUDGET = 5000, DEFAULT_GMAIL_PAGE_SIZE = 100, MAX_GMAIL_SYNC_MESSAGES = 1000, MAX_GMAIL_LIST_PAGES_PER_RUN = 50, TRAVERSAL_START_MARGIN_MS = 86400000, GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1", GMAIL_CURSOR_PREFIX = "gm1:", MAX_GMAIL_CURSOR_LENGTH = 4096, DEFAULT_GMAIL_MAX_RETRIES = 3, MAX_GMAIL_RETRY_DELAY_MS = 30000, GMAIL_PRIVATE_SCOPE_CONFIRMATION_MAX_ITEMS = 32, GmailPageTokenRejectedError, GMAIL_LABEL_PAGE_SIZE = 500, GMAIL_METADATA_HEADERS, GMAIL_PART_LOCATOR_PREFIX = "gmail-part1:";
 var init_gmail = __esm(() => {
   init_olympus_layout();
   init_mail_source_scope();
   init_sender_rules();
+  init_file_extraction_source();
   init_credential_broker();
   init_ingest_filter();
   init_gmail_mail_record();
@@ -55257,7 +55401,7 @@ var init_gmail = __esm(() => {
 });
 
 // src/workers/google-connectors/drive.ts
-import { createHash as createHash33 } from "node:crypto";
+import { createHash as createHash34 } from "node:crypto";
 
 class GoogleDriveSourceConnector {
   id = GOOGLE_DRIVE_PROVIDER;
@@ -55876,7 +56020,7 @@ function safeProviderDetail2(value) {
   return value.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]").slice(0, 500);
 }
 function hashString5(value) {
-  return createHash33("sha256").update(value).digest("hex");
+  return createHash34("sha256").update(value).digest("hex");
 }
 var GOOGLE_DRIVE_SOURCE_ID = "google_drive.docs", GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID = "internal.drive.docs", GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID = "secure_local.drive.docs", GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID = "public_safe.drive.docs", GOOGLE_DRIVE_PROVIDER = "google_drive", DEFAULT_GOOGLE_DRIVE_SYNC_MAX_FILES = 200, DEFAULT_GOOGLE_DRIVE_CONTENT_MAX_FILES = 50, GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET", GOOGLE_DRIVE_DAILY_REQUEST_BUDGET_STATE_PATH_ENV = "OLYMPUS_SOURCE_INDEX_GOOGLE_DRIVE_DAILY_API_REQUEST_BUDGET_STATE_PATH", DEFAULT_GOOGLE_DRIVE_DAILY_REQUEST_BUDGET = 3000, DEFAULT_GOOGLE_DRIVE_PAGE_SIZE = 100, DEFAULT_GOOGLE_DRIVE_MAX_TEXT_BYTES = 128000, MAX_GOOGLE_DRIVE_SYNC_FILES = 1000, GOOGLE_DRIVE_API_BASE_URL = "https://www.googleapis.com/drive/v3", GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document", GOOGLE_DRIVE_CURSOR_PREFIX = "gd1:", MAX_GOOGLE_DRIVE_CURSOR_LENGTH = 4096, DEFAULT_GOOGLE_DRIVE_MAX_RETRIES = 3, MAX_GOOGLE_DRIVE_RETRY_DELAY_MS = 30000, GoogleDriveContentTooLargeError, GoogleDriveApiError, GOOGLE_DRIVE_MAX_ANCESTRY_LOOKUPS = 64, FOLDER_LOOKUP_FAILED, GOOGLE_DRIVE_INGESTION_EXCLUSION_SOURCE = "google_drive.personal", GOOGLE_DRIVE_ENFORCEABLE_EXCLUSION_CRITERIA;
 var init_drive = __esm(() => {
@@ -56195,7 +56339,7 @@ var init_corpus_adapter2 = __esm(() => {
 });
 
 // src/workers/readwise/connector.ts
-import { createHash as createHash34 } from "node:crypto";
+import { createHash as createHash35 } from "node:crypto";
 import { mkdirSync as mkdirSync31, readFileSync as readFileSync37 } from "node:fs";
 import { dirname as dirname45 } from "node:path";
 
@@ -56566,7 +56710,7 @@ function rawItem(input) {
       ...input.authoredAt ? { authoredAt: input.authoredAt } : {},
       ...input.updatedAt ? { updatedAt: input.updatedAt } : {},
       ...input.metadata,
-      contentHash: createHash34("sha256").update(JSON.stringify({
+      contentHash: createHash35("sha256").update(JSON.stringify({
         text: input.text,
         title: input.title,
         author: input.author,
@@ -57340,7 +57484,7 @@ var init_embedding_ledger = __esm(() => {
 });
 
 // src/workers/connector-store/tier-move.ts
-import { createHash as createHash35 } from "node:crypto";
+import { createHash as createHash36 } from "node:crypto";
 function rowRehomeReceiptId(ledger, identity2, generation) {
   return `row-rehome:${ledger.ledgerId()}:${tierLedgerIdentityKey(identity2)}:${generation}`;
 }
@@ -57641,7 +57785,7 @@ function readVerifiedMove(ledger, identity2) {
   return receipt;
 }
 function copyFingerprint(copy, layers) {
-  return createHash35("sha256").update(JSON.stringify({
+  return createHash36("sha256").update(JSON.stringify({
     identity: copy.identity,
     columns: copy.columns,
     chunks: layers === "metadata" ? [] : copy.chunks
@@ -58498,7 +58642,7 @@ var init_wordpiece = __esm(() => {
 });
 
 // src/workers/source-index/built-in-embedding/provider.ts
-import { createHash as createHash36 } from "node:crypto";
+import { createHash as createHash37 } from "node:crypto";
 import { readFileSync as readFileSync38 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname as dirname48, join as join52 } from "node:path";
@@ -58550,7 +58694,7 @@ class BuiltInSourceEmbeddingProvider {
       backend: this.backend,
       ...options.epochId ? { epochOverride: options.epochId } : {}
     });
-    this.configHash = createHash36("sha256").update(JSON.stringify({
+    this.configHash = createHash37("sha256").update(JSON.stringify({
       provider: this.provider,
       model: this.modelId,
       repository: this.spec.repository,
@@ -59818,7 +59962,7 @@ var init_tier_override_settle = __esm(() => {
 });
 
 // src/workers/connector-store/tier-rules-sweep.ts
-import { createHash as createHash37 } from "node:crypto";
+import { createHash as createHash38 } from "node:crypto";
 function sweepOwnerRuleRaises(options) {
   const report = { scanned: 0, raised: 0, secrets: 0, complete: true };
   const { set } = options;
@@ -60085,7 +60229,7 @@ function isRaisingRule(rule) {
   return tierRank(rule.tier) > tierRank("private");
 }
 function ruleKey(rule) {
-  return createHash37("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
+  return createHash38("sha256").update(JSON.stringify([rule.id, rule.source ?? "", rule.match.kind, rule.match.value, rule.tier, rule.strength])).digest("hex").slice(0, 24);
 }
 function readState5(raw) {
   if (!raw)
@@ -60310,7 +60454,7 @@ var init_tier_media_judgment_sweep = __esm(() => {
 });
 
 // src/workers/connector-store/tiered-store-set.ts
-import { createHash as createHash38 } from "node:crypto";
+import { createHash as createHash39 } from "node:crypto";
 import { existsSync as existsSync46 } from "node:fs";
 function tieredStoreSetLedgerPath(secureLocalStoreDbPath) {
   return tierLedgerPathForStore(secureLocalStoreDbPath);
@@ -61486,7 +61630,7 @@ function identityKey(identity2) {
   return tierLedgerIdentityKey(identity2);
 }
 function planKey(item) {
-  const judged = createHash38("sha256").update(JSON.stringify([
+  const judged = createHash39("sha256").update(JSON.stringify([
     item.content.kind,
     item.content.kind === "metadata_only" ? "" : connectorStoreItemText(item) ?? "",
     stringMetadata(item, ["title", "name", "subject"]) ?? "",
@@ -61586,7 +61730,7 @@ var init_tiered_store_set = __esm(() => {
 });
 
 // src/workers/readwise/live-sync.ts
-import { createHash as createHash39 } from "node:crypto";
+import { createHash as createHash40 } from "node:crypto";
 function createReadwiseConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultReadwiseLiveSyncConfig(env);
@@ -61760,7 +61904,7 @@ function taskOutcome(input) {
   };
 }
 function readwiseReceiptDigest(receipt) {
-  return createHash39("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash40("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function emptyEmbedSummary(store, provider) {
   return {
@@ -67368,7 +67512,7 @@ var init_grant_fence = __esm(() => {
 });
 
 // src/workers/x-bookmarks/live-control.ts
-import { createHash as createHash40, randomUUID as randomUUID15 } from "node:crypto";
+import { createHash as createHash41, randomUUID as randomUUID15 } from "node:crypto";
 import { chmodSync as chmodSync15, existsSync as existsSync47, lstatSync as lstatSync24, mkdirSync as mkdirSync32 } from "node:fs";
 import { dirname as dirname49 } from "node:path";
 import { Database as Database14 } from "bun:sqlite";
@@ -68203,7 +68347,7 @@ function rateLimitStatus(row) {
   };
 }
 function hashResourceId(resourceId) {
-  return createHash40("sha256").update(resourceId).digest("hex");
+  return createHash41("sha256").update(resourceId).digest("hex");
 }
 function utcDayFrom(date) {
   return date.toISOString().slice(0, 10);
@@ -68325,7 +68469,7 @@ var init_live_control2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/api-connector.ts
-import { createHash as createHash41 } from "node:crypto";
+import { createHash as createHash42 } from "node:crypto";
 function createXBookmarksApiSourceConnector(options) {
   const env = options.env ?? process.env;
   const config = options.config ?? defaultXBookmarksLiveSyncConfig(env);
@@ -69052,7 +69196,7 @@ function classifyXBookmarksProviderWindowBoundary(error, context2, policy = X_BO
   const matchedCode = error.providerErrorCode && approvedCodes.has(error.providerErrorCode) ? error.providerErrorCode : undefined;
   if (!matchedType && !matchedCode)
     return;
-  const fingerprintSha256 = createHash41("sha256").update(JSON.stringify({
+  const fingerprintSha256 = createHash42("sha256").update(JSON.stringify({
     kind: "x_provider_window_boundary",
     algorithm_version: algorithmVersion,
     http_status: error.status,
@@ -69253,7 +69397,7 @@ var init_api_connector = __esm(() => {
 });
 
 // src/workers/x-bookmarks/window-diagnostic.ts
-import { createHash as createHash42, randomUUID as randomUUID16 } from "node:crypto";
+import { createHash as createHash43, randomUUID as randomUUID16 } from "node:crypto";
 import {
   chmodSync as chmodSync16,
   existsSync as existsSync48,
@@ -69305,7 +69449,7 @@ async function runXBookmarksWindowDiagnostic(options) {
     kind: "x_bookmarks_window_diagnostic",
     version: 1,
     generated_at: attemptedAt.toISOString(),
-    account_sha256: createHash42("sha256").update(account).digest("hex"),
+    account_sha256: createHash43("sha256").update(account).digest("hex"),
     page_size: config.reconcilePageSize,
     max_pages_per_traversal: MAX_DIAGNOSTIC_PAGES,
     probes: [freshRoot, identicalCursorRetry, idOnlyTraversal, richTraversal],
@@ -69328,7 +69472,7 @@ async function runXBookmarksWindowDiagnostic(options) {
   return {
     report,
     report_path: options.reportPath,
-    report_sha256: createHash42("sha256").update(reportJson).digest("hex")
+    report_sha256: createHash43("sha256").update(reportJson).digest("hex")
   };
 }
 async function diagnosticClient(options, env) {
@@ -69932,7 +70076,7 @@ var init_live_sync2 = __esm(() => {
 });
 
 // src/workers/x-bookmarks/content-recovery.ts
-import { createHash as createHash43, randomUUID as randomUUID17 } from "node:crypto";
+import { createHash as createHash44, randomUUID as randomUUID17 } from "node:crypto";
 import {
   chmodSync as chmodSync17,
   renameSync as renameSync9,
@@ -70146,7 +70290,7 @@ function sameFolderFacetAuthorityReading(atGate, atRestore) {
   return atGate.leaseGeneration === atRestore.leaseGeneration;
 }
 function contentRecoveryEmbeddingJournalId(restoreItems) {
-  const inputSha256 = createHash43("sha256").update(JSON.stringify(restoreItems)).digest("hex");
+  const inputSha256 = createHash44("sha256").update(JSON.stringify(restoreItems)).digest("hex");
   return `x_content_recovery:${inputSha256}:embeddings`;
 }
 function defaultXBookmarksContentRecoveryReceiptPath(storePath) {
@@ -70259,7 +70403,7 @@ function writeReceipt(pathValue, receipt) {
   }
 }
 function sha256Json2(value) {
-  return createHash43("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash44("sha256").update(JSON.stringify(value)).digest("hex");
 }
 function requireNonEmpty2(value, label) {
   const normalized = value.trim();
@@ -70677,7 +70821,7 @@ var init_provider_client = __esm(() => {
 });
 
 // src/workers/dropbox-files/connector.ts
-import { createHash as createHash44 } from "node:crypto";
+import { createHash as createHash45 } from "node:crypto";
 function createDropboxSourceConnector(options) {
   const account = requireNonEmpty3(options.account, "Dropbox source connector account");
   const credentialHandle = options.credentialHandle?.trim() || DEFAULT_CREDENTIAL_HANDLE;
@@ -71178,7 +71322,7 @@ function resumedPageOffset(cursor, page2) {
   return cursor.pageDigest === metadataPageDigest(page2) ? cursor.itemOffset : 0;
 }
 function metadataPageDigest(page2) {
-  return createHash44("sha256").update(JSON.stringify({
+  return createHash45("sha256").update(JSON.stringify({
     entries: page2.entries,
     cursor: page2.cursor?.trim() || null,
     hasMore: Boolean(page2.hasMore)
@@ -71193,7 +71337,7 @@ function providerItemIdFromLocalItemId(localItemId, account) {
 }
 function deletedProviderItemId(entry) {
   const ref = entry.pathLower || entry.pathDisplay || entry.name;
-  return `deleted:${createHash44("sha256").update(ref).digest("hex").slice(0, 32)}`;
+  return `deleted:${createHash45("sha256").update(ref).digest("hex").slice(0, 32)}`;
 }
 function listRootPath(rootFolderPath, approvedScopeKey, account) {
   const explicit = rootFolderPath?.trim();
@@ -71464,7 +71608,7 @@ var init_connector_store2 = __esm(() => {
 });
 
 // src/workers/dropbox-files/provider-store-sync.ts
-import { createHash as createHash45 } from "node:crypto";
+import { createHash as createHash46 } from "node:crypto";
 function createDropboxProviderStoreSyncHandler(options) {
   const account = required2(options.account, "Dropbox connector-store account");
   if (options.embeddingProvider && !isApprovedSecureSourceEmbeddingProvider(options.embeddingProvider)) {
@@ -71607,7 +71751,7 @@ function createDropboxProviderStoreSyncHandler(options) {
       return {
         receipt: {
           ...receiptWithoutDigest,
-          receipt_sha256: createHash45("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
+          receipt_sha256: createHash46("sha256").update(JSON.stringify(receiptWithoutDigest)).digest("hex")
         },
         checkpoint: dropboxScopedCheckpoint(sync.cursor, connectorId, options.scope !== undefined)
       };
@@ -71619,7 +71763,7 @@ function dropboxConnectorIdForScope(account, approvedScopeKey, scope) {
   const normalizedAccount = required2(account, "Dropbox connector account");
   const normalizedScope = required2(approvedScopeKey, "Dropbox approved scope key");
   const approvedScopeIdentity = scope ? `\x00${required2(scope.generation, "Dropbox approved scope generation")}` + `\x00${required2(scope.revision, "Dropbox approved scope revision")}` : "";
-  const scopeHash = createHash45("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
+  const scopeHash = createHash46("sha256").update(`${normalizedAccount}\x00${normalizedScope}${approvedScopeIdentity}`).digest("hex").slice(0, 24);
   return `dropbox.files.${scopeHash}`;
 }
 function dropboxScopedCheckpoint(cursor, connectorId, scoped) {
@@ -71836,14 +71980,14 @@ var init_locator_result_projector = __esm(() => {
 });
 
 // src/workers/dropbox-files/dropbox-content-hash.ts
-import { createHash as createHash46 } from "node:crypto";
+import { createHash as createHash47 } from "node:crypto";
 function computeDropboxContentHash(bytes) {
   const blockDigests = [];
   for (let offset = 0;offset < bytes.byteLength; offset += DROPBOX_CONTENT_HASH_BLOCK_SIZE) {
     const block = bytes.subarray(offset, Math.min(offset + DROPBOX_CONTENT_HASH_BLOCK_SIZE, bytes.byteLength));
-    blockDigests.push(createHash46("sha256").update(block).digest());
+    blockDigests.push(createHash47("sha256").update(block).digest());
   }
-  return createHash46("sha256").update(Buffer.concat(blockDigests)).digest("hex");
+  return createHash47("sha256").update(Buffer.concat(blockDigests)).digest("hex");
 }
 var DROPBOX_CONTENT_HASH_BLOCK_SIZE;
 var init_dropbox_content_hash = __esm(() => {
@@ -72751,7 +72895,7 @@ var init_corpus_adapter4 = __esm(() => {
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID = LEGACY_TELEGRAM_MESSAGES_CORPUS_ID;
 });
 // src/workers/connector-store/capture-spool-secrets.ts
-import { createHash as createHash47 } from "node:crypto";
+import { createHash as createHash48 } from "node:crypto";
 import { closeSync as closeSync15, fsyncSync as fsyncSync3, lstatSync as lstatSync25, openSync as openSync15, readFileSync as readFileSync39, readSync as readSync3, writeSync as writeSync4 } from "node:fs";
 import { join as join58 } from "node:path";
 function redactCaptureSpoolLines(options) {
@@ -72884,7 +73028,7 @@ function addCaptureSpoolRedactions(...results) {
   }), { recordsRedacted: 0, recordsBlanked: 0 });
 }
 function secretsDigest(ledger) {
-  const hash = createHash47("sha256");
+  const hash = createHash48("sha256");
   for (const { identity: identity2, names } of ledger.secretsIdentities()) {
     hash.update([
       identity2.provider,
@@ -72915,7 +73059,7 @@ var init_capture_spool_secrets = __esm(() => {
 });
 
 // src/workers/telegram-messages/capture-spool-connector.ts
-import { createHash as createHash48 } from "node:crypto";
+import { createHash as createHash49 } from "node:crypto";
 import { existsSync as existsSync49, lstatSync as lstatSync26, readFileSync as readFileSync40, readdirSync as readdirSync6 } from "node:fs";
 import { join as join59 } from "node:path";
 function defaultTelegramCaptureSpoolDir(env = process.env) {
@@ -73401,7 +73545,7 @@ function normalizeBudget(value) {
   return value;
 }
 function sha2563(value) {
-  return createHash48("sha256").update(value).digest("hex");
+  return createHash49("sha256").update(value).digest("hex");
 }
 function telegramConversationKind(chatType) {
   switch (chatType?.toLowerCase()) {
@@ -73709,13 +73853,22 @@ var init_gmail_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/gmail-live-sync.ts
-import { createHash as createHash49 } from "node:crypto";
+import { createHash as createHash50 } from "node:crypto";
 function gmailLaneSyncOptions(ownerRules = []) {
   return {
     fetchContent: true,
     classification: gmailConnectorStoreClassification(ownerRules),
     tierClassification: { ...ownerRules.length > 0 ? { rules: [...ownerRules] } : {} }
   };
+}
+function readChildrenBackfill(cursor) {
+  try {
+    const parsed = cursor ? JSON.parse(cursor) : {};
+    const pk = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+    return { internal: pk(parsed.internal), secure: pk(parsed.secure), ...parsed.done === true ? { done: true } : {} };
+  } catch {
+    return { internal: 0, secure: 0 };
+  }
 }
 function createGmailConnectorStoreSyncHandler(options) {
   const env = options.env ?? process.env;
@@ -73928,6 +74081,80 @@ function createGmailConnectorStoreSyncHandler(options) {
         warnings
       });
     },
+    ...options.build?.children === true ? {
+      backfillChildren: async (request = {}) => {
+        const saved = readChildrenBackfill(tierSet.ledger.setCursor(GMAIL_CHILDREN_BACKFILL_SET, GMAIL_CHILDREN_BACKFILL_CONNECTOR)?.cursor);
+        if (saved.done)
+          return { listed: 0, examined: 0, done: true };
+        const max2 = Math.max(1, Math.min(request.max_items ?? GMAIL_CHILDREN_BACKFILL_PER_PASS, GMAIL_CHILDREN_BACKFILL_PER_PASS));
+        options.assertScopeCurrent?.();
+        const connector = buildConnector({ maxMessages: max2, provenance: sourceInvocationProvenance(request.provenance) });
+        const client = await connector.apiClientForTooling();
+        const children = [];
+        let examined = 0;
+        let exhausted = 0;
+        let stopped;
+        const stores = [["internal", options.internalStore, options.secureStore], ["secure", options.secureStore, options.internalStore]];
+        for (const [name, store, other] of stores) {
+          let storeDone = false;
+          while (examined < max2 && stopped === undefined) {
+            const rows = store.parentsAwaitingChildren(GMAIL_PROVIDER, GMAIL_ATTACHMENT_LINE, saved[name], max2 - examined);
+            if (rows.length === 0) {
+              storeDone = true;
+              break;
+            }
+            for (const row of rows) {
+              if (examined >= max2 || stopped !== undefined)
+                break;
+              if (row.accountScope === account && !row.providerItemId.startsWith(GMAIL_OWN_ID_PREFIX) && !other.hasChildRowsOf(row.localItemId)) {
+                examined += 1;
+                let message2;
+                try {
+                  options.assertScopeCurrent?.();
+                  message2 = await client.getMessage(row.providerItemId);
+                  options.assertScopeCurrent?.();
+                } catch (error) {
+                  if (!(error instanceof Error && /Gmail API request failed \(404\)/.test(error.message))) {
+                    stopped = error;
+                    break;
+                  }
+                  saved[name] = row.itemPk;
+                  continue;
+                }
+                if (!options.scope || gmailMessageInScope(message2, options.scope)) {
+                  const [, ...kids] = gmailMailItems(gmailMailRecordFromMessage(message2, { children: true }), account, { children: true });
+                  children.push(...kids);
+                }
+              }
+              saved[name] = row.itemPk;
+            }
+          }
+          if (storeDone)
+            exhausted += 1;
+          if (stopped !== undefined)
+            break;
+        }
+        if (children.length > 0) {
+          const byId = new Map(children.map((item) => [item.identity.localItemId, item]));
+          const listing = {
+            id: connectorId,
+            family: "email",
+            authenticate: async () => {},
+            async* listItems() {
+              yield { items: children, done: true };
+            },
+            fetchItem: async (localItemId) => byId.get(localItemId) ?? Promise.reject(new Error("not listed")),
+            classificationSignals: (item) => connector.classificationSignals(item)
+          };
+          await tierSet.sync(listing, { fetchContent: true, classification, tierClassification }, { commitCursor: false });
+        }
+        const done = stopped === undefined && exhausted === stores.length;
+        tierSet.ledger.commitSetCursor(GMAIL_CHILDREN_BACKFILL_SET, GMAIL_CHILDREN_BACKFILL_CONNECTOR, JSON.stringify({ ...saved, ...done ? { done: true } : {} }));
+        if (stopped !== undefined)
+          throw stopped;
+        return { listed: children.length, examined, done };
+      }
+    } : {},
     lastStoreRunCompletedAt: () => latestCompletedAt([
       options.internalStore.status().lastSyncRun?.completedAt,
       options.secureStore.status().lastSyncRun?.completedAt
@@ -73978,7 +74205,7 @@ function scopedTraversal(connector, connectorId, assertScopeCurrent) {
 function gmailCursorConnectorId(account, scope) {
   if (!scope)
     return GMAIL_PROVIDER;
-  const digest3 = createHash49("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest3 = createHash50("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GMAIL_SCOPED_CONNECTOR_PREFIX}${digest3}`;
 }
 function encodeCheckpoint(envelope) {
@@ -74074,7 +74301,7 @@ function taskOutcome2(input) {
   };
 }
 function gmailReceiptDigest(receipt) {
-  return createHash49("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash50("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError2(error) {
   if (error instanceof TypeError)
@@ -74096,11 +74323,12 @@ function boundedMaxItems2(value, fallback) {
 function latestCompletedAt(values) {
   return values.filter((value) => Boolean(value)).sort().at(-1);
 }
-var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", GMAIL_LABEL_RULES_PENDING_WARNING = "gmail_label_rules_pending", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, gmailContentArrivesLater = (item) => item.deferredBytes !== undefined, GMAIL_SCOPED_CONNECTOR_PREFIX;
+var GMAIL_STORE_PULL_RECEIPT_KIND = "gmail_connector_store_pull_receipt", GMAIL_STORE_RECONCILE_RECEIPT_KIND = "gmail_connector_store_reconcile_receipt", GMAIL_RESUME_REJECTED_WARNING = "gmail_store_resume_cursor_rejected", GMAIL_ATTACHMENTS_NOT_INGESTED_WARNING = "gmail_attachments_not_ingested", GMAIL_INGEST_FILTERED_WARNING = "gmail_ingest_filtered_items", GMAIL_LABEL_RULES_PENDING_WARNING = "gmail_label_rules_pending", CHECKPOINT_PREFIX = "gmp1:", MAX_CHECKPOINT_CHARS = 16384, MAX_RECONCILE_MESSAGES = 1000, GMAIL_CHILDREN_BACKFILL_SET = "gmail.email", GMAIL_CHILDREN_BACKFILL_CONNECTOR = "gmail.children-backfill.v1", GMAIL_CHILDREN_BACKFILL_PER_PASS = 20, GMAIL_ATTACHMENT_LINE = "Attachment: ", gmailContentArrivesLater = (item) => item.deferredBytes !== undefined, GMAIL_SCOPED_CONNECTOR_PREFIX;
 var init_gmail_live_sync = __esm(() => {
   init_tiered_store_set();
   init_tier_rules_sweep();
   init_embeddings();
+  init_gmail_mail_record();
   init_gmail();
   init_gmail_live_control();
   GMAIL_SCOPED_CONNECTOR_PREFIX = `${GMAIL_PROVIDER}.scope.`;
@@ -74141,7 +74369,7 @@ var init_drive_live_control = __esm(() => {
 });
 
 // src/workers/google-connectors/drive-live-sync.ts
-import { createHash as createHash50 } from "node:crypto";
+import { createHash as createHash51 } from "node:crypto";
 function createGoogleDriveLaneTierSet(options) {
   return createLaneTieredStoreSet({
     ...options,
@@ -74299,7 +74527,7 @@ function scopedTraversal2(connector, connectorId) {
 function googleDriveCursorConnectorId(account, scope) {
   if (!scope)
     return GOOGLE_DRIVE_PROVIDER;
-  const digest3 = createHash50("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
+  const digest3 = createHash51("sha256").update(`${account}\x00${scope.generation}\x00${scope.revision}`).digest("hex").slice(0, 24);
   return `${GOOGLE_DRIVE_PROVIDER}.scope.${digest3}`;
 }
 function googleDriveScopedCheckpoint(cursor, connectorId) {
@@ -74388,7 +74616,7 @@ function taskOutcome3(input) {
   };
 }
 function googleDriveReceiptDigest(receipt) {
-  return createHash50("sha256").update(JSON.stringify(receipt)).digest("hex");
+  return createHash51("sha256").update(JSON.stringify(receipt)).digest("hex");
 }
 function isRejectedCursorError3(error) {
   if (error instanceof TypeError)
@@ -79014,7 +79242,7 @@ var init_source_scheduler_state = __esm(() => {
 });
 
 // src/workers/file-extraction/spool.ts
-import { createHash as createHash51 } from "node:crypto";
+import { createHash as createHash52 } from "node:crypto";
 import { chmodSync as chmodSync19, existsSync as existsSync54, mkdirSync as mkdirSync37, readdirSync as readdirSync7, rmSync as rmSync13, rmdirSync as rmdirSync5, statSync as statSync22 } from "node:fs";
 import { dirname as dirname55, isAbsolute as isAbsolute21, join as join63, relative as relative7, sep as sep9 } from "node:path";
 function extractionSpoolOwnerDir(root, owner) {
@@ -79210,7 +79438,7 @@ function makeExtractionSpoolOwnerDir(ownerDir, anchor) {
     }
   }
 }
-var EXTRACTION_SPOOL_STALE_MS, digest3 = (value) => createHash51("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest3(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest3(accountScope)}`;
+var EXTRACTION_SPOOL_STALE_MS, digest3 = (value) => createHash52("sha256").update(value).digest("hex").slice(0, 32), corpusFolder = (corpusId) => `c-${digest3(corpusId)}`, accountFolder2 = (accountScope) => `a-${digest3(accountScope)}`;
 var init_spool = __esm(() => {
   EXTRACTION_SPOOL_STALE_MS = 24 * 60 * 60 * 1000;
 });
@@ -79516,7 +79744,7 @@ var init_source_forget_registry = __esm(() => {
 });
 
 // src/data-lifecycle.ts
-import { createHash as createHash52, randomUUID as randomUUID18 } from "node:crypto";
+import { createHash as createHash53, randomUUID as randomUUID18 } from "node:crypto";
 import {
   closeSync as closeSync16,
   existsSync as existsSync56,
@@ -80476,7 +80704,7 @@ function fileArtifact(exportRoot, path, sourceId, role) {
   };
 }
 function sha256File2(path) {
-  const hash = createHash52("sha256");
+  const hash = createHash53("sha256");
   const descriptor = openSync16(path, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -82587,7 +82815,7 @@ __export(exports_managed_tools, {
   MANAGED_TOOL_ORDER: () => MANAGED_TOOL_ORDER
 });
 import { execFile as execFile2 } from "node:child_process";
-import { createHash as createHash53, randomUUID as randomUUID19 } from "node:crypto";
+import { createHash as createHash54, randomUUID as randomUUID19 } from "node:crypto";
 import {
   accessSync as accessSync8,
   constants as constants7,
@@ -83033,7 +83261,7 @@ async function installOne(tool, pin, platformKey, root, uid, options, lease) {
   }
 }
 function fileSha256(path) {
-  return createHash53("sha256").update(readFileSync44(path)).digest("hex");
+  return createHash54("sha256").update(readFileSync44(path)).digest("hex");
 }
 function verifyPinnedFiles(staging, asset, uid, label, tool) {
   for (const pinned of asset.pinnedFiles ?? []) {
@@ -83085,7 +83313,7 @@ async function downloadTo(path, asset, options, onBytes, tool, label) {
     });
     throw new ManagedToolsError("size_mismatch", `The ${label} download is not the pinned size, so nothing was installed.`, tool);
   }
-  const hash = createHash53("sha256");
+  const hash = createHash54("sha256");
   const file = await open3(path, "wx", 384);
   let received = 0;
   let lastReport = 0;
@@ -84826,7 +85054,7 @@ __export(exports_zkapi_confinement_linux, {
 import { execFile as execFile3 } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile as readFile4, stat as fileStat } from "node:fs/promises";
-import { createHash as createHash54 } from "node:crypto";
+import { createHash as createHash55 } from "node:crypto";
 import { lstatSync as lstatSync29, readFileSync as readFileSync46, readlinkSync as readlinkSync2, readdirSync as readdirSync12, realpathSync as realpathSync14 } from "node:fs";
 import { dirname as dirname59, join as join69 } from "node:path";
 function record(value) {
@@ -85003,7 +85231,7 @@ async function launcherPath(env) {
           break;
         current2 = dirname59(current2);
       }
-      if (!lstatSync29(path).isFile() || createHash54("sha256").update(await readFile4(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
+      if (!lstatSync29(path).isFile() || createHash55("sha256").update(await readFile4(path)).digest("hex") !== ZKAPI_CONFINE_SHA256)
         continue;
       return path;
     } catch {}
@@ -85014,7 +85242,7 @@ async function launcherIdentity(path) {
   const info = await fileStat(path);
   if (!info.isFile())
     throw new Error("not a launcher");
-  const hash = createHash54("sha256").update(await readFile4(path)).digest("hex");
+  const hash = createHash55("sha256").update(await readFile4(path)).digest("hex");
   return [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode, hash].join(":");
 }
 function linuxZkapiConfinement(deps = {}) {
@@ -85220,7 +85448,7 @@ __export(exports_consult_transport_zkapi, {
   DEFAULT_EXECUTABLE_TRUST: () => DEFAULT_EXECUTABLE_TRUST
 });
 import { spawn as spawn5, execFileSync as execFileSync2 } from "node:child_process";
-import { createHash as createHash55, randomUUID as randomUUID20 } from "node:crypto";
+import { createHash as createHash56, randomUUID as randomUUID20 } from "node:crypto";
 import { accessSync as accessSync9, chmodSync as chmodSync22, closeSync as closeSync17, constants as constants8, existsSync as existsSync58, mkdirSync as mkdirSync41, mkdtempSync as mkdtempSync2, readdirSync as readdirSync13, readFileSync as readFileSync47, readlinkSync as readlinkSync3, realpathSync as realpathSync15, rmSync as rmSync17, statSync as statSync25, writeFileSync as writeFileSync13 } from "node:fs";
 import { createConnection as createConnection3, createServer as createServer3 } from "node:net";
 import { homedir as homedir29, tmpdir as tmpdir4 } from "node:os";
@@ -85509,7 +85737,7 @@ function zkapiWalletDirectory(env) {
   }
 }
 function zkapiFenceScope(input) {
-  return createHash55("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
+  return createHash56("sha256").update(zkapiWalletDirectory(input.env)).digest("hex").slice(0, 32);
 }
 function abandonZkapiFence(path, scope, now) {
   let found = false;
@@ -87470,7 +87698,7 @@ setInterval(() => { if (process.ppid !== expectedParent) cleanup(); }, 500);
 
 // src/core/engine-service.ts
 import { spawnSync as spawnSync11 } from "node:child_process";
-import { createHash as createHash56, randomBytes as randomBytes14 } from "node:crypto";
+import { createHash as createHash57, randomBytes as randomBytes14 } from "node:crypto";
 import { existsSync as existsSync59, lstatSync as lstatSync30, readdirSync as readdirSync14, readFileSync as readFileSync48, renameSync as renameSync12, statSync as statSync26 } from "node:fs";
 import { homedir as homedir30, platform as osPlatform3 } from "node:os";
 import { basename as basename11, dirname as dirname61, isAbsolute as isAbsolute24, join as join71, resolve as resolvePath2 } from "node:path";
@@ -87535,7 +87763,7 @@ function engineBuildIdentity(packageRoot) {
     if (typeof manifest.version === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(manifest.version))
       version = manifest.version;
   } catch {}
-  const hash = createHash56("sha256");
+  const hash = createHash57("sha256");
   for (const name of BUILD_DIGEST_FILES) {
     try {
       const bytes = readFileSync48(join71(packageRoot, "dist", name));
@@ -88630,7 +88858,7 @@ import { chmodSync as chmodSync23, closeSync as closeSync18, constants as consta
 import { createRequire as createRequire6 } from "node:module";
 import { basename as basename12, dirname as dirname62, join as join72, relative as relative9, resolve as resolve16, sep as sep12 } from "node:path";
 import { userInfo } from "node:os";
-import { randomBytes as randomBytes15, createHash as createHash57, randomUUID as randomUUID21 } from "node:crypto";
+import { randomBytes as randomBytes15, createHash as createHash58, randomUUID as randomUUID21 } from "node:crypto";
 function linuxEngineExec(command, args) {
   const r = spawnSync12(command, args, { encoding: "utf8", timeout: 35000, env: { ...process.env, SYSTEMD_PAGER: "", SYSTEMD_COLORS: "0" } });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? r.error?.message ?? "" };
@@ -88942,7 +89170,7 @@ function hashFile(path) {
   const info = lstatSync31(path);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
     throw new Error(`${path} must be a singly-linked regular file.`);
-  return createHash57("sha256").update(readFileSync49(path)).digest("hex");
+  return createHash58("sha256").update(readFileSync49(path)).digest("hex");
 }
 function linuxMachineArtifactDigest(path, kind) {
   if (kind === "file")
@@ -88951,13 +89179,13 @@ function linuxMachineArtifactDigest(path, kind) {
     const info = lstatSync31(path);
     if (!info.isSymbolicLink())
       throw new Error(`${path} is not a symbolic link.`);
-    return createHash57("sha256").update(readlinkSync4(path)).digest("hex");
+    return createHash58("sha256").update(readlinkSync4(path)).digest("hex");
   }
   const root = resolve16(path);
   const rootInfo = lstatSync31(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
     throw new Error(`${path} is not a real directory tree.`);
-  const hash = createHash57("sha256");
+  const hash = createHash58("sha256");
   const walk = (dir) => {
     for (const name of readdirSync15(dir).sort()) {
       const full = join72(dir, name);
@@ -89039,7 +89267,7 @@ function durableProgram(layout, source, transaction, options) {
   syncCopiedFile(runtime);
   syncDirectorySync(runtimeDir);
   syncDirectorySync(staging);
-  const custodyToken = createHash57("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
+  const custodyToken = createHash58("sha256").update(`olympus.engine.generation.v1\x00${linuxMachineArtifactDigest(app, "tree")}\x00${hashFile(runtime)}`).digest("hex");
   writePrivateFileAtomicSync(join72(staging, ".olympus-generation.json"), `${JSON.stringify({ schema: "olympus.engine.generation.v1", token: custodyToken, build: source.build ?? null })}
 `);
   syncDirectorySync(staging);
@@ -90095,7 +90323,7 @@ async function rollbackLinuxEngine(options) {
       throw new Error("The current service generation is unknown; rollback refused.");
     for (const p of [previous.program.runtimePath, previous.program.entryPath, current2.runtimePath, current2.entryPath])
       assertLinuxManagedPath(p);
-    if (!previous.program.runtimeDigest || createHash57("sha256").update(readFileSync49(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
+    if (!previous.program.runtimeDigest || createHash58("sha256").update(readFileSync49(previous.program.runtimePath)).digest("hex") !== previous.program.runtimeDigest)
       throw new Error("The previous Bun runtime has changed; rollback refused.");
     if (engineBuildIdentity(previous.program.workingDirectory) !== previous.program.build)
       throw new Error("The previous package has changed; rollback refused.");
@@ -90313,7 +90541,7 @@ var init_setup_preflight = __esm(() => {
 });
 
 // src/workers/credential-degradation.ts
-import { createHash as createHash58 } from "node:crypto";
+import { createHash as createHash59 } from "node:crypto";
 function credentialConfigFingerprint(profileId, profile) {
   const material = JSON.stringify({
     version: 1,
@@ -90325,7 +90553,7 @@ function credentialConfigFingerprint(profileId, profile) {
     secret_ref: profile.secretRef ?? null,
     purpose: profile.purpose ?? null
   });
-  return createHash58("sha256").update(material, "utf8").digest("hex");
+  return createHash59("sha256").update(material, "utf8").digest("hex");
 }
 
 class WorkerBootSecretResolver {
@@ -90524,7 +90752,7 @@ var init_credential_degradation = __esm(() => {
 });
 
 // src/core/consult-gate.ts
-import { createHash as createHash59 } from "node:crypto";
+import { createHash as createHash60 } from "node:crypto";
 import { existsSync as existsSync62, readFileSync as readFileSync50, statSync as statSync28 } from "node:fs";
 import { homedir as homedir31 } from "node:os";
 import { basename as basename13, dirname as dirname63, join as join73 } from "node:path";
@@ -91038,7 +91266,7 @@ function verifiedPackFile(path, sha2564) {
     if (statSync28(path).size > CONSULT_VOCABULARY_MAX_COMPRESSED_BYTES)
       return "too_large";
     const gz = readFileSync50(path);
-    return createHash59("sha256").update(gz).digest("hex") === sha2564 ? gz : "hash_mismatch";
+    return createHash60("sha256").update(gz).digest("hex") === sha2564 ? gz : "hash_mismatch";
   } catch {
     return "unreadable";
   }
@@ -97754,7 +97982,7 @@ var init_tier_rules = __esm(() => {
 });
 
 // src/workers/classification/privacy-profile.ts
-import { createHash as createHash62 } from "node:crypto";
+import { createHash as createHash63 } from "node:crypto";
 import { mkdirSync as mkdirSync45 } from "node:fs";
 import { dirname as dirname69 } from "node:path";
 function defaultPrivacyProfilePath(env = process.env) {
@@ -97896,7 +98124,7 @@ function privacyRuleToTierRule(rule) {
 }
 function privacyRuleId(rule) {
   const matched = rule.kind === "sender" ? rule.value ?? "" : rule.key ?? "";
-  const digest4 = createHash62("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
+  const digest4 = createHash63("sha256").update(`${rule.kind}\x00${rule.source_id}\x00${matched}`).digest("hex").slice(0, 16);
   return `${PRIVACY_RULE_ID_PREFIX}${rule.kind}-${digest4}`;
 }
 function writePrivacyProfile(update, options = {}) {
@@ -97947,7 +98175,7 @@ var init_privacy_profile = __esm(() => {
 });
 
 // src/workers/classification/tier-migration.ts
-import { createHash as createHash63 } from "node:crypto";
+import { createHash as createHash64 } from "node:crypto";
 import { chmodSync as chmodSync26, existsSync as existsSync69, mkdirSync as mkdirSync46, readFileSync as readFileSync57, renameSync as renameSync15, writeFileSync as writeFileSync16 } from "node:fs";
 import { dirname as dirname70, join as join83 } from "node:path";
 function domainTier(domain) {
@@ -97993,7 +98221,7 @@ function findPlan(statePath, planId) {
   return plan;
 }
 function sha2565(text2) {
-  return createHash63("sha256").update(text2, "utf8").digest("hex");
+  return createHash64("sha256").update(text2, "utf8").digest("hex");
 }
 function tierMigrationBatchKey(selector) {
   return sha2565(`tier-migration-batch\x00${normalizeSelector(selector)}`).slice(0, 32);
@@ -100747,7 +100975,7 @@ __export(exports_tier_migration_cli, {
   runTierMigrateCommand: () => runTierMigrateCommand,
   TIER_MIGRATE_USAGE: () => TIER_MIGRATE_USAGE
 });
-import { createHash as createHash64 } from "node:crypto";
+import { createHash as createHash65 } from "node:crypto";
 async function runTierMigrateCommand(args, context2 = {}) {
   const [command, ...rest] = args;
   const flags = parseFlags(rest);
@@ -100916,7 +101144,7 @@ async function withLanes(context2, env, mode, inputs, run) {
 }
 async function installedInputs(env, options) {
   const rules = loadOwnerTierRules({ env, allowMissing: true });
-  const rulesDigest = createHash64("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
+  const rulesDigest = createHash65("sha256").update(JSON.stringify(rules)).digest("hex").slice(0, 16);
   const revision = `map:${TIER_MAP_REVISION};rules:${rules.length > 0 ? rulesDigest : "none"}`;
   const base = {
     ...rules.length > 0 ? { rules } : {},
@@ -119906,7 +120134,7 @@ __export(exports_source_answer_jobs, {
   SOURCE_ANSWER_HANDOFF_DEFAULT_MS: () => SOURCE_ANSWER_HANDOFF_DEFAULT_MS,
   SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS: () => SOURCE_ANSWER_BACKGROUND_MAX_WAIT_MS
 });
-import { createHash as createHash65, randomBytes as randomBytes19, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
+import { createHash as createHash66, randomBytes as randomBytes19, timingSafeEqual as timingSafeEqual6 } from "node:crypto";
 
 class SourceAnswerJobRegistry {
   limits;
@@ -120410,8 +120638,8 @@ class SourceAnswerJobRegistry {
   }
 }
 function sameOwner(a, b) {
-  const left = createHash65("sha256").update(a).digest();
-  const right = createHash65("sha256").update(b).digest();
+  const left = createHash66("sha256").update(a).digest();
+  const right = createHash66("sha256").update(b).digest();
   return timingSafeEqual6(left, right);
 }
 function callerAbortError(message2) {
@@ -120682,7 +120910,7 @@ var init_server4 = __esm(() => {
 });
 
 // connect-relay/shared/protocol.ts
-import { createHash as createHash66, createPublicKey, randomBytes as randomBytes20, sign, verify } from "node:crypto";
+import { createHash as createHash67, createPublicKey, randomBytes as randomBytes20, sign, verify } from "node:crypto";
 function parseSurfacesMessage(message2) {
   if (message2.type !== "surfaces" || message2.v !== 1 || !Array.isArray(message2.entries))
     return;
@@ -120734,7 +120962,7 @@ function base32(data2) {
   return out;
 }
 function installIdForPublicKey(spkiDer) {
-  return base32(createHash66("sha256").update(spkiDer).digest().subarray(0, 20));
+  return base32(createHash67("sha256").update(spkiDer).digest().subarray(0, 20));
 }
 function spkiOf(key2) {
   return key2.export({ format: "der", type: "spki" });
@@ -120748,7 +120976,7 @@ function signInstallMessage(privateKey, kind, nonce, installId, relayHost, schem
   return base64url2(sign(null, signedPayload(kind, nonce, installId, relayHost, scheme), privateKey));
 }
 function powDigest(nonce, installId, relayHost, counter) {
-  return createHash66("sha256").update(`${POW_DOMAIN}
+  return createHash67("sha256").update(`${POW_DOMAIN}
 ${nonce}
 ${installId}
 ${relayHost.toLowerCase()}
@@ -121709,7 +121937,7 @@ var init_manifest3 = __esm(() => {
 
 // src/workers/source-index/built-in-reasoning/install.ts
 import { spawnSync as spawnSync18 } from "node:child_process";
-import { createHash as createHash67, randomUUID as randomUUID26 } from "node:crypto";
+import { createHash as createHash68, randomUUID as randomUUID26 } from "node:crypto";
 import {
   closeSync as closeSync21,
   createReadStream as createReadStream3,
@@ -122090,7 +122318,7 @@ function hashInto(path, hash, timeoutMs, onProgress) {
   });
 }
 async function sha256File3(path, timeoutMs, onProgress) {
-  const hash = createHash67("sha256");
+  const hash = createHash68("sha256");
   await hashInto(path, hash, timeoutMs, onProgress);
   return hash.digest("hex");
 }
@@ -124942,57 +125170,6 @@ var init_dashboard_session_secret = __esm(() => {
   init_atomic_file();
   init_worker_auth();
   SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-});
-
-// src/core/file-extraction-source.ts
-import { createHash as createHash68 } from "node:crypto";
-function isFileExtractionSourceError(value2) {
-  if (!value2 || typeof value2 !== "object")
-    return false;
-  const candidate = value2;
-  return typeof candidate.errorKind === "string" && typeof candidate.settleAs === "string" && typeof candidate.retryable === "boolean" && Object.hasOwn(FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, candidate.errorKind);
-}
-function splitScopedLocalItemId(localItemId) {
-  const separator = localItemId.indexOf(":");
-  if (separator <= 0 || separator === localItemId.length - 1)
-    return;
-  return {
-    accountScope: localItemId.slice(0, separator),
-    providerItemId: localItemId.slice(separator + 1)
-  };
-}
-var FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS, ERROR_HASH_CHARS = 32, FileExtractionSourceError;
-var init_file_extraction_source = __esm(() => {
-  FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS = Object.freeze({
-    source_item_not_found: "failed_terminal",
-    source_permission_denied: "failed_terminal",
-    source_version_gone: "failed_terminal",
-    source_content_unavailable: "skipped_unsupported",
-    source_request_rejected: "failed_terminal",
-    source_too_large: "skipped_too_large",
-    source_rate_limited: "failed_retryable",
-    source_unavailable: "failed_retryable",
-    source_auth_expired: "failed_retryable",
-    source_budget_exhausted: "failed_retryable",
-    network_unreachable: "failed_retryable",
-    network_socket_closed: "failed_retryable"
-  });
-  FileExtractionSourceError = class FileExtractionSourceError extends Error {
-    errorKind;
-    settleAs;
-    retryable;
-    errorHash;
-    constructor(errorKind, options = {}) {
-      super(errorKind);
-      this.name = "FileExtractionSourceError";
-      this.errorKind = errorKind;
-      this.settleAs = FILE_EXTRACTION_SOURCE_ERROR_SETTLEMENTS[errorKind];
-      this.retryable = this.settleAs === "failed_retryable";
-      const errorHash = options.detailForHash === undefined ? undefined : createHash68("sha256").update(options.detailForHash).digest("hex").slice(0, ERROR_HASH_CHARS);
-      if (errorHash)
-        this.errorHash = errorHash;
-    }
-  };
 });
 
 // src/workers/dropbox-files/extraction-source.ts
@@ -154323,6 +154500,27 @@ function createGmailConnectorStoreSchedulerSource(input) {
             throw gmailSchedulerFailure(error2);
           }
         }
+      }] : [],
+      ...input.sync.backfillChildren ? [{
+        id: "gmail.email_children_backfill_v1",
+        kind: "sync",
+        writer: true,
+        intervalMs: liveConfig.storePullIntervalMs,
+        freshnessThresholdMs: liveConfig.storePullFreshnessThresholdMs,
+        run: async (context2) => {
+          try {
+            const result = await input.sync.backfillChildren({
+              ...context2?.provenance === "operator" ? { provenance: "operator" } : {}
+            });
+            return {
+              status: result.listed > 0 ? "progress" : "idle",
+              counts: { items_seen: result.examined, items_changed: result.listed },
+              ...!result.done ? { continueSoon: true } : {}
+            };
+          } catch (error2) {
+            throw gmailSchedulerFailure(error2);
+          }
+        }
       }] : []
     ],
     lastSyncCompletedAt: lastCompletedAt
@@ -160542,10 +160740,11 @@ function declaredCharsets(raw) {
   }
   return [...found];
 }
-async function parseMboxMessage(raw) {
+async function parseMboxMessage(raw, options = {}) {
   let email2;
   try {
     email2 = await PostalMime.parse(raw, {
+      ...options.rfc822AsAttachments ? { forceRfc822Attachments: true } : {},
       maxHeadersSize: 1024 * 1024,
       maxPartCount: 2000,
       maxNestingDepth: 64,
@@ -168697,10 +168896,19 @@ function mimePartBytes(raw, partId, maxBytes = Number.POSITIVE_INFINITY) {
         throw new MimePartTooLargeError;
       return { bytes: decodeBody(body, encoding), mimeType };
     }
-    const boundary = type.params.get("boundary");
-    if (!mimeType.startsWith("multipart/") || !boundary || depth2 >= MAX_DEPTH)
+    if (depth2 >= MAX_DEPTH)
       return;
     if (path !== "" && !partId.startsWith(`${path}.`))
+      return;
+    if (mimeType === "message/rfc822") {
+      for (const inner of encapsulatedParts(text4, bodyStart, to, path === "" ? "0" : path)) {
+        if (partId === inner.path || partId.startsWith(`${inner.path}.`))
+          return find(inner.start, inner.end, inner.path, depth2 + 1);
+      }
+      return;
+    }
+    const boundary = type.params.get("boundary");
+    if (!mimeType.startsWith("multipart/") || !boundary)
       return;
     const bodies = multipartBodies(text4, bodyStart, to, boundary);
     for (const [index, body] of bodies.entries()) {
@@ -168712,8 +168920,18 @@ function mimePartBytes(raw, partId, maxBytes = Number.POSITIVE_INFINITY) {
   };
   return find(0, text4.length, "", 0);
 }
-function mimeAttachments(raw) {
+function encapsulatedParts(text4, from, to, path) {
+  const { headersEnd, bodyStart } = headerBlockEnd(text4, from, to);
+  const type = splitParams(parseHeaders(text4.slice(from, headersEnd)).get("content-type") ?? "text/plain");
+  const boundary = type.params.get("boundary");
+  if (type.value.toLowerCase().startsWith("multipart/") && boundary) {
+    return multipartBodies(text4, bodyStart, to, boundary).map((body, index) => ({ ...body, path: `${path}.${index}` }));
+  }
+  return [{ start: from, end: to, path: `${path}.0` }];
+}
+function mimeAttachments(raw, options = {}) {
   const text4 = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
+  const children = options.children === true;
   const found = [];
   let parts = 0;
   const walk = (from, to, partId, depth2, inside) => {
@@ -168726,21 +168944,29 @@ function mimeAttachments(raw) {
     const mimeType = type.value.toLowerCase() || "text/plain";
     const disposition = splitParams(headers.get("content-disposition") ?? "");
     const filename = (paramValue(disposition.params, "filename") ?? paramValue(type.params, "name"))?.trim();
-    if (filename) {
+    const attachment = children ? isGmailAttachmentPart({ mimeType, ...filename ? { filename } : {}, ...disposition.value ? { disposition: disposition.value } : {} }) : Boolean(filename);
+    if (attachment) {
       const encoding = (headers.get("content-transfer-encoding") ?? "").trim().toLowerCase();
+      const contentId = headers.get("content-id");
       found.push({
         partId,
-        filename,
+        filename: children ? gmailAttachmentPartName({ partId, mimeType, ...filename ? { filename } : {}, ...contentId ? { contentId } : {} }) : filename,
         mimeType,
         size: decodedSize(text4.slice(bodyStart, to), encoding),
         ...inside ? { nested: true } : {}
       });
     }
+    if (depth2 >= MAX_DEPTH)
+      return;
     const boundary = type.params.get("boundary");
-    if (mimeType.startsWith("multipart/") && boundary && depth2 < MAX_DEPTH) {
+    if (mimeType.startsWith("multipart/") && boundary) {
       multipartBodies(text4, bodyStart, to, boundary).forEach((body, index) => {
-        walk(body.start, body.end, partId === "" ? String(index) : `${partId}.${index}`, depth2 + 1, inside || Boolean(filename));
+        walk(body.start, body.end, partId === "" ? String(index) : `${partId}.${index}`, depth2 + 1, inside || attachment);
       });
+    } else if (children && mimeType === "message/rfc822") {
+      for (const inner of encapsulatedParts(text4, bodyStart, to, partId === "" ? "0" : partId)) {
+        walk(inner.start, inner.end, inner.path, depth2 + 1, true);
+      }
     }
   };
   walk(0, text4.length, "", 0, false);
@@ -168749,6 +168975,7 @@ function mimeAttachments(raw) {
 var MAX_PARTS = 2000, MAX_DEPTH = 64, MAX_HEADER_BYTES2, MimePartTooLargeError;
 var init_mime_parts = __esm(() => {
   init_postal_mime();
+  init_gmail_mail_record();
   MAX_HEADER_BYTES2 = 256 * 1024;
   MimePartTooLargeError = class MimePartTooLargeError extends Error {
     constructor() {
@@ -168786,18 +169013,18 @@ function gmailLabelIds(names, byName) {
   }
   return ids;
 }
-function mboxPartLocator(archiveId, fileIndex, offset, partId) {
-  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${partId}`;
+function mboxPartLocator(archiveId, fileIndex, offset, parentId, partId) {
+  return `${MBOX_PART_LOCATOR_PREFIX}${archiveId}:${fileIndex}:${offset}:${parentId}:${partId}`;
 }
 function parseMboxPartLocator(locator) {
   if (!locator.startsWith(MBOX_PART_LOCATOR_PREFIX))
     return;
-  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
+  const match = /^([0-9a-f-]{36}):(\d{1,6}):(\d{1,15}):([A-Za-z0-9_-]{1,128}):([0-9.]{0,64})$/.exec(locator.slice(MBOX_PART_LOCATOR_PREFIX.length));
   if (!match)
     return;
-  return { archiveId: match[1], fileIndex: Number(match[2]), offset: Number(match[3]), partId: match[4] };
+  return { archiveId: match[1], fileIndex: Number(match[2]), offset: Number(match[3]), parentId: match[4], partId: match[5] };
 }
-function recordOf(archiveId, parsed, span, fileIndex, id, labelsByName) {
+function recordOf(children, archiveId, parsed, span, fileIndex, id, labelsByName) {
   const threadId = parsed.gmailThread ? gmailIdFromDecimal(parsed.gmailThread) : parsed.threadRoot ? `mid:${sha2567(parsed.threadRoot).slice(0, 24)}` : undefined;
   return {
     id,
@@ -168812,12 +169039,12 @@ function recordOf(archiveId, parsed, span, fileIndex, id, labelsByName) {
     },
     body: parsed.body,
     metadataOnly: false,
-    attachments: mimeAttachments(span.raw).map((part) => ({
+    attachments: mimeAttachments(span.raw, { children }).map((part) => ({
       partId: part.partId,
       filename: part.filename,
       ...part.mimeType ? { mimeType: part.mimeType } : {},
       size: part.size,
-      locator: mboxPartLocator(archiveId, fileIndex, span.offset, part.partId),
+      locator: mboxPartLocator(archiveId, fileIndex, span.offset, id, part.partId),
       ...part.nested ? { nested: true } : {}
     })),
     sourceVersion: parsed.messageHash.slice(0, 32)
@@ -168914,7 +169141,7 @@ function mboxGmailInput(archive, options = {}) {
               if (span.tooLarge) {
                 report(MBOX_FINDINGS.tooLarge, "gap");
               } else {
-                const parsed = await parseMboxMessage(span.raw);
+                const parsed = await parseMboxMessage(span.raw, { rfc822AsAttachments: children });
                 if (!parsed)
                   report(MBOX_FINDINGS.unreadable, "gap");
                 else if (parsed.spamOrTrash)
@@ -168939,7 +169166,7 @@ function mboxGmailInput(archive, options = {}) {
                     if (matched !== "none")
                       id = matched.id;
                   }
-                  const record5 = recordOf(archive.archiveId, parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
+                  const record5 = recordOf(children, archive.archiveId, parsed, span, fileIndex, id ?? ownId(parsed), labelsByName);
                   page2.push(record5);
                   positions.push({ fileIndex, offset: span.offset });
                   pending = true;
@@ -170882,9 +171109,11 @@ function importServesSource(state, archiveId, sourceId) {
     return false;
   }
 }
-function readMboxPart(input) {
+async function readMboxPart(input) {
   const where2 = parseMboxPartLocator(input.locator);
   if (!where2)
+    throw new FileExtractionSourceError("source_content_unavailable");
+  if (gmailChildProviderId(where2.parentId, where2.partId) !== input.childProviderItemId)
     throw new FileExtractionSourceError("source_content_unavailable");
   if (!importServesSource(input.state, where2.archiveId, input.sourceId))
     throw new FileExtractionSourceError("source_item_not_found");
@@ -170924,6 +171153,14 @@ function readMboxPart(input) {
         throw new FileExtractionSourceError("source_version_gone");
       if (!span.raw)
         throw new FileExtractionSourceError("source_too_large");
+      const takeout = takeoutMessageId(span.separator);
+      if (takeout !== undefined && takeout !== where2.parentId)
+        throw new FileExtractionSourceError("source_content_unavailable");
+      if (takeout === undefined && where2.parentId.startsWith(GMAIL_OWN_ID_PREFIX)) {
+        const parsed = await parseMboxMessage(span.raw);
+        if (!parsed || ownId(parsed) !== where2.parentId)
+          throw new FileExtractionSourceError("source_content_unavailable");
+      }
       let part;
       try {
         part = mimePartBytes(span.raw, where2.partId, input.maxBytes);
@@ -170948,7 +171185,9 @@ var init_part_reader = __esm(() => {
   init_file_extraction_source();
   init_scope_safe_fs();
   init_manifest2();
+  init_gmail_mail_record();
   init_gmail_input();
+  init_parse4();
   init_mime_parts();
   init_split();
 });
@@ -170961,6 +171200,24 @@ function gmailAttachmentLanes(accountScope) {
     accountScope,
     approvedScopeKey: GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY
   }));
+}
+async function forwardedMessageAsText(item) {
+  if (item.content.kind !== "bytes" || item.content.mimeType.trim().toLowerCase() !== "message/rfc822")
+    return item;
+  const parsed = await parseMboxMessage(item.content.bytes, { rfc822AsAttachments: true });
+  if (!parsed)
+    throw new FileExtractionSourceError("source_content_unavailable");
+  const text4 = [
+    `From: ${parsed.from}`,
+    ...parsed.to ? [`To: ${parsed.to}`] : [],
+    ...parsed.subject ? [`Subject: ${parsed.subject}`] : [],
+    ...parsed.dateHeader ? [`Date: ${parsed.dateHeader}`] : [],
+    "",
+    parsed.body
+  ].join(`
+`);
+  const bytes = new TextEncoder().encode(text4);
+  return { ...item, mimeType: "text/plain", content: { kind: "bytes", mimeType: "text/plain", bytes } };
 }
 function childIdentity(account, localItemId) {
   const providerItemId = localItemId.startsWith(`${account}:`) ? localItemId.slice(account.length + 1) : localItemId;
@@ -170975,28 +171232,29 @@ function gmailAttachmentConnector(input) {
       const live = input.live();
       if (!live)
         throw new FileExtractionSourceError("source_unavailable");
-      const item = await live.fetchItem(localItemId, { deferredBytes: { locator } });
+      const item = await live.fetchItemWithin(localItemId, { deferredBytes: { locator }, ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {} });
       if (item.content.kind === "bytes" && options.maxBytes !== undefined && item.content.bytes.byteLength > options.maxBytes) {
         throw new FileExtractionSourceError("source_too_large");
       }
-      return item;
+      return forwardedMessageAsText(item);
     }
     if (locator.startsWith(MBOX_PART_LOCATOR_PREFIX)) {
       if (!input.imports)
         throw new FileExtractionSourceError("source_item_not_found");
-      const part = readMboxPart({
+      const part = await readMboxPart({
         state: input.imports,
         sourceId: GMAIL_ARCHIVE_SOURCE_ID,
         locator,
+        childProviderItemId: childIdentity(input.account, localItemId).providerItemId,
         ...options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}
       });
-      return {
+      return forwardedMessageAsText({
         identity: childIdentity(input.account, localItemId),
         mimeType: part.mimeType,
         content: { kind: "bytes", mimeType: part.mimeType, bytes: part.bytes },
         metadata: {},
         fetchedAt: new Date().toISOString()
-      };
+      });
     }
     throw new FileExtractionSourceError("source_content_unavailable");
   };
@@ -171054,6 +171312,7 @@ function createGmailAttachmentExtractionRuntime(input) {
 var GMAIL_ATTACHMENT_EXTRACTION_PROVIDER = "gmail.attachments", GMAIL_ATTACHMENT_EXTRACTION_SCOPE_KEY = "gmail.attachments:extraction", GMAIL_ATTACHMENT_EXTRACTION_PLAN_LIMIT = 200, GMAIL_ATTACHMENT_CORPUS_IDS, GMAIL_ATTACHMENT_EXTRACTION_BATCH_SIZE = 10;
 var init_gmail_attachment_extraction = __esm(() => {
   init_file_extraction_source();
+  init_parse4();
   init_part_reader();
   init_connector_source();
   init_file_extraction_runtime();
@@ -193813,8 +194072,9 @@ ${key2}`;
           const scopeRef = handle && fileSourceScopeAuthority ? fileSourceScopeAuthority.mailPolicyRef() : undefined;
           if (!handle || !scopeRef || !fileSourceScopeAuthority || !gmailRequestBudget)
             return;
+          let approval;
           try {
-            fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            approval = fileSourceScopeAuthority.assertCurrentMail(scopeRef);
           } catch {
             return;
           }
@@ -193822,7 +194082,11 @@ ${key2}`;
             credentialHandle: handle.handle,
             account: accountScope,
             requestBudget: gmailRequestBudget,
-            build: { children: true }
+            build: { children: true },
+            scope: gmailConnectorScopeFromApproval(approval),
+            beforeEachRequest: () => {
+              fileSourceScopeAuthority.assertCurrentMail(scopeRef);
+            }
           });
         }
       }),
@@ -197302,7 +197566,7 @@ init_remote_open();
 // src/core/lifecycle.ts
 init_worker_transport();
 init_atomic_file();
-import { createHash as createHash61 } from "node:crypto";
+import { createHash as createHash62 } from "node:crypto";
 import { spawnSync as spawnSync15 } from "node:child_process";
 import { existsSync as existsSync68, lstatSync as lstatSync34, mkdirSync as mkdirSync43, readFileSync as readFileSync56 } from "node:fs";
 import { homedir as homedir33, platform as osPlatform4 } from "node:os";
@@ -197311,7 +197575,7 @@ import { dirname as dirname66, isAbsolute as isAbsolute26, join as join81 } from
 // src/core/lifecycle-artifact.ts
 init_atomic_file();
 init_operation_error();
-import { createHash as createHash60, randomUUID as randomUUID22 } from "node:crypto";
+import { createHash as createHash61, randomUUID as randomUUID22 } from "node:crypto";
 import { spawnSync as spawnSync14 } from "node:child_process";
 import {
   chmodSync as chmodSync24,
@@ -197339,7 +197603,7 @@ function prepareWorkerUpgradeArtifact(options) {
   if (artifactBytes.byteLength <= 0 || artifactBytes.byteLength > MAX_UPGRADE_ARTIFACT_BYTES) {
     throw new OperationError("invalid_params", `Upgrade artifact must be between 1 byte and ${MAX_UPGRADE_ARTIFACT_BYTES} bytes.`);
   }
-  const artifactSha256 = createHash60("sha256").update(artifactBytes).digest("hex");
+  const artifactSha256 = createHash61("sha256").update(artifactBytes).digest("hex");
   const snapshotDir = mkdtempSync3(join79(tmpdir6(), ".olympus-artifact-snapshot-"));
   const artifactPath = join79(snapshotDir, "artifact.tgz");
   const descriptor = openSync19(artifactPath, "wx", 384);
@@ -197589,7 +197853,7 @@ function syncVersionTree(root) {
   syncDirectorySync(root);
 }
 function versionTreeDigest(root) {
-  const digest4 = createHash60("sha256");
+  const digest4 = createHash61("sha256");
   hashVersionTree(root, "", digest4);
   return digest4.digest("hex");
 }
@@ -198395,7 +198659,7 @@ function assertRegularFile2(path, label) {
   throw new OperationError("config_error", `Refusing a non-regular ${label}: ${path}`);
 }
 function sha2564(value2) {
-  return createHash61("sha256").update(value2).digest("hex");
+  return createHash62("sha256").update(value2).digest("hex");
 }
 
 // src/cli.ts

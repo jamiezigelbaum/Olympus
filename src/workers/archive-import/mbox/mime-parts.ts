@@ -12,6 +12,7 @@
  * Nothing is decoded but the sizes; the bytes stay where they are.
  */
 import { decodeWords } from 'postal-mime';
+import { gmailAttachmentPartName, isGmailAttachmentPart } from '../../google-connectors/gmail-mail-record.ts';
 
 const MAX_PARTS = 2_000;
 const MAX_DEPTH = 64;
@@ -230,9 +231,16 @@ export function mimePartBytes(raw: Uint8Array, partId: string, maxBytes = Number
       if (decodedSize(body, encoding) > maxBytes) throw new MimePartTooLargeError();
       return { bytes: decodeBody(body, encoding), mimeType };
     }
-    const boundary = type.params.get('boundary');
-    if (!mimeType.startsWith('multipart/') || !boundary || depth >= MAX_DEPTH) return undefined;
+    if (depth >= MAX_DEPTH) return undefined;
     if (path !== '' && !partId.startsWith(`${path}.`)) return undefined;
+    if (mimeType === 'message/rfc822') {
+      for (const inner of encapsulatedParts(text, bodyStart, to, path === '' ? '0' : path)) {
+        if (partId === inner.path || partId.startsWith(`${inner.path}.`)) return find(inner.start, inner.end, inner.path, depth + 1);
+      }
+      return undefined;
+    }
+    const boundary = type.params.get('boundary');
+    if (!mimeType.startsWith('multipart/') || !boundary) return undefined;
     const bodies = multipartBodies(text, bodyStart, to, boundary);
     for (const [index, body] of bodies.entries()) {
       const childPath = path === '' ? String(index) : `${path}.${index}`;
@@ -244,8 +252,33 @@ export function mimePartBytes(raw: Uint8Array, partId: string, maxBytes = Number
 }
 
 /** Every part with a file name in a raw message, in tree order. */
-export function mimeAttachments(raw: Uint8Array): MimeAttachment[] {
+/**
+ * The parts inside a forwarded message (`message/rfc822` at `path`), numbered
+ * as Gmail numbers them: the forwarded message's own container is not a part
+ * of its own, so its parts are `path.0`, `path.1`, …; a forwarded message with
+ * a single part has it at `path.0`. (How Gmail numbers inside a forward is not
+ * verified against a real mailbox; both inputs use this rule.)
+ */
+function encapsulatedParts(text: string, from: number, to: number, path: string): Array<{ start: number; end: number; path: string }> {
+  const { headersEnd, bodyStart } = headerBlockEnd(text, from, to);
+  const type = splitParams(parseHeaders(text.slice(from, headersEnd)).get('content-type') ?? 'text/plain');
+  const boundary = type.params.get('boundary');
+  if (type.value.toLowerCase().startsWith('multipart/') && boundary) {
+    return multipartBodies(text, bodyStart, to, boundary).map((body, index) => ({ ...body, path: `${path}.${index}` }));
+  }
+  return [{ start: from, end: to, path: `${path}.0` }];
+}
+
+/**
+ * The attachment parts of a raw message, in tree order. With `children`, every
+ * part the shared rule calls an attachment (gmail-mail-record.ts
+ * `isGmailAttachmentPart`: named files, forwarded messages and their own
+ * attachments, unnamed non-text parts), named by file name, content id or
+ * type; without, named parts only, as before.
+ */
+export function mimeAttachments(raw: Uint8Array, options: { children?: boolean } = {}): MimeAttachment[] {
   const text = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString('latin1');
+  const children = options.children === true;
   const found: MimeAttachment[] = [];
   let parts = 0;
   const walk = (from: number, to: number, partId: string, depth: number, inside: boolean): void => {
@@ -257,21 +290,31 @@ export function mimeAttachments(raw: Uint8Array): MimeAttachment[] {
     const mimeType = type.value.toLowerCase() || 'text/plain';
     const disposition = splitParams(headers.get('content-disposition') ?? '');
     const filename = (paramValue(disposition.params, 'filename') ?? paramValue(type.params, 'name'))?.trim();
-    if (filename) {
+    const attachment = children
+      ? isGmailAttachmentPart({ mimeType, ...(filename ? { filename } : {}), ...(disposition.value ? { disposition: disposition.value } : {}) })
+      : Boolean(filename);
+    if (attachment) {
       const encoding = (headers.get('content-transfer-encoding') ?? '').trim().toLowerCase();
+      const contentId = headers.get('content-id');
       found.push({
         partId,
-        filename,
+        filename: children ? gmailAttachmentPartName({ partId, mimeType, ...(filename ? { filename } : {}), ...(contentId ? { contentId } : {}) }) : filename!,
         mimeType,
         size: decodedSize(text.slice(bodyStart, to), encoding),
         ...(inside ? { nested: true } : {}),
       });
     }
+    if (depth >= MAX_DEPTH) return;
     const boundary = type.params.get('boundary');
-    if (mimeType.startsWith('multipart/') && boundary && depth < MAX_DEPTH) {
+    if (mimeType.startsWith('multipart/') && boundary) {
       multipartBodies(text, bodyStart, to, boundary).forEach((body, index) => {
-        walk(body.start, body.end, partId === '' ? String(index) : `${partId}.${index}`, depth + 1, inside || Boolean(filename));
+        walk(body.start, body.end, partId === '' ? String(index) : `${partId}.${index}`, depth + 1, inside || attachment);
       });
+    } else if (children && mimeType === 'message/rfc822') {
+      // A forwarded message's own attachments are children too.
+      for (const inner of encapsulatedParts(text, bodyStart, to, partId === '' ? '0' : partId)) {
+        walk(inner.start, inner.end, inner.path, depth + 1, true);
+      }
     }
   };
   walk(0, text.length, '', 0, false);

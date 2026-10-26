@@ -25,10 +25,15 @@ import { MacPermissions } from '../../src/workers/local-files/mac-permissions.ts
 import { VolumeResolver } from '../../src/workers/local-files/volume-identity.ts';
 import { createExclusiveRunner } from '../../src/workers/source-account-guard.ts';
 import type { CredentialBroker } from '../../src/workers/credential-broker/index.ts';
-import { GoogleGmailSourceConnector, type GmailApiClient, type GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
+import { GoogleGmailSourceConnector, type GmailApiClient, type GmailConnectorScope, type GmailMessage } from '../../src/workers/google-connectors/gmail.ts';
 import { gmailArchiveTarget, GMAIL_ARCHIVE_SOURCE_ID } from '../../src/workers/google-connectors/gmail-archive-target.ts';
 import type { GmailMailBuild } from '../../src/workers/google-connectors/gmail-mail-record.ts';
-import { gmailContentArrivesLater, gmailLaneSyncOptions } from '../../src/workers/google-connectors/gmail-live-sync.ts';
+import {
+  createGmailConnectorStoreSyncHandler,
+  gmailContentArrivesLater,
+  gmailLaneSyncOptions,
+  type GmailConnectorStoreSyncHandler,
+} from '../../src/workers/google-connectors/gmail-live-sync.ts';
 import type { MboxGmailMatch } from '../../src/workers/archive-import/mbox/gmail-input.ts';
 
 export const ACCOUNT = 'personal';
@@ -42,8 +47,12 @@ export interface GmailArchiveHarness {
   targets: ArchiveSourceTargets;
   dashboard: ArchiveImportDashboard;
   set: TieredStoreSet;
-  /** The live mailbox the fake Gmail API serves: assign to change what a live pull sees. */
-  mailbox: { messages: GmailMessage[] };
+  /**
+   * The live mailbox the fake Gmail API serves: assign to change what a live
+   * pull sees. `attachments` holds attachment bodies by attachment id
+   * (base64url); `calls` records each request the fake answers.
+   */
+  mailbox: { messages: GmailMessage[]; attachments: Record<string, string>; calls: string[] };
   /** The content window of the live lane (mail older is kept by name only). */
   window: { contentAfterMs?: number };
   build: GmailMailBuild;
@@ -55,6 +64,10 @@ export interface GmailArchiveHarness {
   /** Gmail connected as the account named by `providerAccountId` (null: an entry that names none). */
   connectLive(providerAccountId: string | null): void;
   pullLive(): Promise<void>;
+  /** The live Gmail connector over the fake API, as the attachment lane reads parts with it. */
+  liveReader(options?: { scope?: GmailConnectorScope; beforeEachRequest?: () => void }): GoogleGmailSourceConnector;
+  /** The Gmail lane's live sync handler over the fake API and this set. */
+  syncHandler(options?: { scope?: GmailConnectorScope; assertScopeCurrent?: () => void }): GmailConnectorStoreSyncHandler;
   writeExport(name: string, text: string): string;
   approve(name: string, text: string, answer?: { confirmAccount?: true; keepApart?: true }): ReturnType<ArchiveImportDashboard['approve']>;
   importAll(archiveId: string, options?: Partial<ArchiveImportPullOptions>): ReturnType<typeof pullArchiveImport>;
@@ -64,9 +77,10 @@ export interface GmailArchiveHarness {
   close(): void;
 }
 
-function fakeGmail(mailbox: { messages: GmailMessage[] }): GmailApiClient {
+function fakeGmail(mailbox: GmailArchiveHarness['mailbox']): GmailApiClient {
   return {
     async listMessages(request) {
+      mailbox.calls.push('list');
       const after = /after:(\d+)/.exec(request.query ?? '')?.[1];
       const before = /before:(\d+)/.exec(request.query ?? '')?.[1];
       const eligible = mailbox.messages.filter((entry) => {
@@ -81,10 +95,17 @@ function fakeGmail(mailbox: { messages: GmailMessage[] }): GmailApiClient {
       };
     },
     async getMessage(id, options) {
+      mailbox.calls.push(`message:${id}`);
       const found = mailbox.messages.find((entry) => entry.id === id);
       if (!found) throw new Error(`Gmail API request failed (404): unknown ${id}`);
       if (options?.format !== 'metadata') return found;
       return { ...found, payload: { headers: found.payload?.headers ?? [] } };
+    },
+    async getAttachment(messageId, attachmentId) {
+      mailbox.calls.push(`attachment:${messageId}:${attachmentId}`);
+      const data = mailbox.attachments[attachmentId];
+      if (data === undefined) throw new Error(`Gmail API request failed (404): unknown ${attachmentId}`);
+      return { data };
     },
   };
 }
@@ -116,7 +137,7 @@ export function gmailArchiveHarness(
     tierClassification: { sniffer: options.sniffer ?? WAITING, ...(options.rules ? { rules: options.rules } : {}) },
     contentArrivesLaterFor: gmailContentArrivesLater,
   });
-  const mailbox = { messages: [] as GmailMessage[] };
+  const mailbox: GmailArchiveHarness['mailbox'] = { messages: [], attachments: {}, calls: [] };
   const window: { contentAfterMs?: number } = {};
   const build = options.build ?? {};
   const match: { current?: MboxGmailMatch } = {};
@@ -193,6 +214,32 @@ export function gmailArchiveHarness(
       set.store('secure_local', { create: true });
       const cursor = set.committedCursor(connector.id)?.cursor ?? undefined;
       await set.sync(connector, { ...gmailLaneSyncOptions(), maxItems: 100, ...(cursor ? { cursor } : {}) });
+    },
+    liveReader(options = {}) {
+      return new GoogleGmailSourceConnector({
+        account: ACCOUNT,
+        credentialBroker: OFFLINE_BROKER,
+        apiClient: fakeGmail(mailbox),
+        maxMessages: 100,
+        build,
+        ...(options.scope ? { scope: options.scope } : {}),
+        ...(options.beforeEachRequest ? { beforeEachRequest: options.beforeEachRequest } : {}),
+      });
+    },
+    syncHandler(options = {}) {
+      return createGmailConnectorStoreSyncHandler({
+        internalStore,
+        secureStore,
+        tierSet: set,
+        account: ACCOUNT,
+        credentialBroker: OFFLINE_BROKER,
+        apiClient: fakeGmail(mailbox),
+        env: {},
+        build,
+        scope: options.scope ?? {},
+        scopeApproval: { generation: 'g'.repeat(64), revision: 'rev-1' },
+        ...(options.assertScopeCurrent ? { assertScopeCurrent: options.assertScopeCurrent } : {}),
+      });
     },
     writeExport(name, text) {
       const path = join(exports, name);
