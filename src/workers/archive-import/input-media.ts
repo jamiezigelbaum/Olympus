@@ -15,10 +15,13 @@
  *   place in the zip's directory. Never a path or a member name.
  * - Bytes are served only while the import's record is there and is an input
  *   of a source; a record that is gone or being removed serves nothing.
- * - Reads are bounded and go through the scope-safe module at the version the
- *   import recorded: a file that changed since is `source_version_gone`.
+ * - Reads go through the scope-safe module at the version the import
+ *   recorded: a file that changed since is `source_version_gone`. A read
+ *   into memory is bounded; a read to a file is not (every media file is
+ *   kept and read: owner, 2026-10-26), and goes a range at a time.
  */
 
+import { closeSync, constants, openSync, rmSync, writeSync } from 'node:fs';
 import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
 import { ScopeRoot, ScopeSafeError, SCOPE_FILE_MAX_RANGE_BYTES, type ScopeFileReader } from '../../core/scope-safe-fs.ts';
 import { archiveMediaAccess, ARCHIVE_MEDIA_DEFAULT_READ_BYTES, type ArchiveMediaBindings } from './media-bindings.ts';
@@ -98,23 +101,78 @@ function servedRecord(state: ArchiveImportStateStore, archiveId: string): Archiv
   return record;
 }
 
+/** Where a locator's bytes go as they are read: told the size first, then each chunk in order. */
+interface MediaSink {
+  begin(size: number): void;
+  write(chunk: Uint8Array): void;
+}
+
 /**
- * The bytes a locator names, up to `maxBytes` (64 MiB when none is named).
- * Throws `FileExtractionSourceError`: `source_item_not_found` (no such
- * archive, or it no longer serves), `source_version_gone` (the file changed
- * or went), `source_too_large`, `source_content_unavailable` (a member that
- * cannot be read: encrypted, damaged, another method).
+ * The bytes a locator names, in memory, up to `maxBytes` (64 MiB when none
+ * is named: a whole-file read into memory is never unbounded). A larger file
+ * is read to a file instead (`copyArchiveInputMediaToFile`). Throws
+ * `FileExtractionSourceError`: `source_item_not_found` (no such archive, or
+ * it no longer serves), `source_version_gone` (the file changed or went),
+ * `source_too_large`, `source_content_unavailable` (a member that cannot be
+ * read: encrypted, damaged, another method).
  */
 export function readArchiveInputMedia(
   locator: string,
   deps: ArchiveInputMediaDeps,
   options: { maxBytes?: number } = {},
 ): Uint8Array {
+  let out = new Uint8Array(0);
+  let at = 0;
+  serveArchiveInputMedia(locator, deps, options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES, {
+    begin(size) {
+      out = new Uint8Array(size);
+    },
+    write(chunk) {
+      if (at + chunk.length > out.length) throw new FileExtractionSourceError('source_content_unavailable');
+      out.set(chunk, at);
+      at += chunk.length;
+    },
+  });
+  return out;
+}
+
+/**
+ * The bytes a locator names, copied to a new file at `dest` (owner-only) a
+ * range at a time, never held whole in memory, whatever their size: every
+ * media file is kept and read (owner, 2026-10-26). A bound comes only from
+ * the caller. The same errors as `readArchiveInputMedia`; nothing is left at
+ * `dest` when it throws. Returns the number of bytes written.
+ */
+export function copyArchiveInputMediaToFile(
+  locator: string,
+  deps: ArchiveInputMediaDeps,
+  options: { maxBytes?: number },
+  dest: string,
+): number {
+  const out = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  let written = 0;
+  try {
+    serveArchiveInputMedia(locator, deps, options.maxBytes, {
+      begin() {},
+      write(chunk) {
+        writeSync(out, chunk);
+        written += chunk.length;
+      },
+    });
+  } catch (error) {
+    closeSync(out);
+    rmSync(dest, { force: true });
+    throw error;
+  }
+  closeSync(out);
+  return written;
+}
+
+function serveArchiveInputMedia(locator: string, deps: ArchiveInputMediaDeps, maxBytes: number | undefined, sink: MediaSink): void {
   const parsed = parseArchiveInputMedia(locator);
   if (!parsed) throw new FileExtractionSourceError('source_item_not_found');
   const record = servedRecord(deps.state, parsed.archiveId);
   if (!record) throw new FileExtractionSourceError('source_item_not_found');
-  const maxBytes = options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES;
   let root: ScopeRoot;
   try {
     root = ScopeRoot.open(record.root_path);
@@ -122,9 +180,8 @@ export function readArchiveInputMedia(
     throw new FileExtractionSourceError('source_version_gone');
   }
   try {
-    return parsed.kind === 'binding'
-      ? readBinding(deps, record, root, parsed.bindingId, maxBytes)
-      : readZipMember(record, root, parsed, maxBytes);
+    if (parsed.kind === 'binding') serveBinding(deps, record, root, parsed.bindingId, maxBytes, sink);
+    else serveZipMember(record, root, parsed, maxBytes, sink);
   } catch (error) {
     if (error instanceof FileExtractionSourceError) throw error;
     if (error instanceof ScopeSafeError) {
@@ -140,13 +197,32 @@ export function readArchiveInputMedia(
   }
 }
 
-function readBinding(deps: ArchiveInputMediaDeps, record: ArchiveImportRecord, root: ScopeRoot, bindingId: string, maxBytes: number): Uint8Array {
+function serveBinding(
+  deps: ArchiveInputMediaDeps,
+  record: ArchiveImportRecord,
+  root: ScopeRoot,
+  bindingId: string,
+  maxBytes: number | undefined,
+  sink: MediaSink,
+): void {
   if (!deps.bindings) throw new FileExtractionSourceError('source_item_not_found');
   const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record.archive_id, root, chosenRelPath: record.chosen_rel_path });
-  return access.read(bindingId, { maxBytes });
+  const reader = access.open(bindingId);
+  try {
+    const size = reader.size;
+    if (maxBytes !== undefined && size > maxBytes) throw new FileExtractionSourceError('source_too_large');
+    sink.begin(size);
+    for (let offset = 0; offset < size; offset += SCOPE_FILE_MAX_RANGE_BYTES) {
+      sink.write(reader.readAt(offset, Math.min(SCOPE_FILE_MAX_RANGE_BYTES, size - offset)));
+    }
+    // Read whole, then checked: the file under the descriptor and at its name is still the bound one.
+    reader.assertCurrent();
+  } finally {
+    reader.close();
+  }
 }
 
-function readZipMember(record: ArchiveImportRecord, root: ScopeRoot, ref: ArchiveInputZipMediaRef, maxBytes: number): Uint8Array {
+function serveZipMember(record: ArchiveImportRecord, root: ScopeRoot, ref: ArchiveInputZipMediaRef, maxBytes: number | undefined, sink: MediaSink): void {
   const file = record.files[ref.fileIndex];
   if (!file) throw new FileExtractionSourceError('source_item_not_found');
   let reader: ScopeFileReader | undefined;
@@ -170,22 +246,21 @@ function readZipMember(record: ArchiveImportRecord, root: ScopeRoot, ref: Archiv
       }
     }
     if (!entry || entry.isDirectory) throw new FileExtractionSourceError('source_item_not_found');
-    if (entry.uncompressedSize > maxBytes) throw new FileExtractionSourceError('source_too_large');
+    if (maxBytes !== undefined && entry.uncompressedSize > maxBytes) throw new FileExtractionSourceError('source_too_large');
     const member = ZipMemberReader.open(zip, entry);
     try {
-      const out = new Uint8Array(entry.uncompressedSize);
+      sink.begin(entry.uncompressedSize);
       let at = 0;
       for (let chunk = member.next(); chunk !== undefined; chunk = member.next()) {
-        if (at + chunk.length > out.length) throw new FileExtractionSourceError('source_content_unavailable');
-        out.set(chunk, at);
+        if (at + chunk.length > entry.uncompressedSize) throw new FileExtractionSourceError('source_content_unavailable');
+        sink.write(chunk);
         at += chunk.length;
       }
       const end = member.end;
-      if (at !== out.length || !end || !end.sizeOk || end.crcOk === false) {
+      if (at !== entry.uncompressedSize || !end || !end.sizeOk || end.crcOk === false) {
         throw new FileExtractionSourceError('source_content_unavailable');
       }
       reader.assertCurrent?.();
-      return out;
     } finally {
       member.close();
     }

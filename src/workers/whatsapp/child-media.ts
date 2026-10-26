@@ -4,10 +4,10 @@
 // (archive-import/input-media.ts). One reader for both, so the connector's
 // `fetchItem` and the extraction source read children the same way.
 
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, rmSync, statSync, writeSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { FileExtractionSourceError } from '../../core/file-extraction-source.ts';
-import { parseArchiveInputMedia, readArchiveInputMedia, type ArchiveInputMediaDeps } from '../archive-import/input-media.ts';
+import { copyArchiveInputMediaToFile, parseArchiveInputMedia, readArchiveInputMedia, type ArchiveInputMediaDeps } from '../archive-import/input-media.ts';
 
 export const WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX = 'whatsapp-media-file:v1:';
 /** The most one read returns when the caller names no limit. */
@@ -61,11 +61,11 @@ export function createWhatsAppChildReader(options: {
     return withConfinedFile(savedPath(locator), options.mediaRoots, bound.maxBytes, (fd, size) => readBounded(fd, size));
   }) as WhatsAppChildReader;
   read.toFile = (locator, bound, dest) => {
-    const archived = archiveBytes(locator, bound.maxBytes);
-    if (archived) {
-      // An export's file comes through the archive reader, within its own bound.
-      writeFileSync(dest, archived, { mode: 0o600, flag: 'wx' });
-      return archived.byteLength;
+    if (parseArchiveInputMedia(locator)) {
+      // An export's file, streamed by the archive reader: no cap but the caller's.
+      const deps = options.archive?.();
+      if (!deps) throw new FileExtractionSourceError('source_item_not_found');
+      return copyArchiveInputMediaToFile(locator, deps, bound.maxBytes !== undefined ? { maxBytes: bound.maxBytes } : {}, dest);
     }
     return withConfinedFile(savedPath(locator), options.mediaRoots, bound.maxBytes, (fd, size) => copyBounded(fd, size, dest));
   };

@@ -10,6 +10,11 @@ import { Database } from 'bun:sqlite';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
+import { ScopeRoot } from '../src/core/scope-safe-fs.ts';
+import { archiveInputZipMediaLocator } from '../src/workers/archive-import/input-media.ts';
+import type { ArchiveImportRecord, ArchiveImportStateStore } from '../src/workers/archive-import/state.ts';
+import { ZipArchive } from '../src/workers/archive-import/zip-reader.ts';
+import { buildZip } from './helpers/zip-fixture.ts';
 import { join } from 'node:path';
 import { LocalConnectorStore } from '../src/workers/connector-store/index.ts';
 import { connectorStoreExtractionCandidateReader } from '../src/workers/connector-store/extraction-candidate-reader.ts';
@@ -604,5 +609,34 @@ describe('review round 5 on #558: the waiting folder is fenced, and swept on eve
     expect(Date.now() - started).toBeGreaterThanOrEqual(300);
     expect(readFileSync(entry, 'utf8')).not.toContain('door code');
   });
+});
+
+describe('an export\'s media of any size reaches extraction as a file (owner, 2026-10-26)', () => {
+  test('a 65 MiB video in the export zip is copied to a file through the child reader, never refused', () => {
+    const root = mkdtempSync(join(tmpdir(), 'whatsapp-export-video-'));
+    roots.push(root);
+    const size = 65 * 1024 * 1024;
+    writeFileSync(join(root, 'WhatsApp Chat - Rowan.zip'), buildZip([
+      { name: '_chat.txt', data: '[01/07/2026, 09:00:00] Rowan: VID-20260701-WA0003.mp4 (file attached)\n', method: 'deflate' },
+      { name: 'VID-20260701-WA0003.mp4', data: new Uint8Array(size).fill(5), method: 'deflate' },
+    ]));
+    const scope = ScopeRoot.open(root);
+    const reader = scope.openFile('WhatsApp Chat - Rowan.zip');
+    const members = ZipArchive.open(reader).memberTable();
+    reader.close();
+    const version = scope.statRelative('WhatsApp Chat - Rowan.zip');
+    scope.close();
+    const record = {
+      archive_id: 'arch-v', status: 'imported', root_path: root, chosen_rel_path: 'WhatsApp Chat - Rowan.zip',
+      target: { source_id: 'whatsapp.personal.messages', slot: 'default' },
+      files: [{ rel_path: 'WhatsApp Chat - Rowan.zip', dev: version.dev, ino: version.ino, size: version.size, mtime_ms: version.mtimeMs, fingerprint: { head_sha256: '', tail_sha256: '' }, members }],
+    } as unknown as ArchiveImportRecord;
+    const state = { get: (id: string) => (id === 'arch-v' ? record : undefined) } as unknown as ArchiveImportStateStore;
+    const readChild = createWhatsAppChildReader({ mediaRoots: [root], archive: () => ({ state }) });
+    const locator = archiveInputZipMediaLocator({ archiveId: 'arch-v', fileIndex: 0, memberIndex: 1 });
+    const dest = join(root, 'out.mp4');
+    expect(readChild.toFile(locator, {}, dest)).toBe(size);
+    expect(readFileSync(dest).byteLength).toBe(size);
+  }, 60_000);
 });
 

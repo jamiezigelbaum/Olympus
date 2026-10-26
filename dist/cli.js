@@ -100103,6 +100103,7 @@ var init_file_extraction_source = __esm(() => {
 });
 
 // src/workers/archive-import/input-media.ts
+import { closeSync as closeSync22, constants as constants11, openSync as openSync21, rmSync as rmSync20, writeSync as writeSync5 } from "node:fs";
 function archiveInputMediaLocator(ref) {
   if (!ARCHIVE_ID.test(ref.archiveId) || !BINDING_ID.test(ref.bindingId))
     throw new Error("An archive media locator needs a plain archive and binding id.");
@@ -100140,13 +100141,47 @@ function servedRecord(state, archiveId) {
   return record2;
 }
 function readArchiveInputMedia(locator, deps, options = {}) {
+  let out = new Uint8Array(0);
+  let at = 0;
+  serveArchiveInputMedia(locator, deps, options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES, {
+    begin(size) {
+      out = new Uint8Array(size);
+    },
+    write(chunk) {
+      if (at + chunk.length > out.length)
+        throw new FileExtractionSourceError("source_content_unavailable");
+      out.set(chunk, at);
+      at += chunk.length;
+    }
+  });
+  return out;
+}
+function copyArchiveInputMediaToFile(locator, deps, options, dest) {
+  const out = openSync21(dest, constants11.O_WRONLY | constants11.O_CREAT | constants11.O_EXCL, 384);
+  let written = 0;
+  try {
+    serveArchiveInputMedia(locator, deps, options.maxBytes, {
+      begin() {},
+      write(chunk) {
+        writeSync5(out, chunk);
+        written += chunk.length;
+      }
+    });
+  } catch (error) {
+    closeSync22(out);
+    rmSync20(dest, { force: true });
+    throw error;
+  }
+  closeSync22(out);
+  return written;
+}
+function serveArchiveInputMedia(locator, deps, maxBytes, sink) {
   const parsed = parseArchiveInputMedia(locator);
   if (!parsed)
     throw new FileExtractionSourceError("source_item_not_found");
   const record2 = servedRecord(deps.state, parsed.archiveId);
   if (!record2)
     throw new FileExtractionSourceError("source_item_not_found");
-  const maxBytes = options.maxBytes ?? ARCHIVE_MEDIA_DEFAULT_READ_BYTES;
   let root;
   try {
     root = ScopeRoot.open(record2.root_path);
@@ -100154,7 +100189,10 @@ function readArchiveInputMedia(locator, deps, options = {}) {
     throw new FileExtractionSourceError("source_version_gone");
   }
   try {
-    return parsed.kind === "binding" ? readBinding(deps, record2, root, parsed.bindingId, maxBytes) : readZipMember(record2, root, parsed, maxBytes);
+    if (parsed.kind === "binding")
+      serveBinding(deps, record2, root, parsed.bindingId, maxBytes, sink);
+    else
+      serveZipMember(record2, root, parsed, maxBytes, sink);
   } catch (error) {
     if (error instanceof FileExtractionSourceError)
       throw error;
@@ -100171,13 +100209,25 @@ function readArchiveInputMedia(locator, deps, options = {}) {
     root.close();
   }
 }
-function readBinding(deps, record2, root, bindingId, maxBytes) {
+function serveBinding(deps, record2, root, bindingId, maxBytes, sink) {
   if (!deps.bindings)
     throw new FileExtractionSourceError("source_item_not_found");
   const access = archiveMediaAccess({ bindings: deps.bindings, archiveId: record2.archive_id, root, chosenRelPath: record2.chosen_rel_path });
-  return access.read(bindingId, { maxBytes });
+  const reader = access.open(bindingId);
+  try {
+    const size = reader.size;
+    if (maxBytes !== undefined && size > maxBytes)
+      throw new FileExtractionSourceError("source_too_large");
+    sink.begin(size);
+    for (let offset = 0;offset < size; offset += SCOPE_FILE_MAX_RANGE_BYTES) {
+      sink.write(reader.readAt(offset, Math.min(SCOPE_FILE_MAX_RANGE_BYTES, size - offset)));
+    }
+    reader.assertCurrent();
+  } finally {
+    reader.close();
+  }
 }
-function readZipMember(record2, root, ref, maxBytes) {
+function serveZipMember(record2, root, ref, maxBytes, sink) {
   const file = record2.files[ref.fileIndex];
   if (!file)
     throw new FileExtractionSourceError("source_item_not_found");
@@ -100202,24 +100252,23 @@ function readZipMember(record2, root, ref, maxBytes) {
     }
     if (!entry || entry.isDirectory)
       throw new FileExtractionSourceError("source_item_not_found");
-    if (entry.uncompressedSize > maxBytes)
+    if (maxBytes !== undefined && entry.uncompressedSize > maxBytes)
       throw new FileExtractionSourceError("source_too_large");
     const member = ZipMemberReader.open(zip, entry);
     try {
-      const out = new Uint8Array(entry.uncompressedSize);
+      sink.begin(entry.uncompressedSize);
       let at = 0;
       for (let chunk = member.next();chunk !== undefined; chunk = member.next()) {
-        if (at + chunk.length > out.length)
+        if (at + chunk.length > entry.uncompressedSize)
           throw new FileExtractionSourceError("source_content_unavailable");
-        out.set(chunk, at);
+        sink.write(chunk);
         at += chunk.length;
       }
       const end = member.end;
-      if (at !== out.length || !end || !end.sizeOk || end.crcOk === false) {
+      if (at !== entry.uncompressedSize || !end || !end.sizeOk || end.crcOk === false) {
         throw new FileExtractionSourceError("source_content_unavailable");
       }
       reader.assertCurrent?.();
-      return out;
     } finally {
       member.close();
     }
@@ -100238,7 +100287,7 @@ var init_input_media = __esm(() => {
 });
 
 // src/workers/whatsapp/child-media.ts
-import { closeSync as closeSync22, constants as constants11, fstatSync as fstatSync6, openSync as openSync21, readSync as readSync7, realpathSync as realpathSync17, rmSync as rmSync20, statSync as statSync31, writeFileSync as writeFileSync17, writeSync as writeSync5 } from "node:fs";
+import { closeSync as closeSync23, constants as constants12, fstatSync as fstatSync6, openSync as openSync22, readSync as readSync7, realpathSync as realpathSync17, rmSync as rmSync21, statSync as statSync31, writeSync as writeSync6 } from "node:fs";
 import { isAbsolute as isAbsolute27, relative as relative10, resolve as resolve17 } from "node:path";
 function whatsAppMediaFileLocator(path) {
   return `${WHATSAPP_MEDIA_FILE_LOCATOR_PREFIX}${path}`;
@@ -100268,10 +100317,11 @@ function createWhatsAppChildReader(options) {
     return withConfinedFile(savedPath(locator), options.mediaRoots, bound.maxBytes, (fd2, size) => readBounded2(fd2, size));
   };
   read.toFile = (locator, bound, dest) => {
-    const archived = archiveBytes(locator, bound.maxBytes);
-    if (archived) {
-      writeFileSync17(dest, archived, { mode: 384, flag: "wx" });
-      return archived.byteLength;
+    if (parseArchiveInputMedia(locator)) {
+      const deps = options.archive?.();
+      if (!deps)
+        throw new FileExtractionSourceError("source_item_not_found");
+      return copyArchiveInputMediaToFile(locator, deps, bound.maxBytes !== undefined ? { maxBytes: bound.maxBytes } : {}, dest);
     }
     return withConfinedFile(savedPath(locator), options.mediaRoots, bound.maxBytes, (fd2, size) => copyBounded(fd2, size, dest));
   };
@@ -100280,7 +100330,7 @@ function createWhatsAppChildReader(options) {
 function withConfinedFile(path, roots, maxBytes, use) {
   let fd2;
   try {
-    fd2 = openSync21(path, constants11.O_RDONLY | constants11.O_NOFOLLOW);
+    fd2 = openSync22(path, constants12.O_RDONLY | constants12.O_NOFOLLOW);
   } catch (error) {
     if (error.code === "ELOOP")
       throw new FileExtractionSourceError("source_permission_denied");
@@ -100304,11 +100354,11 @@ function withConfinedFile(path, roots, maxBytes, use) {
       throw new FileExtractionSourceError("source_too_large");
     return use(fd2, Math.min(opened.size, maxBytes ?? opened.size));
   } finally {
-    closeSync22(fd2);
+    closeSync23(fd2);
   }
 }
 function copyBounded(fd2, maxBytes, dest) {
-  const out = openSync21(dest, constants11.O_WRONLY | constants11.O_CREAT | constants11.O_EXCL, 384);
+  const out = openSync22(dest, constants12.O_WRONLY | constants12.O_CREAT | constants12.O_EXCL, 384);
   const chunk = Buffer.allocUnsafe(Math.min(COPY_CHUNK_BYTES, maxBytes + 1));
   let total = 0;
   try {
@@ -100319,14 +100369,14 @@ function copyBounded(fd2, maxBytes, dest) {
       total += read;
       if (total > maxBytes)
         throw new FileExtractionSourceError("source_too_large");
-      writeSync5(out, chunk, 0, read);
+      writeSync6(out, chunk, 0, read);
     }
   } catch (error) {
-    closeSync22(out);
-    rmSync20(dest, { force: true });
+    closeSync23(out);
+    rmSync21(dest, { force: true });
     throw error;
   }
-  closeSync22(out);
+  closeSync23(out);
   return total;
 }
 function insideAny(real, roots) {
@@ -100412,7 +100462,7 @@ var init_match_keys = __esm(() => {
 });
 
 // src/workers/whatsapp/spool-reader.ts
-import { closeSync as closeSync23, openSync as openSync22, readFileSync as readFileSync57, readSync as readSync8, statSync as statSync32 } from "node:fs";
+import { closeSync as closeSync24, openSync as openSync23, readFileSync as readFileSync57, readSync as readSync8, statSync as statSync32 } from "node:fs";
 import { join as join86 } from "node:path";
 function pauseAt(offset, skipping, continued) {
   if (!skipping)
@@ -100422,7 +100472,7 @@ function pauseAt(offset, skipping, continued) {
 function* spoolRecords(path, startOffset = 0, maxRecordBytes = WHATSAPP_SPOOL_MAX_RECORD_BYTES, budget, skipping = false, chunkBytes = CHUNK_BYTES) {
   let fd2;
   try {
-    fd2 = openSync22(path, "r");
+    fd2 = openSync23(path, "r");
   } catch {
     return;
   }
@@ -100493,7 +100543,7 @@ function* spoolRecords(path, startOffset = 0, maxRecordBytes = WHATSAPP_SPOOL_MA
       position += read;
     }
   } finally {
-    closeSync23(fd2);
+    closeSync24(fd2);
   }
 }
 function* spoolFileLines(path, startOffset = 0) {
@@ -100507,7 +100557,7 @@ function offsetAfterLines(path, lines) {
     return 0;
   let fd2;
   try {
-    fd2 = openSync22(path, "r");
+    fd2 = openSync23(path, "r");
   } catch {
     return;
   }
@@ -100532,13 +100582,13 @@ function offsetAfterLines(path, lines) {
       position += read;
     }
   } finally {
-    closeSync23(fd2);
+    closeSync24(fd2);
   }
 }
 function terminatedLinesEnd(path) {
   let fd2;
   try {
-    fd2 = openSync22(path, "r");
+    fd2 = openSync23(path, "r");
   } catch {
     return;
   }
@@ -100563,7 +100613,7 @@ function terminatedLinesEnd(path) {
       position += read;
     }
   } finally {
-    closeSync23(fd2);
+    closeSync24(fd2);
   }
 }
 function isRecordBoundary(path, offset) {
@@ -100571,7 +100621,7 @@ function isRecordBoundary(path, offset) {
     return true;
   let fd2;
   try {
-    fd2 = openSync22(path, "r");
+    fd2 = openSync23(path, "r");
   } catch {
     return false;
   }
@@ -100579,7 +100629,7 @@ function isRecordBoundary(path, offset) {
     const byte = Buffer.alloc(1);
     return readSync8(fd2, byte, 0, 1, offset - 1) === 1 && byte[0] === NEWLINE2;
   } finally {
-    closeSync23(fd2);
+    closeSync24(fd2);
   }
 }
 function newestSpoolRecord(spoolDir, files, pick) {
@@ -100589,7 +100639,7 @@ function newestSpoolRecord(spoolDir, files, pick) {
     const size = spoolFileIdentity(path)?.size ?? 0;
     let fd2;
     try {
-      fd2 = openSync22(path, "r");
+      fd2 = openSync23(path, "r");
     } catch {
       continue;
     }
@@ -100632,7 +100682,7 @@ function newestSpoolRecord(spoolDir, files, pick) {
         end = start;
       }
     } finally {
-      closeSync23(fd2);
+      closeSync24(fd2);
     }
   }
   return;
@@ -100681,7 +100731,7 @@ var init_spool_reader = __esm(() => {
 // src/workers/whatsapp/live-connector.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
 import { createHash as createHash66, randomBytes as randomBytes17 } from "node:crypto";
-import { existsSync as existsSync71, lstatSync as lstatSync36, readFileSync as readFileSync58, readdirSync as readdirSync18, realpathSync as realpathSync18, renameSync as renameSync16, rmSync as rmSync21, statSync as statSync33, writeFileSync as writeFileSync18 } from "node:fs";
+import { existsSync as existsSync71, lstatSync as lstatSync36, readFileSync as readFileSync58, readdirSync as readdirSync18, realpathSync as realpathSync18, renameSync as renameSync16, rmSync as rmSync22, statSync as statSync33, writeFileSync as writeFileSync17 } from "node:fs";
 import { basename as basename15, isAbsolute as isAbsolute28, join as join87, relative as relative11 } from "node:path";
 function emptyWhatsAppSpoolPassFindings() {
   return {
@@ -101575,7 +101625,7 @@ function withWaitingLock(dir, use) {
   const deadline = Date.now() + WAITING_LOCK_WAIT_MS;
   for (;; ) {
     try {
-      writeFileSync18(path, `${process.pid} ${whatsAppBootNonce()}
+      writeFileSync17(path, `${process.pid} ${whatsAppBootNonce()}
 `, { mode: 384, flag: "wx" });
       break;
     } catch (error) {
@@ -101586,7 +101636,7 @@ function withWaitingLock(dir, use) {
         throw error;
     }
     if (waitingLockHolderGone(path)) {
-      rmSync21(path, { force: true });
+      rmSync22(path, { force: true });
       continue;
     }
     if (Date.now() > deadline)
@@ -101596,7 +101646,7 @@ function withWaitingLock(dir, use) {
   try {
     return use();
   } finally {
-    rmSync21(path, { force: true });
+    rmSync22(path, { force: true });
   }
 }
 function waitingLockHolderGone(path) {
@@ -101631,7 +101681,7 @@ function sweepWaitingTemps(dir, nowMs = Date.now()) {
     const path = join87(dir, name);
     try {
       if (nowMs - lstatSync36(path).mtimeMs >= WAITING_TEMP_MAX_AGE_MS)
-        rmSync21(path, { force: true });
+        rmSync22(path, { force: true });
     } catch {}
   }
 }
@@ -101676,16 +101726,16 @@ function clearWaitingEntryLocked(dir, message2, how) {
   record2["secret_redacted"] = true;
   const temp = join87(dir, `.${stem}.json.tmp${randomBytes17(6).toString("hex")}`);
   try {
-    writeFileSync18(temp, JSON.stringify(record2), { mode: 384, flag: "wx" });
+    writeFileSync17(temp, JSON.stringify(record2), { mode: 384, flag: "wx" });
     renameSync16(temp, entry);
   } catch (error) {
-    rmSync21(temp, { force: true });
+    rmSync22(temp, { force: true });
     throw error;
   }
 }
 function removeTemp(path) {
   try {
-    rmSync21(path);
+    rmSync22(path);
   } catch (error) {
     if (error.code !== "ENOENT")
       throw error;
@@ -101748,7 +101798,7 @@ function deleteSavedMedia(mediaPath, mediaRoots) {
     return;
   if (!statSync33(real).isFile())
     return;
-  rmSync21(real, { force: true });
+  rmSync22(real, { force: true });
 }
 function enrichWithLinkPreview(text2, message2) {
   const lines = [];
@@ -104193,7 +104243,7 @@ var init_native_process_service = __esm(() => {
 });
 
 // src/workers/dashboard/embedding-runtime.ts
-import { mkdirSync as mkdirSync47, readFileSync as readFileSync60, rmSync as rmSync22, writeFileSync as writeFileSync19 } from "node:fs";
+import { mkdirSync as mkdirSync47, readFileSync as readFileSync60, rmSync as rmSync23, writeFileSync as writeFileSync18 } from "node:fs";
 import { dirname as dirname72, join as join90 } from "node:path";
 import { homedir as homedir36 } from "node:os";
 function guardStateDir(env) {
@@ -104238,11 +104288,11 @@ function readEmbeddingOperatorOverride(path) {
 }
 function writeEmbeddingOperatorOverride(path, on) {
   if (!on) {
-    rmSync22(path, { force: true });
+    rmSync23(path, { force: true });
     return;
   }
   mkdirSync47(dirname72(path), { recursive: true, mode: 448 });
-  writeFileSync19(path, `${EMBEDDING_PRIORITY_TOKEN}
+  writeFileSync18(path, `${EMBEDDING_PRIORITY_TOKEN}
 `, "utf8");
 }
 function asRecord14(value2) {
@@ -105427,7 +105477,7 @@ var init_engine_host = __esm(() => {
 // src/workers/source-index/built-in-reasoning/server.ts
 import { spawn as spawn7 } from "node:child_process";
 import { randomBytes as randomBytes20 } from "node:crypto";
-import { mkdtempSync as mkdtempSync5, rmSync as rmSync24, writeFileSync as writeFileSync20 } from "node:fs";
+import { mkdtempSync as mkdtempSync5, rmSync as rmSync25, writeFileSync as writeFileSync19 } from "node:fs";
 import { createServer as createServer4 } from "node:net";
 import { availableParallelism as availableParallelism2, setPriority, tmpdir as tmpdir7 } from "node:os";
 import { join as join96 } from "node:path";
@@ -105589,7 +105639,7 @@ function createLlamaServerHandle(launch, options = {}) {
     const tokenFile = join96(tokenDir, "token");
     let spawnedProcess;
     try {
-      writeFileSync20(tokenFile, `${token}
+      writeFileSync19(tokenFile, `${token}
 `, { mode: 384 });
       spawnedProcess = spawnImpl(launch.serverPath, llamaServerArguments(launch, port, tokenFile), {
         stdio: ["ignore", "ignore", "pipe"],
@@ -105744,7 +105794,7 @@ function callerCancelled(reason) {
 }
 function removeTokenDir(tokenDir) {
   try {
-    rmSync24(tokenDir, { recursive: true, force: true });
+    rmSync25(tokenDir, { recursive: true, force: true });
     return true;
   } catch {
     console.warn("Olympus built-in model: could not remove a model server token directory.");
@@ -114310,11 +114360,11 @@ var require_codegen = __commonJS((exports) => {
       const rhs = this.rhs === undefined ? "" : ` = ${this.rhs}`;
       return `${varKind} ${this.name}${rhs};` + _n;
     }
-    optimizeNames(names, constants12) {
+    optimizeNames(names, constants13) {
       if (!names[this.name.str])
         return;
       if (this.rhs)
-        this.rhs = optimizeExpr(this.rhs, names, constants12);
+        this.rhs = optimizeExpr(this.rhs, names, constants13);
       return this;
     }
     get names() {
@@ -114332,10 +114382,10 @@ var require_codegen = __commonJS((exports) => {
     render({ _n }) {
       return `${this.lhs} = ${this.rhs};` + _n;
     }
-    optimizeNames(names, constants12) {
+    optimizeNames(names, constants13) {
       if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
         return;
-      this.rhs = optimizeExpr(this.rhs, names, constants12);
+      this.rhs = optimizeExpr(this.rhs, names, constants13);
       return this;
     }
     get names() {
@@ -114401,8 +114451,8 @@ var require_codegen = __commonJS((exports) => {
     optimizeNodes() {
       return `${this.code}` ? this : undefined;
     }
-    optimizeNames(names, constants12) {
-      this.code = optimizeExpr(this.code, names, constants12);
+    optimizeNames(names, constants13) {
+      this.code = optimizeExpr(this.code, names, constants13);
       return this;
     }
     get names() {
@@ -114432,12 +114482,12 @@ var require_codegen = __commonJS((exports) => {
       }
       return nodes.length > 0 ? this : undefined;
     }
-    optimizeNames(names, constants12) {
+    optimizeNames(names, constants13) {
       const { nodes } = this;
       let i2 = nodes.length;
       while (i2--) {
         const n = nodes[i2];
-        if (n.optimizeNames(names, constants12))
+        if (n.optimizeNames(names, constants13))
           continue;
         subtractNames(names, n.names);
         nodes.splice(i2, 1);
@@ -114494,12 +114544,12 @@ var require_codegen = __commonJS((exports) => {
         return;
       return this;
     }
-    optimizeNames(names, constants12) {
+    optimizeNames(names, constants13) {
       var _a5;
-      this.else = (_a5 = this.else) === null || _a5 === undefined ? undefined : _a5.optimizeNames(names, constants12);
-      if (!(super.optimizeNames(names, constants12) || this.else))
+      this.else = (_a5 = this.else) === null || _a5 === undefined ? undefined : _a5.optimizeNames(names, constants13);
+      if (!(super.optimizeNames(names, constants13) || this.else))
         return;
-      this.condition = optimizeExpr(this.condition, names, constants12);
+      this.condition = optimizeExpr(this.condition, names, constants13);
       return this;
     }
     get names() {
@@ -114524,10 +114574,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.iteration})` + super.render(opts);
     }
-    optimizeNames(names, constants12) {
-      if (!super.optimizeNames(names, constants12))
+    optimizeNames(names, constants13) {
+      if (!super.optimizeNames(names, constants13))
         return;
-      this.iteration = optimizeExpr(this.iteration, names, constants12);
+      this.iteration = optimizeExpr(this.iteration, names, constants13);
       return this;
     }
     get names() {
@@ -114565,10 +114615,10 @@ var require_codegen = __commonJS((exports) => {
     render(opts) {
       return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
     }
-    optimizeNames(names, constants12) {
-      if (!super.optimizeNames(names, constants12))
+    optimizeNames(names, constants13) {
+      if (!super.optimizeNames(names, constants13))
         return;
-      this.iterable = optimizeExpr(this.iterable, names, constants12);
+      this.iterable = optimizeExpr(this.iterable, names, constants13);
       return this;
     }
     get names() {
@@ -114613,11 +114663,11 @@ var require_codegen = __commonJS((exports) => {
       (_b2 = this.finally) === null || _b2 === undefined || _b2.optimizeNodes();
       return this;
     }
-    optimizeNames(names, constants12) {
+    optimizeNames(names, constants13) {
       var _a5, _b2;
-      super.optimizeNames(names, constants12);
-      (_a5 = this.catch) === null || _a5 === undefined || _a5.optimizeNames(names, constants12);
-      (_b2 = this.finally) === null || _b2 === undefined || _b2.optimizeNames(names, constants12);
+      super.optimizeNames(names, constants13);
+      (_a5 = this.catch) === null || _a5 === undefined || _a5.optimizeNames(names, constants13);
+      (_b2 = this.finally) === null || _b2 === undefined || _b2.optimizeNames(names, constants13);
       return this;
     }
     get names() {
@@ -114891,7 +114941,7 @@ var require_codegen = __commonJS((exports) => {
   function addExprNames(names, from) {
     return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
   }
-  function optimizeExpr(expr, names, constants12) {
+  function optimizeExpr(expr, names, constants13) {
     if (expr instanceof code_1.Name)
       return replaceName(expr);
     if (!canOptimize(expr))
@@ -114906,14 +114956,14 @@ var require_codegen = __commonJS((exports) => {
       return items;
     }, []));
     function replaceName(n) {
-      const c = constants12[n.str];
+      const c = constants13[n.str];
       if (c === undefined || names[n.str] !== 1)
         return n;
       delete names[n.str];
       return c;
     }
     function canOptimize(e) {
-      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants12[c.str] !== undefined);
+      return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants13[c.str] !== undefined);
     }
   }
   function subtractNames(names, from) {
@@ -122695,7 +122745,7 @@ var init_protocol2 = __esm(() => {
 
 // connect-relay/client/identity.ts
 import { createPrivateKey, createPublicKey as createPublicKey2, generateKeyPairSync } from "node:crypto";
-import { chmodSync as chmodSync29, existsSync as existsSync77, lstatSync as lstatSync39, mkdirSync as mkdirSync50, readFileSync as readFileSync64, renameSync as renameSync18, writeFileSync as writeFileSync21 } from "node:fs";
+import { chmodSync as chmodSync29, existsSync as existsSync77, lstatSync as lstatSync39, mkdirSync as mkdirSync50, readFileSync as readFileSync64, renameSync as renameSync18, writeFileSync as writeFileSync20 } from "node:fs";
 import { join as join97 } from "node:path";
 function ensureStateDir(stateDir) {
   mkdirSync50(stateDir, { recursive: true, mode: 448 });
@@ -122710,7 +122760,7 @@ function ensureStateDir(stateDir) {
 }
 function writePrivateFile(path, contents) {
   const temporary = `${path}.tmp.${process.pid}`;
-  writeFileSync21(temporary, contents, { mode: 384 });
+  writeFileSync20(temporary, contents, { mode: 384 });
   chmodSync29(temporary, 384);
   renameSync18(temporary, path);
 }
@@ -123556,19 +123606,19 @@ var init_manifest3 = __esm(() => {
 import { spawnSync as spawnSync18 } from "node:child_process";
 import { createHash as createHash70, randomUUID as randomUUID26 } from "node:crypto";
 import {
-  closeSync as closeSync24,
+  closeSync as closeSync25,
   createReadStream as createReadStream3,
   existsSync as existsSync78,
   mkdirSync as mkdirSync51,
-  openSync as openSync23,
+  openSync as openSync24,
   readFileSync as readFileSync65,
   readdirSync as readdirSync20,
   renameSync as renameSync19,
-  rmSync as rmSync25,
+  rmSync as rmSync26,
   statSync as statSync36,
   statfsSync,
-  writeFileSync as writeFileSync22,
-  writeSync as writeSync6
+  writeFileSync as writeFileSync21,
+  writeSync as writeSync7
 } from "node:fs";
 import { dirname as dirname76, isAbsolute as isAbsolute32, join as join98 } from "node:path";
 function builtInReasoningPaths(model, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
@@ -123801,7 +123851,7 @@ async function verifyPinnedFile(path, file, noun, reporter, timeoutMs) {
   reporter.verifying(label, 0, file.bytes);
   const digest4 = size === file.bytes ? await sha256File3(path, timeoutMs, (done) => reporter.verifying(label, done, file.bytes)) : undefined;
   if (digest4 !== file.sha256) {
-    rmSync25(path, { force: true });
+    rmSync26(path, { force: true });
     throw new BuiltInReasoningInstallError("checksum_mismatch", `${file.name} did not match its pinned checksum and was removed; it will download again.`);
   }
   verifiedThisProcess2.add(key2);
@@ -123832,18 +123882,18 @@ async function installRuntime2(fetchImpl, runtimeDir, archive, reporter, extract
       }
       throw new BuiltInReasoningInstallError("runtime_load_failed", `The built-in model server could not be unpacked (${error2 instanceof Error ? error2.message : String(error2)}).`);
     }
-    rmSync25(archivePath, { force: true });
+    rmSync26(archivePath, { force: true });
     const server = locateFile(staging, SERVER_BINARY);
     if (!server) {
       throw new BuiltInReasoningInstallError("runtime_load_failed", `${archive.name} did not contain ${SERVER_BINARY}.`);
     }
     const marker = { archive: archive.name, sha256: archive.sha256, serverPath: server };
-    writeFileSync22(join98(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
+    writeFileSync21(join98(staging, RUNTIME_MARKER2), `${JSON.stringify(marker, null, 2)}
 `);
-    rmSync25(runtimeDir, { recursive: true, force: true });
+    rmSync26(runtimeDir, { recursive: true, force: true });
     renameSync19(staging, runtimeDir);
   } catch (error2) {
-    rmSync25(staging, { recursive: true, force: true });
+    rmSync26(staging, { recursive: true, force: true });
     throw error2;
   }
 }
@@ -123957,7 +124007,7 @@ async function withInstallLock2(lockPath, waitMs, refreshMs, noun, run2) {
   } finally {
     clearInterval(refresh);
     if (lockHolder(lockPath)?.token === token)
-      rmSync25(lockPath, { force: true });
+      rmSync26(lockPath, { force: true });
   }
 }
 function lockHolder(lockPath) {
@@ -123972,19 +124022,19 @@ function refreshLock(lockPath, token) {
     return;
   try {
     const temporary = `${lockPath}.${process.pid}.tmp`;
-    writeFileSync22(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
+    writeFileSync21(temporary, JSON.stringify({ pid: process.pid, at: Date.now(), token }), { mode: 384 });
     renameSync19(temporary, lockPath);
   } catch {}
 }
 function tryAcquireLock2(lockPath, token) {
   try {
-    const fd2 = openSync23(lockPath, "wx", 384);
-    writeSync6(fd2, JSON.stringify({ pid: process.pid, at: Date.now(), token }));
-    closeSync24(fd2);
+    const fd2 = openSync24(lockPath, "wx", 384);
+    writeSync7(fd2, JSON.stringify({ pid: process.pid, at: Date.now(), token }));
+    closeSync25(fd2);
     return true;
   } catch {
     if (lockIsStale2(lockPath)) {
-      rmSync25(lockPath, { force: true });
+      rmSync26(lockPath, { force: true });
       return tryAcquireLock2(lockPath, token);
     }
     return false;
@@ -124084,7 +124134,7 @@ class ProgressReporter2 {
     try {
       mkdirSync51(dirname76(this.statusPath), { recursive: true, mode: 448 });
       const temporary = `${this.statusPath}.${process.pid}.tmp`;
-      writeFileSync22(temporary, `${JSON.stringify(this.status)}
+      writeFileSync21(temporary, `${JSON.stringify(this.status)}
 `, { mode: 384 });
       renameSync19(temporary, this.statusPath);
     } catch {}
@@ -126217,7 +126267,7 @@ var init_update_check = __esm(() => {
 });
 
 // src/workers/source-index/built-in-reasoning/transcription-model.ts
-import { accessSync as accessSync10, constants as constants12, readFileSync as readFileSync67 } from "node:fs";
+import { accessSync as accessSync10, constants as constants13, readFileSync as readFileSync67 } from "node:fs";
 import { delimiter as delimiter8, isAbsolute as isAbsolute33, join as join100 } from "node:path";
 function builtInTranscriptionLayout(model = QWEN3_ASR_06B, env = process.env, runtime = LLAMA_SERVER_RUNTIME, platform2 = currentPlatform2()) {
   const root = env[BUILT_IN_TRANSCRIPTION_DIR_ENV]?.trim() || sharedDataPath("built-in-transcription", env);
@@ -126293,7 +126343,7 @@ function builtInTranscriptionEnabled(env = process.env, platform2 = currentPlatf
 function audioDecoderPresent(platform2 = currentPlatform2(), env = process.env) {
   const executable = (path) => {
     try {
-      accessSync10(path, constants12.X_OK);
+      accessSync10(path, constants13.X_OK);
       return true;
     } catch {
       return false;
@@ -127303,7 +127353,7 @@ function connectorStoreExtractionCandidateReader(store, filters) {
 }
 
 // src/workers/file-extraction/connector-source.ts
-import { rmSync as rmSync26, writeFileSync as writeFileSync23 } from "node:fs";
+import { rmSync as rmSync27, writeFileSync as writeFileSync22 } from "node:fs";
 import { basename as basename17, join as join102, resolve as resolve20, sep as sep14 } from "node:path";
 function isBoundedFetchConnector(connector) {
   return typeof connector.fetchItemWithin === "function";
@@ -127344,7 +127394,7 @@ async function readItemToFile(connector, localItemId, options) {
       if (!served())
         refuseGone();
       makeExtractionSpoolOwnerDir(options.spoolDir, options.spoolAnchor);
-      writeFileSync23(path, bytes, { mode: 384 });
+      writeFileSync22(path, bytes, { mode: 384 });
       break;
     } catch (error2) {
       if (attempt >= 3 || error2.code !== "ENOENT")
@@ -127521,7 +127571,7 @@ function fileHandOver(path, spooled, spoolDir, tidy) {
       const target = resolve20(path);
       if (!target.startsWith(root) || basename17(target) === "")
         return;
-      rmSync26(target, { force: true });
+      rmSync27(target, { force: true });
       tidy();
     }
   };
@@ -127533,7 +127583,7 @@ var init_connector_source = __esm(() => {
 
 // src/workers/whatsapp/extraction-source.ts
 import { readFile as readFile8, realpath as realpath2, stat as stat4 } from "node:fs/promises";
-import { closeSync as closeSync25, constants as constants13, openSync as openSync24, readSync as readSync9, rmSync as rmSync27, writeSync as writeSync7 } from "node:fs";
+import { closeSync as closeSync26, constants as constants14, openSync as openSync25, readSync as readSync9, rmSync as rmSync28, writeSync as writeSync8 } from "node:fs";
 import { basename as basename18, join as join103, relative as relative14, resolve as resolve21, sep as sep15 } from "node:path";
 
 class WhatsAppExtractionSource {
@@ -127655,7 +127705,7 @@ class WhatsAppExtractionSource {
       ...ref.mimeType ? { mimeType: ref.mimeType } : {},
       sizeBytes,
       dispose: async () => {
-        rmSync27(dest, { force: true });
+        rmSync28(dest, { force: true });
         pruneExtractionSpoolOwner(options.spoolDir, owner);
       }
     };
@@ -127718,7 +127768,7 @@ function nodeErrorCode(error2) {
   return typeof code === "string" ? code : undefined;
 }
 function copyDescriptor(fd2, size, dest) {
-  const out = openSync24(dest, constants13.O_WRONLY | constants13.O_CREAT | constants13.O_EXCL, 384);
+  const out = openSync25(dest, constants14.O_WRONLY | constants14.O_CREAT | constants14.O_EXCL, 384);
   const chunk = Buffer.allocUnsafe(Math.min(1024 * 1024, Math.max(1, size)));
   let total = 0;
   try {
@@ -127726,11 +127776,11 @@ function copyDescriptor(fd2, size, dest) {
       const read = readSync9(fd2, chunk, 0, Math.min(chunk.length, size - total), total);
       if (read === 0)
         break;
-      writeSync7(out, chunk, 0, read);
+      writeSync8(out, chunk, 0, read);
       total += read;
     }
   } finally {
-    closeSync25(out);
+    closeSync26(out);
   }
   return total;
 }
@@ -135517,8 +135567,8 @@ import {
   mkdirSync as mkdirSync54,
   readFileSync as readFileSync69,
   renameSync as renameSync20,
-  rmSync as rmSync28,
-  writeFileSync as writeFileSync24
+  rmSync as rmSync29,
+  writeFileSync as writeFileSync23
 } from "node:fs";
 import { randomUUID as randomUUID28 } from "node:crypto";
 import { homedir as homedir39 } from "node:os";
@@ -135734,7 +135784,7 @@ function writeCatalogCache(path, catalog) {
   try {
     mkdirSync54(dirname81(path), { recursive: true, mode: 448 });
     const models = Object.fromEntries(Object.entries(catalog.models).sort(([a], [b]) => a.localeCompare(b)));
-    writeFileSync24(tempPath, `${JSON.stringify({
+    writeFileSync23(tempPath, `${JSON.stringify({
       schema_version: CACHE_SCHEMA_VERSION,
       catalog_type: catalog.type,
       fetched_at: new Date(catalog.fetchedAtMs).toISOString(),
@@ -135743,7 +135793,7 @@ function writeCatalogCache(path, catalog) {
 `, { mode: 384 });
     renameSync20(tempPath, path);
   } catch {} finally {
-    rmSync28(tempPath, { force: true });
+    rmSync29(tempPath, { force: true });
   }
 }
 function parsePrivacyCategory(value2) {
@@ -154216,7 +154266,7 @@ var init_watch_hub = __esm(() => {
 
 // src/workers/local-files/connector.ts
 import { createHash as createHash80, randomUUID as randomUUID29 } from "node:crypto";
-import { realpathSync as realpathSync19, rmSync as rmSync29, readdirSync as readdirSync21 } from "node:fs";
+import { realpathSync as realpathSync19, rmSync as rmSync30, readdirSync as readdirSync21 } from "node:fs";
 import { join as join115, posix as posix3 } from "node:path";
 function nameAsOnDisk(scopeRoot, rel) {
   let dir = "";
@@ -154516,7 +154566,7 @@ function createLocalFilesSourceConnector(options) {
     try {
       for (const name of readdirSync21(options.watch.snapshotDir)) {
         if (name.startsWith(`${options.connectorId}.`) && name.endsWith(".snap") && !keepNames.has(name)) {
-          rmSync29(join115(options.watch.snapshotDir, name), { force: true });
+          rmSync30(join115(options.watch.snapshotDir, name), { force: true });
         }
       }
     } catch {}
@@ -197949,7 +197999,7 @@ init_config();
 init_dashboard_opening();
 init_open_targets();
 import { randomBytes as randomBytes33 } from "node:crypto";
-import { existsSync as existsSync93, readFileSync as readFileSync78, openSync as openSync25, closeSync as closeSync26, writeSync as writeSync8 } from "node:fs";
+import { existsSync as existsSync93, readFileSync as readFileSync78, openSync as openSync26, closeSync as closeSync27, writeSync as writeSync9 } from "node:fs";
 import { createInterface as createInterface3 } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve as resolve25 } from "node:path";
@@ -199849,7 +199899,7 @@ init_engine_service();
 init_operation_error();
 init_package_root();
 import { spawnSync as spawnSync17 } from "node:child_process";
-import { existsSync as existsSync75, lstatSync as lstatSync38, mkdirSync as mkdirSync49, mkdtempSync as mkdtempSync4, renameSync as renameSync17, rmSync as rmSync23 } from "node:fs";
+import { existsSync as existsSync75, lstatSync as lstatSync38, mkdirSync as mkdirSync49, mkdtempSync as mkdtempSync4, renameSync as renameSync17, rmSync as rmSync24 } from "node:fs";
 import { homedir as homedir37 } from "node:os";
 import { join as join94, resolve as resolve18 } from "node:path";
 var MACOS_SIGNING_IDENTITY_ENV = "OLYMPUS_MACOS_SIGNING_IDENTITY";
@@ -199965,7 +200015,7 @@ function installEngineHelper(options = {}) {
       replaced
     };
   } finally {
-    rmSync23(staging, { recursive: true, force: true });
+    rmSync24(staging, { recursive: true, force: true });
   }
 }
 
@@ -202353,11 +202403,11 @@ async function runMessagingPairing(source, secretStore, registryPath) {
   }
   let terminal;
   try {
-    terminal = openSync25("/dev/tty", "r+");
+    terminal = openSync26("/dev/tty", "r+");
   } catch {
     throw new OperationError("invalid_params", "Run this pairing command in your own terminal on the Olympus host. Login codes and passwords must never be entered in chat.");
   }
-  const tell = (text6) => writeSync8(terminal, text6);
+  const tell = (text6) => writeSync9(terminal, text6);
   try {
     tell(`Pairing ${source} privately on this machine. Selected messaging is treated as Private data. No messages are captured until you approve the scope.
 `);
@@ -202402,7 +202452,7 @@ async function runMessagingPairing(source, secretStore, registryPath) {
     const activation = runWorkerLifecycle("restart");
     return { ...paired, captureStarted: false, captureActivation: activation.ok ? "requested" : "needs_attention", next: activation.ok ? "Open this source in the Olympus dashboard to monitor capture and initial indexing." : "Pairing is saved. Ask your agent to repair the managed worker before capture can start." };
   } finally {
-    closeSync26(terminal);
+    closeSync27(terminal);
   }
 }
 function parseConnectOptions(args) {

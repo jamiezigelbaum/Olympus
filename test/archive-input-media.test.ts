@@ -3,7 +3,7 @@
 // served. Synthetic files only.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileExtractionSourceError } from '../src/core/file-extraction-source.ts';
@@ -11,6 +11,7 @@ import {
   archiveInputMediaLocator,
   archiveInputZipMediaLocator,
   parseArchiveInputMedia,
+  copyArchiveInputMediaToFile,
   parseArchiveInputMediaLocator,
   readArchiveInputMedia,
 } from '../src/workers/archive-import/input-media.ts';
@@ -24,13 +25,14 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function exportZip() {
+function exportZip(extra: Array<{ name: string; data: string | Uint8Array; method: 'stored' | 'deflate' }> = []) {
   const root = mkdtempSync(join(tmpdir(), 'archive-input-media-'));
   roots.push(root);
   const zip = buildZip([
     { name: '_chat.txt', data: '[01/07/2026, 09:00:00] Rowan: hello\n', method: 'deflate' },
     { name: 'IMG-20260701-WA0001.jpg', data: 'synthetic jpeg bytes', method: 'stored' },
     { name: 'PTT-20260701-WA0002.opus', data: 'synthetic voice bytes '.repeat(50), method: 'deflate' },
+    ...extra,
   ]);
   writeFileSync(join(root, 'WhatsApp Chat - Rowan.zip'), zip);
   const stat = statSync(join(root, 'WhatsApp Chat - Rowan.zip'), { bigint: false });
@@ -109,3 +111,31 @@ describe('archive input media locators', () => {
     }
   });
 });
+
+describe('every export media file is kept and read, however large (owner, 2026-10-26)', () => {
+  test('a member past the in-memory bound is copied to a file whole, a range at a time', () => {
+    const size = 65 * 1024 * 1024;
+    const { state, root } = exportZip([{ name: 'VID-20260701-WA0003.mp4', data: new Uint8Array(size).fill(7), method: 'deflate' }]);
+    const video = archiveInputZipMediaLocator({ archiveId: 'arch-1', fileIndex: 0, memberIndex: 3 });
+    // Into memory it stays bounded...
+    expect(() => readArchiveInputMedia(video, { state })).toThrow(FileExtractionSourceError);
+    // ...and to a file it is read whole, with no cap but the caller's.
+    const dest = join(root, 'copied.mp4');
+    expect(copyArchiveInputMediaToFile(video, { state }, {}, dest)).toBe(size);
+    expect(statSync(dest).size).toBe(size);
+    expect(readFileSync(dest).subarray(0, 4)).toEqual(Buffer.from([7, 7, 7, 7]));
+    const bounded = join(root, 'bounded.mp4');
+    expect(() => copyArchiveInputMediaToFile(video, { state }, { maxBytes: 1024 }, bounded)).toThrow(FileExtractionSourceError);
+    expect(existsSync(bounded)).toBe(false);
+  }, 60_000);
+
+  test('a copy of a file that changed leaves nothing behind', () => {
+    const { state, root } = exportZip();
+    writeFileSync(join(root, 'WhatsApp Chat - Rowan.zip'), buildZip([{ name: '_chat.txt', data: 'other', method: 'stored' }]));
+    const photo = archiveInputZipMediaLocator({ archiveId: 'arch-1', fileIndex: 0, memberIndex: 1 });
+    const dest = join(root, 'copied.jpg');
+    expect(() => copyArchiveInputMediaToFile(photo, { state }, {}, dest)).toThrow(FileExtractionSourceError);
+    expect(existsSync(dest)).toBe(false);
+  });
+});
+
