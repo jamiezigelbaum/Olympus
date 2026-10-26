@@ -4,7 +4,7 @@
 // timing and failure outcomes, but both schemas use strict field-by-field
 // construction: no question, answer, document content, paths, or citations.
 
-import { olympusDataPath } from '../../core/olympus-layout.ts';
+import { sharedDataPath } from '../../core/olympus-layout.ts';
 import {
   chmod,
   mkdir,
@@ -341,7 +341,7 @@ export function resolveSourceAnswerLatencyLogPath(
     }
     return raw;
   }
-  return olympusDataPath(env, 'source-answer-latency.jsonl');
+  return sharedDataPath('answer-latency', env);
 }
 
 async function makeExistingLedgerPrivate(path: string): Promise<void> {

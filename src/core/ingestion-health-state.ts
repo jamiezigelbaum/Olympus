@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { writePrivateFileAtomicSync } from './atomic-file.ts';
-import { olympusDataPath, type LayoutEnv } from './olympus-layout.ts';
+import { sharedDataPath, type LayoutEnv } from './olympus-layout.ts';
 
 export interface IngestionHealthDoctorState {
   generated_at: string;
@@ -22,7 +22,7 @@ export interface IngestionHealthDoctorState {
 }
 
 export function defaultIngestionHealthStatePath(env: LayoutEnv = process.env): string {
-  return olympusDataPath(env, 'source-ingestion-doctor-state.json');
+  return sharedDataPath('ingestion-doctor-state', env);
 }
 
 export function readIngestionHealthState(path: string): IngestionHealthDoctorState | undefined {

@@ -1,4 +1,4 @@
-import { olympusDataPath } from '../core/olympus-layout.ts';
+import { sharedDataPath } from '../core/olympus-layout.ts';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -199,7 +199,7 @@ interface SchedulerUnparkRow {
 export function defaultSourceSchedulerStateDbPath(
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return olympusDataPath(env, 'source-scheduler.sqlite');
+  return sharedDataPath('source-scheduler', env);
 }
 
 /**

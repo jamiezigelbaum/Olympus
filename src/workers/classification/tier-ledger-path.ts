@@ -4,7 +4,7 @@
 //
 // One ledger per connector store, co-located with it: `<store>.tier-ledger.sqlite`
 // beside `<store>.sqlite`. Wherever the store is — the default data
-// directory, a *_DB_PATH override, XDG_DATA_HOME, the WhatsApp state
+// directory, an account folder, XDG_DATA_HOME, the WhatsApp state
 // directory — its ledger is next to it, so every path that finds the store
 // finds the ledger, and deleting one source's stores deletes exactly that
 // source's ledger rows.

@@ -41,7 +41,6 @@ import {
 } from '../../core/sqlite-migrations.ts';
 import { closeSqliteStore } from '../../core/sqlite-store.ts';
 import {
-  FILE_EXTRACTION_JOBS_DB_PATH_ENV,
   SECRET_ITEM_REDACTION_CLAIMS_TABLE,
   SECRET_RESTORED_REREADS_TABLE,
   SECRET_ITEM_REDACTIONS_TABLE,
@@ -61,7 +60,7 @@ import type {
 
 export const FILE_EXTRACTION_JOBS_STORE_ID = 'file-extraction-jobs';
 export const FILE_EXTRACTION_JOBS_SCHEMA_VERSION = 5;
-export { FILE_EXTRACTION_JOBS_DB_PATH_ENV, defaultFileExtractionJobsDbPath };
+export { defaultFileExtractionJobsDbPath };
 
 /**
  * Lease, retry and janitor constants, ported verbatim from the queue running

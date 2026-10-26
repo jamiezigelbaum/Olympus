@@ -17,7 +17,10 @@ describe('private eval store access', () => {
       expect(source).toContain('readOnly: true');
       expect(source).toContain('createConnectorStoreCorpusAdapter({');
       expect(source).toContain('createConnectorStoreContentProvider({');
-      expect(source).toContain('OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH');
+      // The store Olympus places for the Dropbox account, or the copy OLYMPUS_EVAL_DROPBOX_STORE names; never a retired override.
+      expect(source).toContain("resolvedStorePath('dropbox.files', 'secure_local')");
+      expect(source).toContain('OLYMPUS_EVAL_DROPBOX_STORE');
+      expect(source).not.toContain('OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH');
       expect(source).not.toContain('LocalDropboxFilesIndex');
       expect(source).not.toContain('OLYMPUS_SOURCE_INDEX_DROPBOX_FILES_DB_PATH');
     });

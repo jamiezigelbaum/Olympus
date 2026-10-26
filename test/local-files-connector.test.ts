@@ -25,7 +25,6 @@ import {
   type LocalFilesContentScope,
 } from '../src/workers/local-files/scope.ts';
 import {
-  LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV,
   createLocalFilesConnectorStore,
 } from '../src/workers/local-files/store.ts';
 import { VolumeResolver } from '../src/workers/local-files/volume-identity.ts';
@@ -59,7 +58,8 @@ function fixture(selectionFor: (proj: string) => Selection[] = (proj) => [{ key:
   const proj = join(home, 'proj');
   mkdirSync(proj, { recursive: true });
   const env = {
-    [LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV]: join(base, 'store.sqlite'),
+    // The store goes where its layout puts it, under a home of its own.
+    HOME: join(base, 'olympus-home'),
     [SOURCE_INGESTION_EXCLUSIONS_PATH_ENV]: join(base, 'no-exclusions.json'),
   };
   const store = createLocalFilesConnectorStore(env, { policy: defaultLocalFilesIngestionPolicy({ stillImagesRead: false }) });

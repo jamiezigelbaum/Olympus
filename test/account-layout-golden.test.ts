@@ -2,8 +2,11 @@
 // resolvers did before account folders (docs/design/source-storage.md,
 // delivery step 4a). The expected values are a fixture generated once from the
 // functions as they stood on main (test/fixtures/legacy-resolution-golden.json),
-// never computed with the code under test.
+// never computed with the code under test. Since step 6 no env variable
+// relocates a store (owner decision 3): a case that sets one resolves as the
+// same environment without it, which the fixture records too.
 
+import { resolvedStorePath, resolvedRawPath } from '../src/core/source-placement.ts';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,41 +18,12 @@ import { sourceRegistryPath } from '../src/core/source-registry.ts';
 import { archiveImportRequestsPath } from '../src/workers/archive-import/requests.ts';
 import { defaultArchiveImportStatePath } from '../src/workers/archive-import/state.ts';
 import { archiveConnectorStoreDbPath, archiveConnectorStoreDbPaths } from '../src/workers/archive-import/store.ts';
+import { dropboxTierConnectorStoreDbPaths } from '../src/workers/dropbox-files/connector-store.ts';
 import {
-  DROPBOX_CONNECTOR_STORE_DB_PATH_ENV,
-  DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV,
-  DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV,
-  defaultDropboxConnectorStoreDbPath,
-  defaultDropboxInternalConnectorStoreDbPath,
-  defaultDropboxPublicConnectorStoreDbPath,
-  dropboxTierConnectorStoreDbPaths,
-} from '../src/workers/dropbox-files/connector-store.ts';
-import {
-  defaultGmailConnectorStoreDbPath,
-  defaultGmailPublicConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
-} from '../src/workers/google-connectors/gmail.ts';
-import {
-  defaultGoogleDriveConnectorStoreDbPath,
-  defaultGoogleDrivePublicConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
-} from '../src/workers/google-connectors/drive.ts';
-import {
-  LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV,
-  LOCAL_FILES_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV,
-  LOCAL_FILES_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV,
-  defaultLocalFilesConnectorStoreDbPath,
-  defaultLocalFilesInternalConnectorStoreDbPath,
-  defaultLocalFilesPublicConnectorStoreDbPath,
   localFilesTierConnectorStoreDbPaths,
   localFilesWatchDir,
 } from '../src/workers/local-files/store.ts';
-import { defaultReadwiseConnectorStoreDbPath } from '../src/workers/readwise/connector.ts';
-import { defaultReadwiseSecureConnectorStoreDbPath } from '../src/workers/readwise/tier-set.ts';
-import { defaultXBookmarksConnectorStoreDbPath } from '../src/workers/x-bookmarks/connector.ts';
 import { defaultXBookmarksApiUsageDbPath } from '../src/workers/x-bookmarks/live-control.ts';
-import { defaultXBookmarksReconcileStateDbPath } from '../src/workers/x-bookmarks/reconcile-state.ts';
-import { defaultXBookmarksSecureConnectorStoreDbPath } from '../src/workers/x-bookmarks/tier-set.ts';
 import golden from './fixtures/legacy-resolution-golden.json';
 
 type Env = Record<string, string | undefined>;
@@ -58,30 +32,30 @@ type Resolvers = Record<string, (env: Env) => unknown>;
 const TIERS = ['secure_local', 'internal', 'public_safe'] as const;
 
 const resolvers: Resolvers = {
-  'gmail.internal': (env) => defaultGmailConnectorStoreDbPath(env),
-  'gmail.secure_local': (env) => defaultGmailSecureConnectorStoreDbPath(env),
-  'gmail.public_safe': (env) => defaultGmailPublicConnectorStoreDbPath(env),
-  'google_drive.internal': (env) => defaultGoogleDriveConnectorStoreDbPath(env),
-  'google_drive.secure_local': (env) => defaultGoogleDriveSecureConnectorStoreDbPath(env),
-  'google_drive.public_safe': (env) => defaultGoogleDrivePublicConnectorStoreDbPath(env),
-  'dropbox.secure_local': (env) => defaultDropboxConnectorStoreDbPath(env),
-  'dropbox.internal': (env) => defaultDropboxInternalConnectorStoreDbPath(env),
-  'dropbox.public_safe': (env) => defaultDropboxPublicConnectorStoreDbPath(env),
+  'gmail.internal': (env) => resolvedStorePath('gmail.email', 'internal', env),
+  'gmail.secure_local': (env) => resolvedStorePath('gmail.email', 'secure_local', env),
+  'gmail.public_safe': (env) => resolvedStorePath('gmail.email', 'public_safe', env),
+  'google_drive.internal': (env) => resolvedStorePath('google_drive.docs', 'internal', env),
+  'google_drive.secure_local': (env) => resolvedStorePath('google_drive.docs', 'secure_local', env),
+  'google_drive.public_safe': (env) => resolvedStorePath('google_drive.docs', 'public_safe', env),
+  'dropbox.secure_local': (env) => resolvedStorePath('dropbox.files', 'secure_local', env),
+  'dropbox.internal': (env) => resolvedStorePath('dropbox.files', 'internal', env),
+  'dropbox.public_safe': (env) => resolvedStorePath('dropbox.files', 'public_safe', env),
   'dropbox.all': (env) => dropboxTierConnectorStoreDbPaths(env),
-  'local_files.secure_local': (env) => defaultLocalFilesConnectorStoreDbPath(env),
-  'local_files.internal': (env) => defaultLocalFilesInternalConnectorStoreDbPath(env),
-  'local_files.public_safe': (env) => defaultLocalFilesPublicConnectorStoreDbPath(env),
+  'local_files.secure_local': (env) => resolvedStorePath('local.files', 'secure_local', env),
+  'local_files.internal': (env) => resolvedStorePath('local.files', 'internal', env),
+  'local_files.public_safe': (env) => resolvedStorePath('local.files', 'public_safe', env),
   'local_files.all': (env) => localFilesTierConnectorStoreDbPaths(env),
   'local_files.watch': (env) => localFilesWatchDir(env),
-  'readwise.internal': (env) => defaultReadwiseConnectorStoreDbPath(env),
-  'readwise.secure_local': (env) => defaultReadwiseSecureConnectorStoreDbPath(env),
-  'x.internal': (env) => defaultXBookmarksConnectorStoreDbPath(env),
-  'x.secure_local': (env) => defaultXBookmarksSecureConnectorStoreDbPath(env),
+  'readwise.internal': (env) => resolvedStorePath('readwise.library', 'internal', env),
+  'readwise.secure_local': (env) => resolvedStorePath('readwise.library', 'secure_local', env),
+  'x.internal': (env) => resolvedStorePath('x.bookmarks', 'internal', env),
+  'x.secure_local': (env) => resolvedStorePath('x.bookmarks', 'secure_local', env),
   'x.usage': (env) => defaultXBookmarksApiUsageDbPath(env),
-  'x.reconcile': (env) => defaultXBookmarksReconcileStateDbPath(env),
-  'x.reconcile+usage': (env) => defaultXBookmarksReconcileStateDbPath(env, defaultXBookmarksApiUsageDbPath(env)),
-  'x.reconcile+memory': (env) => defaultXBookmarksReconcileStateDbPath(env, ':memory:'),
-  'x.reconcile+custom': (env) => defaultXBookmarksReconcileStateDbPath(env, '/custom/usage.sqlite'),
+  'x.reconcile': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env),
+  'x.reconcile+usage': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: defaultXBookmarksApiUsageDbPath(env) }),
+  'x.reconcile+memory': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: ':memory:' }),
+  'x.reconcile+custom': (env) => resolvedRawPath('x.bookmarks', 'x-reconcile.sqlite', env, { usageDbPath: '/custom/usage.sqlite' }),
   'archive.all': (env) => archiveConnectorStoreDbPaths(archiveImportFamilies(), env),
   'archive.state': (env) => defaultArchiveImportStatePath(env),
   'archive.requests': (env) => archiveImportRequestsPath(defaultArchiveImportStatePath(env)),
@@ -210,6 +184,17 @@ const OVERRIDE_GROUPS: Record<string, string[]> = {
 };
 const overrideNames = (group: string): string[] => OVERRIDE_GROUPS[group] ?? [];
 
+/**
+ * The fixture case an environment resolves as since step 6: an override case as
+ * the same environment without its overrides (`override-all` also sets
+ * XDG_DATA_HOME), every other case as itself.
+ */
+function resolvesAs(name: string): string {
+  if (name.startsWith('override-all:')) return 'xdg';
+  if (name.startsWith('override:') || name.startsWith('override-blank:')) return 'default';
+  return name;
+}
+
 function withPlatform<T>(platform: string, run: () => T): T {
   const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
   Object.defineProperty(process, 'platform', { value: platform });
@@ -242,7 +227,7 @@ describe('a legacy account resolves exactly what main resolved', () => {
 
   test.each(cases.map(([name]) => name))('with an entry for it: %s', (name) => {
     const { env, platform } = caseEnv(name);
-    const results = (golden.cases as Record<string, Record<string, unknown>>)[name]!;
+    const results = (golden.cases as Record<string, Record<string, unknown>>)[resolvesAs(name)]!;
     withPlatform(platform, () => {
       // Where main cannot work out the data folder at all, no registry can be written either.
       if (!Object.values(results).some((expected) => throwsOf(expected) !== undefined)) writeLegacyRegistry(env);
@@ -278,22 +263,16 @@ describe('a legacy account resolves exactly what main resolved', () => {
     });
   });
 
-  test('an override pins an account that has no entry: the override is honored, nothing moves', () => {
+  test('a dropped override pins nothing: an account with no entry is placed as without it', () => {
     for (const [name] of cases.filter(([n]) => n.startsWith('override:') || n.startsWith('override-all:'))) {
       const { env, platform } = caseEnv(name);
-      const results = (golden.cases as Record<string, Record<string, unknown>>)[name]!;
+      const without = Object.fromEntries(Object.entries(env).filter(([key]) => !Object.values(OVERRIDE_GROUPS).flat().includes(key)));
       withPlatform(platform, () => {
-        for (const [key, expected] of Object.entries(results)) expectResolves(name, key, env, expected);
+        for (const key of Object.keys(resolvers)) {
+          if (throwsOf((golden.cases as Record<string, Record<string, unknown>>)[name]![key]) !== undefined) continue;
+          expect(resolvers[key]!(env), `${name}: ${key}`).toEqual(resolvers[key]!(without));
+        }
       });
     }
-  });
-
-  test('the connectors export the override names the layout honors', () => {
-    expect(DROPBOX_CONNECTOR_STORE_DB_PATH_ENV).toBe(OVERRIDE_GROUPS.dropbox![0]!);
-    expect(DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV).toBe(OVERRIDE_GROUPS.dropbox![1]!);
-    expect(DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV).toBe(OVERRIDE_GROUPS.dropbox![2]!);
-    expect(LOCAL_FILES_CONNECTOR_STORE_DB_PATH_ENV).toBe(OVERRIDE_GROUPS.localfiles![0]!);
-    expect(LOCAL_FILES_INTERNAL_CONNECTOR_STORE_DB_PATH_ENV).toBe(OVERRIDE_GROUPS.localfiles![1]!);
-    expect(LOCAL_FILES_PUBLIC_CONNECTOR_STORE_DB_PATH_ENV).toBe(OVERRIDE_GROUPS.localfiles![2]!);
   });
 });
