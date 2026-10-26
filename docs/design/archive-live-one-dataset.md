@@ -430,7 +430,12 @@ Live WhatsApp capture, with no change to identities or stores
   the spool folder is the owner's alone (0700, files 0600, the bridge
   making it so at start), written only by the bridge and by Olympus.
   Index rows, the files' records and the high-water mark commit in one
-  transaction.
+  transaction. A boundary and its receipt (the offset and the digest that ends there)
+  are one record, written in one step, so a boundary is never trusted at an
+  offset its receipt was not taken for: a crash before clearing records its
+  new boundary leaves the old record, whose window is checked on the next
+  pull. The listing's cursor carries no receipt and is never what decides
+  whether a Secret is cleared; clearing's own record does.
 - **One builder, the intake rule.** The spool is the WhatsApp connector's
   live input: its records become items through the connector's one record
   builder under the shared intake rule (`core/source-inputs.ts`), versions

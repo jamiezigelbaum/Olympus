@@ -199,6 +199,37 @@ describe('review round 5', () => {
     expect(readFileSync(file, 'utf8')).not.toContain(keyFor(55));
   });
 
+  test('a crash after the cursor moved but before clearing recorded its boundary still clears a rewrite in the old window', async () => {
+    const target = lane();
+    const file = join(target.spoolDir, '2026-10-25.jsonl');
+    const early = line('e1', { text: 'x'.repeat(120) });
+    writeFileSync(file, line('a') + early);
+    await target.sync.pull();
+    // The cursor moves on; clearing crashes before it records the new boundary (the cleared record keeps the old one).
+    appendFileSync(file, line('b', { text: 'y'.repeat(6000) }) + line('c'));
+    const writeMeta = target.ledger.writeMeta.bind(target.ledger);
+    let crashed = false;
+    target.ledger.writeMeta = (key: string, value: string) => {
+      if (!crashed && key.endsWith(':cleared_files')) {
+        crashed = true;
+        throw new Error('crash before the boundary is recorded');
+      }
+      writeMeta(key, value);
+    };
+    const failed = await target.sync.pull();
+    target.ledger.writeMeta = writeMeta;
+    expect(crashed).toBe(true);
+    expect(failed.warnings).toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    // An earlier record, inside the old boundary's window, is rewritten in place to hold a Secret.
+    const secret = line('e1', { text: `k ${keyFor(66)}`.padEnd(120, ' ') });
+    expect(Buffer.byteLength(secret)).toBe(Buffer.byteLength(early));
+    const now = readFileSync(file, 'utf8');
+    writeFileSync(file, now.replace(early, secret));
+    const after = await target.sync.pull();
+    expect(after.warnings ?? []).not.toContain(WHATSAPP_SPOOL_REDACTION_FAILED_WARNING);
+    expect(readFileSync(file, 'utf8')).not.toContain(keyFor(66));
+  });
+
   test('an index page commits whole: a failure before its files are recorded leaves no rows behind', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'whatsapp-bookkeeping-atomic-'));
     roots.push(dir);
