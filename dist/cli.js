@@ -60467,12 +60467,22 @@ class TieredStoreSet {
     if (this.finishPendingIntents())
       await this.sweepOrphanedChildren();
   }
+  intentSuperseded(intent) {
+    const identity2 = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
+    if (intent.version === undefined) {
+      return this.anyLegHasRow(identity2) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity2).active !== true);
+    }
+    return TIER_DOMAIN_ORDER.some((domain) => {
+      const row = this.store(domain)?.storedItemState(identity2);
+      return row?.tombstoned === true && row.version === intent.version;
+    });
+  }
   finishPendingIntents() {
     let removed = false;
     for (const intent of this.ledger.writeIntents()) {
       const identity2 = { ...intent.identity, ...intent.version !== undefined ? { sourceVersion: intent.version } : {} };
       if (intent.kind === "content" || intent.kind === "names") {
-        if (this.anyLegHasRow(identity2) && TIER_DOMAIN_ORDER.every((domain) => this.store(domain)?.itemPresence(identity2).active !== true))
+        if (this.intentSuperseded(intent))
           this.ledger.clearWriteIntent(intent.identity);
         continue;
       }
@@ -60567,12 +60577,12 @@ class TieredStoreSet {
         return;
       if (hidden !== undefined)
         return { version: hidden, hasContent: false, tombstoned: true };
-      const owesBody = pending.kind === "content" || pending.kind === "names";
+      const owesBody2 = pending.kind === "content" || pending.kind === "names";
       return {
         version: pending.version,
         hasContent: false,
         incomplete: true,
-        ...owesBody && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}
+        ...owesBody2 && pending.bodyVersion !== undefined ? { owedBodyVersion: pending.bodyVersion } : {}
       };
     }
     const newest = found.reduce((best, leg) => leg.version !== undefined && (best === undefined || compareVersions(leg.version, best) > 0) ? leg.version : best, undefined);
@@ -60582,15 +60592,17 @@ class TieredStoreSet {
     const intentLeads = hidden !== undefined && (newest === undefined || compareVersions(hidden, newest) > 0);
     const tombstoned = topActive.length === 0 || intentLeads;
     const owed = this.ledger.writeIntent(identity2);
-    const owedBody = (owed?.kind === "content" || owed?.kind === "names") && owed.version !== undefined && !tombstoned;
+    const owesBody = owed?.kind === "content" || owed?.kind === "names";
+    const owedLeads = owesBody && owed.version !== undefined && (newest === undefined || compareVersions(owed.version, newest) > 0);
+    const owedBody = owesBody && owed.version !== undefined && (owedLeads || !tombstoned);
     const incomplete = owedBody;
     const owedBodyVersion = owedBody ? owed?.bodyVersion : undefined;
     const moving = pending?.kind === "advance" && pending.version !== undefined && (newest === undefined || compareVersions(pending.version, newest) > 0) ? pending.version : undefined;
     const version = intentLeads ? hidden : moving !== undefined ? moving : owedBody && (newest === undefined || compareVersions(owed.version, newest) > 0) ? owed.version : newest;
     return {
       ...version !== undefined ? { version } : {},
-      hasContent: !intentLeads && topActive.some((leg) => leg.chunkCount > 0),
-      ...tombstoned ? { tombstoned: true } : {},
+      hasContent: !intentLeads && !owedLeads && topActive.some((leg) => leg.chunkCount > 0),
+      ...tombstoned && !owedLeads ? { tombstoned: true } : {},
       ...incomplete ? { incomplete: true } : {},
       ...owedBodyVersion !== undefined ? { owedBodyVersion } : {}
     };
