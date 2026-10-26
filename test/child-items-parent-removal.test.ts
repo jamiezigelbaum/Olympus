@@ -209,7 +209,7 @@ describe('a child is hidden the moment its parent is, on every read path', () =>
 
     const child = input(M1_CHILDREN[0]!);
     const sibling = input(M2_CHILD);
-    const parentNames = input('m1', { layer: 'names' });
+    const parentNames = input('m1', { layer: 'names', dependency: 'parent_label' });
     expect(check.inputs([child, sibling]).map((verdict) => verdict.gone)).toEqual([false, false]);
     const before = remoteOperationOutput('source_answer_result', answer(M1_CHILDREN[0]!, M2_CHILD), {
       releaseCheck: check, releaseManifests: written(child, sibling),
@@ -247,7 +247,7 @@ describe('a child is hidden the moment its parent is, on every read path', () =>
       releaseCheck: check, releaseManifests: written(sibling, parentNames),
     })).toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
     // And the sibling parent's names are as they were.
-    expect(check.inputs([input('m2', { layer: 'names' })]).map((verdict) => verdict.gone)).toEqual([false]);
+    expect(check.inputs([input('m2', { layer: 'names', dependency: 'parent_label' })]).map((verdict) => verdict.gone)).toEqual([false]);
   });
 
   test('a deleted parent gives no label to its child\'s citation', async () => {

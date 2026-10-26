@@ -567,7 +567,7 @@ describe('the release manifest, revalidated against current tiers and rules', ()
   test('a parent label\'s names input is a dependency of the answer, never a cited item', async () => {
     const { fixture, check } = await routed();
     // The label names `orchard`'s names; the answer cites `garden`, which is what its text came from.
-    const labelled = [manifest([input('garden'), input('orchard', { layer: 'names' })])];
+    const labelled = [manifest([input('garden'), input('orchard', { layer: 'names', dependency: 'parent_label' })])];
     const answer = leakyAnswer([leakyEvidence('garden')], 'ok');
     expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }).status).toBe('answered');
     // A citation of the parent itself does not make the names-layer input a cited one: it stays a dependency.
@@ -577,7 +577,7 @@ describe('the release manifest, revalidated against current tiers and rules', ()
 
     // The parent's names are raised to Private under the answer: the whole answer is withheld, label or not.
     await moveTieredItem({ set: fixture.set, identity: identityOf('orchard'), target: { metadataTier: 'secure', contentTier: 'secure' } });
-    expect(check.inputs([input('orchard', { layer: 'names' })])).toEqual([{ tier: 'private', gone: false }]);
+    expect(check.inputs([input('orchard', { layer: 'names', dependency: 'parent_label' })])).toEqual([{ tier: 'private', gone: false }]);
     expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }))
       .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_CHANGED, citations: [] });
 
@@ -585,6 +585,19 @@ describe('the release manifest, revalidated against current tiers and rules', ()
     await moveTieredItem({ set: fixture.set, identity: identityOf('orchard'), target: { metadataTier: 'secrets', contentTier: 'secrets' } });
     expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }))
       .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_CHANGED, citations: [] });
+  });
+
+  test('a names-only evidence candidate may be cited: its names-layer input covers its citation', async () => {
+    const { fixture, check } = await routed();
+    // A Private file matched by name: the model saw `orchard`'s names, never its text.
+    const read = [manifest([input('garden'), input('orchard', { layer: 'names' })])];
+    const citesBoth = leakyAnswer([leakyEvidence('garden'), leakyEvidence('orchard')], 'ok');
+    expect(remoteOperationOutput('source_answer_result', citesBoth, { releaseCheck: check, releaseManifests: read }).status).toBe('answered');
+    // Gone: only its citation goes, as for any cited item.
+    fixture.ledger.removeCopies(identityOf('orchard'));
+    const output = remoteOperationOutput('source_answer_result', citesBoth, { releaseCheck: check, releaseManifests: read });
+    expect(output.status).toBe('answered');
+    expect(output.citations).toEqual([{ label: 'Files', title: 'garden-plan.txt', date: '2026-01-02' }]);
   });
 
   test('a cited input gone drops its citation only', async () => {
@@ -598,7 +611,7 @@ describe('the release manifest, revalidated against current tiers and rules', ()
   test('a parent label\'s names input that is gone withholds the whole answer: prose can still carry the parent\'s subject and sender', async () => {
     const { fixture, check } = await routed();
     // The answer was written with the parent's names in front of the model; it cites the child only.
-    const labelled = [manifest([input('garden'), input('orchard', { layer: 'names' })])];
+    const labelled = [manifest([input('garden'), input('orchard', { layer: 'names', dependency: 'parent_label' })])];
     const answer = leakyAnswer([leakyEvidence('garden')], 'ok');
     expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }).status).toBe('answered');
 
@@ -606,7 +619,7 @@ describe('the release manifest, revalidated against current tiers and rules', ()
     // are still in the prose, so nothing of the answer may leave.
     fixture.ledger.removeCopies(identityOf('orchard'));
     fixture.ledger.removeCopies(identityOf('garden'));
-    expect(check.inputs([input('orchard', { layer: 'names' })])).toEqual([{ tier: 'public_or_personal', gone: true }]);
+    expect(check.inputs([input('orchard', { layer: 'names', dependency: 'parent_label' })])).toEqual([{ tier: 'public_or_personal', gone: true }]);
     expect(remoteOperationOutput('source_answer_result', answer, { releaseCheck: check, releaseManifests: labelled }))
       .toEqual({ kind: 'source_answer', status: 'withheld', answer: REMOTE_ANSWER_UNVERIFIED, citations: [] });
   });
