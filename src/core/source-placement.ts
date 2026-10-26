@@ -337,7 +337,7 @@ const RETIRED_PATH_SETTING = /^OLYMPUS_\w+_DB_PATH$|^OLYMPUS_ARCHIVE_IMPORTS_STA
  * The retired path settings this environment still sets, in words: an
  * `OLYMPUS_*_DB_PATH` (or the archive record's path), and a connector-store
  * mount that names a path for a source whose stores Olympus places, other
- * than the one it places them at. Nothing reads them any more, so a worker
+ * than the one it places them at or their usual legacy place. Nothing reads them any more, so a worker
  * started with one would open an empty store where the files are not, and the
  * account's data would look gone: the worker refuses to start instead, naming
  * each one, until the files are moved to where Olympus keeps them (or the
@@ -352,7 +352,14 @@ export function retiredPathSettings(env: LayoutEnv = process.env): string[] {
   for (const mount of mounts) {
     if (!hasFolderLayout(mount.sourceId) || !accountStoreNames(mount.sourceId).includes(mount.trustDomain)) continue;
     const placed = resolvedStorePath(mount.sourceId, mount.trustDomain, env);
-    if (resolve(mount.dbPath) !== resolve(placed)) found.push(`${MOUNTS_ENV} ${mount.corpusId} dbPath=${mount.dbPath} (Olympus keeps it at ${placed})`);
+    // The usual legacy place is fine too: it is where the account's files were
+    // before the boot migration moved them, and the lane ignores the path.
+    const usual = hasLegacyLayout(mount.sourceId)
+      ? [placed, accountStorePath({ source_id: mount.sourceId, slot: DEFAULT_ACCOUNT_SLOT, layout: 'legacy' }, mount.trustDomain, env)]
+      : [placed];
+    if (!usual.some((path) => resolve(path) === resolve(mount.dbPath))) {
+      found.push(`${MOUNTS_ENV} ${mount.corpusId} dbPath=${mount.dbPath} (Olympus keeps it at ${placed})`);
+    }
   }
   return found;
 }

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { accountStorePath } from '../src/core/olympus-layout.ts';
 import { resolvedStorePath, retiredPathSettings } from '../src/core/source-placement.ts';
 
 const roots: string[] = [];
@@ -50,6 +51,10 @@ describe('retired path settings', () => {
       { corpusId: 'secure_local.reflect.notes', family: 'note', trustDomain: 'secure_local', dbPath: '/anywhere/reflect-notes.sqlite' },
     ]);
     expect(retiredPathSettings({ ...base, OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: mounts(placed) })).toEqual([]);
+    // The usual legacy place stays fine after the boot migration moved the store into its folder.
+    const legacy = accountStorePath({ source_id: 'whatsapp.personal.messages', slot: '1', layout: 'legacy' }, 'secure_local', base);
+    expect(legacy).not.toBe(placed);
+    expect(retiredPathSettings({ ...base, OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: mounts(legacy) })).toEqual([]);
     expect(retiredPathSettings({ ...base, OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON: mounts('/old/wa/connector-store.db') })).toEqual([
       `OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON secure_local.whatsapp.messages dbPath=/old/wa/connector-store.db (Olympus keeps it at ${placed})`,
     ]);
