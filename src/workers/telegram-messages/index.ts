@@ -3,8 +3,6 @@ export {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   LEGACY_SECURE_LOCAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
   defineInternalTelegramMessagesCorpus,
   defineProtectedTelegramMessagesCorpus,
   defineTelegramMessagesCorpus,

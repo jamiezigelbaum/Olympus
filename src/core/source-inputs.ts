@@ -85,7 +85,9 @@ export type IntakeDecision =
  *   a live record applies and an archive record does not. A live record that
  *   is identical to the stored item is a no-op in the store.
  * - Every row a tombstone: only a newer record brings the item back (live's
- *   word wins a tie).
+ *   word counts only where no version can be compared). A deletion or Secret cut
+ *   off between legs is finished from its write intent before any record is
+ *   decided, so a tombstone seen here is whole.
  */
 export function decideIntake(args: {
   input: SourceInputKind;
@@ -104,7 +106,8 @@ export function decideIntake(args: {
     // Deleted, or a Secret kept as a location only: an older or equal record never brings it back; a newer one does,
     // and live's own word wins a tie (or an unknown version), as it does for any item.
     if (order !== undefined && order > 0) return 'apply';
-    if (args.input === 'live' && (order === undefined || order === 0)) return 'apply';
+    // (A deletion cut off between legs is finished by the set before any record is decided: a tombstone here is whole.)
+    if (args.input === 'live' && order === undefined) return 'apply';
     return order !== undefined && order < 0 ? 'skip_older' : 'skip_same';
   }
   // A stored item with no version to compare (an old row) is completed by the next record.
@@ -112,8 +115,10 @@ export function decideIntake(args: {
   // The provider's deletion of the version stored beats its content.
   if (args.deletes === true && order >= 0) return 'apply';
   if (order > 0) return 'apply';
-  if (order < 0) return 'skip_older';
-  // An item cut off between legs, or whose rows disagree, is completed by a record of its own version.
+  // The record whose body a cut-off write still owes is replayed whatever its place in the order.
+  if (order < 0) return stored.incomplete === true && stored.owedBodyVersion !== undefined && args.bringsContent && args.version !== undefined
+    && args.compareVersions(args.version, stored.owedBodyVersion) >= 0 ? 'apply' : 'skip_older';
+  // An item cut off between legs (a write still owed) is completed by a record of its own version.
   if (stored.incomplete === true) return 'apply';
   if (!args.bringsContent) return 'skip_same';
   if (!stored.hasContent) return 'apply';
@@ -176,6 +181,8 @@ interface PageUnit {
   /** Records of the input's stream since its last page cursor, up to and including this unit's record. */
   record: number;
   entry: number;
+  /** The record's own item: the parent a child belongs to. */
+  parent: string;
   item: RawItem;
 }
 
@@ -275,9 +282,15 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
               // A record that carries no version was accepted as the version the store holds: it keeps that
               // version, in the pass's own state and in the item it emits, so it can never erase the boundary.
               const known = stateOf(built1.identity)?.version;
-              const item = built1.identity.sourceVersion === undefined && known !== undefined
-                ? { ...built1, identity: { ...built1.identity, sourceVersion: known } }
-                : built1;
+              const owedBody = stateOf(built1.identity);
+              // A record older than the item that carries the body still owed to it is that body at the item's version.
+              const owedOlder = owedBody?.incomplete === true && owedBody.version !== undefined && built1.identity.sourceVersion !== undefined
+                && builder.compareVersions(built1.identity.sourceVersion, owedBody.version) < 0 && hasContent(built1);
+              const item = owedOlder
+                ? { ...built1, identity: { ...built1.identity, sourceVersion: owedBody!.version! }, metadata: { ...built1.metadata, contentVersion: built1.identity.sourceVersion } }
+                : built1.identity.sourceVersion === undefined && known !== undefined
+                  ? { ...built1, identity: { ...built1.identity, sourceVersion: known } }
+                  : built1;
               const deleted = item.metadata['deleted'] === true;
               // Names alone take no content away: what the item held before this record is still there.
               const before = stateOf(item.identity);
@@ -286,8 +299,10 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
                 hasContent: hasContent(item) || (!deleted && before?.hasContent === true && before.tombstoned !== true),
                 // Names alone do not bring a deleted item or a Secret back: it stays one, at the newer version.
                 ...(deleted || (before?.tombstoned === true && !hasContent(item)) ? { tombstoned: true as const } : {}),
+                // A write still owed at this very version stays owed for the records after it in the pass.
+                ...(before?.incomplete === true && before.version === item.identity.sourceVersion ? { incomplete: true as const } : {}),
               });
-              units.push({ record: offset + position, entry: index, item });
+              units.push({ record: offset + position, entry: index, parent: entries[0]!.identity.localItemId, item });
             });
           }
           // Each item of a page is reduced, on its own, to its newest accepted record: parents and children
@@ -322,9 +337,9 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
               });
               // The merged item resumes from the record that brought its content: a pass cut before it reads that
               // record again, so the content is never lost to the cut.
-              if (older) units[at] = { record: older.record, entry: older.entry, item: { ...won.item, content: older.item.content } };
+              if (older) units[at] = { record: older.record, entry: older.entry, parent: older.parent, item: { ...won.item, content: older.item.content, metadata: { ...won.item.metadata, ...(older.item.metadata['contentVersion'] !== undefined ? { contentVersion: older.item.metadata['contentVersion'] } : older.item.identity.sourceVersion !== undefined && older.item.identity.sourceVersion !== won.item.identity.sourceVersion ? { contentVersion: older.item.identity.sourceVersion } : {}) } } };
               // Names alone never revive a deleted item: after a deletion in this page it stays a deletion, at the newer version.
-              else if (deletion) units[at] = { record: deletion.record, entry: deletion.entry, item: { ...deletion.item, identity: { ...deletion.item.identity, ...(won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {}) } } };
+              else if (deletion) units[at] = { record: deletion.record, entry: deletion.entry, parent: deletion.parent, item: { ...deletion.item, identity: { ...deletion.item.identity, ...(won.item.identity.sourceVersion !== undefined ? { sourceVersion: won.item.identity.sourceVersion } : {}) } } };
             }
             const kept = new Set(winner.values());
             for (const [at, unit] of units.entries()) {
@@ -334,12 +349,27 @@ export function inputConnector<R>(builder: SourceRecordBuilder<R>, input: Intake
             }
             units = units.filter((_, at) => kept.has(at));
           }
+          // An item is emitted before its children, whatever records they came from: a pass cut between them
+          // must never leave a child stored ahead of the parent that decides whether it stays.
+          const ordered: PageUnit[] = [];
+          const held = new Map<string, PageUnit[]>();
+          units.forEach((unit, at) => {
+            const parentLater = unit.entry !== 0 && units.some((other, later) => later > at && other.entry === 0 && other.item.identity.localItemId === unit.parent);
+            if (parentLater) {
+              held.set(unit.parent, [...(held.get(unit.parent) ?? []), unit]);
+              return;
+            }
+            ordered.push(unit);
+            if (unit.entry === 0) ordered.push(...(held.get(unit.item.identity.localItemId) ?? []));
+          });
+          units = ordered;
           input.observeIntake?.(outcomes);
           const room = budget === undefined ? Number.POSITIVE_INFINITY : budget - yielded;
           if (units.length > room) {
             // The page holds more than the pass may store: yield what fits, resume at the first unit that does not.
             if (room <= 0) return;
-            const next = units[room]!;
+            // Resume at the earliest record and entry among the units not yielded: the emit order is not the stream's.
+            const next = units.slice(room).reduce((first, unit) => (unit.record < first.record || (unit.record === first.record && unit.entry < first.entry) ? unit : first));
             yield {
               items: units.slice(0, room).map((unit) => unit.item),
               nextCursor: encodeResume({ inner: base, records: next.record, entries: next.entry }),

@@ -41,6 +41,8 @@ import {
   createXBookmarksSourceConnector,
 } from '../src/workers/x-bookmarks/index.ts';
 import { X_BOOKMARKS_STORE_PLACEMENT } from '../src/workers/x-bookmarks/connector.ts';
+import { resolvedStorePath } from '../src/core/source-placement.ts';
+import { tierLedgerPathForStore } from '../src/workers/classification/tier-ledger-path.ts';
 
 /** The owner's privacy profile: an always-Private Dropbox folder. */
 function ownerRules() {
@@ -136,8 +138,8 @@ describe('P1c Dropbox lane', () => {
   test('provider sync through the tier set: existing files stay put, a new file\'s names go Personal, its text lands by its own tier', async () => {
     const root = workspace();
     const env = {
-      OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
-      OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+      // The tier stores go where the layout puts them, under this test's own home.
+      HOME: join(root, 'home'),
       OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     };
     const entries: Array<{ tag: 'file'; id: string; name: string; pathDisplay: string; rev: string }> = [
@@ -197,7 +199,7 @@ describe('P1c Dropbox lane', () => {
     expect(internal).toBeDefined();
     expect(ids(internal, 'integral')).toEqual(['id:integral']);
     expect(ids(secure, 'integral')).toEqual([]);
-    expect(existsSync(env.OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH)).toBe(false);
+    expect(existsSync(resolvedStorePath('dropbox.files', 'public_safe', env))).toBe(false);
 
     const sink = createTieredStoreExtractionSink({
       set: lane.set,
@@ -241,8 +243,8 @@ describe('P1c: the owner\'s privacy rules and the shared detectors judge every n
   test('Dropbox: an always-Private folder or Private text keeps a new file Private and away from the cloud embedder', async () => {
     const root = workspace();
     const env = {
-      OLYMPUS_SOURCE_INDEX_DROPBOX_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-internal.sqlite'),
-      OLYMPUS_SOURCE_INDEX_DROPBOX_PUBLIC_CONNECTOR_STORE_DB_PATH: join(root, 'dropbox-public.sqlite'),
+      // The tier stores go where the layout puts them, under this test's own home.
+      HOME: join(root, 'home'),
       OLYMPUS_SOURCE_INGESTION_EXCLUSIONS_PATH: join(root, 'no-exclusions.json'),
     };
     const entries = [
@@ -323,7 +325,7 @@ describe('P1c: the owner\'s privacy rules and the shared detectors judge every n
     const local = localProvider();
     const lane = createReadwiseTierLane({
       store,
-      env: { OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'readwise-secure.sqlite') },
+      env: { HOME: join(root, 'home') },
       embeddingProvider: cloud,
       secureEmbeddingProvider: local,
     });
@@ -350,7 +352,7 @@ describe('P1c X content recovery', () => {
     closers.push(() => usage.close());
     const lane = createXBookmarksTierLane({
       store,
-      env: { OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'x-secure.sqlite') },
+      env: { HOME: join(root, 'home') },
     });
     closers.push(() => lane.newStores.secure_local?.current()?.close());
     // Private text: the names copy stays in the internal store with no text.
@@ -384,7 +386,7 @@ describe('P1c X content recovery', () => {
 describe('P1c Readwise and X lanes', () => {
   test('existing items stay byte-identical; a new item rests Personal at the lane tier, is raised to Private by its text, or is Secrets', async () => {
     const root = workspace();
-    const env = { OLYMPUS_SOURCE_INDEX_READWISE_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'readwise-secure.sqlite') };
+    const env = { HOME: join(root, 'home') };
     const internalPath = join(root, 'readwise.sqlite');
     const legacy: Spec[] = [{ id: 'hl-old', title: 'Old highlight', text: 'A passage about attention and practice.' }];
     {
@@ -445,15 +447,16 @@ describe('P1c Readwise and X lanes', () => {
     closers.push(() => store.close());
     const lane = createXBookmarksTierLane({
       store,
-      env: { OLYMPUS_SOURCE_INDEX_X_BOOKMARKS_SECURE_CONNECTOR_STORE_DB_PATH: join(root, 'x-secure.sqlite') },
+      env: { HOME: join(root, 'home') },
     });
     closers.push(() => lane.ledger.close());
     expect(lane.newStores.secure_local?.corpusId).toBe(X_BOOKMARKS_SECURE_CORPUS_ID);
     expect(lane.newStores.public_safe).toBeUndefined();
-    expect(existsSync(join(root, 'x-secure.sqlite'))).toBe(false);
+    const secureDbPath = resolvedStorePath('x.bookmarks', 'secure_local', { HOME: join(root, 'home') });
+    expect(existsSync(secureDbPath)).toBe(false);
     // The set ledger sits beside the (future) Private store, where the data
     // lifecycle finds it.
-    expect(lane.ledger.dbPath).toBe(join(root, 'x-secure.tier-ledger.sqlite'));
+    expect(lane.ledger.dbPath).toBe(tierLedgerPathForStore(secureDbPath));
   });
 });
 
@@ -470,7 +473,7 @@ describe('P1c WhatsApp lane: fail closed', () => {
     closers.push(() => store.close());
     const lane = createWhatsAppTierLane({
       store,
-      env: { OLYMPUS_SOURCE_INDEX_WHATSAPP_INTERNAL_CONNECTOR_STORE_DB_PATH: join(root, 'whatsapp-internal.db') },
+      env: { HOME: join(root, 'home') },
       ...(rules.length > 0 ? { tierClassification: { rules } } : {}),
     });
     closers.push(() => lane.newStores.internal?.current()?.close());
@@ -489,7 +492,7 @@ describe('P1c WhatsApp lane: fail closed', () => {
       { id: 'm2', conversation: 'chat-a', title: 'Garden club', text: 'Photos are on the public page.', sharing: 'public_link' },
     ]);
     expect(internal()).toBeUndefined();
-    expect(existsSync(join(root, 'whatsapp-internal.db'))).toBe(false);
+    expect(existsSync(resolvedStorePath('whatsapp.personal.messages', 'internal', { HOME: join(root, 'home') }))).toBe(false);
     expect(ids(store, 'allotment')).toEqual(['m1']);
     expect(ids(store, 'photos')).toEqual(['m2']);
   });

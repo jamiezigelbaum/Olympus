@@ -4,6 +4,7 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import type { SourceItemIdentity } from '../../core/source-index/types.ts';
 import { sameSpoolFile, spoolBoundaryDigest, spoolBoundaryHolds, spoolFileIdentity } from '../connector-store/spool-file-identity.ts';
 import { openConnectorStore } from '../../core/source-storage.ts';
@@ -33,8 +34,6 @@ import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
   type TelegramMessagesCorpusTrustDomain,
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
 } from './corpus-adapter.ts';
 import {
   TELEGRAM_CAPTURE_CONNECTOR_IDS,
@@ -153,13 +152,13 @@ export function createTelegramConnectorStores(
   const account = { sourceId: TELEGRAM_MESSAGES_SOURCE_ID };
   return {
     internal: openConnectorStore(account, {
-      dbPath: defaultInternalTelegramConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('telegram.messages', 'internal', env),
       corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'internal',
     }, env),
     secureLocal: openConnectorStore(account, {
-      dbPath: defaultProtectedTelegramConnectorStoreDbPath(env),
+      dbPath: resolvedStorePath('telegram.messages', 'secure_local', env),
       corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
       family: 'chat',
       trustDomain: 'secure_local',

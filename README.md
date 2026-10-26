@@ -767,12 +767,14 @@ hand goes through the `olympus` CLI. The whole agent tool surface is thirteen to
 [`src/core/public-surface.ts`](src/core/public-surface.ts); Hermes over MCP sees
 the subset above, and worker bearer auth is enforced throughout.
 
-Operational note for connector-store corpora: run the matching sync script
-first, then mount the same SQLite store in the source worker with
-`OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON`. The worker env entry must use
-the same corpus id, `family`, `trustDomain`, and `dbPath` the sync script
-writes, and that corpus id must be in the corpus registry — a store mounted
-for an unregistered corpus fills but is never read.
+Operational note for connector-store corpora: a source with an account folder
+(Gmail, Drive, Dropbox, local files, Readwise, X, Telegram, WhatsApp, imported
+archives) keeps its stores where Olympus places them, and its
+`OLYMPUS_SOURCE_INDEX_CONNECTOR_STORES_JSON` entry names no path: it only adds a
+principal to the store its lane opened. A store only the mount list places
+(Reflect, Roam) is mounted with the same corpus id, `family`, `trustDomain` and
+`dbPath` its sync script writes, and that corpus id must be in the corpus
+registry — a store mounted for an unregistered corpus fills but is never read.
 
 Chat-family mounts must also declare their exact principal identity with
 `principalProvider` and `principalAccountScope` (for example, `whatsapp` and

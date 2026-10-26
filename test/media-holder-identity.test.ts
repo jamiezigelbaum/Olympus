@@ -36,7 +36,7 @@ import type { ExtractionSinkRequest } from '../src/workers/file-extraction/types
 import { DeterministicSourceEmbeddingProvider } from '../src/workers/source-index/embeddings.ts';
 
 type Env = Record<string, string | undefined>;
-type StoreOf = 'local.files' | 'dropbox.files' | 'telegram.messages';
+type StoreOf = 'local.files' | 'dropbox.files' | 'telegram.messages' | 'whatsapp.personal.messages';
 
 const THREE_DAYS = 3 * 24 * 60 * 60_000;
 const CREATED = '2026-10-25T00:00:00.000Z';
@@ -607,19 +607,21 @@ describe('what cannot be told is kept', () => {
   });
 
   test('a store whose folder cannot be looked at is not reported gone', async () => {
-    account('dropbox.files', 'legacy');
-    // A legacy store on an external volume: the override names it, and the volume is not mounted.
-    const volume = join(base, 'volume', 'dropbox.sqlite');
-    const pinned = { ...env, OLYMPUS_SOURCE_INDEX_DROPBOX_CONNECTOR_STORE_DB_PATH: volume };
-    const store = openConnectorStore({ sourceId: 'dropbox.files' }, { dbPath: volume, corpusId: corpusOf('dropbox.files'), family: 'file', trustDomain: 'secure_local', tierLedger: null }, pinned);
+    account('whatsapp.personal.messages', 'legacy');
+    // A legacy WhatsApp store on an external volume: the capture state folder the
+    // spawner hands over names it (no per-store override exists since step 6),
+    // and the volume is not mounted.
+    const volume = join(base, 'volume', 'connector-store.db');
+    const pinned = { ...env, OLYMPUS_WHATSAPP_STATE_DIR: dirname(volume) };
+    const store = openConnectorStore({ sourceId: 'whatsapp.personal.messages' }, { dbPath: volume, corpusId: 'secure_local.whatsapp.messages', family: 'file', trustDomain: 'secure_local', tierLedger: null }, pinned);
     open.push(store);
     const media = await landPicture(store, 42);
     closeStore(store);
     expect(identityMarkers(media)).toHaveLength(1);
     renameStore(volume, join(base, 'unmounted-volume.sqlite'));
     rmSync(dirname(volume), { recursive: true });
-    // Neither the default path's folder (the data root) nor the override's folder is there to look in... the data root is, but the volume is not.
-    expect(sweep()).toBe(0);
+    // The state folder the store sits in is not there to look in: the store is not reported gone.
+    expect(sweep(pinned)).toBe(0);
     expect(existsSync(media.path)).toBe(true);
   });
 

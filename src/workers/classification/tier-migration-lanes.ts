@@ -10,6 +10,7 @@
 // `write` mode (run, rollback, purge) opens them for writing and lets a move
 // create a destination store on first need.
 
+import { resolvedStorePath } from '../../core/source-placement.ts';
 import { existsSync } from 'node:fs';
 import type { SourceFamily, SourceTrustDomain, SourceTrustTier } from '../../core/source-index/types.ts';
 import { READWISE_LIBRARY_CORPUS_ID } from '../../core/source-corpus-registry.ts';
@@ -28,55 +29,39 @@ import {
   DROPBOX_TIER_CORPUS_IDS,
   createDropboxConnectorStore,
   createDropboxTierConnectorStore,
-  defaultDropboxConnectorStoreDbPath,
-  defaultDropboxInternalConnectorStoreDbPath,
-  defaultDropboxPublicConnectorStoreDbPath,
 } from '../dropbox-files/connector-store.ts';
 import { DROPBOX_FILES_SOURCE_ID } from '../dropbox-files/corpus-adapter.ts';
 import {
   LOCAL_FILES_TIER_CORPUS_IDS,
   createLocalFilesConnectorStore,
   createLocalFilesTierConnectorStore,
-  defaultLocalFilesConnectorStoreDbPath,
-  defaultLocalFilesInternalConnectorStoreDbPath,
-  defaultLocalFilesPublicConnectorStoreDbPath,
 } from '../local-files/store.ts';
 import { LOCAL_FILES_SOURCE_ID } from '../local-files/scope.ts';
 import {
   GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID,
   GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID,
-  defaultGoogleDriveConnectorStoreDbPath,
-  defaultGoogleDrivePublicConnectorStoreDbPath,
-  defaultGoogleDriveSecureConnectorStoreDbPath,
 } from '../google-connectors/drive.ts';
 import {
   GMAIL_INTERNAL_CONNECTOR_CORPUS_ID,
   GMAIL_PUBLIC_CONNECTOR_CORPUS_ID,
   GMAIL_SECURE_CONNECTOR_CORPUS_ID,
-  defaultGmailConnectorStoreDbPath,
-  defaultGmailPublicConnectorStoreDbPath,
-  defaultGmailSecureConnectorStoreDbPath,
 } from '../google-connectors/gmail.ts';
-import { READWISE_STORE_PLACEMENT, defaultReadwiseConnectorStoreDbPath } from '../readwise/connector.ts';
-import { READWISE_SECURE_LIBRARY_CORPUS_ID, READWISE_TIER_SET_ID, defaultReadwiseSecureConnectorStoreDbPath } from '../readwise/tier-set.ts';
+import { READWISE_STORE_PLACEMENT } from '../readwise/connector.ts';
+import { READWISE_SECURE_LIBRARY_CORPUS_ID, READWISE_TIER_SET_ID } from '../readwise/tier-set.ts';
 import {
   INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID,
   PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID,
-  defaultInternalTelegramConnectorStoreDbPath,
-  defaultProtectedTelegramConnectorStoreDbPath,
 } from '../telegram-messages/corpus-adapter.ts';
 import { TELEGRAM_MESSAGES_SOURCE_ID } from '../telegram-messages/store-sync.ts';
 import {
   WHATSAPP_INTERNAL_CORPUS_ID,
   WHATSAPP_LIVE_CORPUS_ID,
   WHATSAPP_PERSONAL_SOURCE_ID,
-  defaultWhatsAppConnectorStoreDbPath,
-  defaultWhatsAppInternalConnectorStoreDbPath,
 } from '../whatsapp/store-sync.ts';
-import { X_BOOKMARKS_STORE_PLACEMENT, defaultXBookmarksConnectorStoreDbPath } from '../x-bookmarks/connector.ts';
+import { X_BOOKMARKS_STORE_PLACEMENT } from '../x-bookmarks/connector.ts';
 import { X_BOOKMARKS_CORPUS_ID } from '../x-bookmarks/corpus-adapter.ts';
-import { X_BOOKMARKS_SECURE_CORPUS_ID, X_BOOKMARKS_TIER_SET_ID, defaultXBookmarksSecureConnectorStoreDbPath } from '../x-bookmarks/tier-set.ts';
+import { X_BOOKMARKS_SECURE_CORPUS_ID, X_BOOKMARKS_TIER_SET_ID } from '../x-bookmarks/tier-set.ts';
 import { archiveTierMigrationLaneSpecs } from '../archive-import/lane.ts';
 import { secretLocationsPathForStore } from './secret-locations.ts';
 import type { TierLedger } from './tier-ledger.ts';
@@ -119,18 +104,18 @@ export function installedTierMigrationLaneSpecs(
       sourceId: 'gmail.email',
       setId: 'gmail.email',
       legs: {
-        public_safe: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: defaultGmailPublicConnectorStoreDbPath(env), family: 'email' },
-        internal: { corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: defaultGmailConnectorStoreDbPath(env), family: 'email', legacy: true },
-        secure_local: { corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID, dbPath: defaultGmailSecureConnectorStoreDbPath(env), family: 'email', legacy: true },
+        public_safe: { corpusId: GMAIL_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath('gmail.email', 'public_safe', env), family: 'email' },
+        internal: { corpusId: GMAIL_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath('gmail.email', 'internal', env), family: 'email', legacy: true },
+        secure_local: { corpusId: GMAIL_SECURE_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath('gmail.email', 'secure_local', env), family: 'email', legacy: true },
       },
     },
     {
       sourceId: 'google_drive.docs',
       setId: 'google_drive.docs',
       legs: {
-        public_safe: { corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: defaultGoogleDrivePublicConnectorStoreDbPath(env), family: 'file' },
-        internal: { corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: defaultGoogleDriveConnectorStoreDbPath(env), family: 'file', legacy: true },
-        secure_local: { corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID, dbPath: defaultGoogleDriveSecureConnectorStoreDbPath(env), family: 'file', legacy: true },
+        public_safe: { corpusId: GOOGLE_DRIVE_PUBLIC_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath('google_drive.docs', 'public_safe', env), family: 'file' },
+        internal: { corpusId: GOOGLE_DRIVE_INTERNAL_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath('google_drive.docs', 'internal', env), family: 'file', legacy: true },
+        secure_local: { corpusId: GOOGLE_DRIVE_SECURE_CONNECTOR_CORPUS_ID, dbPath: resolvedStorePath('google_drive.docs', 'secure_local', env), family: 'file', legacy: true },
       },
     },
     {
@@ -140,19 +125,19 @@ export function installedTierMigrationLaneSpecs(
       legs: {
         public_safe: {
           corpusId: DROPBOX_TIER_CORPUS_IDS.public_safe,
-          dbPath: defaultDropboxPublicConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'public_safe', env),
           family: 'file',
           open: ({ readOnly, tierLedger }) => createDropboxTierConnectorStore('public_safe', env, { readOnly, tierLedger }),
         },
         internal: {
           corpusId: DROPBOX_TIER_CORPUS_IDS.internal,
-          dbPath: defaultDropboxInternalConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'internal', env),
           family: 'file',
           open: ({ readOnly, tierLedger }) => createDropboxTierConnectorStore('internal', env, { readOnly, tierLedger }),
         },
         secure_local: {
           corpusId: DROPBOX_FILES_CONNECTOR_STORE_CORPUS_ID,
-          dbPath: defaultDropboxConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath(DROPBOX_FILES_SOURCE_ID, 'secure_local', env),
           family: 'file',
           legacy: true,
           open: ({ readOnly }) => createDropboxConnectorStore(env, { readOnly }),
@@ -166,19 +151,19 @@ export function installedTierMigrationLaneSpecs(
       legs: {
         public_safe: {
           corpusId: LOCAL_FILES_TIER_CORPUS_IDS.public_safe,
-          dbPath: defaultLocalFilesPublicConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'public_safe', env),
           family: 'file',
           open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore('public_safe', env, { readOnly, tierLedger }),
         },
         internal: {
           corpusId: LOCAL_FILES_TIER_CORPUS_IDS.internal,
-          dbPath: defaultLocalFilesInternalConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'internal', env),
           family: 'file',
           open: ({ readOnly, tierLedger }) => createLocalFilesTierConnectorStore('internal', env, { readOnly, tierLedger }),
         },
         secure_local: {
           corpusId: LOCAL_FILES_TIER_CORPUS_IDS.secure_local,
-          dbPath: defaultLocalFilesConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath(LOCAL_FILES_SOURCE_ID, 'secure_local', env),
           family: 'file',
           legacy: true,
           open: ({ readOnly }) => createLocalFilesConnectorStore(env, { readOnly }),
@@ -193,8 +178,8 @@ export function installedTierMigrationLaneSpecs(
       // publishes it as a prior): messages are never lowered below it.
       storedPlacementIsPrior: true,
       legs: {
-        internal: { corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: defaultInternalTelegramConnectorStoreDbPath(env), family: 'chat', legacy: true },
-        secure_local: { corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: defaultProtectedTelegramConnectorStoreDbPath(env), family: 'chat', legacy: true },
+        internal: { corpusId: INTERNAL_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath('telegram.messages', 'internal', env), family: 'chat', legacy: true },
+        secure_local: { corpusId: PROTECTED_TELEGRAM_MESSAGES_CORPUS_ID, dbPath: resolvedStorePath('telegram.messages', 'secure_local', env), family: 'chat', legacy: true },
       },
     },
     {
@@ -203,12 +188,12 @@ export function installedTierMigrationLaneSpecs(
       legs: {
         internal: {
           corpusId: READWISE_LIBRARY_CORPUS_ID,
-          dbPath: defaultReadwiseConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath('readwise.library', 'internal', env),
           family: 'readwise',
           legacy: true,
           ...(READWISE_STORE_PLACEMENT.trustTier ? { restingTier: READWISE_STORE_PLACEMENT.trustTier } : {}),
         },
-        secure_local: { corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID, dbPath: defaultReadwiseSecureConnectorStoreDbPath(env), family: 'readwise' },
+        secure_local: { corpusId: READWISE_SECURE_LIBRARY_CORPUS_ID, dbPath: resolvedStorePath('readwise.library', 'secure_local', env), family: 'readwise' },
       },
     },
     {
@@ -217,12 +202,12 @@ export function installedTierMigrationLaneSpecs(
       legs: {
         internal: {
           corpusId: X_BOOKMARKS_CORPUS_ID,
-          dbPath: defaultXBookmarksConnectorStoreDbPath(env),
+          dbPath: resolvedStorePath('x.bookmarks', 'internal', env),
           family: 'x',
           legacy: true,
           ...(X_BOOKMARKS_STORE_PLACEMENT.trustTier ? { restingTier: X_BOOKMARKS_STORE_PLACEMENT.trustTier } : {}),
         },
-        secure_local: { corpusId: X_BOOKMARKS_SECURE_CORPUS_ID, dbPath: defaultXBookmarksSecureConnectorStoreDbPath(env), family: 'x' },
+        secure_local: { corpusId: X_BOOKMARKS_SECURE_CORPUS_ID, dbPath: resolvedStorePath('x.bookmarks', 'secure_local', env), family: 'x' },
       },
     },
     {
@@ -231,8 +216,8 @@ export function installedTierMigrationLaneSpecs(
       splitLayers: false,
       laneFloor: { trustDomain: 'secure_local', liftedByOwnerRule: ['chat'] },
       legs: {
-        internal: { corpusId: WHATSAPP_INTERNAL_CORPUS_ID, dbPath: defaultWhatsAppInternalConnectorStoreDbPath(env), family: 'chat' },
-        secure_local: { corpusId: WHATSAPP_LIVE_CORPUS_ID, dbPath: defaultWhatsAppConnectorStoreDbPath(env), family: 'chat', legacy: true },
+        internal: { corpusId: WHATSAPP_INTERNAL_CORPUS_ID, dbPath: resolvedStorePath('whatsapp.personal.messages', 'internal', env), family: 'chat' },
+        secure_local: { corpusId: WHATSAPP_LIVE_CORPUS_ID, dbPath: resolvedStorePath('whatsapp.personal.messages', 'secure_local', env), family: 'chat', legacy: true },
       },
     },
     ...archiveTierMigrationLaneSpecs(env),
