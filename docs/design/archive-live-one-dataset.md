@@ -252,7 +252,7 @@ its own.
 | Reading | chunked streaming, a bound per record and per pass, damage reported as a finding | archive | live Telegram re-reads whole spool files from its cursor each page and fails once the files one read visits pass 768 MB; live WhatsApp scans its whole spool for freshness each pull, with no byte bound; neither prunes |
 | Resume | a cursor bound to its input's version, with named stop codes | archive | a missing Telegram cursor wedges its lane; a WhatsApp cursor whose file vanished silently skips the rest |
 | Identity and versions | account, chat and message ids; a version that tracks edits and reactions, with explicit clears | live | archive Telegram ids hash file positions, WhatsApp's hash time, sender, text and occurrence, mbox's the raw message, and versions hash text, so a second export of the same chat would not match |
-| Item text | service messages as items, sender names, reply and forward names, captions | archive (Telegram), new (WhatsApp) | live Telegram keeps a sender id without a name and a forward as a bare flag; the WhatsApp bridge drops captions |
+| Item text | service messages as items, sender names, forward names, captions | archive (Telegram), new (WhatsApp) | live Telegram's search context left out the chat and sender names the helper records (its explicit search text was the words alone), wrote a service message as an empty item and a forward as a bare flag; the WhatsApp bridge drops captions. Neither Telegram input has a reply's sender name: the export gives only the replied-to message id, as live does (corrected 2026-10-25; this row said "reply names") |
 | Privacy signals | chat id as the folder key, priors, protected floors, owner chat rules | live | archive copies today carry file positions as folder keys, so an owner rule on a chat never reached its imported history |
 | Hold | held until judged, per item, for every archive input | archive | section 3 |
 | Media | the extraction factory for every input; WhatsApp voice notes as live reads them | both | only live WhatsApp reads any media today (voice notes); archives count media as not imported |
@@ -292,7 +292,8 @@ Each source's Import an archive appears as its step registers it.
    fixture source that has a live and an archive input (see "Built, step 2").
 3. Live capture fixes from "Best of both", each with its own tests:
    streaming spool reads with bounds, cursor recovery, counted bridge
-   drops, WhatsApp captions, freshness told apart from quiet.
+   drops, WhatsApp captions, freshness told apart from quiet. Telegram's
+   part built (see "Built, step 3: Telegram"); WhatsApp's in its own lane.
 4. Telegram: the export becomes an input of the Telegram connector (exact
    ids, account hash), with folder media as children; reusable builder and
    new record kinds. After storage's account-identity step.
@@ -619,6 +620,107 @@ connector; any other mbox stays under Archives, as before.
   archives and a Remove, which a merged import does not have, and a fresh
   machine has no live Gmail input. The leg's journey for it is still to
   build.
+
+## Built, step 3: Telegram
+
+Live Telegram capture, with no change to what it stores for an ordinary
+message beyond its search context (`src/workers/telegram-messages/`,
+`scripts/telegram-telethon-reader.py`; tests
+`test/telegram-live-capture-fixes.test.ts`,
+`test/telegram-telethon-richer-records.test.ts`).
+
+- **Reading.** The spool is read a line at a time in 1 MB chunks
+  (`spool-lines.ts`). One read stops after 64 MB or 200,000 lines and hands
+  back where it stopped, so a backlog of any size is read in passes; the
+  768 MB failure is gone. A record over 32 MB is counted as damaged and
+  passed without being held. Cursors keep their `<file>:<lines>` shape (the
+  Secrets rewrite relies on it); because the helper only appends and the
+  rewrite keeps every record's byte length, the byte offset of a line once
+  found is remembered in the process and checked (same file, a newline just
+  before it), so a page no longer re-scans its file from the top. The
+  freshness check reads only a file's last 16 MB. The helper's report now
+  counts and dates the spool in chunks and passes a damaged line, where it
+  used to load every record each cycle and stop on the first bad one.
+- **Cursor recovery.** A lane cursor whose file is gone while older files
+  remain, or whose file holds fewer lines than it says, no longer stops the
+  lane for good: that lane reads the spool again from its start (writes are
+  idempotent; skipping could lose history), and the receipt says so
+  (`telegram_spool_cursor_reset`, `spool_cursor_resets`). Reading again never
+  puts back an older version: both lanes now read the spool as the live
+  input of the Telegram connector, through the one record builder
+  (`record-builder.ts`) and the intake rule, so a record older than what the
+  stores hold is not applied (review, #545). A live version is the
+  helper's (edit time, reactions) plus the capture's order: when the helper
+  captured it, the helper's capture sequence (a counter kept beside the
+  spool, `.capture-seq`, that only grows; records written before it read as
+  0), and its place in the spool as the last tie-break. Two captures at the
+  same edit time are ordered, also across a day file removed and written
+  again, and a capture read again after a reset never puts back an older
+  count; an export's version has no capture mark, so ties go to live.
+- **Protected claims.** A protected lane's claim applies to the message,
+  whatever the version (`protection-claims.ts`). Before either lane writes,
+  each claimed message the ordinary lane still serves moves into the
+  protected lane with one tier move (the lower copy superseded first, so
+  every read hides it, its content copied up, purged only once the protected
+  copy is verified; a pre-tier row has its placement adopted first). When the
+  spool holds a newer version, that version is then listed in the protected
+  lane and replaces the moved copy. Nothing is deleted on the way, and a
+  move a crash left unfinished is finished by the next pull. The claim is
+  then kept in the set's ledger, so a later ordinary record is never
+  admitted to the ordinary lane. Any step that fails stops the pull before
+  either cursor passes the claim. The protected lane judges a claimed record
+  against what it alone holds, so a claimed record newer than its own copy
+  always lands there. (The spine's persisted write intent, #540, will take
+  this move over; it already goes through the tiered set's move API.)
+- **A cursor knows its file.** Each lane cursor is bound to the identity its
+  day file had (`connector-store/spool-file-identity.ts`, shared with
+  WhatsApp: device, inode, birth time and a digest of the first line, kept
+  in the set's ledger); a file removed and written again under the same name
+  is read from its start. The helper's capture-sequence counter is replaced
+  whole (a temporary file, synced, renamed, the folder synced) under a lock
+  file of its own, so a kill at any step leaves the old value or the new one.
+- **The spool contract** (shared with WhatsApp, `spool-file-identity.ts`).
+  Only the capture helper writes the spool, and only by appending; only
+  Olympus's own Secrets clearing rewrites records, in place and at their
+  length, and it records its boundaries again after it runs. The spool folder
+  is owner-only (0700, files 0600). Every boundary Telegram records (each
+  lane's cursor, where the clearing has reached) keeps the file's identity
+  and a digest of the 4 KiB that end at it, checked before the boundary is
+  used. A boundary is trusted only on a receipt for exactly its position: a
+  missing receipt, or one for another position (a crash between a cursor's
+  commit and its receipt, or the first pull after this change), counts as a
+  mismatch, which costs one read of the file again. Detected: a file removed and written again, and any change within
+  the 4 KiB before a boundary (a record rewritten under a cursor, longer or
+  as another lane's). On a mismatch every boundary in that file is dropped:
+  its lanes read it again from its start under the intake rule, and the
+  clearing is owed again from the start of the spool, recorded only as far as
+  it then runs. Not detected: an in-place rewrite by anything else further
+  back than 4 KiB before every boundary; that breaks the contract and cannot
+  be seen within the read bounds (scoped out by the coordinator, 2026-10-26).
+- **Quiet is not stale.** After every finished cycle (it read every approved
+  chat) the helper writes `.capture-heartbeat.json` beside the spool. The
+  receipt's age is from the newer of the newest record and the heartbeat,
+  so a quiet account with a running helper reads fresh and only a stopped
+  capture reads stale; `capture_quiet` says when only the heartbeat is
+  fresh. Same rule as WhatsApp's lane, which adds it to the shared
+  `capture-freshness.ts`; Telegram moves onto that once both have landed.
+- **Richer text.** One builder (`telegramMessageItem`) turns a spool
+  message into its item, ready for the archive input. A service message's
+  event is recorded by the helper under the export's own action names and
+  becomes the export reader's sentence ("Ada made a phone call that lasted 1
+  minute 5 seconds."), where it used to be an empty item. A forward records
+  who it came from when Telethon already holds it (no extra request). The
+  search context adds the chat, the sender and the forward's origin to the
+  words and attachment names. A Secrets rewrite of a spool record now also
+  takes the forward's origin and the per-sender names with the names, and a
+  service event's words (a title, an amount) with the text. Every name the
+  search context adds beyond the chat and the sender (the forward's origin,
+  attachment names) is passed to the classifier as the item's names, so a
+  Secret in one of them makes the names Secrets (review, #545). The Secrets
+  rewrite itself reads a spool file in 1 MB chunks, holding one record at a
+  time, instead of the whole file.
+- **Cost.** An existing item is rewritten only when it is read again, and
+  its new search context then re-embeds it once.
 
 ## To verify before step 4
 

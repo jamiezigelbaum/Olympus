@@ -41,7 +41,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, readSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, lstatSync, openSync, readSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { detectSecretFindingKinds } from '../classification/engine.ts';
 import type { TierLedger, TierLedgerIdentity } from '../classification/tier-ledger.ts';
@@ -79,11 +79,22 @@ export interface CaptureSpoolRedactionResult {
   recordsBlanked: number;
 }
 
+/** How much of a spool file one read holds: the file is scanned in chunks, never whole. */
+const SPOOL_SCAN_CHUNK_BYTES = 1 << 20;
+/**
+ * A record longer than this is not judged here (every reader passes it as
+ * damaged), so no more than this of one line is ever held.
+ */
+const SPOOL_MAX_LINE_BYTES = 32 * 1024 * 1024;
+
 /**
  * Rewrite, in place, every complete line in `[from, through)` for which
  * `redact` returns a replacement. `files` are the spool's file names in
  * order. A line still being written (no newline yet) is never touched, and
  * a line that changed on disk between the read and the write is left alone.
+ * Each file is read in chunks from its start up to the window's end, holding
+ * one line at a time, so a pass costs memory for one record whatever the
+ * size of the spool.
  */
 export function redactCaptureSpoolLines(options: {
   dir: string;
@@ -99,44 +110,74 @@ export function redactCaptureSpoolLines(options: {
     const path = join(options.dir, name);
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink()) continue;
-    const bytes = readFileSync(path);
     const startLine = options.from?.file === name ? options.from.line : 0;
     const endLine = options.through?.file === name ? options.through.line : Number.POSITIVE_INFINITY;
-    const edits: Array<{ offset: number; original: Buffer; replacement: Buffer; blanked: boolean }> = [];
-    let offset = 0;
-    let lineIndex = 0;
-    while (offset < bytes.length && lineIndex < endLine) {
-      const newline = bytes.indexOf(0x0a, offset);
-      if (newline < 0) break;
-      if (lineIndex >= startLine) {
-        // A carriage return before the newline stays where it is.
-        const contentEnd = newline > offset && bytes[newline - 1] === 0x0d ? newline - 1 : newline;
-        const original = bytes.subarray(offset, contentEnd);
-        const line = original.toString('utf8');
-        const replacementText = line.trim() ? options.redact(line) : undefined;
-        if (replacementText !== undefined) {
-          const encoded = Buffer.from(replacementText, 'utf8');
-          const fits = encoded.length <= original.length && !encoded.includes(0x0a);
-          const replacement = Buffer.alloc(original.length, 0x20);
-          if (fits) encoded.copy(replacement);
-          edits.push({ offset, original: Buffer.from(original), replacement, blanked: !fits });
-        }
-      }
-      offset = newline + 1;
-      lineIndex += 1;
-    }
-    if (edits.length === 0) continue;
     const fd = openSync(path, 'r+');
+    let wrote = false;
     try {
-      for (const edit of edits) {
-        const current = Buffer.alloc(edit.original.length);
-        readSync(fd, current, 0, current.length, edit.offset);
-        if (!current.equals(edit.original)) continue;
-        writeSync(fd, edit.replacement, 0, edit.replacement.length, edit.offset);
-        if (edit.blanked) result.recordsBlanked += 1;
-        else result.recordsRedacted += 1;
+      const chunk = Buffer.allocUnsafe(SPOOL_SCAN_CHUNK_BYTES);
+      let parts: Buffer[] = [];
+      let held = 0;
+      let oversize = false;
+      let lineStart = 0;
+      let lineIndex = 0;
+      let position = 0;
+      // The line just ended at `newline`: judge it, and rewrite it in place when the judge says so.
+      const finishLine = (newline: number): void => {
+        if (lineIndex >= startLine && !oversize) {
+          const raw = Buffer.concat(parts, held);
+          // A carriage return before the newline stays where it is.
+          const original = raw.length > 0 && raw[raw.length - 1] === 0x0d ? raw.subarray(0, raw.length - 1) : raw;
+          const line = original.toString('utf8');
+          const replacementText = line.trim() ? options.redact(line) : undefined;
+          if (replacementText !== undefined) {
+            const encoded = Buffer.from(replacementText, 'utf8');
+            const fits = encoded.length <= original.length && !encoded.includes(0x0a);
+            const replacement = Buffer.alloc(original.length, 0x20);
+            if (fits) encoded.copy(replacement);
+            const current = Buffer.alloc(original.length);
+            readSync(fd, current, 0, current.length, lineStart);
+            if (current.equals(original)) {
+              writeSync(fd, replacement, 0, replacement.length, lineStart);
+              wrote = true;
+              if (fits) result.recordsRedacted += 1;
+              else result.recordsBlanked += 1;
+            }
+          }
+        }
+        parts = [];
+        held = 0;
+        oversize = false;
+        lineStart = newline + 1;
+        lineIndex += 1;
+      };
+      scan: while (position < stat.size && lineIndex < endLine) {
+        const read = readSync(fd, chunk, 0, Math.min(SPOOL_SCAN_CHUNK_BYTES, stat.size - position), position);
+        if (read <= 0) break;
+        let at = 0;
+        while (at < read) {
+          const found = chunk.indexOf(0x0a, at);
+          const newline = found >= 0 && found < read ? found : -1;
+          const stop = newline < 0 ? read : newline;
+          // Lines before the window are only counted; a line in it is held, up to the bound.
+          if (lineIndex >= startLine && !oversize && stop > at) {
+            if (held + (stop - at) > SPOOL_MAX_LINE_BYTES) {
+              oversize = true;
+              parts = [];
+              held = 0;
+            } else {
+              parts.push(Buffer.from(chunk.subarray(at, stop)));
+              held += stop - at;
+            }
+          }
+          if (newline < 0) break;
+          finishLine(position + newline);
+          if (lineIndex >= endLine) break scan;
+          at = newline + 1;
+        }
+        position += read;
       }
-      fsyncSync(fd);
+      if (wrote) fsyncSync(fd);
     } finally {
       closeSync(fd);
     }

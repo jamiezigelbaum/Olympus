@@ -118,9 +118,16 @@ describe('long-lived read-only Telethon capture gateway', () => {
         },
       });
       expect(new Set(records.map((record) => record.capture_id)).size).toBe(4);
+      // Every record carries the helper's capture sequence, which only grows (kept beside the spool).
+      expect(records.map((record) => record.capture_seq)).toEqual([1, 2, 3, 4]);
+      expect(readFileSync(join(fixture.spoolDir, '.capture-seq'), 'utf8')).toBe('4');
       expect(statSync(fixture.spoolDir).mode & 0o777).toBe(0o700);
       expect(statSync(spoolPath).mode & 0o777).toBe(0o600);
       expect(statSync(fixture.statePath).mode & 0o777).toBe(0o600);
+      // A finished cycle leaves its heartbeat beside the spool, with no content in it.
+      const heartbeat = readFileSync(join(fixture.spoolDir, '.capture-heartbeat.json'), 'utf8');
+      expect(JSON.parse(heartbeat)).toEqual({ kind: 'telegram_capture_heartbeat', schema_version: 1, cycle_completed_at: '2026-07-22T12:00:00Z' });
+      expect(statSync(join(fixture.spoolDir, '.capture-heartbeat.json')).mode & 0o777).toBe(0o600);
 
       writeFileSync(fixture.callLog, '');
       const second = await runGateway(fixture);
